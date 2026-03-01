@@ -27,11 +27,14 @@ struct RuleSetListView: View {
                         Text(configuration.name).tag(configuration.id.uuidString as String?)
                     }
                 } label: {
-                    Text(ruleSet.name)
+                    HStack(spacing: 12) {
+                        AppIconView(ruleSet.name)
+                        Text(ruleSet.name)
+                    }
                 }
             }
-            .listRowSpacing(8)
         }
+        .listRowSpacing(8)
         .navigationTitle("Routing Rules")
     }
 }
