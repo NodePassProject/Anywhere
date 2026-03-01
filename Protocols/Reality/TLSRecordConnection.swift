@@ -43,6 +43,9 @@ class TLSRecordConnection {
     private var serverSeqNum: UInt64 = 0
     private let seqLock = UnfairLock()
 
+    /// TLS 1.3 maximum plaintext per record (RFC 8446 §5.1).
+    private static let maxRecordPlaintext = 16384
+
     // Receive buffer for batching reads
     private var receiveBuffer = Data(capacity: 256 * 1024)
     private let receiveLock = UnfairLock()
@@ -78,12 +81,7 @@ class TLSRecordConnection {
             return
         }
         do {
-            seqLock.lock()
-            let seqNum = clientSeqNum
-            clientSeqNum += 1
-            seqLock.unlock()
-
-            let record = try encryptAndBuildTLSRecord(plaintext: data, seqNum: seqNum)
+            let record = try buildTLSRecords(for: data)
             connection.send(data: record, completion: completion)
         } catch {
             logger.error("[Reality] Encryption error: \(error.localizedDescription, privacy: .public)")
@@ -97,12 +95,7 @@ class TLSRecordConnection {
     func send(data: Data) {
         guard let connection else { return }
         do {
-            seqLock.lock()
-            let seqNum = clientSeqNum
-            clientSeqNum += 1
-            seqLock.unlock()
-
-            let record = try encryptAndBuildTLSRecord(plaintext: data, seqNum: seqNum)
+            let record = try buildTLSRecords(for: data)
             connection.send(data: record)
         } catch {
             logger.error("[Reality] Encryption error: \(error.localizedDescription, privacy: .public)")
@@ -420,6 +413,37 @@ class TLSRecordConnection {
     }
 
     // MARK: - TLS Record Crypto
+
+    /// Encrypts plaintext into one or more TLS Application Data records.
+    /// Splits at the TLS 1.3 maximum (16384 bytes) to prevent record_overflow.
+    /// Sequence numbers are reserved atomically so concurrent sends stay ordered.
+    private func buildTLSRecords(for data: Data) throws -> Data {
+        if data.count <= Self.maxRecordPlaintext {
+            seqLock.lock()
+            let seqNum = clientSeqNum
+            clientSeqNum += 1
+            seqLock.unlock()
+            return try encryptAndBuildTLSRecord(plaintext: data, seqNum: seqNum)
+        }
+
+        let chunkCount = (data.count + Self.maxRecordPlaintext - 1) / Self.maxRecordPlaintext
+        seqLock.lock()
+        let startSeqNum = clientSeqNum
+        clientSeqNum += UInt64(chunkCount)
+        seqLock.unlock()
+
+        // 22 bytes overhead per record: 5 header + 1 content type + 16 GCM tag
+        var records = Data(capacity: data.count + chunkCount * 22)
+        var offset = 0
+        var seqNum = startSeqNum
+        while offset < data.count {
+            let end = min(offset + Self.maxRecordPlaintext, data.count)
+            records.append(try encryptAndBuildTLSRecord(plaintext: data[offset..<end], seqNum: seqNum))
+            seqNum += 1
+            offset = end
+        }
+        return records
+    }
 
     private func decryptTLSRecord(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
         guard ciphertext.count >= 16 else {
