@@ -38,8 +38,7 @@ class LWIPUDPFlow {
 
     private var vlessConnecting = false
     private var forceBypass = false
-    private var pendingData: [Data] = []  // raw payloads for mux, length-framed chunks for non-mux
-    private var pendingIsMux = false       // tracks which format pendingData uses
+    private var pendingData: [Data] = []  // always raw payloads (framing deferred to send time)
     private var pendingBufferSize = 0      // current total size of pendingData
     private var closed = false
 
@@ -113,29 +112,11 @@ class LWIPUDPFlow {
             return
         }
 
-        if LWIPStack.shared?.muxManager != nil {
-            // Mux path: buffer raw payloads
-            pendingIsMux = true
-            let payload = Data(data.prefix(payloadLength))
-            pendingData.append(payload)
-            pendingBufferSize += payload.count
-        } else {
-            // Non-mux path: buffer length-framed via C
-            pendingIsMux = false
-            let framedLen = 2 + payloadLength
-            var framedPayload = Data(count: framedLen)
-            framedPayload.withUnsafeMutableBytes { outPtr in
-                data.withUnsafeBytes { srcPtr in
-                    frame_udp_payload(
-                        outPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                        srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                        UInt16(payloadLength)
-                    )
-                }
-            }
-            pendingData.append(framedPayload)
-            pendingBufferSize += framedLen
-        }
+        // Always buffer raw payloads. Framing for VLESS non-mux is deferred
+        // to send time so that bypass and mux paths receive unframed data.
+        let payload = Data(data.prefix(payloadLength))
+        pendingData.append(payload)
+        pendingBufferSize += payload.count
     }
 
     private func sendUDPThroughVLESS(connection: VLESSConnection, payload: Data, payloadLength: Int) {
@@ -238,15 +219,24 @@ class LWIPUDPFlow {
                         self.vlessClient = client
                         self.vlessConnection = vlessConnection
 
-                        // Send buffered length-framed data
+                        // Send buffered raw payloads (frame each for VLESS non-mux)
                         if !self.pendingData.isEmpty {
                             var dataToSend = Data()
-                            for chunk in self.pendingData {
-                                dataToSend.append(chunk)
+                            for payload in self.pendingData {
+                                var framedPayload = Data(count: 2 + payload.count)
+                                framedPayload.withUnsafeMutableBytes { outPtr in
+                                    payload.withUnsafeBytes { srcPtr in
+                                        frame_udp_payload(
+                                            outPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                                            srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                                            UInt16(payload.count)
+                                        )
+                                    }
+                                }
+                                dataToSend.append(framedPayload)
                             }
                             self.pendingData.removeAll()
                             self.pendingBufferSize = 0
-                            // Use sendRaw because pendingData is already length-framed
                             vlessConnection.sendRaw(data: dataToSend) { [weak self] error in
                                 if let error {
                                     logger.error("[UDP] VLESS initial send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
