@@ -17,7 +17,6 @@ struct TextWithColorfulIcon: View {
         if #available(iOS 26.0, *) {
             HStack {
                 Image(systemName: systemName)
-                    .symbolRenderingMode(.hierarchical)
                     .resizable()
                     .scaledToFit()
                     .frame(width: 18, height: 18)
@@ -30,10 +29,26 @@ struct TextWithColorfulIcon: View {
                             .strokeBorder(
                                 LinearGradient(
                                     colors: [
-                                        .white.opacity(0.8),
+                                        .white.opacity(0.6),
                                         .white.opacity(0.3),
                                         .clear,
                                         .clear
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.5
+                            )
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        .clear,
+                                        .clear,
+                                        .white.opacity(0.1),
+                                        .white.opacity(0.3)
                                     ],
                                     startPoint: .topLeading,
                                     endPoint: .bottomTrailing

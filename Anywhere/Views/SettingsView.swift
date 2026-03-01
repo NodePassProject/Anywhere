@@ -21,27 +21,27 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage("alwaysOnEnabled", store: APCore.userDefaults)
     private var alwaysOnEnabled = false
-
+    
     @AppStorage("ipv6Enabled", store: APCore.userDefaults)
     private var ipv6Enabled = false
-
+    
     @AppStorage("dohEnabled", store: APCore.userDefaults)
     private var dohEnabled = false
-
+    
     @AppStorage("bypassCountryCode", store: APCore.userDefaults)
     private var bypassCountryCode = ""
-
+    
     @State private var showDoHAlert = false
-
+    
     // Countries with serious internet censorship (must match INCLUDED_COUNTRIES in build_geoip.py)
     private static let countryCodes: [String] = [
         "AE", "BY", "CN", "CU", "IR", "MM", "RU", "SA", "TM", "VN"
     ]
-
+    
     private var hasRoutingRules: Bool {
         RuleSetStore.shared.ruleSets.contains { $0.assignedConfigurationId != nil }
     }
-
+    
     var body: some View {
         Form {
             Section("VPN") {
@@ -49,7 +49,7 @@ struct SettingsView: View {
                     TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.shield.fill", foregroundColor: .white, backgroundColor: .green)
                 }
             }
-
+            
             Section("Network") {
                 Toggle(isOn: $ipv6Enabled) {
                     TextWithColorfulIcon(titleKey: "IPv6", systemName: "6.circle.fill", foregroundColor: .white, backgroundColor: .blue)
@@ -68,7 +68,7 @@ struct SettingsView: View {
                     TextWithColorfulIcon(titleKey: "DNS over HTTPS", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .teal)
                 }
             }
-
+            
             Section("Routing") {
                 NavigationLink {
                     RuleSetListView()
@@ -82,6 +82,15 @@ struct SettingsView: View {
                     }
                 } label: {
                     TextWithColorfulIcon(titleKey: "Country Bypass", systemName: "globe.americas.fill", foregroundColor: .white, backgroundColor: .orange)
+                }
+            }
+            
+            
+            Section("About") {
+                NavigationLink {
+                    AcknowledgementsView()
+                } label: {
+                    TextWithColorfulIcon(titleKey: "Acknowledgements", systemName: "doc.text.fill", foregroundColor: .white, backgroundColor: .gray)
                 }
             }
         }
@@ -98,13 +107,13 @@ struct SettingsView: View {
             Text("Enabling DNS over HTTPS will prevent routing rules from working. Domain-based routing requires plain DNS to intercept queries.")
         }
     }
-
+    
     private func flag(for countryCode: String) -> String {
         String(countryCode.unicodeScalars.compactMap {
             UnicodeScalar(127397 + $0.value)
         }.map(Character.init))
     }
-
+    
     private func notifySettingsChanged() {
         CFNotificationCenterPostNotification(
             CFNotificationCenterGetDarwinNotifyCenter(),

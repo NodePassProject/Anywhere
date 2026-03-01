@@ -1,3617 +1,3877 @@
 {
-  "sourceLanguage": "en",
-  "strings": {
-    "·": {
-      "shouldTranslate": false
+  "sourceLanguage" : "en",
+  "strings" : {
+    "·" : {
+      "shouldTranslate" : false
     },
-    "/": {
-      "shouldTranslate": false
+    "/" : {
+      "shouldTranslate" : false
     },
-    "%@ %@": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
+    "%@ %@" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
           }
         },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ %2$@"
           }
         }
       }
     },
-    "%@:%@": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
+    "%@:%@" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
           }
         },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@:%2$@"
           }
         }
       }
     },
-    "%lld ms": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld مللي ثانية"
+    "%lld ms" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld مللي ثانية"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld ms"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld ms"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld میلی‌ثانیه"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld میلی‌ثانیه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld ms"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld ms"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld мс"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld мс"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld ms"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld ms"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld ms"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld ms"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld 毫秒"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 毫秒"
           }
         }
       }
     },
-    "Add": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "إضافة"
+    "About" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "حول"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Agregar"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Acerca de"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "افزودن"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "درباره"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ထည့်ရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အကြောင်း"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Добавить"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "О приложении"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Goş"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hakynda"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Thêm"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Giới thiệu"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "添加"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关于"
           }
         }
       }
     },
-    "Add a Configuration": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "إضافة تكوين"
+    "Acknowledgements" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "شكر وتقدير"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Agregar una configuración"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reconocimientos"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "افزودن پیکربندی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "قدردانی‌ها"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖွဲ့စည်းမှုတစ်ခုထည့်ပါ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကျေးဇူးတင်လွှာ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Добавьте конфигурацию"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Благодарности"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Konfigurasiýa goşuň"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Minnetdarlyklar"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Thêm cấu hình"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ghi nhận"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "添加配置"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "致谢"
           }
         }
       }
     },
-    "Add Configuration": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "إضافة تكوين"
+    "Add" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إضافة"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Agregar configuración"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Agregar"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "افزودن پیکربندی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "افزودن"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖွဲ့စည်းမှုထည့်ရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ထည့်ရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Добавить конфигурацию"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавить"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Konfigurasiýa goş"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Goş"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Thêm cấu hình"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thêm"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "添加配置"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加"
           }
         }
       }
     },
-    "Add Proxy": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "إضافة بروكسي"
+    "Add a Configuration" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إضافة تكوين"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Agregar proxy"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Agregar una configuración"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "افزودن پروکسی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "افزودن پیکربندی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီထည့်ရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဖွဲ့စည်းမှုတစ်ခုထည့်ပါ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Добавить прокси"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавьте конфигурацию"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Proksi goş"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Konfigurasiýa goşuň"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Thêm proxy"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thêm cấu hình"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "添加代理"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加配置"
           }
         }
       }
     },
-    "Address": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "العنوان"
+    "Add Configuration" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إضافة تكوين"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Dirección"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Agregar configuración"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "آدرس"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "افزودن پیکربندی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လိပ်စာ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဖွဲ့စည်းမှုထည့်ရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Адрес"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавить конфигурацию"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Salgy"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Konfigurasiýa goş"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Địa chỉ"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thêm cấu hình"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "地址"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加配置"
           }
         }
       }
     },
-    "Allow Insecure": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "السماح بغير الآمن"
+    "Add Proxy" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إضافة بروكسي"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Permitir inseguro"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Agregar proxy"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "اجازه ناامن"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "افزودن پروکسی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မလုံခြုံမှုခွင့်ပြု"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပရောက်စီထည့်ရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Небезопасное соединение"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавить прокси"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Howpsuz däl"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proksi goş"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cho phép không an toàn"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thêm proxy"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "允许不安全"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加代理"
           }
         }
       }
     },
-    "ALPN": {
-      "shouldTranslate": false
+    "Address" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "العنوان"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dirección"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "آدرس"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လိပ်စာ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Адрес"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Salgy"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Địa chỉ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "地址"
+          }
+        }
+      }
+    },
+    "All trademarks, service marks, and company names are the property of their respective owners." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جميع العلامات التجارية وعلامات الخدمة وأسماء الشركات هي ملك لأصحابها المعنيين."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Todas las marcas comerciales, marcas de servicio y nombres de empresas son propiedad de sus respectivos titulares."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تمامی علائم تجاری، علائم خدماتی و نام‌های شرکت‌ها متعلق به صاحبان مربوطه آن‌ها است."
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကုန်အမှတ်တံဆိပ်များ၊ ဝန်ဆောင်မှုအမှတ်တံဆိပ်များနှင့် ကုမ္ပဏီအမည်များအားလုံးသည် သက်ဆိုင်ရာပိုင်ရှင်များ၏ ပိုင်ဆိုင်မှုဖြစ်ပါသည်။"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Все товарные знаки, знаки обслуживания и названия компаний являются собственностью их владельцев."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ähli haryt nyşanlary, hyzmat nyşanlary we kompaniýa atlary degişli eýeleriniň emlägidir."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tất cả các nhãn hiệu, nhãn hiệu dịch vụ và tên công ty là tài sản của chủ sở hữu tương ứng."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "所有商标、服务标识和公司名称均为其各自所有者的财产。"
+          }
+        }
+      }
+    },
+    "Allow Insecure" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "السماح بغير الآمن"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permitir inseguro"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اجازه ناامن"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "မလုံခြုံမှုခွင့်ပြု"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Небезопасное соединение"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Howpsuz däl"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cho phép không an toàn"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许不安全"
+          }
+        }
+      }
+    },
+    "ALPN" : {
+      "shouldTranslate" : false
+    },
+    "Always On" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "التشغيل الدائم"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Siempre activo"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "همیشه روشن"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အမြဲဖွင့်"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Всегда включён"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hemişe açyk"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Luôn bật"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "始终开启"
+          }
+        }
+      }
     },
-    "Always On": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "التشغيل الدائم"
+    "Anywhere is an independent project and is not affiliated with, endorsed by, or sponsored by any of the companies listed below." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere هو مشروع مستقل وليس تابعًا لأي من الشركات المذكورة أدناه أو معتمدًا أو مدعومًا منها."
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Siempre activo"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere es un proyecto independiente y no está afiliado, respaldado ni patrocinado por ninguna de las empresas que se indican a continuación."
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "همیشه روشن"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere یک پروژه مستقل است و هیچ‌گونه وابستگی، تأیید یا حمایت مالی از سوی شرکت‌های ذکر شده در زیر ندارد."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အမြဲဖွင့်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere သည် လွတ်လပ်သောပရောဂျက်တစ်ခုဖြစ်ပြီး အောက်တွင်ဖော်ပြထားသော ကုမ္ပဏီတစ်ခုခုနှင့် ဆက်စပ်ခြင်း၊ ထောက်ခံခြင်း သို့မဟုတ် ပံ့ပိုးကူညီခြင်းမရှိပါ။"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Всегда включён"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere — независимый проект, не связанный ни с одной из перечисленных ниже компаний и не одобренный или спонсируемый ими."
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hemişe açyk"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere garaşsyz taslamadyr we aşakda görkezilen kompaniýalaryň hiç biri bilen baglanyşykly, goldanýan ýa-da maliýeleşdirilýän däldir."
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Luôn bật"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere là một dự án độc lập, không liên kết, được xác nhận hay tài trợ bởi bất kỳ công ty nào được liệt kê dưới đây."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "始终开启"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere 是一个独立项目，与以下列出的任何公司无关，未获其认可或赞助。"
           }
         }
       }
     },
-    "Auto": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تلقائي"
+    "Auto" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تلقائي"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Automático"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Automático"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "خودکار"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "خودکار"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အလိုအလျောက်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အလိုအလျောက်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Авто"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Авто"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Awto"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Awto"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tự động"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tự động"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "自动"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动"
           }
         }
       }
     },
-    "Cancel": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "إلغاء"
+    "Cancel" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إلغاء"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cancelar"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cancelar"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "لغو"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لغو"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပယ်ဖျက်ရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပယ်ဖျက်ရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Отмена"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отмена"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ýatyr"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ýatyr"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hủy bỏ"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hủy bỏ"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "取消"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "取消"
           }
         }
       }
     },
-    "Connected": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "متصل"
+    "Connected" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "متصل"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Conectado"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conectado"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "متصل"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "متصل"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်ပြီး"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ချိတ်ဆက်ပြီး"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Подключено"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключено"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Birikdirildi"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Birikdirildi"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Đã kết nối"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đã kết nối"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已连接"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已连接"
           }
         }
       }
     },
-    "Connecting...": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "جارٍ الاتصال..."
+    "Connecting..." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جارٍ الاتصال..."
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Conectando..."
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conectando..."
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "در حال اتصال..."
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "در حال اتصال..."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်နေသည်..."
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ချိတ်ဆက်နေသည်..."
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Подключение..."
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подключение..."
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Birikdirilýär..."
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Birikdirilýär..."
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Đang kết nối..."
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đang kết nối..."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在连接..."
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在连接..."
           }
         }
       }
     },
-    "Continue": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "متابعة"
+    "Continue" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "متابعة"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Continuar"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Continuar"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ادامه"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ادامه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဆက်လုပ်ရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဆက်လုပ်ရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Продолжить"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Продолжить"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Dowam et"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dowam et"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tiếp tục"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tiếp tục"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "继续"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "继续"
           }
         }
       }
     },
-    "Country Bypass": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تجاوز البلد"
+    "Country Bypass" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تجاوز البلد"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Omitir país"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Omitir país"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "دور زدن کشور"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "دور زدن کشور"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "နိုင်ငံရှောင်ကွင်း"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "နိုင်ငံရှောင်ကွင်း"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Обход по стране"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Обход по стране"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ýurt aýlaw"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ýurt aýlaw"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bỏ qua quốc gia"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bỏ qua quốc gia"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "国家分流"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "国家分流"
           }
         }
       }
     },
-    "Default": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "الافتراضي"
+    "Default" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الافتراضي"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Predeterminado"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Predeterminado"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "پیش‌فرض"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "پیش‌فرض"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မူရင်း"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "မူရင်း"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "По умолчанию"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "По умолчанию"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bellenen"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bellenen"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mặc định"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mặc định"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "默认"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "默认"
           }
         }
       }
     },
-    "Delete": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "حذف"
+    "Delete" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "حذف"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Eliminar"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Eliminar"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "حذف"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "حذف"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖျက်ရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဖျက်ရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Удалить"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Удалить"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Poz"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Poz"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Xóa"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Xóa"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "删除"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除"
           }
         }
       }
     },
-    "DIRECT": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "مباشر"
+    "DIRECT" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مباشر"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Directo"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Directo"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "مستقیم"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مستقیم"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "တိုက်ရိုက်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "တိုက်ရိုက်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Прямое"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Прямое"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Göni"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Göni"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Trực tiếp"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trực tiếp"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "直连"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "直连"
           }
         }
       }
     },
-    "Disable": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تعطيل"
+    "Disable" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تعطيل"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Desactivar"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desactivar"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "غیرفعال"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "غیرفعال"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပိတ်ရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပိတ်ရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Отключить"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отключить"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Öçür"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Öçür"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tắt"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tắt"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "禁用"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "禁用"
           }
         }
       }
     },
-    "Disconnected": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "غير متصل"
+    "Disconnected" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "غير متصل"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Desconectado"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desconectado"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "قطع شده"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "قطع شده"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုပြတ်ပြီး"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ချိတ်ဆက်မှုပြတ်ပြီး"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Отключено"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отключено"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Aýryldy"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aýryldy"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Đã ngắt kết nối"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đã ngắt kết nối"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未连接"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未连接"
           }
         }
       }
     },
-    "Disconnecting...": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "جارٍ قطع الاتصال..."
+    "Disconnecting..." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جارٍ قطع الاتصال..."
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Desconectando..."
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desconectando..."
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "در حال قطع..."
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "در حال قطع..."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုဖြတ်နေသည်..."
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ချိတ်ဆက်မှုဖြတ်နေသည်..."
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Отключение..."
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отключение..."
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Aýrylýar..."
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aýrylýar..."
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Đang ngắt kết nối..."
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đang ngắt kết nối..."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在断开..."
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在断开..."
           }
         }
       }
     },
-    "DNS over HTTPS": {
-      "shouldTranslate": false
+    "DNS over HTTPS" : {
+      "shouldTranslate" : false
     },
-    "Edit": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تعديل"
+    "Edit" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تعديل"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Editar"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Editar"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ویرایش"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ویرایش"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "တည်းဖြတ်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "တည်းဖြတ်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Изменить"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Изменить"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Üýtget"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Üýtget"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sửa"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sửa"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "编辑"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "编辑"
           }
         }
       }
     },
-    "Edit Configuration": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تعديل التكوين"
+    "Edit Configuration" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تعديل التكوين"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Editar configuración"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Editar configuración"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ویرایش پیکربندی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ویرایش پیکربندی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖွဲ့စည်းမှုတည်းဖြတ်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဖွဲ့စည်းမှုတည်းဖြတ်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Изменить конфигурацию"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Изменить конфигурацию"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Konfigurasiýany üýtget"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Konfigurasiýany üýtget"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sửa cấu hình"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sửa cấu hình"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "编辑配置"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "编辑配置"
           }
         }
       }
     },
-    "Enable Anyway": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تفعيل على أي حال"
+    "Enable Anyway" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تفعيل على أي حال"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Activar de todos modos"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activar de todos modos"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "فعال‌سازی در هر صورت"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "فعال‌سازی در هر صورت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဘယ်လိုပဲဖြစ်ဖြစ် ဖွင့်ရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဘယ်လိုပဲဖြစ်ဖြစ် ဖွင့်ရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Всё равно включить"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Всё равно включить"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Şonda-da aç"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Şonda-da aç"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Vẫn bật"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vẫn bật"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "仍然启用"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍然启用"
           }
         }
       }
     },
-    "Enabling DNS over HTTPS will prevent routing rules from working. Domain-based routing requires plain DNS to intercept queries.": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "سيؤدي تفعيل DNS عبر HTTPS إلى منع قواعد التوجيه من العمل. يتطلب التوجيه المبني على النطاقات استخدام DNS العادي لاعتراض الاستعلامات."
+    "Enabling DNS over HTTPS will prevent routing rules from working. Domain-based routing requires plain DNS to intercept queries." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "سيؤدي تفعيل DNS عبر HTTPS إلى منع قواعد التوجيه من العمل. يتطلب التوجيه المبني على النطاقات استخدام DNS العادي لاعتراض الاستعلامات."
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Activar DNS sobre HTTPS impedirá que las reglas de enrutamiento funcionen. El enrutamiento basado en dominios requiere DNS simple para interceptar las consultas."
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activar DNS sobre HTTPS impedirá que las reglas de enrutamiento funcionen. El enrutamiento basado en dominios requiere DNS simple para interceptar las consultas."
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "فعال‌سازی DNS از طریق HTTPS مانع عملکرد قوانین مسیریابی می‌شود. مسیریابی مبتنی بر دامنه نیاز به DNS ساده برای رهگیری درخواست‌ها دارد."
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "فعال‌سازی DNS از طریق HTTPS مانع عملکرد قوانین مسیریابی می‌شود. مسیریابی مبتنی بر دامنه نیاز به DNS ساده برای رهگیری درخواست‌ها دارد."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "DNS over HTTPS ကိုဖွင့်ခြင်းသည် လမ်းကြောင်းသတ်မှတ်ချက်များ အလုပ်မလုပ်စေပါ။ ဒိုမိန်းအခြေခံ လမ်းကြောင်းသတ်မှတ်ခြင်းသည် DNS ရိုးရိုးဖြင့် မေးခွန်းများကို ကြားဖြတ်ရန် လိုအပ်ပါသည်။"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DNS over HTTPS ကိုဖွင့်ခြင်းသည် လမ်းကြောင်းသတ်မှတ်ချက်များ အလုပ်မလုပ်စေပါ။ ဒိုမိန်းအခြေခံ လမ်းကြောင်းသတ်မှတ်ခြင်းသည် DNS ရိုးရိုးဖြင့် မေးခွန်းများကို ကြားဖြတ်ရန် လိုအပ်ပါသည်။"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Включение DNS через HTTPS помешает работе правил маршрутизации. Маршрутизация по доменам требует обычного DNS для перехвата запросов."
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включение DNS через HTTPS помешает работе правил маршрутизации. Маршрутизация по доменам требует обычного DNS для перехвата запросов."
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "DNS over HTTPS-i açmak ugratma düzgünleriniň işlemeginiň öňüni alar. Domen esasly ugratma soraglary tutmak üçin adaty DNS talap edýär."
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "DNS over HTTPS-i açmak ugratma düzgünleriniň işlemeginiň öňüni alar. Domen esasly ugratma soraglary tutmak üçin adaty DNS talap edýär."
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bật DNS qua HTTPS sẽ khiến quy tắc định tuyến không hoạt động. Định tuyến theo tên miền yêu cầu DNS thuần để chặn các truy vấn."
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bật DNS qua HTTPS sẽ khiến quy tắc định tuyến không hoạt động. Định tuyến theo tên miền yêu cầu DNS thuần để chặn các truy vấn."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "启用 DNS over HTTPS 将导致路由规则无法工作。基于域名的路由需要使用普通 DNS 来拦截查询。"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用 DNS over HTTPS 将导致路由规则无法工作。基于域名的路由需要使用普通 DNS 来拦截查询。"
           }
         }
       }
     },
-    "Encryption": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "التشفير"
+    "Encryption" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "التشفير"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cifrado"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cifrado"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "رمزگذاری"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "رمزگذاری"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကုဒ်ဝှက်ခြင်း"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကုဒ်ဝှက်ခြင်း"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Шифрование"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Шифрование"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Şifrlemek"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Şifrlemek"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mã hóa"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mã hóa"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "加密"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加密"
           }
         }
       }
     },
-    "Fingerprint": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "البصمة"
+    "Fingerprint" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "البصمة"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Huella digital"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Huella digital"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "اثر انگشت"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اثر انگشت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လက်ဗွေ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လက်ဗွေ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Отпечаток"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отпечаток"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Barmak yzy"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Barmak yzy"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Vân tay"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vân tay"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "指纹"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "指纹"
           }
         }
       }
     },
-    "Flow": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "التدفق"
+    "Flow" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "التدفق"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Flujo"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Flujo"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "جریان"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جریان"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Flow"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Flow"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Flow"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Flow"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Flow"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Flow"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Flow"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Flow"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "流控"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "流控"
           }
         }
       }
     },
-    "Go to Settings": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "انتقل إلى الإعدادات"
+    "Go to Settings" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "انتقل إلى الإعدادات"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ir a Ajustes"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ir a Ajustes"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "رفتن به تنظیمات"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "رفتن به تنظیمات"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဆက်တင်သို့သွားရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဆက်တင်သို့သွားရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Перейти в Настройки"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Перейти в Настройки"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sazlamalara git"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sazlamalara git"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Đi đến Cài đặt"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đi đến Cài đặt"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "前往设置"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "前往设置"
           }
         }
       }
     },
-    "h2,http/1.1": {
-      "shouldTranslate": false
+    "h2,http/1.1" : {
+      "shouldTranslate" : false
     },
-    "Home": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "الرئيسية"
+    "Home" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الرئيسية"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Inicio"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Inicio"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "خانه"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "خانه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပင်မ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပင်မ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Главная"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Главная"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Baş sahypa"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Baş sahypa"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Trang chủ"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trang chủ"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "主页"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主页"
           }
         }
       }
     },
-    "Host": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "المضيف"
+    "Host" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "المضيف"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Host"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Host"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "میزبان"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "میزبان"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Host"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Host"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Хост"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Хост"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Host"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Host"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Host"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Host"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "主机"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "主机"
           }
         }
       }
     },
-    "HTTPUpgrade": {
-      "shouldTranslate": false
+    "HTTPUpgrade" : {
+      "shouldTranslate" : false
     },
-    "Import Failed": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "فشل الاستيراد"
+    "Import Failed" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "فشل الاستيراد"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Error de importación"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Error de importación"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "وارد کردن ناموفق بود"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "وارد کردن ناموفق بود"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "တင်သွင်းမှု မအောင်မြင်ပါ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "တင်သွင်းမှု မအောင်မြင်ပါ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ошибка импорта"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ошибка импорта"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Import şowsuz"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Import şowsuz"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nhập thất bại"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nhập thất bại"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "导入失败"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "导入失败"
           }
         }
       }
     },
-    "IPv6": {
-      "shouldTranslate": false
+    "IPv6" : {
+      "shouldTranslate" : false
     },
-    "Link": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "رابط"
+    "Link" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "رابط"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Enlace"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enlace"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "لینک"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لینک"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လင့်ခ်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လင့်ခ်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ссылка"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ссылка"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Salgy"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Salgy"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Liên kết"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Liên kết"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "链接"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "链接"
           }
         }
       }
     },
-    "Manual": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "يدوي"
+    "Manual" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "يدوي"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Manual"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Manual"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "دستی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "دستی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကိုယ်တိုင်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကိုယ်တိုင်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Вручную"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Вручную"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "El bilen"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "El bilen"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Thủ công"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thủ công"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "手动"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "手动"
           }
         }
       }
     },
-    "Mode": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "الوضع"
+    "Mode" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الوضع"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Modo"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Modo"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "حالت"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "حالت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မုဒ်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "မုဒ်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Режим"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Режим"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tertip"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tertip"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Chế độ"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chế độ"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "模式"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模式"
           }
         }
       }
     },
-    "Mux": {
-      "shouldTranslate": false
+    "Mux" : {
+      "shouldTranslate" : false
     },
-    "Name": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "الاسم"
+    "Name" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الاسم"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nombre"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nombre"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "نام"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نام"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အမည်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အမည်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Имя"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Имя"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ady"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ady"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tên"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tên"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "名称"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "名称"
           }
         }
       }
     },
-    "Network": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "الشبكة"
+    "Network" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الشبكة"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Red"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Red"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "شبکه"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "شبکه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကွန်ရက်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကွန်ရက်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Сеть"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сеть"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tor"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tor"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mạng"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mạng"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "网络"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "网络"
           }
         }
       }
     },
-    "No Proxies": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "لا توجد بروكسيات"
+    "No Proxies" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لا توجد بروكسيات"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sin proxies"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sin proxies"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "بدون پروکسی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بدون پروکسی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီမရှိပါ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပရောက်စီမရှိပါ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Нет прокси"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет прокси"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Proksi ýok"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proksi ýok"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Không có proxy"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Không có proxy"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "没有代理"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "没有代理"
           }
         }
       }
     },
-    "None": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "لا شيء"
+    "None" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لا شيء"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ninguno"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ninguno"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "هیچ"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "هیچ"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မရှိ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "မရှိ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Нет"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ýok"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ýok"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Không"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Không"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "无"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无"
           }
         }
       }
     },
-    "Not Configured": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "غير مُهيّأ"
+    "Not Configured" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "غير مُهيّأ"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No configurado"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No configurado"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "پیکربندی نشده"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "پیکربندی نشده"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖွဲ့စည်းမထားပါ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဖွဲ့စည်းမထားပါ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Не настроено"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не настроено"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sazlanmadyk"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sazlanmadyk"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Chưa cấu hình"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chưa cấu hình"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未配置"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未配置"
           }
         }
       }
     },
-    "OK": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "موافق"
+    "OK" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "موافق"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Aceptar"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aceptar"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تأیید"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تأیید"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အိုကေ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အိုကေ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ОК"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ОК"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bolýar"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bolýar"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "OK"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "OK"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "好"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "好"
           }
         }
       }
     },
-    "Packet Up": {
-      "shouldTranslate": false
+    "Packet Up" : {
+      "shouldTranslate" : false
     },
-    "Path": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "المسار"
+    "Path" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "المسار"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ruta"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ruta"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "مسیر"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مسیر"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လမ်းကြောင်း"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လမ်းကြောင်း"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Путь"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Путь"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ýol"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ýol"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Đường dẫn"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đường dẫn"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "路径"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路径"
           }
         }
       }
     },
-    "Permission denied": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تم رفض الإذن"
+    "Permission denied" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تم رفض الإذن"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Permiso denegado"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permiso denegado"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "اجازه رد شد"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اجازه رد شد"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ခွင့်ပြုချက်ငြင်းပယ်ခံရသည်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ခွင့်ပြုချက်ငြင်းပယ်ခံရသည်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Нет разрешения"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет разрешения"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Rugsat berilmedi"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Rugsat berilmedi"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Quyền bị từ chối"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quyền bị từ chối"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "权限被拒绝"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "权限被拒绝"
           }
         }
       }
     },
-    "Port": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "المنفذ"
+    "Port" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "المنفذ"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Puerto"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Puerto"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "پورت"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "پورت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပို့တ်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပို့တ်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Порт"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Порт"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Port"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Port"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cổng"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cổng"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "端口"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "端口"
           }
         }
       }
     },
-    "Proxies": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "البروكسيات"
+    "Proxies" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "البروكسيات"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Proxies"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proxies"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "پروکسی‌ها"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "پروکسی‌ها"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီများ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပရောက်စီများ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Прокси"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Прокси"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Proksiler"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proksiler"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Proxy"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proxy"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "代理"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理"
           }
         }
       }
     },
-    "Public Key": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "المفتاح العام"
+    "Public Key" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "المفتاح العام"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Clave pública"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Clave pública"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "کلید عمومی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "کلید عمومی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အများသုံးသော့"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အများသုံးသော့"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Публичный ключ"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Публичный ключ"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Açyk açar"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Açyk açar"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Khóa công khai"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Khóa công khai"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "公钥"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "公钥"
           }
         }
       }
     },
-    "QR Code": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "رمز QR"
+    "QR Code" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "رمز QR"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Código QR"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Código QR"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "کد QR"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "کد QR"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "QR ကုဒ်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR ကုဒ်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "QR-код"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR-код"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "QR kod"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR kod"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mã QR"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mã QR"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "二维码"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "二维码"
           }
         }
       }
     },
-    "Reality": {
-      "shouldTranslate": false
+    "Reality" : {
+      "shouldTranslate" : false
     },
-    "Reconnecting...": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "جارٍ إعادة الاتصال..."
+    "Reconnecting..." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جارٍ إعادة الاتصال..."
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Reconectando..."
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reconectando..."
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "در حال اتصال مجدد..."
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "در حال اتصال مجدد..."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပြန်လည်ချိတ်ဆက်နေသည်..."
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပြန်လည်ချိတ်ဆက်နေသည်..."
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Переподключение..."
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Переподключение..."
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Täzeden birikdirilýär..."
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Täzeden birikdirilýär..."
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Đang kết nối lại..."
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đang kết nối lại..."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "正在重连..."
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在重连..."
           }
         }
       }
     },
-    "Routing": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "التوجيه"
+    "Routing" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "التوجيه"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Enrutamiento"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enrutamiento"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "مسیریابی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مسیریابی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လမ်းကြောင်းသတ်မှတ်ခြင်း"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လမ်းကြောင်းသတ်မှတ်ခြင်း"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Маршрутизация"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Маршрутизация"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ugratma"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ugratma"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Định tuyến"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Định tuyến"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "路由"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路由"
           }
         }
       }
     },
-    "Routing Rules": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "قواعد التوجيه"
+    "Routing Rules" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "قواعد التوجيه"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Reglas de enrutamiento"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reglas de enrutamiento"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "قوانین مسیریابی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "قوانین مسیریابی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လမ်းကြောင်းသတ်မှတ်ချက်များ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လမ်းကြောင်းသတ်မှတ်ချက်များ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Правила маршрутизации"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Правила маршрутизации"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ugratma düzgünleri"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ugratma düzgünleri"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Quy tắc định tuyến"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quy tắc định tuyến"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "路由规则"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路由规则"
           }
         }
       }
     },
-    "Routing Rules Updated": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تم تحديث قواعد التوجيه"
+    "Routing Rules Updated" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تم تحديث قواعد التوجيه"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Reglas de enrutamiento actualizadas"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reglas de enrutamiento actualizadas"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "قوانین مسیریابی به‌روزرسانی شد"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "قوانین مسیریابی به‌روزرسانی شد"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လမ်းကြောင်းသတ်မှတ်ချက်များ အပ်ဒိတ်လုပ်ပြီးပါပြီ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လမ်းကြောင်းသတ်မှတ်ချက်များ အပ်ဒိတ်လုပ်ပြီးပါပြီ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Правила маршрутизации обновлены"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Правила маршрутизации обновлены"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ugratma düzgünleri täzelendi"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ugratma düzgünleri täzelendi"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Đã cập nhật quy tắc định tuyến"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đã cập nhật quy tắc định tuyến"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "路由规则已更新"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "路由规则已更新"
           }
         }
       }
     },
-    "Save": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "حفظ"
+    "Save" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "حفظ"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Guardar"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Guardar"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ذخیره"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ذخیره"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "သိမ်းရန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "သိမ်းရန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Сохранить"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сохранить"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sakla"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sakla"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Lưu"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lưu"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "保存"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "保存"
           }
         }
       }
     },
-    "Scan your QR code": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "امسح رمز QR الخاص بك"
+    "Scan your QR code" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "امسح رمز QR الخاص بك"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Escanea tu código QR"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Escanea tu código QR"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "کد QR خود را اسکن کنید"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "کد QR خود را اسکن کنید"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "သင့် QR ကုဒ်ကိုစကင်ဖတ်ပါ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "သင့် QR ကုဒ်ကိုစကင်ဖတ်ပါ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Отсканируйте QR-код"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отсканируйте QR-код"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "QR koduňyzy skanirläň"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "QR koduňyzy skanirläň"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Quét mã QR của bạn"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quét mã QR của bạn"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "扫描二维码"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "扫描二维码"
           }
         }
       }
     },
-    "Security": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "الأمان"
+    "Security" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الأمان"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Seguridad"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Seguridad"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "امنیت"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "امنیت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လုံခြုံရေး"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လုံခြုံရေး"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Безопасность"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Безопасность"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Howpsuzlyk"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Howpsuzlyk"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bảo mật"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bảo mật"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "安全"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安全"
           }
         }
       }
     },
-    "Server": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "الخادم"
+    "Server" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الخادم"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Servidor"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Servidor"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "سرور"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "سرور"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဆာဗာ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဆာဗာ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Сервер"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сервер"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Serwer"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Serwer"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Máy chủ"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Máy chủ"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "服务器"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "服务器"
           }
         }
       }
     },
-    "Settings": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "الإعدادات"
+    "Settings" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الإعدادات"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ajustes"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ajustes"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تنظیمات"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تنظیمات"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဆက်တင်များ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဆက်တင်များ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Настройки"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Настройки"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sazlamalar"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sazlamalar"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cài đặt"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cài đặt"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "设置"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设置"
           }
         }
       }
     },
-    "Short ID": {
-      "shouldTranslate": false
+    "Short ID" : {
+      "shouldTranslate" : false
     },
-    "SNI": {
-      "shouldTranslate": false
+    "SNI" : {
+      "shouldTranslate" : false
     },
-    "Stream One": {
-      "shouldTranslate": false
+    "Stream One" : {
+      "shouldTranslate" : false
     },
-    "Tap + to add a VLESS proxy.": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "انقر + لإضافة بروكسي VLESS."
+    "Tap + to add a VLESS proxy." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "انقر + لإضافة بروكسي VLESS."
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Toca + para agregar un proxy VLESS."
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Toca + para agregar un proxy VLESS."
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "برای افزودن پروکسی VLESS روی + بزنید."
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "برای افزودن پروکسی VLESS روی + بزنید."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VLESS ပရောက်စီထည့်ရန် + ကိုနှိပ်ပါ။"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VLESS ပရောက်စီထည့်ရန် + ကိုနှိပ်ပါ။"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Нажмите +, чтобы добавить прокси VLESS."
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нажмите +, чтобы добавить прокси VLESS."
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VLESS proksi goşmak üçin + basyň."
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VLESS proksi goşmak üçin + basyň."
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nhấn + để thêm proxy VLESS."
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nhấn + để thêm proxy VLESS."
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "点按 + 添加 VLESS 代理。"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "点按 + 添加 VLESS 代理。"
           }
         }
       }
     },
-    "TCP": {
-      "shouldTranslate": false
+    "TCP" : {
+      "shouldTranslate" : false
     },
-    "Test All": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "اختبار الكل"
+    "Test All" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اختبار الكل"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Probar todo"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Probar todo"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "آزمایش همه"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "آزمایش همه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အားလုံးစမ်းသပ်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အားလုံးစမ်းသပ်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Проверить все"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Проверить все"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Hemmesini barla"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hemmesini barla"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kiểm tra tất cả"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kiểm tra tất cả"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "全部测试"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全部测试"
           }
         }
       }
     },
-    "Test Latency": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "اختبار زمن الاستجابة"
+    "Test Latency" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اختبار زمن الاستجابة"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Probar latencia"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Probar latencia"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "آزمایش تأخیر"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "آزمایش تأخیر"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Latency စမ်းသပ်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Latency စမ်းသပ်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Проверить задержку"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Проверить задержку"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Gijikdirmäni barla"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Gijikdirmäni barla"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kiểm tra độ trễ"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kiểm tra độ trễ"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "测试延迟"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "测试延迟"
           }
         }
       }
     },
-    "The proxy used by the following routing rules was deleted. They have been reset to Default: %@": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تم حذف البروكسي المستخدم في قواعد التوجيه التالية. تمت إعادة تعيينها إلى الافتراضي: %@"
+    "The proxy used by the following routing rules was deleted. They have been reset to Default: %@" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تم حذف البروكسي المستخدم في قواعد التوجيه التالية. تمت إعادة تعيينها إلى الافتراضي: %@"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Se eliminó el proxy utilizado por las siguientes reglas de enrutamiento. Se han restablecido a Predeterminado: %@"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Se eliminó el proxy utilizado por las siguientes reglas de enrutamiento. Se han restablecido a Predeterminado: %@"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "پروکسی استفاده‌شده در قوانین مسیریابی زیر حذف شد. آن‌ها به پیش‌فرض بازنشانی شده‌اند: %@"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "پروکسی استفاده‌شده در قوانین مسیریابی زیر حذف شد. آن‌ها به پیش‌فرض بازنشانی شده‌اند: %@"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အောက်ပါ လမ်းကြောင်းသတ်မှတ်ချက်များတွင် အသုံးပြုထားသော ပရောက်စီကို ဖျက်လိုက်ပါပြီ။ ၎င်းတို့ကို မူရင်းသို့ ပြန်လည်သတ်မှတ်ထားပါသည်: %@"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အောက်ပါ လမ်းကြောင်းသတ်မှတ်ချက်များတွင် အသုံးပြုထားသော ပရောက်စီကို ဖျက်လိုက်ပါပြီ။ ၎င်းတို့ကို မူရင်းသို့ ပြန်လည်သတ်မှတ်ထားပါသည်: %@"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Прокси, используемый следующими правилами маршрутизации, был удалён. Они сброшены на значение по умолчанию: %@"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Прокси, используемый следующими правилами маршрутизации, был удалён. Они сброшены на значение по умолчанию: %@"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Aşakdaky ugratma düzgünleri tarapyndan ulanylýan proksi pozuldy. Olar Bellenen-e gaýtaryldy: %@"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aşakdaky ugratma düzgünleri tarapyndan ulanylýan proksi pozuldy. Olar Bellenen-e gaýtaryldy: %@"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Proxy được sử dụng bởi các quy tắc định tuyến sau đã bị xóa. Chúng đã được đặt lại về Mặc định: %@"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proxy được sử dụng bởi các quy tắc định tuyến sau đã bị xóa. Chúng đã được đặt lại về Mặc định: %@"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "以下路由规则使用的代理已被删除，它们已重置为默认: %@"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "以下路由规则使用的代理已被删除，它们已重置为默认: %@"
           }
         }
       }
     },
-    "timeout": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "انتهت المهلة"
+    "timeout" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "انتهت المهلة"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "tiempo agotado"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "tiempo agotado"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "وقفه"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "وقفه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အချိန်ကုန်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အချိန်ကုန်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "таймаут"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "таймаут"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "wagt gutardy"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "wagt gutardy"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "hết thời gian"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "hết thời gian"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "超时"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "超时"
           }
         }
       }
     },
-    "TLS": {
-      "shouldTranslate": false
+    "TLS" : {
+      "shouldTranslate" : false
+    },
+    "Trademarks" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "العلامات التجارية"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Marcas comerciales"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "علائم تجاری"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကုန်အမှတ်တံဆိပ်များ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Товарные знаки"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Haryt nyşanlary"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nhãn hiệu"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "商标"
+          }
+        }
+      }
     },
-    "Transport": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "النقل"
+    "Transport" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "النقل"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Transporte"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Transporte"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "انتقال"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "انتقال"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အပို့အဆောင်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အပို့အဆောင်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Транспорт"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Транспорт"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Transport"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Transport"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Truyền tải"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Truyền tải"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "传输"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "传输"
           }
         }
       }
     },
-    "Unknown": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "غير معروف"
+    "Unknown" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "غير معروف"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Desconocido"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Desconocido"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "نامشخص"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نامشخص"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မသိ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "မသိ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Неизвестно"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Неизвестно"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Näbelli"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Näbelli"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Không xác định"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Không xác định"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "未知"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未知"
           }
         }
       }
     },
-    "Update": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "تحديث"
+    "Update" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تحديث"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Actualizar"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Actualizar"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "به‌روزرسانی"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "به‌روزرسانی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အပ်ဒိတ်"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အပ်ဒိတ်"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Обновить"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Обновить"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Täzele"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Täzele"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cập nhật"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cập nhật"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "更新"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新"
           }
         }
       }
     },
-    "Update Failed": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "فشل التحديث"
+    "Update Failed" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "فشل التحديث"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Error de actualización"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Error de actualización"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "به‌روزرسانی ناموفق بود"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "به‌روزرسانی ناموفق بود"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အပ်ဒိတ် မအောင်မြင်ပါ"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အပ်ဒိတ် မအောင်မြင်ပါ"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ошибка обновления"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ошибка обновления"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Täzelemek şowsuz"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Täzelemek şowsuz"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Cập nhật thất bại"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cập nhật thất bại"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "更新失败"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新失败"
           }
         }
       }
     },
-    "UUID": {
-      "shouldTranslate": false
+    "UUID" : {
+      "shouldTranslate" : false
     },
-    "Vision": {
-      "shouldTranslate": false
+    "Vision" : {
+      "shouldTranslate" : false
     },
-    "Vision with UDP 443": {
-      "shouldTranslate": false
+    "Vision with UDP 443" : {
+      "shouldTranslate" : false
     },
-    "VPN": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN"
+    "VPN" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN"
           }
         }
       }
     },
-    "VPN Error": {
-      "localizations": {
-        "ar": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "خطأ VPN"
+    "VPN Error" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "خطأ VPN"
           }
         },
-        "es": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Error de VPN"
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Error de VPN"
           }
         },
-        "fa": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "خطای VPN"
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "خطای VPN"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN အမှား"
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN အမှား"
           }
         },
-        "ru": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ошибка VPN"
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ошибка VPN"
           }
         },
-        "tk": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN ýalňyşlygy"
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN ýalňyşlygy"
           }
         },
-        "vi": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Lỗi VPN"
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lỗi VPN"
           }
         },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN 错误"
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN 错误"
           }
         }
       }
     },
-    "WebSocket": {
-      "shouldTranslate": false
+    "WebSocket" : {
+      "shouldTranslate" : false
     },
-    "XHTTP": {
-      "shouldTranslate": false
+    "XHTTP" : {
+      "shouldTranslate" : false
     },
-    "XUDP": {
-      "shouldTranslate": false
+    "XUDP" : {
+      "shouldTranslate" : false
     }
   },
-  "version": "1.1"
+  "version" : "1.1"
 }

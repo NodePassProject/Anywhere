@@ -23,7 +23,7 @@ class RuleSetStore {
     private(set) var ruleSets: [RuleSet] = []
 
     /// Bundled ruleset names (must match JSON filenames in Resources/).
-    private static let builtIn = ["Telegram"]
+    private static let builtIn = ["Telegram", "Netflix", "YouTube", "OpenAI", "Claude"]
     private static let assignmentsKey = "ruleSetAssignments"
 
     private init() {
