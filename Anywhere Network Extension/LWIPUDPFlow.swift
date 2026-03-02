@@ -75,6 +75,14 @@ class LWIPUDPFlow {
 
         let payload = data.prefix(payloadLength)
 
+        // Buffer data while the outbound connection is being established.
+        // directRelay is set before its socket connects; sending to an
+        // unconnected UDP socket silently drops the datagram.
+        if vlessConnecting {
+            bufferPayload(data: data, payloadLength: payloadLength)
+            return
+        }
+
         // Direct bypass path
         if let relay = directRelay {
             relay.send(data: Data(payload))
@@ -97,13 +105,9 @@ class LWIPUDPFlow {
             return
         }
 
-        // Buffer and connect
-        if vlessConnecting {
-            bufferPayload(data: data, payloadLength: payloadLength)
-        } else {
-            bufferPayload(data: data, payloadLength: payloadLength)
-            connectVLESS()
-        }
+        // No connection yet — buffer and start connecting
+        bufferPayload(data: data, payloadLength: payloadLength)
+        connectVLESS()
     }
 
     private func bufferPayload(data: Data, payloadLength: Int) {

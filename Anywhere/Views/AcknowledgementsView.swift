@@ -12,8 +12,8 @@ struct AcknowledgementsView: View {
         ("Telegram", "Telegram FZ-LLC"),
         ("Netflix", "Netflix, Inc."),
         ("YouTube", "Google LLC"),
-        ("OpenAI", "OpenAI, Inc."),
-        ("Disney", "The Walt Disney Company"),
+        ("ChatGPT", "OpenAI, Inc."),
+        ("Disney+", "The Walt Disney Company"),
         ("TikTok", "ByteDance Ltd."),
         ("Claude", "Anthropic, PBC"),
     ]
