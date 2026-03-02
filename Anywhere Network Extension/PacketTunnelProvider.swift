@@ -108,7 +108,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Re-applies tunnel network settings with current UserDefaults values.
-    /// Called by LWIPStack via onTunnelSettingsNeedReapply when IPv6 or routing rules change.
+    /// Called by LWIPStack via onTunnelSettingsNeedReapply when IPv6 setting changes.
     /// Resets the virtual interface and flushes the OS DNS cache.
     private func reapplyTunnelSettings() {
         let settings = buildTunnelSettings()

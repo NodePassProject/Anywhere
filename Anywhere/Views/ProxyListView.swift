@@ -18,22 +18,22 @@ struct ProxyListView: View {
     @State private var showingSubscriptionError = false
     @State private var subscriptionErrorMessage = ""
 
-    private var standaloneConfigs: [VLESSConfiguration] {
+    private var standaloneConfigurations: [VLESSConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }
     }
 
     private var subscribedGroups: [(Subscription, [VLESSConfiguration])] {
-        viewModel.subscriptions.compactMap { sub in
-            let configs = viewModel.configurations(for: sub)
-            return configs.isEmpty ? nil : (sub, configs)
+        viewModel.subscriptions.compactMap { subscription in
+            let configurations = viewModel.configurations(for: subscription)
+            return configurations.isEmpty ? nil : (subscription, configurations)
         }
     }
 
     var body: some View {
         List {
-            if !standaloneConfigs.isEmpty {
+            if !standaloneConfigurations.isEmpty {
                 Section {
-                    ForEach(standaloneConfigs) { configuration in
+                    ForEach(standaloneConfigurations) { configuration in
                         configurationRow(configuration)
                     }
                 }
