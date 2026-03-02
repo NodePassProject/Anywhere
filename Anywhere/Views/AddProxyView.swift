@@ -191,12 +191,16 @@ struct AddProxyView: View {
     // MARK: - Link Input
 
     private var linkInputField: some View {
-        TextField(String("vless:// or https://"), text: $linkURL)
-            .textFieldStyle(LinkTextFieldStyle())
-            .textInputAutocapitalization(.never)
-            .keyboardType(.URL)
-            .autocorrectionDisabled()
-            .padding(.top, 12)
+        VStack {
+            TextField(String("Link"), text: $linkURL)
+                .textFieldStyle(LinkTextFieldStyle())
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+                .autocorrectionDisabled()
+                .padding(.top, 12)
+            Text("Supports VLESS link, subscription link and Clash link")
+                .font(.caption)
+        }
     }
 
     // MARK: - Actions
@@ -242,7 +246,7 @@ struct AddProxyView: View {
                 do {
                     let result = try await SubscriptionFetcher.fetch(url: trimmed)
                     let subscription = Subscription(
-                        name: result.name ?? "Subscription",
+                        name: result.name ?? URL(string: trimmed)?.host ?? String(localized: "Subscription"),
                         url: trimmed,
                         lastUpdate: Date(),
                         upload: result.upload,

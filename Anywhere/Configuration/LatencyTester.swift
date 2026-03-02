@@ -29,9 +29,7 @@ nonisolated enum LatencyTester {
     /// excluding DNS resolution and connection setup overhead.
     nonisolated static func test(_ configuration: VLESSConfiguration) async -> LatencyResult {
         // Resolve DNS outside the tunnel
-        let resolvedIP = await Task.detached {
-            VPNViewModel.resolveServerAddress(configuration.serverAddress)
-        }.value
+        let resolvedIP = VPNViewModel.resolveServerAddress(configuration.serverAddress)
 
         // Create configuration with resolved IP
         let testConfiguration = await VLESSConfiguration(
@@ -77,21 +75,27 @@ nonisolated enum LatencyTester {
         }
     }
 
-    /// Test multiple configurations sequentially, emitting results one at a time.
+    /// Test multiple configurations in batches of 3, emitting results as each test finishes.
     nonisolated static func testAll(_ configurations: [VLESSConfiguration]) -> AsyncStream<(UUID, LatencyResult)> {
         AsyncStream { continuation in
             let task = Task {
-                for configuration in configurations {
+                var index = 0
+                while index < configurations.count {
                     guard !Task.isCancelled else { break }
-                    let result = await Self.test(configuration)
-                    continuation.yield((configuration.id, result))
+                    let batch = configurations[index..<min(index + 3, configurations.count)]
+                    await withTaskGroup(of: (UUID, LatencyResult).self) { group in
+                        for configuration in batch {
+                            group.addTask { (configuration.id, await Self.test(configuration)) }
+                        }
+                        for await pair in group {
+                            continuation.yield(pair)
+                        }
+                    }
+                    index += 3
                 }
                 continuation.finish()
             }
-
-            continuation.onTermination = { _ in
-                task.cancel()
-            }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 

@@ -40,7 +40,7 @@ struct SubscriptionFetcher {
         }
 
         var request = URLRequest(url: url)
-        request.setValue("Anywhere/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("Anywhere", forHTTPHeaderField: "User-Agent")
 
         // Use a delegate that accepts untrusted certificates — subscription
         // servers commonly run on IP addresses with self-signed certs.
@@ -68,6 +68,22 @@ struct SubscriptionFetcher {
             bodyString = rawString
         } else {
             throw FetchError.noConfigurations
+        }
+
+        // Try Clash YAML format first
+        if bodyString.contains("proxies:") {
+            let result = try ClashProxyParser.parse(yaml: bodyString)
+            guard !result.configurations.isEmpty else {
+                throw FetchError.noConfigurations
+            }
+            return Result(
+                configurations: result.configurations,
+                name: profileTitle,
+                upload: userInfo.upload,
+                download: userInfo.download,
+                total: userInfo.total,
+                expire: userInfo.expire
+            )
         }
 
         // Parse VLESS lines

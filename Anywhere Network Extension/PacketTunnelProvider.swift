@@ -67,30 +67,60 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // DNS servers are always plain UDP (1.1.1.1, 1.0.0.1); DoH auto-upgrade is
     // prevented at the lwIP level by blocking DDR queries, not by DNS settings here.
 
+    // MARK: - Bypass Routes
+    //
+    // These IP ranges are always excluded from the VPN tunnel (sent directly).
+    // Domain-based entries (localhost, *.local, captive.apple.com) are not
+    // expressible as packet-level route exclusions:
+    //   - localhost   → covered by 127.0.0.0/8
+    //   - *.local     → mDNS/Bonjour; addresses fall in private/link-local ranges below
+    //   - captive.apple.com → handled by the OS captive-portal detection layer
+
+    private static let bypassIPv4Routes: [NEIPv4Route] = [
+        NEIPv4Route(destinationAddress: "127.0.0.0",     subnetMask: "255.0.0.0"),     // 127.0.0.0/8
+        NEIPv4Route(destinationAddress: "10.0.0.0",      subnetMask: "255.0.0.0"),     // 10.0.0.0/8
+        NEIPv4Route(destinationAddress: "172.16.0.0",    subnetMask: "255.240.0.0"),   // 172.16.0.0/12
+        NEIPv4Route(destinationAddress: "192.168.0.0",   subnetMask: "255.255.0.0"),   // 192.168.0.0/16
+        NEIPv4Route(destinationAddress: "100.64.0.0",    subnetMask: "255.192.0.0"),   // 100.64.0.0/10
+        NEIPv4Route(destinationAddress: "162.14.0.0",    subnetMask: "255.255.0.0"),   // 162.14.0.0/16
+        NEIPv4Route(destinationAddress: "211.99.96.0",   subnetMask: "255.255.224.0"), // 211.99.96.0/19
+        NEIPv4Route(destinationAddress: "162.159.192.0", subnetMask: "255.255.255.0"), // 162.159.192.0/24
+        NEIPv4Route(destinationAddress: "162.159.193.0", subnetMask: "255.255.255.0"), // 162.159.193.0/24
+        NEIPv4Route(destinationAddress: "162.159.195.0", subnetMask: "255.255.255.0"), // 162.159.195.0/24
+    ]
+
+    private static let bypassIPv6Routes: [NEIPv6Route] = [
+        NEIPv6Route(destinationAddress: "fc00::", networkPrefixLength: 7),  // fc00::/7  unique-local
+        NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10), // fe80::/10 link-local
+    ]
+
     private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remoteAddress)
 
         var sa4 = sockaddr_in()
         let serverIsIPv4 = inet_pton(AF_INET, remoteAddress, &sa4.sin_addr) == 1
 
+        var ipv4Exclusions = Self.bypassIPv4Routes
+        if serverIsIPv4 {
+            ipv4Exclusions.append(NEIPv4Route(destinationAddress: remoteAddress, subnetMask: "255.255.255.255"))
+        }
+        logger.info("[VPN] Bypass IPv4: \(Self.bypassIPv4Routes.map { "\($0.destinationAddress)/\($0.destinationSubnetMask)" }.joined(separator: ", "), privacy: .public)")
+
         let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.0"])
         ipv4Settings.includedRoutes = [NEIPv4Route.default()]
-        if serverIsIPv4 {
-            ipv4Settings.excludedRoutes = [
-                NEIPv4Route(destinationAddress: remoteAddress, subnetMask: "255.255.255.255")
-            ]
-        }
+        ipv4Settings.excludedRoutes = ipv4Exclusions
         settings.ipv4Settings = ipv4Settings
 
         let ipv6Enabled = APCore.userDefaults.bool(forKey: "ipv6Enabled")
         if ipv6Enabled {
+            var ipv6Exclusions = Self.bypassIPv6Routes
+            if !serverIsIPv4 {
+                ipv6Exclusions.append(NEIPv6Route(destinationAddress: remoteAddress, networkPrefixLength: 128))
+            }
+
             let ipv6Settings = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
             ipv6Settings.includedRoutes = [NEIPv6Route.default()]
-            if !serverIsIPv4 {
-                ipv6Settings.excludedRoutes = [
-                    NEIPv6Route(destinationAddress: remoteAddress, networkPrefixLength: 128)
-                ]
-            }
+            ipv6Settings.excludedRoutes = ipv6Exclusions
             settings.ipv6Settings = ipv6Settings
         }
 
