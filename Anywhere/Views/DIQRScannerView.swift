@@ -100,9 +100,9 @@ fileprivate struct DIQRScannerView: View {
             let dynamicIslandHeight: CGFloat = 36
             let topOffset: CGFloat = haveDynamicIsland ? (11 + max((safeArea.top - 59), 0)) : (isExpanding ? safeArea.top : -50)
             
-            let expandedWidth: CGFloat = size.width - 30
+            let expandedWidth: CGFloat = min(size.width - 30, size.height - 30, 400)
             /// For making it square
-            let expandedHeight: CGFloat = min(size.height, expandedWidth)
+            let expandedHeight: CGFloat = min(size.width - 30, size.height - 30, 400)
             
             ZStack(alignment: .top) {
                 Rectangle()
@@ -115,7 +115,7 @@ fileprivate struct DIQRScannerView: View {
                 
                 /// Scanner Animated View
                 if showContent {
-                    RoundedRectangle(cornerRadius: 30)
+                    RoundedRectangle(cornerRadius: 40)
                         .fill(.black)
                         .overlay {
                             GeometryReader {
@@ -244,25 +244,54 @@ fileprivate struct DIQRScannerView: View {
     }
 }
 
+fileprivate class CameraPreviewUIView: UIView {
+    private let previewLayer: AVCaptureVideoPreviewLayer
+
+    init(session: AVCaptureSession) {
+        previewLayer = AVCaptureVideoPreviewLayer(session: session)
+        previewLayer.videoGravity = .resizeAspectFill
+        previewLayer.masksToBounds = true
+        super.init(frame: .zero)
+        layer.addSublayer(previewLayer)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func updateSize(_ size: CGSize) {
+        frame.size = size
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        previewLayer.frame = bounds
+        if let connection = previewLayer.connection, connection.isVideoRotationAngleSupported(videoRotationAngle) {
+            connection.videoRotationAngle = videoRotationAngle
+        }
+    }
+
+    private var videoRotationAngle: CGFloat {
+        switch window?.windowScene?.interfaceOrientation {
+        case .landscapeLeft: return 180
+        case .landscapeRight: return 0
+        case .portraitUpsideDown: return 270
+        default: return 90
+        }
+    }
+}
+
 fileprivate struct CameraLayerView: UIViewRepresentable {
     var size: CGSize
     @Binding var camera: CameraProperties
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView(frame: .init(origin: .zero, size: size))
+    func makeUIView(context: Context) -> CameraPreviewUIView {
+        let view = CameraPreviewUIView(session: camera.session)
         view.backgroundColor = .clear
-        
-        /// Setting up camera layer
-        let layer = AVCaptureVideoPreviewLayer(session: camera.session)
-        layer.frame = .init(origin: .zero, size: size)
-        layer.videoGravity = .resizeAspectFill
-        layer.masksToBounds = true
-        view.layer.addSublayer(layer)
-        
         return view
     }
-    
-    func updateUIView(_ uiView: UIView, context: Context) {
-        
+
+    func updateUIView(_ uiView: CameraPreviewUIView, context: Context) {
+        uiView.updateSize(size)
     }
     
     func makeCoordinator() -> Coordinator {
@@ -285,18 +314,21 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                 let output = parent.camera.output
                 
                 guard !session.isRunning else { return }
-                /// Finding Back Camera
-                guard let device = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera], mediaType: .video, position: .back).devices.first else {
+                /// Use a virtual multi-camera device (triple → dual → wide fallback).
+                /// Virtual devices auto-switch to the ultra-wide for macro when close,
+                /// and zoom factor 2x gives a telephoto framing at normal distance.
+                let discovery = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInTripleCamera, .builtInDualCamera, .builtInWideAngleCamera], mediaType: .video, position: .back)
+                guard let device = discovery.devices.first else {
                     return
                 }
-                
+
                 /// Camera Input
                 let input = try AVCaptureDeviceInput(device: device)
                 /// Checking whether input & output can be added to the session
                 guard session.canAddInput(input), session.canAddOutput(output) else {
                     return
                 }
-                
+
                 /// Adding input & output to camera session
                 session.beginConfiguration()
                 session.addInput(input)
@@ -306,6 +338,20 @@ fileprivate struct CameraLayerView: UIViewRepresentable {
                 /// Adding delegate to retrieve the scanned QR code
                 output.setMetadataObjectsDelegate(self, queue: .main)
                 session.commitConfiguration()
+
+                /// Set zoom to the telephoto switch-over point so the actual
+                /// telephoto lens is engaged. Must be set AFTER session
+                /// configuration, otherwise commitConfiguration resets it.
+                /// The virtual device still auto-switches to ultra-wide
+                /// for macro when close.
+                try device.lockForConfiguration()
+                let switchOverFactors = device.virtualDeviceSwitchOverVideoZoomFactors
+                if let telephotoZoom = switchOverFactors.last?.doubleValue {
+                    device.videoZoomFactor = min(telephotoZoom, device.activeFormat.videoMaxZoomFactor)
+                } else {
+                    device.videoZoomFactor = min(2.0, device.activeFormat.videoMaxZoomFactor)
+                }
+                device.unlockForConfiguration()
                 /// Starting Session
                 /// NOTE: Session must be started in background thread
                 DispatchQueue.global(qos: .background).async {

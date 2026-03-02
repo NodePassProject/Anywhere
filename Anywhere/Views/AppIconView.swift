@@ -17,6 +17,7 @@ struct AppIconView: View {
     var body: some View {
         if #available(iOS 26.0, *) {
             Image(name)
+                .interpolation(.high)
                 .resizable()
                 .scaledToFit()
                 .frame(width: 32, height: 32)
@@ -56,6 +57,7 @@ struct AppIconView: View {
         }
         else {
             Image(name)
+                .interpolation(.high)
                 .resizable()
                 .scaledToFit()
                 .frame(width: 32, height: 32)
