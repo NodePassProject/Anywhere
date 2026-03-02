@@ -99,6 +99,14 @@ class LWIPTCPConnection {
         guard !closed else { return }
         activityTimer?.update()
 
+        // Buffer data while the outbound connection is being established.
+        // directRelay / vlessClient are set before their sockets connect;
+        // sending to an unconnected socket would fail and abort the PCB.
+        if vlessConnecting || directConnecting {
+            pendingData.append(data)
+            return
+        }
+
         if let relay = directRelay {
             let dataLen = UInt16(data.count)
             relay.send(data: data) { [weak self] error in
@@ -127,8 +135,6 @@ class LWIPTCPConnection {
                     }
                 }
             }
-        } else if vlessConnecting || directConnecting {
-            pendingData.append(data)
         } else {
             pendingData.append(data)
             if bypass {

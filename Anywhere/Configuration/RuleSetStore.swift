@@ -24,7 +24,7 @@ class RuleSetStore: ObservableObject {
     @Published private(set) var ruleSets: [RuleSet] = []
 
     /// Bundled ruleset names (must match JSON filenames in Resources/).
-    private static let builtIn = ["Telegram", "Netflix", "YouTube", "Disney", "TikTok", "OpenAI", "Claude"]
+    private static let builtIn = ["Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude"]
     private static let assignmentsKey = "ruleSetAssignments"
 
     private init() {
@@ -116,8 +116,6 @@ class RuleSetStore: ObservableObject {
         }
 
         let routing: [String: Any] = ["rules": routingRules, "configs": configurationsDict]
-
-        logger.info("[RuleSetStore] Writing routing.json: \(routingRules.count) rules, \(configurationsDict.count) configurations")
 
         do {
             let data = try JSONSerialization.data(withJSONObject: routing, options: [.sortedKeys])
