@@ -6,12 +6,13 @@
 //
 
 import Foundation
+import Combine
 import os.log
 
 private let logger = Logger(subsystem: "com.argsment.Anywhere", category: "RuleSetStore")
 
-@Observable @MainActor
-class RuleSetStore {
+@MainActor
+class RuleSetStore: ObservableObject {
     static let shared = RuleSetStore()
 
     struct RuleSet: Identifiable {
@@ -20,10 +21,10 @@ class RuleSetStore {
         var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, UUID string = proxy
     }
 
-    private(set) var ruleSets: [RuleSet] = []
+    @Published private(set) var ruleSets: [RuleSet] = []
 
     /// Bundled ruleset names (must match JSON filenames in Resources/).
-    private static let builtIn = ["Telegram", "Netflix", "YouTube", "OpenAI", "Claude"]
+    private static let builtIn = ["Telegram", "Netflix", "YouTube", "Disney", "TikTok", "OpenAI", "Claude"]
     private static let assignmentsKey = "ruleSetAssignments"
 
     private init() {

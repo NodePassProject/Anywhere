@@ -206,6 +206,7 @@ class LWIPUDPFlow {
         } else {
             // Non-mux path (existing behavior)
             let client = VLESSClient(configuration: configuration)
+            self.vlessClient = client
 
             client.connectUDP(to: dstHost, port: dstPort) { [weak self] result in
                 guard let self else { return }
@@ -216,7 +217,6 @@ class LWIPUDPFlow {
 
                     switch result {
                     case .success(let vlessConnection):
-                        self.vlessClient = client
                         self.vlessConnection = vlessConnection
 
                         // Send buffered raw payloads (frame each for VLESS non-mux)
@@ -264,6 +264,7 @@ class LWIPUDPFlow {
         vlessConnecting = true  // reuse flag to prevent re-entry
 
         let relay = DirectUDPRelay()
+        self.directRelay = relay
         relay.connect(dstHost: dstHost, dstPort: dstPort, lwipQueue: lwipQueue) { [weak self] error in
             guard let self else { return }
 
@@ -277,8 +278,6 @@ class LWIPUDPFlow {
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                     return
                 }
-
-                self.directRelay = relay
 
                 // Send buffered payloads
                 for payload in self.pendingData {

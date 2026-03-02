@@ -37,7 +37,7 @@ class VPNViewModel {
 
     private let store = ConfigurationStore.shared
     private let subscriptionStore = SubscriptionStore.shared
-    let ruleSetStore = RuleSetStore.shared
+    private let ruleSetStore = RuleSetStore.shared
     private var vpnManager: NETunnelProviderManager?
     private var statusObserver: AnyCancellable?
     private var storeCancellable: AnyCancellable?

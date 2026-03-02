@@ -13,6 +13,8 @@ struct AcknowledgementsView: View {
         ("Netflix", "Netflix, Inc."),
         ("YouTube", "Google LLC"),
         ("OpenAI", "OpenAI, Inc."),
+        ("Disney", "The Walt Disney Company"),
+        ("TikTok", "ByteDance Ltd."),
         ("Claude", "Anthropic, PBC"),
     ]
 
@@ -24,7 +26,7 @@ struct AcknowledgementsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Trademarks") {
+            Section {
                 ForEach(Self.trademarks, id: \.name) { item in
                     HStack(spacing: 12) {
                         AppIconView(item.name)
@@ -36,12 +38,10 @@ struct AcknowledgementsView: View {
                         }
                     }
                 }
-            }
-
-            Section {
+            } header: {
+                Text("Trademarks")
+            } footer: {
                 Text("All trademarks, service marks, and company names are the property of their respective owners.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Acknowledgements")

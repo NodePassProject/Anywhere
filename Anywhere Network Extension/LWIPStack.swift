@@ -316,13 +316,13 @@ class LWIPStack {
     /// Handles the "routingChanged" notification (routing rule assignments changed).
     /// Restarts the stack to close all connections using outdated proxy configurations,
     /// rebuilds the FakeIPPool, and reloads DomainRouter rules from routing.json.
-    /// Also re-applies tunnel settings to flush the OS DNS cache — without this,
-    /// apps would keep using cached real IPs and never trigger fake-IP interception.
+    /// Note: Do NOT call onTunnelSettingsNeedReapply here — setTunnelNetworkSettings
+    /// should only be triggered by IPv6 changes (which affect tunnel routes and DNS servers).
+    /// Routing changes do not alter NEPacketTunnelNetworkSettings.
     private func handleRoutingChanged() {
         lwipQueue.async { [self] in
             guard self.running, let config = self.configuration else { return }
             logger.info("[LWIPStack] Routing rules changed, restarting")
-            self.onTunnelSettingsNeedReapply?()
             self.restartStack(configuration: config, ipv6Enabled: self.ipv6Enabled)
         }
     }

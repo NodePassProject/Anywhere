@@ -176,6 +176,7 @@ class LWIPTCPConnection {
         }
 
         let relay = DirectTCPRelay()
+        self.directRelay = relay
         relay.connect(host: dstHost, port: dstPort, queue: lwipQueue) { [weak self] error in
             guard let self else { return }
 
@@ -188,8 +189,6 @@ class LWIPTCPConnection {
                     self.abort()
                     return
                 }
-
-                self.directRelay = relay
                 self.handshakeTimer?.cancel()
                 self.handshakeTimer = nil
                 self.activityTimer = ActivityTimer(
@@ -252,6 +251,7 @@ class LWIPTCPConnection {
         }
 
         let client = VLESSClient(configuration: configuration)
+        self.vlessClient = client
 
         client.connect(to: dstHost, port: dstPort, initialData: initialData) { [weak self] result in
             guard let self else { return }
@@ -262,7 +262,6 @@ class LWIPTCPConnection {
 
                 switch result {
                 case .success(let vlessConnection):
-                    self.vlessClient = client
                     self.vlessConnection = vlessConnection
                     self.handshakeTimer?.cancel()
                     self.handshakeTimer = nil
