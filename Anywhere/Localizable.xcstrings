@@ -2429,6 +2429,9 @@
         }
       }
     },
+    "Open Source Libraries" : {
+
+    },
     "Packet Up" : {
       "shouldTranslate" : false
     },
@@ -3223,6 +3226,12 @@
     },
     "Stream One" : {
       "shouldTranslate" : false
+    },
+    "Subscription" : {
+
+    },
+    "Supports VLESS link, subscription link and Clash link" : {
+
     },
     "Tap + to add a VLESS proxy." : {
       "localizations" : {

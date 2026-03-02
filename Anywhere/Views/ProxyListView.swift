@@ -60,7 +60,7 @@ struct ProxyListView: View {
         .navigationTitle("Proxies")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     Button {
                         viewModel.testAllLatencies()
                     } label: {
@@ -176,6 +176,7 @@ struct ProxyListView: View {
                     Text("\(configuration.serverAddress):\(configuration.serverPort, format: .number.grouping(.never))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                     HStack(spacing: 4) {
                         Text(configuration.transport.uppercased())
                         Text("·")
