@@ -162,6 +162,7 @@ class LWIPStack {
         logger.info("[LWIPStack] Stopping")
         stopObservingSettings()
         lwipQueue.sync { [self] in
+            self.running = false
             self.shutdownInternal()
             self.fakeIPPool.reset()
         }
@@ -184,11 +185,14 @@ class LWIPStack {
     }
 
     /// Shuts down the lwIP stack and all active flows. Must be called on `lwipQueue`.
+    /// Does NOT change `running` — callers manage it:
+    /// - `stop()` sets `running = false` before calling (kills the packet read loop).
+    /// - `restartStack()` leaves `running = true` (existing read loop continues).
+    ///
     /// Note: Does NOT reset FakeIPPool. Callers handle pool lifecycle:
     /// - `stop()` calls `fakeIPPool.reset()` (full teardown, no reconnections expected).
     /// - `restartStack()` calls `fakeIPPool.rebuild()` (preserves mappings for cached DNS).
     private func shutdownInternal() {
-        self.running = false
         self.totalBytesIn = 0
         self.totalBytesOut = 0
 
@@ -211,6 +215,8 @@ class LWIPStack {
     }
 
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.
+    /// `running` stays `true` so the existing `readPackets` loop continues uninterrupted —
+    /// packets queued on lwipQueue during reinit are processed after `lwip_bridge_init()`.
     /// Preserves FakeIPPool mappings across restart (rebuilt with updated configurations)
     /// so that apps holding cached fake IPs from before the restart still work.
     private func restartStack(configuration: VLESSConfiguration, ipv6Enabled: Bool) {
@@ -218,7 +224,6 @@ class LWIPStack {
 
         self.configuration = configuration
         self.ipv6Enabled = ipv6Enabled
-        self.running = true
         self.loadBypassCountry()
         self.loadDoHSetting()
 
@@ -232,7 +237,8 @@ class LWIPStack {
         lwip_bridge_init()
         self.startTimeoutTimer()
         self.startUDPCleanupTimer()
-        self.startReadingPackets()
+        // Note: startReadingPackets() is NOT called here — the existing read loop
+        // (started in start()) continues because `running` was never set to false.
         logger.info("[LWIPStack] Restarted, mux=\(self.muxManager != nil), bypass=\(self.bypassCountry != 0), doh=\(self.dohEnabled), ipv6=\(self.ipv6Enabled)")
     }
 

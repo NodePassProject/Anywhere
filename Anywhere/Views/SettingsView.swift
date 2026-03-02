@@ -57,7 +57,7 @@ struct SettingsView: View {
                 Toggle(isOn: Binding(
                     get: { dohEnabled },
                     set: { newValue in
-                        if newValue && hasRoutingRules {
+                        if newValue {
                             showDoHAlert = true
                         } else {
                             dohEnabled = newValue
@@ -96,6 +96,7 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .onChange(of: ipv6Enabled) { notifySettingsChanged() }
+        .onChange(of: dohEnabled) { notifySettingsChanged() }
         .onChange(of: bypassCountryCode) { notifySettingsChanged() }
         .alert(String(localized: "DNS over HTTPS"), isPresented: $showDoHAlert) {
             Button(String(localized: "Enable Anyway"), role: .destructive) {

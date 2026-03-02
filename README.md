@@ -1,6 +1,10 @@
 <div align="center">
-  
-<div><img width="100" height="100" alt="Anywhere" src="https://github.com/user-attachments/assets/c4ce4299-f9e1-461c-925e-814506952ba4" /></div>
+
+<div>
+    <a href="https://apps.apple.com/us/app/anywhere-vless-proxy/id6758235178">
+        <img width="100" height="100" alt="Anywhere" src="https://github.com/user-attachments/assets/c4ce4299-f9e1-461c-925e-814506952ba4" />
+    </a>
+</div>
 
 # Anywhere
 
@@ -21,7 +25,7 @@ No Electron. No WebView. No sing-box wrapper. Pure protocol implementation from 
 
 ## Why Anywhere?
 
-Anywhere is implemented natively in Swift, running directly on Apple's networking stack with smaller binary, lower memory usage, tighter system integration, and no bridging overhead.
+Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere takes a different approach — every protocol, every transport, and the entire packet tunnel stack is implemented natively in Swift and C. The result is a smaller binary, lower memory usage, tighter system integration, and no bridging overhead.
 
 ## Features
 
@@ -35,23 +39,30 @@ Anywhere is implemented natively in Swift, running directly on Apple's networkin
 
 ### App
 
-- **One-tap connect** with animated status UI
+- **One-tap connect** with animated status UI and real-time traffic stats
 - **QR code scanner** for instant config import
-- **Subscription import** — paste a URL, auto-detect VLESS links vs subscription endpoints
+- **Subscription import** with auto-detection and profile metadata
 - **Manual editor** for full control over every parameter
-- **Country bypass** — GeoIP-based split routing for 10 countries (CN, RU, IR, TM, MM, BY, SA, AE, VN, CU)
+- **Latency testing** with color-coded indicators and batch "Test All"
+- **Domain routing rules** with exact, suffix, and keyword matching
+- **Country bypass** — GeoIP-based split routing (CN, RU, IR, TM, MM, BY, SA, AE, VN, CU)
+- **DNS over HTTPS** toggle
+- **IPv6** support
+- **Always On VPN**
+- **Xray-core compatible** — works with standard V2Ray/Xray server deployments
 
 ### Architecture
 
-- **Zero third-party dependencies** — Apple frameworks only (SwiftUI, NetworkExtension, Security, Foundation)
-- **Native Packet Tunnel** — full system-wide VPN via NetworkExtension with lwIP stack
+- **Zero third-party dependencies** — Apple frameworks + vendored C libraries (lwIP, BLAKE3)
+- **Native Packet Tunnel** — system-wide VPN via `NEPacketTunnelProvider` with userspace TCP/IP stack
+- **Fake-IP DNS** — transparent domain-based routing for all apps
 
 ## Getting Started
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/hiDandelion/Anywhere.git
+git clone https://github.com/NodePassProject/Anywhere.git
 cd Anywhere
 open Anywhere.xcodeproj
 ```
@@ -61,8 +72,6 @@ Select the `Anywhere` scheme, choose your device, and hit Run.
 ## License
 
 Anywhere is licensed under the [GNU General Public License v3.0](LICENSE).
-
-<div align="center">
 
 ---
 
