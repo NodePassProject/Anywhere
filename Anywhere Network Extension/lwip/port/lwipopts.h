@@ -40,8 +40,8 @@
 /* --- Raw API only (no sockets/netconn) --- */
 #define LWIP_CALLBACK_API               1
 
-/* --- Memory configuration (iOS NE ~15MB limit) --- */
-#define MEM_SIZE                        (512 * 1024)
+/* --- Memory configuration --- */
+#define MEM_SIZE                        (1024 * 1024)
 #define MEM_ALIGNMENT                   4
 #define MEMP_OVERFLOW_CHECK             0
 #define MEMP_SANITY_CHECK               0
@@ -50,7 +50,7 @@
 #define MEMP_NUM_TCP_PCB                128
 #define MEMP_NUM_TCP_PCB_LISTEN         2
 #define MEMP_NUM_UDP_PCB                4
-#define MEMP_NUM_TCP_SEG                512
+#define MEMP_NUM_TCP_SEG                2048
 #define MEMP_NUM_PBUF                   64
 #define MEMP_NUM_NETBUF                 0
 #define MEMP_NUM_NETCONN                0

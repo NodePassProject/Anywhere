@@ -36,6 +36,13 @@ class LWIPTCPConnection {
     /// Prevents unbounded memory growth from pathological receives.
     private static let maxOverflowBufferSize = 512 * 1024  // 512 KB
 
+    /// Maximum bytes per tcp_write call. Limits pbuf/segment allocation pressure:
+    /// 16 KB ≈ 12 TCP segments (TCP_MSS=1360). With MEMP_NUM_TCP_SEG=2048 globally,
+    /// this allows many concurrent connections to make progress without exhausting
+    /// the segment pool (a 65 KB write would need ~49 segments — all-or-nothing).
+    /// See also: MEMP_NUM_TCP_SEG in lwipopts.h (must stay in sync).
+    private static let maxWriteSize = 16384
+
     /// Whether the VLESS receive loop is paused due to a full lwIP send buffer.
     private var receivePaused = false
 
@@ -394,6 +401,12 @@ class LWIPTCPConnection {
             }
             overflowBuffer.append(data)
             drainOverflowBuffer()
+            guard !closed else { return }
+            if overflowBuffer.isEmpty {
+                requestNextReceive()
+            } else {
+                receivePaused = true
+            }
             return
         }
 
@@ -417,10 +430,22 @@ class LWIPTCPConnection {
                         break
                     }
                 }
-                let chunkSize = min(min(sndbuf, data.count - offset), Int(UInt16.max))
+                let chunkSize = min(min(sndbuf, data.count - offset), Self.maxWriteSize)
                 let writeLen = UInt16(chunkSize)
                 let err = lwip_bridge_tcp_write(pcb, base + offset, writeLen)
                 if err != 0 {
+                    if err == -1 {
+                        // ERR_MEM: global pbuf/segment pool exhausted — treat like full send buffer
+                        let remaining = data.count - offset
+                        if overflowBuffer.count + remaining > Self.maxOverflowBufferSize {
+                            logger.error("[TCP] Overflow buffer limit exceeded for \(self.dstHost, privacy: .public):\(self.dstPort)")
+                            self.abort()
+                            return
+                        }
+                        overflowBuffer.append(Data(bytes: base + offset, count: remaining))
+                        offset = data.count
+                        break
+                    }
                     logger.error("[TCP] tcp_write error: \(err) for \(self.dstHost, privacy: .public):\(self.dstPort)")
                     self.abort()
                     return
@@ -455,10 +480,11 @@ class LWIPTCPConnection {
             while offset < data.count {
                 let sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
                 guard sndbuf > 0 else { break }
-                let chunkSize = min(min(sndbuf, data.count - offset), Int(UInt16.max))
+                let chunkSize = min(min(sndbuf, data.count - offset), Self.maxWriteSize)
                 let writeLen = UInt16(chunkSize)
                 let err = lwip_bridge_tcp_write(pcb, base + offset, writeLen)
                 if err != 0 {
+                    if err == -1 { break }  // ERR_MEM: retry on next handleSent or delayed retry
                     logger.error("[TCP] tcp_write error: \(err) for \(self.dstHost, privacy: .public):\(self.dstPort)")
                     self.abort()
                     return
@@ -476,6 +502,14 @@ class LWIPTCPConnection {
                 overflowBuffer = Data(overflowBuffer.suffix(from: offset))
             }
             lwip_bridge_tcp_output(pcb)
+        } else if !overflowBuffer.isEmpty {
+            // Nothing drained (ERR_MEM with empty send buffer) — no handleSent will
+            // fire for this connection, so schedule a delayed retry to catch when the
+            // global pbuf pool frees up from other connections.
+            lwipQueue.asyncAfter(deadline: .now() + .milliseconds(100)) { [weak self] in
+                guard let self, !self.closed else { return }
+                self.drainOverflowBuffer()
+            }
         }
 
         if receivePaused && overflowBuffer.count < Self.maxOverflowBufferSize {
@@ -498,7 +532,7 @@ class LWIPTCPConnection {
             while offset < data.count {
                 let sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
                 guard sndbuf > 0 else { break }
-                let chunkSize = min(min(sndbuf, data.count - offset), Int(UInt16.max))
+                let chunkSize = min(min(sndbuf, data.count - offset), Self.maxWriteSize)
                 let writeLen = UInt16(chunkSize)
                 let err = lwip_bridge_tcp_write(pcb, base + offset, writeLen)
                 if err != 0 { break }

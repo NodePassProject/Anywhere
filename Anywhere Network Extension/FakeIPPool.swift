@@ -99,9 +99,7 @@ class FakeIPPool {
         domainToOffset[domain] = offset
         offsetToEntry[offset] = Entry(domain: domain)
         appendLRU(offset)
-
-        let ip = Self.ipv4Bytes(offset: offset)
-        logger.debug("[FakeIP] \(domain, privacy: .public) → \(ip.0).\(ip.1).\(ip.2).\(ip.3)")
+        
         return offset
     }
 
