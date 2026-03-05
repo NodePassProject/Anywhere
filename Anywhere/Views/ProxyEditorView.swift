@@ -26,6 +26,7 @@ struct ProxyEditorView: View {
     @State private var xhttpHost = ""
     @State private var xhttpPath = "/"
     @State private var xhttpMode = "auto"
+    @State private var xhttpExtra = ""
 
     // TLS fields
     @State private var tlsSNI = ""
@@ -80,7 +81,7 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(titleKey: "Address", systemName: "server.rack", foregroundColor: .white, backgroundColor: .blue)
+                        TextWithColorfulIcon(titleKey: "Address", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                     }
                     LabeledContent {
                         TextField("Port", text: $serverPort)
@@ -118,32 +119,6 @@ struct ProxyEditorView: View {
                             flow = ""
                         }
                     }
-                    if transport == "xhttp" {
-                        LabeledContent {
-                            TextField("Host", text: $xhttpHost)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Host", systemName: "globe", foregroundColor: .white, backgroundColor: .purple)
-                        }
-                        LabeledContent {
-                            TextField("/", text: $xhttpPath)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath.fill", foregroundColor: .white, backgroundColor: .purple)
-                        }
-                        Picker(selection: $xhttpMode) {
-                            Text("Auto").tag("auto")
-                            Text("Packet Up").tag("packet-up")
-                            Text("Stream One").tag("stream-one")
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Mode", systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .purple)
-                        }
-                    }
                     if transport == "tcp" {
                         Picker(selection: $flow) {
                             Text("None").tag("")
@@ -164,6 +139,42 @@ struct ProxyEditorView: View {
                             Toggle(isOn: $xudpEnabled) {
                                 TextWithColorfulIcon(titleKey: "XUDP", systemName: "arrow.up.arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .cyan)
                             }
+                        }
+                    }
+                    if transport == "xhttp" {
+                        LabeledContent {
+                            TextField("Host", text: $xhttpHost)
+                                .keyboardType(.URL)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                        LabeledContent {
+                            TextField("/", text: $xhttpPath)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                        Picker(selection: $xhttpMode) {
+                            Text("Auto").tag("auto")
+                            Text("Packet Up").tag("packet-up")
+                            Text("Stream Up").tag("stream-up")
+                            Text("Stream One").tag("stream-one")
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Mode", systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .purple)
+                        }
+                        LabeledContent {
+                            TextEditor(text: $xhttpExtra)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .font(.system(.caption, design: .monospaced))
+                                .lineLimit(1...5)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Extra", systemName: "ellipsis.rectangle", foregroundColor: .white, backgroundColor: .gray)
                         }
                     }
                 }
@@ -294,6 +305,7 @@ struct ProxyEditorView: View {
             xhttpHost = xhttp.host
             xhttpPath = xhttp.path
             xhttpMode = xhttp.mode.rawValue
+            xhttpExtra = Self.encodeExtra(from: xhttp)
         }
 
         muxEnabled = configuration.muxEnabled
@@ -312,6 +324,47 @@ struct ProxyEditorView: View {
             shortId = reality.shortId.hexEncodedString()
             fingerprint = reality.fingerprint
         }
+    }
+
+    /// Encodes non-default extra fields from an XHTTPConfiguration back to a JSON string.
+    private static func encodeExtra(from config: XHTTPConfiguration) -> String {
+        var dict: [String: Any] = [:]
+
+        if !config.headers.isEmpty { dict["headers"] = config.headers }
+        if config.noGRPCHeader { dict["noGRPCHeader"] = true }
+        if config.scMaxEachPostBytes != 1_000_000 { dict["scMaxEachPostBytes"] = config.scMaxEachPostBytes }
+        if config.scMinPostsIntervalMs != 30 { dict["scMinPostsIntervalMs"] = config.scMinPostsIntervalMs }
+        if config.xPaddingBytesFrom != 100 || config.xPaddingBytesTo != 1000 {
+            dict["xPaddingBytes"] = ["from": config.xPaddingBytesFrom, "to": config.xPaddingBytesTo]
+        }
+        if config.xPaddingObfsMode { dict["xPaddingObfsMode"] = true }
+        if config.xPaddingKey != "x_padding" { dict["xPaddingKey"] = config.xPaddingKey }
+        if config.xPaddingHeader != "X-Padding" { dict["xPaddingHeader"] = config.xPaddingHeader }
+        if config.xPaddingPlacement != .queryInHeader { dict["xPaddingPlacement"] = config.xPaddingPlacement.rawValue }
+        if config.xPaddingMethod != .repeatX { dict["xPaddingMethod"] = config.xPaddingMethod.rawValue }
+        if config.uplinkHTTPMethod != "POST" { dict["uplinkHTTPMethod"] = config.uplinkHTTPMethod }
+        if config.sessionPlacement != .path { dict["sessionPlacement"] = config.sessionPlacement.rawValue }
+        if !config.sessionKey.isEmpty { dict["sessionKey"] = config.sessionKey }
+        if config.seqPlacement != .path { dict["seqPlacement"] = config.seqPlacement.rawValue }
+        if !config.seqKey.isEmpty { dict["seqKey"] = config.seqKey }
+        if config.uplinkDataPlacement != .body { dict["uplinkDataPlacement"] = config.uplinkDataPlacement.rawValue }
+        // Compare against placement-dependent defaults (Xray-core Build())
+        let defaultDataKey: String
+        let defaultChunkSize: Int
+        switch config.uplinkDataPlacement {
+        case .header: defaultDataKey = "X-Data"; defaultChunkSize = 4096
+        case .cookie: defaultDataKey = "x_data"; defaultChunkSize = 3072
+        default: defaultDataKey = ""; defaultChunkSize = 0
+        }
+        if config.uplinkDataKey != defaultDataKey { dict["uplinkDataKey"] = config.uplinkDataKey }
+        if config.uplinkChunkSize != defaultChunkSize { dict["uplinkChunkSize"] = config.uplinkChunkSize }
+
+        guard !dict.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys, .prettyPrinted]),
+              let str = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return str
     }
 
     private func save() {
@@ -346,7 +399,17 @@ struct ProxyEditorView: View {
         if transport == "xhttp" {
             let host = xhttpHost.isEmpty ? serverAddress : xhttpHost
             let mode = XHTTPMode(rawValue: xhttpMode) ?? .auto
-            xhttpConfiguration = XHTTPConfiguration(host: host, path: xhttpPath, mode: mode)
+            // Parse extra JSON for advanced settings, passing through to XHTTPConfiguration.parse
+            var params: [String: String] = [
+                "host": host,
+                "path": xhttpPath,
+                "mode": mode.rawValue
+            ]
+            if !xhttpExtra.isEmpty {
+                // Store raw JSON as the extra param (parse expects it URL-decoded)
+                params["extra"] = xhttpExtra
+            }
+            xhttpConfiguration = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress)
         }
 
         // Strip brackets from IPv6 addresses (e.g. "[::1]" → "::1")

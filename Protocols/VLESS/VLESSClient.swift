@@ -673,8 +673,8 @@ class VLESSClient {
             resolvedMode = xhttpConfiguration.mode
         }
 
-        // Generate session ID for packet-up mode
-        let sessionId = resolvedMode == .packetUp ? UUID().uuidString : ""
+        // Generate session ID for packet-up and stream-up modes
+        let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? UUID().uuidString : ""
 
         if let realityConfiguration = configuration.reality {
             connectXHTTPRealityWithRetry(attempt: 0, lastError: nil, realityConfig: realityConfiguration, xhttpConfig: xhttpConfiguration, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
@@ -726,8 +726,9 @@ class VLESSClient {
                     return
                 }
 
-                // Upload connection factory for packet-up mode
-                let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = mode == .packetUp ? { [weak self] factoryCompletion in
+                // Upload connection factory for packet-up and stream-up modes
+                let needsUpload = mode == .packetUp || mode == .streamUp
+                let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = needsUpload ? { [weak self] factoryCompletion in
                     guard let self else {
                         factoryCompletion(.failure(VLESSError.connectionFailed("Client deallocated")))
                         return
@@ -830,8 +831,9 @@ class VLESSClient {
                     self.tlsClient = tlsClient
                     self.tlsConnection = tlsConnection
 
-                    // Upload connection factory for packet-up mode
-                    let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = mode == .packetUp ? { [weak self] factoryCompletion in
+                    // Upload connection factory for packet-up and stream-up modes
+                    let needsUpload = mode == .packetUp || mode == .streamUp
+                    let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = needsUpload ? { [weak self] factoryCompletion in
                         guard let self else {
                             factoryCompletion(.failure(VLESSError.connectionFailed("Client deallocated")))
                             return

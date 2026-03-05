@@ -21,7 +21,7 @@ struct TransportClosures {
 
 // MARK: - XHTTPConnection
 
-/// XHTTP connection implementing both packet-up and stream-one modes.
+/// XHTTP connection implementing packet-up, stream-up, and stream-one modes.
 ///
 /// Uses the same closure-based transport abstraction as ``WebSocketConnection`` and ``HTTPUpgradeConnection``.
 class XHTTPConnection {
@@ -35,10 +35,10 @@ class XHTTPConnection {
     private let downloadReceive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
     private let downloadCancel: () -> Void
 
-    // Upload connection factory (packet-up only)
+    // Upload connection factory (packet-up and stream-up)
     private let uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)?
 
-    // Upload connection state (packet-up only)
+    // Upload connection state (packet-up and stream-up)
     private var uploadSend: ((Data, @escaping (Error?) -> Void) -> Void)?
     private var uploadReceive: ((@escaping (Data?, Bool, Error?) -> Void) -> Void)?
     private var uploadCancel: (() -> Void)?
@@ -72,15 +72,118 @@ class XHTTPConnection {
 
     // MARK: - X-Padding (matching Xray-core xpadding.go)
 
-    /// Generates the `Referer` header value containing X-Padding.
+    /// Applies X-Padding to the raw HTTP request string based on configuration.
     ///
-    /// Default non-obfs mode: `Referer: https://{host}{path}?x_padding=XXX...`
-    /// Server validates padding length is within 100-1000 bytes (default range).
-    /// Matches Xray-core `ApplyXPaddingToRequest` with `PlacementQueryInHeader`.
-    private func generatePaddingReferer(forPath path: String) -> String {
-        let length = Int.random(in: 100...1000)
-        let padding = String(repeating: "X", count: length)
-        return "https://\(configuration.host)\(path)?x_padding=\(padding)"
+    /// Non-obfs mode (default): `Referer: https://{host}{path}?x_padding=XXX...`
+    /// Obfs mode: Places padding in header, query, cookie, or queryInHeader based on config.
+    private func applyPadding(to request: inout String, forPath path: String) {
+        let padding = configuration.generatePadding()
+
+        if !configuration.xPaddingObfsMode {
+            // Default mode: padding as Referer URL query param
+            request += "Referer: https://\(configuration.host)\(path)?\(configuration.xPaddingKey)=\(padding)\r\n"
+            return
+        }
+
+        // Obfs mode: place based on configured placement
+        switch configuration.xPaddingPlacement {
+        case .header:
+            request += "\(configuration.xPaddingHeader): \(padding)\r\n"
+        case .queryInHeader:
+            request += "\(configuration.xPaddingHeader): https://\(configuration.host)\(path)?\(configuration.xPaddingKey)=\(padding)\r\n"
+        case .cookie:
+            request += "Cookie: \(configuration.xPaddingKey)=\(padding)\r\n"
+        case .query:
+            // Query padding is appended to the URL path in the request line — handled separately
+            break
+        default:
+            break
+        }
+    }
+
+    /// Returns the request path with query-based padding appended if needed.
+    private func pathWithQueryPadding(_ basePath: String) -> String {
+        if configuration.xPaddingObfsMode && configuration.xPaddingPlacement == .query {
+            let padding = configuration.generatePadding()
+            return "\(basePath)?\(configuration.xPaddingKey)=\(padding)"
+        }
+        return basePath
+    }
+
+    // MARK: - Session/Seq Metadata (matching Xray-core config.go ApplyMetaToRequest)
+
+    /// Applies session ID to the request path, headers, query, or cookie based on configuration.
+    private func applySessionId(to request: inout String, path: inout String) {
+        guard !sessionId.isEmpty else { return }
+        let key = configuration.normalizedSessionKey
+        switch configuration.sessionPlacement {
+        case .path:
+            path = appendToPath(path, sessionId)
+        case .query:
+            // Will be appended to URL
+            break
+        case .header:
+            request += "\(key): \(sessionId)\r\n"
+        case .cookie:
+            request += "Cookie: \(key)=\(sessionId)\r\n"
+        default:
+            break
+        }
+    }
+
+    /// Returns query string components for session/seq placed in query params.
+    private func queryParamsForMeta(seq: Int64? = nil) -> String {
+        var parts: [String] = []
+        if !sessionId.isEmpty && configuration.sessionPlacement == .query {
+            let key = configuration.normalizedSessionKey
+            parts.append("\(key)=\(sessionId)")
+        }
+        if let seq, configuration.seqPlacement == .query {
+            let key = configuration.normalizedSeqKey
+            parts.append("\(key)=\(seq)")
+        }
+        return parts.joined(separator: "&")
+    }
+
+    /// Applies sequence number to the request path, headers, or cookie based on configuration.
+    private func applySeq(to request: inout String, path: inout String, seq: Int64) {
+        let key = configuration.normalizedSeqKey
+        switch configuration.seqPlacement {
+        case .path:
+            path = appendToPath(path, "\(seq)")
+        case .query:
+            // Handled in queryParamsForMeta
+            break
+        case .header:
+            request += "\(key): \(seq)\r\n"
+        case .cookie:
+            request += "Cookie: \(key)=\(seq)\r\n"
+        default:
+            break
+        }
+    }
+
+    /// Appends a segment to a URL path, ensuring proper "/" handling.
+    private func appendToPath(_ path: String, _ segment: String) -> String {
+        if path.hasSuffix("/") {
+            return path + segment
+        }
+        return path + "/" + segment
+    }
+
+    /// Builds the full request URL path with optional query string.
+    private func buildRequestLine(method: String, path: String, queryParts: [String]) -> String {
+        var url = path
+        var allQuery = queryParts.filter { !$0.isEmpty }
+        // Add query-based padding if in obfs+query mode
+        if configuration.xPaddingObfsMode && configuration.xPaddingPlacement == .query {
+            let padding = configuration.generatePadding()
+            allQuery.append("\(configuration.xPaddingKey)=\(padding)")
+        }
+        if !allQuery.isEmpty {
+            url += "?" + allQuery.joined(separator: "&")
+        }
+        return "\(method) \(url) HTTP/1.1\r\n"
     }
 
     // MARK: - Initializers (BSDSocket)
@@ -132,6 +235,8 @@ class XHTTPConnection {
     /// Performs the initial HTTP handshake (sends the initial request and reads the response headers).
     ///
     /// - For stream-one mode: sends a POST with `Transfer-Encoding: chunked` and reads the response headers.
+    /// - For stream-up mode: sends a GET for download stream, establishes upload connection,
+    ///   and sends a streaming POST with `Transfer-Encoding: chunked` (no sequence numbers).
     /// - For packet-up mode: sends a GET request for the download stream, reads response headers,
     ///   and establishes the upload connection via the factory.
     func performSetup(completion: @escaping (Error?) -> Void) {
@@ -139,6 +244,8 @@ class XHTTPConnection {
             performH2Setup(completion: completion)
         } else if mode == .streamOne {
             performStreamOneSetup(completion: completion)
+        } else if mode == .streamUp {
+            performStreamUpSetup(completion: completion)
         } else {
             performPacketUpSetup(completion: completion)
         }
@@ -147,10 +254,16 @@ class XHTTPConnection {
     // MARK: stream-one Setup
 
     private func performStreamOneSetup(completion: @escaping (Error?) -> Void) {
-        var request = "POST \(configuration.normalizedPath) HTTP/1.1\r\n"
+        let method = configuration.uplinkHTTPMethod
+        let path = configuration.normalizedPath
+        var request = ""
+
+        // stream-one: no session ID in path (matching Xray-core: sessionId="" for stream-one)
+        let metaQuery = queryParamsForMeta()
+        request += buildRequestLine(method: method, path: path, queryParts: [metaQuery])
         request += "Host: \(configuration.host)\r\n"
         request += "User-Agent: \(configuration.headers["User-Agent"] ?? defaultUserAgent)\r\n"
-        request += "Referer: \(generatePaddingReferer(forPath: configuration.normalizedPath))\r\n"
+        applyPadding(to: &request, forPath: path)
         request += "Transfer-Encoding: chunked\r\n"
         if !configuration.noGRPCHeader {
             request += "Content-Type: application/grpc\r\n"
@@ -178,15 +291,7 @@ class XHTTPConnection {
 
     private func performPacketUpSetup(completion: @escaping (Error?) -> Void) {
         // Send GET request on the download connection
-        let getPath = "\(configuration.normalizedPath)\(sessionId)/"
-        var request = "GET \(getPath) HTTP/1.1\r\n"
-        request += "Host: \(configuration.host)\r\n"
-        request += "User-Agent: \(configuration.headers["User-Agent"] ?? defaultUserAgent)\r\n"
-        request += "Referer: \(generatePaddingReferer(forPath: getPath))\r\n"
-        for (key, value) in configuration.headers where key != "User-Agent" {
-            request += "\(key): \(value)\r\n"
-        }
-        request += "\r\n"
+        let request = buildDownloadGETRequest()
 
         guard let requestData = request.data(using: .utf8) else {
             completion(XHTTPError.setupFailed("Failed to encode GET request"))
@@ -227,6 +332,118 @@ class XHTTPConnection {
                 }
             }
         }
+    }
+
+    // MARK: stream-up Setup
+
+    private func performStreamUpSetup(completion: @escaping (Error?) -> Void) {
+        // 1. Send GET request on the download connection (same as packet-up)
+        let request = buildDownloadGETRequest()
+
+        guard let requestData = request.data(using: .utf8) else {
+            completion(XHTTPError.setupFailed("Failed to encode GET request"))
+            return
+        }
+
+        downloadSend(requestData) { [weak self] error in
+            if let error {
+                completion(XHTTPError.setupFailed(error.localizedDescription))
+                return
+            }
+
+            // 2. Read GET response headers
+            self?.receiveResponseHeaders { [weak self] headerError in
+                if let headerError {
+                    completion(headerError)
+                    return
+                }
+
+                // 3. Establish the upload connection and send streaming POST headers
+                guard let self, let factory = self.uploadConnectionFactory else {
+                    completion(XHTTPError.setupFailed("No upload connection factory"))
+                    return
+                }
+
+                factory { [weak self] result in
+                    switch result {
+                    case .success(let closures):
+                        guard let self else {
+                            completion(XHTTPError.setupFailed("Connection deallocated"))
+                            return
+                        }
+                        self.lock.lock()
+                        self.uploadSend = closures.send
+                        self.uploadReceive = closures.receive
+                        self.uploadCancel = closures.cancel
+                        self.lock.unlock()
+
+                        // 4. Send streaming POST request headers on upload connection
+                        let postRequest = self.buildStreamUpPOSTRequest()
+
+                        guard let postData = postRequest.data(using: .utf8) else {
+                            completion(XHTTPError.setupFailed("Failed to encode stream-up POST request"))
+                            return
+                        }
+
+                        closures.send(postData) { error in
+                            if let error {
+                                completion(XHTTPError.setupFailed("Stream-up POST send failed: \(error.localizedDescription)"))
+                            } else {
+                                completion(nil)
+                            }
+                        }
+
+                    case .failure(let error):
+                        completion(XHTTPError.setupFailed("Upload connection failed: \(error.localizedDescription)"))
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Request Builders
+
+    /// Builds a GET request for the download stream (used by packet-up and stream-up).
+    /// Session ID is placed according to sessionPlacement config.
+    private func buildDownloadGETRequest() -> String {
+        var path = configuration.normalizedPath
+        var request = ""
+        applySessionId(to: &request, path: &path)
+        if path.last != "/" { path += "/" }
+        let metaQuery = queryParamsForMeta()
+        request = buildRequestLine(method: "GET", path: path, queryParts: [metaQuery]) + request
+        request += "Host: \(configuration.host)\r\n"
+        request += "User-Agent: \(configuration.headers["User-Agent"] ?? defaultUserAgent)\r\n"
+        applyPadding(to: &request, forPath: path)
+        for (key, value) in configuration.headers where key != "User-Agent" {
+            request += "\(key): \(value)\r\n"
+        }
+        request += "\r\n"
+        return request
+    }
+
+    /// Builds a streaming POST request for stream-up upload.
+    /// Session ID placed according to config, no sequence number, chunked transfer.
+    private func buildStreamUpPOSTRequest() -> String {
+        let method = configuration.uplinkHTTPMethod
+        var path = configuration.normalizedPath
+        var request = ""
+        applySessionId(to: &request, path: &path)
+        if path.last != "/" { path += "/" }
+        let metaQuery = queryParamsForMeta()
+        request = buildRequestLine(method: method, path: path, queryParts: [metaQuery]) + request
+        request += "Host: \(configuration.host)\r\n"
+        request += "User-Agent: \(configuration.headers["User-Agent"] ?? defaultUserAgent)\r\n"
+        applyPadding(to: &request, forPath: path)
+        request += "Transfer-Encoding: chunked\r\n"
+        if !configuration.noGRPCHeader {
+            request += "Content-Type: application/grpc\r\n"
+        }
+        for (key, value) in configuration.headers where key != "User-Agent" {
+            request += "\(key): \(value)\r\n"
+        }
+        request += "\r\n"
+        return request
     }
 
     // MARK: - HTTP Response Header Parsing
@@ -296,6 +513,8 @@ class XHTTPConnection {
             sendH2Data(data: data, completion: completion)
         } else if mode == .streamOne {
             sendStreamOne(data: data, completion: completion)
+        } else if mode == .streamUp {
+            sendStreamUp(data: data, completion: completion)
         } else {
             sendPacketUp(data: data, completion: completion)
         }
@@ -312,6 +531,22 @@ class XHTTPConnection {
     private func sendStreamOne(data: Data, completion: @escaping (Error?) -> Void) {
         let chunk = ChunkedTransferEncoder.encode(data)
         downloadSend(chunk, completion)
+    }
+
+    // MARK: stream-up Send
+
+    /// Sends data as a chunked-encoded chunk on the stream-up upload POST.
+    private func sendStreamUp(data: Data, completion: @escaping (Error?) -> Void) {
+        lock.lock()
+        guard let uploadSend = self.uploadSend else {
+            lock.unlock()
+            completion(XHTTPError.setupFailed("Upload connection not established"))
+            return
+        }
+        lock.unlock()
+
+        let chunk = ChunkedTransferEncoder.encode(data)
+        uploadSend(chunk, completion)
     }
 
     // MARK: packet-up Send
@@ -356,12 +591,55 @@ class XHTTPConnection {
         uploadReceive: @escaping (@escaping (Data?, Bool, Error?) -> Void) -> Void,
         completion: @escaping (Error?) -> Void
     ) {
-        let postPath = "\(configuration.normalizedPath)\(sessionId)/\(seq)"
-        var request = "POST \(postPath) HTTP/1.1\r\n"
+        let method = configuration.uplinkHTTPMethod
+        var path = configuration.normalizedPath
+        var headerBlock = ""
+
+        // Apply session ID and sequence number metadata
+        applySessionId(to: &headerBlock, path: &path)
+        applySeq(to: &headerBlock, path: &path, seq: seq)
+
+        // Determine body vs non-body data placement
+        let bodyData: Data
+        if configuration.uplinkDataPlacement != .body {
+            // Encode data in headers or cookies instead of body
+            let encoded = data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+            let chunkSize = configuration.uplinkChunkSize > 0 ? configuration.uplinkChunkSize : encoded.count
+            let key = configuration.uplinkDataKey
+
+            switch configuration.uplinkDataPlacement {
+            case .header:
+                var i = 0
+                var chunkIndex = 0
+                while i < encoded.count {
+                    let end = min(i + chunkSize, encoded.count)
+                    let chunk = String(encoded[encoded.index(encoded.startIndex, offsetBy: i)..<encoded.index(encoded.startIndex, offsetBy: end)])
+                    headerBlock += "\(key)-\(chunkIndex): \(chunk)\r\n"
+                    i = end
+                    chunkIndex += 1
+                }
+                headerBlock += "\(key)-Length: \(encoded.count)\r\n"
+                headerBlock += "\(key)-Upstream: 1\r\n"
+            case .cookie:
+                headerBlock += "Cookie: \(key)=\(encoded)\r\n"
+            default:
+                break
+            }
+            bodyData = Data()
+        } else {
+            bodyData = data
+        }
+
+        let metaQuery = queryParamsForMeta(seq: seq)
+        var request = buildRequestLine(method: method, path: path, queryParts: [metaQuery])
         request += "Host: \(configuration.host)\r\n"
         request += "User-Agent: \(configuration.headers["User-Agent"] ?? defaultUserAgent)\r\n"
-        request += "Referer: \(generatePaddingReferer(forPath: postPath))\r\n"
-        request += "Content-Length: \(data.count)\r\n"
+        request += headerBlock
+        applyPadding(to: &request, forPath: path)
+        request += "Content-Length: \(bodyData.count)\r\n"
         if !configuration.noGRPCHeader {
             request += "Content-Type: application/grpc\r\n"
         }
@@ -375,7 +653,7 @@ class XHTTPConnection {
             completion(XHTTPError.setupFailed("Failed to encode POST request"))
             return
         }
-        requestData.append(data)
+        requestData.append(bodyData)
 
         uploadSend(requestData) { [weak self] error in
             if let error {
@@ -697,13 +975,40 @@ extension XHTTPConnection {
         block.append(contentsOf: uaBytes)
         block.append(contentsOf: Self.hpackEncodeString(ua))
 
-        // referer (X-Padding) — name index 51
-        // Xray-core sends padding as Referer URL with x_padding query param (xpadding.go)
-        let referer = generatePaddingReferer(forPath: configuration.normalizedPath)
-        var refBytes = Self.hpackEncodeInteger(51, prefixBits: 4)
-        refBytes[0] &= 0x0F
-        block.append(contentsOf: refBytes)
-        block.append(contentsOf: Self.hpackEncodeString(referer))
+        // X-Padding — applied based on configuration
+        // Default (non-obfs): Referer header with x_padding query param
+        // Obfs mode: Uses configured placement (header, queryInHeader, cookie, query)
+        let padding = configuration.generatePadding()
+        if !configuration.xPaddingObfsMode {
+            // Default: Referer (name index 51) with padding in URL query
+            let referer = "https://\(configuration.host)\(configuration.normalizedPath)?\(configuration.xPaddingKey)=\(padding)"
+            var refBytes = Self.hpackEncodeInteger(51, prefixBits: 4)
+            refBytes[0] &= 0x0F
+            block.append(contentsOf: refBytes)
+            block.append(contentsOf: Self.hpackEncodeString(referer))
+        } else {
+            switch configuration.xPaddingPlacement {
+            case .header:
+                // Custom header with padding value
+                block.append(0x00)
+                block.append(contentsOf: Self.hpackEncodeString(configuration.xPaddingHeader.lowercased()))
+                block.append(contentsOf: Self.hpackEncodeString(padding))
+            case .queryInHeader:
+                // Custom header with padding in URL query
+                let headerValue = "https://\(configuration.host)\(configuration.normalizedPath)?\(configuration.xPaddingKey)=\(padding)"
+                block.append(0x00)
+                block.append(contentsOf: Self.hpackEncodeString(configuration.xPaddingHeader.lowercased()))
+                block.append(contentsOf: Self.hpackEncodeString(headerValue))
+            case .cookie:
+                // Cookie header (name index 32)
+                var cookieBytes = Self.hpackEncodeInteger(32, prefixBits: 4)
+                cookieBytes[0] &= 0x0F
+                block.append(contentsOf: cookieBytes)
+                block.append(contentsOf: Self.hpackEncodeString("\(configuration.xPaddingKey)=\(padding)"))
+            default:
+                break
+            }
+        }
 
         // Custom headers (literal, new names)
         for (key, value) in configuration.headers where key != "User-Agent" {

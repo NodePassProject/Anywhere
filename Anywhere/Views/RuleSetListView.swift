@@ -37,6 +37,7 @@ struct RuleSetListView: View {
                 )) {
                     Text("Default").tag(nil as String?)
                     Text("DIRECT").tag("DIRECT" as String?)
+                    Text("REJECT").tag("REJECT" as String?)
                     ForEach(standaloneConfigurations) { configuration in
                         Text(configuration.name).tag(configuration.id.uuidString as String?)
                     }

@@ -18,7 +18,7 @@ class RuleSetStore: ObservableObject {
     struct RuleSet: Identifiable {
         let id: String   // = name
         let name: String
-        var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, UUID string = proxy
+        var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
     }
 
     @Published private(set) var ruleSets: [RuleSet] = []
@@ -49,6 +49,7 @@ class RuleSetStore: ObservableObject {
         for (index, ruleSet) in ruleSets.enumerated() {
             guard let assignedId = ruleSet.assignedConfigurationId,
                   assignedId != "DIRECT",
+                  assignedId != "REJECT",
                   !availableConfigIds.contains(assignedId) else { continue }
             ruleSets[index].assignedConfigurationId = nil
             affected.append(ruleSet.name)
@@ -89,6 +90,7 @@ class RuleSetStore: ObservableObject {
 
         for ruleSet in ruleSets {
             guard let assignedId = ruleSet.assignedConfigurationId else { continue }
+
             let domainRules = loadRules(for: ruleSet.name)
             guard !domainRules.isEmpty else { continue }
 
@@ -99,6 +101,8 @@ class RuleSetStore: ObservableObject {
 
             if assignedId == "DIRECT" {
                 ruleEntry["action"] = "direct"
+            } else if assignedId == "REJECT" {
+                ruleEntry["action"] = "reject"
             } else if let configurationUUID = UUID(uuidString: assignedId),
                       let configuration = configurations.first(where: { $0.id == configurationUUID }) {
                 ruleEntry["action"] = "proxy"

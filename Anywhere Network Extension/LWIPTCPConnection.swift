@@ -385,6 +385,18 @@ class LWIPTCPConnection {
     private func writeToLWIP(_ data: Data) {
         guard !closed else { return }
 
+        // If overflow already queued, append to preserve ordering.
+        if !overflowBuffer.isEmpty {
+            if overflowBuffer.count + data.count > Self.maxOverflowBufferSize {
+                logger.error("[TCP] Overflow buffer limit exceeded for \(self.dstHost, privacy: .public):\(self.dstPort)")
+                self.abort()
+                return
+            }
+            overflowBuffer.append(data)
+            drainOverflowBuffer()
+            return
+        }
+
         var offset = 0
         data.withUnsafeBytes { buffer in
             guard let base = buffer.baseAddress else { return }
@@ -421,7 +433,7 @@ class LWIPTCPConnection {
 
         lwip_bridge_tcp_output(pcb)
 
-        if overflowBuffer.isEmpty {
+        if overflowBuffer.count < Self.maxOverflowBufferSize {
             requestNextReceive()
         } else {
             receivePaused = true
@@ -432,7 +444,7 @@ class LWIPTCPConnection {
     ///
     /// Called from ``handleSent(len:)`` when the local app acknowledges data,
     /// freeing space in the lwIP send buffer. Resumes the VLESS receive loop
-    /// once the overflow buffer is fully drained.
+    /// as soon as any data is drained (mirroring Xray-core's instant-resume).
     private func drainOverflowBuffer() {
         guard !closed, !overflowBuffer.isEmpty else { return }
 
@@ -466,7 +478,7 @@ class LWIPTCPConnection {
             lwip_bridge_tcp_output(pcb)
         }
 
-        if overflowBuffer.isEmpty && receivePaused {
+        if receivePaused && overflowBuffer.count < Self.maxOverflowBufferSize {
             receivePaused = false
             requestNextReceive()
         }

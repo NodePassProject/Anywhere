@@ -56,7 +56,6 @@ class ActivityTimer {
             onTimeout()
             return
         }
-        hasActivity = true
         startTimer(timeout: timeout)
     }
 

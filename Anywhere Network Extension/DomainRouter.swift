@@ -12,6 +12,7 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension"
 
 enum RouteAction {
     case direct
+    case reject
     case proxy(UUID)
 }
 
@@ -69,6 +70,8 @@ class DomainRouter {
             let action: RouteAction
             if actionStr == "direct" {
                 action = .direct
+            } else if actionStr == "reject" {
+                action = .reject
             } else if actionStr == "proxy", let configurationIdStr = rule["configId"] as? String, let configurationId = UUID(uuidString: configurationIdStr) {
                 action = .proxy(configurationId)
             } else {
@@ -134,7 +137,7 @@ class DomainRouter {
     /// Returns nil for .direct or when the configuration UUID is not found.
     func resolveConfiguration(action: RouteAction) -> VLESSConfiguration? {
         switch action {
-        case .direct:
+        case .direct, .reject:
             return nil
         case .proxy(let id):
             return configurationMap[id]

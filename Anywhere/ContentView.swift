@@ -39,6 +39,7 @@ struct ContentView: View {
                         }
                     }
                 }
+                .tabViewStyle(.sidebarAdaptable)
             } else {
                 TabView {
                     NavigationStack {

@@ -44,9 +44,9 @@ class LWIPStack {
     // dohEnabled       │ lwIP DNS interception (DDR block) │ Stack restart (forces DNS
     //                  │                                   │ re-discovery with new DDR policy)
     // bypassCountry    │ lwIP per-connection bypass check  │ Stack restart
-    // routingRules     │ DomainRouter + FakeIPPool         │ Stack restart (closes connections
+    // routingRules     │ DomainRouter (connection-time)     │ Stack restart (closes connections
     //                  │                                   │ using outdated proxy configurations;
-    //                  │                                   │ FakeIPPool rebuilt, not reset)
+    //                  │                                   │ FakeIPPool preserved)
 
     private(set) var ipv6Enabled: Bool = false
     private(set) var dohEnabled: Bool = false
@@ -191,7 +191,7 @@ class LWIPStack {
     ///
     /// Note: Does NOT reset FakeIPPool. Callers handle pool lifecycle:
     /// - `stop()` calls `fakeIPPool.reset()` (full teardown, no reconnections expected).
-    /// - `restartStack()` calls `fakeIPPool.rebuild()` (preserves mappings for cached DNS).
+    /// - `restartStack()` preserves pool as-is (routing decisions are made at connection time).
     private func shutdownInternal() {
         self.totalBytesIn = 0
         self.totalBytesOut = 0
@@ -217,8 +217,8 @@ class LWIPStack {
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.
     /// `running` stays `true` so the existing `readPackets` loop continues uninterrupted —
     /// packets queued on lwipQueue during reinit are processed after `lwip_bridge_init()`.
-    /// Preserves FakeIPPool mappings across restart (rebuilt with updated configurations)
-    /// so that apps holding cached fake IPs from before the restart still work.
+    /// FakeIPPool is preserved across restarts — since all DNS queries get fake IPs and
+    /// routing decisions are made at connection time, cached fake IPs remain valid.
     private func restartStack(configuration: VLESSConfiguration, ipv6Enabled: Bool) {
         shutdownInternal()
 
@@ -232,7 +232,6 @@ class LWIPStack {
         }
 
         self.domainRouter.loadRoutingConfiguration()
-        self.fakeIPPool.rebuild(using: self.domainRouter)
         self.registerCallbacks()
         lwip_bridge_init()
         self.startTimeoutTimer()
@@ -245,9 +244,9 @@ class LWIPStack {
     // MARK: - Settings Observation
     //
     // Two Darwin notifications are observed. Both trigger a full stack restart
-    // (shutdownInternal → restartStack), which closes all TCP/UDP connections,
-    // clears the FakeIPPool, and re-reads settings. This ensures no stale
-    // connections continue using outdated proxy configurations or routing rules.
+    // (shutdownInternal → restartStack), which closes all TCP/UDP connections
+    // and re-reads settings. FakeIPPool is preserved — routing decisions are
+    // made at connection time, so rule changes take effect immediately.
     //
     // 1. "settingsChanged" — posted by SettingsView when ipv6/bypass/doh toggles change.
     //    IPv6 additionally re-applies tunnel network settings (routes + DNS servers).
@@ -372,8 +371,22 @@ class LWIPStack {
             if FakeIPPool.isFakeIP(dstIPString) {
                 if let entry = shared.fakeIPPool.lookup(ip: dstIPString) {
                     dstHost = entry.domain
-                    forceBypass = entry.isDirect
-                    connectionConfiguration = entry.configuration ?? defaultConfiguration
+                    // Routing decision at connection time
+                    if let action = shared.domainRouter.matchDomain(entry.domain) {
+                        switch action {
+                        case .direct:
+                            forceBypass = true
+                        case .reject:
+                            logger.info("[FakeIP] TCP rejected for \(entry.domain, privacy: .public)")
+                            return nil
+                        case .proxy(let id):
+                            if let config = shared.domainRouter.resolveConfiguration(action: action) {
+                                connectionConfiguration = config
+                            } else {
+                                logger.warning("[FakeIP] TCP proxy config \(id) not found for \(entry.domain, privacy: .public)")
+                            }
+                        }
+                    }
                 } else {
                     // Fake IP but entry evicted from LRU — drop connection
                     logger.warning("[FakeIP] TCP to \(dstIPString, privacy: .public):\(dstPort) but no domain mapping found (evicted)")
@@ -431,7 +444,7 @@ class LWIPStack {
 
             let payload = Data(bytes: data, count: Int(len))
 
-            // DNS interception: intercept port-53 queries for matched domains
+            // DNS interception: intercept port-53 A/AAAA queries with fake-IP responses
             if dstPort == 53 {
                 if shared.handleDNSQuery(payload: payload,
                                           srcIP: srcIP, srcPort: srcPort,
@@ -439,7 +452,7 @@ class LWIPStack {
                                           isIPv6: isIPv6 != 0) {
                     return  // Fake response sent, no flow needed
                 }
-                // No rule match — fall through, create normal UDP flow to proxy DNS
+                // Non-A/AAAA query — fall through, create normal UDP flow to proxy DNS
             }
 
             let srcHost = LWIPStack.ipAddrToString(srcIP, isIPv6: isIPv6 != 0)
@@ -454,8 +467,22 @@ class LWIPStack {
             if FakeIPPool.isFakeIP(dstIPString) {
                 if let entry = shared.fakeIPPool.lookup(ip: dstIPString) {
                     dstHost = entry.domain
-                    forceBypass = entry.isDirect
-                    flowConfiguration = entry.configuration ?? defaultConfiguration
+                    // Routing decision at connection time
+                    if let action = shared.domainRouter.matchDomain(entry.domain) {
+                        switch action {
+                        case .direct:
+                            forceBypass = true
+                        case .reject:
+                            logger.info("[FakeIP] UDP rejected for \(entry.domain, privacy: .public)")
+                            return
+                        case .proxy(let id):
+                            if let config = shared.domainRouter.resolveConfiguration(action: action) {
+                                flowConfiguration = config
+                            } else {
+                                logger.warning("[FakeIP] UDP proxy config \(id) not found for \(entry.domain, privacy: .public)")
+                            }
+                        }
+                    }
                 } else {
                     // Fake IP but entry evicted from LRU — drop packet
                     logger.warning("[FakeIP] UDP to \(dstIPString, privacy: .public):\(dstPort) but no domain mapping found (evicted)")
@@ -497,7 +524,7 @@ class LWIPStack {
 
     // MARK: - DNS Interception (Fake-IP)
     //
-    // DNS queries arriving on UDP port 53 are checked here before creating any flow.
+    // DNS queries arriving on UDP port 53 are intercepted here before creating any flow.
     // Two types of interception:
     //
     // 1. DDR blocking: When DoH is disabled, queries for "_dns.resolver.arpa" (RFC 9462)
@@ -505,11 +532,11 @@ class LWIPStack {
     //    server supports DoH and auto-upgrading, which would move all DNS to port 443
     //    and bypass our port-53 interception entirely.
     //
-    // 2. Domain routing: A/AAAA queries for domains matching routing rules get a fake IP
-    //    response from the FakeIPPool. When TCP/UDP connections later arrive at the fake IP,
-    //    we look up the original domain and route through the assigned proxy.
-    //
-    // Unmatched queries fall through and create normal UDP flows to the DNS server via proxy.
+    // 2. Fake-IP for ALL A/AAAA queries: Every domain gets a synthetic fake IP response.
+    //    When TCP/UDP connections later arrive at the fake IP, we look up the original
+    //    domain and make routing decisions (direct/proxy) at connection time by checking
+    //    DomainRouter. This ensures routing rule changes take effect immediately without
+    //    waiting for OS DNS cache expiry.
 
     /// Intercepts a DNS query. Returns true if handled (no UDP flow needed).
     private func handleDNSQuery(payload: Data,
@@ -540,31 +567,18 @@ class LWIPStack {
         // Only intercept A (1) and AAAA (28) queries; let MX/SRV/etc. pass through
         guard qtype == 1 || qtype == 28 else { return false }
 
-        // Skip if no routing rules loaded
-        guard domainRouter.hasRules else { return false }
-
-        // Check routing rules
-        guard let action = domainRouter.matchDomain(domain) else {
-            return false
+        // Reject: return NODATA so the domain gets no IP at all
+        if let action = domainRouter.matchDomain(domain), case .reject = action {
+            logger.info("[FakeIP] Rejected DNS for \(domain, privacy: .public)")
+            return sendNODATA(payload: payload, srcIP: srcIP, srcPort: srcPort,
+                              dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6, qtype: qtype)
         }
 
-        let isDirect: Bool
-        let configuration: VLESSConfiguration?
-        switch action {
-        case .direct:
-            isDirect = true
-            configuration = nil
-        case .proxy(let id):
-            isDirect = false
-            configuration = domainRouter.resolveConfiguration(action: action)
-            guard let configuration else {
-                logger.warning("[FakeIP] Proxy configuration \(id) not found, forwarding DNS normally")
-                return false
-            }
-        }
-
-        // Allocate offset (same offset used for both A and AAAA of the same domain)
-        let (offset, _) = fakeIPPool.allocate(domain: domain, configuration: configuration, isDirect: isDirect)
+        // Intercept ALL A/AAAA queries with fake IPs.
+        // Routing decisions (direct/proxy/specific proxy) are made at connection time
+        // by checking domainRouter, so rule changes take effect immediately without
+        // waiting for DNS cache expiry.
+        let offset = fakeIPPool.allocate(domain: domain)
 
         // Build fake IP bytes for the response
         var fakeIPBytes: [UInt8]?

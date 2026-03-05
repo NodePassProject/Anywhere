@@ -14,8 +14,6 @@ class FakeIPPool {
 
     struct Entry {
         let domain: String
-        let configuration: VLESSConfiguration?  // nil = DIRECT bypass
-        let isDirect: Bool
     }
 
     // IPv4: 198.18.0.0/15 → offsets 1..131071
@@ -81,16 +79,11 @@ class FakeIPPool {
 
     /// Allocate (or reuse) an offset for the given domain.
     /// Use `ipv4Bytes(offset:)` or `ipv6Bytes(offset:)` to get the actual address bytes.
-    func allocate(domain: String, configuration: VLESSConfiguration?, isDirect: Bool)
-        -> (offset: Int, entry: Entry)
-    {
-        let entry = Entry(domain: domain, configuration: configuration, isDirect: isDirect)
-
-        // Already allocated? Touch LRU and update entry (configuration may have changed)
+    func allocate(domain: String) -> Int {
+        // Already allocated? Touch LRU and return existing offset
         if let offset = domainToOffset[domain] {
-            offsetToEntry[offset] = entry
             touchLRU(offset)
-            return (offset, entry)
+            return offset
         }
 
         // Need a new offset
@@ -104,12 +97,12 @@ class FakeIPPool {
         }
 
         domainToOffset[domain] = offset
-        offsetToEntry[offset] = entry
+        offsetToEntry[offset] = Entry(domain: domain)
         appendLRU(offset)
 
         let ip = Self.ipv4Bytes(offset: offset)
         logger.debug("[FakeIP] \(domain, privacy: .public) → \(ip.0).\(ip.1).\(ip.2).\(ip.3)")
-        return (offset, entry)
+        return offset
     }
 
     /// Look up an entry by its fake IP string (IPv4 or IPv6).
@@ -130,50 +123,8 @@ class FakeIPPool {
         nextOffset = 1
     }
 
-    /// Updates existing entries' configurations from the current routing rules.
-    /// Called on stack restart instead of `reset()` so that apps holding cached fake IPs
-    /// (from before the restart) still resolve to valid domain→proxy mappings.
-    /// Entries whose domains no longer match any rule are removed.
-    func rebuild(using router: DomainRouter) {
-        var domainsToRemove: [String] = []
-
-        for (domain, offset) in domainToOffset {
-            guard let action = router.matchDomain(domain) else {
-                domainsToRemove.append(domain)
-                continue
-            }
-
-            let isDirect: Bool
-            let configuration: VLESSConfiguration?
-            switch action {
-            case .direct:
-                isDirect = true
-                configuration = nil
-            case .proxy:
-                isDirect = false
-                configuration = router.resolveConfiguration(action: action)
-                if configuration == nil {
-                    domainsToRemove.append(domain)
-                    continue
-                }
-            }
-
-            offsetToEntry[offset] = Entry(domain: domain, configuration: configuration, isDirect: isDirect)
-        }
-
-        for domain in domainsToRemove {
-            if let offset = domainToOffset.removeValue(forKey: domain) {
-                offsetToEntry.removeValue(forKey: offset)
-                if let node = offsetToNode.removeValue(forKey: offset) {
-                    removeNode(node)
-                }
-            }
-        }
-
-        if !domainsToRemove.isEmpty {
-            logger.info("[FakeIP] Rebuild: removed \(domainsToRemove.count) stale entries, \(self.domainToOffset.count) active")
-        }
-    }
+    /// Returns the number of active entries.
+    var count: Int { domainToOffset.count }
 
     // MARK: - IP ↔ Offset Conversion
 
