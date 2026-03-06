@@ -409,7 +409,7 @@ int lwip_bridge_tcp_write(void *pcb, const void *data, uint16_t len) {
     err_t err = tcp_write(tpcb, data, len, TCP_WRITE_FLAG_COPY);
     if (err != ERR_OK) {
         os_log_error(s_log, "[Bridge] tcp_write: err=%d len=%u sndbuf=%u",
-                     (int)err, len, tcp_sndbuf(tpcb));
+                     (int)err, len, (unsigned)tpcb->snd_buf);
     }
     return (int)err;
 }
@@ -445,7 +445,7 @@ void lwip_bridge_tcp_abort(void *pcb) {
 }
 
 int lwip_bridge_tcp_sndbuf(void *pcb) {
-    return (int)tcp_sndbuf((struct tcp_pcb *)pcb);
+    return (int)((struct tcp_pcb *)pcb)->snd_buf;
 }
 
 /* ========================================================================

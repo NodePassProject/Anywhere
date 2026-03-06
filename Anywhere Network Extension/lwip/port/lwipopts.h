@@ -41,7 +41,7 @@
 #define LWIP_CALLBACK_API               1
 
 /* --- Memory configuration --- */
-#define MEM_SIZE                        (1024 * 1024)
+#define MEM_SIZE                        (8 * 1024 * 1024)
 #define MEM_ALIGNMENT                   4
 #define MEMP_OVERFLOW_CHECK             0
 #define MEMP_SANITY_CHECK               0
@@ -64,6 +64,7 @@
 #define TCP_WND                         (128 * TCP_MSS)
 #define TCP_SND_BUF                     (128 * TCP_MSS)
 #define TCP_SND_QUEUELEN                (4 * TCP_SND_BUF / TCP_MSS)
+#define TCP_SNDLOWAT                    (TCP_SND_BUF / 4)
 #define TCP_QUEUE_OOSEQ                 1
 #define TCP_OVERSIZE                    TCP_MSS
 #define LWIP_TCP_TIMESTAMPS             0
