@@ -34,6 +34,12 @@ class LWIPStack {
     private var packetFlow: NEPacketTunnelFlow?
     private(set) var configuration: VLESSConfiguration?
 
+    private static let ipv4Proto = NSNumber(value: AF_INET)
+    private static let ipv6Proto = NSNumber(value: AF_INET6)
+    private var outputPackets: [Data] = []
+    private var outputProtocols: [NSNumber] = []
+    private var outputFlushScheduled = false
+
     // --- Settings (read from App Group UserDefaults) ---
     // These are loaded at start/restart and live-reloaded via Darwin notification.
     //
@@ -201,6 +207,10 @@ class LWIPStack {
         self.udpCleanupTimer?.cancel()
         self.udpCleanupTimer = nil
 
+        self.outputPackets.removeAll()
+        self.outputProtocols.removeAll()
+        self.outputFlushScheduled = false
+
         self.muxManager?.closeAll()
         self.muxManager = nil
 
@@ -336,15 +346,22 @@ class LWIPStack {
 
     /// Registers C callbacks that route lwIP events through ``shared``.
     private func registerCallbacks() {
-        // Output: lwIP → tunnel packet flow
+        // Output: lwIP → tunnel packet flow (batched)
+        // Accumulates output packets during synchronous lwip_bridge_input processing,
+        // then flushes them all in a single writePackets call. This reduces kernel
+        // crossings from N per batch to 1, speeding up ACK delivery to the OS TCP
+        // stack and improving upload throughput.
         lwip_bridge_set_output_fn { data, len, isIPv6 in
             guard let shared = LWIPStack.shared, let data else { return }
             let byteCount = Int(len)
-            let packetData = Data(bytes: data, count: byteCount)
-            let proto = isIPv6 != 0 ? NSNumber(value: AF_INET6) : NSNumber(value: AF_INET)
             shared.totalBytesIn += Int64(byteCount)
-            shared.outputQueue.async {
-                shared.packetFlow?.writePackets([packetData], withProtocols: [proto])
+            shared.outputPackets.append(Data(bytes: data, count: byteCount))
+            shared.outputProtocols.append(isIPv6 != 0 ? LWIPStack.ipv6Proto : LWIPStack.ipv4Proto)
+            if !shared.outputFlushScheduled {
+                shared.outputFlushScheduled = true
+                shared.lwipQueue.async {
+                    shared.flushOutputPackets()
+                }
             }
         }
 
@@ -648,6 +665,23 @@ class LWIPStack {
         }
         logger.info("[FakeIP] Blocked DDR query (qtype=\(qtype))")
         return true
+    }
+
+    // MARK: - Output Batching
+
+    /// Flushes accumulated output packets to the TUN device in a single writePackets call.
+    /// Called via deferred lwipQueue.async after the current batch of lwip_bridge_input
+    /// calls completes. Reduces kernel crossings from N to 1 per processing cycle.
+    private func flushOutputPackets() {
+        outputFlushScheduled = false
+        guard !outputPackets.isEmpty else { return }
+        let packets = outputPackets
+        let protocols = outputProtocols
+        outputPackets.removeAll(keepingCapacity: true)
+        outputProtocols.removeAll(keepingCapacity: true)
+        outputQueue.async { [weak self] in
+            self?.packetFlow?.writePackets(packets, withProtocols: protocols)
+        }
     }
 
     // MARK: - Packet Reading

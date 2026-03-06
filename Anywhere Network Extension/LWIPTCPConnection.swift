@@ -24,8 +24,6 @@ class LWIPTCPConnection {
     private var directConnecting = false
     private let bypass: Bool
     private var pendingData = Data()
-    private var uploadBuffer = Data()
-    private var uploadFlushScheduled = false
     private var closed = false
 
     // MARK: Backpressure State
@@ -108,12 +106,10 @@ class LWIPTCPConnection {
 
     /// Handles data received from the local app via lwIP (upload path).
     ///
-    /// Batches segments from multiple tcp_recv_cb calls into a single send.
-    /// lwIP delivers one TCP_MSS (~1360 bytes) per callback; without batching,
-    /// each segment triggers a separate BSDSocket.send() syscall and TLS record.
-    /// By accumulating into `uploadBuffer` and flushing via a deferred
-    /// `lwipQueue.async`, all segments from the current batch of TUN packets
-    /// are coalesced into one send — reducing syscalls and TLS records ~12x.
+    /// Sends each segment immediately to the proxy connection (matching
+    /// Xray-core's tight read→write copy loop). tcp_recved is called
+    /// upfront to keep the receive window open (pipelined). BSDSocket
+    /// queues sends internally and drains via a write dispatch source.
     ///
     /// **IMPORTANT**: tcp_recved must ONLY be called when data is handed to an
     /// active connection — never for data buffered in `pendingData`. The
@@ -131,14 +127,19 @@ class LWIPTCPConnection {
             return
         }
 
-        if directRelay != nil || vlessConnection != nil {
+        if let relay = directRelay {
             lwip_bridge_tcp_recved(pcb, UInt16(data.count))
-            uploadBuffer.append(data)
-            if !uploadFlushScheduled {
-                uploadFlushScheduled = true
-                lwipQueue.async { [weak self] in
-                    self?.flushUploadBuffer()
-                }
+            relay.send(data: data) { [weak self] error in
+                guard let self, let error else { return }
+                logger.error("[TCP] Direct send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                self.lwipQueue.async { self.abort() }
+            }
+        } else if let connection = vlessConnection {
+            lwip_bridge_tcp_recved(pcb, UInt16(data.count))
+            connection.send(data: data) { [weak self] error in
+                guard let self, let error else { return }
+                logger.error("[TCP] VLESS send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                self.lwipQueue.async { self.abort() }
             }
         } else {
             // No connection yet — buffer without advancing window.
@@ -147,33 +148,6 @@ class LWIPTCPConnection {
                 connectDirect()
             } else {
                 connectVLESS()
-            }
-        }
-    }
-
-    /// Flushes the accumulated upload buffer to the proxy connection.
-    ///
-    /// Called via deferred `lwipQueue.async` after the current batch of
-    /// tcp_recv_cb callbacks completes. Sends all accumulated segments
-    /// as a single chunk, minimizing syscalls and TLS record overhead.
-    private func flushUploadBuffer() {
-        uploadFlushScheduled = false
-        guard !closed, !uploadBuffer.isEmpty else { return }
-
-        var data = Data()
-        swap(&data, &uploadBuffer)
-
-        if let relay = directRelay {
-            relay.send(data: data) { [weak self] error in
-                guard let self, let error else { return }
-                logger.error("[TCP] Direct send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
-                self.lwipQueue.async { self.abort() }
-            }
-        } else if let connection = vlessConnection {
-            connection.send(data: data) { [weak self] error in
-                guard let self, let error else { return }
-                logger.error("[TCP] VLESS send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
-                self.lwipQueue.async { self.abort() }
             }
         }
     }
@@ -584,8 +558,6 @@ class LWIPTCPConnection {
         vlessClient = nil
         vlessConnecting = false
         pendingData = Data()
-        uploadBuffer = Data()
-        uploadFlushScheduled = false
         overflowBuffer = Data()
         receivePaused = false
         relay?.cancel()
