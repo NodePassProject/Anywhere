@@ -172,6 +172,16 @@ class LWIPUDPFlow {
 
                     switch result {
                     case .success(let session):
+                        // Guard against race: closeAll() may have already closed the
+                        // session (via receive-loop error) before this handler ran.
+                        // closeHandler was never set, so the flow won't be cleaned up
+                        // unless we handle it here.
+                        guard !session.closed else {
+                            self.releaseVLESS()
+                            LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                            return
+                        }
+
                         self.muxSession = session
 
                         // Set up receive handler
