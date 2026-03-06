@@ -32,12 +32,24 @@ class LWIPTCPConnection {
     /// Acts as the equivalent of Xray-core's pipe buffer between reader and writer.
     private var overflowBuffer = Data()
 
-    /// Maximum size for the overflow buffer (matches Xray-core's pipe limit concept).
-    /// Prevents unbounded memory growth from pathological receives.
+    /// Soft limit for the overflow buffer (matches Xray-core's pipe limit concept).
+    ///
+    /// When the buffer exceeds this size, `receivePaused` is set to `true` to
+    /// stop reading from the remote side, applying backpressure. The buffer is
+    /// NOT hard-capped: a single in-flight receive (≤ `maxWriteSize` = 16 KB)
+    /// may push it slightly over the limit before the pause takes effect.
+    ///
+    /// **CAUTION — do NOT abort when this limit is exceeded.**
+    /// Aborting here causes unnecessary RSTs under heavy load (e.g. speed tests)
+    /// where ERR_MEM / full send buffers are transient. The backpressure mechanism
+    /// (`receivePaused` + `drainOverflowBuffer`) is the correct recovery path:
+    /// ACKs from the local app free send-buffer space → drain fires → buffer
+    /// shrinks → receive resumes. Aborting short-circuits this and kills
+    /// connections that would otherwise recover on their own.
     private static let maxOverflowBufferSize = 512 * 1024  // 512 KB
 
     /// Maximum bytes per tcp_write call. Limits pbuf/segment allocation pressure:
-    /// 16 KB ≈ 12 TCP segments (TCP_MSS=1360). With MEMP_NUM_TCP_SEG=2048 globally,
+    /// 16 KB ≈ 12 TCP segments (TCP_MSS=1360). With MEMP_NUM_TCP_SEG=4096 globally,
     /// this allows many concurrent connections to make progress without exhausting
     /// the segment pool (a 65 KB write would need ~49 segments — all-or-nothing).
     /// See also: MEMP_NUM_TCP_SEG in lwipopts.h (must stay in sync).
@@ -393,16 +405,15 @@ class LWIPTCPConnection {
         guard !closed else { return }
 
         // If overflow already queued, append to preserve ordering.
+        // Always accept the data — do NOT reject/abort here. The buffer may
+        // temporarily exceed maxOverflowBufferSize by up to one chunk, but
+        // backpressure (receivePaused) prevents further growth. Draining via
+        // handleSent will bring it back under the limit.
         if !overflowBuffer.isEmpty {
-            if overflowBuffer.count + data.count > Self.maxOverflowBufferSize {
-                logger.error("[TCP] Overflow buffer limit exceeded for \(self.dstHost, privacy: .public):\(self.dstPort)")
-                self.abort()
-                return
-            }
             overflowBuffer.append(data)
             drainOverflowBuffer()
             guard !closed else { return }
-            if overflowBuffer.isEmpty {
+            if overflowBuffer.count < Self.maxOverflowBufferSize {
                 requestNextReceive()
             } else {
                 receivePaused = true
@@ -419,13 +430,10 @@ class LWIPTCPConnection {
                     lwip_bridge_tcp_output(pcb)
                     sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
                     if sndbuf <= 0 {
-                        let remaining = data.count - offset
-                        if overflowBuffer.count + remaining > Self.maxOverflowBufferSize {
-                            logger.error("[TCP] Overflow buffer limit exceeded for \(self.dstHost, privacy: .public):\(self.dstPort)")
-                            self.abort()
-                            return
-                        }
-                        overflowBuffer.append(Data(bytes: base + offset, count: remaining))
+                        // Send buffer still full after flush — spill remainder to overflow.
+                        // Do NOT abort: backpressure (receivePaused) at the end of this
+                        // method will stop further receives until the buffer drains.
+                        overflowBuffer.append(Data(bytes: base + offset, count: data.count - offset))
                         offset = data.count
                         break
                     }
@@ -435,14 +443,12 @@ class LWIPTCPConnection {
                 let err = lwip_bridge_tcp_write(pcb, base + offset, writeLen)
                 if err != 0 {
                     if err == -1 {
-                        // ERR_MEM: global pbuf/segment pool exhausted — treat like full send buffer
-                        let remaining = data.count - offset
-                        if overflowBuffer.count + remaining > Self.maxOverflowBufferSize {
-                            logger.error("[TCP] Overflow buffer limit exceeded for \(self.dstHost, privacy: .public):\(self.dstPort)")
-                            self.abort()
-                            return
-                        }
-                        overflowBuffer.append(Data(bytes: base + offset, count: remaining))
+                        // ERR_MEM: global pbuf/segment pool exhausted — treat like full
+                        // send buffer. Spill to overflow and let backpressure handle it.
+                        // Do NOT abort: ERR_MEM is transient under load (e.g. speed tests).
+                        // Other connections' ACKs will free segments, drainOverflowBuffer
+                        // retries on handleSent / delayed timer, and this connection recovers.
+                        overflowBuffer.append(Data(bytes: base + offset, count: data.count - offset))
                         offset = data.count
                         break
                     }
@@ -458,6 +464,10 @@ class LWIPTCPConnection {
 
         lwip_bridge_tcp_output(pcb)
 
+        // Backpressure gate: if overflow has accumulated beyond the soft limit,
+        // pause receives so the remote side stops sending. drainOverflowBuffer()
+        // will resume receives once the buffer drops back under the limit.
+        // This is the ONLY mechanism that bounds memory — do not add an abort here.
         if overflowBuffer.count < Self.maxOverflowBufferSize {
             requestNextReceive()
         } else {
