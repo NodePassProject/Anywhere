@@ -107,48 +107,50 @@ class LWIPTCPConnection {
     /// Handles data received from the local app via lwIP (upload path).
     ///
     /// Sends each segment immediately to the proxy connection (matching
-    /// Xray-core's tight read→write copy loop). tcp_recved is called
-    /// upfront to keep the receive window open (pipelined). BSDSocket
-    /// queues sends internally and drains via a write dispatch source.
-    ///
-    /// **IMPORTANT**: tcp_recved must ONLY be called when data is handed to an
-    /// active connection — never for data buffered in `pendingData`. The
-    /// pending-data path defers tcp_recved to the connect-completion handler
-    /// to avoid double-advancing the receive window.
+    /// Xray-core's tight read→write copy loop). tcp_recved is deferred
+    /// until the send completion fires, providing backpressure: when the
+    /// outbound socket is busy, the receive window shrinks and the local
+    /// app naturally slows down — matching Xray-core's blocking Write().
     func handleReceivedData(_ data: Data) {
         guard !closed else { return }
         activityTimer?.update()
 
-        // Buffer data while the outbound connection is being established.
-        // Do NOT call tcp_recved here — the connect-completion handler will
-        // advance the window when pendingData is actually sent.
         if vlessConnecting || directConnecting {
             pendingData.append(data)
             return
         }
 
+        let recvLen = UInt16(data.count)
+
         if let relay = directRelay {
-            lwip_bridge_tcp_recved(pcb, UInt16(data.count))
             relay.send(data: data) { [weak self] error in
-                guard let self, let error else { return }
-                logger.error("[TCP] Direct send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
-                self.lwipQueue.async { self.abort() }
+                guard let self else { return }
+                if let error {
+                    logger.error("[TCP] Direct send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    self.lwipQueue.async { self.abort() }
+                } else {
+                    self.lwipQueue.async {
+                        guard !self.closed else { return }
+                        lwip_bridge_tcp_recved(self.pcb, recvLen)
+                    }
+                }
             }
         } else if let connection = vlessConnection {
-            lwip_bridge_tcp_recved(pcb, UInt16(data.count))
             connection.send(data: data) { [weak self] error in
-                guard let self, let error else { return }
-                logger.error("[TCP] VLESS send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
-                self.lwipQueue.async { self.abort() }
+                guard let self else { return }
+                if let error {
+                    logger.error("[TCP] VLESS send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    self.lwipQueue.async { self.abort() }
+                } else {
+                    self.lwipQueue.async {
+                        guard !self.closed else { return }
+                        lwip_bridge_tcp_recved(self.pcb, recvLen)
+                    }
+                }
             }
         } else {
-            // No connection yet — buffer without advancing window.
             pendingData.append(data)
-            if bypass {
-                connectDirect()
-            } else {
-                connectVLESS()
-            }
+            if bypass { connectDirect() } else { connectVLESS() }
         }
     }
 
@@ -212,24 +214,37 @@ class LWIPTCPConnection {
                     self.close()
                 }
 
-                // Flush data that arrived before/during connect
                 if let initialData {
-                    lwip_bridge_tcp_recved(self.pcb, UInt16(clamping: initialData.count))
+                    let count = UInt16(clamping: initialData.count)
                     relay.send(data: initialData) { [weak self] error in
-                        guard let self, let error else { return }
-                        logger.error("[TCP] Direct initial send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                        self.lwipQueue.async { self.abort() }
+                        guard let self else { return }
+                        if let error {
+                            logger.error("[TCP] Direct initial send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                            self.lwipQueue.async { self.abort() }
+                        } else {
+                            self.lwipQueue.async {
+                                guard !self.closed else { return }
+                                lwip_bridge_tcp_recved(self.pcb, count)
+                            }
+                        }
                     }
                 }
 
                 if !self.pendingData.isEmpty {
                     let dataToSend = self.pendingData
                     self.pendingData.removeAll(keepingCapacity: true)
-                    lwip_bridge_tcp_recved(self.pcb, UInt16(clamping: dataToSend.count))
+                    let count = UInt16(clamping: dataToSend.count)
                     relay.send(data: dataToSend) { [weak self] error in
-                        guard let self, let error else { return }
-                        logger.error("[TCP] Direct pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                        self.lwipQueue.async { self.abort() }
+                        guard let self else { return }
+                        if let error {
+                            logger.error("[TCP] Direct pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                            self.lwipQueue.async { self.abort() }
+                        } else {
+                            self.lwipQueue.async {
+                                guard !self.closed else { return }
+                                lwip_bridge_tcp_recved(self.pcb, count)
+                            }
+                        }
                     }
                 }
 
@@ -275,11 +290,18 @@ class LWIPTCPConnection {
                     if !self.pendingData.isEmpty {
                         let dataToSend = self.pendingData
                         self.pendingData.removeAll(keepingCapacity: true)
-                        lwip_bridge_tcp_recved(self.pcb, UInt16(clamping: dataToSend.count))
+                        let count = UInt16(clamping: dataToSend.count)
                         vlessConnection.send(data: dataToSend) { [weak self] error in
-                            guard let self, let error else { return }
-                            logger.error("[TCP] VLESS pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                            self.lwipQueue.async { self.abort() }
+                            guard let self else { return }
+                            if let error {
+                                logger.error("[TCP] VLESS pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                self.lwipQueue.async { self.abort() }
+                            } else {
+                                self.lwipQueue.async {
+                                    guard !self.closed else { return }
+                                    lwip_bridge_tcp_recved(self.pcb, count)
+                                }
+                            }
                         }
                     }
 
