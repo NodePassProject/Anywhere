@@ -14,7 +14,7 @@ import SwiftUI
 @Observable @MainActor
 class VPNViewModel {
     var vpnStatus: NEVPNStatus = .disconnected
-    var selectedConfiguration: VLESSConfiguration? {
+    var selectedConfiguration: ProxyConfiguration? {
         didSet {
             if let selectedConfiguration {
                 APCore.userDefaults.set(selectedConfiguration.id.uuidString, forKey: Self.selectedConfigurationIdKey)
@@ -27,7 +27,7 @@ class VPNViewModel {
             }
         }
     }
-    private(set) var configurations: [VLESSConfiguration] = []
+    private(set) var configurations: [ProxyConfiguration] = []
     private(set) var subscriptions: [Subscription] = []
     var latencyResults: [UUID: LatencyResult] = [:]
     var startError: String?
@@ -137,29 +137,29 @@ class VPNViewModel {
 
     // MARK: - Configuration CRUD
 
-    func addConfiguration(_ configuration: VLESSConfiguration) {
+    func addConfiguration(_ configuration: ProxyConfiguration) {
         store.add(configuration)
         if selectedConfiguration == nil {
             selectedConfiguration = configuration
         }
     }
 
-    func updateConfiguration(_ configuration: VLESSConfiguration) {
+    func updateConfiguration(_ configuration: ProxyConfiguration) {
         store.update(configuration)
         if selectedConfiguration?.id == configuration.id {
             selectedConfiguration = configuration
         }
     }
 
-    func deleteConfiguration(_ configuration: VLESSConfiguration) {
+    func deleteConfiguration(_ configuration: ProxyConfiguration) {
         store.delete(configuration)
     }
 
     // MARK: - Subscription CRUD
 
-    func addSubscription(configurations newConfigurations: [VLESSConfiguration], subscription: Subscription) {
+    func addSubscription(configurations newConfigurations: [ProxyConfiguration], subscription: Subscription) {
         for configuration in newConfigurations {
-            let tagged = VLESSConfiguration(
+            let tagged = ProxyConfiguration(
                 id: configuration.id, name: configuration.name, serverAddress: configuration.serverAddress,
                 serverPort: configuration.serverPort, uuid: configuration.uuid, encryption: configuration.encryption,
                 transport: configuration.transport, flow: configuration.flow, security: configuration.security,
@@ -185,7 +185,7 @@ class VPNViewModel {
         // Match new configurations against old ones by content to preserve IDs (and routing rules)
         let oldConfigurations = configurations(for: subscription)
         var usedOldIds = Set<UUID>()
-        var newConfigurations: [VLESSConfiguration] = []
+        var newConfigurations: [ProxyConfiguration] = []
 
         for configuration in result.configurations {
             let matchedOld = oldConfigurations.first { old in
@@ -198,7 +198,7 @@ class VPNViewModel {
             } else {
                 id = configuration.id
             }
-            newConfigurations.append(VLESSConfiguration(
+            newConfigurations.append(ProxyConfiguration(
                 id: id, name: configuration.name, serverAddress: configuration.serverAddress,
                 serverPort: configuration.serverPort, uuid: configuration.uuid, encryption: configuration.encryption,
                 transport: configuration.transport, flow: configuration.flow, security: configuration.security,
@@ -239,13 +239,13 @@ class VPNViewModel {
     }
 
     /// Returns the subscription that owns this configuration, if any.
-    func subscription(for configuration: VLESSConfiguration) -> Subscription? {
+    func subscription(for configuration: ProxyConfiguration) -> Subscription? {
         guard let subId = configuration.subscriptionId else { return nil }
         return subscriptions.first { $0.id == subId }
     }
 
     /// Returns all configurations belonging to a subscription.
-    func configurations(for subscription: Subscription) -> [VLESSConfiguration] {
+    func configurations(for subscription: Subscription) -> [ProxyConfiguration] {
         configurations.filter { $0.subscriptionId == subscription.id }
     }
 
@@ -253,7 +253,7 @@ class VPNViewModel {
 
     private var latencyTask: Task<Void, Never>?
 
-    func testLatency(for configuration: VLESSConfiguration) {
+    func testLatency(for configuration: ProxyConfiguration) {
         latencyTask?.cancel()
         let configurationId = configuration.id
         latencyResults[configurationId] = .testing
@@ -440,7 +440,7 @@ class VPNViewModel {
     // MARK: - Configuration Switching
 
     /// Sends the new configuration to the running tunnel extension via app message.
-    private func sendConfigurationToTunnel(_ configuration: VLESSConfiguration) {
+    private func sendConfigurationToTunnel(_ configuration: ProxyConfiguration) {
         guard let session = vpnManager?.connection as? NETunnelProviderSession else { return }
         var configurationDict = serializeConfiguration(configuration)
         // Resolve domain to IP so the tunnel can use it for socket connections
@@ -513,7 +513,7 @@ class VPNViewModel {
 
     // MARK: - Configuration Serialization
 
-    private func serializeConfiguration(_ configuration: VLESSConfiguration) -> [String: Any] {
+    private func serializeConfiguration(_ configuration: ProxyConfiguration) -> [String: Any] {
         var configurationDict: [String: Any] = [
             "name": configuration.name,
             "serverAddress": configuration.serverAddress,
@@ -524,7 +524,16 @@ class VPNViewModel {
             "security": configuration.security,
             "muxEnabled": configuration.muxEnabled,
             "xudpEnabled": configuration.xudpEnabled,
+            "outboundProtocol": configuration.outboundProtocol.rawValue,
         ]
+
+        // Add Shadowsocks fields if present
+        if let ssPassword = configuration.ssPassword {
+            configurationDict["ssPassword"] = ssPassword
+        }
+        if let ssMethod = configuration.ssMethod {
+            configurationDict["ssMethod"] = ssMethod
+        }
 
         // Add Reality configuration if present
         if let reality = configuration.reality {

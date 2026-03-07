@@ -9,7 +9,7 @@ import Foundation
 
 struct ClashProxyParser {
     struct ParseResult {
-        let configurations: [VLESSConfiguration]
+        let configurations: [ProxyConfiguration]
         let skippedCount: Int
     }
 
@@ -56,7 +56,7 @@ struct ClashProxyParser {
                 throw ParseError.missingProxiesKey
             }
 
-            var configurations: [VLESSConfiguration] = []
+            var configurations: [ProxyConfiguration] = []
             var skippedCount = 0
 
             let items = proxiesNode.pointee.data.sequence.items
@@ -170,8 +170,12 @@ struct ClashProxyParser {
     private static func parseProxy(
         _ doc: UnsafeMutablePointer<yaml_document_t>,
         node: UnsafeMutablePointer<yaml_node_t>
-    ) -> VLESSConfiguration? {
-        guard getString(doc, mapping: node, key: "type") == "vless" else { return nil }
+    ) -> ProxyConfiguration? {
+        let proxyType = getString(doc, mapping: node, key: "type")
+        if proxyType == "ss" {
+            return parseShadowsocksProxy(doc, node: node)
+        }
+        guard proxyType == "vless" else { return nil }
 
         guard
             let name = getString(doc, mapping: node, key: "name"),
@@ -281,7 +285,7 @@ struct ClashProxyParser {
             wsConfig = WebSocketConfiguration(host: wsHost, path: wsPath, headers: wsHeaders)
         }
 
-        return VLESSConfiguration(
+        return ProxyConfiguration(
             name: name,
             serverAddress: server,
             serverPort: port,
@@ -293,6 +297,102 @@ struct ClashProxyParser {
             tls: tlsConfig,
             reality: realityConfig,
             websocket: wsConfig
+        )
+    }
+
+    // MARK: - Shadowsocks proxy parsing
+
+    private static func parseShadowsocksProxy(
+        _ doc: UnsafeMutablePointer<yaml_document_t>,
+        node: UnsafeMutablePointer<yaml_node_t>
+    ) -> ProxyConfiguration? {
+        guard
+            let name = getString(doc, mapping: node, key: "name"),
+            let server = getString(doc, mapping: node, key: "server"),
+            let password = getString(doc, mapping: node, key: "password"),
+            let cipher = getString(doc, mapping: node, key: "cipher")
+        else { return nil }
+
+        guard ShadowsocksCipher(method: cipher) != nil else { return nil }
+
+        guard
+            let portInt = getInt(doc, mapping: node, key: "port"),
+            portInt > 0, portInt <= Int(UInt16.max)
+        else { return nil }
+        let port = UInt16(portInt)
+
+        // Transport: tcp (default) or ws
+        let network = getString(doc, mapping: node, key: "network") ?? getString(doc, mapping: node, key: "plugin-opts-network") ?? "tcp"
+        guard network != "h2" && network != "grpc" else { return nil }
+        let transport = (network == "ws") ? "ws" : "tcp"
+
+        // TLS
+        let tlsEnabled = getBool(doc, mapping: node, key: "tls") ?? false
+        let security = tlsEnabled ? "tls" : "none"
+
+        var tlsConfig: TLSConfiguration? = nil
+        if tlsEnabled {
+            let sni = getString(doc, mapping: node, key: "servername")
+                ?? getString(doc, mapping: node, key: "sni")
+                ?? server
+            let skipCertVerify = getBool(doc, mapping: node, key: "skip-cert-verify") ?? false
+            let alpn = getStringSequence(doc, mapping: node, key: "alpn")
+            let clientFP = getString(doc, mapping: node, key: "client-fingerprint")
+            let fingerprint = TLSFingerprint(rawValue: mapFingerprint(clientFP)) ?? .chrome120
+
+            tlsConfig = TLSConfiguration(
+                serverName: sni,
+                alpn: alpn,
+                allowInsecure: skipCertVerify,
+                fingerprint: fingerprint
+            )
+        }
+
+        // WebSocket
+        var wsConfig: WebSocketConfiguration? = nil
+        if transport == "ws" {
+            var wsPath = "/"
+            var wsHost = server
+            var wsHeaders: [String: String] = [:]
+
+            if let woIdx = mappingLookup(doc, node: node, key: "ws-opts"),
+               let woNode = yaml_document_get_node(doc, woIdx),
+               woNode.pointee.type == YAML_MAPPING_NODE {
+                wsPath = getString(doc, mapping: woNode, key: "path") ?? "/"
+                if let hIdx = mappingLookup(doc, node: woNode, key: "headers"),
+                   let hNode = yaml_document_get_node(doc, hIdx),
+                   hNode.pointee.type == YAML_MAPPING_NODE {
+                    let hPairs = hNode.pointee.data.mapping.pairs
+                    var hp = hPairs.start
+                    while let p = hp, p < hPairs.top {
+                        if let kNode = yaml_document_get_node(doc, p.pointee.key),
+                           let vNode = yaml_document_get_node(doc, p.pointee.value),
+                           let k = scalarString(kNode),
+                           let v = scalarString(vNode) {
+                            wsHeaders[k] = v
+                            if k == "Host" { wsHost = v }
+                        }
+                        hp = p.advanced(by: 1)
+                    }
+                }
+            }
+
+            wsConfig = WebSocketConfiguration(host: wsHost, path: wsPath, headers: wsHeaders)
+        }
+
+        return ProxyConfiguration(
+            name: name,
+            serverAddress: server,
+            serverPort: port,
+            uuid: UUID(), // placeholder
+            encryption: "none",
+            transport: transport,
+            security: security,
+            tls: tlsConfig,
+            websocket: wsConfig,
+            outboundProtocol: .shadowsocks,
+            ssPassword: password,
+            ssMethod: cipher
         )
     }
 

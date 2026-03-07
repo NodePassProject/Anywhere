@@ -11,11 +11,11 @@ import os.log
 private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "MuxClient")
 
 class MuxClient {
-    let configuration: VLESSConfiguration
+    let configuration: ProxyConfiguration
     let lwipQueue: DispatchQueue
 
-    private var vlessClient: VLESSClient?
-    private var vlessConnection: VLESSConnection?
+    private var proxyClient: ProxyClient?
+    private var proxyConnection: ProxyConnection?
     private var sessions: [UInt16: MuxSession] = [:]
     private var nextSessionID: UInt16 = 1
     private var connecting = false
@@ -41,7 +41,7 @@ class MuxClient {
     var sessionCount: Int { sessions.count }
     var isFull: Bool { closed || isXUDP }
 
-    init(configuration: VLESSConfiguration, lwipQueue: DispatchQueue) {
+    init(configuration: ProxyConfiguration, lwipQueue: DispatchQueue) {
         self.configuration = configuration
         self.lwipQueue = lwipQueue
     }
@@ -49,7 +49,7 @@ class MuxClient {
     // MARK: - Session Management
 
     /// Creates a new mux session for the given target.
-    /// Lazily connects the underlying VLESS connection on first use.
+    /// Lazily connects the underlying proxy connection on first use.
     func createSession(
         network: MuxNetwork,
         host: String,
@@ -58,7 +58,7 @@ class MuxClient {
         completion: @escaping (Result<MuxSession, Error>) -> Void
     ) {
         guard !closed else {
-            completion(.failure(VLESSError.connectionFailed("Mux client closed")))
+            completion(.failure(ProxyError.connectionFailed("Mux client closed")))
             return
         }
 
@@ -133,7 +133,7 @@ class MuxClient {
         }
     }
 
-    /// Closes all sessions and the underlying VLESS connection.
+    /// Closes all sessions and the underlying proxy connection.
     func closeAll() {
         guard !closed else { return }
         closed = true
@@ -148,10 +148,10 @@ class MuxClient {
             session.deliverClose()
         }
 
-        vlessConnection?.cancel()
-        vlessClient?.cancel()
-        vlessConnection = nil
-        vlessClient = nil
+        proxyConnection?.cancel()
+        proxyClient?.cancel()
+        proxyConnection = nil
+        proxyClient = nil
 
         frameParser.reset()
         writeQueue.removeAll()
@@ -160,11 +160,11 @@ class MuxClient {
         connectCompletions.removeAll()
         connecting = false
         for cb in pendingCompletions {
-            cb(VLESSError.connectionFailed("Mux client closed"))
+            cb(ProxyError.connectionFailed("Mux client closed"))
         }
     }
 
-    // MARK: - VLESS Mux Connection
+    // MARK: - Mux Connection
 
     private func connectMux(completion: @escaping (Error?) -> Void) {
         if connected {
@@ -173,7 +173,7 @@ class MuxClient {
         }
 
         if closed {
-            completion(VLESSError.connectionFailed("Mux client closed"))
+            completion(ProxyError.connectionFailed("Mux client closed"))
             return
         }
 
@@ -186,10 +186,10 @@ class MuxClient {
         connecting = true
         connectCompletions.append(completion)
 
-        let client = VLESSClient(configuration: configuration)
-        self.vlessClient = client
+        let client = ProxyClient(configuration: configuration)
+        self.proxyClient = client
 
-        client.connectMux { [weak self] (result: Result<VLESSConnection, Error>) in
+        client.connectMux { [weak self] (result: Result<ProxyConnection, Error>) in
             guard let self else { return }
 
             self.lwipQueue.async { [weak self] in
@@ -201,7 +201,7 @@ class MuxClient {
 
                 switch result {
                 case .success(let connection):
-                    self.vlessConnection = connection
+                    self.proxyConnection = connection
                     self.connected = true
                     self.startReceiveLoop(connection)
                     self.resetIdleTimer()
@@ -222,7 +222,7 @@ class MuxClient {
     func writeFrame(_ data: Data, completion: @escaping (Error?) -> Void) {
         lwipQueue.async { [weak self] in
             guard let self, !self.closed else {
-                completion(VLESSError.connectionFailed("Mux client closed"))
+                completion(ProxyError.connectionFailed("Mux client closed"))
                 return
             }
             self.writeQueue.append((data, completion))
@@ -231,7 +231,7 @@ class MuxClient {
     }
 
     private func drainWriteQueue() {
-        guard !isWriting, !writeQueue.isEmpty, let connection = vlessConnection else { return }
+        guard !isWriting, !writeQueue.isEmpty, let connection = proxyConnection else { return }
 
         isWriting = true
         let (data, completion) = writeQueue.removeFirst()
@@ -255,7 +255,7 @@ class MuxClient {
 
     // MARK: - Receive Loop
 
-    private func startReceiveLoop(_ connection: VLESSConnection) {
+    private func startReceiveLoop(_ connection: ProxyConnection) {
         connection.startReceiving(handler: { [weak self] (data: Data) in
             guard let self else { return }
             self.lwipQueue.async { [weak self] in
@@ -321,7 +321,7 @@ class MuxClient {
 
     deinit {
         idleTimer?.cancel()
-        vlessConnection?.cancel()
-        vlessClient?.cancel()
+        proxyConnection?.cancel()
+        proxyClient?.cancel()
     }
 }

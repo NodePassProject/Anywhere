@@ -8,11 +8,12 @@
 import SwiftUI
 
 struct ProxyEditorView: View {
-    let configuration: VLESSConfiguration?
-    let onSave: (VLESSConfiguration) -> Void
+    let configuration: ProxyConfiguration?
+    let onSave: (ProxyConfiguration) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
+    @State private var selectedProtocol: OutboundProtocol = .vless
     @State private var name = ""
     @State private var serverAddress = ""
     @State private var serverPort = ""
@@ -21,7 +22,7 @@ struct ProxyEditorView: View {
     @State private var transport = "tcp"
     @State private var flow = ""
     @State private var security = "none"
-    
+
     // XHTTP fields
     @State private var xhttpHost = ""
     @State private var xhttpPath = "/"
@@ -43,6 +44,11 @@ struct ProxyEditorView: View {
     @State private var shortId = ""
     @State private var fingerprint: TLSFingerprint = .chrome120
 
+    // Shadowsocks fields
+    @State private var ssPassword = ""
+    @State private var ssMethod = "aes-128-gcm"
+
+    private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isReality: Bool { security == "reality" }
     private var isTLS: Bool { security == "tls" }
 
@@ -50,11 +56,11 @@ struct ProxyEditorView: View {
         !name.isEmpty &&
         !serverAddress.isEmpty &&
         UInt16(serverPort) != nil &&
-        UUID(uuidString: uuid) != nil &&
+        (isShadowsocks ? !ssPassword.isEmpty : UUID(uuidString: uuid) != nil) &&
         (!isReality || (!sni.isEmpty && !publicKey.isEmpty))
     }
 
-    init(configuration: VLESSConfiguration? = nil, onSave: @escaping (VLESSConfiguration) -> Void) {
+    init(configuration: ProxyConfiguration? = nil, onSave: @escaping (ProxyConfiguration) -> Void) {
         self.configuration = configuration
         self.onSave = onSave
     }
@@ -62,6 +68,21 @@ struct ProxyEditorView: View {
     var body: some View {
         NavigationView {
             Form {
+                Section {
+                    Picker(selection: $selectedProtocol) {
+                        Text("VLESS").tag(OutboundProtocol.vless)
+                        Text("Shadowsocks").tag(OutboundProtocol.shadowsocks)
+                    } label: {
+                        TextWithColorfulIcon(titleKey: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
+                    }
+                    .onChange(of: selectedProtocol) {
+                        if isShadowsocks {
+                            flow = ""
+                            security = security == "reality" ? "none" : security
+                        }
+                    }
+                }
+                
                 Section("Name") {
                     LabeledContent {
                         TextField("Name", text: $name)
@@ -90,18 +111,40 @@ struct ProxyEditorView: View {
                     } label: {
                         TextWithColorfulIcon(titleKey: "Port", systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
                     }
-                    LabeledContent {
-                        TextField("UUID", text: $uuid)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(titleKey: "UUID", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
-                    }
-                    Picker(selection: $encryption) {
-                        Text("None").tag("none")
-                    } label: {
-                        TextWithColorfulIcon(titleKey: "Encryption", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                    if isShadowsocks {
+                        LabeledContent {
+                            SecureField("Password", text: $ssPassword)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                        Picker(selection: $ssMethod) {
+                            Text("None").tag("none")
+                            Text("AES-128-GCM").tag("aes-128-gcm")
+                            Text("AES-256-GCM").tag("aes-256-gcm")
+                            Text("ChaCha20-Poly1305").tag("chacha20-ietf-poly1305")
+                            Text("BLAKE3-AES-128-GCM").tag("2022-blake3-aes-128-gcm")
+                            Text("BLAKE3-AES-256-GCM").tag("2022-blake3-aes-256-gcm")
+                            Text("BLAKE3-ChaCha20-Poly1305").tag("2022-blake3-chacha20-poly1305")
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Method", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                        }
+                    } else {
+                        LabeledContent {
+                            TextField("UUID", text: $uuid)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "UUID", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                        Picker(selection: $encryption) {
+                            Text("None").tag("none")
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Encryption", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                        }
                     }
                 }
                 
@@ -119,7 +162,7 @@ struct ProxyEditorView: View {
                             flow = ""
                         }
                     }
-                    if transport == "tcp" {
+                    if !isShadowsocks && transport == "tcp" {
                         Picker(selection: $flow) {
                             Text("None").tag("")
                             Text("Vision").tag("xtls-rprx-vision")
@@ -183,7 +226,9 @@ struct ProxyEditorView: View {
                     Picker(selection: $security) {
                         Text("None").tag("none")
                         Text("TLS").tag("tls")
-                        Text("Reality").tag("reality")
+                        if !isShadowsocks {
+                            Text("Reality").tag("reality")
+                        }
                     } label: {
                         TextWithColorfulIcon(titleKey: "Security", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
                     }
@@ -292,6 +337,7 @@ struct ProxyEditorView: View {
 
     private func populateFromExisting() {
         guard let configuration else { return }
+        selectedProtocol = configuration.outboundProtocol
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
@@ -317,13 +363,16 @@ struct ProxyEditorView: View {
             tlsAllowInsecure = tls.allowInsecure
             fingerprint = tls.fingerprint
         }
-        
+
         if let reality = configuration.reality {
             sni = reality.serverName
             publicKey = reality.publicKey.base64URLEncodedString()
             shortId = reality.shortId.hexEncodedString()
             fingerprint = reality.fingerprint
         }
+
+        ssPassword = configuration.ssPassword ?? ""
+        ssMethod = configuration.ssMethod ?? "aes-128-gcm"
     }
 
     /// Encodes non-default extra fields from an XHTTPConfiguration back to a JSON string.
@@ -368,8 +417,14 @@ struct ProxyEditorView: View {
     }
 
     private func save() {
-        guard let port = UInt16(serverPort),
-              let parsedUUID = UUID(uuidString: uuid) else { return }
+        guard let port = UInt16(serverPort) else { return }
+        let parsedUUID: UUID
+        if isShadowsocks {
+            parsedUUID = self.configuration?.uuid ?? UUID()
+        } else {
+            guard let u = UUID(uuidString: uuid) else { return }
+            parsedUUID = u
+        }
 
         var tlsConfiguration: TLSConfiguration?
         if isTLS {
@@ -417,7 +472,7 @@ struct ProxyEditorView: View {
             ? String(serverAddress.dropFirst().dropLast())
             : serverAddress
 
-        let configuration = VLESSConfiguration(
+        let configuration = ProxyConfiguration(
             id: self.configuration?.id ?? UUID(),
             name: name,
             serverAddress: bareAddress,
@@ -431,7 +486,10 @@ struct ProxyEditorView: View {
             reality: realityConfiguration,
             xhttp: xhttpConfiguration,
             muxEnabled: muxEnabled,
-            xudpEnabled: xudpEnabled
+            xudpEnabled: xudpEnabled,
+            outboundProtocol: selectedProtocol,
+            ssPassword: isShadowsocks ? ssPassword : nil,
+            ssMethod: isShadowsocks ? ssMethod : nil
         )
 
         onSave(configuration)

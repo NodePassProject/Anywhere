@@ -539,6 +539,12 @@
         }
       }
     },
+    "AES-128-GCM" : {
+
+    },
+    "AES-256-GCM" : {
+
+    },
     "All trademarks, service marks, and company names are the property of their respective owners." : {
       "localizations" : {
         "ar" : {
@@ -802,6 +808,15 @@
         }
       }
     },
+    "BLAKE3-AES-128-GCM" : {
+
+    },
+    "BLAKE3-AES-256-GCM" : {
+
+    },
+    "BLAKE3-ChaCha20-Poly1305" : {
+
+    },
     "Cancel" : {
       "localizations" : {
         "ar" : {
@@ -853,6 +868,9 @@
           }
         }
       }
+    },
+    "ChaCha20-Poly1305" : {
+
     },
     "Connected" : {
       "localizations" : {
@@ -1009,6 +1027,9 @@
           }
         }
       }
+    },
+    "Copy Link" : {
+
     },
     "Country Bypass" : {
       "localizations" : {
@@ -1967,6 +1988,9 @@
         }
       }
     },
+    "Method" : {
+
+    },
     "Mode" : {
       "localizations" : {
         "ar" : {
@@ -2389,6 +2413,9 @@
     "Packet Up" : {
       "shouldTranslate" : false
     },
+    "Password" : {
+
+    },
     "Path" : {
       "localizations" : {
         "ar" : {
@@ -2544,6 +2571,9 @@
           }
         }
       }
+    },
+    "Protocol" : {
+
     },
     "Proxies" : {
       "localizations" : {
@@ -3224,6 +3254,9 @@
         }
       }
     },
+    "Shadowsocks" : {
+
+    },
     "Short ID" : {
       "shouldTranslate" : false
     },
@@ -3289,6 +3322,7 @@
       }
     },
     "Supports VLESS link, subscription link and Clash link" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -3339,6 +3373,9 @@
           }
         }
       }
+    },
+    "Supports VLESS, Shadowsocks, subscription and Clash links" : {
+
     },
     "Tap + to add a VLESS proxy." : {
       "localizations" : {
@@ -3874,6 +3911,9 @@
     },
     "Vision with UDP 443" : {
       "shouldTranslate" : false
+    },
+    "VLESS" : {
+
     },
     "VPN" : {
       "localizations" : {

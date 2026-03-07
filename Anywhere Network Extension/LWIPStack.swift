@@ -32,7 +32,7 @@ class LWIPStack {
     private let outputQueue = DispatchQueue(label: "com.argsment.Anywhere.output")
 
     private var packetFlow: NEPacketTunnelFlow?
-    private(set) var configuration: VLESSConfiguration?
+    private(set) var configuration: ProxyConfiguration?
 
     private static let ipv4Proto = NSNumber(value: AF_INET)
     private static let ipv6Proto = NSNumber(value: AF_INET6)
@@ -126,7 +126,7 @@ class LWIPStack {
     ///   - packetFlow: The tunnel's packet flow for reading/writing IP packets.
     ///   - configuration: The VLESS proxy configuration.
     func start(packetFlow: NEPacketTunnelFlow,
-               configuration: VLESSConfiguration,
+               configuration: ProxyConfiguration,
                ipv6Enabled: Bool = false) {
         logger.info("[LWIPStack] Starting, ipv6Enabled=\(ipv6Enabled)")
         LWIPStack.shared = self
@@ -147,7 +147,8 @@ class LWIPStack {
             self.loadDoHSetting()
 
             // Create MuxManager when Vision + Mux is active (matches Xray-core auto-mux for UDP)
-            if configuration.muxEnabled && (configuration.flow == "xtls-rprx-vision" || configuration.flow == "xtls-rprx-vision-udp443") {
+            // Mux is not supported with Shadowsocks
+            if configuration.outboundProtocol == .vless && configuration.muxEnabled && (configuration.flow == "xtls-rprx-vision" || configuration.flow == "xtls-rprx-vision-udp443") {
                 self.muxManager = MuxManager(configuration: configuration, lwipQueue: self.lwipQueue)
             }
 
@@ -182,7 +183,7 @@ class LWIPStack {
     ///
     /// Shuts down the lwIP stack and all VLESS connections, then restarts
     /// with the new configuration using the existing packet flow.
-    func switchConfiguration(_ newConfiguration: VLESSConfiguration, ipv6Enabled: Bool? = nil) {
+    func switchConfiguration(_ newConfiguration: ProxyConfiguration, ipv6Enabled: Bool? = nil) {
         logger.info("[LWIPStack] Switching configuration")
         lwipQueue.async { [self] in
             self.restartStack(configuration: newConfiguration,
@@ -229,7 +230,7 @@ class LWIPStack {
     /// packets queued on lwipQueue during reinit are processed after `lwip_bridge_init()`.
     /// FakeIPPool is preserved across restarts — since all DNS queries get fake IPs and
     /// routing decisions are made at connection time, cached fake IPs remain valid.
-    private func restartStack(configuration: VLESSConfiguration, ipv6Enabled: Bool) {
+    private func restartStack(configuration: ProxyConfiguration, ipv6Enabled: Bool) {
         shutdownInternal()
 
         self.configuration = configuration
@@ -237,7 +238,7 @@ class LWIPStack {
         self.loadBypassCountry()
         self.loadDoHSetting()
 
-        if configuration.muxEnabled && (configuration.flow == "xtls-rprx-vision" || configuration.flow == "xtls-rprx-vision-udp443") {
+        if configuration.outboundProtocol == .vless && configuration.muxEnabled && (configuration.flow == "xtls-rprx-vision" || configuration.flow == "xtls-rprx-vision-udp443") {
             self.muxManager = MuxManager(configuration: configuration, lwipQueue: self.lwipQueue)
         }
 

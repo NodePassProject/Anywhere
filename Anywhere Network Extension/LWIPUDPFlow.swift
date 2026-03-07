@@ -17,7 +17,7 @@ class LWIPUDPFlow {
     let dstHost: String
     let dstPort: UInt16
     let isIPv6: Bool
-    let configuration: VLESSConfiguration
+    let configuration: ProxyConfiguration
     let lwipQueue: DispatchQueue
 
     // Raw IP bytes for lwip_bridge_udp_sendto (swapped src/dst for responses)
@@ -30,13 +30,16 @@ class LWIPUDPFlow {
     private var directRelay: DirectUDPRelay?
 
     // Non-mux path
-    private var vlessClient: VLESSClient?
-    private var vlessConnection: VLESSConnection?
+    private var proxyClient: ProxyClient?
+    private var proxyConnection: ProxyConnection?
+
+    // Shadowsocks direct UDP relay
+    private var ssUDPRelay: ShadowsocksUDPRelay?
 
     // Mux path
     private var muxSession: MuxSession?
 
-    private var vlessConnecting = false
+    private var proxyConnecting = false
     private var forceBypass = false
     private var pendingData: [Data] = []  // always raw payloads (framing deferred to send time)
     private var pendingBufferSize = 0      // current total size of pendingData
@@ -51,7 +54,7 @@ class LWIPUDPFlow {
          dstHost: String, dstPort: UInt16,
          srcIPData: Data, dstIPData: Data,
          isIPv6: Bool,
-         configuration: VLESSConfiguration,
+         configuration: ProxyConfiguration,
          forceBypass: Bool = false,
          lwipQueue: DispatchQueue) {
         self.flowKey = flowKey
@@ -78,13 +81,19 @@ class LWIPUDPFlow {
         // Buffer data while the outbound connection is being established.
         // directRelay is set before its socket connects; sending to an
         // unconnected UDP socket silently drops the datagram.
-        if vlessConnecting {
+        if proxyConnecting {
             bufferPayload(data: data, payloadLength: payloadLength)
             return
         }
 
         // Direct bypass path
         if let relay = directRelay {
+            relay.send(data: Data(payload))
+            return
+        }
+
+        // Shadowsocks direct UDP relay
+        if let relay = ssUDPRelay {
             relay.send(data: Data(payload))
             return
         }
@@ -99,15 +108,24 @@ class LWIPUDPFlow {
             return
         }
 
-        // Non-mux path: send length-framed payload through VLESS connection
-        if let connection = vlessConnection {
-            sendUDPThroughVLESS(connection: connection, payload: data, payloadLength: payloadLength)
+        // Non-mux path: send payload through proxy connection
+        if let connection = proxyConnection {
+            if configuration.outboundProtocol == .shadowsocks {
+                // SS connection handles encryption; send raw payload
+                connection.send(data: Data(data.prefix(payloadLength))) { [weak self] error in
+                    if let error {
+                        logger.error("[UDP] SS send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+            } else {
+                sendUDPThroughProxy(connection: connection, payload: data, payloadLength: payloadLength)
+            }
             return
         }
 
         // No connection yet — buffer and start connecting
         bufferPayload(data: data, payloadLength: payloadLength)
-        connectVLESS()
+        connectProxy()
     }
 
     private func bufferPayload(data: Data, payloadLength: Int) {
@@ -123,7 +141,7 @@ class LWIPUDPFlow {
         pendingBufferSize += payload.count
     }
 
-    private func sendUDPThroughVLESS(connection: VLESSConnection, payload: Data, payloadLength: Int) {
+    private func sendUDPThroughProxy(connection: ProxyConnection, payload: Data, payloadLength: Int) {
         let framedLen = 2 + payloadLength
         var framedPayload = Data(count: framedLen)
         framedPayload.withUnsafeMutableBytes { outPtr in
@@ -138,26 +156,27 @@ class LWIPUDPFlow {
 
         connection.sendRaw(data: framedPayload) { [weak self] error in
             if let error {
-                logger.error("[UDP] VLESS send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.error("[UDP] Proxy send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
     }
 
-    // MARK: - VLESS Connection
+    // MARK: - Proxy Connection
 
-    private func connectVLESS() {
-        guard !vlessConnecting && vlessConnection == nil && muxSession == nil && directRelay == nil && !closed else { return }
+    private func connectProxy() {
+        guard !proxyConnecting && proxyConnection == nil && muxSession == nil && directRelay == nil && ssUDPRelay == nil && !closed else { return }
 
         if forceBypass || LWIPStack.shared?.shouldBypass(host: dstHost) == true {
             connectDirectUDP()
             return
         }
 
-        vlessConnecting = true
+        proxyConnecting = true
 
-        // Only use mux for the default configuration (mux is tied to the default proxy's connection)
+        // Only use mux for VLESS with the default configuration (mux is tied to the default proxy's connection)
+        // Shadowsocks does not support mux
         let isDefaultConfiguration = (LWIPStack.shared?.configuration?.id == configuration.id)
-        if isDefaultConfiguration, let muxManager = LWIPStack.shared?.muxManager {
+        if configuration.outboundProtocol == .vless, isDefaultConfiguration, let muxManager = LWIPStack.shared?.muxManager {
             // Mux path
             // Cone NAT: GlobalID = blake3("udp:srcHost:srcPort") matching Xray-core's
             // net.Destination.String() format. Non-zero GlobalID enables server-side
@@ -167,7 +186,7 @@ class LWIPUDPFlow {
                 guard let self else { return }
 
                 self.lwipQueue.async {
-                    self.vlessConnecting = false
+                    self.proxyConnecting = false
                     guard !self.closed else { return }
 
                     switch result {
@@ -177,7 +196,7 @@ class LWIPUDPFlow {
                         // closeHandler was never set, so the flow won't be cleaned up
                         // unless we handle it here.
                         guard !session.closed else {
-                            self.releaseVLESS()
+                            self.releaseProxy()
                             LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                             return
                         }
@@ -186,7 +205,7 @@ class LWIPUDPFlow {
 
                         // Set up receive handler
                         session.dataHandler = { [weak self] data in
-                            self?.handleVLESSData(data)
+                            self?.handleProxyData(data)
                         }
                         session.closeHandler = { [weak self] in
                             guard let self else { return }
@@ -209,63 +228,78 @@ class LWIPUDPFlow {
                         }
 
                     case .failure(let error):
-                        if case .dropped = error as? VLESSError {} else {
+                        if case .dropped = error as? ProxyError {} else {
                             logger.error("[UDP] Mux dispatch failed: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
                         }
-                        self.releaseVLESS()
+                        self.releaseProxy()
                         LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                     }
                 }
             }
+        } else if configuration.outboundProtocol == .shadowsocks {
+            // Shadowsocks UDP: direct UDP datagrams to the SS server with per-packet encryption
+            connectShadowsocksUDP()
         } else {
-            // Non-mux path (existing behavior)
-            let client = VLESSClient(configuration: configuration)
-            self.vlessClient = client
+            // Non-mux path (VLESS non-mux UDP)
+            let client = ProxyClient(configuration: configuration)
+            self.proxyClient = client
 
             client.connectUDP(to: dstHost, port: dstPort) { [weak self] result in
                 guard let self else { return }
 
                 self.lwipQueue.async {
-                    self.vlessConnecting = false
+                    self.proxyConnecting = false
                     guard !self.closed else { return }
 
                     switch result {
-                    case .success(let vlessConnection):
-                        self.vlessConnection = vlessConnection
+                    case .success(let proxyConnection):
+                        self.proxyConnection = proxyConnection
 
-                        // Send buffered raw payloads (frame each for VLESS non-mux)
+                        // Send buffered raw payloads
                         if !self.pendingData.isEmpty {
-                            var dataToSend = Data()
-                            for payload in self.pendingData {
-                                var framedPayload = Data(count: 2 + payload.count)
-                                framedPayload.withUnsafeMutableBytes { outPtr in
-                                    payload.withUnsafeBytes { srcPtr in
-                                        frame_udp_payload(
-                                            outPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                                            srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                                            UInt16(payload.count)
-                                        )
+                            if self.configuration.outboundProtocol == .shadowsocks {
+                                // SS: send raw payloads (connection handles encryption)
+                                for payload in self.pendingData {
+                                    proxyConnection.send(data: payload) { [weak self] error in
+                                        if let error {
+                                            logger.error("[UDP] SS initial send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                        }
                                     }
                                 }
-                                dataToSend.append(framedPayload)
+                            } else {
+                                // VLESS: frame each payload with 2-byte length prefix
+                                var dataToSend = Data()
+                                for payload in self.pendingData {
+                                    var framedPayload = Data(count: 2 + payload.count)
+                                    framedPayload.withUnsafeMutableBytes { outPtr in
+                                        payload.withUnsafeBytes { srcPtr in
+                                            frame_udp_payload(
+                                                outPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                                                srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                                                UInt16(payload.count)
+                                            )
+                                        }
+                                    }
+                                    dataToSend.append(framedPayload)
+                                }
+                                proxyConnection.sendRaw(data: dataToSend) { [weak self] error in
+                                    if let error {
+                                        logger.error("[UDP] Proxy initial send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                    }
+                                }
                             }
                             self.pendingData.removeAll()
                             self.pendingBufferSize = 0
-                            vlessConnection.sendRaw(data: dataToSend) { [weak self] error in
-                                if let error {
-                                    logger.error("[UDP] VLESS initial send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
-                                }
-                            }
                         }
 
-                        // Start receiving VLESS responses
-                        self.startVLESSReceiving(vlessConnection: vlessConnection)
+                        // Start receiving proxy responses
+                        self.startProxyReceiving(proxyConnection: proxyConnection)
 
                     case .failure(let error):
-                        if case .dropped = error as? VLESSError {} else {
+                        if case .dropped = error as? ProxyError {} else {
                             logger.error("[UDP] connect failed: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
                         }
-                        self.releaseVLESS()
+                        self.releaseProxy()
                         LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                     }
                 }
@@ -273,9 +307,72 @@ class LWIPUDPFlow {
         }
     }
 
+    private func connectShadowsocksUDP() {
+        guard ssUDPRelay == nil && !closed else { return }
+        proxyConnecting = true
+
+        guard let method = configuration.ssMethod,
+              let cipher = ShadowsocksCipher(method: method),
+              let password = configuration.ssPassword else {
+            proxyConnecting = false
+            close()
+            LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
+            return
+        }
+
+        let mode: ShadowsocksUDPRelay.Mode
+        if cipher.isSS2022 {
+            guard let psk = ShadowsocksKeyDerivation.decodePSK(password: password, keySize: cipher.keySize) else {
+                proxyConnecting = false
+                close()
+                LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
+                return
+            }
+            if cipher == .blake3chacha20poly1305 {
+                mode = .ss2022ChaCha(psk: psk)
+            } else {
+                mode = .ss2022AES(cipher: cipher, psk: psk)
+            }
+        } else {
+            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
+            mode = .legacy(cipher: cipher, masterKey: masterKey)
+        }
+
+        let relay = ShadowsocksUDPRelay(mode: mode, dstHost: dstHost, dstPort: dstPort)
+        self.ssUDPRelay = relay
+
+        relay.connect(serverHost: configuration.connectAddress, serverPort: configuration.serverPort, lwipQueue: lwipQueue) { [weak self] error in
+            guard let self else { return }
+
+            self.lwipQueue.async {
+                self.proxyConnecting = false
+                guard !self.closed else { return }
+
+                if let error {
+                    logger.error("[UDP] SS UDP relay connect failed: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    self.close()
+                    LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    return
+                }
+
+                // Send buffered payloads
+                for payload in self.pendingData {
+                    relay.send(data: payload)
+                }
+                self.pendingData.removeAll()
+                self.pendingBufferSize = 0
+
+                // Start receiving responses
+                relay.startReceiving { [weak self] data in
+                    self?.handleProxyData(data)
+                }
+            }
+        }
+    }
+
     private func connectDirectUDP() {
         guard directRelay == nil && !closed else { return }
-        vlessConnecting = true  // reuse flag to prevent re-entry
+        proxyConnecting = true  // reuse flag to prevent re-entry
 
         let relay = DirectUDPRelay()
         self.directRelay = relay
@@ -283,7 +380,7 @@ class LWIPUDPFlow {
             guard let self else { return }
 
             self.lwipQueue.async {
-                self.vlessConnecting = false
+                self.proxyConnecting = false
                 guard !self.closed else { return }
 
                 if let error {
@@ -302,20 +399,20 @@ class LWIPUDPFlow {
 
                 // Start receiving responses
                 relay.startReceiving { [weak self] data in
-                    self?.handleVLESSData(data)
+                    self?.handleProxyData(data)
                 }
             }
         }
     }
 
-    private func startVLESSReceiving(vlessConnection: VLESSConnection) {
-        vlessConnection.startReceiving { [weak self] data in
+    private func startProxyReceiving(proxyConnection: ProxyConnection) {
+        proxyConnection.startReceiving { [weak self] data in
             guard let self else { return }
-            self.handleVLESSData(data)
+            self.handleProxyData(data)
         } errorHandler: { [weak self] error in
             guard let self else { return }
             if let error {
-                logger.error("[UDP] VLESS recv error: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.error("[UDP] Proxy recv error: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
             self.lwipQueue.async {
                 self.close()
@@ -324,7 +421,7 @@ class LWIPUDPFlow {
         }
     }
 
-    private func handleVLESSData(_ data: Data) {
+    private func handleProxyData(_ data: Data) {
         lwipQueue.async { [weak self] in
             guard let self, !self.closed else { return }
             self.lastActivity = CFAbsoluteTimeGetCurrent()
@@ -356,22 +453,25 @@ class LWIPUDPFlow {
     func close() {
         guard !closed else { return }
         closed = true
-        releaseVLESS()
+        releaseProxy()
     }
 
-    private func releaseVLESS() {
+    private func releaseProxy() {
         let relay = directRelay
-        let connection = vlessConnection
-        let client = vlessClient
+        let ssRelay = ssUDPRelay
+        let connection = proxyConnection
+        let client = proxyClient
         let session = muxSession
         directRelay = nil
-        vlessConnection = nil
-        vlessClient = nil
+        ssUDPRelay = nil
+        proxyConnection = nil
+        proxyClient = nil
         muxSession = nil
-        vlessConnecting = false
+        proxyConnecting = false
         pendingData.removeAll()
         pendingBufferSize = 0
         relay?.cancel()
+        ssRelay?.cancel()
         connection?.cancel()
         client?.cancel()
         session?.close()
@@ -379,8 +479,9 @@ class LWIPUDPFlow {
 
     deinit {
         directRelay?.cancel()
-        vlessConnection?.cancel()
-        vlessClient?.cancel()
+        ssUDPRelay?.cancel()
+        proxyConnection?.cancel()
+        proxyClient?.cancel()
         muxSession?.close()
     }
 }

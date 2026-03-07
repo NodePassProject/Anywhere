@@ -12,7 +12,7 @@ import Combine
 class ConfigurationStore: ObservableObject, ConfigurationProviding {
     static let shared = ConfigurationStore()
 
-    @Published private(set) var configurations: [VLESSConfiguration] = []
+    @Published private(set) var configurations: [ProxyConfiguration] = []
 
     private let fileURL: URL
 
@@ -24,25 +24,25 @@ class ConfigurationStore: ObservableObject, ConfigurationProviding {
 
     // MARK: - ConfigurationProviding
 
-    func loadConfigurations() -> [VLESSConfiguration] {
+    func loadConfigurations() -> [ProxyConfiguration] {
         configurations
     }
 
     // MARK: - CRUD
 
-    func add(_ configuration: VLESSConfiguration) {
+    func add(_ configuration: ProxyConfiguration) {
         configurations.append(configuration)
         saveToDisk()
     }
 
-    func update(_ configuration: VLESSConfiguration) {
+    func update(_ configuration: ProxyConfiguration) {
         if let index = configurations.firstIndex(where: { $0.id == configuration.id }) {
             configurations[index] = configuration
             saveToDisk()
         }
     }
 
-    func delete(_ configuration: VLESSConfiguration) {
+    func delete(_ configuration: ProxyConfiguration) {
         configurations.removeAll { $0.id == configuration.id }
         saveToDisk()
     }
@@ -54,11 +54,11 @@ class ConfigurationStore: ObservableObject, ConfigurationProviding {
 
     // MARK: - Persistence
 
-    private func loadFromDisk() -> [VLESSConfiguration] {
+    private func loadFromDisk() -> [ProxyConfiguration] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
         do {
             let data = try Data(contentsOf: fileURL)
-            return try JSONDecoder().decode([VLESSConfiguration].self, from: data)
+            return try JSONDecoder().decode([ProxyConfiguration].self, from: data)
         } catch {
             print("Failed to load configurations: \(error)")
             return []

@@ -35,12 +35,12 @@ class MuxSession {
     /// Sends data through the mux connection as a Keep frame with payload.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         guard !closed else {
-            completion(VLESSError.connectionFailed("Mux session closed"))
+            completion(ProxyError.connectionFailed("Mux session closed"))
             return
         }
 
         guard let client else {
-            completion(VLESSError.connectionFailed("Mux client deallocated"))
+            completion(ProxyError.connectionFailed("Mux client deallocated"))
             return
         }
 

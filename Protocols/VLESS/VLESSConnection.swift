@@ -8,12 +8,12 @@
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "VLESS")
+private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "Proxy")
 
-// MARK: - VLESSConnectionProtocol
+// MARK: - ProxyConnectionProtocol
 
-/// Defines the interface for all VLESS connection types.
-protocol VLESSConnectionProtocol: AnyObject {
+/// Defines the interface for all proxy connection types.
+protocol ProxyConnectionProtocol: AnyObject {
     var isConnected: Bool { get }
     var responseHeaderReceived: Bool { get set }
 
@@ -24,7 +24,7 @@ protocol VLESSConnectionProtocol: AnyObject {
     func cancel()
 }
 
-// MARK: - VLESSConnection
+// MARK: - ProxyConnection
 
 /// TLS version constants matching TLS protocol version numbers.
 enum TLSVersion: UInt16 {
@@ -32,11 +32,11 @@ enum TLSVersion: UInt16 {
     case tls13 = 0x0304
 }
 
-/// Abstract base class providing common VLESS connection functionality.
+/// Abstract base class providing common proxy connection functionality.
 ///
 /// Subclasses must override ``isConnected``, ``sendRaw(data:completion:)``,
 /// ``sendRaw(data:)``, ``receiveRaw(completion:)``, and ``cancel()``.
-class VLESSConnection: VLESSConnectionProtocol {
+class ProxyConnection: ProxyConnectionProtocol {
     var responseHeaderReceived = false
     let lock = UnfairLock()
 
@@ -190,13 +190,13 @@ class VLESSConnection: VLESSConnectionProtocol {
     }
 }
 
-// MARK: - VLESSDirectConnection
+// MARK: - DirectProxyConnection
 
-/// VLESS connection over a direct ``BSDSocket`` transport.
-class VLESSDirectConnection: VLESSConnection {
+/// Proxy connection over a direct ``BSDSocket`` transport.
+class DirectProxyConnection: ProxyConnection {
     let connection: BSDSocket
 
-    /// Creates a new direct VLESS connection.
+    /// Creates a new direct proxy connection.
     ///
     /// - Parameter connection: The underlying BSD socket.
     init(connection: BSDSocket) {
@@ -246,10 +246,10 @@ class VLESSDirectConnection: VLESSConnection {
     }
 }
 
-// MARK: - VLESSDirectUDPConnection
+// MARK: - DirectUDPProxyConnection
 
-/// VLESS UDP connection over a direct ``BSDSocket`` with length-prefixed packets.
-class VLESSDirectUDPConnection: VLESSDirectConnection, UDPFramingCapable {
+/// Proxy UDP connection over a direct ``BSDSocket`` with length-prefixed packets.
+class DirectUDPProxyConnection: DirectProxyConnection, UDPFramingCapable {
     var udpBuffer = Data()
     var udpBufferOffset = 0
     let udpLock = UnfairLock()
@@ -276,7 +276,7 @@ class VLESSDirectUDPConnection: VLESSDirectConnection, UDPFramingCapable {
     private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
         super.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -311,10 +311,10 @@ class VLESSDirectUDPConnection: VLESSDirectConnection, UDPFramingCapable {
     }
 }
 
-// MARK: - VLESSHTTPUpgradeConnection
+// MARK: - HTTPUpgradeProxyConnection
 
-/// VLESS connection over an ``HTTPUpgradeConnection`` transport (raw TCP after HTTP upgrade).
-class VLESSHTTPUpgradeConnection: VLESSConnection {
+/// Proxy connection over an ``HTTPUpgradeConnection`` transport (raw TCP after HTTP upgrade).
+class HTTPUpgradeProxyConnection: ProxyConnection {
     private let huConnection: HTTPUpgradeConnection
 
     init(huConnection: HTTPUpgradeConnection) {
@@ -336,7 +336,7 @@ class VLESSHTTPUpgradeConnection: VLESSConnection {
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         huConnection.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -359,10 +359,10 @@ class VLESSHTTPUpgradeConnection: VLESSConnection {
     }
 }
 
-// MARK: - VLESSHTTPUpgradeUDPConnection
+// MARK: - HTTPUpgradeUDPProxyConnection
 
-/// VLESS UDP connection over an ``HTTPUpgradeConnection`` with length-prefixed packets.
-class VLESSHTTPUpgradeUDPConnection: VLESSHTTPUpgradeConnection, UDPFramingCapable {
+/// Proxy UDP connection over an ``HTTPUpgradeConnection`` with length-prefixed packets.
+class HTTPUpgradeUDPProxyConnection: HTTPUpgradeProxyConnection, UDPFramingCapable {
     var udpBuffer = Data()
     var udpBufferOffset = 0
     let udpLock = UnfairLock()
@@ -389,7 +389,7 @@ class VLESSHTTPUpgradeUDPConnection: VLESSHTTPUpgradeConnection, UDPFramingCapab
     private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
         super.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -424,10 +424,10 @@ class VLESSHTTPUpgradeUDPConnection: VLESSHTTPUpgradeConnection, UDPFramingCapab
     }
 }
 
-// MARK: - VLESSXHTTPConnection
+// MARK: - XHTTPProxyConnection
 
-/// VLESS connection over an ``XHTTPConnection`` transport.
-class VLESSXHTTPConnection: VLESSConnection {
+/// Proxy connection over an ``XHTTPConnection`` transport.
+class XHTTPProxyConnection: ProxyConnection {
     private let xhttpConnection: XHTTPConnection
 
     init(xhttpConnection: XHTTPConnection) {
@@ -449,7 +449,7 @@ class VLESSXHTTPConnection: VLESSConnection {
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         xhttpConnection.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -472,10 +472,10 @@ class VLESSXHTTPConnection: VLESSConnection {
     }
 }
 
-// MARK: - VLESSXHTTPUDPConnection
+// MARK: - XHTTPUDPProxyConnection
 
-/// VLESS UDP connection over an ``XHTTPConnection`` with length-prefixed packets.
-class VLESSXHTTPUDPConnection: VLESSXHTTPConnection, UDPFramingCapable {
+/// Proxy UDP connection over an ``XHTTPConnection`` with length-prefixed packets.
+class XHTTPUDPProxyConnection: XHTTPProxyConnection, UDPFramingCapable {
     var udpBuffer = Data()
     var udpBufferOffset = 0
     let udpLock = UnfairLock()
@@ -502,7 +502,7 @@ class VLESSXHTTPUDPConnection: VLESSXHTTPConnection, UDPFramingCapable {
     private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
         super.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -537,13 +537,13 @@ class VLESSXHTTPUDPConnection: VLESSXHTTPConnection, UDPFramingCapable {
     }
 }
 
-// MARK: - VLESSTLSConnection
+// MARK: - TLSProxyConnection
 
-/// VLESS connection over a standard TLS ``TLSRecordConnection`` transport.
-class VLESSTLSConnection: VLESSConnection {
+/// Proxy connection over a standard TLS ``TLSRecordConnection`` transport.
+class TLSProxyConnection: ProxyConnection {
     private let tlsConnection: TLSRecordConnection
 
-    /// Creates a new TLS-backed VLESS connection.
+    /// Creates a new TLS-backed proxy connection.
     ///
     /// - Parameter tlsConnection: The underlying TLS record connection.
     init(tlsConnection: TLSRecordConnection) {
@@ -569,7 +569,7 @@ class VLESSTLSConnection: VLESSConnection {
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         tlsConnection.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -608,10 +608,10 @@ class VLESSTLSConnection: VLESSConnection {
     }
 }
 
-// MARK: - VLESSTLSUDPConnection
+// MARK: - TLSUDPProxyConnection
 
-/// VLESS UDP connection over a standard TLS transport with length-prefixed packets.
-class VLESSTLSUDPConnection: VLESSTLSConnection, UDPFramingCapable {
+/// Proxy UDP connection over a standard TLS transport with length-prefixed packets.
+class TLSUDPProxyConnection: TLSProxyConnection, UDPFramingCapable {
     var udpBuffer = Data()
     var udpBufferOffset = 0
     let udpLock = UnfairLock()
@@ -638,7 +638,7 @@ class VLESSTLSUDPConnection: VLESSTLSConnection, UDPFramingCapable {
     private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
         super.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -673,10 +673,10 @@ class VLESSTLSUDPConnection: VLESSTLSConnection, UDPFramingCapable {
     }
 }
 
-// MARK: - VLESSWebSocketConnection
+// MARK: - WebSocketProxyConnection
 
-/// VLESS connection over a ``WebSocketConnection`` transport.
-class VLESSWebSocketConnection: VLESSConnection {
+/// Proxy connection over a ``WebSocketConnection`` transport.
+class WebSocketProxyConnection: ProxyConnection {
     private let wsConnection: WebSocketConnection
 
     init(wsConnection: WebSocketConnection) {
@@ -698,7 +698,7 @@ class VLESSWebSocketConnection: VLESSConnection {
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         wsConnection.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -721,10 +721,10 @@ class VLESSWebSocketConnection: VLESSConnection {
     }
 }
 
-// MARK: - VLESSWebSocketUDPConnection
+// MARK: - WebSocketUDPProxyConnection
 
-/// VLESS UDP connection over a ``WebSocketConnection`` with length-prefixed packets.
-class VLESSWebSocketUDPConnection: VLESSWebSocketConnection, UDPFramingCapable {
+/// Proxy UDP connection over a ``WebSocketConnection`` with length-prefixed packets.
+class WebSocketUDPProxyConnection: WebSocketProxyConnection, UDPFramingCapable {
     var udpBuffer = Data()
     var udpBufferOffset = 0
     let udpLock = UnfairLock()
@@ -751,7 +751,7 @@ class VLESSWebSocketUDPConnection: VLESSWebSocketConnection, UDPFramingCapable {
     private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
         super.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -786,13 +786,13 @@ class VLESSWebSocketUDPConnection: VLESSWebSocketConnection, UDPFramingCapable {
     }
 }
 
-// MARK: - VLESSRealityConnection
+// MARK: - RealityProxyConnection
 
-/// VLESS connection over a ``TLSRecordConnection`` transport.
-class VLESSRealityConnection: VLESSConnection {
+/// Proxy connection over a ``TLSRecordConnection`` transport.
+class RealityProxyConnection: ProxyConnection {
     private let realityConnection: TLSRecordConnection
 
-    /// Creates a new Reality-backed VLESS connection.
+    /// Creates a new Reality-backed proxy connection.
     ///
     /// - Parameter realityConnection: The underlying TLS record connection.
     init(realityConnection: TLSRecordConnection) {
@@ -818,7 +818,7 @@ class VLESSRealityConnection: VLESSConnection {
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         realityConnection.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 
@@ -858,10 +858,10 @@ class VLESSRealityConnection: VLESSConnection {
     }
 }
 
-// MARK: - VLESSRealityUDPConnection
+// MARK: - RealityUDPProxyConnection
 
-/// VLESS UDP connection over a ``TLSRecordConnection`` with length-prefixed packets.
-class VLESSRealityUDPConnection: VLESSRealityConnection, UDPFramingCapable {
+/// Proxy UDP connection over a ``TLSRecordConnection`` with length-prefixed packets.
+class RealityUDPProxyConnection: RealityProxyConnection, UDPFramingCapable {
     var udpBuffer = Data()
     var udpBufferOffset = 0
     let udpLock = UnfairLock()
@@ -888,7 +888,7 @@ class VLESSRealityUDPConnection: VLESSRealityConnection, UDPFramingCapable {
     private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
         super.receive { [weak self] data, error in
             guard let self else {
-                completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
             }
 

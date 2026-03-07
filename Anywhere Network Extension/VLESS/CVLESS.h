@@ -1,10 +1,3 @@
-//
-//  CVLESS.h
-//  Network Extension
-//
-//  Created by Argsment Limited on 1/23/26.
-//
-
 #ifndef CVLESS_h
 #define CVLESS_h
 

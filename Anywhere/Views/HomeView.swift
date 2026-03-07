@@ -220,7 +220,7 @@ struct HomeView: View {
         }
     }
 
-    private func selectedConfigurationCard(_ configuration: VLESSConfiguration) -> some View {
+    private func selectedConfigurationCard(_ configuration: ProxyConfiguration) -> some View {
         Button {
             pickerConfig.text = configuration.name
             pickerConfig.show = true

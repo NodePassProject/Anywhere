@@ -13,16 +13,16 @@ struct ProxyListView: View {
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
-    @State private var configurationToEdit: VLESSConfiguration?
+    @State private var configurationToEdit: ProxyConfiguration?
     @State private var updatingSubscription: Subscription?
     @State private var showingSubscriptionError = false
     @State private var subscriptionErrorMessage = ""
 
-    private var standaloneConfigurations: [VLESSConfiguration] {
+    private var standaloneConfigurations: [ProxyConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }
     }
 
-    private var subscribedGroups: [(Subscription, [VLESSConfiguration])] {
+    private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
         viewModel.subscriptions.compactMap { subscription in
             let configurations = viewModel.configurations(for: subscription)
             return configurations.isEmpty ? nil : (subscription, configurations)
@@ -156,7 +156,7 @@ struct ProxyListView: View {
     // MARK: - Config Row
 
     @ViewBuilder
-    private func configurationRow(_ configuration: VLESSConfiguration) -> some View {
+    private func configurationRow(_ configuration: ProxyConfiguration) -> some View {
         let latency = viewModel.latencyResults[configuration.id]
 
         Button {
@@ -210,11 +210,17 @@ struct ProxyListView: View {
             }
 
             Button {
+                UIPasteboard.general.string = configuration.toURL()
+            } label: {
+                Label("Copy Link", systemImage: "doc.on.doc")
+            }
+
+            Button {
                 configurationToEdit = configuration
             } label: {
                 Label("Edit", systemImage: "pencil")
             }
-            
+
             Button(role: .destructive) {
                 viewModel.deleteConfiguration(configuration)
             } label: {

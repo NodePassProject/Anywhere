@@ -14,14 +14,14 @@ import SwiftUI
 
 private let sampleSubscriptionId = UUID()
 
-private let sampleConfigurations: [VLESSConfiguration] = [
-    VLESSConfiguration(name: "Tokyo", serverAddress: "jp-tok.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "tcp", flow: "xtls-rprx-vision", security: "reality"),
-    VLESSConfiguration(name: "Seoul", serverAddress: "kr.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "ws", security: "tls"),
-    VLESSConfiguration(name: "US - New York", serverAddress: "us-ny.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "tcp", flow: "xtls-rprx-vision", security: "reality", subscriptionId: sampleSubscriptionId),
-    VLESSConfiguration(name: "US - Los Angeles", serverAddress: "us-la.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "tcp", flow: "xtls-rprx-vision", security: "reality", subscriptionId: sampleSubscriptionId),
-    VLESSConfiguration(name: "JP - Tokyo", serverAddress: "jp-tok.example.net", serverPort: 443, uuid: UUID(), encryption: "none", transport: "ws", security: "tls", subscriptionId: sampleSubscriptionId),
-    VLESSConfiguration(name: "DE - Frankfurt", serverAddress: "de-fra.example.net", serverPort: 443, uuid: UUID(), encryption: "none", transport: "httpupgrade", security: "tls", subscriptionId: sampleSubscriptionId),
-    VLESSConfiguration(name: "SG - Singapore", serverAddress: "sg.example.net", serverPort: 443, uuid: UUID(), encryption: "none", transport: "xhttp", security: "reality", subscriptionId: sampleSubscriptionId),
+private let sampleConfigurations: [ProxyConfiguration] = [
+    ProxyConfiguration(name: "Tokyo", serverAddress: "jp-tok.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "tcp", flow: "xtls-rprx-vision", security: "reality"),
+    ProxyConfiguration(name: "Seoul", serverAddress: "kr.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "ws", security: "tls"),
+    ProxyConfiguration(name: "US - New York", serverAddress: "us-ny.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "tcp", flow: "xtls-rprx-vision", security: "reality", subscriptionId: sampleSubscriptionId),
+    ProxyConfiguration(name: "US - Los Angeles", serverAddress: "us-la.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "tcp", flow: "xtls-rprx-vision", security: "reality", subscriptionId: sampleSubscriptionId),
+    ProxyConfiguration(name: "JP - Tokyo", serverAddress: "jp-tok.example.net", serverPort: 443, uuid: UUID(), encryption: "none", transport: "ws", security: "tls", subscriptionId: sampleSubscriptionId),
+    ProxyConfiguration(name: "DE - Frankfurt", serverAddress: "de-fra.example.net", serverPort: 443, uuid: UUID(), encryption: "none", transport: "httpupgrade", security: "tls", subscriptionId: sampleSubscriptionId),
+    ProxyConfiguration(name: "SG - Singapore", serverAddress: "sg.example.net", serverPort: 443, uuid: UUID(), encryption: "none", transport: "xhttp", security: "reality", subscriptionId: sampleSubscriptionId),
 ]
 
 private let sampleSubscription = Subscription(
@@ -200,11 +200,11 @@ struct DemoProxyListView: View {
     
     private let selectedId = sampleConfigurations[0].id
 
-    private var standalone: [VLESSConfiguration] {
+    private var standalone: [ProxyConfiguration] {
         sampleConfigurations.filter { $0.subscriptionId == nil }
     }
 
-    private var subscriptionConfigs: [VLESSConfiguration] {
+    private var subscriptionConfigs: [ProxyConfiguration] {
         sampleConfigurations.filter { $0.subscriptionId == sampleSubscriptionId }
     }
 
@@ -261,7 +261,7 @@ struct DemoProxyListView: View {
     }
 
     @ViewBuilder
-    private func configRow(_ config: VLESSConfiguration) -> some View {
+    private func configRow(_ config: ProxyConfiguration) -> some View {
         let latency = sampleLatencyResults[config.id]
 
         HStack {

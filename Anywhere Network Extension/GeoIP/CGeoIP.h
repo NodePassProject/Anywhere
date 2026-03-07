@@ -1,10 +1,3 @@
-//
-//  CGeoIP.h
-//  Network Extension
-//
-//  Binary search GeoIP lookup using direct pointer arithmetic.
-//
-
 #ifndef CGeoIP_h
 #define CGeoIP_h
 

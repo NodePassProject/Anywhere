@@ -9,5 +9,5 @@ import Foundation
 
 /// Protocol for loading VPN configurations
 protocol ConfigurationProviding {
-    func loadConfigurations() -> [VLESSConfiguration]
+    func loadConfigurations() -> [ProxyConfiguration]
 }

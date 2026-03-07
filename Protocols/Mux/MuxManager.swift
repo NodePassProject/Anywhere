@@ -9,11 +9,11 @@ import Foundation
 import os.log
 
 class MuxManager {
-    let configuration: VLESSConfiguration
+    let configuration: ProxyConfiguration
     let lwipQueue: DispatchQueue
     private var clients: [MuxClient] = []
 
-    init(configuration: VLESSConfiguration, lwipQueue: DispatchQueue) {
+    init(configuration: ProxyConfiguration, lwipQueue: DispatchQueue) {
         self.configuration = configuration
         self.lwipQueue = lwipQueue
     }
