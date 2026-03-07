@@ -16,7 +16,7 @@ enum LatencyResult: Sendable {
     case failed
 }
 
-/// Tests full proxy round-trip latency by establishing a VLESS connection
+/// Tests full proxy round-trip latency by establishing a proxy connection
 /// and sending an HTTP request through the proxy chain.
 nonisolated enum LatencyTester {
 
@@ -25,14 +25,14 @@ nonisolated enum LatencyTester {
 
     /// Test a single configuration's proxy round-trip latency.
     ///
-    /// Measures only the HTTP request/response time through the VLESS chain,
+    /// Measures only the HTTP request/response time through the proxy chain,
     /// excluding DNS resolution and connection setup overhead.
-    nonisolated static func test(_ configuration: VLESSConfiguration) async -> LatencyResult {
+    nonisolated static func test(_ configuration: ProxyConfiguration) async -> LatencyResult {
         // Resolve DNS outside the tunnel
         let resolvedIP = VPNViewModel.resolveServerAddress(configuration.serverAddress)
 
         // Create configuration with resolved IP
-        let testConfiguration = await VLESSConfiguration(
+        let testConfiguration = await ProxyConfiguration(
             id: configuration.id,
             name: configuration.name,
             serverAddress: configuration.serverAddress,
@@ -51,7 +51,10 @@ nonisolated enum LatencyTester {
             muxEnabled: configuration.muxEnabled,
             xudpEnabled: configuration.xudpEnabled,
             resolvedIP: resolvedIP,
-            subscriptionId: configuration.subscriptionId
+            subscriptionId: configuration.subscriptionId,
+            outboundProtocol: configuration.outboundProtocol,
+            ssPassword: configuration.ssPassword,
+            ssMethod: configuration.ssMethod
         )
 
         do {
@@ -76,7 +79,7 @@ nonisolated enum LatencyTester {
     }
 
     /// Test multiple configurations in batches of 3, emitting results as each test finishes.
-    nonisolated static func testAll(_ configurations: [VLESSConfiguration]) -> AsyncStream<(UUID, LatencyResult)> {
+    nonisolated static func testAll(_ configurations: [ProxyConfiguration]) -> AsyncStream<(UUID, LatencyResult)> {
         AsyncStream { continuation in
             let task = Task {
                 var index = 0
@@ -101,14 +104,14 @@ nonisolated enum LatencyTester {
 
     // MARK: - Private
 
-    private static func performTest(_ configuration: VLESSConfiguration) async throws -> Int {
-        let client = VLESSClient(configuration: configuration)
+    private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
+        let client = ProxyClient(configuration: configuration)
 
         defer { client.cancel() }
 
-        // Phase 1: Establish VLESS connection (TCP + TLS/Reality + VLESS handshake).
+        // Phase 1: Establish proxy connection (TCP + TLS/Reality + VLESS/SS handshake).
         // This is NOT timed
-        let vlessConnection: VLESSConnection = try await withCheckedThrowingContinuation { continuation in
+        let proxyConnection: ProxyConnection = try await withCheckedThrowingContinuation { continuation in
             client.connect(to: "www.gstatic.com", port: 80) { result in
                 continuation.resume(with: result)
             }
@@ -121,7 +124,7 @@ nonisolated enum LatencyTester {
         let requestStart = clock.now
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            vlessConnection.send(data: httpRequest) { error in
+            proxyConnection.send(data: httpRequest) { error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
@@ -132,7 +135,7 @@ nonisolated enum LatencyTester {
 
         // Wait for any response data
         let _: Data? = try await withCheckedThrowingContinuation { continuation in
-            vlessConnection.receive { data, error in
+            proxyConnection.receive { data, error in
                 if let error {
                     continuation.resume(throwing: error)
                 } else {

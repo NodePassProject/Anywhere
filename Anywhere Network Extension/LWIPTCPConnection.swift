@@ -14,12 +14,12 @@ class LWIPTCPConnection {
     let pcb: UnsafeMutableRawPointer
     let dstHost: String
     let dstPort: UInt16
-    let configuration: VLESSConfiguration
+    let configuration: ProxyConfiguration
     let lwipQueue: DispatchQueue
 
-    private var vlessClient: VLESSClient?
-    private var vlessConnection: VLESSConnection?
-    private var vlessConnecting = false
+    private var proxyClient: ProxyClient?
+    private var proxyConnection: ProxyConnection?
+    private var proxyConnecting = false
     private var directRelay: DirectTCPRelay?
     private var directConnecting = false
     private let bypass: Bool
@@ -49,7 +49,7 @@ class LWIPTCPConnection {
     /// See also: MEMP_NUM_TCP_SEG in lwipopts.h (must stay in sync).
     private static let maxWriteSize = 16 * 1024
 
-    /// Whether the VLESS receive loop is paused due to a full lwIP send buffer.
+    /// Whether the proxy receive loop is paused due to a full lwIP send buffer.
     private var receivePaused = false
 
     // MARK: Activity Timeout (matches Xray-core policy defaults)
@@ -75,7 +75,7 @@ class LWIPTCPConnection {
     // MARK: Lifecycle
 
     init(pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
-         configuration: VLESSConfiguration, forceBypass: Bool = false,
+         configuration: ProxyConfiguration, forceBypass: Bool = false,
          lwipQueue: DispatchQueue) {
         self.pcb = pcb
         self.dstHost = dstHost
@@ -87,7 +87,7 @@ class LWIPTCPConnection {
         // Start handshake timeout (Xray-core Timeout.Handshake = 60s)
         let timer = DispatchWorkItem { [weak self] in
             guard let self, !self.closed else { return }
-            if self.vlessConnecting || self.directConnecting {
+            if self.proxyConnecting || self.directConnecting {
                 logger.error("[TCP] Handshake timeout for \(self.dstHost, privacy: .public):\(self.dstPort)")
                 self.abort()
             }
@@ -98,7 +98,7 @@ class LWIPTCPConnection {
         if bypass {
             connectDirect()
         } else {
-            connectVLESS()
+            connectProxy()
         }
     }
 
@@ -115,7 +115,7 @@ class LWIPTCPConnection {
         guard !closed else { return }
         activityTimer?.update()
 
-        if vlessConnecting || directConnecting {
+        if proxyConnecting || directConnecting {
             pendingData.append(data)
             return
         }
@@ -135,11 +135,11 @@ class LWIPTCPConnection {
                     }
                 }
             }
-        } else if let connection = vlessConnection {
+        } else if let connection = proxyConnection {
             connection.send(data: data) { [weak self] error in
                 guard let self else { return }
                 if let error {
-                    logger.error("[TCP] VLESS send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    logger.error("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
                     self.lwipQueue.async { self.abort() }
                 } else {
                     self.lwipQueue.async {
@@ -150,7 +150,7 @@ class LWIPTCPConnection {
             }
         } else {
             pendingData.append(data)
-            if bypass { connectDirect() } else { connectVLESS() }
+            if bypass { connectDirect() } else { connectProxy() }
         }
     }
 
@@ -176,7 +176,7 @@ class LWIPTCPConnection {
 
     func handleError(err: Int32) {
         closed = true
-        releaseVLESS()
+        releaseProxy()
     }
 
     // MARK: - Direct Connection (bypass)
@@ -253,30 +253,38 @@ class LWIPTCPConnection {
         }
     }
 
-    // MARK: - VLESS Connection
+    // MARK: - Proxy Connection
 
-    private func connectVLESS() {
-        guard !vlessConnecting && vlessConnection == nil && !closed else { return }
-        vlessConnecting = true
+    private func connectProxy() {
+        guard !proxyConnecting && proxyConnection == nil && !closed else { return }
+        proxyConnecting = true
 
-        let initialData = pendingData.isEmpty ? nil : pendingData
-        if initialData != nil {
-            pendingData.removeAll(keepingCapacity: true)
+        // For VLESS, initial data is appended to the protocol header and sent in one packet.
+        // For Shadowsocks, data flows through send() which prepends the address header,
+        // so we keep it in pendingData to be sent after connection succeeds.
+        let initialData: Data?
+        if configuration.outboundProtocol == .shadowsocks {
+            initialData = nil
+        } else {
+            initialData = pendingData.isEmpty ? nil : pendingData
+            if initialData != nil {
+                pendingData.removeAll(keepingCapacity: true)
+            }
         }
 
-        let client = VLESSClient(configuration: configuration)
-        self.vlessClient = client
+        let client = ProxyClient(configuration: configuration)
+        self.proxyClient = client
 
         client.connect(to: dstHost, port: dstPort, initialData: initialData) { [weak self] result in
             guard let self else { return }
 
             self.lwipQueue.async {
-                self.vlessConnecting = false
+                self.proxyConnecting = false
                 guard !self.closed else { return }
 
                 switch result {
-                case .success(let vlessConnection):
-                    self.vlessConnection = vlessConnection
+                case .success(let proxyConnection):
+                    self.proxyConnection = proxyConnection
                     self.handshakeTimer?.cancel()
                     self.handshakeTimer = nil
                     self.activityTimer = ActivityTimer(
@@ -291,10 +299,10 @@ class LWIPTCPConnection {
                         let dataToSend = self.pendingData
                         self.pendingData.removeAll(keepingCapacity: true)
                         let count = UInt16(clamping: dataToSend.count)
-                        vlessConnection.send(data: dataToSend) { [weak self] error in
+                        proxyConnection.send(data: dataToSend) { [weak self] error in
                             guard let self else { return }
                             if let error {
-                                logger.error("[TCP] VLESS pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                logger.error("[TCP] Proxy pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
                                 self.lwipQueue.async { self.abort() }
                             } else {
                                 self.lwipQueue.async {
@@ -315,9 +323,9 @@ class LWIPTCPConnection {
         }
     }
 
-    // MARK: - VLESS Receive Loop
+    // MARK: - Proxy Receive Loop
 
-    /// Requests the next chunk of data from the VLESS connection.
+    /// Requests the next chunk of data from the proxy connection.
     ///
     /// Manages the receive loop manually (instead of `startReceiving`) to
     /// support pause/resume for backpressure. Only issues a receive when
@@ -355,7 +363,7 @@ class LWIPTCPConnection {
             return
         }
 
-        guard let connection = vlessConnection else { return }
+        guard let connection = proxyConnection else { return }
 
         connection.receive { [weak self] data, error in
             guard let self else { return }
@@ -364,7 +372,7 @@ class LWIPTCPConnection {
                 guard !self.closed else { return }
 
                 if let error {
-                    logger.error("[TCP] VLESS recv error: \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    logger.error("[TCP] Proxy recv error: \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
                     self.abort()
                     return
                 }
@@ -385,7 +393,7 @@ class LWIPTCPConnection {
         }
     }
 
-    /// Writes data from VLESS to the lwIP TCP send buffer.
+    /// Writes data from proxy to the lwIP TCP send buffer.
     ///
     /// Writes as much data as the lwIP send buffer can accept. Any remainder
     /// is stored in ``overflowBuffer`` and the receive loop pauses until
@@ -467,7 +475,7 @@ class LWIPTCPConnection {
     /// Drains the overflow buffer into lwIP's TCP send buffer.
     ///
     /// Called from ``handleSent(len:)`` when the local app acknowledges data,
-    /// freeing space in the lwIP send buffer. Resumes the VLESS receive loop
+    /// freeing space in the lwIP send buffer. Resumes the proxy receive loop
     /// as soon as any data is drained (mirroring Xray-core's instant-resume).
     private func drainOverflowBuffer() {
         guard !closed, !overflowBuffer.isEmpty else { return }
@@ -554,7 +562,7 @@ class LWIPTCPConnection {
         closed = true
         flushOverflowToLWIP()
         lwip_bridge_tcp_close(pcb)
-        releaseVLESS()
+        releaseProxy()
         Unmanaged.passUnretained(self).release()
     }
 
@@ -562,23 +570,23 @@ class LWIPTCPConnection {
         guard !closed else { return }
         closed = true
         lwip_bridge_tcp_abort(pcb)
-        releaseVLESS()
+        releaseProxy()
         Unmanaged.passUnretained(self).release()
     }
 
-    private func releaseVLESS() {
+    private func releaseProxy() {
         handshakeTimer?.cancel()
         handshakeTimer = nil
         activityTimer?.cancel()
         activityTimer = nil
         let relay = directRelay
-        let connection = vlessConnection
-        let client = vlessClient
+        let connection = proxyConnection
+        let client = proxyClient
         directRelay = nil
         directConnecting = false
-        vlessConnection = nil
-        vlessClient = nil
-        vlessConnecting = false
+        proxyConnection = nil
+        proxyClient = nil
+        proxyConnecting = false
         pendingData = Data()
         overflowBuffer = Data()
         receivePaused = false
@@ -589,7 +597,7 @@ class LWIPTCPConnection {
 
     deinit {
         directRelay?.cancel()
-        vlessConnection?.cancel()
-        vlessClient?.cancel()
+        proxyConnection?.cancel()
+        proxyClient?.cancel()
     }
 }

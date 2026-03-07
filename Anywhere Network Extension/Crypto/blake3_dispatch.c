@@ -1,6 +1,3 @@
-// Portable-only dispatch for BLAKE3.
-// Routes all calls to the portable (non-SIMD) implementation.
-
 #include "blake3_impl.h"
 
 void blake3_compress_in_place(uint32_t cv[8],

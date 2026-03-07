@@ -81,7 +81,7 @@ class RuleSetStore: ObservableObject {
 
     // MARK: - App Group Sync
 
-    func syncToAppGroup(configurations: [VLESSConfiguration], serializeConfiguration: (VLESSConfiguration) -> [String: Any]) {
+    func syncToAppGroup(configurations: [ProxyConfiguration], serializeConfiguration: (ProxyConfiguration) -> [String: Any]) {
         guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: APCore.suiteName) else { return }
         let routingURL = containerURL.appendingPathComponent("routing.json")
 

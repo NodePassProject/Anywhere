@@ -24,7 +24,7 @@ class DomainRouter {
     private var keywordRules: [(keyword: String, action: RouteAction)] = []
 
     // Proxy configurations for rule-assigned proxies
-    private var configurationMap: [UUID: VLESSConfiguration] = [:]
+    private var configurationMap: [UUID: ProxyConfiguration] = [:]
 
     /// Reads routing.json from the App Group container and compiles rules.
     func loadRoutingConfiguration() {
@@ -50,7 +50,7 @@ class DomainRouter {
             for (key, value) in configurations {
                 guard let configurationId = UUID(uuidString: key),
                       let configurationDict = value as? [String: Any] else { continue }
-                if let configuration = VLESSConfiguration.parse(from: configurationDict) {
+                if let configuration = ProxyConfiguration.parse(from: configurationDict) {
                     configurationMap[configurationId] = configuration
                 }
             }
@@ -133,9 +133,9 @@ class DomainRouter {
         return nil
     }
 
-    /// Resolves a RouteAction to a VLESSConfiguration.
+    /// Resolves a RouteAction to a ProxyConfiguration.
     /// Returns nil for .direct or when the configuration UUID is not found.
-    func resolveConfiguration(action: RouteAction) -> VLESSConfiguration? {
+    func resolveConfiguration(action: RouteAction) -> ProxyConfiguration? {
         switch action {
         case .direct, .reject:
             return nil

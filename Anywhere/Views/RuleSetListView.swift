@@ -12,11 +12,11 @@ struct RuleSetListView: View {
     // Workaround: SwiftUI view redraw bugs
     @State private var shouldRefreshList: Bool = false
     
-    private var standaloneConfigurations: [VLESSConfiguration] {
+    private var standaloneConfigurations: [ProxyConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }
     }
 
-    private var subscribedGroups: [(Subscription, [VLESSConfiguration])] {
+    private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
         viewModel.subscriptions.compactMap { subscription in
             let configurations = viewModel.configurations(for: subscription)
             return configurations.isEmpty ? nil : (subscription, configurations)

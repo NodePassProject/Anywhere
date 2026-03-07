@@ -9,7 +9,7 @@ import Foundation
 
 struct SubscriptionFetcher {
     struct Result {
-        let configurations: [VLESSConfiguration]
+        let configurations: [ProxyConfiguration]
         let name: String?
         let upload: Int64?
         let download: Int64?
@@ -27,7 +27,7 @@ struct SubscriptionFetcher {
             case .invalidURL:
                 return "Invalid subscription URL."
             case .noConfigurations:
-                return "No valid VLESS configurations found in subscription."
+                return "No valid configurations found in subscription."
             case .networkError(let message):
                 return "Network error: \(message)"
             }
@@ -62,7 +62,7 @@ struct SubscriptionFetcher {
         let bodyString: String
         if let decoded = Data(base64Encoded: data, options: .ignoreUnknownCharacters),
            let decodedString = String(data: decoded, encoding: .utf8),
-           decodedString.contains("vless://") {
+           decodedString.contains("vless://") || decodedString.contains("ss://") {
             bodyString = decodedString
         } else if let rawString = String(data: data, encoding: .utf8) {
             bodyString = rawString
@@ -86,12 +86,12 @@ struct SubscriptionFetcher {
             )
         }
 
-        // Parse VLESS lines
+        // Parse VLESS and Shadowsocks lines
         let configurations = bodyString
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { $0.hasPrefix("vless://") }
-            .compactMap { try? VLESSConfiguration.parse(url: $0) }
+            .filter { $0.hasPrefix("vless://") || $0.hasPrefix("ss://") }
+            .compactMap { try? ProxyConfiguration.parse(url: $0) }
 
         guard !configurations.isEmpty else {
             throw FetchError.noConfigurations

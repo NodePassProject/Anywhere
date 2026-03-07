@@ -30,7 +30,7 @@ class XHTTPConnection {
     let mode: XHTTPMode
     let sessionId: String
 
-    // Download / stream-one connection (closure-based, from VLESSClient)
+    // Download / stream-one connection (closure-based, from ProxyClient)
     private let downloadSend: (Data, @escaping (Error?) -> Void) -> Void
     private let downloadReceive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
     private let downloadCancel: () -> Void

@@ -34,8 +34,8 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
 struct AddProxyView: View {
     @Environment(\.dismiss) var dismiss
     @Binding var showingManualAddSheet: Bool
-    var onImport: ((VLESSConfiguration) -> Void)?
-    var onSubscriptionImport: (([VLESSConfiguration], Subscription) -> Void)?
+    var onImport: ((ProxyConfiguration) -> Void)?
+    var onSubscriptionImport: (([ProxyConfiguration], Subscription) -> Void)?
 
     @State private var selectedMethod: Method?
     @State private var showingQRScanner = false
@@ -198,7 +198,7 @@ struct AddProxyView: View {
                 .keyboardType(.URL)
                 .autocorrectionDisabled()
                 .padding(.top, 12)
-            Text("Supports VLESS link, subscription link and Clash link")
+            Text("Supports VLESS, Shadowsocks, subscription and Clash links")
                 .font(.caption)
         }
     }
@@ -207,7 +207,7 @@ struct AddProxyView: View {
 
     private func checkClipboard() {
         if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-           clip.hasPrefix("vless://") || clip.hasPrefix("http://") || clip.hasPrefix("https://") {
+           clip.hasPrefix("vless://") || clip.hasPrefix("ss://") || clip.hasPrefix("http://") || clip.hasPrefix("https://") {
             linkURL = clip
         }
     }
@@ -229,10 +229,10 @@ struct AddProxyView: View {
     private func importFromString(_ string: String) {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if trimmed.hasPrefix("vless://") {
-            // Single VLESS link
+        if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") {
+            // Single VLESS or Shadowsocks link
             do {
-                let configuration = try VLESSConfiguration.parse(url: trimmed)
+                let configuration = try ProxyConfiguration.parse(url: trimmed)
                 onImport?(configuration)
                 dismiss()
             } catch {

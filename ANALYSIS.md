@@ -79,7 +79,7 @@ The `NEPacketTunnelProvider` subclass — the single entry point the OS calls.
 
 | Method | Purpose |
 |---|---|
-| `startTunnel(options:)` | Parses `VLESSConfiguration` from options dict, builds tunnel settings (IP/DNS/routes), starts `LWIPStack` |
+| `startTunnel(options:)` | Parses `ProxyConfiguration` from options dict, builds tunnel settings (IP/DNS/routes), starts `LWIPStack` |
 | `stopTunnel(with:)` | Calls `lwipStack.stop()` |
 | `handleAppMessage(_:)` | Two message types: `"stats"` returns `bytesIn/bytesOut`; otherwise treats as configuration switch |
 | `buildTunnelSettings()` | Creates `NEPacketTunnelNetworkSettings` — IPv4 `10.8.0.2/24`, optional IPv6 `fd00::2/64`, Cloudflare DNS, MTU 1400, excludes server IP from routes |
@@ -135,7 +135,7 @@ Loads `routing.json` from the App Group container. Three rule types:
 2. **Domain suffix** — linear scan (e.g., `.google.com` matches `www.google.com`)
 3. **Domain keyword** — linear scan (e.g., `"google"` matches `mail.google.com`)
 
-Each rule maps to either `.direct` or `.proxy(UUID)`, where the UUID references a `VLESSConfiguration` stored in the same JSON file.
+Each rule maps to either `.direct` or `.proxy(UUID)`, where the UUID references a `ProxyConfiguration` stored in the same JSON file.
 
 ### 3.6 FakeIPPool (`FakeIPPool.swift`)
 
@@ -169,7 +169,7 @@ Binary GEO1 format: 8-byte header + N×10-byte entries (startIP:4, endIP:4, coun
 
 ```
 OS calls startTunnel(options:)
-  → Parse VLESSConfiguration from options dict
+  → Parse ProxyConfiguration from options dict
   → Set remoteAddress (server connect IP)
   → Build NEPacketTunnelNetworkSettings (IPv4/IPv6/DNS/routes/MTU)
   → setTunnelNetworkSettings()
@@ -284,7 +284,7 @@ User selects different proxy in app
   → NETunnelProviderSession.sendProviderMessage()
 
 Network Extension receives message
-  → handleAppMessage() → parse as VLESSConfiguration
+  → handleAppMessage() → parse as ProxyConfiguration
   → LWIPStack.switchConfiguration(newConfig)
       → restartStack() (same as settings change path)
 ```

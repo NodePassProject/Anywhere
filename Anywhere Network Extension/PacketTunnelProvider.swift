@@ -196,7 +196,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Configuration Parsing
 
-    static func parseConfiguration(from configurationDict: [String: Any]) -> VLESSConfiguration? {
-        VLESSConfiguration.parse(from: configurationDict)
+    static func parseConfiguration(from configurationDict: [String: Any]) -> ProxyConfiguration? {
+        ProxyConfiguration.parse(from: configurationDict)
     }
 }

@@ -1,10 +1,3 @@
-//
-//  CPacket.c
-//  Network Extension
-//
-//  TLS processing utilities (used by Reality/Vision).
-//
-
 #include "CPacket.h"
 #include <string.h>
 

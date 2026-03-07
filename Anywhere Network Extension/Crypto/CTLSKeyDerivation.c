@@ -1,10 +1,3 @@
-//
-//  CTLSKeyDerivation.c
-//  Network Extension
-//
-//  TLS 1.3 key derivation using CommonCrypto (RFC 8446).
-//
-
 #include "CTLSKeyDerivation.h"
 #include <CommonCrypto/CommonHMAC.h>
 #include <CommonCrypto/CommonDigest.h>

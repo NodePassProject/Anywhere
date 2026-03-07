@@ -1,5 +1,5 @@
 //
-//  VLESSConfiguration.swift
+//  ProxyConfiguration.swift
 //  Anywhere
 //
 //  Created by Argsment Limited on 3/1/26.
@@ -7,8 +7,14 @@
 
 import Foundation
 
-/// VLESS protocol configuration
-struct VLESSConfiguration: Identifiable, Hashable, Codable {
+/// Outbound protocol type.
+enum OutboundProtocol: String, Codable {
+    case vless
+    case shadowsocks
+}
+
+/// Proxy configuration for VLESS and Shadowsocks outbound protocols.
+struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let id: UUID
     let name: String
     let serverAddress: String
@@ -43,12 +49,19 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
     /// The subscription this configuration belongs to, if any.
     let subscriptionId: UUID?
 
+    /// The outbound protocol. Default `.vless`.
+    let outboundProtocol: OutboundProtocol
+    /// Shadowsocks password (only when `outboundProtocol == .shadowsocks`).
+    let ssPassword: String?
+    /// Shadowsocks method (e.g. "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305").
+    let ssMethod: String?
+
     /// The address to use for socket connections: the resolved IP if available, otherwise `serverAddress`.
     var connectAddress: String { resolvedIP ?? serverAddress }
 
     /// Compares configuration content, ignoring `id`, `resolvedIP`, and `subscriptionId`.
     /// Used to detect unchanged configs during subscription updates.
-    func contentEquals(_ other: VLESSConfiguration) -> Bool {
+    func contentEquals(_ other: ProxyConfiguration) -> Bool {
         name == other.name &&
         serverAddress == other.serverAddress &&
         serverPort == other.serverPort &&
@@ -64,10 +77,13 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
         xhttp == other.xhttp &&
         testseed == other.testseed &&
         muxEnabled == other.muxEnabled &&
-        xudpEnabled == other.xudpEnabled
+        xudpEnabled == other.xudpEnabled &&
+        outboundProtocol == other.outboundProtocol &&
+        ssPassword == other.ssPassword &&
+        ssMethod == other.ssMethod
     }
 
-    init(id: UUID = UUID(), name: String, serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String? = nil, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil) {
+    init(id: UUID = UUID(), name: String, serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String? = nil, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil) {
         self.id = id
         self.name = name
         self.serverAddress = serverAddress
@@ -87,11 +103,14 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
         self.muxEnabled = muxEnabled
         self.xudpEnabled = xudpEnabled
         self.subscriptionId = subscriptionId
+        self.outboundProtocol = outboundProtocol
+        self.ssPassword = ssPassword
+        self.ssMethod = ssMethod
     }
 
     /// Convenience initializer that defaults the name to `"Untitled"`.
-    init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil) {
-        self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId)
+    init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil) {
+        self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId, outboundProtocol: outboundProtocol, ssPassword: ssPassword, ssMethod: ssMethod)
     }
 
     /// Custom decoder for backward compatibility (old configs may lack newer fields like
@@ -118,14 +137,20 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
         muxEnabled = try container.decodeIfPresent(Bool.self, forKey: .muxEnabled) ?? true
         xudpEnabled = try container.decodeIfPresent(Bool.self, forKey: .xudpEnabled) ?? true
         subscriptionId = try container.decodeIfPresent(UUID.self, forKey: .subscriptionId)
+        outboundProtocol = try container.decodeIfPresent(OutboundProtocol.self, forKey: .outboundProtocol) ?? .vless
+        ssPassword = try container.decodeIfPresent(String.self, forKey: .ssPassword)
+        ssMethod = try container.decodeIfPresent(String.self, forKey: .ssMethod)
     }
     
-    /// Parse a VLESS URL into configuration
+    /// Parse a VLESS or Shadowsocks URL into configuration.
     /// Format: vless://uuid@host:port/?type=tcp&encryption=none&security=none
-    /// Reality format: vless://uuid@host:port/?security=reality&sni=example.com&pbk=...&sid=...&fp=chrome
-    static func parse(url: String) throws -> VLESSConfiguration {
+    /// SS format: ss://base64(method:password)@host:port#name
+    static func parse(url: String) throws -> ProxyConfiguration {
+        if url.hasPrefix("ss://") {
+            return try parseShadowsocks(url: url)
+        }
         guard url.hasPrefix("vless://") else {
-            throw VLESSError.invalidURL("URL must start with vless://")
+            throw ProxyError.invalidURL("URL must start with vless:// or ss://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -140,7 +165,7 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
 
         // Split by @ to get UUID and server info
         guard let atIndex = urlWithoutScheme.firstIndex(of: "@") else {
-            throw VLESSError.invalidURL("Missing @ separator")
+            throw ProxyError.invalidURL("Missing @ separator")
         }
 
         let uuidString = String(urlWithoutScheme[..<atIndex])
@@ -148,7 +173,7 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
 
         // Parse UUID
         guard let uuid = UUID(uuidString: uuidString) else {
-            throw VLESSError.invalidURL("Invalid UUID: \(uuidString)")
+            throw ProxyError.invalidURL("Invalid UUID: \(uuidString)")
         }
 
         // Separate host:port from query string.
@@ -171,24 +196,24 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
         let portString: String
         if hostPort.hasPrefix("[") {
             guard let closeBracket = hostPort.firstIndex(of: "]") else {
-                throw VLESSError.invalidURL("Missing closing bracket for IPv6 address")
+                throw ProxyError.invalidURL("Missing closing bracket for IPv6 address")
             }
             host = String(hostPort[hostPort.index(after: hostPort.startIndex)..<closeBracket])
             let afterBracket = hostPort[hostPort.index(after: closeBracket)...]
             guard afterBracket.hasPrefix(":") else {
-                throw VLESSError.invalidURL("Missing port after IPv6 address")
+                throw ProxyError.invalidURL("Missing port after IPv6 address")
             }
             portString = String(afterBracket.dropFirst())
         } else {
             guard let colonIndex = hostPort.lastIndex(of: ":") else {
-                throw VLESSError.invalidURL("Missing port in server address")
+                throw ProxyError.invalidURL("Missing port in server address")
             }
             host = String(hostPort[..<colonIndex])
             portString = String(hostPort[hostPort.index(after: colonIndex)...])
         }
 
         guard let port = UInt16(portString) else {
-            throw VLESSError.invalidURL("Invalid port: \(portString)")
+            throw ProxyError.invalidURL("Invalid port: \(portString)")
         }
 
         // Parse query parameters into dictionary
@@ -225,7 +250,7 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
             do {
                 realityConfiguration = try RealityConfiguration.parse(from: params)
             } catch {
-                throw VLESSError.invalidURL("Reality configuration error: \(error.localizedDescription)")
+                throw ProxyError.invalidURL("Reality configuration error: \(error.localizedDescription)")
             }
         }
 
@@ -235,7 +260,7 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
             do {
                 tlsConfiguration = try TLSConfiguration.parse(from: params, serverAddress: host)
             } catch {
-                throw VLESSError.invalidURL("TLS configuration error: \(error.localizedDescription)")
+                throw ProxyError.invalidURL("TLS configuration error: \(error.localizedDescription)")
             }
         }
 
@@ -261,7 +286,7 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
         let muxEnabled = params["mux"].map { $0 != "false" && $0 != "0" } ?? true
         let xudpEnabled = params["xudp"].map { $0 != "false" && $0 != "0" } ?? true
 
-        return VLESSConfiguration(
+        return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
@@ -281,17 +306,322 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
         )
     }
 
+    /// Parse a Shadowsocks URL into configuration.
+    /// Format: ss://base64(method:password)@host:port#name
+    /// Also handles: ss://base64(method:password@host:port)#name (SIP002)
+    private static func parseShadowsocks(url: String) throws -> ProxyConfiguration {
+        var urlWithoutScheme = String(url.dropFirst("ss://".count))
+
+        // Extract fragment (#name)
+        var fragmentName: String?
+        if let hashIndex = urlWithoutScheme.lastIndex(of: "#") {
+            fragmentName = String(urlWithoutScheme[urlWithoutScheme.index(after: hashIndex)...])
+                .removingPercentEncoding
+            urlWithoutScheme = String(urlWithoutScheme[..<hashIndex])
+        }
+
+        let method: String
+        let password: String
+        let host: String
+        let port: UInt16
+        var queryString: String?
+
+        if let atIndex = urlWithoutScheme.firstIndex(of: "@") {
+            // Standard format: base64(method:password)@host:port/?params
+            let userInfo = String(urlWithoutScheme[..<atIndex])
+            var serverPart = String(urlWithoutScheme[urlWithoutScheme.index(after: atIndex)...])
+
+            // Extract query string before stripping path
+            if let questionIndex = serverPart.firstIndex(of: "?") {
+                queryString = String(serverPart[serverPart.index(after: questionIndex)...])
+                serverPart = String(serverPart[..<questionIndex])
+            }
+            // Strip trailing path
+            if let slashIndex = serverPart.firstIndex(of: "/") {
+                serverPart = String(serverPart[..<slashIndex])
+            }
+
+            // Decode base64 user info
+            guard let decoded = Data(base64Encoded: padBase64(userInfo)),
+                  let decodedString = String(data: decoded, encoding: .utf8),
+                  let colonIndex = decodedString.firstIndex(of: ":") else {
+                throw ProxyError.invalidURL("Invalid SS user info encoding")
+            }
+            method = String(decodedString[..<colonIndex])
+            password = String(decodedString[decodedString.index(after: colonIndex)...])
+
+            // Parse host:port
+            (host, port) = try parseHostPort(serverPart)
+        } else {
+            // SIP002 format: base64(method:password@host:port)
+            guard let decoded = Data(base64Encoded: padBase64(urlWithoutScheme)),
+                  let decodedString = String(data: decoded, encoding: .utf8) else {
+                throw ProxyError.invalidURL("Invalid SS URL encoding")
+            }
+            guard let colonIndex = decodedString.firstIndex(of: ":") else {
+                throw ProxyError.invalidURL("Missing method:password separator")
+            }
+            method = String(decodedString[..<colonIndex])
+            let rest = String(decodedString[decodedString.index(after: colonIndex)...])
+            guard let atIndex = rest.lastIndex(of: "@") else {
+                throw ProxyError.invalidURL("Missing @ separator in decoded SS URL")
+            }
+            password = String(rest[..<atIndex])
+            let serverPart = String(rest[rest.index(after: atIndex)...])
+            (host, port) = try parseHostPort(serverPart)
+        }
+
+        guard ShadowsocksCipher(method: method) != nil else {
+            throw ProxyError.invalidURL("Unsupported SS method: \(method)")
+        }
+
+        // Parse query parameters (same format as VLESS: type, security, sni, host, path, etc.)
+        var params: [String: String] = [:]
+        if let queryString {
+            for param in queryString.split(separator: "&") {
+                let keyValue = param.split(separator: "=", maxSplits: 1)
+                if keyValue.count == 2 {
+                    let key = String(keyValue[0])
+                    let value = String(keyValue[1]).removingPercentEncoding ?? String(keyValue[1])
+                    params[key] = value
+                }
+            }
+        }
+
+        let transport = params["type"] ?? "tcp"
+        let security = params["security"] ?? "none"
+
+        var tlsConfiguration: TLSConfiguration? = nil
+        if security == "tls" {
+            tlsConfiguration = try TLSConfiguration.parse(from: params, serverAddress: host)
+        }
+
+        var wsConfiguration: WebSocketConfiguration? = nil
+        if transport == "ws" {
+            wsConfiguration = WebSocketConfiguration.parse(from: params, serverAddress: host)
+        }
+
+        var httpUpgradeConfiguration: HTTPUpgradeConfiguration? = nil
+        if transport == "httpupgrade" {
+            httpUpgradeConfiguration = HTTPUpgradeConfiguration.parse(from: params, serverAddress: host)
+        }
+
+        var xhttpConfiguration: XHTTPConfiguration? = nil
+        if transport == "xhttp" {
+            xhttpConfiguration = XHTTPConfiguration.parse(from: params, serverAddress: host)
+        }
+
+        return ProxyConfiguration(
+            name: fragmentName ?? "Untitled",
+            serverAddress: host,
+            serverPort: port,
+            uuid: UUID(), // placeholder, not used for SS
+            encryption: "none",
+            transport: transport,
+            security: security,
+            tls: tlsConfiguration,
+            websocket: wsConfiguration,
+            httpUpgrade: httpUpgradeConfiguration,
+            xhttp: xhttpConfiguration,
+            outboundProtocol: .shadowsocks,
+            ssPassword: password,
+            ssMethod: method
+        )
+    }
+
+    /// Pads a base64 string to a multiple of 4 characters.
+    private static func padBase64(_ string: String) -> String {
+        let remainder = string.count % 4
+        if remainder == 0 { return string }
+        return string + String(repeating: "=", count: 4 - remainder)
+    }
+
+    /// Parses a host:port string, handling IPv6 brackets.
+    private static func parseHostPort(_ string: String) throws -> (String, UInt16) {
+        let host: String
+        let portString: String
+        if string.hasPrefix("[") {
+            guard let closeBracket = string.firstIndex(of: "]") else {
+                throw ProxyError.invalidURL("Missing closing bracket for IPv6")
+            }
+            host = String(string[string.index(after: string.startIndex)..<closeBracket])
+            let afterBracket = string[string.index(after: closeBracket)...]
+            guard afterBracket.hasPrefix(":") else {
+                throw ProxyError.invalidURL("Missing port after IPv6 address")
+            }
+            portString = String(afterBracket.dropFirst())
+        } else {
+            guard let colonIndex = string.lastIndex(of: ":") else {
+                throw ProxyError.invalidURL("Missing port")
+            }
+            host = String(string[..<colonIndex])
+            portString = String(string[string.index(after: colonIndex)...])
+        }
+        guard let port = UInt16(portString) else {
+            throw ProxyError.invalidURL("Invalid port: \(portString)")
+        }
+        return (host, port)
+    }
+
+    /// Export configuration as a shareable URL string.
+    /// Produces `vless://...` for VLESS or `ss://...` for Shadowsocks.
+    func toURL() -> String {
+        switch outboundProtocol {
+        case .shadowsocks:
+            return toShadowsocksURL()
+        case .vless:
+            return toVLESSURL()
+        }
+    }
+
+    private func toVLESSURL() -> String {
+        var params: [String] = []
+
+        if encryption != "none" {
+            params.append("encryption=\(encryption)")
+        }
+        if let flow, !flow.isEmpty {
+            params.append("flow=\(flow)")
+        }
+        params.append("security=\(security)")
+        if transport != "tcp" {
+            params.append("type=\(transport)")
+        }
+
+        // TLS parameters
+        if security == "tls", let tls {
+            if tls.serverName != serverAddress {
+                params.append("sni=\(tls.serverName)")
+            }
+            if let alpn = tls.alpn, !alpn.isEmpty {
+                params.append("alpn=\(alpn.joined(separator: ",").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? alpn.joined(separator: ","))")
+            }
+            if tls.allowInsecure {
+                params.append("allowInsecure=1")
+            }
+            if tls.fingerprint != .chrome120 {
+                params.append("fp=\(tls.fingerprint.rawValue)")
+            }
+        }
+
+        // Reality parameters
+        if security == "reality", let reality {
+            params.append("sni=\(reality.serverName)")
+            params.append("pbk=\(reality.publicKey.base64URLEncodedString())")
+            if !reality.shortId.isEmpty {
+                params.append("sid=\(reality.shortId.hexEncodedString())")
+            }
+            if reality.fingerprint != .chrome120 {
+                params.append("fp=\(reality.fingerprint.rawValue)")
+            }
+        }
+
+        // Transport parameters
+        appendTransportParams(to: &params)
+
+        // Mux/XUDP
+        if !muxEnabled {
+            params.append("mux=false")
+        }
+        if !xudpEnabled {
+            params.append("xudp=false")
+        }
+
+        // Testseed (only if non-default)
+        if testseed != [900, 500, 900, 256] {
+            params.append("testseed=\(testseed.map { String($0) }.joined(separator: ","))")
+        }
+
+        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        return "vless://\(uuid.uuidString.lowercased())@\(serverAddress):\(serverPort)/\(query)#\(fragment)"
+    }
+
+    private func toShadowsocksURL() -> String {
+        guard let method = ssMethod, let password = ssPassword else {
+            return "ss://invalid"
+        }
+        let userInfo = "\(method):\(password)"
+        let encoded = Data(userInfo.utf8).base64EncodedString()
+            .replacingOccurrences(of: "=", with: "")
+
+        var params: [String] = []
+        if transport != "tcp" {
+            params.append("type=\(transport)")
+        }
+        if security != "none" {
+            params.append("security=\(security)")
+        }
+
+        // TLS parameters
+        if security == "tls", let tls {
+            if tls.serverName != serverAddress {
+                params.append("sni=\(tls.serverName)")
+            }
+            if let alpn = tls.alpn, !alpn.isEmpty {
+                params.append("alpn=\(alpn.joined(separator: ",").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? alpn.joined(separator: ","))")
+            }
+            if tls.allowInsecure {
+                params.append("allowInsecure=1")
+            }
+            if tls.fingerprint != .chrome120 {
+                params.append("fp=\(tls.fingerprint.rawValue)")
+            }
+        }
+
+        // Transport parameters
+        appendTransportParams(to: &params)
+
+        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        return "ss://\(encoded)@\(serverAddress):\(serverPort)/\(query)#\(fragment)"
+    }
+
+    private func appendTransportParams(to params: inout [String]) {
+        if let ws = websocket, transport == "ws" {
+            if ws.host != serverAddress {
+                params.append("host=\(ws.host)")
+            }
+            if ws.path != "/" {
+                params.append("path=\(ws.path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ws.path)")
+            }
+            if ws.maxEarlyData > 0 {
+                params.append("ed=\(ws.maxEarlyData)")
+            }
+        }
+        if let hu = httpUpgrade, transport == "httpupgrade" {
+            if hu.host != serverAddress {
+                params.append("host=\(hu.host)")
+            }
+            if hu.path != "/" {
+                params.append("path=\(hu.path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? hu.path)")
+            }
+        }
+        if let xhttp, transport == "xhttp" {
+            if xhttp.host != serverAddress {
+                params.append("host=\(xhttp.host)")
+            }
+            if xhttp.path != "/" {
+                params.append("path=\(xhttp.path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? xhttp.path)")
+            }
+            if xhttp.mode != .auto {
+                params.append("mode=\(xhttp.mode.rawValue)")
+            }
+        }
+    }
+
     /// Parses a VLESS configuration from a serialized dictionary.
     ///
     /// Used by PacketTunnelProvider (from tunnel start options / app messages)
     /// and DomainRouter (from routing.json configs).
-    static func parse(from configurationDict: [String: Any]) -> VLESSConfiguration? {
-        guard let serverAddress = configurationDict["serverAddress"] as? String,
-              let uuidString = configurationDict["uuid"] as? String,
-              let uuid = UUID(uuidString: uuidString),
-              let encryption = configurationDict["encryption"] as? String else {
+    static func parse(from configurationDict: [String: Any]) -> ProxyConfiguration? {
+        guard let serverAddress = configurationDict["serverAddress"] as? String else {
             return nil
         }
+        // UUID is required for VLESS but optional for Shadowsocks
+        let uuidString = configurationDict["uuid"] as? String
+        let uuid = uuidString.flatMap { UUID(uuidString: $0) } ?? UUID()
+        let encryption = (configurationDict["encryption"] as? String) ?? "none"
 
         // serverPort may arrive as UInt16 (from startTunnel options) or Int (from JSON)
         let serverPort: UInt16
@@ -427,7 +757,12 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
         let xudpEnabled = (configurationDict["xudpEnabled"] as? Bool) ?? true
         let resolvedIP = configurationDict["resolvedIP"] as? String
 
-        return VLESSConfiguration(
+        let protocolStr = (configurationDict["outboundProtocol"] as? String) ?? "vless"
+        let outboundProtocol = OutboundProtocol(rawValue: protocolStr) ?? .vless
+        let ssPassword = configurationDict["ssPassword"] as? String
+        let ssMethod = configurationDict["ssMethod"] as? String
+
+        return ProxyConfiguration(
             name: (configurationDict["name"] as? String) ?? serverAddress,
             serverAddress: serverAddress,
             serverPort: serverPort,
@@ -443,13 +778,16 @@ struct VLESSConfiguration: Identifiable, Hashable, Codable {
             xhttp: xhttpConfiguration,
             muxEnabled: muxEnabled,
             xudpEnabled: xudpEnabled,
-            resolvedIP: resolvedIP
+            resolvedIP: resolvedIP,
+            outboundProtocol: outboundProtocol,
+            ssPassword: ssPassword,
+            ssMethod: ssMethod
         )
     }
 
 }
 
-enum VLESSError: Error, LocalizedError {
+enum ProxyError: Error, LocalizedError {
     case invalidURL(String)
     case connectionFailed(String)
     case protocolError(String)
@@ -459,7 +797,7 @@ enum VLESSError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidURL(let message):
-            return "Invalid VLESS URL: \(message)"
+            return "Invalid URL: \(message)"
         case .connectionFailed(let message):
             return "Connection failed: \(message)"
         case .protocolError(let message):

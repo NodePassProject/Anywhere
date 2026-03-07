@@ -32,7 +32,7 @@ class DirectTCPRelay {
 
     /// Receives up to 64KB from the socket.
     ///
-    /// Completion signature matches VLESSConnection's receive pattern:
+    /// Completion signature matches ProxyConnection's receive pattern:
     /// - `(data, nil)` — data received
     /// - `(nil, nil)` — EOF (remote closed)
     /// - `(nil, error)` — error

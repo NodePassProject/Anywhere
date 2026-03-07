@@ -1,10 +1,3 @@
-//
-//  CVLESS.c
-//  Network Extension
-//
-//  Created by Argsment Limited on 1/23/26.
-//
-
 #include "CVLESS.h"
 #include <string.h>
 #include <stdlib.h>

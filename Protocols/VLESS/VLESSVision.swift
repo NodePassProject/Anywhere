@@ -354,11 +354,11 @@ func isCompleteTLSRecord(data: Data) -> Bool {
 // MARK: - Vision Connection Wrapper
 
 /// VLESS connection with Vision flow control
-class VLESSVisionConnection: VLESSConnection {
-    private let innerConnection: VLESSConnection
+class VLESSVisionConnection: ProxyConnection {
+    private let innerConnection: ProxyConnection
     private let trafficState: VisionTrafficState
 
-    init(connection: VLESSConnection, userUUID: Data, testseed: [UInt32] = [900, 500, 900, 256]) {
+    init(connection: ProxyConnection, userUUID: Data, testseed: [UInt32] = [900, 500, 900, 256]) {
         self.innerConnection = connection
         self.trafficState = VisionTrafficState(userUUID: userUUID, testseed: testseed)
         super.init()
@@ -503,7 +503,7 @@ class VLESSVisionConnection: VLESSConnection {
             // Normal mode: receive through Reality decryption
             innerConnection.receive { [weak self] data, error in
                 guard let self else {
-                    completion(nil, VLESSError.connectionFailed("Connection deallocated"))
+                    completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                     return
                 }
 

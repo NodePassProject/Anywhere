@@ -1,10 +1,3 @@
-//
-//  CGeoIP.c
-//  Network Extension
-//
-//  Binary search GeoIP lookup using direct pointer arithmetic.
-//
-
 #include "CGeoIP.h"
 #include <arpa/inet.h>
 

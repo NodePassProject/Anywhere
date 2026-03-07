@@ -8,16 +8,16 @@
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "VLESS")
+private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "Proxy")
 
-// MARK: - VLESSClient
+// MARK: - ProxyClient
 
-/// Client for establishing VLESS proxy connections over TCP or UDP.
+/// Client for establishing proxy connections over TCP or UDP.
 ///
 /// Supports both direct BSD socket connections and Reality-wrapped connections.
 /// For the XTLS Vision flow, the connection is wrapped in a ``VLESSVisionConnection``.
-class VLESSClient {
-    private let configuration: VLESSConfiguration
+class ProxyClient {
+    private let configuration: ProxyConfiguration
     private var connection: BSDSocket?
     private var realityClient: RealityClient?
     private var realityConnection: TLSRecordConnection?
@@ -45,10 +45,10 @@ class VLESSClient {
         configuration.flow == Self.visionFlow + "-udp443"
     }
 
-    /// Creates a new VLESS client with the given configuration.
+    /// Creates a new proxy client with the given configuration.
     ///
-    /// - Parameter configuration: The VLESS server configuration.
-    init(configuration: VLESSConfiguration) {
+    /// - Parameter configuration: The proxy server configuration.
+    init(configuration: ProxyConfiguration) {
         self.configuration = configuration
     }
 
@@ -60,12 +60,12 @@ class VLESSClient {
     ///   - destinationHost: The destination hostname or IP address.
     ///   - destinationPort: The destination port number.
     ///   - initialData: Optional initial data to send with the VLESS request header.
-    ///   - completion: Called with the established ``VLESSConnection`` or an error.
+    ///   - completion: Called with the established ``ProxyConnection`` or an error.
     func connect(
         to destinationHost: String,
         port destinationPort: UInt16,
         initialData: Data? = nil,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         connectWithCommand(
             command: .tcp,
@@ -81,11 +81,11 @@ class VLESSClient {
     /// - Parameters:
     ///   - destinationHost: The destination hostname or IP address.
     ///   - destinationPort: The destination port number.
-    ///   - completion: Called with the established ``VLESSConnection`` or an error.
+    ///   - completion: Called with the established ``ProxyConnection`` or an error.
     func connectUDP(
         to destinationHost: String,
         port destinationPort: UInt16,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         connectWithCommand(
             command: .udp,
@@ -101,8 +101,8 @@ class VLESSClient {
     /// Uses `command=.mux` with destination `v1.mux.cool:666` (matching Xray-core).
     /// When Vision flow is active, the mux connection is wrapped with Vision.
     ///
-    /// - Parameter completion: Called with the established ``VLESSConnection`` or an error.
-    func connectMux(completion: @escaping (Result<VLESSConnection, Error>) -> Void) {
+    /// - Parameter completion: Called with the established ``ProxyConnection`` or an error.
+    func connectMux(completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
         connectWithCommand(
             command: .mux,
             destinationHost: "v1.mux.cool",
@@ -140,18 +140,30 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         // Vision silently drops UDP/443 (QUIC) unless the -udp443 flow variant is used
         if command == .udp && destinationPort == 443 && isVisionFlow && !allowUDP443 {
-            completion(.failure(VLESSError.dropped))
+            completion(.failure(ProxyError.dropped))
             return
+        }
+
+        // SS restrictions: no Mux, no Reality, no Vision
+        if isShadowsocks {
+            if command == .mux {
+                completion(.failure(ProxyError.protocolError("Mux is not supported with Shadowsocks")))
+                return
+            }
+            if configuration.reality != nil {
+                completion(.failure(ProxyError.protocolError("Reality is not supported with Shadowsocks")))
+                return
+            }
         }
 
         if configuration.transport == "ws" {
             // Vision over WebSocket is not supported
             if isVisionFlow {
-                completion(.failure(VLESSError.protocolError("Vision flow is not supported over WebSocket transport")))
+                completion(.failure(ProxyError.protocolError("Vision flow is not supported over WebSocket transport")))
                 return
             }
             connectWithWebSocket(
@@ -164,7 +176,7 @@ class VLESSClient {
         } else if configuration.transport == "httpupgrade" {
             // Vision over HTTP upgrade is not supported
             if isVisionFlow {
-                completion(.failure(VLESSError.protocolError("Vision flow is not supported over HTTP upgrade transport")))
+                completion(.failure(ProxyError.protocolError("Vision flow is not supported over HTTP upgrade transport")))
                 return
             }
             connectWithHTTPUpgrade(
@@ -177,7 +189,7 @@ class VLESSClient {
         } else if configuration.transport == "xhttp" {
             // Vision over XHTTP is not supported
             if isVisionFlow {
-                completion(.failure(VLESSError.protocolError("Vision flow is not supported over XHTTP transport")))
+                completion(.failure(ProxyError.protocolError("Vision flow is not supported over XHTTP transport")))
                 return
             }
             connectWithXHTTP(
@@ -225,10 +237,10 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard let wsConfiguration = configuration.websocket else {
-            completion(.failure(VLESSError.connectionFailed("WebSocket transport specified but no WebSocket configuration")))
+            completion(.failure(ProxyError.connectionFailed("WebSocket transport specified but no WebSocket configuration")))
             return
         }
 
@@ -249,17 +261,17 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
@@ -274,7 +286,7 @@ class VLESSClient {
                 }
 
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -317,22 +329,22 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
             guard let tlsConfiguration = self.configuration.tls else {
-                completion(.failure(VLESSError.connectionFailed("WSS requires TLS configuration")))
+                completion(.failure(ProxyError.connectionFailed("WSS requires TLS configuration")))
                 return
             }
 
@@ -350,7 +362,7 @@ class VLESSClient {
 
             tlsClient.connect(host: self.configuration.connectAddress, port: self.configuration.serverPort) { [weak self, tlsClient] result in
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -402,8 +414,16 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        if isShadowsocks {
+            let inner = WebSocketProxyConnection(wsConnection: wsConnection)
+            inner.responseHeaderReceived = true
+            let result = wrapWithShadowsocks(inner: inner, command: command, destinationHost: destinationHost, destinationPort: destinationPort)
+            completion(result)
+            return
+        }
+
         var requestData = VLESSProtocol.encodeRequestHeader(
             uuid: configuration.uuid,
             command: command,
@@ -418,18 +438,18 @@ class VLESSClient {
 
         wsConnection.send(data: requestData) { error in
             if let error {
-                completion(.failure(VLESSError.connectionFailed(error.localizedDescription)))
+                completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
                 return
             }
 
-            var vlessConnection: VLESSConnection
+            var proxyConnection: ProxyConnection
             if command == .udp {
-                vlessConnection = VLESSWebSocketUDPConnection(wsConnection: wsConnection)
+                proxyConnection = WebSocketUDPProxyConnection(wsConnection: wsConnection)
             } else {
-                vlessConnection = VLESSWebSocketConnection(wsConnection: wsConnection)
+                proxyConnection = WebSocketProxyConnection(wsConnection: wsConnection)
             }
 
-            completion(.success(vlessConnection))
+            completion(.success(proxyConnection))
         }
     }
 
@@ -442,10 +462,10 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard let httpUpgradeConfiguration = configuration.httpUpgrade else {
-            completion(.failure(VLESSError.connectionFailed("HTTP upgrade transport specified but no configuration")))
+            completion(.failure(ProxyError.connectionFailed("HTTP upgrade transport specified but no configuration")))
             return
         }
 
@@ -466,17 +486,17 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
@@ -491,7 +511,7 @@ class VLESSClient {
                 }
 
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -534,22 +554,22 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
             guard let tlsConfiguration = self.configuration.tls else {
-                completion(.failure(VLESSError.connectionFailed("HTTPS upgrade requires TLS configuration")))
+                completion(.failure(ProxyError.connectionFailed("HTTPS upgrade requires TLS configuration")))
                 return
             }
 
@@ -557,7 +577,7 @@ class VLESSClient {
 
             tlsClient.connect(host: self.configuration.connectAddress, port: self.configuration.serverPort) { [weak self, tlsClient] result in
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -609,8 +629,16 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        if isShadowsocks {
+            let inner = HTTPUpgradeProxyConnection(huConnection: huConnection)
+            inner.responseHeaderReceived = true
+            let result = wrapWithShadowsocks(inner: inner, command: command, destinationHost: destinationHost, destinationPort: destinationPort)
+            completion(result)
+            return
+        }
+
         var requestData = VLESSProtocol.encodeRequestHeader(
             uuid: configuration.uuid,
             command: command,
@@ -625,18 +653,18 @@ class VLESSClient {
 
         huConnection.send(data: requestData) { error in
             if let error {
-                completion(.failure(VLESSError.connectionFailed(error.localizedDescription)))
+                completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
                 return
             }
 
-            var vlessConnection: VLESSConnection
+            var proxyConnection: ProxyConnection
             if command == .udp {
-                vlessConnection = VLESSHTTPUpgradeUDPConnection(huConnection: huConnection)
+                proxyConnection = HTTPUpgradeUDPProxyConnection(huConnection: huConnection)
             } else {
-                vlessConnection = VLESSHTTPUpgradeConnection(huConnection: huConnection)
+                proxyConnection = HTTPUpgradeProxyConnection(huConnection: huConnection)
             }
 
-            completion(.success(vlessConnection))
+            completion(.success(proxyConnection))
         }
     }
 
@@ -656,10 +684,10 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard let xhttpConfiguration = configuration.xhttp else {
-            completion(.failure(VLESSError.connectionFailed("XHTTP transport specified but no XHTTP configuration")))
+            completion(.failure(ProxyError.connectionFailed("XHTTP transport specified but no XHTTP configuration")))
             return
         }
 
@@ -697,17 +725,17 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
@@ -722,7 +750,7 @@ class VLESSClient {
                 }
 
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -730,7 +758,7 @@ class VLESSClient {
                 let needsUpload = mode == .packetUp || mode == .streamUp
                 let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = needsUpload ? { [weak self] factoryCompletion in
                     guard let self else {
-                        factoryCompletion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                        factoryCompletion(.failure(ProxyError.connectionFailed("Client deallocated")))
                         return
                     }
                     let uploadSocket = BSDSocket()
@@ -789,22 +817,22 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
             guard let baseTLSConfiguration = self.configuration.tls else {
-                completion(.failure(VLESSError.connectionFailed("XHTTPS requires TLS configuration")))
+                completion(.failure(ProxyError.connectionFailed("XHTTPS requires TLS configuration")))
                 return
             }
 
@@ -822,7 +850,7 @@ class VLESSClient {
 
             tlsClient.connect(host: self.configuration.connectAddress, port: self.configuration.serverPort) { [weak self, tlsClient] result in
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -835,7 +863,7 @@ class VLESSClient {
                     let needsUpload = mode == .packetUp || mode == .streamUp
                     let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = needsUpload ? { [weak self] factoryCompletion in
                         guard let self else {
-                            factoryCompletion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                            factoryCompletion(.failure(ProxyError.connectionFailed("Client deallocated")))
                             return
                         }
                         // Use same http/1.1-forced TLS configuration for upload connection
@@ -902,17 +930,17 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
@@ -920,7 +948,7 @@ class VLESSClient {
 
             realityClient.connect(host: self.configuration.connectAddress, port: self.configuration.serverPort) { [weak self, realityClient] result in
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -979,8 +1007,16 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        if isShadowsocks {
+            let inner = XHTTPProxyConnection(xhttpConnection: xhttpConnection)
+            inner.responseHeaderReceived = true
+            let result = wrapWithShadowsocks(inner: inner, command: command, destinationHost: destinationHost, destinationPort: destinationPort)
+            completion(result)
+            return
+        }
+
         var requestData = VLESSProtocol.encodeRequestHeader(
             uuid: configuration.uuid,
             command: command,
@@ -995,18 +1031,18 @@ class VLESSClient {
 
         xhttpConnection.send(data: requestData) { error in
             if let error {
-                completion(.failure(VLESSError.connectionFailed(error.localizedDescription)))
+                completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
                 return
             }
 
-            var vlessConnection: VLESSConnection
+            var proxyConnection: ProxyConnection
             if command == .udp {
-                vlessConnection = VLESSXHTTPUDPConnection(xhttpConnection: xhttpConnection)
+                proxyConnection = XHTTPUDPProxyConnection(xhttpConnection: xhttpConnection)
             } else {
-                vlessConnection = VLESSXHTTPConnection(xhttpConnection: xhttpConnection)
+                proxyConnection = XHTTPProxyConnection(xhttpConnection: xhttpConnection)
             }
 
-            completion(.success(vlessConnection))
+            completion(.success(proxyConnection))
         }
     }
 
@@ -1019,7 +1055,7 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         connectDirectWithRetry(attempt: 0, lastError: nil, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
     }
@@ -1031,17 +1067,17 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
@@ -1056,7 +1092,7 @@ class VLESSClient {
                 }
 
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -1087,7 +1123,7 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         connectRealityWithRetry(attempt: 0, lastError: nil, realityConfig: realityConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
     }
@@ -1100,17 +1136,17 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
@@ -1118,7 +1154,7 @@ class VLESSClient {
 
             realityClient.connect(host: self.configuration.connectAddress, port: self.configuration.serverPort) { [weak self, realityClient] result in
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -1158,7 +1194,7 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         connectTLSWithRetry(attempt: 0, lastError: nil, tlsConfig: tlsConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
     }
@@ -1171,17 +1207,17 @@ class VLESSClient {
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard attempt < Self.maxRetryAttempts else {
-            completion(.failure(lastError ?? VLESSError.connectionFailed("All retry attempts failed")))
+            completion(.failure(lastError ?? ProxyError.connectionFailed("All retry attempts failed")))
             return
         }
 
         let delay = Self.retryBaseDelay * attempt
         let work = { [weak self] in
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
@@ -1189,7 +1225,7 @@ class VLESSClient {
 
             tlsClient.connect(host: self.configuration.connectAddress, port: self.configuration.serverPort) { [weak self, tlsClient] result in
                 guard let self else {
-                    completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
 
@@ -1222,14 +1258,26 @@ class VLESSClient {
     /// Performs the VLESS handshake over a TLS connection.
     ///
     /// Sends the VLESS request header through the TLS tunnel and returns
-    /// a ``VLESSConnection`` wrapper.
+    /// a ``ProxyConnection`` wrapper.
     private func performTLSHandshake(
         command: VLESSCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        if isShadowsocks {
+            guard let tlsConnection else {
+                completion(.failure(ProxyError.connectionFailed("Connection cancelled")))
+                return
+            }
+            let inner = TLSProxyConnection(tlsConnection: tlsConnection)
+            inner.responseHeaderReceived = true
+            let result = wrapWithShadowsocks(inner: inner, command: command, destinationHost: destinationHost, destinationPort: destinationPort)
+            completion(result)
+            return
+        }
+
         let isVision = isVisionFlow && (command == .tcp || command == .mux)
 
         var requestData = VLESSProtocol.encodeRequestHeader(
@@ -1245,48 +1293,48 @@ class VLESSClient {
         }
 
         guard let tlsConnection else {
-            completion(.failure(VLESSError.connectionFailed("Connection cancelled")))
+            completion(.failure(ProxyError.connectionFailed("Connection cancelled")))
             return
         }
         tlsConnection.send(data: requestData) { [weak self, weak tlsConnection] error in
             if let error {
-                completion(.failure(VLESSError.connectionFailed(error.localizedDescription)))
+                completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
                 return
             }
 
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
             guard let tlsConnection else {
-                completion(.failure(VLESSError.connectionFailed("Connection deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Connection deallocated")))
                 return
             }
 
-            var vlessConnection: VLESSConnection
+            var proxyConnection: ProxyConnection
             if command == .udp {
-                vlessConnection = VLESSTLSUDPConnection(tlsConnection: tlsConnection)
+                proxyConnection = TLSUDPProxyConnection(tlsConnection: tlsConnection)
             } else {
-                vlessConnection = VLESSTLSConnection(tlsConnection: tlsConnection)
+                proxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
             }
 
             if isVision {
                 // Verify outer TLS is 1.3 (matches Xray-core outbound.go:346-355)
-                if let tlsError = self.validateOuterTLSForVision(vlessConnection) {
+                if let tlsError = self.validateOuterTLSForVision(proxyConnection) {
                     completion(.failure(tlsError))
                     return
                 }
-                let vision = self.wrapWithVision(vlessConnection)
+                let vision = self.wrapWithVision(proxyConnection)
                 if let initialData {
                     vision.send(data: initialData)
                 } else {
                     vision.sendEmptyPadding()
                 }
-                vlessConnection = vision
+                proxyConnection = vision
             }
 
-            completion(.success(vlessConnection))
+            completion(.success(proxyConnection))
         }
     }
 
@@ -1294,15 +1342,27 @@ class VLESSClient {
 
     /// Performs the VLESS handshake over a direct BSD socket connection.
     ///
-    /// Sends the VLESS request header and returns a ``VLESSConnection`` wrapper.
+    /// Sends the VLESS request header and returns a ``ProxyConnection`` wrapper.
     /// For Vision flow, the connection is additionally wrapped in ``VLESSVisionConnection``.
     private func performHandshake(
         command: VLESSCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        if isShadowsocks {
+            guard let connection else {
+                completion(.failure(ProxyError.connectionFailed("Connection cancelled")))
+                return
+            }
+            let inner = DirectProxyConnection(connection: connection)
+            inner.responseHeaderReceived = true
+            let result = wrapWithShadowsocks(inner: inner, command: command, destinationHost: destinationHost, destinationPort: destinationPort)
+            completion(result)
+            return
+        }
+
         let isVision = isVisionFlow && (command == .tcp || command == .mux)
 
         var requestData = VLESSProtocol.encodeRequestHeader(
@@ -1319,61 +1379,61 @@ class VLESSClient {
         }
 
         guard let connection else {
-            completion(.failure(VLESSError.connectionFailed("Connection cancelled")))
+            completion(.failure(ProxyError.connectionFailed("Connection cancelled")))
             return
         }
         connection.send(data: requestData) { [weak self, weak connection] error in
             if let error {
-                completion(.failure(VLESSError.connectionFailed(error.localizedDescription)))
+                completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
                 return
             }
 
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
             guard let connection else {
-                completion(.failure(VLESSError.connectionFailed("Connection deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Connection deallocated")))
                 return
             }
 
-            var vlessConnection: VLESSConnection
+            var proxyConnection: ProxyConnection
             if command == .udp {
-                vlessConnection = VLESSDirectUDPConnection(connection: connection)
+                proxyConnection = DirectUDPProxyConnection(connection: connection)
             } else {
-                vlessConnection = VLESSDirectConnection(connection: connection)
+                proxyConnection = DirectProxyConnection(connection: connection)
             }
 
             if isVision {
                 // Verify outer TLS is 1.3 (matches Xray-core outbound.go:346-355)
-                if let tlsError = self.validateOuterTLSForVision(vlessConnection) {
+                if let tlsError = self.validateOuterTLSForVision(proxyConnection) {
                     completion(.failure(tlsError))
                     return
                 }
-                let vision = self.wrapWithVision(vlessConnection)
+                let vision = self.wrapWithVision(proxyConnection)
                 if let initialData {
                     vision.send(data: initialData)
                 } else {
                     vision.sendEmptyPadding()
                 }
-                vlessConnection = vision
+                proxyConnection = vision
             }
 
-            completion(.success(vlessConnection))
+            completion(.success(proxyConnection))
         }
     }
 
     /// Performs the VLESS handshake over a Reality connection.
     ///
     /// Sends the VLESS request header through the Reality tunnel and returns
-    /// a ``VLESSConnection`` wrapper.
+    /// a ``ProxyConnection`` wrapper.
     private func performRealityHandshake(
         command: VLESSCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
-        completion: @escaping (Result<VLESSConnection, Error>) -> Void
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let isVision = isVisionFlow && (command == .tcp || command == .mux)
 
@@ -1390,48 +1450,48 @@ class VLESSClient {
         }
 
         guard let realityConnection else {
-            completion(.failure(VLESSError.connectionFailed("Connection cancelled")))
+            completion(.failure(ProxyError.connectionFailed("Connection cancelled")))
             return
         }
         realityConnection.send(data: requestData) { [weak self, weak realityConnection] error in
             if let error {
-                completion(.failure(VLESSError.connectionFailed(error.localizedDescription)))
+                completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
                 return
             }
 
             guard let self else {
-                completion(.failure(VLESSError.connectionFailed("Client deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
             guard let realityConnection else {
-                completion(.failure(VLESSError.connectionFailed("Connection deallocated")))
+                completion(.failure(ProxyError.connectionFailed("Connection deallocated")))
                 return
             }
 
-            var vlessConnection: VLESSConnection
+            var proxyConnection: ProxyConnection
             if command == .udp {
-                vlessConnection = VLESSRealityUDPConnection(realityConnection: realityConnection)
+                proxyConnection = RealityUDPProxyConnection(realityConnection: realityConnection)
             } else {
-                vlessConnection = VLESSRealityConnection(realityConnection: realityConnection)
+                proxyConnection = RealityProxyConnection(realityConnection: realityConnection)
             }
 
             if isVision {
                 // Verify outer TLS is 1.3 (matches Xray-core outbound.go:346-355)
-                if let tlsError = self.validateOuterTLSForVision(vlessConnection) {
+                if let tlsError = self.validateOuterTLSForVision(proxyConnection) {
                     completion(.failure(tlsError))
                     return
                 }
-                let vision = self.wrapWithVision(vlessConnection)
+                let vision = self.wrapWithVision(proxyConnection)
                 if let initialData {
                     vision.send(data: initialData)
                 } else {
                     vision.sendEmptyPadding()
                 }
-                vlessConnection = vision
+                proxyConnection = vision
             }
 
-            completion(.success(vlessConnection))
+            completion(.success(proxyConnection))
         }
     }
 
@@ -1440,13 +1500,13 @@ class VLESSClient {
     /// Validates that the outer TLS connection is TLS 1.3 when using Vision flow.
     /// Matches Xray-core `outbound.go` lines 346-355.
     /// Returns an error if the check fails, nil if OK or not applicable.
-    private func validateOuterTLSForVision(_ connection: VLESSConnection) -> Error? {
+    private func validateOuterTLSForVision(_ connection: ProxyConnection) -> Error? {
         guard let version = connection.outerTLSVersion else {
             // No TLS (raw TCP) — nothing to check
             return nil
         }
         if version != .tls13 {
-            return VLESSError.protocolError("Vision requires outer TLS 1.3, found \(version)")
+            return ProxyError.protocolError("Vision requires outer TLS 1.3, found \(version)")
         }
         return nil
     }
@@ -1457,7 +1517,7 @@ class VLESSClient {
     ///
     /// - Parameter connection: The base VLESS connection to wrap.
     /// - Returns: A ``VLESSVisionConnection`` wrapping the provided connection.
-    private func wrapWithVision(_ connection: VLESSConnection) -> VLESSVisionConnection {
+    private func wrapWithVision(_ connection: ProxyConnection) -> VLESSVisionConnection {
         let uuidBytes = configuration.uuid.uuid
         let uuidData = Data([
             uuidBytes.0, uuidBytes.1, uuidBytes.2, uuidBytes.3,
@@ -1466,5 +1526,75 @@ class VLESSClient {
             uuidBytes.12, uuidBytes.13, uuidBytes.14, uuidBytes.15
         ])
         return VLESSVisionConnection(connection: connection, userUUID: uuidData, testseed: configuration.testseed)
+    }
+
+    // MARK: - Shadowsocks
+
+    /// Whether this client is configured for Shadowsocks outbound.
+    private var isShadowsocks: Bool {
+        configuration.outboundProtocol == .shadowsocks
+    }
+
+    /// Wraps a bare transport connection with Shadowsocks AEAD encryption for TCP.
+    private func wrapWithShadowsocks(
+        inner: ProxyConnection,
+        command: VLESSCommand,
+        destinationHost: String,
+        destinationPort: UInt16
+    ) -> Result<ProxyConnection, Error> {
+        guard let method = configuration.ssMethod,
+              let cipher = ShadowsocksCipher(method: method) else {
+            return .failure(ProxyError.protocolError("Invalid Shadowsocks method: \(configuration.ssMethod ?? "nil")"))
+        }
+        guard let password = configuration.ssPassword else {
+            return .failure(ProxyError.protocolError("Shadowsocks password not set"))
+        }
+
+        if cipher.isSS2022 {
+            // Shadowsocks 2022: base64-encoded PSK(s), BLAKE3 key derivation
+            guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
+                return .failure(ProxyError.protocolError("Invalid Shadowsocks 2022 PSK"))
+            }
+
+            if command == .udp {
+                if cipher == .blake3chacha20poly1305 {
+                    let ssConn = Shadowsocks2022ChaChaUDPConnection(
+                        inner: inner, psk: pskList.last!, dstHost: destinationHost, dstPort: destinationPort
+                    )
+                    return .success(ssConn)
+                } else {
+                    let ssConn = Shadowsocks2022AESUDPConnection(
+                        inner: inner, cipher: cipher, pskList: pskList,
+                        dstHost: destinationHost, dstPort: destinationPort
+                    )
+                    return .success(ssConn)
+                }
+            } else {
+                let addressHeader = ShadowsocksProtocol.buildAddressHeader(host: destinationHost, port: destinationPort)
+                let ssConn = Shadowsocks2022Connection(
+                    inner: inner, cipher: cipher, pskList: pskList,
+                    addressHeader: addressHeader
+                )
+                return .success(ssConn)
+            }
+        } else {
+            // Legacy Shadowsocks: password-based EVP_BytesToKey derivation
+            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
+            let addressHeader = ShadowsocksProtocol.buildAddressHeader(host: destinationHost, port: destinationPort)
+
+            if command == .udp {
+                let ssConn = ShadowsocksUDPConnection(
+                    inner: inner, cipher: cipher, masterKey: masterKey,
+                    dstHost: destinationHost, dstPort: destinationPort
+                )
+                return .success(ssConn)
+            } else {
+                let ssConn = ShadowsocksConnection(
+                    inner: inner, cipher: cipher, masterKey: masterKey,
+                    addressHeader: addressHeader
+                )
+                return .success(ssConn)
+            }
+        }
     }
 }
