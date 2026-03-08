@@ -60,10 +60,14 @@ struct HomeView: View {
                 }
             }
         }
-        .picker3D($pickerConfig, items: viewModel.configurations.map { PickerItem(id: $0.id, name: $0.name) })
+        .picker3D($pickerConfig, items: viewModel.allPickerItems)
         .onChange(of: pickerConfig.show) {
-            if !pickerConfig.show, let id = pickerConfig.selectedId, let configuration = viewModel.configurations.first(where: { $0.id == id }) {
-                viewModel.selectedConfiguration = configuration
+            if !pickerConfig.show, let id = pickerConfig.selectedId {
+                if let configuration = viewModel.configurations.first(where: { $0.id == id }) {
+                    viewModel.selectedConfiguration = configuration
+                } else if let chain = viewModel.chains.first(where: { $0.id == id }) {
+                    viewModel.selectChain(chain)
+                }
             }
         }
         .sheet(isPresented: $showingAddSheet) {
@@ -146,7 +150,7 @@ struct HomeView: View {
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 } else {
                     Circle()
-                        .fill(.regularMaterial)
+                        .fill(.white.opacity(0.2))
                         .frame(width: 140, height: 140)
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 }
@@ -285,7 +289,7 @@ struct HomeView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .background(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(.regularMaterial)
+                        .fill(.white.opacity(0.2))
                 )
         }
     }

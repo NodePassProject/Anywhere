@@ -10,6 +10,28 @@ import os.log
 
 private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "BSDSocket")
 
+// MARK: - RawTransport
+
+/// Protocol abstracting the raw I/O layer used by TLS/Reality handshakes and proxy chaining.
+///
+/// Both ``BSDSocket`` (real TCP) and ``TunneledTransport`` (tunneled TCP via proxy chain) conform.
+protocol RawTransport: AnyObject {
+    /// Whether the transport is connected and ready for I/O.
+    var isTransportReady: Bool { get }
+
+    /// Sends data through the transport.
+    func send(data: Data, completion: @escaping (Error?) -> Void)
+
+    /// Sends data through the transport without tracking completion.
+    func send(data: Data)
+
+    /// Receives up to `maximumLength` bytes from the transport.
+    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void)
+
+    /// Closes the transport and cancels all pending operations.
+    func forceCancel()
+}
+
 // MARK: - Error
 
 /// Errors that can occur during BSD socket operations.
@@ -45,7 +67,7 @@ enum BSDSocketError: Error, LocalizedError {
 /// are blocked waiting for I/O.
 ///
 /// Socket options are configured following Xray-core's `sockopt_darwin.go`.
-class BSDSocket {
+class BSDSocket: RawTransport {
 
     /// The current connection state.
     enum State {
@@ -101,7 +123,7 @@ class BSDSocket {
     // MARK: - Connect
 
     /// A resolved network address, copied from `addrinfo` so it outlives `freeaddrinfo`.
-    private struct ResolvedAddress {
+    struct ResolvedAddress {
         let family: Int32
         let socktype: Int32
         let proto: Int32
@@ -123,7 +145,7 @@ class BSDSocket {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let addresses: [ResolvedAddress]
             do {
-                addresses = try Self.resolveAddresses(host: host, port: port)
+                addresses = try DNSCache.shared.resolveTCP(host: host, port: port)
             } catch {
                 socketQueue.async { self.state = .failed(error); completion(error) }
                 return
@@ -135,7 +157,7 @@ class BSDSocket {
     }
 
     /// Resolves a hostname to an array of socket addresses via `getaddrinfo`.
-    private static func resolveAddresses(host: String, port: UInt16) throws -> [ResolvedAddress] {
+    static func resolveAddresses(host: String, port: UInt16) throws -> [ResolvedAddress] {
         // Strip brackets from IPv6 addresses (e.g. "[::1]" → "::1")
         let bare = host.hasPrefix("[") && host.hasSuffix("]")
             ? String(host.dropFirst().dropLast())
@@ -460,6 +482,15 @@ class BSDSocket {
     /// Handles a write-ready event from the write dispatch source.
     private func handleWriteEvent() {
         drainSendQueue()
+    }
+
+    // MARK: - Cancel
+
+    // MARK: - RawTransport Conformance
+
+    var isTransportReady: Bool {
+        if case .ready = state { return true }
+        return false
     }
 
     // MARK: - Cancel

@@ -33,6 +33,12 @@ struct ContentView: View {
                         }
                     }
 
+                    Tab("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill") {
+                        NavigationStack {
+                            ChainListView()
+                        }
+                    }
+
                     Tab("Settings", systemImage: "gearshape") {
                         NavigationStack {
                             SettingsView()
@@ -51,6 +57,11 @@ struct ContentView: View {
                         ProxyListView()
                     }
                     .tabItem { Label("Proxies", systemImage: "network") }
+
+                    NavigationStack {
+                        ChainListView()
+                    }
+                    .tabItem { Label("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill") }
 
                     NavigationStack {
                         SettingsView()

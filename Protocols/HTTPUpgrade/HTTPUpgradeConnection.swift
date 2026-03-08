@@ -83,6 +83,29 @@ class HTTPUpgradeConnection {
         self._isConnected = true
     }
 
+    /// Creates an HTTP upgrade connection over a proxy tunnel (for proxy chaining).
+    init(tunnel: ProxyConnection, configuration: HTTPUpgradeConfiguration) {
+        self.configuration = configuration
+        self.transportSend = { data, completion in
+            tunnel.sendRaw(data: data, completion: completion)
+        }
+        self.transportReceive = { completion in
+            tunnel.receiveRaw { data, error in
+                if let error {
+                    completion(nil, true, error)
+                } else if let data, !data.isEmpty {
+                    completion(data, false, nil)
+                } else {
+                    completion(nil, true, nil)
+                }
+            }
+        }
+        self.transportCancel = {
+            tunnel.cancel()
+        }
+        self._isConnected = true
+    }
+
     // MARK: - HTTP Upgrade Handshake
 
     /// Performs the HTTP upgrade handshake.

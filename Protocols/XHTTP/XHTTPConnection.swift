@@ -58,6 +58,7 @@ class XHTTPConnection {
     private var h2ReadBuffer = Data()
     private var h2DataBuffer = Data()
     private var h2PeerWindowSize: Int = 65535
+    private var h2PeerInitialWindowSize: Int = 65535
     private var h2LocalWindowSize: Int = 65535
     private var h2MaxFrameSize: Int = 16384
     private var h2ResponseReceived = false
@@ -203,6 +204,35 @@ class XHTTPConnection {
         }
         self.downloadCancel = {
             socket.forceCancel()
+        }
+        self._isConnected = true
+    }
+
+    // MARK: - Initializers (Proxy Tunnel)
+
+    /// Creates an XHTTP connection over a proxy tunnel (for proxy chaining).
+    init(tunnel: ProxyConnection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
+        self.configuration = configuration
+        self.mode = mode
+        self.sessionId = sessionId
+        self.useHTTP2 = useHTTP2
+        self.uploadConnectionFactory = uploadConnectionFactory
+        self.downloadSend = { data, completion in
+            tunnel.sendRaw(data: data, completion: completion)
+        }
+        self.downloadReceive = { completion in
+            tunnel.receiveRaw { data, error in
+                if let error {
+                    completion(nil, true, error)
+                } else if let data, !data.isEmpty {
+                    completion(data, false, nil)
+                } else {
+                    completion(nil, true, nil)
+                }
+            }
+        }
+        self.downloadCancel = {
+            tunnel.cancel()
         }
         self._isConnected = true
     }
@@ -1022,38 +1052,137 @@ extension XHTTPConnection {
     }
 
     /// Checks if the HEADERS response block starts with :status 200.
-    private func checkH2ResponseStatus(_ headerBlock: Data) -> Bool {
-        guard !headerBlock.isEmpty else { return false }
-        // 0x88 = indexed representation of :status 200 (static table index 8)
-        if headerBlock[headerBlock.startIndex] == 0x88 {
-            return true
-        }
-        // Also accept literal with name index 8, value "200"
-        // 0x48 = literal with incremental indexing, name index 8
-        if headerBlock.count >= 5 && headerBlock[headerBlock.startIndex] == 0x48 {
-            let valueStart = headerBlock.startIndex + 2 // skip 0x48 and length byte
-            if headerBlock[headerBlock.startIndex + 1] == 0x03, // length=3
-               headerBlock.count >= valueStart + 3 {
-                let value = String(data: headerBlock[valueStart..<valueStart + 3], encoding: .ascii)
-                return value == "200"
+    /// Returns nil if status is 200 OK, or an error description string otherwise.
+    private func checkH2ResponseStatus(_ headerBlock: Data) -> String? {
+        guard !headerBlock.isEmpty else { return "empty header block" }
+
+        // Skip HPACK dynamic table size updates (prefix 001xxxxx, RFC 7541 §6.3).
+        // Servers may send these at the start of a header block after a SETTINGS change.
+        var offset = headerBlock.startIndex
+        while offset < headerBlock.endIndex, headerBlock[offset] & 0xE0 == 0x20 {
+            // Decode the 5-bit prefixed integer to find the entry's length
+            let initial = headerBlock[offset] & 0x1F
+            offset += 1
+            if initial == 0x1F {
+                // Multi-byte integer: skip continuation bytes (high bit set)
+                while offset < headerBlock.endIndex, headerBlock[offset] & 0x80 != 0 {
+                    offset += 1
+                }
+                offset += 1  // final byte (high bit clear)
             }
         }
-        return false
+        guard offset < headerBlock.endIndex else { return "empty header block (only table size updates)" }
+
+        let first = headerBlock[offset]
+        let remaining = headerBlock[offset...]
+
+        // 1. Indexed representation (top bit set): static table index
+        //    0x88=200, 0x89=204, 0x8a=206, 0x8b=304, 0x8c=400, 0x8d=404, 0x8e=500
+        if first & 0x80 != 0 {
+            if first == 0x88 { return nil } // 200 OK
+            let indexedStatus: [UInt8: String] = [0x89: "204", 0x8a: "206", 0x8b: "304", 0x8c: "400", 0x8d: "404", 0x8e: "500"]
+            if let status = indexedStatus[first] { return "status \(status)" }
+            return "status (indexed \(first & 0x7F))"
+        }
+
+        // 2. Literal representations with name index 8 (:status)
+        //    0x08 = without indexing, 0x18 = never indexed, 0x48 = incremental indexing
+        let nameIndex: UInt8
+        if first & 0xF0 == 0x00 {       // Literal without indexing (0000 NNNN)
+            nameIndex = first & 0x0F
+        } else if first & 0xF0 == 0x10 { // Literal never indexed (0001 NNNN)
+            nameIndex = first & 0x0F
+        } else if first & 0xC0 == 0x40 { // Literal with incremental indexing (01NN NNNN)
+            nameIndex = first & 0x3F
+        } else {
+            let hex = remaining.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
+            return "unknown status (HPACK: \(hex))"
+        }
+
+        guard nameIndex == 8, remaining.count >= 2 else {
+            let hex = remaining.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
+            return "unknown status (HPACK: \(hex))"
+        }
+
+        let valueMeta = remaining[remaining.startIndex + 1]
+        let isHuffman = (valueMeta & 0x80) != 0
+        let valueLen = Int(valueMeta & 0x7F)
+        let valueStart = remaining.startIndex + 2
+
+        guard remaining.count >= 2 + valueLen, valueLen > 0 else {
+            return "status (?)"
+        }
+
+        let valueData = Data(remaining[valueStart..<(valueStart + valueLen)])
+
+        if !isHuffman {
+            let status = String(data: valueData, encoding: .ascii) ?? "?"
+            return status == "200" ? nil : "status \(status)"
+        }
+
+        // Huffman-decode digits for status code (RFC 7541 Appendix B)
+        // '0'=00000(5), '1'=00001(5), '2'=00010(5),
+        // '3'=011000(6), '4'=011001(6), '5'=011010(6), '6'=011011(6),
+        // '7'=011100(6), '8'=011101(6), '9'=011110(6)
+        let status = Self.huffmanDecodeDigits(valueData)
+        if status.isEmpty {
+            let hex = valueData.map { String(format: "%02x", $0) }.joined(separator: " ")
+            return "status (huffman: \(hex))"
+        }
+        return status == "200" ? nil : "status \(status)"
+    }
+
+    /// Huffman-decodes a byte sequence containing only ASCII digits (for HTTP status codes).
+    private static func huffmanDecodeDigits(_ data: Data) -> String {
+        var result = ""
+        var bits: UInt32 = 0
+        var numBits = 0
+
+        for byte in data {
+            bits = (bits << 8) | UInt32(byte)
+            numBits += 8
+        }
+
+        while numBits >= 5 {
+            let top5 = Int((bits >> (numBits - 5)) & 0x1F)
+            // 5-bit codes: '0'=0x00, '1'=0x01, '2'=0x02
+            if top5 <= 0x02 {
+                result.append(Character(UnicodeScalar(48 + top5)!))
+                numBits -= 5
+                continue
+            }
+            // 6-bit codes: '3'=0x18...'9'=0x1e
+            guard numBits >= 6 else { break }
+            let top6 = Int((bits >> (numBits - 6)) & 0x3F)
+            if top6 >= 0x18 && top6 <= 0x1E {
+                let digit = top6 - 0x18 + 3 // '3'..'9'
+                result.append(Character(UnicodeScalar(48 + digit)!))
+                numBits -= 6
+                continue
+            }
+            break // Unknown code or EOS padding
+        }
+        return result
     }
 
     // MARK: HTTP/2 Setup
 
-    /// Performs HTTP/2 connection setup: sends preface + SETTINGS + WINDOW_UPDATE,
-    /// exchanges settings with server, sends HEADERS for the stream-one POST.
+    /// Performs HTTP/2 connection setup matching Go's http2.Transport behavior:
+    /// 1. Send preface + SETTINGS + WINDOW_UPDATE
+    /// 2. Wait for server's SETTINGS (exchange settings)
+    /// 3. Send HEADERS for the stream-one POST
+    /// 4. Wait for server's HEADERS response (200 OK)
     func performH2Setup(completion: @escaping (Error?) -> Void) {
-        // Build initial data: preface + SETTINGS + WINDOW_UPDATE
+        // Phase 1: Send connection preface + SETTINGS + WINDOW_UPDATE
         var initData = Data()
 
         // 1. Connection preface
         initData.append(Self.h2Preface)
 
-        // 2. Client SETTINGS frame
+        // 2. Client SETTINGS frame (matching Go http2.Transport defaults)
         var settingsPayload = Data()
+        // HEADER_TABLE_SIZE = 4096 (Go default: initialHeaderTableSize)
+        settingsPayload.append(contentsOf: [0x00, 0x01, 0x00, 0x00, 0x10, 0x00])
         // ENABLE_PUSH = 0
         settingsPayload.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00])
         // INITIAL_WINDOW_SIZE = 4MB (matches Go http2.Transport)
@@ -1063,6 +1192,8 @@ extension XHTTPConnection {
             UInt8((winSize >> 24) & 0xFF), UInt8((winSize >> 16) & 0xFF),
             UInt8((winSize >> 8) & 0xFF), UInt8(winSize & 0xFF)
         ])
+        // MAX_HEADER_LIST_SIZE = 10MB (Go default)
+        settingsPayload.append(contentsOf: [0x00, 0x06, 0x00, 0xA0, 0x00, 0x00])
         initData.append(buildH2Frame(type: Self.h2FrameSettings, flags: 0, streamId: 0, payload: settingsPayload))
 
         // 3. Connection-level WINDOW_UPDATE (increase from default 65535 to 1GB)
@@ -1074,25 +1205,90 @@ extension XHTTPConnection {
         wuPayload[3] = UInt8(windowIncrement & 0xFF)
         initData.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: wuPayload))
 
-        // 4. HEADERS frame for stream 1 (the stream-one POST request)
-        let headerBlock = encodeH2RequestHeaders()
-        // END_HEADERS (0x04), but NOT END_STREAM (body follows)
-        initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: 1, payload: headerBlock))
-
-        // Send all at once
+        // Send preface + settings + window_update (NO HEADERS yet — wait for server settings first)
         downloadSend(initData) { [weak self] error in
             if let error {
                 completion(XHTTPError.setupFailed("H2 preface send failed: \(error.localizedDescription)"))
                 return
             }
 
-            // Read server frames until we get SETTINGS and HEADERS response
-            self?.readH2SetupFrames(completion: completion)
+            // Phase 2: Read server SETTINGS, then send HEADERS
+            self?.waitForServerSettings(completion: completion)
         }
     }
 
-    /// Reads server frames during setup: process SETTINGS, wait for HEADERS response.
-    private func readH2SetupFrames(completion: @escaping (Error?) -> Void) {
+    /// Reads frames until we receive the server's SETTINGS frame, sends ACK,
+    /// then sends the HEADERS frame for the POST request.
+    private func waitForServerSettings(completion: @escaping (Error?) -> Void) {
+        readH2Frame { [weak self] result in
+            guard let self else {
+                completion(XHTTPError.connectionClosed)
+                return
+            }
+
+            switch result {
+            case .failure(let error):
+                completion(XHTTPError.setupFailed("H2 settings exchange failed: \(error.localizedDescription)"))
+
+            case .success(let frame):
+                switch frame.type {
+                case Self.h2FrameSettings:
+                    if frame.flags & Self.h2FlagAck != 0 {
+                        // SETTINGS ACK for our settings — keep waiting for server's own SETTINGS
+                        self.waitForServerSettings(completion: completion)
+                    } else {
+                        // Server's SETTINGS — parse and send ACK
+                        self.parseH2Settings(frame.payload)
+                        let ack = self.buildH2Frame(type: Self.h2FrameSettings, flags: Self.h2FlagAck, streamId: 0, payload: Data())
+                        self.downloadSend(ack) { _ in }
+
+                        // Phase 3: Now send HEADERS for stream 1
+                        self.sendH2Headers(completion: completion)
+                    }
+
+                case Self.h2FrameWindowUpdate:
+                    self.lock.lock()
+                    if frame.payload.count >= 4 {
+                        let increment = (UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])
+                        self.h2PeerWindowSize += Int(increment & 0x7FFFFFFF)
+                    }
+                    self.lock.unlock()
+                    self.waitForServerSettings(completion: completion)
+
+                case Self.h2FramePing:
+                    let pong = self.buildH2Frame(type: Self.h2FramePing, flags: Self.h2FlagAck, streamId: 0, payload: frame.payload)
+                    self.downloadSend(pong) { _ in }
+                    self.waitForServerSettings(completion: completion)
+
+                case Self.h2FrameGoaway:
+                    completion(XHTTPError.setupFailed("Server sent GOAWAY during settings exchange"))
+
+                default:
+                    self.waitForServerSettings(completion: completion)
+                }
+            }
+        }
+    }
+
+    /// Sends the HEADERS frame for the stream-one POST, then waits for the response.
+    private func sendH2Headers(completion: @escaping (Error?) -> Void) {
+        let headerBlock = encodeH2RequestHeaders()
+        // END_HEADERS (0x04), but NOT END_STREAM (body follows)
+        let headersFrame = buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: 1, payload: headerBlock)
+
+        downloadSend(headersFrame) { [weak self] error in
+            if let error {
+                completion(XHTTPError.setupFailed("H2 HEADERS send failed: \(error.localizedDescription)"))
+                return
+            }
+
+            // Phase 4: Wait for server's HEADERS response (200 OK)
+            self?.readH2ResponseHeaders(completion: completion)
+        }
+    }
+
+    /// Reads server frames after sending HEADERS, waiting for the response HEADERS.
+    private func readH2ResponseHeaders(completion: @escaping (Error?) -> Void) {
         readH2Frame { [weak self] result in
             guard let self else {
                 completion(XHTTPError.connectionClosed)
@@ -1106,26 +1302,22 @@ extension XHTTPConnection {
             case .success(let frame):
                 switch frame.type {
                 case Self.h2FrameSettings:
-                    if frame.flags & Self.h2FlagAck != 0 {
-                        // SETTINGS ACK
-                    } else {
-                        // Server's SETTINGS — parse and send ACK
+                    if frame.flags & Self.h2FlagAck == 0 {
                         self.parseH2Settings(frame.payload)
                         let ack = self.buildH2Frame(type: Self.h2FrameSettings, flags: Self.h2FlagAck, streamId: 0, payload: Data())
                         self.downloadSend(ack) { _ in }
                     }
-                    // Keep reading until we get HEADERS response
-                    self.readH2SetupFrames(completion: completion)
+                    self.readH2ResponseHeaders(completion: completion)
 
                 case Self.h2FrameHeaders:
                     // Response headers for stream 1
-                    if self.checkH2ResponseStatus(frame.payload) {
+                    if let statusError = self.checkH2ResponseStatus(frame.payload) {
+                        completion(XHTTPError.httpError("H2 response \(statusError)"))
+                    } else {
                         self.lock.lock()
                         self.h2ResponseReceived = true
                         self.lock.unlock()
                         completion(nil)
-                    } else {
-                        completion(XHTTPError.httpError("H2 response status is not 200"))
                     }
 
                 case Self.h2FrameWindowUpdate:
@@ -1135,27 +1327,28 @@ extension XHTTPConnection {
                         self.h2PeerWindowSize += Int(increment & 0x7FFFFFFF)
                     }
                     self.lock.unlock()
-                    self.readH2SetupFrames(completion: completion)
+                    self.readH2ResponseHeaders(completion: completion)
 
                 case Self.h2FramePing:
-                    // Send PONG
                     let pong = self.buildH2Frame(type: Self.h2FramePing, flags: Self.h2FlagAck, streamId: 0, payload: frame.payload)
                     self.downloadSend(pong) { _ in }
-                    self.readH2SetupFrames(completion: completion)
+                    self.readH2ResponseHeaders(completion: completion)
 
                 case Self.h2FrameGoaway:
                     completion(XHTTPError.setupFailed("Server sent GOAWAY during setup"))
+
+                case Self.h2FrameRstStream:
+                    completion(XHTTPError.setupFailed("Server sent RST_STREAM during setup"))
 
                 case Self.h2FrameData:
                     // Early DATA before we saw HEADERS — buffer it
                     self.lock.lock()
                     self.h2DataBuffer.append(frame.payload)
                     self.lock.unlock()
-                    self.readH2SetupFrames(completion: completion)
+                    self.readH2ResponseHeaders(completion: completion)
 
                 default:
-                    // Ignore unknown frames
-                    self.readH2SetupFrames(completion: completion)
+                    self.readH2ResponseHeaders(completion: completion)
                 }
             }
         }
@@ -1171,9 +1364,11 @@ extension XHTTPConnection {
             offset += 6
 
             switch id {
-            case 0x04: // INITIAL_WINDOW_SIZE
+            case 0x04: // INITIAL_WINDOW_SIZE (RFC 7540 §6.9.2: adjust by delta)
                 lock.lock()
-                h2PeerWindowSize = Int(value)
+                let delta = Int(value) - h2PeerInitialWindowSize
+                h2PeerInitialWindowSize = Int(value)
+                h2PeerWindowSize += delta
                 lock.unlock()
             case 0x05: // MAX_FRAME_SIZE
                 lock.lock()
@@ -1285,7 +1480,7 @@ extension XHTTPConnection {
                         completion(nil, nil)
                     } else if !self.h2ResponseReceived {
                         // Late response headers
-                        if self.checkH2ResponseStatus(frame.payload) {
+                        if self.checkH2ResponseStatus(frame.payload) == nil {
                             self.lock.lock()
                             self.h2ResponseReceived = true
                             self.lock.unlock()

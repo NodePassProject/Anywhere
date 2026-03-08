@@ -73,7 +73,7 @@ nonisolated enum LatencyTester {
             }
             return .success(ms)
         } catch {
-            logger.debug("Latency test failed for \(configuration.name): \(error.localizedDescription)")
+            logger.error("Latency test failed for \(configuration.name): \(error.localizedDescription)")
             return .failed
         }
     }

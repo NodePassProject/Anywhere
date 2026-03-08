@@ -16,10 +16,15 @@ class VPNViewModel {
     var vpnStatus: NEVPNStatus = .disconnected
     var selectedConfiguration: ProxyConfiguration? {
         didSet {
-            if let selectedConfiguration {
-                AWCore.userDefaults.set(selectedConfiguration.id.uuidString, forKey: Self.selectedConfigurationIdKey)
-            } else {
-                AWCore.userDefaults.removeObject(forKey: Self.selectedConfigurationIdKey)
+            if !_suppressSelectionPersistence {
+                // Direct proxy selection — clear any chain selection
+                selectedChainId = nil
+                AWCore.userDefaults.removeObject(forKey: Self.selectedChainIdKey)
+                if let selectedConfiguration {
+                    AWCore.userDefaults.set(selectedConfiguration.id.uuidString, forKey: Self.selectedConfigurationIdKey)
+                } else {
+                    AWCore.userDefaults.removeObject(forKey: Self.selectedConfigurationIdKey)
+                }
             }
             // If VPN is connected, push new configuration to the tunnel
             if vpnStatus == .connected, let selectedConfiguration {
@@ -29,7 +34,11 @@ class VPNViewModel {
     }
     private(set) var configurations: [ProxyConfiguration] = []
     private(set) var subscriptions: [Subscription] = []
+    private(set) var chains: [ProxyChain] = []
+    /// Non-nil when a chain is the active selection.
+    private(set) var selectedChainId: UUID?
     var latencyResults: [UUID: LatencyResult] = [:]
+    var chainLatencyResults: [UUID: LatencyResult] = [:]
     var startError: String?
     var orphanedRuleSetNames: [String] = []
     var bytesIn: Int64 = 0
@@ -37,23 +46,38 @@ class VPNViewModel {
 
     private let store = ConfigurationStore.shared
     private let subscriptionStore = SubscriptionStore.shared
+    private let chainStore = ChainStore.shared
     private let ruleSetStore = RuleSetStore.shared
     private var vpnManager: NETunnelProviderManager?
     private var statusObserver: AnyCancellable?
     private var storeCancellable: AnyCancellable?
     private var subscriptionStoreCancellable: AnyCancellable?
+    private var chainStoreCancellable: AnyCancellable?
     private var statsTask: Task<Void, Never>?
+    /// Suppresses UserDefaults persistence in `selectedConfiguration.didSet`
+    /// so that `selectChain` can set the chain ID without the didSet clearing it.
+    private var _suppressSelectionPersistence = false
 
     private static let selectedConfigurationIdKey = "selectedConfigurationId"
+    private static let selectedChainIdKey = "selectedChainId"
 
     init() {
         configurations = store.configurations
         subscriptions = subscriptionStore.subscriptions
+        chains = chainStore.chains
 
-        // Restore selected configuration from UserDefaults
-        if let savedConfigurationIdSrting = AWCore.userDefaults.string(forKey: Self.selectedConfigurationIdKey),
-           let savedConfigurationId = UUID(uuidString: savedConfigurationIdSrting),
-           let configuration = configurations.first(where: { $0.id == savedConfigurationId }) {
+        // Restore selection from UserDefaults — chain takes priority
+        if let savedChainIdString = AWCore.userDefaults.string(forKey: Self.selectedChainIdKey),
+           let savedChainId = UUID(uuidString: savedChainIdString),
+           let chain = chains.first(where: { $0.id == savedChainId }),
+           let resolved = resolveChain(chain) {
+            selectedChainId = savedChainId
+            _suppressSelectionPersistence = true
+            selectedConfiguration = resolved
+            _suppressSelectionPersistence = false
+        } else if let savedConfigurationIdString = AWCore.userDefaults.string(forKey: Self.selectedConfigurationIdKey),
+                  let savedConfigurationId = UUID(uuidString: savedConfigurationIdString),
+                  let configuration = configurations.first(where: { $0.id == savedConfigurationId }) {
             selectedConfiguration = configuration
         } else {
             selectedConfiguration = configurations.first
@@ -64,14 +88,21 @@ class VPNViewModel {
             .sink { [weak self] newConfigurations in
                 guard let self else { return }
                 self.configurations = newConfigurations
-                // Keep selection valid
-                if let selected = self.selectedConfiguration,
-                   !newConfigurations.contains(where: { $0.id == selected.id }) {
-                    self.selectedConfiguration = newConfigurations.first
+
+                if self.selectedChainId != nil {
+                    // Re-resolve chain in case underlying proxies changed
+                    self.reResolveSelectedChain()
+                } else {
+                    // Keep selection valid
+                    if let selected = self.selectedConfiguration,
+                       !newConfigurations.contains(where: { $0.id == selected.id }) {
+                        self.selectedConfiguration = newConfigurations.first
+                    }
+                    if self.selectedConfiguration == nil {
+                        self.selectedConfiguration = newConfigurations.first
+                    }
                 }
-                if self.selectedConfiguration == nil {
-                    self.selectedConfiguration = newConfigurations.first
-                }
+
                 // Reset routing rules that reference deleted configs
                 let validIds = Set(newConfigurations.map { $0.id.uuidString })
                 let affected = self.ruleSetStore.clearOrphanedAssignments(availableConfigIds: validIds)
@@ -85,6 +116,20 @@ class VPNViewModel {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] newSubscriptions in
                 self?.subscriptions = newSubscriptions
+            }
+
+        chainStoreCancellable = chainStore.$chains
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] newChains in
+                guard let self else { return }
+                self.chains = newChains
+                // If selected chain was deleted, fall back to first proxy
+                if let chainId = self.selectedChainId,
+                   !newChains.contains(where: { $0.id == chainId }) {
+                    self.selectedChainId = nil
+                    AWCore.userDefaults.removeObject(forKey: Self.selectedChainIdKey)
+                    self.selectedConfiguration = self.configurations.first
+                }
             }
 
         setupStatusObserver()
@@ -153,6 +198,101 @@ class VPNViewModel {
 
     func deleteConfiguration(_ configuration: ProxyConfiguration) {
         store.delete(configuration)
+    }
+
+    // MARK: - Chain CRUD & Selection
+
+    func addChain(_ chain: ProxyChain) {
+        chainStore.add(chain)
+    }
+
+    func updateChain(_ chain: ProxyChain) {
+        chainStore.update(chain)
+        // Re-resolve if this is the active chain
+        if selectedChainId == chain.id {
+            if let resolved = resolveChain(chain) {
+                _suppressSelectionPersistence = true
+                selectedConfiguration = resolved
+                _suppressSelectionPersistence = false
+            }
+        }
+    }
+
+    func deleteChain(_ chain: ProxyChain) {
+        chainStore.delete(chain)
+    }
+
+    /// Selects a chain as the working configuration.
+    func selectChain(_ chain: ProxyChain) {
+        guard let resolved = resolveChain(chain) else { return }
+        selectedChainId = chain.id
+        AWCore.userDefaults.set(chain.id.uuidString, forKey: Self.selectedChainIdKey)
+        AWCore.userDefaults.removeObject(forKey: Self.selectedConfigurationIdKey)
+        _suppressSelectionPersistence = true
+        selectedConfiguration = resolved
+        _suppressSelectionPersistence = false
+    }
+
+    /// Resolves a chain into a composite ProxyConfiguration.
+    ///
+    /// The last proxy becomes the main config; preceding proxies fill the `chain` field.
+    func resolveChain(_ chain: ProxyChain) -> ProxyConfiguration? {
+        let configs = chain.proxyIds.compactMap { id in configurations.first(where: { $0.id == id }) }
+        guard configs.count == chain.proxyIds.count, configs.count >= 2 else { return nil }
+        let exitProxy = configs.last!
+        let chainProxies = Array(configs.dropLast())
+        return ProxyConfiguration(
+            name: chain.name,
+            serverAddress: exitProxy.serverAddress,
+            serverPort: exitProxy.serverPort,
+            uuid: exitProxy.uuid,
+            encryption: exitProxy.encryption,
+            transport: exitProxy.transport,
+            flow: exitProxy.flow,
+            security: exitProxy.security,
+            tls: exitProxy.tls,
+            reality: exitProxy.reality,
+            websocket: exitProxy.websocket,
+            httpUpgrade: exitProxy.httpUpgrade,
+            xhttp: exitProxy.xhttp,
+            testseed: exitProxy.testseed,
+            muxEnabled: exitProxy.muxEnabled,
+            xudpEnabled: exitProxy.xudpEnabled,
+            outboundProtocol: exitProxy.outboundProtocol,
+            ssPassword: exitProxy.ssPassword,
+            ssMethod: exitProxy.ssMethod,
+            chain: chainProxies
+        )
+    }
+
+    /// Re-resolves the currently selected chain after underlying configs change.
+    private func reResolveSelectedChain() {
+        guard let chainId = selectedChainId,
+              let chain = chains.first(where: { $0.id == chainId }) else {
+            // Chain itself was deleted — handled by chain store sink
+            return
+        }
+        if let resolved = resolveChain(chain) {
+            _suppressSelectionPersistence = true
+            selectedConfiguration = resolved
+            _suppressSelectionPersistence = false
+        } else {
+            // Chain is broken (proxies deleted), fall back
+            selectedChainId = nil
+            AWCore.userDefaults.removeObject(forKey: Self.selectedChainIdKey)
+            selectedConfiguration = configurations.first
+        }
+    }
+
+    /// All items available for the Home picker (proxies + chains).
+    var allPickerItems: [PickerItem] {
+        var items = configurations.map { PickerItem(id: $0.id, name: $0.name) }
+        for chain in chains {
+            let proxies = chain.proxyIds.compactMap { id in configurations.first(where: { $0.id == id }) }
+            guard proxies.count == chain.proxyIds.count, proxies.count >= 2 else { continue }
+            items.append(PickerItem(id: chain.id, name: chain.name))
+        }
+        return items
     }
 
     // MARK: - Subscription CRUD
@@ -280,6 +420,45 @@ class VPNViewModel {
         }
     }
 
+    // MARK: - Chain Latency Testing
+
+    private var chainLatencyTask: Task<Void, Never>?
+
+    func testChainLatency(for chain: ProxyChain) {
+        guard let resolved = resolveChain(chain) else { return }
+        chainLatencyResults[chain.id] = .testing
+        let chainId = chain.id
+        chainLatencyTask?.cancel()
+        chainLatencyTask = Task.detached { [resolved] in
+            let result = await LatencyTester.test(resolved)
+            await MainActor.run { [weak self] in
+                self?.chainLatencyResults[chainId] = result
+            }
+        }
+    }
+
+    func testAllChainLatencies() {
+        chainLatencyTask?.cancel()
+        var resolvedChains: [(UUID, ProxyConfiguration)] = []
+        for chain in chains {
+            if let resolved = resolveChain(chain) {
+                chainLatencyResults[chain.id] = .testing
+                resolvedChains.append((chain.id, resolved))
+            }
+        }
+        let configs = resolvedChains.map { $0.1 }
+        let idMap = Dictionary(uniqueKeysWithValues: zip(configs.map(\.id), resolvedChains.map(\.0)))
+        chainLatencyTask = Task.detached {
+            for await (configId, result) in LatencyTester.testAll(configs) {
+                if let chainId = idMap[configId] {
+                    await MainActor.run { [weak self] in
+                        self?.chainLatencyResults[chainId] = result
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Setup
 
     private func setupStatusObserver() {
@@ -376,7 +555,8 @@ class VPNViewModel {
         // Sync routing rules to App Group before starting tunnel
         syncRoutingConfigurationToNE()
 
-        // Resolve domain to IP before tunnel starts (avoids DNS-over-tunnel loop)
+        // Pre-resolve the main proxy address for tunnel settings (route exclusion).
+        // Actual connections resolve lazily via DNSCache at connection time.
         let resolvedIP = Self.resolveServerAddress(configuration.serverAddress)
 
         // Configure the VPN
@@ -443,12 +623,19 @@ class VPNViewModel {
     private func sendConfigurationToTunnel(_ configuration: ProxyConfiguration) {
         guard let session = vpnManager?.connection as? NETunnelProviderSession else { return }
         var configurationDict = serializeConfiguration(configuration)
-        // Resolve domain to IP so the tunnel can use it for socket connections
-        if let resolvedIP = Self.resolveServerAddress(configuration.serverAddress) {
-            configurationDict["resolvedIP"] = resolvedIP
-        }
+        Self.resolveAddressesInDict(&configurationDict)
         guard let data = try? JSONSerialization.data(withJSONObject: configurationDict) else { return }
         try? session.sendProviderMessage(data) { _ in }
+    }
+
+    /// Resolves `serverAddress` to IP for a config dict (main proxy only, for tunnel settings).
+    /// Chain proxy addresses are resolved lazily via DNSCache at connection time.
+    nonisolated private static func resolveAddressesInDict(_ dict: inout [String: Any]) {
+        if let addr = dict["serverAddress"] as? String, dict["resolvedIP"] == nil {
+            if let resolved = resolveServerAddress(addr) {
+                dict["resolvedIP"] = resolved
+            }
+        }
     }
 
     // MARK: - DNS Resolution
@@ -583,6 +770,11 @@ class VPNViewModel {
                 configurationDict["xhttpHeaders"] = xhttp.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
             }
             configurationDict["xhttpNoGRPCHeader"] = xhttp.noGRPCHeader
+        }
+
+        // Add proxy chain if present
+        if let chain = configuration.chain, !chain.isEmpty {
+            configurationDict["chain"] = chain.map { serializeConfiguration($0) }
         }
 
         return configurationDict

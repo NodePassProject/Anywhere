@@ -25,7 +25,7 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension"
 /// the underlying ``BSDSocket`` with TLS record encryption/decryption.
 class RealityClient {
     private let configuration: RealityConfiguration
-    private var connection: BSDSocket?
+    private var connection: (any RawTransport)?
 
     // Ephemeral key pair (cleared after handshake)
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
@@ -81,6 +81,22 @@ class RealityClient {
 
             self.performRealityHandshake(completion: completion)
         }
+    }
+
+    /// Connects over an existing proxy tunnel and performs the Reality handshake.
+    ///
+    /// Used for proxy chaining: the tunnel provides raw TCP I/O to the remote server.
+    ///
+    /// - Parameters:
+    ///   - tunnel: The proxy connection providing a TCP tunnel to the server.
+    ///   - completion: Called with the established ``TLSRecordConnection`` or an error.
+    func connect(
+        overTunnel tunnel: ProxyConnection,
+        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
+    ) {
+        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        self.connection = TunneledTransport(tunnel: tunnel)
+        performRealityHandshake(completion: completion)
     }
 
     /// Cancels the connection and releases all resources.
@@ -226,7 +242,9 @@ class RealityClient {
             }
 
             guard let data, data.count >= 5 else {
-                logger.error("[Reality] No server response or too short")
+                let len = data?.count ?? 0
+                let hex = data.map { $0.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ") } ?? "nil"
+                logger.error("[Reality] No server response or too short (len=\(len, privacy: .public), data=\(hex, privacy: .public))")
                 completion(.failure(RealityError.handshakeFailed("No server response")))
                 return
             }
@@ -241,7 +259,8 @@ class RealityClient {
                 logger.error("[Reality] TLS Alert: level=\(alertLevel, privacy: .public), desc=\(alertDesc, privacy: .public)")
                 completion(.failure(RealityError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")))
             } else {
-                logger.error("[Reality] Unexpected content type: 0x\(String(format: "%02x", contentType), privacy: .public)")
+                let hex = data.prefix(32).map { String(format: "%02x", $0) }.joined(separator: " ")
+                logger.error("[Reality] Unexpected content type: 0x\(String(format: "%02x", contentType), privacy: .public), first 32 bytes: \(hex, privacy: .public)")
                 completion(.failure(RealityError.handshakeFailed("Unexpected content type: \(contentType)")))
             }
         }

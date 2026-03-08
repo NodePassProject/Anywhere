@@ -528,9 +528,6 @@ class LWIPTCPConnection {
         }
 
         if offset > 0 {
-            if offset < count {
-                logger.debug("[TCP] Flushed \(offset)/\(count) overflow bytes on close for \(self.dstHost, privacy: .public):\(self.dstPort)")
-            }
             lwip_bridge_tcp_output(pcb)
         }
     }

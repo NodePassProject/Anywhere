@@ -1,0 +1,153 @@
+//
+//  DNSCache.swift
+//  Network Extension
+//
+//  Created by Argsment Limited on 3/8/26.
+//
+
+import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "DNSCache")
+
+/// Thread-safe DNS cache that wraps `getaddrinfo` with TTL-based caching.
+///
+/// Modeled after Xray-core's DNS cache: resolved IP addresses are cached per domain
+/// and re-resolved when the TTL expires. IP addresses bypass the cache entirely.
+///
+/// The cache stores resolved IP strings (not full sockaddrs) so results can be shared
+/// by both TCP (``BSDSocket``) and UDP (``ShadowsocksUDPRelay``) callers.
+final class DNSCache {
+    static let shared = DNSCache()
+
+    /// Default TTL for cached entries (seconds).
+    static let defaultTTL: TimeInterval = 120
+
+    private struct CacheEntry {
+        let ips: [String]
+        let expiry: Date
+    }
+
+    private var cache: [String: CacheEntry] = [:]
+    private let lock = ReadWriteLock()
+
+    private init() {}
+
+    // MARK: - Public API
+
+    /// Resolves a hostname to IP address strings, using the cache when available.
+    ///
+    /// - If `host` is already an IP, returns it directly without caching.
+    /// - If `host` is a domain, checks the cache first. On miss or expiry,
+    ///   calls `getaddrinfo` and caches the result with ``defaultTTL``.
+    ///
+    /// - Returns: All resolved IP addresses (IPv4 and IPv6), or empty on failure.
+    func resolveAll(_ host: String) -> [String] {
+        let bare = Self.stripBrackets(host)
+
+        // IP addresses bypass cache
+        if Self.isIPAddress(bare) { return [bare] }
+
+        let key = bare.lowercased()
+
+        // Check cache (read lock)
+        let cached: [String]? = lock.withReadLock {
+            if let entry = cache[key], entry.expiry > Date() {
+                return entry.ips
+            }
+            return nil
+        }
+        if let cached { return cached }
+
+        // Cache miss — resolve via getaddrinfo
+        let ips = Self.resolveViaGetaddrinfo(bare)
+        guard !ips.isEmpty else {
+            logger.warning("[DNS] Resolution failed for \(bare, privacy: .public)")
+            return []
+        }
+
+        lock.withWriteLock {
+            cache[key] = CacheEntry(ips: ips, expiry: Date() + Self.defaultTTL)
+        }
+
+        return ips
+    }
+
+    /// Convenience: returns a single resolved IP (first result), or `nil` on failure.
+    func resolveHost(_ host: String) -> String? {
+        resolveAll(host).first
+    }
+
+    /// Resolves a hostname and returns ``BSDSocket/ResolvedAddress`` array ready for TCP connect.
+    ///
+    /// Uses the DNS cache for domain lookups, then constructs sockaddrs via `getaddrinfo`
+    /// with each cached IP (which is instant — no DNS involved).
+    func resolveTCP(host: String, port: UInt16) throws -> [BSDSocket.ResolvedAddress] {
+        let ips = resolveAll(host)
+        guard !ips.isEmpty else {
+            throw BSDSocketError.resolutionFailed("DNS resolution failed for \(host)")
+        }
+
+        var addresses: [BSDSocket.ResolvedAddress] = []
+        for ip in ips {
+            if let addrs = try? BSDSocket.resolveAddresses(host: ip, port: port) {
+                addresses.append(contentsOf: addrs)
+            }
+        }
+
+        guard !addresses.isEmpty else {
+            throw BSDSocketError.resolutionFailed("No usable addresses for \(host)")
+        }
+        return addresses
+    }
+
+    // MARK: - Internal
+
+    private static func stripBrackets(_ host: String) -> String {
+        host.hasPrefix("[") && host.hasSuffix("]")
+            ? String(host.dropFirst().dropLast())
+            : host
+    }
+
+    private static func isIPAddress(_ host: String) -> Bool {
+        var sa4 = sockaddr_in()
+        if inet_pton(AF_INET, host, &sa4.sin_addr) == 1 { return true }
+        var sa6 = sockaddr_in6()
+        if inet_pton(AF_INET6, host, &sa6.sin6_addr) == 1 { return true }
+        return false
+    }
+
+    /// Resolves a domain to IP address strings via `getaddrinfo`.
+    private static func resolveViaGetaddrinfo(_ host: String) -> [String] {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, nil, &hints, &result)
+        guard status == 0, let res = result else { return [] }
+        defer { freeaddrinfo(res) }
+
+        var ips: [String] = []
+        var current: UnsafeMutablePointer<addrinfo>? = res
+        while let info = current {
+            if info.pointee.ai_family == AF_INET {
+                var addr = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+                var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                if inet_ntop(AF_INET, &addr.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                    let ip = String(cString: buf)
+                    if !ips.contains(ip) { ips.append(ip) }
+                }
+            } else if info.pointee.ai_family == AF_INET6 {
+                var addr = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+                var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                if inet_ntop(AF_INET6, &addr.sin6_addr, &buf, socklen_t(INET6_ADDRSTRLEN)) != nil {
+                    let ip = String(cString: buf)
+                    if !ips.contains(ip) { ips.append(ip) }
+                }
+            }
+            current = info.pointee.ai_next
+        }
+        return ips
+    }
+}

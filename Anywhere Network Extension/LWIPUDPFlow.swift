@@ -327,7 +327,7 @@ class LWIPUDPFlow {
         let relay = ShadowsocksUDPRelay(mode: mode, dstHost: dstHost, dstPort: dstPort)
         self.ssUDPRelay = relay
 
-        relay.connect(serverHost: configuration.connectAddress, serverPort: configuration.serverPort, lwipQueue: lwipQueue) { [weak self] error in
+        relay.connect(serverHost: configuration.serverAddress, serverPort: configuration.serverPort, lwipQueue: lwipQueue) { [weak self] error in
             guard let self else { return }
 
             self.lwipQueue.async {
