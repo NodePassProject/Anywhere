@@ -24,7 +24,7 @@ class RuleSetStore: ObservableObject {
     @Published private(set) var ruleSets: [RuleSet] = []
 
     /// Bundled ruleset names (must match JSON filenames in Resources/).
-    private static let builtIn = ["Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini"]
+    private static let builtIn = ["Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini", "ADBlock"]
     private static let assignmentsKey = "ruleSetAssignments"
 
     private init() {

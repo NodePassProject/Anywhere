@@ -1,0 +1,266 @@
+//
+//  OnboardingView.swift
+//  Anywhere
+//
+//  Created by Argsment Limited on 3/9/26.
+//
+
+import SwiftUI
+
+struct OnboardingView: View {
+    @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
+    @AppStorage("onboardingCompleted", store: AWCore.userDefaults)
+    private var onboardingCompleted = false
+
+    @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
+    private var bypassCountryCode = ""
+
+    @State private var currentPage = 0
+    @State private var isGoingForward = true
+    @State private var adBlockEnabled = false
+
+    private static let countryCodes: [String] = [
+        "AE", "BY", "CN", "CU", "IR", "MM", "RU", "SA", "TM", "VN"
+    ]
+
+    /// Maps language codes to the most likely bypass country.
+    private static let languageToCountry: [String: String] = [
+        "ar": "SA", "fa": "IR", "my": "MM", "ru": "RU",
+        "tk": "TM", "vi": "VN", "zh": "CN", "be": "BY",
+        "cu": "CU", "es": "CU",
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack {
+                switch currentPage {
+                case 0: countryBypassPage
+                default: adBlockPage
+                }
+            }
+            .transition(.asymmetric(
+                insertion: .move(edge: isGoingForward ? .trailing : .leading),
+                removal: .move(edge: isGoingForward ? .leading : .trailing)
+            ))
+            
+            bottomBar
+                .padding(.horizontal, 24)
+                .padding(.bottom, 16)
+        }
+        .background(
+            LinearGradient(
+                colors: [Color("GradientStart"), Color("GradientEnd")],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+        )
+        .onAppear {
+            if let langCode = Locale.current.language.languageCode?.identifier,
+               let country = Self.languageToCountry[langCode] {
+                bypassCountryCode = country
+            }
+        }
+    }
+
+    // MARK: - Bottom Bar
+
+    private var bottomBar: some View {
+        HStack {
+            if currentPage > 0 {
+                Button {
+                    isGoingForward = false
+                    withAnimation { currentPage -= 1 }
+                } label: {
+                    Text("Back")
+                        .fontWeight(.medium)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+
+            Spacer()
+
+            Button {
+                if currentPage < 1 {
+                    isGoingForward = true
+                    withAnimation { currentPage += 1 }
+                } else {
+                    finishOnboarding()
+                }
+            } label: {
+                Text(currentPage < 1 ? String(localized: "Next") : String(localized: "Get Started"))
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+                    .background(.white.opacity(0.2), in: Capsule())
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    // MARK: - Page 1: Country Bypass
+
+    private var countryBypassPage: some View {
+        VStack {
+            VStack(spacing: 24) {
+                Spacer(minLength: 40)
+
+                Image(systemName: "globe.americas.fill")
+                    .font(.system(size: 56))
+                    .foregroundStyle(.white.opacity(0.9))
+
+                VStack(spacing: 8) {
+                    Text("Country Bypass")
+                        .font(.title.bold())
+                        .foregroundStyle(.white)
+                    Text("Route traffic to your home country directly, bypassing the proxy for faster local access.")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                }
+                
+                ScrollView {
+                    VStack(spacing: 0) {
+                        Button {
+                            bypassCountryCode = ""
+                        } label: {
+                            HStack {
+                                Text("Disable")
+                                    .foregroundStyle(.white)
+                                Spacer()
+                                if bypassCountryCode == "" {
+                                    Image(systemName: "checkmark")
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.white)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        ForEach(Self.countryCodes, id: \.self) { code in
+                            Divider().opacity(0.3)
+                            countryRow(code: code) {
+                                bypassCountryCode = code
+                            }
+                        }
+                    }
+                    .background(.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .padding(.horizontal, 24)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func countryRow(code: String, action: @escaping () -> Void) -> some View {
+        let name = Locale.current.localizedString(forRegionCode: code) ?? code
+        Button(action: action) {
+            HStack {
+                Text("\(flag(for: code)) \(name)")
+                    .foregroundStyle(.white)
+                Spacer()
+                if bypassCountryCode == code {
+                    Image(systemName: "checkmark")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.white)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Page 2: AD Block
+
+    private var adBlockPage: some View {
+        VStack(spacing: 24) {
+            Spacer()
+
+            Image(systemName: "shield.checkered")
+                .font(.system(size: 56))
+                .foregroundStyle(.white.opacity(0.9))
+
+            VStack(spacing: 8) {
+                Text("AD Blocking")
+                    .font(.title.bold())
+                    .foregroundStyle(.white)
+                Text("Block ads and trackers at the network level for a cleaner browsing experience.")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+
+            Button {
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+                    adBlockEnabled.toggle()
+                }
+            } label: {
+                HStack {
+                    Image(systemName: adBlockEnabled ? "checkmark.shield.fill" : "shield.slash")
+                        .font(.title2)
+                        .foregroundStyle(adBlockEnabled ? .green : .white.opacity(0.5))
+                        .contentTransition(.symbolEffect(.replace))
+                    Text("Enable AD Blocking")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    Toggle("", isOn: $adBlockEnabled)
+                        .labelsHidden()
+                }
+                .padding(16)
+                .background(.white.opacity(0.2), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 24)
+
+            Spacer()
+            Spacer()
+        }
+    }
+
+    // MARK: - Actions
+
+    private func finishOnboarding() {
+        // Apply AD block setting
+        if adBlockEnabled {
+            if let adBlock = RuleSetStore.shared.ruleSets.first(where: { $0.name == "ADBlock" }) {
+                RuleSetStore.shared.updateAssignment(adBlock, configurationId: "REJECT")
+            }
+        }
+
+        // Sync routing to network extension
+        viewModel.syncRoutingConfigurationToNE()
+
+        // Notify settings changed for country bypass
+        if !bypassCountryCode.isEmpty {
+            notifySettingsChanged()
+        }
+
+        withAnimation {
+            onboardingCompleted = true
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func flag(for countryCode: String) -> String {
+        String(countryCode.unicodeScalars.compactMap {
+            UnicodeScalar(127397 + $0.value)
+        }.map(Character.init))
+    }
+
+    private func notifySettingsChanged() {
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName("com.argsment.Anywhere.settingsChanged" as CFString),
+            nil, nil, true
+        )
+    }
+}

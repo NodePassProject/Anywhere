@@ -1,6 +1,9 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "" : {
+      "shouldTranslate" : false
+    },
     "·" : {
       "shouldTranslate" : false
     },
@@ -388,6 +391,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "致谢"
+          }
+        }
+      }
+    },
+    "AD Blocking" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "حظر الإعلانات"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bloqueo de anuncios"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مسدودسازی تبلیغات"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကြော်ငြာပိတ်ဆို့ခြင်း"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Блокировка рекламы"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mahabat blokirlemek"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chặn quảng cáo"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "广告拦截"
           }
         }
       }
@@ -1025,6 +1080,58 @@
         }
       }
     },
+    "Back" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "رجوع"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Atrás"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بازگشت"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "နောက်သို့"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Назад"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Yza"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Quay lại"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "返回"
+          }
+        }
+      }
+    },
     "BLAKE3-AES-128-GCM" : {
       "shouldTranslate" : false
     },
@@ -1033,6 +1140,58 @@
     },
     "BLAKE3-ChaCha20-Poly1305" : {
       "shouldTranslate" : false
+    },
+    "Block ads and trackers at the network level for a cleaner browsing experience." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "حظر الإعلانات والمتتبعات على مستوى الشبكة لتجربة تصفح أنظف."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bloquea anuncios y rastreadores a nivel de red para una experiencia de navegación más limpia."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مسدودسازی تبلیغات و ردیاب‌ها در سطح شبکه برای تجربه مرور پاک‌تر."
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကွန်ရက်အဆင့်တွင် ကြော်ငြာနှင့် ခြေရာခံများကို ပိတ်ဆို့ပြီး ပိုသန့်ရှင်းသော ဘရောက်ဆာအတွေ့အကြုံကို ရယူပါ။"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Блокируйте рекламу и трекеры на сетевом уровне для более чистого просмотра."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Arassa görmek tejribesi üçin tor derejesinde mahabatlary we yzarlaýjylary blokirläň."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chặn quảng cáo và trình theo dõi ở cấp mạng để có trải nghiệm duyệt web sạch hơn."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在网络层拦截广告和追踪器，获得更清爽的浏览体验。"
+          }
+        }
+      }
     },
     "Cancel" : {
       "localizations" : {
@@ -1872,6 +2031,58 @@
         }
       }
     },
+    "Enable AD Blocking" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تفعيل حظر الإعلانات"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activar bloqueo de anuncios"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "فعال‌سازی مسدودسازی تبلیغات"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကြော်ငြာပိတ်ဆို့ခြင်းကို ဖွင့်ရန်"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включить блокировку рекламы"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mahabat blokirlemegi açmak"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bật chặn quảng cáo"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用广告拦截"
+          }
+        }
+      }
+    },
     "Enable Anyway" : {
       "localizations" : {
         "ar" : {
@@ -2140,6 +2351,58 @@
     },
     "Flow" : {
       "shouldTranslate" : false
+    },
+    "Get Started" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ابدأ"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Comenzar"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "شروع"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "စတင်ရန်"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Начать"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Başla"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bắt đầu"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "开始使用"
+          }
+        }
+      }
     },
     "Go to Settings" : {
       "localizations" : {
@@ -2773,6 +3036,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "新建链"
+          }
+        }
+      }
+    },
+    "Next" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "التالي"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Siguiente"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بعدی"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "နောက်တစ်ခု"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Далее"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Indiki"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tiếp theo"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下一步"
           }
         }
       }
@@ -3719,6 +4034,58 @@
         }
       }
     },
+    "Route traffic to your home country directly, bypassing the proxy for faster local access." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "وجّه حركة المرور إلى بلدك مباشرة، متجاوزًا البروكسي للوصول المحلي الأسرع."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dirige el tráfico a tu país directamente, evitando el proxy para un acceso local más rápido."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ترافیک به کشور خود را مستقیماً هدایت کنید و پروکسی را برای دسترسی سریع‌تر دور بزنید."
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပိုမြန်သော ပြည်တွင်းဝင်ရောက်မှုအတွက် ပရောက်စီကို ကျော်ပြီး သင့်နိုင်ငံသို့ တိုက်ရိုက်လမ်းကြောင်းပေးပါ။"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Направляйте трафик в вашу страну напрямую, минуя прокси для более быстрого локального доступа."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ýerli elýeterliligi çaltlaşdyrmak üçin proksi aýlanyp, traffigi öz ýurduňyza gönüden-göni ugrugyň."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Định tuyến lưu lượng đến quốc gia của bạn trực tiếp, bỏ qua proxy để truy cập nội địa nhanh hơn."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将访问本国的流量直连，绕过代理以获得更快的本地访问速度。"
+          }
+        }
+      }
+    },
     "Routing" : {
       "localizations" : {
         "ar" : {
@@ -4250,59 +4617,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "订阅"
-          }
-        }
-      }
-    },
-    "Supports VLESS link, subscription link and Clash link" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "يدعم رابط VLESS ورابط الاشتراك ورابط Clash"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Compatible con enlace VLESS, enlace de suscripción y enlace Clash"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "پشتیبانی از لینک VLESS، لینک اشتراک و لینک Clash"
-          }
-        },
-        "my" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "VLESS လင့်၊ စာရင်းသွင်းလင့်နှင့် Clash လင့်ကို ပံ့ပိုးသည်"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Поддерживает ссылки VLESS, подписки и Clash"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "VLESS baglanyşygyny, abuna baglanyşygyny we Clash baglanyşygyny goldaýar"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hỗ trợ liên kết VLESS, liên kết đăng ký và liên kết Clash"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "支持 VLESS 链接、订阅链接和 Clash 链接"
           }
         }
       }
