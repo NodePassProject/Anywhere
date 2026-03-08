@@ -52,7 +52,7 @@ struct ProxyListView: View {
             if viewModel.configurations.isEmpty {
                 ContentUnavailableView(
                     "No Proxies",
-                    systemImage: "network.slash",
+                    systemImage: "network",
                     description: Text("Tap + to add a VLESS proxy.")
                 )
             }

@@ -26,7 +26,7 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension"
 /// the underlying ``BSDSocket`` with TLS record encryption/decryption.
 class TLSClient {
     private let configuration: TLSConfiguration
-    private var connection: BSDSocket?
+    private var connection: (any RawTransport)?
 
     // Ephemeral key pair (cleared after handshake)
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
@@ -84,6 +84,22 @@ class TLSClient {
 
             self.performTLSHandshake(completion: completion)
         }
+    }
+
+    /// Connects over an existing proxy tunnel and performs the TLS 1.3 handshake.
+    ///
+    /// Used for proxy chaining: the tunnel provides raw TCP I/O to the remote server.
+    ///
+    /// - Parameters:
+    ///   - tunnel: The proxy connection providing a TCP tunnel to the server.
+    ///   - completion: Called with the established ``TLSRecordConnection`` or an error.
+    func connect(
+        overTunnel tunnel: ProxyConnection,
+        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
+    ) {
+        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+        self.connection = TunneledTransport(tunnel: tunnel)
+        performTLSHandshake(completion: completion)
     }
 
     /// Cancels the connection and releases all resources.

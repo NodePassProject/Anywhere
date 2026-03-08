@@ -307,27 +307,21 @@ struct ProxyEditorView: View {
                         } label: {
                             Label("Cancel", systemImage: "xmark")
                         }
-                    }
-                    else {
-                        Button("Cancel") {
-                            dismiss()
-                        }
+                    } else {
+                        Button("Cancel") { dismiss() }
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     if #available(iOS 26.0, *) {
-                        Button(role: .confirm) {
+                        Button {
                             save()
                         } label: {
                             Label("Save", systemImage: "checkmark")
                         }
                         .disabled(!isValid)
-                    }
-                    else {
-                        Button("Save") {
-                            save()
-                        }
-                        .disabled(!isValid)
+                    } else {
+                        Button("Save") { save() }
+                            .disabled(!isValid)
                     }
                 }
             }

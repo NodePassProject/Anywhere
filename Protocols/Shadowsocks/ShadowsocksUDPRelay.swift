@@ -84,13 +84,16 @@ class ShadowsocksUDPRelay {
     func connect(serverHost: String, serverPort: UInt16, lwipQueue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
+            // Resolve via DNS cache (shared with BSDSocket/TCP connections)
+            let resolvedHost = DNSCache.shared.resolveHost(serverHost) ?? serverHost
+
             var hints = addrinfo()
             hints.ai_family = AF_UNSPEC
             hints.ai_socktype = SOCK_DGRAM
             hints.ai_protocol = IPPROTO_UDP
 
             var result: UnsafeMutablePointer<addrinfo>?
-            let status = getaddrinfo(serverHost, String(serverPort), &hints, &result)
+            let status = getaddrinfo(resolvedHost, String(serverPort), &hints, &result)
             guard status == 0, let info = result else {
                 let msg = status != 0 ? String(cString: gai_strerror(status)) : "No addresses"
                 lwipQueue.async { completion(BSDSocketError.resolutionFailed(msg)) }
