@@ -142,14 +142,7 @@ enum ShadowsocksKeyDerivation {
     /// Used for identity header pskHash computation.
     static func blake3Hash16(_ data: Data) -> Data {
         #if NETWORK_EXTENSION
-        var hasher = blake3_hasher()
-        blake3_hasher_init(&hasher)
-        return data.withUnsafeBytes { ptr -> Data in
-            blake3_hasher_update(&hasher, ptr.baseAddress!, data.count)
-            var output = [UInt8](repeating: 0, count: 16)
-            blake3_hasher_finalize(&hasher, &output, 16)
-            return Data(output)
-        }
+        return Blake3Hasher.hash(data, count: 16)
         #else
         return Data(repeating: 0, count: 16)
         #endif
@@ -159,16 +152,10 @@ enum ShadowsocksKeyDerivation {
     /// context = "shadowsocks 2022 identity subkey", input = psk + salt.
     static func deriveIdentitySubkey(psk: Data, salt: Data, keySize: Int) -> Data {
         #if NETWORK_EXTENSION
-        var hasher = blake3_hasher()
-        blake3_hasher_init_derive_key(&hasher, "shadowsocks 2022 identity subkey")
         var input = Data(psk)
         input.append(salt)
-        return input.withUnsafeBytes { ptr -> Data in
-            blake3_hasher_update(&hasher, ptr.baseAddress!, input.count)
-            var output = [UInt8](repeating: 0, count: keySize)
-            blake3_hasher_finalize(&hasher, &output, keySize)
-            return Data(output)
-        }
+        return Blake3Hasher.deriveKey(context: "shadowsocks 2022 identity subkey",
+                                     input: input, count: keySize)
         #else
         return Data(repeating: 0, count: keySize)
         #endif
@@ -179,18 +166,10 @@ enum ShadowsocksKeyDerivation {
     /// Matching sing-shadowsocks SessionKey().
     static func deriveSessionKey(psk: Data, salt: Data, keySize: Int) -> Data {
         #if NETWORK_EXTENSION
-        var hasher = blake3_hasher()
-        blake3_hasher_init_derive_key(&hasher, "shadowsocks 2022 session subkey")
-
         var input = Data(psk)
         input.append(salt)
-        let result = input.withUnsafeBytes { ptr -> Data in
-            blake3_hasher_update(&hasher, ptr.baseAddress!, input.count)
-            var output = [UInt8](repeating: 0, count: keySize)
-            blake3_hasher_finalize(&hasher, &output, keySize)
-            return Data(output)
-        }
-        return result
+        return Blake3Hasher.deriveKey(context: "shadowsocks 2022 session subkey",
+                                     input: input, count: keySize)
         #else
         // BLAKE3 not available outside Network Extension — SS 2022 won't work
         // in the main app (latency tester). Return empty data to trigger error.
@@ -239,12 +218,15 @@ enum ShadowsocksAEADCrypto {
         case .aes128gcm, .aes256gcm, .blake3aes128gcm, .blake3aes256gcm:
             let nonceObj = try AES.GCM.Nonce(data: nonce)
             let sealed = try AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonceObj)
-            return sealed.ciphertext + sealed.tag
+            // combined = nonce(12) + ciphertext + tag; skip nonce prefix
+            guard let combined = sealed.combined else { throw ShadowsocksError.decryptionFailed }
+            return combined.suffix(from: 12)
 
         case .chacha20poly1305, .blake3chacha20poly1305:
             let nonceObj = try ChaChaPoly.Nonce(data: nonce)
             let sealed = try ChaChaPoly.seal(plaintext, using: symmetricKey, nonce: nonceObj)
-            return sealed.ciphertext + sealed.tag
+            let combined = sealed.combined
+            return combined.suffix(from: 12)
 
         case .none:
             return plaintext
@@ -347,7 +329,7 @@ class ShadowsocksAEADWriter {
 
             // Encrypt payload
             let encryptedPayload = try ShadowsocksAEADCrypto.seal(
-                cipher: cipher, key: subkey, nonce: nonce.next(), plaintext: Data(chunk)
+                cipher: cipher, key: subkey, nonce: nonce.next(), plaintext: chunk
             )
             output.append(encryptedPayload)
 
@@ -370,7 +352,11 @@ class ShadowsocksAEADReader {
     private var nonce: ShadowsocksNonce
     private var state: State = .waitingSalt
     private var buffer = Data()
+    private var bufferOffset = 0
     private var pendingPayloadLength = 0
+
+    /// Compaction threshold — avoid O(n) shifts until dead space is significant.
+    private static let compactThreshold = 4096
 
     private enum State {
         case waitingSalt
@@ -397,23 +383,25 @@ class ShadowsocksAEADReader {
         var output = Data()
 
         while true {
+            let remaining = buffer.count - bufferOffset
             switch state {
             case .waitingSalt:
-                guard buffer.count >= cipher.saltSize else { return output }
-                let salt = Data(buffer.prefix(cipher.saltSize))
-                buffer.removeFirst(cipher.saltSize)
+                guard remaining >= cipher.saltSize else { break }
+                let salt = buffer[bufferOffset..<(bufferOffset + cipher.saltSize)]
+                bufferOffset += cipher.saltSize
                 self.subkey = ShadowsocksKeyDerivation.deriveSubkey(
                     masterKey: masterKey, salt: salt, keySize: cipher.keySize
                 )
                 state = .readingLength
+                continue
 
             case .readingLength:
                 // Encrypted length = 2 bytes + tagSize
                 let needed = 2 + cipher.tagSize
-                guard buffer.count >= needed else { return output }
+                guard remaining >= needed else { break }
 
-                let encryptedLength = Data(buffer.prefix(needed))
-                buffer.removeFirst(needed)
+                let encryptedLength = buffer[bufferOffset..<(bufferOffset + needed)]
+                bufferOffset += needed
 
                 guard let subkey else { throw ShadowsocksError.decryptionFailed }
                 let lengthData = try ShadowsocksAEADCrypto.open(
@@ -423,14 +411,15 @@ class ShadowsocksAEADReader {
 
                 pendingPayloadLength = Int(UInt16(lengthData[lengthData.startIndex]) << 8 | UInt16(lengthData[lengthData.startIndex + 1]))
                 state = .readingPayload
+                continue
 
             case .readingPayload:
                 // Encrypted payload = payloadLength + tagSize
                 let needed = pendingPayloadLength + cipher.tagSize
-                guard buffer.count >= needed else { return output }
+                guard remaining >= needed else { break }
 
-                let encryptedPayload = Data(buffer.prefix(needed))
-                buffer.removeFirst(needed)
+                let encryptedPayload = buffer[bufferOffset..<(bufferOffset + needed)]
+                bufferOffset += needed
 
                 guard let subkey else { throw ShadowsocksError.decryptionFailed }
                 let payload = try ShadowsocksAEADCrypto.open(
@@ -439,8 +428,21 @@ class ShadowsocksAEADReader {
                 output.append(payload)
 
                 state = .readingLength
+                continue
             }
+            break
         }
+
+        // Compact buffer only when dead space exceeds threshold
+        if bufferOffset > Self.compactThreshold {
+            buffer.removeSubrange(0..<bufferOffset)
+            bufferOffset = 0
+        } else if bufferOffset > 0 && bufferOffset == buffer.count {
+            buffer.removeAll(keepingCapacity: true)
+            bufferOffset = 0
+        }
+
+        return output
     }
 }
 
@@ -468,7 +470,10 @@ enum ShadowsocksUDPCrypto {
             cipher: cipher, key: subkey, nonce: nonce, plaintext: payload
         )
 
-        return salt + encrypted
+        var result = Data(capacity: salt.count + encrypted.count)
+        result.append(salt)
+        result.append(encrypted)
+        return result
     }
 
     /// Decrypts a UDP packet: extract salt, derive subkey, AEAD open.
@@ -479,8 +484,8 @@ enum ShadowsocksUDPCrypto {
             throw ShadowsocksError.decryptionFailed
         }
 
-        let salt = Data(data.prefix(cipher.saltSize))
-        let ciphertext = Data(data.suffix(from: data.startIndex + cipher.saltSize))
+        let salt = data.prefix(cipher.saltSize)
+        let ciphertext = data.suffix(from: data.startIndex + cipher.saltSize)
 
         let subkey = ShadowsocksKeyDerivation.deriveSubkey(
             masterKey: masterKey, salt: salt, keySize: cipher.keySize

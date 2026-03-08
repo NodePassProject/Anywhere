@@ -75,8 +75,20 @@ class LWIPStack {
     /// Mux manager for multiplexing UDP flows (created when Vision flow is active).
     var muxManager: MuxManager?
 
-    /// Active UDP flows keyed by 5-tuple string (e.g. "10.0.0.1:1234-8.8.8.8:53").
-    var udpFlows: [String: LWIPUDPFlow] = [:]
+    /// Hashable key for UDP flows — avoids per-packet string interpolation.
+    struct UDPFlowKey: Hashable, CustomStringConvertible {
+        let srcHost: String
+        let srcPort: UInt16
+        let dstHost: String
+        let dstPort: UInt16
+
+        var description: String {
+            "\(srcHost):\(srcPort)-\(dstHost):\(dstPort)"
+        }
+    }
+
+    /// Active UDP flows keyed by 5-tuple.
+    var udpFlows: [UDPFlowKey: LWIPUDPFlow] = [:]
     private var udpCleanupTimer: DispatchSourceTimer?
     private let maxUDPFlows = 200
     private let udpIdleTimeout: CFAbsoluteTime = 60
@@ -106,7 +118,7 @@ class LWIPStack {
 
     /// Reads the bypass country code from app group UserDefaults and converts to UInt16.
     private func loadBypassCountry() {
-        let code = APCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
+        let code = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
         bypassCountry = code.isEmpty ? 0 : GeoIPDatabase.packCountryCode(code)
         if bypassCountry != 0 {
             logger.info("[LWIPStack] Bypass country: \(code, privacy: .public)")
@@ -115,7 +127,7 @@ class LWIPStack {
 
     /// Reads the DoH setting from app group UserDefaults.
     private func loadDoHSetting() {
-        dohEnabled = APCore.userDefaults.bool(forKey: "dohEnabled")
+        dohEnabled = AWCore.userDefaults.bool(forKey: "dohEnabled")
     }
 
     // MARK: - Lifecycle
@@ -208,8 +220,8 @@ class LWIPStack {
         self.udpCleanupTimer?.cancel()
         self.udpCleanupTimer = nil
 
-        self.outputPackets.removeAll()
-        self.outputProtocols.removeAll()
+        self.outputPackets.removeAll(keepingCapacity: true)
+        self.outputProtocols.removeAll(keepingCapacity: true)
         self.outputFlushScheduled = false
 
         self.muxManager?.closeAll()
@@ -307,10 +319,10 @@ class LWIPStack {
         lwipQueue.async { [self] in
             guard self.running, let config = self.configuration else { return }
 
-            let newIPv6 = APCore.userDefaults.bool(forKey: "ipv6Enabled")
-            let newBypassCode = APCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
+            let newIPv6 = AWCore.userDefaults.bool(forKey: "ipv6Enabled")
+            let newBypassCode = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
             let newBypass = newBypassCode.isEmpty ? 0 : GeoIPDatabase.packCountryCode(newBypassCode)
-            let newDoH = APCore.userDefaults.bool(forKey: "dohEnabled")
+            let newDoH = AWCore.userDefaults.bool(forKey: "dohEnabled")
 
             let ipv6Changed = newIPv6 != self.ipv6Enabled
             let bypassChanged = newBypass != self.bypassCountry
@@ -386,30 +398,15 @@ class LWIPStack {
             var connectionConfiguration = defaultConfiguration
             var forceBypass = false
 
-            if FakeIPPool.isFakeIP(dstIPString) {
-                if let entry = shared.fakeIPPool.lookup(ip: dstIPString) {
-                    dstHost = entry.domain
-                    // Routing decision at connection time
-                    if let action = shared.domainRouter.matchDomain(entry.domain) {
-                        switch action {
-                        case .direct:
-                            forceBypass = true
-                        case .reject:
-                            logger.info("[FakeIP] TCP rejected for \(entry.domain, privacy: .public)")
-                            return nil
-                        case .proxy(let id):
-                            if let config = shared.domainRouter.resolveConfiguration(action: action) {
-                                connectionConfiguration = config
-                            } else {
-                                logger.warning("[FakeIP] TCP proxy config \(id) not found for \(entry.domain, privacy: .public)")
-                            }
-                        }
-                    }
-                } else {
-                    // Fake IP but entry evicted from LRU — drop connection
-                    logger.warning("[FakeIP] TCP to \(dstIPString, privacy: .public):\(dstPort) but no domain mapping found (evicted)")
-                    return nil
-                }
+            switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
+            case .passthrough:
+                break
+            case .resolved(let domain, let configOverride, let bypass):
+                dstHost = domain
+                if let config = configOverride { connectionConfiguration = config }
+                forceBypass = bypass
+            case .drop:
+                return nil
             }
 
             let connection = LWIPTCPConnection(pcb: pcb, dstHost: dstHost, dstPort: dstPort,
@@ -482,34 +479,19 @@ class LWIPStack {
             var flowConfiguration = defaultConfiguration
             var forceBypass = false
 
-            if FakeIPPool.isFakeIP(dstIPString) {
-                if let entry = shared.fakeIPPool.lookup(ip: dstIPString) {
-                    dstHost = entry.domain
-                    // Routing decision at connection time
-                    if let action = shared.domainRouter.matchDomain(entry.domain) {
-                        switch action {
-                        case .direct:
-                            forceBypass = true
-                        case .reject:
-                            logger.info("[FakeIP] UDP rejected for \(entry.domain, privacy: .public)")
-                            return
-                        case .proxy(let id):
-                            if let config = shared.domainRouter.resolveConfiguration(action: action) {
-                                flowConfiguration = config
-                            } else {
-                                logger.warning("[FakeIP] UDP proxy config \(id) not found for \(entry.domain, privacy: .public)")
-                            }
-                        }
-                    }
-                } else {
-                    // Fake IP but entry evicted from LRU — drop packet
-                    logger.warning("[FakeIP] UDP to \(dstIPString, privacy: .public):\(dstPort) but no domain mapping found (evicted)")
-                    return
-                }
+            switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "UDP") {
+            case .passthrough:
+                break
+            case .resolved(let domain, let configOverride, let bypass):
+                dstHost = domain
+                if let config = configOverride { flowConfiguration = config }
+                forceBypass = bypass
+            case .drop:
+                return
             }
 
             // flowKey uses dstIPString (not domain) for consistency with lwIP packet delivery
-            let flowKey = "\(srcHost):\(srcPort)-\(dstIPString):\(dstPort)"
+            let flowKey = UDPFlowKey(srcHost: srcHost, srcPort: srcPort, dstHost: dstIPString, dstPort: dstPort)
 
             if let flow = shared.udpFlows[flowKey] {
                 flow.handleReceivedData(payload, payloadLength: Int(len))
@@ -540,6 +522,47 @@ class LWIPStack {
         }
     }
 
+    // MARK: - Fake-IP Resolution
+
+    /// Result of resolving a fake IP to its domain and routing configuration.
+    enum FakeIPResolution {
+        /// IP is not a fake IP — use original IP as host, default config, no bypass.
+        case passthrough
+        /// Resolved to a domain with optional config override and bypass flag.
+        case resolved(domain: String, configOverride: ProxyConfiguration?, forceBypass: Bool)
+        /// Connection should be dropped (rejected by rule or evicted from pool).
+        case drop
+    }
+
+    /// Resolves a destination IP through the fake-IP pool and domain router.
+    /// Shared by TCP accept and UDP recv callbacks.
+    func resolveFakeIP(_ ip: String, dstPort: UInt16, proto: String) -> FakeIPResolution {
+        guard FakeIPPool.isFakeIP(ip) else { return .passthrough }
+
+        guard let entry = fakeIPPool.lookup(ip: ip) else {
+            logger.warning("[FakeIP] \(proto, privacy: .public) to \(ip, privacy: .public):\(dstPort) but no domain mapping found (evicted)")
+            return .drop
+        }
+
+        if let action = domainRouter.matchDomain(entry.domain) {
+            switch action {
+            case .direct:
+                return .resolved(domain: entry.domain, configOverride: nil, forceBypass: true)
+            case .reject:
+                logger.info("[FakeIP] \(proto, privacy: .public) rejected for \(entry.domain, privacy: .public)")
+                return .drop
+            case .proxy(let id):
+                let config = domainRouter.resolveConfiguration(action: action)
+                if config == nil {
+                    logger.warning("[FakeIP] \(proto, privacy: .public) proxy config \(id) not found for \(entry.domain, privacy: .public)")
+                }
+                return .resolved(domain: entry.domain, configOverride: config, forceBypass: false)
+            }
+        }
+
+        return .resolved(domain: entry.domain, configOverride: nil, forceBypass: false)
+    }
+
     // MARK: - DNS Interception (Fake-IP)
     //
     // DNS queries arriving on UDP port 53 are intercepted here before creating any flow.
@@ -562,17 +585,13 @@ class LWIPStack {
                                  dstIP: UnsafeRawPointer, dstPort: UInt16,
                                  isIPv6: Bool) -> Bool {
         // Parse domain + QTYPE
-        var domainBuf = [CChar](repeating: 0, count: 256)
-        var domainLen: Int = 255
-        var qtype: UInt16 = 0
+        guard let parsed = payload.withUnsafeBytes({ ptr -> (domain: String, qtype: UInt16)? in
+            guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            return DNSPacket.parseQuery(UnsafeBufferPointer(start: base, count: ptr.count))
+        }) else { return false }
 
-        let success = payload.withUnsafeBytes { ptr -> Int32 in
-            guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
-            return parse_dns_query_ext(base, ptr.count, &domainBuf, &domainLen, &qtype)
-        }
-        guard success == 1 else { return false }
-
-        let domain = String(cString: domainBuf).lowercased()
+        let domain = parsed.domain.lowercased()
+        let qtype = parsed.qtype
 
         // Block DDR (Discovery of Designated Resolvers, RFC 9462) when DoH is disabled
         // to prevent the system from auto-upgrading to DNS-over-HTTPS, which bypasses
@@ -611,34 +630,19 @@ class LWIPStack {
         // else: AAAA query + IPv6 disabled → fakeIPBytes stays nil → NODATA response
 
         // Generate DNS response
-        var responseBuf = [UInt8](repeating: 0, count: 512)
-
-        let responseLen = payload.withUnsafeBytes { queryPtr -> Int32 in
-            guard let queryBase = queryPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
-            if let fakeIPBytes {
-                return fakeIPBytes.withUnsafeBufferPointer { ipPtr in
-                    Int32(generate_dns_response(queryBase, queryPtr.count,
-                                                ipPtr.baseAddress!, qtype,
-                                                &responseBuf, responseBuf.count))
-                }
-            } else {
-                return Int32(generate_dns_response(queryBase, queryPtr.count,
-                                                   nil, qtype,
-                                                   &responseBuf, responseBuf.count))
-            }
-        }
-
-        guard responseLen > 0 else { return false }
-
-        // Send response back via lwIP (swap src/dst so it goes back to the app)
-        let responseData = Data(bytes: responseBuf, count: Int(responseLen))
+        guard let responseData = payload.withUnsafeBytes({ ptr -> Data? in
+            guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            return DNSPacket.generateResponse(
+                query: UnsafeBufferPointer(start: base, count: ptr.count),
+                fakeIP: fakeIPBytes, qtype: qtype)
+        }) else { return false }
         responseData.withUnsafeBytes { dataPtr in
             guard let dataBase = dataPtr.baseAddress else { return }
             lwip_bridge_udp_sendto(
                 dstIP, dstPort,     // original dst becomes response src
                 srcIP, srcPort,     // original src becomes response dst
                 isIPv6 ? 1 : 0,
-                dataBase, responseLen
+                dataBase, Int32(responseData.count)
             )
         }
 
@@ -650,19 +654,17 @@ class LWIPStack {
                              srcIP: UnsafeRawPointer, srcPort: UInt16,
                              dstIP: UnsafeRawPointer, dstPort: UInt16,
                              isIPv6: Bool, qtype: UInt16) -> Bool {
-        var responseBuf = [UInt8](repeating: 0, count: 512)
-        let responseLen = payload.withUnsafeBytes { queryPtr -> Int32 in
-            guard let queryBase = queryPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
-            return Int32(generate_dns_response(queryBase, queryPtr.count,
-                                                nil, qtype,
-                                                &responseBuf, responseBuf.count))
-        }
-        guard responseLen > 0 else { return false }
+        guard let responseData = payload.withUnsafeBytes({ ptr -> Data? in
+            guard let base = ptr.bindMemory(to: UInt8.self).baseAddress else { return nil }
+            return DNSPacket.generateResponse(
+                query: UnsafeBufferPointer(start: base, count: ptr.count),
+                fakeIP: nil, qtype: qtype)
+        }) else { return false }
 
-        Data(bytes: responseBuf, count: Int(responseLen)).withUnsafeBytes { dataPtr in
+        responseData.withUnsafeBytes { dataPtr in
             guard let dataBase = dataPtr.baseAddress else { return }
             lwip_bridge_udp_sendto(dstIP, dstPort, srcIP, srcPort,
-                                    isIPv6 ? 1 : 0, dataBase, responseLen)
+                                    isIPv6 ? 1 : 0, dataBase, Int32(responseData.count))
         }
         logger.info("[FakeIP] Blocked DDR query (qtype=\(qtype))")
         return true
@@ -733,7 +735,7 @@ class LWIPStack {
         timer.setEventHandler { [weak self] in
             guard let self, self.running else { return }
             let now = CFAbsoluteTimeGetCurrent()
-            var keysToRemove: [String] = []
+            var keysToRemove: [UDPFlowKey] = []
             for (key, flow) in self.udpFlows {
                 if now - flow.lastActivity > self.udpIdleTimeout {
                     flow.close()

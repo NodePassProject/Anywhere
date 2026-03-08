@@ -20,7 +20,7 @@ class DomainRouter {
 
     // Compiled rules
     private var exactDomains: [String: RouteAction] = [:]
-    private var suffixRules: [(suffix: String, action: RouteAction)] = []
+    private var suffixRules: [(suffix: String, dotSuffix: String, action: RouteAction)] = []
     private var keywordRules: [(keyword: String, action: RouteAction)] = []
 
     // Proxy configurations for rule-assigned proxies
@@ -87,7 +87,7 @@ class DomainRouter {
                     exactDomains[lowered] = action
                     ruleCount += 1
                 case "domainSuffix":
-                    suffixRules.append((suffix: lowered, action: action))
+                    suffixRules.append((suffix: lowered, dotSuffix: "." + lowered, action: action))
                     ruleCount += 1
                 case "domainKeyword":
                     keywordRules.append((keyword: lowered, action: action))
@@ -107,25 +107,25 @@ class DomainRouter {
     }
 
     /// Matches a domain against routing rules. Returns nil if no rule matches.
+    /// The domain must already be lowercased (all rule values are stored lowercased at load time).
     func matchDomain(_ domain: String) -> RouteAction? {
-        let lowered = domain.lowercased()
-        guard !lowered.isEmpty else { return nil }
+        guard !domain.isEmpty else { return nil }
 
         // 1. Exact match (O(1))
-        if let action = exactDomains[lowered] {
+        if let action = exactDomains[domain] {
             return action
         }
 
         // 2. Suffix match
         for rule in suffixRules {
-            if lowered == rule.suffix || lowered.hasSuffix("." + rule.suffix) {
+            if domain == rule.suffix || domain.hasSuffix(rule.dotSuffix) {
                 return rule.action
             }
         }
 
         // 3. Keyword match
         for rule in keywordRules {
-            if lowered.contains(rule.keyword) {
+            if domain.contains(rule.keyword) {
                 return rule.action
             }
         }

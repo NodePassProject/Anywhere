@@ -165,9 +165,9 @@ class Shadowsocks2022Connection: ProxyConnection {
         var fixedHeader = Data(capacity: 11)
         fixedHeader.append(headerTypeClient)
         var timestamp = UInt64(Date().timeIntervalSince1970).bigEndian
-        fixedHeader.append(Data(bytes: &timestamp, count: 8))
+        withUnsafeBytes(of: &timestamp) { fixedHeader.append(contentsOf: $0) }
         var varLenBE = UInt16(variableHeaderLen).bigEndian
-        fixedHeader.append(Data(bytes: &varLenBE, count: 2))
+        withUnsafeBytes(of: &varLenBE) { fixedHeader.append(contentsOf: $0) }
 
         // Seal fixed header (one AEAD chunk)
         let nonce0 = writeNonce.next()
@@ -180,7 +180,7 @@ class Shadowsocks2022Connection: ProxyConnection {
         var variableHeader = Data(capacity: variableHeaderLen)
         variableHeader.append(addressHeader)
         var paddingLenBE = UInt16(paddingLen).bigEndian
-        variableHeader.append(Data(bytes: &paddingLenBE, count: 2))
+        withUnsafeBytes(of: &paddingLenBE) { variableHeader.append(contentsOf: $0) }
         if paddingLen > 0 {
             variableHeader.append(Data(repeating: 0, count: paddingLen))
         }
@@ -234,7 +234,7 @@ class Shadowsocks2022Connection: ProxyConnection {
 
             // Encrypted payload
             let encPayload = try ShadowsocksAEADCrypto.seal(
-                cipher: cipher, key: subkey, nonce: writeNonce.next(), plaintext: Data(chunk)
+                cipher: cipher, key: subkey, nonce: writeNonce.next(), plaintext: chunk
             )
             output.append(encPayload)
 
@@ -282,9 +282,8 @@ class Shadowsocks2022Connection: ProxyConnection {
         let minNeeded = keySize + fixedHeaderPlainLen + tagSize
         guard readBuffer.count >= minNeeded else { return nil }
 
-        // Read salt
-        let salt = Data(readBuffer.prefix(keySize))
-        readBuffer.removeFirst(keySize)
+        // Read salt (pass slice directly)
+        let salt = readBuffer.prefix(keySize)
 
         // Derive read session key
         let sessionKey = ShadowsocksKeyDerivation.deriveSessionKey(psk: psk, salt: salt, keySize: keySize)
@@ -292,15 +291,11 @@ class Shadowsocks2022Connection: ProxyConnection {
 
         // Read and decrypt fixed header chunk
         let fixedChunkLen = fixedHeaderPlainLen + tagSize
-        guard readBuffer.count >= fixedChunkLen else {
-            // Put salt back (shouldn't happen given our minNeeded check)
-            readBuffer.insert(contentsOf: salt, at: readBuffer.startIndex)
-            self.readSubkey = nil
-            return nil
-        }
+        let fixedChunkStart = keySize
+        // minNeeded check guarantees we have enough data
 
-        let fixedChunk = Data(readBuffer.prefix(fixedChunkLen))
-        readBuffer.removeFirst(fixedChunkLen)
+        let fixedChunk = readBuffer[fixedChunkStart..<(fixedChunkStart + fixedChunkLen)]
+        readBuffer.removeFirst(keySize + fixedChunkLen)
 
         let fixedHeader = try ShadowsocksAEADCrypto.open(
             cipher: cipher, key: sessionKey, nonce: readNonce.next(), ciphertext: fixedChunk
@@ -359,7 +354,7 @@ class Shadowsocks2022Connection: ProxyConnection {
             return nil
         }
 
-        let varChunk = Data(readBuffer.prefix(varChunkLen))
+        let varChunk = readBuffer.prefix(varChunkLen)
         readBuffer.removeFirst(varChunkLen)
 
         guard let subkey = readSubkey else {
@@ -379,8 +374,11 @@ class Shadowsocks2022Connection: ProxyConnection {
     private func decryptChunks() throws -> Data {
         guard let subkey = readSubkey else { return Data() }
         var output = Data()
+        let base = readBuffer.startIndex
+        var offset = 0  // relative to base
 
         while true {
+            let remaining = readBuffer.count - offset
             let payloadLen: Int
 
             if let pending = pendingPayloadLength {
@@ -389,20 +387,21 @@ class Shadowsocks2022Connection: ProxyConnection {
             } else {
                 // Need encrypted length: 2 + tagSize
                 let lenNeeded = 2 + tagSize
-                guard readBuffer.count >= lenNeeded else { break }
+                guard remaining >= lenNeeded else { break }
 
-                let encLen = Data(readBuffer.prefix(lenNeeded))
+                let encLen = readBuffer[(base + offset)..<(base + offset + lenNeeded)]
                 let lenData = try ShadowsocksAEADCrypto.open(
                     cipher: cipher, key: subkey, nonce: readNonce.next(), ciphertext: encLen
                 )
                 guard lenData.count == 2 else { throw ShadowsocksError.decryptionFailed }
-                readBuffer.removeFirst(lenNeeded)
+                offset += lenNeeded
 
                 payloadLen = Int(UInt16(lenData[lenData.startIndex]) << 8 | UInt16(lenData[lenData.startIndex + 1]))
             }
 
             let payloadNeeded = payloadLen + tagSize
-            guard readBuffer.count >= payloadNeeded else {
+            let remainingAfterLen = readBuffer.count - offset
+            guard remainingAfterLen >= payloadNeeded else {
                 // Save state — length nonce already consumed, wait for payload data
                 pendingPayloadLength = payloadLen
                 break
@@ -410,13 +409,18 @@ class Shadowsocks2022Connection: ProxyConnection {
 
             pendingPayloadLength = nil
 
-            let encPayload = Data(readBuffer.prefix(payloadNeeded))
-            readBuffer.removeFirst(payloadNeeded)
+            let encPayload = readBuffer[(base + offset)..<(base + offset + payloadNeeded)]
+            offset += payloadNeeded
 
             let payload = try ShadowsocksAEADCrypto.open(
                 cipher: cipher, key: subkey, nonce: readNonce.next(), ciphertext: encPayload
             )
             output.append(payload)
+        }
+
+        // Compact buffer once
+        if offset > 0 {
+            readBuffer.removeFirst(offset)
         }
 
         return output
@@ -535,20 +539,18 @@ class Shadowsocks2022AESUDPConnection: ProxyConnection {
         packetID += 1
         var header = Data(capacity: 16)
         var sidBE = sessionID.bigEndian
-        header.append(Data(bytes: &sidBE, count: 8))
+        withUnsafeBytes(of: &sidBE) { header.append(contentsOf: $0) }
         var pidBE = packetID.bigEndian
-        header.append(Data(bytes: &pidBE, count: 8))
+        withUnsafeBytes(of: &pidBE) { header.append(contentsOf: $0) }
 
         // Build identity headers for multi-user mode
         var identityData = Data()
         if pskList.count >= 2 {
             for i in 0..<(pskList.count - 1) {
                 // identityHeader = AES-ECB(psk[i], pskHash[i] XOR header[0:16])
-                var xored = Data(count: 16)
                 let pskHash = pskHashes[i]
-                for j in 0..<16 {
-                    xored[j] = pskHash[j] ^ header[j]
-                }
+                var xored = Data(count: 16)
+                for j in 0..<16 { xored[j] = pskHash[j] ^ header[j] }
                 let encrypted = try aesECBEncrypt(key: pskList[i], block: xored)
                 identityData.append(encrypted)
             }
@@ -560,12 +562,12 @@ class Shadowsocks2022AESUDPConnection: ProxyConnection {
             ? Int.random(in: 1...(maxPaddingLength - payload.count))
             : 0
 
-        var body = Data()
+        var body = Data(capacity: 1 + 8 + 2 + paddingLen + addressHeader.count + payload.count)
         body.append(headerTypeClient)
         var timestamp = UInt64(Date().timeIntervalSince1970).bigEndian
-        body.append(Data(bytes: &timestamp, count: 8))
+        withUnsafeBytes(of: &timestamp) { body.append(contentsOf: $0) }
         var paddingLenBE = UInt16(paddingLen).bigEndian
-        body.append(Data(bytes: &paddingLenBE, count: 2))
+        withUnsafeBytes(of: &paddingLenBE) { body.append(contentsOf: $0) }
         if paddingLen > 0 {
             body.append(Data(repeating: 0, count: paddingLen))
         }
@@ -573,7 +575,7 @@ class Shadowsocks2022AESUDPConnection: ProxyConnection {
         body.append(payload)
 
         // AEAD seal body: nonce = header[4:16] (last 12 bytes of header)
-        let nonce = Data(header[4..<16])
+        let nonce = header[4..<16]
         let sealedBody = try ShadowsocksAEADCrypto.seal(
             cipher: cipher, key: sessionCipher, nonce: nonce, plaintext: body
         )
@@ -581,7 +583,7 @@ class Shadowsocks2022AESUDPConnection: ProxyConnection {
         // AES-ECB encrypt the 16-byte header using first PSK
         let encryptedHeader = try aesECBEncrypt(key: headerEncryptPSK, block: header)
 
-        var packet = Data()
+        var packet = Data(capacity: encryptedHeader.count + identityData.count + sealedBody.count)
         packet.append(encryptedHeader)
         packet.append(identityData)
         packet.append(sealedBody)
@@ -594,8 +596,7 @@ class Shadowsocks2022AESUDPConnection: ProxyConnection {
         }
 
         // AES-ECB decrypt the 16-byte header using last PSK (server sends encrypted with user PSK)
-        let encryptedHeader = Data(data.prefix(16))
-        let header = try aesECBDecrypt(key: psk, block: encryptedHeader)
+        let header = try aesECBDecrypt(key: psk, block: data.prefix(16))
 
         // Parse sessionID + packetID
         var sidBE: UInt64 = 0
@@ -617,8 +618,8 @@ class Shadowsocks2022AESUDPConnection: ProxyConnection {
         }
 
         // AEAD open body: nonce = header[4:16]
-        let nonce = Data(header[4..<16])
-        let sealedBody = Data(data.suffix(from: data.startIndex + 16))
+        let nonce = header[4..<16]
+        let sealedBody = data.suffix(from: data.startIndex + 16)
         let body = try ShadowsocksAEADCrypto.open(
             cipher: cipher, key: remoteCipherKey, nonce: nonce, ciphertext: sealedBody
         )
@@ -765,16 +766,16 @@ class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
             : 0
 
         packetID += 1
-        var body = Data()
+        var body = Data(capacity: 8 + 8 + 1 + 8 + 2 + paddingLen + addressHeader.count + payload.count)
         var sidBE = sessionID.bigEndian
-        body.append(Data(bytes: &sidBE, count: 8))
+        withUnsafeBytes(of: &sidBE) { body.append(contentsOf: $0) }
         var pidBE = packetID.bigEndian
-        body.append(Data(bytes: &pidBE, count: 8))
+        withUnsafeBytes(of: &pidBE) { body.append(contentsOf: $0) }
         body.append(headerTypeClient)
         var timestamp = UInt64(Date().timeIntervalSince1970).bigEndian
-        body.append(Data(bytes: &timestamp, count: 8))
+        withUnsafeBytes(of: &timestamp) { body.append(contentsOf: $0) }
         var paddingLenBE = UInt16(paddingLen).bigEndian
-        body.append(Data(bytes: &paddingLenBE, count: 2))
+        withUnsafeBytes(of: &paddingLenBE) { body.append(contentsOf: $0) }
         if paddingLen > 0 {
             body.append(Data(repeating: 0, count: paddingLen))
         }
@@ -784,7 +785,7 @@ class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
         // XChaCha20-Poly1305 seal
         let sealed = try XChaCha20Poly1305.seal(key: psk, nonce: nonce, plaintext: body)
 
-        var packet = Data()
+        var packet = Data(capacity: nonce.count + sealed.count)
         packet.append(nonce)
         packet.append(sealed)
         return packet
@@ -795,8 +796,8 @@ class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
             throw ShadowsocksError.decryptionFailed
         }
 
-        let nonce = Data(data.prefix(24))
-        let ciphertext = Data(data.suffix(from: data.startIndex + 24))
+        let nonce = data.prefix(24)
+        let ciphertext = data.suffix(from: data.startIndex + 24)
 
         let body = try XChaCha20Poly1305.open(key: psk, nonce: nonce, ciphertext: ciphertext)
 
@@ -983,10 +984,17 @@ enum XChaCha20Poly1305 {
         }
 
         // Output: words 0..3 and 12..15 (8 words = 32 bytes)
-        var output = Data(capacity: 32)
-        for i in [0, 1, 2, 3, 12, 13, 14, 15] {
-            var word = state[i].littleEndian
-            output.append(Data(bytes: &word, count: 4))
+        var output = Data(count: 32)
+        output.withUnsafeMutableBytes { ptr in
+            let p = ptr.bindMemory(to: UInt32.self)
+            p[0] = state[0].littleEndian
+            p[1] = state[1].littleEndian
+            p[2] = state[2].littleEndian
+            p[3] = state[3].littleEndian
+            p[4] = state[12].littleEndian
+            p[5] = state[13].littleEndian
+            p[6] = state[14].littleEndian
+            p[7] = state[15].littleEndian
         }
         return output
     }

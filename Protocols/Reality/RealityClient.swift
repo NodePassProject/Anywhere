@@ -189,7 +189,7 @@ class RealityClient {
 
         let encryptedSessionId = try TLSRecordCrypto.encryptAESGCM(
             plaintext: Data(plaintext),
-            key: authKey,
+            key: SymmetricKey(data: authKey),
             nonce: Data(nonce),
             aad: rawClientHelloForAAD
         )
@@ -342,30 +342,6 @@ class RealityClient {
     /// - Parameter data: The raw TLS data containing the ServerHello record.
     /// - Returns: A tuple of (keyShare, cipherSuite) or `nil` if parsing fails.
     private func parseServerHello(data: Data) -> (keyShare: Data, cipherSuite: UInt16)? {
-        #if NETWORK_EXTENSION
-        var keyShareBuf = Data(count: 32)
-        var cipherSuite: UInt16 = 0
-
-        let ok = data.withUnsafeBytes { ptr -> Int32 in
-            keyShareBuf.withUnsafeMutableBytes { ksBuf in
-                parse_server_hello(
-                    ptr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                    ptr.count,
-                    ksBuf.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                    &cipherSuite
-                )
-            }
-        }
-
-        guard ok == 1 else { return nil }
-        return (keyShareBuf, cipherSuite)
-        #else
-        return parseServerHelloSwift(data: data)
-        #endif
-    }
-
-    /// Swift fallback for ServerHello parsing (used in main app target).
-    private func parseServerHelloSwift(data: Data) -> (keyShare: Data, cipherSuite: UInt16)? {
         var offset = 0
 
         while offset + 5 < data.count {
@@ -463,7 +439,7 @@ class RealityClient {
                     let seqNum = serverHandshakeSeqNum
                     let decrypted = try TLSRecordCrypto.decryptRecord(
                         ciphertext: ciphertext,
-                        key: keys.serverKey,
+                        key: SymmetricKey(data: keys.serverKey),
                         iv: keys.serverIV,
                         seqNum: seqNum,
                         recordHeader: recordHeader
@@ -578,7 +554,7 @@ class RealityClient {
         do {
             let finishedRecord = try TLSRecordCrypto.encryptHandshakeRecord(
                 plaintext: finishedMsg,
-                key: keys.clientKey,
+                key: SymmetricKey(data: keys.clientKey),
                 iv: keys.clientIV,
                 seqNum: 0
             )

@@ -17,9 +17,9 @@ class VPNViewModel {
     var selectedConfiguration: ProxyConfiguration? {
         didSet {
             if let selectedConfiguration {
-                APCore.userDefaults.set(selectedConfiguration.id.uuidString, forKey: Self.selectedConfigurationIdKey)
+                AWCore.userDefaults.set(selectedConfiguration.id.uuidString, forKey: Self.selectedConfigurationIdKey)
             } else {
-                APCore.userDefaults.removeObject(forKey: Self.selectedConfigurationIdKey)
+                AWCore.userDefaults.removeObject(forKey: Self.selectedConfigurationIdKey)
             }
             // If VPN is connected, push new configuration to the tunnel
             if vpnStatus == .connected, let selectedConfiguration {
@@ -51,7 +51,7 @@ class VPNViewModel {
         subscriptions = subscriptionStore.subscriptions
 
         // Restore selected configuration from UserDefaults
-        if let savedConfigurationIdSrting = APCore.userDefaults.string(forKey: Self.selectedConfigurationIdKey),
+        if let savedConfigurationIdSrting = AWCore.userDefaults.string(forKey: Self.selectedConfigurationIdKey),
            let savedConfigurationId = UUID(uuidString: savedConfigurationIdSrting),
            let configuration = configurations.first(where: { $0.id == savedConfigurationId }) {
             selectedConfiguration = configuration
@@ -388,7 +388,7 @@ class VPNViewModel {
         manager.localizedDescription = "Anywhere"
         manager.isEnabled = true
 
-        let alwaysOn = APCore.userDefaults.bool(forKey: "alwaysOnEnabled")
+        let alwaysOn = AWCore.userDefaults.bool(forKey: "alwaysOnEnabled")
         if alwaysOn {
             let rule = NEOnDemandRuleConnect()
             rule.interfaceTypeMatch = .any

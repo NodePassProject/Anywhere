@@ -134,11 +134,31 @@ class FakeIPPool {
     }
 
     private func ipv4ToOffset(_ ip: String) -> Int? {
-        let parts = ip.split(separator: ".")
-        guard parts.count == 4,
-              let a = UInt32(parts[0]), let b = UInt32(parts[1]),
-              let c = UInt32(parts[2]), let d = UInt32(parts[3]) else { return nil }
-        let ip32 = (a << 24) | (b << 16) | (c << 8) | d
+        var octets: (UInt32, UInt32, UInt32, UInt32) = (0, 0, 0, 0)
+        var current: UInt32 = 0
+        var octetIndex = 0
+        for c in ip.utf8 {
+            if c == UInt8(ascii: ".") {
+                guard octetIndex < 3 else { return nil }
+                switch octetIndex {
+                case 0: octets.0 = current
+                case 1: octets.1 = current
+                case 2: octets.2 = current
+                default: return nil
+                }
+                current = 0
+                octetIndex += 1
+            } else if c >= UInt8(ascii: "0") && c <= UInt8(ascii: "9") {
+                current = current * 10 + UInt32(c - UInt8(ascii: "0"))
+                guard current <= 255 else { return nil }
+            } else {
+                return nil
+            }
+        }
+        guard octetIndex == 3 else { return nil }
+        octets.3 = current
+        guard octets.3 <= 255 else { return nil }
+        let ip32 = (octets.0 << 24) | (octets.1 << 16) | (octets.2 << 8) | octets.3
         let offset = Int(ip32 - Self.baseIPv4)
         guard offset >= 1, offset <= Self.poolSize else { return nil }
         return offset

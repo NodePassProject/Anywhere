@@ -29,6 +29,10 @@ class WebSocketConnection {
     private var upgraded = false
     private var heartbeatTimer: DispatchSourceTimer?
 
+    /// Maximum receive buffer size (1 MB). Protects against unbounded growth
+    /// from a misbehaving server sending large frames without consumption.
+    private static let maxReceiveBufferSize = 1_048_576
+
     /// Chrome User-Agent string matching Xray-core's `utils.ChromeUA`.
     /// Uses a fixed base version (Chrome 144, released 2026-01-13) and advances
     /// by one version every ~35 days (midpoint of Xray-core's 25-45 day range).
@@ -43,10 +47,7 @@ class WebSocketConnection {
     }()
 
     var isConnected: Bool {
-        lock.lock()
-        let v = _isConnected
-        lock.unlock()
-        return v
+        lock.withLock { _isConnected }
     }
 
     // MARK: - Initializers
@@ -118,7 +119,7 @@ class WebSocketConnection {
         // Early data: base64url-encode and place in the configured header
         if let earlyData, !earlyData.isEmpty, configuration.maxEarlyData > 0 {
             let dataToEmbed = earlyData.prefix(configuration.maxEarlyData)
-            let encoded = Self.base64URLEncode(dataToEmbed)
+            let encoded = dataToEmbed.base64URLEncodedString()
             request += "\(configuration.earlyDataHeaderName): \(encoded)\r\n"
         }
 
@@ -156,27 +157,28 @@ class WebSocketConnection {
                 return
             }
 
-            self.lock.lock()
-            self.receiveBuffer.append(data)
+            let headerData: Data? = self.lock.withLock {
+                self.receiveBuffer.append(data)
 
-            // Look for the end of HTTP headers
-            let headerEnd: Data = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
-            guard let range = self.receiveBuffer.range(of: headerEnd) else {
-                self.lock.unlock()
-                // Haven't received the full header yet, keep reading
+                // Look for the end of HTTP headers
+                let headerEnd: Data = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+                guard let range = self.receiveBuffer.range(of: headerEnd) else {
+                    return nil
+                }
+
+                let hdr = Data(self.receiveBuffer[self.receiveBuffer.startIndex..<range.lowerBound])
+                let leftover = self.receiveBuffer[range.upperBound...]
+                self.receiveBuffer = Data(leftover)
+                return hdr
+            }
+
+            guard let headerData else {
                 self.receiveUpgradeResponse(completion: completion)
                 return
             }
 
-            let headerData = self.receiveBuffer[self.receiveBuffer.startIndex..<range.lowerBound]
-            let leftover = self.receiveBuffer[range.upperBound...]
-
-            // Replace buffer with any leftover data after headers
-            self.receiveBuffer = Data(leftover)
-            self.lock.unlock()
-
             // Validate HTTP 101 response
-            guard let headerString = String(data: Data(headerData), encoding: .utf8) else {
+            guard let headerString = String(data: headerData, encoding: .utf8) else {
                 completion(WebSocketError.upgradeFailed("Cannot decode response headers"))
                 return
             }
@@ -187,9 +189,7 @@ class WebSocketConnection {
                 return
             }
 
-            self.lock.lock()
-            self.upgraded = true
-            self.lock.unlock()
+            self.lock.withLock { self.upgraded = true }
             self.startHeartbeat()
             completion(nil)
         }
@@ -210,27 +210,21 @@ class WebSocketConnection {
 
     /// Receives a complete WebSocket frame payload.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
-        lock.lock()
-        // Try to extract a frame from the existing buffer first
-        if let result = tryExtractFrame() {
-            lock.unlock()
+        if let result = lock.withLock({ tryExtractFrame() }) {
             handleFrameResult(result, completion: completion)
             return
         }
-        lock.unlock()
-
-        // Need more data
         receiveMore(completion: completion)
     }
 
     /// Cancels the connection.
     func cancel() {
-        lock.lock()
-        _isConnected = false
-        receiveBuffer.removeAll()
-        heartbeatTimer?.cancel()
-        heartbeatTimer = nil
-        lock.unlock()
+        lock.withLock {
+            _isConnected = false
+            receiveBuffer.removeAll()
+            heartbeatTimer?.cancel()
+            heartbeatTimer = nil
+        }
         transportCancel()
     }
 
@@ -248,26 +242,24 @@ class WebSocketConnection {
                        repeating: .seconds(Int(period)))
         timer.setEventHandler { [weak self] in
             guard let self, self.isConnected else {
-                self?.lock.lock()
-                self?.heartbeatTimer?.cancel()
-                self?.heartbeatTimer = nil
-                self?.lock.unlock()
+                self?.lock.withLock {
+                    self?.heartbeatTimer?.cancel()
+                    self?.heartbeatTimer = nil
+                }
                 return
             }
             let pingFrame = self.buildFrame(opcode: 0x09, payload: Data())
             self.transportSend(pingFrame) { [weak self] error in
                 if error != nil {
-                    self?.lock.lock()
-                    self?.heartbeatTimer?.cancel()
-                    self?.heartbeatTimer = nil
-                    self?.lock.unlock()
+                    self?.lock.withLock {
+                        self?.heartbeatTimer?.cancel()
+                        self?.heartbeatTimer = nil
+                    }
                 }
             }
         }
 
-        lock.lock()
-        heartbeatTimer = timer
-        lock.unlock()
+        lock.withLock { heartbeatTimer = timer }
         timer.resume()
     }
 
@@ -423,9 +415,7 @@ class WebSocketConnection {
             closePayload.append(UInt8(code & 0xFF))
             let closeFrame = buildFrame(opcode: 0x08, payload: closePayload)
             transportSend(closeFrame) { _ in }
-            lock.lock()
-            _isConnected = false
-            lock.unlock()
+            lock.withLock { _isConnected = false }
             completion(nil, WebSocketError.connectionClosed(code, reason))
         }
     }
@@ -448,27 +438,35 @@ class WebSocketConnection {
                 return
             }
 
-            self.lock.lock()
-            self.receiveBuffer.append(data)
+            enum ExtractResult {
+                case frame(FrameResult)
+                case needMore
+                case overflow
+            }
 
-            if let result = self.tryExtractFrame() {
-                self.lock.unlock()
+            let status: ExtractResult = self.lock.withLock {
+                self.receiveBuffer.append(data)
+
+                if self.receiveBuffer.count > Self.maxReceiveBufferSize {
+                    self.receiveBuffer.removeAll()
+                    return .overflow
+                }
+
+                if let result = self.tryExtractFrame() {
+                    return .frame(result)
+                }
+                return .needMore
+            }
+
+            switch status {
+            case .frame(let result):
                 self.handleFrameResult(result, completion: completion)
-            } else {
-                self.lock.unlock()
-                // Still not enough data, keep reading
+            case .needMore:
                 self.receiveMore(completion: completion)
+            case .overflow:
+                completion(nil, WebSocketError.invalidFrame("Receive buffer exceeded limit"))
             }
         }
     }
 
-    // MARK: - Base64URL Encoding
-
-    /// RFC 4648 base64url encoding (no padding).
-    private static func base64URLEncode(_ data: Data) -> String {
-        data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-    }
 }

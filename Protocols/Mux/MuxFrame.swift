@@ -90,14 +90,15 @@ struct MuxFrameMetadata {
     static func decode(from data: Data) -> (MuxFrameMetadata, Int)? {
         guard data.count >= 4 else { return nil }  // minimum: 2B id + 1B status + 1B option
 
+        let base = data.startIndex
         var offset = 0
-        let sessionID = UInt16(data[offset]) << 8 | UInt16(data[offset + 1])
+        let sessionID = UInt16(data[base + offset]) << 8 | UInt16(data[base + offset + 1])
         offset += 2
 
-        guard let status = MuxSessionStatus(rawValue: data[offset]) else { return nil }
+        guard let status = MuxSessionStatus(rawValue: data[base + offset]) else { return nil }
         offset += 1
 
-        let option = MuxOption(rawValue: data[offset])
+        let option = MuxOption(rawValue: data[base + offset])
         offset += 1
 
         var metadata = MuxFrameMetadata(
@@ -109,13 +110,13 @@ struct MuxFrameMetadata {
         // New frames carry address info
         if status == .new {
             guard data.count >= offset + 1 else { return nil }
-            guard let network = MuxNetwork(rawValue: data[offset]) else { return nil }
+            guard let network = MuxNetwork(rawValue: data[base + offset]) else { return nil }
             metadata.network = network
             offset += 1
 
             // Port (2B big-endian)
             guard data.count >= offset + 2 else { return nil }
-            metadata.targetPort = UInt16(data[offset]) << 8 | UInt16(data[offset + 1])
+            metadata.targetPort = UInt16(data[base + offset]) << 8 | UInt16(data[base + offset + 1])
             offset += 2
 
             // Address
@@ -125,7 +126,7 @@ struct MuxFrameMetadata {
 
             // GlobalID for UDP (optional — only present with XUDP)
             if network == .udp && data.count >= offset + 8 {
-                metadata.globalID = data[offset..<(offset + 8)]
+                metadata.globalID = data[(base + offset)..<(base + offset + 8)]
                 offset += 8
             }
         }
@@ -152,76 +153,56 @@ struct MuxFrameMetadata {
     }
 
     private static func decodeAddress(from data: Data, offset: Int) -> (String, Int)? {
+        let base = data.startIndex
         guard data.count > offset else { return nil }
-        guard let addrType = MuxAddressType(rawValue: data[offset]) else { return nil }
+        guard let addrType = MuxAddressType(rawValue: data[base + offset]) else { return nil }
         var pos = 1  // consumed addr_type byte
 
         switch addrType {
         case .ipv4:
             guard data.count >= offset + pos + 4 else { return nil }
-            let a = data[offset + pos]
-            let b = data[offset + pos + 1]
-            let c = data[offset + pos + 2]
-            let d = data[offset + pos + 3]
+            let a = data[base + offset + pos]
+            let b = data[base + offset + pos + 1]
+            let c = data[base + offset + pos + 2]
+            let d = data[base + offset + pos + 3]
             return ("\(a).\(b).\(c).\(d)", pos + 4)
 
         case .domain:
             guard data.count >= offset + pos + 1 else { return nil }
-            let domainLen = Int(data[offset + pos])
+            let domainLen = Int(data[base + offset + pos])
             pos += 1
             guard data.count >= offset + pos + domainLen else { return nil }
-            let domain = String(data: data[(offset + pos)..<(offset + pos + domainLen)], encoding: .utf8) ?? ""
+            let domain = String(data: data[(base + offset + pos)..<(base + offset + pos + domainLen)], encoding: .utf8) ?? ""
             return (domain, pos + domainLen)
 
         case .ipv6:
             guard data.count >= offset + pos + 16 else { return nil }
-            var parts = [String]()
-            for i in stride(from: 0, to: 16, by: 2) {
-                let val = UInt16(data[offset + pos + i]) << 8 | UInt16(data[offset + pos + i + 1])
-                parts.append(String(val, radix: 16))
+            var addr = in6_addr()
+            withUnsafeMutableBytes(of: &addr) { ptr in
+                for i in 0..<16 { ptr[i] = data[base + offset + pos + i] }
             }
-            return (parts.joined(separator: ":"), pos + 16)
+            var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            inet_ntop(AF_INET6, &addr, &buf, socklen_t(buf.count))
+            return (String(cString: buf), pos + 16)
         }
     }
 
     // MARK: - IP Parsing Helpers
 
     private func parseIPv4(_ address: String) -> [UInt8]? {
-        let parts = address.split(separator: ".")
-        guard parts.count == 4 else { return nil }
-        var bytes = [UInt8]()
-        for part in parts {
-            guard let byte = UInt8(part) else { return nil }
-            bytes.append(byte)
-        }
-        return bytes
+        var addr = in_addr()
+        guard inet_pton(AF_INET, address, &addr) == 1 else { return nil }
+        return withUnsafeBytes(of: &addr) { Array($0) }
     }
 
     private func parseIPv6(_ address: String) -> [UInt8]? {
-        var addr = address
-        if addr.hasPrefix("[") && addr.hasSuffix("]") {
-            addr = String(addr.dropFirst().dropLast())
+        var clean = address
+        if clean.hasPrefix("[") && clean.hasSuffix("]") {
+            clean = String(clean.dropFirst().dropLast())
         }
-
-        var parts = addr.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
-
-        if let emptyIndex = parts.firstIndex(of: "") {
-            let before = Array(parts[..<emptyIndex])
-            let after = Array(parts[(emptyIndex + 1)...]).filter { !$0.isEmpty }
-            let missing = 8 - before.count - after.count
-            if missing < 0 { return nil }
-            parts = before + Array(repeating: "0", count: missing) + after
-        }
-
-        guard parts.count == 8 else { return nil }
-
-        var bytes = [UInt8]()
-        for part in parts {
-            guard let value = UInt16(part, radix: 16) else { return nil }
-            bytes.append(UInt8(value >> 8))
-            bytes.append(UInt8(value & 0xFF))
-        }
-        return bytes
+        var addr = in6_addr()
+        guard inet_pton(AF_INET6, clean, &addr) == 1 else { return nil }
+        return withUnsafeBytes(of: &addr) { Array($0) }
     }
 }
 
@@ -257,6 +238,10 @@ func encodeMuxFrame(metadata: MuxFrameMetadata, payload: Data?) -> Data {
 /// Streaming parser that buffers partial reads and emits complete frames.
 class MuxFrameParser {
     private var buffer = Data()
+    private var bufferOffset = 0
+
+    /// Compaction threshold — avoid O(n) shifts until dead space is significant.
+    private static let compactThreshold = 4096
 
     /// Feeds raw bytes into the parser and returns any complete frames.
     func feed(_ data: Data) -> [(metadata: MuxFrameMetadata, payload: Data?)] {
@@ -264,18 +249,21 @@ class MuxFrameParser {
         var results: [(MuxFrameMetadata, Data?)] = []
 
         while true {
+            let remaining = buffer.count - bufferOffset
             // Need at least 2 bytes for metadata length
-            guard buffer.count >= 2 else { break }
+            guard remaining >= 2 else { break }
 
-            let metaLen = Int(UInt16(buffer[0]) << 8 | UInt16(buffer[1]))
+            let metaLen = Int(UInt16(buffer[bufferOffset]) << 8 | UInt16(buffer[bufferOffset + 1]))
 
             // Need full metadata
-            guard buffer.count >= 2 + metaLen else { break }
+            guard remaining >= 2 + metaLen else { break }
 
-            let metaData = buffer[2..<(2 + metaLen)]
-            guard let (metadata, _) = MuxFrameMetadata.decode(from: Data(metaData)) else {
+            let metaStart = bufferOffset + 2
+            let metaSlice = buffer[metaStart..<(metaStart + metaLen)]
+            guard let (metadata, _) = MuxFrameMetadata.decode(from: metaSlice) else {
                 // Corrupt frame — discard buffer
                 buffer.removeAll()
+                bufferOffset = 0
                 break
             }
 
@@ -284,25 +272,35 @@ class MuxFrameParser {
 
             if metadata.option.contains(.data) {
                 // Need 2 bytes for payload length
-                guard buffer.count >= consumed + 2 else { break }
+                guard remaining >= consumed + 2 else { break }
 
-                let payloadLen = Int(UInt16(buffer[consumed]) << 8 | UInt16(buffer[consumed + 1]))
+                let payloadLen = Int(UInt16(buffer[bufferOffset + consumed]) << 8 | UInt16(buffer[bufferOffset + consumed + 1]))
                 consumed += 2
 
                 // Need full payload
-                guard buffer.count >= consumed + payloadLen else {
+                guard remaining >= consumed + payloadLen else {
                     // Revert — not enough payload data yet
                     break
                 }
 
                 if payloadLen > 0 {
-                    payload = Data(buffer[consumed..<(consumed + payloadLen)])
+                    payload = buffer[(bufferOffset + consumed)..<(bufferOffset + consumed + payloadLen)]
                 }
                 consumed += payloadLen
             }
 
             results.append((metadata, payload))
-            buffer.removeSubrange(0..<consumed)
+            bufferOffset += consumed
+        }
+
+        // Compact buffer only when dead space exceeds threshold
+        if bufferOffset > Self.compactThreshold {
+            buffer.removeSubrange(0..<bufferOffset)
+            bufferOffset = 0
+        } else if bufferOffset > 0 && bufferOffset == buffer.count {
+            // Fully consumed — reset cheaply
+            buffer.removeAll(keepingCapacity: true)
+            bufferOffset = 0
         }
 
         return results
@@ -311,5 +309,6 @@ class MuxFrameParser {
     /// Resets the parser state.
     func reset() {
         buffer.removeAll()
+        bufferOffset = 0
     }
 }

@@ -65,77 +65,10 @@ struct VLESSProtocol {
         destinationPort: UInt16,
         flow: String? = nil
     ) -> Data {
-        #if NETWORK_EXTENSION
-        // If flow is specified or command is mux, use Swift implementation
-        // (C doesn't support addons, and mux omits address/port)
-        if (flow != nil && !flow!.isEmpty) || command == .mux {
-            return encodeRequestHeaderSwift(uuid: uuid, command: command,
-                                            destinationAddress: destinationAddress,
-                                            destinationPort: destinationPort,
-                                            flow: flow)
-        }
-
-        // Max header size: 1 + 16 + 1 + 1 + 2 + 1 + 1 + 255 = 278 bytes
-        var buffer = [UInt8](repeating: 0, count: 278)
-
-        // Get UUID bytes
-        let uuidBytes = uuid.uuid
-        let uuidArray: [UInt8] = [
-            uuidBytes.0, uuidBytes.1, uuidBytes.2, uuidBytes.3,
-            uuidBytes.4, uuidBytes.5, uuidBytes.6, uuidBytes.7,
-            uuidBytes.8, uuidBytes.9, uuidBytes.10, uuidBytes.11,
-            uuidBytes.12, uuidBytes.13, uuidBytes.14, uuidBytes.15
-        ]
-
-        // Parse address using C function
-        var addressType: UInt8 = 0
-        var addressBytes = [UInt8](repeating: 0, count: 256)
-        var addressLen: Int = 0
-
-        let headerLen: Int = destinationAddress.withCString { cStr in
-            let strLen = strlen(cStr)
-
-            let parseResult = parse_vless_address(cStr, strLen,
-                                                   &addressType, &addressBytes, &addressLen)
-            guard parseResult != 0 else {
-                // Fallback: treat as domain
-                addressType = UInt8(VLESS_ADDR_DOMAIN)
-                addressLen = min(strLen, 255)
-                memcpy(&addressBytes, cStr, addressLen)
-                return 0
-            }
-
-            // Build header using C function
-            return uuidArray.withUnsafeBufferPointer { uuidPtr in
-                addressBytes.withUnsafeBufferPointer { addrPtr in
-                    Int(build_vless_request_header(
-                        &buffer,
-                        uuidPtr.baseAddress!,
-                        command.rawValue,
-                        destinationPort,
-                        addressType,
-                        addrPtr.baseAddress!,
-                        addressLen
-                    ))
-                }
-            }
-        }
-
-        if headerLen > 0 {
-            return Data(buffer.prefix(headerLen))
-        }
-
-        // Fallback to Swift implementation if C parsing failed
-        return encodeRequestHeaderSwift(uuid: uuid, command: command,
-                                        destinationAddress: destinationAddress,
-                                        destinationPort: destinationPort,
-                                        flow: nil)
-        #else
         return encodeRequestHeaderSwift(uuid: uuid, command: command,
                                         destinationAddress: destinationAddress,
                                         destinationPort: destinationPort,
                                         flow: flow)
-        #endif
     }
 
     /// Swift fallback implementation
@@ -229,48 +162,22 @@ struct VLESSProtocol {
         return totalLength
     }
 
-    /// Parse an IPv4 address string into bytes
+    /// Parse an IPv4 address string into 4 bytes using inet_pton.
     private static func parseIPv4(_ address: String) -> [UInt8]? {
-        let parts = address.split(separator: ".")
-        guard parts.count == 4 else { return nil }
-
-        var bytes: [UInt8] = []
-        for part in parts {
-            guard let byte = UInt8(part) else { return nil }
-            bytes.append(byte)
-        }
-        return bytes
+        var addr = in_addr()
+        guard inet_pton(AF_INET, address, &addr) == 1 else { return nil }
+        return withUnsafeBytes(of: &addr) { Array($0) }
     }
 
-    /// Parse an IPv6 address string into bytes
+    /// Parse an IPv6 address string into 16 bytes using inet_pton.
+    /// Handles bracketed addresses like "[::1]".
     private static func parseIPv6(_ address: String) -> [UInt8]? {
-        // Handle bracketed IPv6 addresses
-        var addr = address
-        if addr.hasPrefix("[") && addr.hasSuffix("]") {
-            addr = String(addr.dropFirst().dropLast())
+        var clean = address
+        if clean.hasPrefix("[") && clean.hasSuffix("]") {
+            clean = String(clean.dropFirst().dropLast())
         }
-
-        // Simple IPv6 parsing - expand :: and parse
-        var parts = addr.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
-
-        // Handle :: expansion
-        if let emptyIndex = parts.firstIndex(of: "") {
-            let before = Array(parts[..<emptyIndex])
-            let after = Array(parts[(emptyIndex + 1)...]).filter { !$0.isEmpty }
-            let missing = 8 - before.count - after.count
-            if missing < 0 { return nil }
-            parts = before + Array(repeating: "0", count: missing) + after
-        }
-
-        guard parts.count == 8 else { return nil }
-
-        var bytes: [UInt8] = []
-        for part in parts {
-            guard let value = UInt16(part, radix: 16) else { return nil }
-            bytes.append(UInt8(value >> 8))
-            bytes.append(UInt8(value & 0xFF))
-        }
-
-        return bytes
+        var addr = in6_addr()
+        guard inet_pton(AF_INET6, clean, &addr) == 1 else { return nil }
+        return withUnsafeBytes(of: &addr) { Array($0) }
     }
 }

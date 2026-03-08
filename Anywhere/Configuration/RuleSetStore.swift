@@ -28,7 +28,7 @@ class RuleSetStore: ObservableObject {
     private static let assignmentsKey = "ruleSetAssignments"
 
     private init() {
-        let assignments = APCore.userDefaults.dictionary(forKey: Self.assignmentsKey) as? [String: String] ?? [:]
+        let assignments = AWCore.userDefaults.dictionary(forKey: Self.assignmentsKey) as? [String: String] ?? [:]
         ruleSets = Self.builtIn.map { name in
             RuleSet(id: name, name: name, assignedConfigurationId: assignments[name])
         }
@@ -82,7 +82,7 @@ class RuleSetStore: ObservableObject {
     // MARK: - App Group Sync
 
     func syncToAppGroup(configurations: [ProxyConfiguration], serializeConfiguration: (ProxyConfiguration) -> [String: Any]) {
-        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: APCore.suiteName) else { return }
+        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName) else { return }
         let routingURL = containerURL.appendingPathComponent("routing.json")
 
         var routingRules: [[String: Any]] = []
@@ -141,6 +141,6 @@ class RuleSetStore: ObservableObject {
         let dict = Dictionary(uniqueKeysWithValues: ruleSets.compactMap { rs in
             rs.assignedConfigurationId.map { (rs.name, $0) }
         })
-        APCore.userDefaults.set(dict, forKey: Self.assignmentsKey)
+        AWCore.userDefaults.set(dict, forKey: Self.assignmentsKey)
     }
 }

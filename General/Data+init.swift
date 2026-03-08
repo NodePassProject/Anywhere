@@ -44,7 +44,14 @@ extension Data {
 
     /// Convert to hex string
     func hexEncodedString() -> String {
-        map { String(format: "%02x", $0) }.joined()
+        let hexChars: [Character] = Array("0123456789abcdef")
+        var result = ""
+        result.reserveCapacity(count * 2)
+        for byte in self {
+            result.append(hexChars[Int(byte >> 4)])
+            result.append(hexChars[Int(byte & 0x0F)])
+        }
+        return result
     }
 
     /// Convert to base64url encoded string (no padding)

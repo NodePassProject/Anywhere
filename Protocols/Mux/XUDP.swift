@@ -25,20 +25,11 @@ enum XUDP {
     /// net.Destination.String() for UDP sources.
     static func generateGlobalID(sourceAddress: String) -> Data {
         #if NETWORK_EXTENSION
-        var hasher = blake3_hasher()
-        baseKey.withUnsafeBufferPointer { keyPtr in
-            blake3_hasher_init_keyed(&hasher, keyPtr.baseAddress!)
-        }
-        let sourceBytes = Array(sourceAddress.utf8)
-        sourceBytes.withUnsafeBufferPointer { srcPtr in
-            blake3_hasher_update(&hasher, srcPtr.baseAddress!, sourceBytes.count)
-        }
-        var output = [UInt8](repeating: 0, count: 8)
-        blake3_hasher_finalize(&hasher, &output, 8)
-        return Data(output)
+        var hasher = Blake3Hasher(key: baseKey)
+        hasher.update(Array(sourceAddress.utf8))
+        return hasher.finalizeData(count: 8)
         #else
-        // Fallback: SHA256-based GlobalID for main app (not used in practice)
-        let sourceBytes = Array(sourceAddress.utf8)
+        // Fallback: random GlobalID for main app (not used in practice)
         var output = [UInt8](repeating: 0, count: 8)
         _ = SecRandomCopyBytes(kSecRandomDefault, 8, &output)
         return Data(output)

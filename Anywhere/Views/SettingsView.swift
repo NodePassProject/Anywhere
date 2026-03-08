@@ -19,16 +19,16 @@ import SwiftUI
 ///
 /// - "alwaysOnEnabled": read by VPNViewModel only; does not affect the running NE.
 struct SettingsView: View {
-    @AppStorage("alwaysOnEnabled", store: APCore.userDefaults)
+    @AppStorage("alwaysOnEnabled", store: AWCore.userDefaults)
     private var alwaysOnEnabled = false
     
-    @AppStorage("ipv6Enabled", store: APCore.userDefaults)
+    @AppStorage("ipv6Enabled", store: AWCore.userDefaults)
     private var ipv6Enabled = false
     
-    @AppStorage("dohEnabled", store: APCore.userDefaults)
+    @AppStorage("dohEnabled", store: AWCore.userDefaults)
     private var dohEnabled = false
     
-    @AppStorage("bypassCountryCode", store: APCore.userDefaults)
+    @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
     private var bypassCountryCode = ""
     
     @State private var showDoHAlert = false

@@ -13,7 +13,7 @@ struct TLSRecordCrypto {
 
     /// Encrypt a TLS 1.3 handshake record using AES-GCM.
     /// Returns a complete TLS record (header + ciphertext + tag).
-    static func encryptHandshakeRecord(plaintext: Data, key: Data, iv: Data, seqNum: UInt64) throws -> Data {
+    static func encryptHandshakeRecord(plaintext: Data, key: SymmetricKey, iv: Data, seqNum: UInt64) throws -> Data {
         let nonce = buildNonce(iv: iv, seqNum: seqNum)
 
         var innerPlaintext = plaintext
@@ -22,9 +22,8 @@ struct TLSRecordCrypto {
         let len = UInt16(innerPlaintext.count + 16)
         let aad = Data([0x17, 0x03, 0x03, UInt8(len >> 8), UInt8(len & 0xFF)])
 
-        let symmetricKey = SymmetricKey(data: key)
         let nonceObj = try AES.GCM.Nonce(data: nonce)
-        let sealedBox = try AES.GCM.seal(innerPlaintext, using: symmetricKey, nonce: nonceObj, authenticating: aad)
+        let sealedBox = try AES.GCM.seal(innerPlaintext, using: key, nonce: nonceObj, authenticating: aad)
 
         // Return full TLS record: header + ciphertext + tag
         var record = aad
@@ -33,21 +32,20 @@ struct TLSRecordCrypto {
         return record
     }
 
-    static func decryptRecord(ciphertext: Data, key: Data, iv: Data, seqNum: UInt64, recordHeader: Data) throws -> Data {
+    static func decryptRecord(ciphertext: Data, key: SymmetricKey, iv: Data, seqNum: UInt64, recordHeader: Data) throws -> Data {
         let nonce = buildNonce(iv: iv, seqNum: seqNum)
 
         guard ciphertext.count >= 16 else {
             throw TLSRecordError.ciphertextTooShort
         }
 
-        let symmetricKey = SymmetricKey(data: key)
         let nonceObj = try AES.GCM.Nonce(data: nonce)
 
         let ct = ciphertext.prefix(ciphertext.count - 16)
         let tag = ciphertext.suffix(16)
 
         let sealedBox = try AES.GCM.SealedBox(nonce: nonceObj, ciphertext: ct, tag: tag)
-        let decrypted = try AES.GCM.open(sealedBox, using: symmetricKey, authenticating: recordHeader)
+        let decrypted = try AES.GCM.open(sealedBox, using: key, authenticating: recordHeader)
 
         guard !decrypted.isEmpty else {
             throw TLSRecordError.emptyDecryptedData
@@ -65,10 +63,9 @@ struct TLSRecordCrypto {
         return Data(decrypted.prefix(contentEnd))
     }
 
-    static func encryptAESGCM(plaintext: Data, key: Data, nonce: Data, aad: Data) throws -> Data {
-        let symmetricKey = SymmetricKey(data: key)
+    static func encryptAESGCM(plaintext: Data, key: SymmetricKey, nonce: Data, aad: Data) throws -> Data {
         let nonceObj = try AES.GCM.Nonce(data: nonce)
-        let sealedBox = try AES.GCM.seal(plaintext, using: symmetricKey, nonce: nonceObj, authenticating: aad)
+        let sealedBox = try AES.GCM.seal(plaintext, using: key, nonce: nonceObj, authenticating: aad)
 
         var result = Data(sealedBox.ciphertext)
         result.append(contentsOf: sealedBox.tag)
