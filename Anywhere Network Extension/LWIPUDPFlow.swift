@@ -11,7 +11,7 @@ import os.log
 private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "LWIP-UDP")
 
 class LWIPUDPFlow {
-    let flowKey: String
+    let flowKey: LWIPStack.UDPFlowKey
     let srcHost: String
     let srcPort: UInt16
     let dstHost: String
@@ -49,7 +49,7 @@ class LWIPUDPFlow {
     /// Datagrams that would exceed this limit are silently dropped (standard UDP behavior).
     private static let maxUDPBufferSize = 16 * 1024  // 16 KB
 
-    init(flowKey: String,
+    init(flowKey: LWIPStack.UDPFlowKey,
          srcHost: String, srcPort: UInt16,
          dstHost: String, dstPort: UInt16,
          srcIPData: Data, dstIPData: Data,
@@ -76,8 +76,6 @@ class LWIPUDPFlow {
         guard !closed else { return }
         lastActivity = CFAbsoluteTimeGetCurrent()
 
-        let payload = data.prefix(payloadLength)
-
         // Buffer data while the outbound connection is being established.
         // directRelay is set before its socket connects; sending to an
         // unconnected UDP socket silently drops the datagram.
@@ -86,23 +84,25 @@ class LWIPUDPFlow {
             return
         }
 
+        let payload = data.prefix(payloadLength)
+
         // Direct bypass path
         if let relay = directRelay {
-            relay.send(data: Data(payload))
+            relay.send(data: payload)
             return
         }
 
         // Shadowsocks direct UDP relay
         if let relay = ssUDPRelay {
-            relay.send(data: Data(payload))
+            relay.send(data: payload)
             return
         }
 
         // Mux path: send raw payload (mux framing handled by MuxSession)
         if let session = muxSession {
-            session.send(data: Data(payload)) { [weak self] error in
+            session.send(data: payload) { [weak self] error in
                 if let error {
-                    logger.error("[UDP] Mux send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    logger.error("[UDP] Mux send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
             }
             return
@@ -112,9 +112,9 @@ class LWIPUDPFlow {
         if let connection = proxyConnection {
             if configuration.outboundProtocol == .shadowsocks {
                 // SS connection handles encryption; send raw payload
-                connection.send(data: Data(data.prefix(payloadLength))) { [weak self] error in
+                connection.send(data: payload) { [weak self] error in
                     if let error {
-                        logger.error("[UDP] SS send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        logger.error("[UDP] SS send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
                     }
                 }
             } else {
@@ -136,27 +136,20 @@ class LWIPUDPFlow {
 
         // Always buffer raw payloads. Framing for VLESS non-mux is deferred
         // to send time so that bypass and mux paths receive unframed data.
-        let payload = Data(data.prefix(payloadLength))
-        pendingData.append(payload)
-        pendingBufferSize += payload.count
+        pendingData.append(data.prefix(payloadLength))
+        pendingBufferSize += payloadLength
     }
 
     private func sendUDPThroughProxy(connection: ProxyConnection, payload: Data, payloadLength: Int) {
-        let framedLen = 2 + payloadLength
-        var framedPayload = Data(count: framedLen)
-        framedPayload.withUnsafeMutableBytes { outPtr in
-            payload.withUnsafeBytes { srcPtr in
-                frame_udp_payload(
-                    outPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                    srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                    UInt16(payloadLength)
-                )
-            }
-        }
+        let slice = payload.prefix(payloadLength)
+        var framedPayload = Data(capacity: 2 + slice.count)
+        framedPayload.append(UInt8(slice.count >> 8))
+        framedPayload.append(UInt8(slice.count & 0xFF))
+        framedPayload.append(slice)
 
         connection.sendRaw(data: framedPayload) { [weak self] error in
             if let error {
-                logger.error("[UDP] Proxy send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.error("[UDP] Proxy send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -222,7 +215,7 @@ class LWIPUDPFlow {
                         for payload in buffered {
                             session.send(data: payload) { [weak self] error in
                                 if let error {
-                                    logger.error("[UDP] Mux initial send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                    logger.error("[UDP] Mux initial send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
                                 }
                             }
                         }
@@ -262,29 +255,22 @@ class LWIPUDPFlow {
                                 for payload in self.pendingData {
                                     proxyConnection.send(data: payload) { [weak self] error in
                                         if let error {
-                                            logger.error("[UDP] SS initial send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                            logger.error("[UDP] SS initial send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
                                         }
                                     }
                                 }
                             } else {
                                 // VLESS: frame each payload with 2-byte length prefix
-                                var dataToSend = Data()
+                                let totalSize = self.pendingData.reduce(0) { $0 + 2 + $1.count }
+                                var dataToSend = Data(capacity: totalSize)
                                 for payload in self.pendingData {
-                                    var framedPayload = Data(count: 2 + payload.count)
-                                    framedPayload.withUnsafeMutableBytes { outPtr in
-                                        payload.withUnsafeBytes { srcPtr in
-                                            frame_udp_payload(
-                                                outPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                                                srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                                                UInt16(payload.count)
-                                            )
-                                        }
-                                    }
-                                    dataToSend.append(framedPayload)
+                                    dataToSend.append(UInt8(payload.count >> 8))
+                                    dataToSend.append(UInt8(payload.count & 0xFF))
+                                    dataToSend.append(payload)
                                 }
                                 proxyConnection.sendRaw(data: dataToSend) { [weak self] error in
                                     if let error {
-                                        logger.error("[UDP] Proxy initial send error for \(self?.flowKey ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                        logger.error("[UDP] Proxy initial send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
                                     }
                                 }
                             }

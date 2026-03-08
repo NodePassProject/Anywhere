@@ -7,7 +7,7 @@
 
 import Foundation
 
-final class APCore {
+final class AWCore {
     static let suiteName = "group.com.argsment.Anywhere"
     static let userDefaults = UserDefaults(suiteName: suiteName)!
 }

@@ -398,7 +398,7 @@ class TLSClient {
                     let seqNum = serverHandshakeSeqNum
                     let decrypted = try TLSRecordCrypto.decryptRecord(
                         ciphertext: ciphertext,
-                        key: keys.serverKey,
+                        key: SymmetricKey(data: keys.serverKey),
                         iv: keys.serverIV,
                         seqNum: seqNum,
                         recordHeader: recordHeader
@@ -744,7 +744,7 @@ class TLSClient {
         do {
             let finishedRecord = try TLSRecordCrypto.encryptHandshakeRecord(
                 plaintext: finishedMsg,
-                key: keys.clientKey,
+                key: SymmetricKey(data: keys.clientKey),
                 iv: keys.clientIV,
                 seqNum: 0
             )

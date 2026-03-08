@@ -91,19 +91,19 @@ private func reshapeData(_ data: Data) -> [Data] {
 
     // Find last occurrence of TLS application data header (0x17 0x03 0x03)
     var splitIndex = data.count / 2
-    let bytes = data.withUnsafeBytes { Array(UnsafeBufferPointer(start: $0.baseAddress!.assumingMemoryBound(to: UInt8.self), count: data.count)) }
-    for i in stride(from: bytes.count - 3, through: 0, by: -1) {
-        if bytes[i] == 0x17 && bytes[i + 1] == 0x03 && bytes[i + 2] == 0x03 {
-            if i >= 21 && i <= reshapeThreshold {
-                splitIndex = i
-                break
+    data.withUnsafeBytes { ptr in
+        let bytes = ptr.bindMemory(to: UInt8.self)
+        for i in stride(from: bytes.count - 3, through: 0, by: -1) {
+            if bytes[i] == 0x17 && bytes[i + 1] == 0x03 && bytes[i + 2] == 0x03 {
+                if i >= 21 && i <= reshapeThreshold {
+                    splitIndex = i
+                    break
+                }
             }
         }
     }
 
-    let first = data.prefix(splitIndex)
-    let second = data.suffix(from: data.index(data.startIndex, offsetBy: splitIndex))
-    return [Data(first), Data(second)]
+    return [data.prefix(splitIndex), data.suffix(from: data.index(data.startIndex, offsetBy: splitIndex))]
 }
 
 // MARK: - Padding Functions
@@ -131,34 +131,38 @@ func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficStat
         paddingLen = 0
     }
 
-    var result = Data()
+    let uuidLen = state.writeOnceUserUUID != nil ? 16 : 0
+    let totalLen = uuidLen + 5 + Int(contentLen) + Int(paddingLen)
+    var result = Data(count: totalLen)
+    result.withUnsafeMutableBytes { ptr in
+        let p = ptr.bindMemory(to: UInt8.self)
+        var offset = 0
 
-    // Add UUID on first packet
-    if let uuid = state.writeOnceUserUUID {
-        result.append(uuid)
-        state.writeOnceUserUUID = nil
-    }
-
-    // Add command header: [command (1)] [contentLen (2)] [paddingLen (2)]
-    result.append(command.rawValue)
-    result.append(UInt8(contentLen >> 8))
-    result.append(UInt8(contentLen & 0xFF))
-    result.append(UInt8(paddingLen >> 8))
-    result.append(UInt8(paddingLen & 0xFF))
-
-    // Add content
-    if let data = data {
-        result.append(data)
-    }
-
-    // Add random padding
-    if paddingLen > 0 {
-        var padding = Data(count: Int(paddingLen))
-        padding.withUnsafeMutableBytes { ptr in
-            _ = SecRandomCopyBytes(kSecRandomDefault, Int(paddingLen), ptr.baseAddress!)
+        // Add UUID on first packet
+        if let uuid = state.writeOnceUserUUID {
+            uuid.copyBytes(to: p.baseAddress! + offset, count: 16)
+            offset += 16
         }
-        result.append(padding)
+
+        // Add command header: [command (1)] [contentLen (2)] [paddingLen (2)]
+        p[offset] = command.rawValue; offset += 1
+        p[offset] = UInt8(contentLen >> 8); offset += 1
+        p[offset] = UInt8(contentLen & 0xFF); offset += 1
+        p[offset] = UInt8(paddingLen >> 8); offset += 1
+        p[offset] = UInt8(paddingLen & 0xFF); offset += 1
+
+        // Add content
+        if let data = data {
+            data.copyBytes(to: p.baseAddress! + offset, count: data.count)
+            offset += data.count
+        }
+
+        // Add random padding
+        if paddingLen > 0 {
+            _ = SecRandomCopyBytes(kSecRandomDefault, Int(paddingLen), p.baseAddress! + offset)
+        }
     }
+    state.writeOnceUserUUID = nil
 
     return result
 }
@@ -166,10 +170,14 @@ func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficStat
 /// Remove Vision padding from data and extract content
 /// Returns the extracted content data
 func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
+    var readOffset = 0
+    let dataCount = data.count
+    let startIdx = data.startIndex
+
     // Initial state check - look for UUID prefix
     if state.remainingCommand == -1 && state.remainingContent == -1 && state.remainingPadding == -1 {
-        if data.count >= 21 && data.prefix(16) == state.userUUID {
-            data = Data(data.dropFirst(16))
+        if dataCount >= 21 && data.prefix(16) == state.userUUID {
+            readOffset = 16
             state.remainingCommand = 5
         } else {
             // No Vision header, return data as-is
@@ -179,10 +187,11 @@ func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
 
     var result = Data()
 
-    while !data.isEmpty {
+    while readOffset < dataCount {
         if state.remainingCommand > 0 {
             // Reading command header
-            let byte = data.removeFirst()
+            let byte = data[startIdx + readOffset]
+            readOffset += 1
             switch state.remainingCommand {
             case 5:
                 state.currentCommand = Int(byte)
@@ -200,14 +209,16 @@ func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
             state.remainingCommand -= 1
         } else if state.remainingContent > 0 {
             // Reading content
-            let toRead = min(Int(state.remainingContent), data.count)
-            result.append(data.prefix(toRead))
-            data = Data(data.dropFirst(toRead))
+            let remaining = dataCount - readOffset
+            let toRead = min(Int(state.remainingContent), remaining)
+            result.append(data[(startIdx + readOffset)..<(startIdx + readOffset + toRead)])
+            readOffset += toRead
             state.remainingContent -= Int32(toRead)
         } else if state.remainingPadding > 0 {
             // Skipping padding
-            let toSkip = min(Int(state.remainingPadding), data.count)
-            data = Data(data.dropFirst(toSkip))
+            let remaining = dataCount - readOffset
+            let toSkip = min(Int(state.remainingPadding), remaining)
+            readOffset += toSkip
             state.remainingPadding -= Int32(toSkip)
         }
 
@@ -221,14 +232,21 @@ func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
                 state.remainingCommand = -1
                 state.remainingContent = -1
                 state.remainingPadding = -1
-                if !data.isEmpty {
+                if readOffset < dataCount {
                     // Remaining data after padding ends
-                    result.append(data)
-                    data = Data()
+                    result.append(data[(startIdx + readOffset)..<(startIdx + dataCount)])
+                    readOffset = dataCount
                 }
                 break
             }
         }
+    }
+
+    // Update data to reflect consumed bytes
+    if readOffset >= dataCount {
+        data = Data()
+    } else {
+        data = Data(data[(startIdx + readOffset)...])
     }
 
     return result

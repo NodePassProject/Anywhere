@@ -52,7 +52,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
 
-            let ipv6Enabled = APCore.userDefaults.bool(forKey: "ipv6Enabled")
+            let ipv6Enabled = AWCore.userDefaults.bool(forKey: "ipv6Enabled")
             self.lwipStack.start(packetFlow: self.packetFlow,
                                  configuration: configuration,
                                  ipv6Enabled: ipv6Enabled)
@@ -111,7 +111,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         ipv4Settings.excludedRoutes = ipv4Exclusions
         settings.ipv4Settings = ipv4Settings
 
-        let ipv6Enabled = APCore.userDefaults.bool(forKey: "ipv6Enabled")
+        let ipv6Enabled = AWCore.userDefaults.bool(forKey: "ipv6Enabled")
         if ipv6Enabled {
             var ipv6Exclusions = Self.bypassIPv6Routes
             if !serverIsIPv4 {

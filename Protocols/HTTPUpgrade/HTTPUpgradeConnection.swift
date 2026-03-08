@@ -229,7 +229,7 @@ class HTTPUpgradeConnection {
         lock.lock()
         if !leftoverBuffer.isEmpty {
             let data = leftoverBuffer
-            leftoverBuffer.removeAll()
+            leftoverBuffer.removeAll(keepingCapacity: true)
             lock.unlock()
             completion(data, nil)
             return

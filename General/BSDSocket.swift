@@ -77,6 +77,9 @@ class BSDSocket {
     private var writeSourceResumed = false
     private var pendingSends: [PendingSend] = []
 
+    /// Maximum total bytes queued across all pending sends (2 MB).
+    private static let maxPendingSendBytes = 2_097_152
+
     private struct PendingSend {
         let data: Data
         var offset: Int
@@ -308,18 +311,18 @@ class BSDSocket {
                 return
             }
 
-            let buffer = UnsafeMutableRawPointer.allocate(byteCount: maximumLength, alignment: 1)
-            let n = Darwin.recv(fd, buffer, maximumLength, 0)
+            var data = Data(count: maximumLength)
+            let n = data.withUnsafeMutableBytes { buf -> Int in
+                guard let base = buf.baseAddress else { return -1 }
+                return Darwin.recv(fd, base, maximumLength, 0)
+            }
 
             if n > 0 {
-                let data = Data(bytes: buffer, count: n)
-                buffer.deallocate()
+                data.count = n
                 completion(data, false, nil)
             } else if n == 0 {
-                buffer.deallocate()
                 completion(nil, true, nil)
             } else if errno == EAGAIN || errno == EWOULDBLOCK {
-                buffer.deallocate()
                 pendingReceive = completion
                 receiveMaxLength = maximumLength
                 if !readSourceResumed {
@@ -327,7 +330,6 @@ class BSDSocket {
                     readSource?.resume()
                 }
             } else {
-                buffer.deallocate()
                 completion(nil, true, BSDSocketError.receiveFailed(String(cString: strerror(errno))))
             }
         }
@@ -351,27 +353,26 @@ class BSDSocket {
         }
 
         let maxLen = receiveMaxLength
-        let buffer = UnsafeMutableRawPointer.allocate(byteCount: maxLen, alignment: 1)
-        let n = Darwin.recv(fd, buffer, maxLen, 0)
+        var data = Data(count: maxLen)
+        let n = data.withUnsafeMutableBytes { buf -> Int in
+            guard let base = buf.baseAddress else { return -1 }
+            return Darwin.recv(fd, base, maxLen, 0)
+        }
 
         if n > 0 {
             pendingReceive = nil
             if readSourceResumed { readSourceResumed = false; readSource?.suspend() }
-            let data = Data(bytes: buffer, count: n)
-            buffer.deallocate()
+            data.count = n
             completion(data, false, nil)
         } else if n == 0 {
             pendingReceive = nil
             if readSourceResumed { readSourceResumed = false; readSource?.suspend() }
-            buffer.deallocate()
             completion(nil, true, nil)
         } else if errno == EAGAIN || errno == EWOULDBLOCK {
-            buffer.deallocate()
             // Spurious wakeup — leave callback and source active
         } else {
             pendingReceive = nil
             if readSourceResumed { readSourceResumed = false; readSource?.suspend() }
-            buffer.deallocate()
             completion(nil, true, BSDSocketError.receiveFailed(String(cString: strerror(errno))))
         }
     }
@@ -390,6 +391,11 @@ class BSDSocket {
         socketQueue.async { [self] in
             guard fd >= 0 else {
                 completion(BSDSocketError.notConnected)
+                return
+            }
+            let queuedBytes = pendingSends.reduce(0) { $0 + ($1.data.count - $1.offset) }
+            if queuedBytes + data.count > Self.maxPendingSendBytes {
+                completion(BSDSocketError.sendFailed("Send queue full"))
                 return
             }
             pendingSends.append(PendingSend(data: data, offset: 0, completion: completion))

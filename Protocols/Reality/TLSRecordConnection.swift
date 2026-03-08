@@ -349,17 +349,10 @@ class TLSRecordConnection {
             let headerEnd = headerStart + 5
             let bodyEnd = headerStart + totalLen
 
-            let header = Data(receiveBuffer[headerStart..<headerEnd])
-            let body = Data(receiveBuffer[headerEnd..<bodyEnd])
-            let fullRecord = Data(receiveBuffer[headerStart..<bodyEnd])
+            let header = receiveBuffer[headerStart..<headerEnd]
+            let body = receiveBuffer[headerEnd..<bodyEnd]
 
-            receiveBuffer.removeSubrange(headerStart..<bodyEnd)
             recordsProcessed += 1
-
-            // Compact buffer to reclaim backing storage
-            if receiveBuffer.isEmpty {
-                receiveBuffer = Data()
-            }
 
             if contentType == 0x17 { // Application Data
                 seqLock.lock()
@@ -369,23 +362,31 @@ class TLSRecordConnection {
 
                 do {
                     let decrypted = try decryptTLSRecord(ciphertext: body, header: header, seqNum: seqNum)
+                    receiveBuffer.removeSubrange(headerStart..<bodyEnd)
+                    if receiveBuffer.isEmpty { receiveBuffer = Data() }
                     if !decrypted.isEmpty {
                         batchedData.append(decrypted)
                     }
                 } catch {
-                    failedRecordData = fullRecord
+                    // Reconstruct full record only on failure (rare path)
+                    var failed = Data(receiveBuffer[headerStart..<bodyEnd])
+                    receiveBuffer.removeSubrange(headerStart..<bodyEnd)
                     if !receiveBuffer.isEmpty {
-                        failedRecordData!.append(receiveBuffer)
+                        failed.append(receiveBuffer)
                         receiveBuffer.removeAll()
                     }
+                    failedRecordData = failed
                     hasError = error
                     break
                 }
             } else if contentType == 0x15 { // Alert
+                receiveBuffer.removeSubrange(headerStart..<bodyEnd)
                 hasError = RealityError.connectionFailed("TLS Alert received")
                 break
+            } else {
+                // Other content types (ChangeCipherSpec, etc.) are skipped
+                receiveBuffer.removeSubrange(headerStart..<bodyEnd)
             }
-            // Other content types (ChangeCipherSpec, etc.) are skipped
         }
 
         if let error = hasError {

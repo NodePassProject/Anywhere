@@ -101,41 +101,18 @@ enum ShadowsocksProtocol {
     // MARK: - IP Parsing
 
     private static func parseIPv4(_ address: String) -> [UInt8]? {
-        let parts = address.split(separator: ".")
-        guard parts.count == 4 else { return nil }
-        var bytes: [UInt8] = []
-        for part in parts {
-            guard let byte = UInt8(part) else { return nil }
-            bytes.append(byte)
-        }
-        return bytes
+        var addr = in_addr()
+        guard inet_pton(AF_INET, address, &addr) == 1 else { return nil }
+        return withUnsafeBytes(of: &addr) { Array($0) }
     }
 
     private static func parseIPv6(_ address: String) -> [UInt8]? {
-        var addr = address
-        if addr.hasPrefix("[") && addr.hasSuffix("]") {
-            addr = String(addr.dropFirst().dropLast())
+        var clean = address
+        if clean.hasPrefix("[") && clean.hasSuffix("]") {
+            clean = String(clean.dropFirst().dropLast())
         }
-
-        var parts = addr.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
-
-        // Handle :: expansion
-        if let emptyIndex = parts.firstIndex(of: "") {
-            let before = Array(parts[..<emptyIndex])
-            let after = Array(parts[(emptyIndex + 1)...]).filter { !$0.isEmpty }
-            let missing = 8 - before.count - after.count
-            if missing < 0 { return nil }
-            parts = before + Array(repeating: "0", count: missing) + after
-        }
-
-        guard parts.count == 8 else { return nil }
-
-        var bytes: [UInt8] = []
-        for part in parts {
-            guard let value = UInt16(part, radix: 16) else { return nil }
-            bytes.append(UInt8(value >> 8))
-            bytes.append(UInt8(value & 0xFF))
-        }
-        return bytes
+        var addr = in6_addr()
+        guard inet_pton(AF_INET6, clean, &addr) == 1 else { return nil }
+        return withUnsafeBytes(of: &addr) { Array($0) }
     }
 }
