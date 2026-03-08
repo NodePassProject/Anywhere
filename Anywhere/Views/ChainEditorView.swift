@@ -204,15 +204,11 @@ private struct ProxyPickerView: View {
                             Text("\(proxy.serverAddress):\(proxy.serverPort, format: .number.grouping(.never))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            HStack(spacing: 4) {
-                                Text(proxy.transport.uppercased())
-                                Text("·")
-                                Text(proxy.security.uppercased())
-                            }
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
                         }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                        .contentShape(RoundedRectangle(cornerRadius: 12))
                     }
+                    .buttonStyle(.plain)
                 }
             }
             .overlay {
@@ -228,7 +224,15 @@ private struct ProxyPickerView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    if #available(iOS 26.0, *) {
+                        Button(role: .cancel) {
+                            dismiss()
+                        } label: {
+                            Label("Cancel", systemImage: "xmark")
+                        }
+                    } else {
+                        Button("Cancel") { dismiss() }
+                    }
                 }
             }
         }

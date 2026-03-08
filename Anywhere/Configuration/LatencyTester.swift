@@ -78,23 +78,17 @@ nonisolated enum LatencyTester {
         }
     }
 
-    /// Test multiple configurations in batches of 3, emitting results as each test finishes.
+    /// Test all configurations concurrently, emitting results as each test finishes.
     nonisolated static func testAll(_ configurations: [ProxyConfiguration]) -> AsyncStream<(UUID, LatencyResult)> {
         AsyncStream { continuation in
             let task = Task {
-                var index = 0
-                while index < configurations.count {
-                    guard !Task.isCancelled else { break }
-                    let batch = configurations[index..<min(index + 3, configurations.count)]
-                    await withTaskGroup(of: (UUID, LatencyResult).self) { group in
-                        for configuration in batch {
-                            group.addTask { (configuration.id, await Self.test(configuration)) }
-                        }
-                        for await pair in group {
-                            continuation.yield(pair)
-                        }
+                await withTaskGroup(of: (UUID, LatencyResult).self) { group in
+                    for configuration in configurations {
+                        group.addTask { (configuration.id, await Self.test(configuration)) }
                     }
-                    index += 3
+                    for await pair in group {
+                        continuation.yield(pair)
+                    }
                 }
                 continuation.finish()
             }

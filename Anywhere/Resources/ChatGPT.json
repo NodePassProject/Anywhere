@@ -30,5 +30,7 @@
   {"type":"domainSuffix","value":"sentry.io"},
   {"type":"domainSuffix","value":"stripe.com"},
   {"type":"domainSuffix","value":"turn.livekit.cloud"},
-  {"type":"domainKeyword","value":"openai"}
+  {"type":"domainKeyword","value":"openai"},
+  {"type":"ipCIDR","value":"24.199.123.28/32"},
+  {"type":"ipCIDR","value":"64.23.132.171/32"}
 ]

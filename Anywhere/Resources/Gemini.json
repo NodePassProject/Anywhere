@@ -1,0 +1,15 @@
+[
+  {"type":"domain","value":"ai.google.dev"},
+  {"type":"domain","value":"alkalimakersuite-pa.clients6.google.com"},
+  {"type":"domain","value":"makersuite.google.com"},
+  {"type":"domainSuffix","value":"bard.google.com"},
+  {"type":"domainSuffix","value":"deepmind.com"},
+  {"type":"domainSuffix","value":"deepmind.google"},
+  {"type":"domainSuffix","value":"gemini.google.com"},
+  {"type":"domainSuffix","value":"generativeai.google"},
+  {"type":"domainSuffix","value":"proactivebackend-pa.googleapis.com"},
+  {"type":"domainSuffix","value":"apis.google.com"},
+  {"type":"domainKeyword","value":"colab"},
+  {"type":"domainKeyword","value":"developerprofiles"},
+  {"type":"domainKeyword","value":"generativelanguage"}
+]

@@ -178,5 +178,8 @@
   {"type":"domainSuffix","value":"youtubemobilesupport.com"},
   {"type":"domainSuffix","value":"yt.be"},
   {"type":"domainSuffix","value":"ytimg.com"},
-  {"type":"domainKeyword","value":"youtube"}
+  {"type":"domainKeyword","value":"youtube"},
+  {"type":"ipCIDR","value":"172.110.32.0/21"},
+  {"type":"ipCIDR","value":"216.73.80.0/20"},
+  {"type":"ipCIDR6","value":"2620:120:e000::/40"}
 ]

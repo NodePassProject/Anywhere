@@ -24,7 +24,7 @@ class RuleSetStore: ObservableObject {
     @Published private(set) var ruleSets: [RuleSet] = []
 
     /// Bundled ruleset names (must match JSON filenames in Resources/).
-    private static let builtIn = ["Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude"]
+    private static let builtIn = ["Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini"]
     private static let assignmentsKey = "ruleSetAssignments"
 
     private init() {
@@ -94,10 +94,26 @@ class RuleSetStore: ObservableObject {
             let domainRules = loadRules(for: ruleSet.name)
             guard !domainRules.isEmpty else { continue }
 
-            let domainRulesArray: [[String: String]] = domainRules.map {
-                ["type": $0.type.rawValue, "value": $0.value]
+            let domainRulesArray: [[String: String]] = domainRules.compactMap {
+                switch $0.type {
+                case .domain, .domainSuffix, .domainKeyword:
+                    return ["type": $0.type.rawValue, "value": $0.value]
+                case .ipCIDR, .ipCIDR6:
+                    return nil
+                }
+            }
+            let ipRulesArray: [[String: String]] = domainRules.compactMap {
+                switch $0.type {
+                case .ipCIDR, .ipCIDR6:
+                    return ["type": $0.type.rawValue, "value": $0.value]
+                case .domain, .domainSuffix, .domainKeyword:
+                    return nil
+                }
             }
             var ruleEntry: [String: Any] = ["domainRules": domainRulesArray]
+            if !ipRulesArray.isEmpty {
+                ruleEntry["ipRules"] = ipRulesArray
+            }
 
             if assignedId == "DIRECT" {
                 ruleEntry["action"] = "direct"

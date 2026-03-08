@@ -415,7 +415,21 @@ class LWIPStack {
 
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
             case .passthrough:
-                break
+                // Real IP — check IP CIDR rules, then GeoIP bypass
+                if let action = shared.domainRouter.matchIP(dstIPString) {
+                    switch action {
+                    case .direct:
+                        forceBypass = true
+                    case .reject:
+                        return nil
+                    case .proxy(let id):
+                        if let config = shared.domainRouter.resolveConfiguration(action: action) {
+                            connectionConfiguration = config
+                        } else {
+                            logger.warning("[LWIPStack] TCP proxy config \(id) not found for IP \(dstIPString, privacy: .public)")
+                        }
+                    }
+                }
             case .resolved(let domain, let configOverride, let bypass):
                 dstHost = domain
                 if let config = configOverride { connectionConfiguration = config }
@@ -505,12 +519,36 @@ class LWIPStack {
 
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "UDP") {
             case .passthrough:
-                break
+                // Real IP — check IP CIDR rules, then GeoIP bypass
+                if let action = shared.domainRouter.matchIP(dstIPString) {
+                    switch action {
+                    case .direct:
+                        forceBypass = true
+                    case .reject:
+                        shared.sendICMPPortUnreachable(
+                            srcIP: srcIP, srcPort: srcPort,
+                            dstIP: dstIP, dstPort: dstPort,
+                            isIPv6: isIPv6 != 0,
+                            udpPayloadLength: Int(len))
+                        return
+                    case .proxy(let id):
+                        if let config = shared.domainRouter.resolveConfiguration(action: action) {
+                            flowConfiguration = config
+                        } else {
+                            logger.warning("[LWIPStack] UDP proxy config \(id) not found for IP \(dstIPString, privacy: .public)")
+                        }
+                    }
+                }
             case .resolved(let domain, let configOverride, let bypass):
                 dstHost = domain
                 if let config = configOverride { flowConfiguration = config }
                 forceBypass = bypass
             case .drop:
+                shared.sendICMPPortUnreachable(
+                    srcIP: srcIP, srcPort: srcPort,
+                    dstIP: dstIP, dstPort: dstPort,
+                    isIPv6: isIPv6 != 0,
+                    udpPayloadLength: Int(len))
                 return
             case .unreachable:
                 shared.sendICMPPortUnreachable(
@@ -628,17 +666,11 @@ class LWIPStack {
         // Only intercept A (1) and AAAA (28) queries; let MX/SRV/etc. pass through
         guard qtype == 1 || qtype == 28 else { return false }
 
-        // Reject: return NODATA so the domain gets no IP at all
-        if let action = domainRouter.matchDomain(domain), case .reject = action {
-            logger.info("[FakeIP] Rejected DNS for \(domain, privacy: .public)")
-            return sendNODATA(payload: payload, srcIP: srcIP, srcPort: srcPort,
-                              dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6, qtype: qtype)
-        }
-
-        // Intercept ALL A/AAAA queries with fake IPs.
-        // Routing decisions (direct/proxy/specific proxy) are made at connection time
-        // by checking domainRouter, so rule changes take effect immediately without
-        // waiting for DNS cache expiry.
+        // Intercept ALL A/AAAA queries with fake IPs — including rejected domains.
+        // Routing decisions (direct/reject/proxy) are all made at connection time
+        // by checking domainRouter in resolveFakeIP(). This avoids NODATA responses
+        // that could be negatively cached by the OS, making rule changes stick even
+        // after the user removes a REJECT assignment.
         let offset = fakeIPPool.allocate(domain: domain)
 
         // Build fake IP bytes for the response
