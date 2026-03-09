@@ -16,6 +16,8 @@ class DirectUDPRelay {
     private var readSource: DispatchSourceRead?
     private var readSourceResumed = false
     private var cancelled = false
+    /// Reusable receive buffer — only accessed from `socketQueue`.
+    private let receiveBuffer = UnsafeMutableRawPointer.allocate(byteCount: 65536, alignment: 1)
 
     init() {}
 
@@ -92,16 +94,11 @@ class DirectUDPRelay {
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: socketQueue)
             source.setEventHandler { [weak self] in
                 guard let self, self.fd >= 0 else { return }
-                let buffer = UnsafeMutableRawPointer.allocate(byteCount: 65536, alignment: 1)
-                let n = Darwin.recv(self.fd, buffer, 65536, 0)
+                let n = Darwin.recv(self.fd, self.receiveBuffer, 65536, 0)
                 if n > 0 {
-                    let data = Data(bytes: buffer, count: n)
-                    buffer.deallocate()
-                    handler(data)
-                } else {
-                    buffer.deallocate()
-                    // UDP doesn't have EOF, ignore errors and zero-length reads
+                    handler(Data(bytes: self.receiveBuffer, count: n))
                 }
+                // UDP doesn't have EOF, ignore errors and zero-length reads
             }
             source.setCancelHandler { [weak self] in
                 self?.readSource = nil
@@ -139,5 +136,6 @@ class DirectUDPRelay {
             Darwin.close(fd)
         }
         if let rs = readSource, !readSourceResumed { rs.resume() }
+        receiveBuffer.deallocate()
     }
 }

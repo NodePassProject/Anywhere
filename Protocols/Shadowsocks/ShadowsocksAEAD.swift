@@ -35,10 +35,20 @@ enum ShadowsocksCipher {
     var saltSize: Int { keySize }
 
     /// AEAD authentication tag size (16 for all AEAD ciphers).
-    var tagSize: Int { 16 }
+    var tagSize: Int {
+        switch self {
+        case .none: return 0
+        default: return 16
+        }
+    }
 
     /// AEAD nonce size (12 for GCM and ChaCha20-Poly1305).
-    var nonceSize: Int { 12 }
+    var nonceSize: Int {
+        switch self {
+        case .none: return 0
+        default: return 12
+        }
+    }
 
     /// Whether this is a Shadowsocks 2022 cipher.
     var isSS2022: Bool {
@@ -281,6 +291,13 @@ class ShadowsocksAEADWriter {
 
     init(cipher: ShadowsocksCipher, masterKey: Data) {
         self.cipher = cipher
+        self.nonce = ShadowsocksNonce(size: cipher.nonceSize)
+
+        guard cipher != .none else {
+            self.salt = Data()
+            self.subkey = Data()
+            return
+        }
 
         // Generate random salt
         var saltBytes = [UInt8](repeating: 0, count: cipher.saltSize)
@@ -291,18 +308,12 @@ class ShadowsocksAEADWriter {
         self.subkey = ShadowsocksKeyDerivation.deriveSubkey(
             masterKey: masterKey, salt: salt, keySize: cipher.keySize
         )
-        self.nonce = ShadowsocksNonce(size: cipher.nonceSize)
     }
 
     /// Encrypts plaintext into AEAD chunks. Prepends salt on first call.
     func seal(plaintext: Data) throws -> Data {
         guard cipher != .none else {
-            var result = Data()
-            if !saltWritten {
-                saltWritten = true
-            }
-            result.append(plaintext)
-            return result
+            return plaintext
         }
 
         var output = Data()

@@ -2564,10 +2564,10 @@
       }
     },
     "HTTP/2" : {
-
+      "shouldTranslate" : false
     },
     "HTTPS" : {
-
+      "shouldTranslate" : false
     },
     "HTTPUpgrade" : {
       "shouldTranslate" : false
@@ -2727,6 +2727,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "链接"
+          }
+        }
+      }
+    },
+    "Link Type" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نوع الرابط"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tipo de enlace"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نوع لینک"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လင့်ခ်အမျိုးအစား"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Тип ссылки"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Salgy görnüşi"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Loại liên kết"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "链接类型"
           }
         }
       }
@@ -3777,6 +3829,58 @@
         }
       }
     },
+    "Proxy" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بروكسي"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proxy"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "پروکسی"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပရောက်စီ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Прокси"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proksi"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proxy"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理"
+          }
+        }
+      }
+    },
     "Public Key" : {
       "localizations" : {
         "ar" : {
@@ -4627,54 +4731,54 @@
         }
       }
     },
-    "Supports VLESS, Shadowsocks, subscription and Clash links" : {
+    "Supports proxy, subscription and Clash links" : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "يدعم روابط VLESS و Shadowsocks والاشتراكات و Clash"
+            "value" : "يدعم روابط البروكسي والاشتراك وClash"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Compatible con enlaces de VLESS, Shadowsocks, suscripción y Clash"
+            "value" : "Compatible con enlaces de proxy, suscripción y Clash"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "پشتیبانی از لینک‌های VLESS، Shadowsocks، اشتراک و Clash"
+            "value" : "پشتیبانی از لینک‌های پروکسی، اشتراک و Clash"
           }
         },
         "my" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VLESS၊ Shadowsocks၊ စာရင်းသွင်းမှုနှင့် Clash လင့်ခ်များကို ပံ့ပိုးသည်"
+            "value" : "ပရောက်စီ၊ စာရင်းသွင်းနှင့် Clash လင့်ခ်များကို ပံ့ပိုးသည်"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Поддерживает ссылки VLESS, Shadowsocks, подписки и Clash"
+            "value" : "Поддержка ссылок прокси, подписок и Clash"
           }
         },
         "tk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VLESS, Shadowsocks, abuna we Clash baglanyşyklaryny goldaýar"
+            "value" : "Proksi, abuna we Clash salgylaryny goldaýar"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Hỗ trợ liên kết VLESS, Shadowsocks, đăng ký và Clash"
+            "value" : "Hỗ trợ liên kết proxy, đăng ký và Clash"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "支持 VLESS、Shadowsocks、订阅和 Clash 链接"
+            "value" : "支持代理、订阅和 Clash 链接"
           }
         }
       }
@@ -5310,7 +5414,56 @@
       }
     },
     "Username" : {
-
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اسم المستخدم"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nombre de usuario"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نام کاربری"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "အသုံးပြုသူအမည်"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Имя пользователя"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ulanyjy ady"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tên người dùng"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "用户名"
+          }
+        }
+      }
     },
     "UUID" : {
       "shouldTranslate" : false
