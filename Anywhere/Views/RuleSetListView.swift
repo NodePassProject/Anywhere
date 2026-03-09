@@ -23,10 +23,6 @@ struct RuleSetListView: View {
         }
     }
 
-    private var adBlockRuleSet: RuleSetStore.RuleSet? {
-        RuleSetStore.shared.ruleSets.first { $0.name == "ADBlock" }
-    }
-
     private var routingRuleSets: [RuleSetStore.RuleSet] {
         RuleSetStore.shared.ruleSets.filter { $0.name != "ADBlock" }
     }
@@ -34,28 +30,13 @@ struct RuleSetListView: View {
     var body: some View {
         List {
             let shouldRefreshList = !shouldRefreshList
-            if let adBlock = adBlockRuleSet {
-                Picker(selection: Binding(
-                    get: { adBlock.assignedConfigurationId },
-                    set: { newValue in
-                        self.shouldRefreshList.toggle()
-                        RuleSetStore.shared.updateAssignment(adBlock, configurationId: newValue)
-                        viewModel.syncRoutingConfigurationToNE()
-                    }
-                )) {
-                    Text("Default").tag(nil as String?)
-                    Text("REJECT").tag("REJECT" as String?)
-                } label: {
-                    TextWithColorfulIcon(titleKey: "AD Blocking", systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
-                }
-            }
             ForEach(routingRuleSets) { ruleSet in
                 Picker(selection: Binding(
                     get: { ruleSet.assignedConfigurationId },
                     set: { newValue in
-                        self.shouldRefreshList.toggle()
                         RuleSetStore.shared.updateAssignment(ruleSet, configurationId: newValue)
                         viewModel.syncRoutingConfigurationToNE()
+                        self.shouldRefreshList.toggle()
                     }
                 )) {
                     Text("Default").tag(nil as String?)

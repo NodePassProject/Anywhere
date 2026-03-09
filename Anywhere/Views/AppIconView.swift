@@ -20,7 +20,7 @@ struct AppIconView: View {
                 .interpolation(.high)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 30, height: 30)
+                .frame(width: 32, height: 32)
                 .cornerRadius(7)
                 .overlay(
                     RoundedRectangle(cornerRadius: 7)
@@ -60,7 +60,7 @@ struct AppIconView: View {
                 .interpolation(.high)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 30, height: 30)
+                .frame(width: 32, height: 32)
                 .cornerRadius(7)
         }
     }

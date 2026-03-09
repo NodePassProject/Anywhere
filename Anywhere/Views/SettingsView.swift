@@ -19,25 +19,33 @@ import SwiftUI
 ///
 /// - "alwaysOnEnabled": read by VPNViewModel only; does not affect the running NE.
 struct SettingsView: View {
+    @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
+
     @AppStorage("alwaysOnEnabled", store: AWCore.userDefaults)
     private var alwaysOnEnabled = false
-    
+
     @AppStorage("ipv6Enabled", store: AWCore.userDefaults)
     private var ipv6Enabled = false
-    
+
     @AppStorage("dohEnabled", store: AWCore.userDefaults)
     private var dohEnabled = false
-    
+
     @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
     private var bypassCountryCode = ""
-    
+
     @State private var showDoHAlert = false
     
+    @State private var shouldRefreshADBlockToggle = true
+
     // Countries with serious internet censorship (must match INCLUDED_COUNTRIES in build_geoip.py)
     private static let countryCodes: [String] = [
         "AE", "BY", "CN", "CU", "IR", "MM", "RU", "SA", "TM", "VN"
     ]
     
+    private var adBlockRuleSet: RuleSetStore.RuleSet? {
+        RuleSetStore.shared.ruleSets.first { $0.name == "ADBlock" }
+    }
+
     private var hasRoutingRules: Bool {
         RuleSetStore.shared.ruleSets.contains { $0.assignedConfigurationId != nil }
     }
@@ -68,13 +76,8 @@ struct SettingsView: View {
                     TextWithColorfulIcon(titleKey: "DNS over HTTPS", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .teal)
                 }
             }
-            
+
             Section("Routing") {
-                NavigationLink {
-                    RuleSetListView()
-                } label: {
-                    TextWithColorfulIcon(titleKey: "Routing Rules", systemName: "arrow.triangle.branch", foregroundColor: .white, backgroundColor: .purple)
-                }
                 Picker(selection: $bypassCountryCode) {
                     Text("Disable").tag("")
                     ForEach(Self.countryCodes, id: \.self) { code in
@@ -82,6 +85,28 @@ struct SettingsView: View {
                     }
                 } label: {
                     TextWithColorfulIcon(titleKey: "Country Bypass", systemName: "globe.americas.fill", foregroundColor: .white, backgroundColor: .orange)
+                }
+                if let adBlock = adBlockRuleSet {
+                    let shouldRefreshADBlockToggle = !shouldRefreshADBlockToggle
+                    Toggle(isOn: Binding(
+                        get: { adBlock.assignedConfigurationId == "REJECT" },
+                        set: { newValue in
+                            if newValue {
+                                RuleSetStore.shared.updateAssignment(adBlock, configurationId: "REJECT")
+                            } else {
+                                RuleSetStore.shared.updateAssignment(adBlock, configurationId: nil)
+                            }
+                            viewModel.syncRoutingConfigurationToNE()
+                            self.shouldRefreshADBlockToggle.toggle()
+                        }
+                    )) {
+                        TextWithColorfulIcon(titleKey: "AD Blocking", systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
+                    }
+                }
+                NavigationLink {
+                    RuleSetListView()
+                } label: {
+                    TextWithColorfulIcon(titleKey: "Routing Rules", systemName: "arrow.triangle.branch", foregroundColor: .white, backgroundColor: .purple)
                 }
             }
             
