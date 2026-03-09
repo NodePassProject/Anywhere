@@ -8,7 +8,7 @@
 import SwiftUI
 
 /// Picker Item
-struct PickerItem {
+struct PickerItem: Identifiable {
     let id: UUID
     let name: String
 }
@@ -57,10 +57,9 @@ fileprivate struct Picker3DView: View {
     var items: [PickerItem]
     @Binding var config: PickerConfig
 
-    private var texts: [String] { items.map(\.name) }
     /// View Private Properties
-    @State private var activeText: String?
-    @State private var initialText: String = ""
+    @State private var activeId: UUID?
+    @State private var initialId: UUID?
     @State private var showContents: Bool = false
     @State private var showScrollView: Bool = false
     @State private var expandItems: Bool = false
@@ -75,8 +74,8 @@ fileprivate struct Picker3DView: View {
 
             ScrollView(.vertical) {
                 LazyVStack(spacing: 0) {
-                    ForEach(texts, id: \.self) { text in
-                        CardView(text, size: size)
+                    ForEach(items) { item in
+                        CardView(item, size: size)
                     }
                 }
                 .scrollTargetLayout()
@@ -84,7 +83,7 @@ fileprivate struct Picker3DView: View {
             /// Making it to start and stop at the center
             .safeAreaPadding(.top, (size.height * 0.5) - 20)
             .safeAreaPadding(.bottom, (size.height * 0.5))
-            .scrollPosition(id: $activeText, anchor: .center)
+            .scrollPosition(id: $activeId, anchor: .center)
             .scrollTargetBehavior(.viewAligned(limitBehavior: .always))
             .scrollIndicators(.hidden)
             .opacity(showScrollView ? 1 : 0)
@@ -106,12 +105,13 @@ fileprivate struct Picker3DView: View {
 
             CloseButton()
         }
-        .sensoryFeedback(.selection, trigger: activeText)
+        .sensoryFeedback(.selection, trigger: activeId)
         .task {
             /// Doing actions only for the first time
-            guard activeText == nil else { return }
-            initialText = config.text
-            activeText = config.text
+            guard activeId == nil else { return }
+            let startId = config.selectedId ?? items.first(where: { $0.name == config.text })?.id
+            initialId = startId
+            activeId = startId
             withAnimation(.easeInOut(duration: 0.3)) {
                 showContents = true
             }
@@ -126,7 +126,7 @@ fileprivate struct Picker3DView: View {
     }
 
     private var hasChanged: Bool {
-        activeText != nil && activeText != initialText
+        activeId != nil && activeId != initialId
     }
 
     /// Close Button
@@ -144,9 +144,9 @@ fileprivate struct Picker3DView: View {
                 /// 2. Hiding ScrollView and Placing the Active item back to it's source position
                 showScrollView = false
                 /// Commit selection before animating closed
-                if let activeText {
-                    config.text = activeText
-                    config.selectedId = items.first(where: { $0.name == activeText })?.id
+                if let activeId, let item = items.first(where: { $0.id == activeId }) {
+                    config.text = item.name
+                    config.selectedId = item.id
                 }
                 withAnimation(.easeInOut(duration: 0.2)) {
                     showContents = false
@@ -174,14 +174,14 @@ fileprivate struct Picker3DView: View {
 
     /// Card View
     @ViewBuilder
-    private func CardView(_ text: String, size: CGSize) -> some View {
+    private func CardView(_ item: PickerItem, size: CGSize) -> some View {
         GeometryReader { proxy in
             let width = proxy.size.width
 
-            Text(text)
+            Text(item.name)
                 .fontWeight(.semibold)
-                .foregroundStyle(activeText == text ? .blue : .gray)
-                .blur(radius: expandItems ? 0 : activeText == text ? 0 : 5)
+                .foregroundStyle(activeId == item.id ? .blue : .gray)
+                .blur(radius: expandItems ? 0 : activeId == item.id ? 0 : 5)
                 .offset(y: offset(proxy))
                 .clipped()
                 .offset(x: -width * 0.3)
@@ -191,7 +191,7 @@ fileprivate struct Picker3DView: View {
         }
         .frame(height: 20)
         .lineLimit(1)
-        .zIndex(activeText == text ? 1000 : 0)
+        .zIndex(activeId == item.id ? 1000 : 0)
     }
 
     /// View Transition Helpers

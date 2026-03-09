@@ -57,6 +57,9 @@ class XHTTPConnection {
     private let useHTTP2: Bool
     private var h2ReadBuffer = Data()
     private var h2DataBuffer = Data()
+
+    /// Maximum h2ReadBuffer size (2 MB). Protects against unbounded growth
+    private static let maxH2ReadBufferSize = 2_097_152
     private var h2PeerWindowSize: Int = 65535
     private var h2PeerInitialWindowSize: Int = 65535
     private var h2LocalWindowSize: Int = 65535
@@ -895,6 +898,10 @@ extension XHTTPConnection {
 
         let payload = Data(h2ReadBuffer[h2ReadBuffer.startIndex + Self.h2FrameHeaderSize ..< h2ReadBuffer.startIndex + totalSize])
         h2ReadBuffer.removeFirst(totalSize)
+        // Release backing store when buffer is fully consumed
+        if h2ReadBuffer.isEmpty {
+            h2ReadBuffer = Data()
+        }
 
         return (type, flags, sid, payload)
     }
@@ -926,6 +933,12 @@ extension XHTTPConnection {
 
             self.lock.lock()
             self.h2ReadBuffer.append(data)
+            if self.h2ReadBuffer.count > Self.maxH2ReadBufferSize {
+                self.h2ReadBuffer.removeAll()
+                self.lock.unlock()
+                completion(.failure(XHTTPError.connectionClosed))
+                return
+            }
             self.lock.unlock()
 
             // Recurse to try parsing again
@@ -1579,9 +1592,8 @@ struct ChunkedTransferDecoder {
             let termEnd = crlfRange.upperBound
             if buffer.endIndex >= termEnd + 2 {
                 buffer.removeFirst(termEnd + 2 - buffer.startIndex)
-            } else {
-                buffer.removeAll()
             }
+            buffer = Data()
             return nil
         }
 
@@ -1596,6 +1608,7 @@ struct ChunkedTransferDecoder {
 
         // Consume the chunk from the buffer (size line + \r\n + data + \r\n)
         buffer.removeFirst(needed - buffer.startIndex)
+        if buffer.isEmpty { buffer = Data() }
 
         return chunkData
     }

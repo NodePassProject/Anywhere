@@ -44,6 +44,9 @@ class ShadowsocksUDPRelay {
     private var readSourceResumed = false
     private var cancelled = false
 
+    /// Reusable receive buffer — only accessed from `socketQueue`.
+    private let receiveBuffer = UnsafeMutableRawPointer.allocate(byteCount: 65536, alignment: 1)
+
     // SS 2022 AES session state
     private var sessionID: UInt64 = 0
     private var packetID: UInt64 = 0
@@ -155,19 +158,14 @@ class ShadowsocksUDPRelay {
             let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: socketQueue)
             source.setEventHandler { [weak self] in
                 guard let self, self.fd >= 0 else { return }
-                let buffer = UnsafeMutableRawPointer.allocate(byteCount: 65536, alignment: 1)
-                let n = Darwin.recv(self.fd, buffer, 65536, 0)
+                let n = Darwin.recv(self.fd, self.receiveBuffer, 65536, 0)
                 if n > 0 {
-                    let data = Data(bytes: buffer, count: n)
-                    buffer.deallocate()
                     do {
-                        let payload = try self.decryptPacket(data)
+                        let payload = try self.decryptPacket(Data(bytes: self.receiveBuffer, count: n))
                         handler(payload)
                     } catch {
                         logger.error("[SS-UDP] Decrypt error: \(error.localizedDescription, privacy: .public)")
                     }
-                } else {
-                    buffer.deallocate()
                 }
             }
             source.setCancelHandler { [weak self] in
@@ -206,6 +204,7 @@ class ShadowsocksUDPRelay {
             Darwin.close(fd)
         }
         if let rs = readSource, !readSourceResumed { rs.resume() }
+        receiveBuffer.deallocate()
     }
 
     // MARK: - Packet Encryption

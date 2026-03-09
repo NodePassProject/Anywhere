@@ -77,6 +77,9 @@ class HTTP2Connection {
     private var flowControl = HTTP2FlowControl()
     private var receiveBuffer = Data()
 
+    /// Maximum receive buffer size (2 MB). Protects against unbounded growth
+    private static let maxReceiveBufferSize = 2_097_152
+
     /// The padding type negotiated with the server during CONNECT.
     private(set) var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType = .none
 
@@ -291,6 +294,10 @@ class HTTP2Connection {
             default:
                 break // Skip unknown frame types (RFC 7540 §4.1)
             }
+        }
+
+        if receiveBuffer.isEmpty {
+            receiveBuffer = Data()
         }
 
         // Need more data from transport
@@ -517,6 +524,12 @@ class HTTP2Connection {
             }
         }
 
+        // Release backing store when buffer is fully consumed to prevent
+        // Data's internal fragmentation from holding unused memory.
+        if receiveBuffer.isEmpty {
+            receiveBuffer = Data()
+        }
+
         // Need more data from transport
         readFromTransport { [weak self] error in
             guard let self else { return }
@@ -548,6 +561,13 @@ class HTTP2Connection {
                     return
                 }
                 self.receiveBuffer.append(data)
+                if self.receiveBuffer.count > Self.maxReceiveBufferSize {
+                    self.receiveBuffer.removeAll()
+                    self.state = .closed
+                    self.transport.cancel()
+                    completion(HTTP2Error.connectionFailed("Receive buffer exceeded \(Self.maxReceiveBufferSize) bytes"))
+                    return
+                }
                 completion(nil)
             }
         }

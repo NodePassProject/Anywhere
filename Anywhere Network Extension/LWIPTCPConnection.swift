@@ -52,6 +52,21 @@ class LWIPTCPConnection {
     /// Whether the proxy receive loop is paused due to a full lwIP send buffer.
     private var receivePaused = false
 
+    // MARK: Upload Coalescing
+
+    /// Accumulates segments from lwIP callbacks within a single processing batch.
+    /// Flushed via `lwipQueue.async` after the current `lwip_bridge_input` loop,
+    /// so all segments in one batch are encrypted and sent as a single chunk.
+    /// This reduces AES-GCM operations from 2×N (per-segment) to 2×ceil(total/16383).
+    private var uploadCoalesceBuffer = Data()
+    private var uploadCoalesceRecvLen: Int = 0
+    private var uploadCoalesceScheduled = false
+    private var uploadFlushInFlight = false
+
+    /// Maximum coalesce buffer size. Capped at UInt16.max because downstream
+    /// protocols (Vision padding) use 2-byte content length fields.
+    private static let maxCoalesceSize = Int(UInt16.max)
+
     // MARK: Activity Timeout (matches Xray-core policy defaults)
 
     /// Inactivity timeout for the connection (Xray-core `connIdle`, default 300s).
@@ -106,11 +121,13 @@ class LWIPTCPConnection {
 
     /// Handles data received from the local app via lwIP (upload path).
     ///
-    /// Sends each segment immediately to the proxy connection (matching
-    /// Xray-core's tight read→write copy loop). tcp_recved is deferred
-    /// until the send completion fires, providing backpressure: when the
-    /// outbound socket is busy, the receive window shrinks and the local
-    /// app naturally slows down — matching Xray-core's blocking Write().
+    /// Coalesces segments within a single lwIP processing batch (all the
+    /// `lwip_bridge_input` calls from one `readPackets` batch run synchronously
+    /// on lwipQueue). A deferred flush encrypts and sends the accumulated data
+    /// as one chunk, reducing per-segment crypto and dispatch overhead.
+    ///
+    /// When a previous flush is still in-flight, falls back to per-segment
+    /// sends to provide natural backpressure via `tcp_recved`.
     func handleReceivedData(_ data: Data) {
         guard !closed else { return }
         activityTimer?.update()
@@ -120,41 +137,102 @@ class LWIPTCPConnection {
             return
         }
 
-        let recvLen = UInt16(data.count)
+        guard directRelay != nil || proxyConnection != nil else {
+            pendingData.append(data)
+            if bypass { connectDirect() } else { connectProxy() }
+            return
+        }
 
-        if let relay = directRelay {
-            relay.send(data: data) { [weak self] error in
-                guard let self else { return }
-                if let error {
-                    logger.error("[TCP] Direct send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
-                    self.lwipQueue.async { self.abort() }
-                } else {
-                    self.lwipQueue.async {
-                        guard !self.closed else { return }
-                        lwip_bridge_tcp_recved(self.pcb, recvLen)
-                    }
-                }
+        // If a flush is still in-flight or buffer is full, send per-segment for backpressure
+        if uploadFlushInFlight || uploadCoalesceRecvLen + data.count > Self.maxCoalesceSize {
+            sendSegmentDirect(data)
+            return
+        }
+
+        uploadCoalesceBuffer.append(data)
+        uploadCoalesceRecvLen += data.count
+
+        if !uploadCoalesceScheduled {
+            uploadCoalesceScheduled = true
+            lwipQueue.async { [weak self] in
+                self?.flushUploadBuffer()
             }
-        } else if let connection = proxyConnection {
-            connection.send(data: data) { [weak self] error in
-                guard let self else { return }
+        }
+    }
+
+    /// Sends a single segment directly (no coalescing), with tcp_recved in the completion.
+    private func sendSegmentDirect(_ data: Data) {
+        let recvLen = UInt16(data.count)
+        let completion: (Error?) -> Void = { [weak self] error in
+            guard let self else { return }
+            self.lwipQueue.async {
+                guard !self.closed else { return }
                 if let error {
                     if error is HTTP2Error {
                         logger.info("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
                     } else {
                         logger.error("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
                     }
-                    self.lwipQueue.async { self.abort() }
-                } else {
-                    self.lwipQueue.async {
-                        guard !self.closed else { return }
-                        lwip_bridge_tcp_recved(self.pcb, recvLen)
+                    self.abort()
+                    return
+                }
+                lwip_bridge_tcp_recved(self.pcb, recvLen)
+            }
+        }
+        if let relay = directRelay {
+            relay.send(data: data, completion: completion)
+        } else if let connection = proxyConnection {
+            connection.send(data: data, completion: completion)
+        }
+    }
+
+    /// Flushes the coalesced upload buffer — encrypts and sends all accumulated
+    /// segments as a single chunk, then acknowledges to lwIP on completion.
+    private func flushUploadBuffer() {
+        uploadCoalesceScheduled = false
+        guard !closed else {
+            uploadCoalesceBuffer.removeAll()
+            uploadCoalesceRecvLen = 0
+            return
+        }
+
+        let data = uploadCoalesceBuffer
+        let recvLen = uploadCoalesceRecvLen
+        uploadCoalesceBuffer = Data()
+        uploadCoalesceRecvLen = 0
+
+        guard !data.isEmpty else { return }
+
+        uploadFlushInFlight = true
+
+        let completion: (Error?) -> Void = { [weak self] error in
+            guard let self else { return }
+            self.lwipQueue.async {
+                self.uploadFlushInFlight = false
+                guard !self.closed else { return }
+                if let error {
+                    if error is HTTP2Error {
+                        logger.info("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    } else {
+                        logger.error("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
                     }
+                    self.abort()
+                    return
+                }
+                // Acknowledge all coalesced bytes to lwIP (uint16_t chunks)
+                var remaining = recvLen
+                while remaining > 0 {
+                    let chunk = UInt16(min(remaining, Int(UInt16.max)))
+                    remaining -= Int(chunk)
+                    lwip_bridge_tcp_recved(self.pcb, chunk)
                 }
             }
-        } else {
-            pendingData.append(data)
-            if bypass { connectDirect() } else { connectProxy() }
+        }
+
+        if let relay = directRelay {
+            relay.send(data: data, completion: completion)
+        } else if let connection = proxyConnection {
+            connection.send(data: data, completion: completion)
         }
     }
 
@@ -572,6 +650,9 @@ class LWIPTCPConnection {
         proxyConnecting = false
         pendingData = Data()
         overflowBuffer = Data()
+        uploadCoalesceBuffer = Data()
+        uploadCoalesceRecvLen = 0
+        uploadFlushInFlight = false
         receivePaused = false
         relay?.cancel()
         connection?.cancel()

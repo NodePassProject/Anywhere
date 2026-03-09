@@ -7,6 +7,11 @@
 
 import SwiftUI
 
+fileprivate enum LinkType: String, CaseIterable {
+    case subscription = "subscription"
+    case proxy = "proxy"
+}
+
 fileprivate enum Method: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 
@@ -40,6 +45,7 @@ struct AddProxyView: View {
     @State private var selectedMethod: Method?
     @State private var showingQRScanner = false
     @State private var linkURL = ""
+    @State private var linkType: LinkType = .subscription
     @State private var isLoading = false
     @State private var showingLinkError = false
     @State private var linkErrorMessage = ""
@@ -192,15 +198,23 @@ struct AddProxyView: View {
 
     private var linkInputField: some View {
         VStack {
+            if linkURL.hasPrefix("http://") || linkURL.hasPrefix("https://") {
+                Picker("Link Type", selection: $linkType) {
+                    Text("Subscription").tag(LinkType.subscription)
+                    Text("Proxy").tag(LinkType.proxy)
+                }
+                .pickerStyle(.segmented)
+            }
             TextField(String("Link"), text: $linkURL)
                 .textFieldStyle(LinkTextFieldStyle())
                 .textInputAutocapitalization(.never)
                 .keyboardType(.URL)
                 .autocorrectionDisabled()
-                .padding(.top, 12)
-            Text("Supports VLESS, Shadowsocks, subscription and Clash links")
+            Text("Supports proxy, subscription and Clash links")
                 .font(.caption)
+                .foregroundStyle(.secondary)
         }
+        .padding(.top, 12)
     }
 
     // MARK: - Actions
@@ -229,8 +243,9 @@ struct AddProxyView: View {
     private func importFromString(_ string: String) {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") {
-            // Single VLESS or Shadowsocks link
+        if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") ||
+            ((trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")) && linkType == .proxy) {
+            // Single proxy link (VLESS, Shadowsocks, or NaiveProxy)
             do {
                 let configuration = try ProxyConfiguration.parse(url: trimmed)
                 onImport?(configuration)

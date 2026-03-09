@@ -315,15 +315,15 @@ class WebSocketConnection {
         _ = SecRandomCopyBytes(kSecRandomDefault, 4, &maskKey)
         frame.append(contentsOf: maskKey)
 
-        // XOR-masked payload
-        var masked = [UInt8](repeating: 0, count: length)
-        payload.withUnsafeBytes { ptr in
+        // XOR-masked payload — append then mask in-place to avoid a temporary copy
+        let maskOffset = frame.count
+        frame.append(payload)
+        frame.withUnsafeMutableBytes { ptr in
             guard let base = ptr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
             for i in 0..<length {
-                masked[i] = base[i] ^ maskKey[i & 3]
+                base[maskOffset + i] ^= maskKey[i & 3]
             }
         }
-        frame.append(contentsOf: masked)
 
         return frame
     }
@@ -392,6 +392,11 @@ class WebSocketConnection {
 
         // Consume the frame from the buffer
         receiveBuffer.removeFirst(totalFrameSize)
+        // Release backing store when buffer is fully consumed to prevent
+        // Data's sliced view from holding the entire original allocation.
+        if receiveBuffer.isEmpty {
+            receiveBuffer = Data()
+        }
 
         let opcode = byte0 & 0x0F
         switch opcode {
