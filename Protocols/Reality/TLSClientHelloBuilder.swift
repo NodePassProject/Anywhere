@@ -244,7 +244,7 @@ struct TLSClientHelloBuilder {
         let unpaddedLen = clientHelloLen // handshake type(1) + length(3) + body
         guard unpaddedLen > 0xFF && unpaddedLen < 0x200 else { return nil }
         let needed = 0x200 - unpaddedLen
-        return needed >= 5 ? (needed - 4) : 1
+        return needed >= 4 ? (needed - 4) : nil
     }
 
     // MARK: - Chrome Extension Shuffling
@@ -415,7 +415,9 @@ struct TLSClientHelloBuilder {
         let gExt1    = grease(random[25])
         let gGroup   = grease(random[26])
         let gVersion = grease(random[28])
-        let gExt2    = grease(random[29])
+        // Ensure gExt2 != gExt1 to avoid duplicate extension types (RFC 8446 §4.2)
+        var gExt2    = grease(random[29])
+        if gExt2 == gExt1 { gExt2 = grease(random[29] &+ 1) }
 
         let suites = cipherSuitesData([
             gCipher,
@@ -540,7 +542,9 @@ struct TLSClientHelloBuilder {
         let gExt1    = grease(random[25])
         let gGroup   = grease(random[26])
         let gVersion = grease(random[28])
-        let gExt2    = grease(random[29])
+        // Ensure gExt2 != gExt1 to avoid duplicate extension types (RFC 8446 §4.2)
+        var gExt2    = grease(random[29])
+        if gExt2 == gExt1 { gExt2 = grease(random[29] &+ 1) }
 
         let suites = cipherSuitesData([
             gCipher,
@@ -599,7 +603,9 @@ struct TLSClientHelloBuilder {
         let gExt1    = grease(random[25])
         let gGroup   = grease(random[26])
         let gVersion = grease(random[28])
-        let gExt2    = grease(random[29])
+        // Ensure gExt2 != gExt1 to avoid duplicate extension types (RFC 8446 §4.2)
+        var gExt2    = grease(random[29])
+        if gExt2 == gExt1 { gExt2 = grease(random[29] &+ 1) }
 
         let suites = cipherSuitesData([
             gCipher,
@@ -658,7 +664,9 @@ struct TLSClientHelloBuilder {
         let gExt1    = grease(random[25])
         let gGroup   = grease(random[26])
         let gVersion = grease(random[28])
-        let gExt2    = grease(random[29])
+        // Ensure gExt2 != gExt1 to avoid duplicate extension types (RFC 8446 §4.2)
+        var gExt2    = grease(random[29])
+        if gExt2 == gExt1 { gExt2 = grease(random[29] &+ 1) }
 
         let suites = cipherSuitesData([
             gCipher,

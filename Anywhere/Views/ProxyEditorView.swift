@@ -48,16 +48,24 @@ struct ProxyEditorView: View {
     @State private var ssPassword = ""
     @State private var ssMethod = "aes-128-gcm"
 
+    // Naive fields
+    @State private var naiveUsername = ""
+    @State private var naivePassword = ""
+
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
+    private var isNaive: Bool { selectedProtocol.isNaive }
     private var isReality: Bool { security == "reality" }
     private var isTLS: Bool { security == "tls" }
 
     private var isValid: Bool {
-        !name.isEmpty &&
-        !serverAddress.isEmpty &&
-        UInt16(serverPort) != nil &&
-        (isShadowsocks ? !ssPassword.isEmpty : UUID(uuidString: uuid) != nil) &&
-        (!isReality || (!sni.isEmpty && !publicKey.isEmpty))
+        guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
+        if isNaive {
+            return !naiveUsername.isEmpty && !naivePassword.isEmpty
+        }
+        if isShadowsocks {
+            return !ssPassword.isEmpty
+        }
+        return UUID(uuidString: uuid) != nil && (!isReality || (!sni.isEmpty && !publicKey.isEmpty))
     }
 
     init(configuration: ProxyConfiguration? = nil, onSave: @escaping (ProxyConfiguration) -> Void) {
@@ -69,28 +77,25 @@ struct ProxyEditorView: View {
         NavigationView {
             Form {
                 Section {
+                    TextField("Name", text: $name)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                }
+                
+                Section {
                     Picker(selection: $selectedProtocol) {
                         Text("VLESS").tag(OutboundProtocol.vless)
                         Text("Shadowsocks").tag(OutboundProtocol.shadowsocks)
+                        Text("HTTPS").tag(OutboundProtocol.https)
+                        Text("HTTP/2").tag(OutboundProtocol.http2)
                     } label: {
                         TextWithColorfulIcon(titleKey: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
                     .onChange(of: selectedProtocol) {
-                        if isShadowsocks {
+                        if isShadowsocks || isNaive {
                             flow = ""
                             security = security == "reality" ? "none" : security
                         }
-                    }
-                }
-                
-                Section("Name") {
-                    LabeledContent {
-                        TextField("Name", text: $name)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(titleKey: "Name", systemName: "tag.fill", foregroundColor: .white, backgroundColor: .gray)
                     }
                 }
 
@@ -111,7 +116,24 @@ struct ProxyEditorView: View {
                     } label: {
                         TextWithColorfulIcon(titleKey: "Port", systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
                     }
-                    if isShadowsocks {
+                    if isNaive {
+                        LabeledContent {
+                            TextField("Username", text: $naiveUsername)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Username", systemName: "person.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                        LabeledContent {
+                            SecureField("Password", text: $naivePassword)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                    } else if isShadowsocks {
                         LabeledContent {
                             SecureField("Password", text: $ssPassword)
                                 .autocorrectionDisabled()
@@ -148,7 +170,7 @@ struct ProxyEditorView: View {
                     }
                 }
                 
-                Section("Transport") {
+                if !isNaive { Section("Transport") {
                     Picker(selection: $transport) {
                         Text("TCP").tag("tcp")
                         Text("WebSocket").tag("ws")
@@ -220,9 +242,9 @@ struct ProxyEditorView: View {
                             TextWithColorfulIcon(titleKey: "Extra", systemName: "ellipsis.rectangle", foregroundColor: .white, backgroundColor: .gray)
                         }
                     }
-                }
-                
-                Section("TLS") {
+                } }
+
+                if !isNaive { Section("TLS") {
                     Picker(selection: $security) {
                         Text("None").tag("none")
                         Text("TLS").tag("tls")
@@ -295,7 +317,7 @@ struct ProxyEditorView: View {
                             TextWithColorfulIcon(titleKey: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
                         }
                     }
-                }
+                } }
             }
             .navigationTitle(configuration != nil ? "Edit Configuration" : "Add Configuration")
             .navigationBarTitleDisplayMode(.inline)
@@ -367,6 +389,9 @@ struct ProxyEditorView: View {
 
         ssPassword = configuration.ssPassword ?? ""
         ssMethod = configuration.ssMethod ?? "aes-128-gcm"
+
+        naiveUsername = configuration.naiveUsername ?? ""
+        naivePassword = configuration.naivePassword ?? ""
     }
 
     /// Encodes non-default extra fields from an XHTTPConfiguration back to a JSON string.
@@ -413,7 +438,7 @@ struct ProxyEditorView: View {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isShadowsocks {
+        if isShadowsocks || isNaive {
             parsedUUID = self.configuration?.uuid ?? UUID()
         } else {
             guard let u = UUID(uuidString: uuid) else { return }
@@ -483,7 +508,10 @@ struct ProxyEditorView: View {
             xudpEnabled: xudpEnabled,
             outboundProtocol: selectedProtocol,
             ssPassword: isShadowsocks ? ssPassword : nil,
-            ssMethod: isShadowsocks ? ssMethod : nil
+            ssMethod: isShadowsocks ? ssMethod : nil,
+            naiveUsername: isNaive ? naiveUsername : nil,
+            naivePassword: isNaive ? naivePassword : nil,
+            naiveScheme: isNaive ? selectedProtocol.rawValue : nil
         )
 
         onSave(configuration)

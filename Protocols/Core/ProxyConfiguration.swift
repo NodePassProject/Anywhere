@@ -11,6 +11,11 @@ import Foundation
 enum OutboundProtocol: String, Codable {
     case vless
     case shadowsocks
+    case https
+    case http2
+
+    /// Whether this protocol uses the NaiveProxy stack.
+    var isNaive: Bool { self == .https || self == .http2 }
 }
 
 /// Proxy configuration for VLESS and Shadowsocks outbound protocols.
@@ -55,6 +60,12 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let ssPassword: String?
     /// Shadowsocks method (e.g. "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305").
     let ssMethod: String?
+    /// NaiveProxy username (only when `outboundProtocol.isNaive`).
+    let naiveUsername: String?
+    /// NaiveProxy password (only when `outboundProtocol.isNaive`).
+    let naivePassword: String?
+    /// NaiveProxy scheme: `"https"` (HTTP/2) or `"quic"` (HTTP/3). Default `"https"`.
+    let naiveScheme: String?
     /// Ordered list of proxy configurations to chain through before reaching this proxy's server.
     /// The first element is the outermost proxy (real TCP connection); the last tunnels to this proxy.
     /// `nil` or empty means a direct connection to the server.
@@ -86,10 +97,13 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         outboundProtocol == other.outboundProtocol &&
         ssPassword == other.ssPassword &&
         ssMethod == other.ssMethod &&
+        naiveUsername == other.naiveUsername &&
+        naivePassword == other.naivePassword &&
+        naiveScheme == other.naiveScheme &&
         chain == other.chain
     }
 
-    init(id: UUID = UUID(), name: String, serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String? = nil, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, chain: [ProxyConfiguration]? = nil) {
+    init(id: UUID = UUID(), name: String, serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String? = nil, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, naiveUsername: String? = nil, naivePassword: String? = nil, naiveScheme: String? = nil, chain: [ProxyConfiguration]? = nil) {
         self.id = id
         self.name = name
         self.serverAddress = serverAddress
@@ -112,12 +126,15 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         self.outboundProtocol = outboundProtocol
         self.ssPassword = ssPassword
         self.ssMethod = ssMethod
+        self.naiveUsername = naiveUsername
+        self.naivePassword = naivePassword
+        self.naiveScheme = naiveScheme
         self.chain = chain
     }
 
     /// Convenience initializer that defaults the name to `"Untitled"`.
-    init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, chain: [ProxyConfiguration]? = nil) {
-        self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId, outboundProtocol: outboundProtocol, ssPassword: ssPassword, ssMethod: ssMethod, chain: chain)
+    init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, naiveUsername: String? = nil, naivePassword: String? = nil, naiveScheme: String? = nil, chain: [ProxyConfiguration]? = nil) {
+        self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId, outboundProtocol: outboundProtocol, ssPassword: ssPassword, ssMethod: ssMethod, naiveUsername: naiveUsername, naivePassword: naivePassword, naiveScheme: naiveScheme, chain: chain)
     }
 
     /// Custom decoder for backward compatibility (old configs may lack newer fields like
@@ -147,6 +164,9 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         outboundProtocol = try container.decodeIfPresent(OutboundProtocol.self, forKey: .outboundProtocol) ?? .vless
         ssPassword = try container.decodeIfPresent(String.self, forKey: .ssPassword)
         ssMethod = try container.decodeIfPresent(String.self, forKey: .ssMethod)
+        naiveUsername = try container.decodeIfPresent(String.self, forKey: .naiveUsername)
+        naivePassword = try container.decodeIfPresent(String.self, forKey: .naivePassword)
+        naiveScheme = try container.decodeIfPresent(String.self, forKey: .naiveScheme)
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
     }
 }

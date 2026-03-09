@@ -141,7 +141,7 @@ static err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
                                   dst_bytes, newpcb->local_port,
                                   is_ipv6, newpcb);
     if (!conn) {
-        os_log_error(s_log, "[Bridge] tcp_accept_cb: Swift returned NULL conn, aborting");
+        os_log_info(s_log, "[Bridge] tcp_accept_cb: Swift returned NULL conn, aborting");
         tcp_abort(newpcb);
         return ERR_ABRT;
     }

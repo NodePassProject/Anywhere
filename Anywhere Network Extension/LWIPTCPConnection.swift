@@ -139,7 +139,11 @@ class LWIPTCPConnection {
             connection.send(data: data) { [weak self] error in
                 guard let self else { return }
                 if let error {
-                    logger.error("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    if error is HTTP2Error {
+                        logger.info("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    } else {
+                        logger.error("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    }
                     self.lwipQueue.async { self.abort() }
                 } else {
                     self.lwipQueue.async {
@@ -260,10 +264,10 @@ class LWIPTCPConnection {
         proxyConnecting = true
 
         // For VLESS, initial data is appended to the protocol header and sent in one packet.
-        // For Shadowsocks, data flows through send() which prepends the address header,
+        // For Shadowsocks and NaiveProxy, data flows through send() after connection,
         // so we keep it in pendingData to be sent after connection succeeds.
         let initialData: Data?
-        if configuration.outboundProtocol == .shadowsocks {
+        if configuration.outboundProtocol == .shadowsocks || configuration.outboundProtocol.isNaive {
             initialData = nil
         } else {
             initialData = pendingData.isEmpty ? nil : pendingData
@@ -302,7 +306,11 @@ class LWIPTCPConnection {
                         proxyConnection.send(data: dataToSend) { [weak self] error in
                             guard let self else { return }
                             if let error {
-                                logger.error("[TCP] Proxy pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                if error is HTTP2Error {
+                                    logger.info("[TCP] Proxy pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                } else {
+                                    logger.error("[TCP] Proxy pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                }
                                 self.lwipQueue.async { self.abort() }
                             } else {
                                 self.lwipQueue.async {

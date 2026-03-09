@@ -2563,6 +2563,12 @@
         }
       }
     },
+    "HTTP/2" : {
+
+    },
+    "HTTPS" : {
+
+    },
     "HTTPUpgrade" : {
       "shouldTranslate" : false
     },
@@ -5302,6 +5308,9 @@
           }
         }
       }
+    },
+    "Username" : {
+
     },
     "UUID" : {
       "shouldTranslate" : false
