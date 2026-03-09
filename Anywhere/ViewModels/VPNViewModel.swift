@@ -722,6 +722,17 @@ class VPNViewModel {
             configurationDict["ssMethod"] = ssMethod
         }
 
+        // Add NaiveProxy fields if present
+        if let naiveUsername = configuration.naiveUsername {
+            configurationDict["naiveUsername"] = naiveUsername
+        }
+        if let naivePassword = configuration.naivePassword {
+            configurationDict["naivePassword"] = naivePassword
+        }
+        if let naiveScheme = configuration.naiveScheme {
+            configurationDict["naiveScheme"] = naiveScheme
+        }
+
         // Add Reality configuration if present
         if let reality = configuration.reality {
             configurationDict["realityServerName"] = reality.serverName

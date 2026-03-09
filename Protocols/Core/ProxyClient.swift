@@ -270,17 +270,17 @@ class ProxyClient {
             }
 
             // Wrap for UDP (VLESS uses length-prefixed framing)
-            var conn: ProxyConnection = connection
+            var proxyConnection: ProxyConnection = connection
             if command == .udp {
-                conn = UDPProxyConnection(inner: connection)
+                proxyConnection = UDPProxyConnection(inner: connection)
             }
 
             if isVision {
-                if let tlsError = self.validateOuterTLSForVision(conn) {
+                if let tlsError = self.validateOuterTLSForVision(proxyConnection) {
                     completion(.failure(tlsError))
                     return
                 }
-                let vision = self.wrapWithVision(conn)
+                let vision = self.wrapWithVision(proxyConnection)
                 if let initialData {
                     vision.send(data: initialData)
                 } else {
@@ -288,7 +288,7 @@ class ProxyClient {
                 }
                 completion(.success(vision))
             } else {
-                completion(.success(conn))
+                completion(.success(proxyConnection))
             }
         }
     }
@@ -319,6 +319,15 @@ class ProxyClient {
                 completion(.failure(ProxyError.protocolError("Reality is not supported with Shadowsocks")))
                 return
             }
+        }
+
+        if configuration.outboundProtocol.isNaive {
+            if command != .tcp {
+                completion(.failure(ProxyError.dropped))
+                return
+            }
+            connectWithNaive(destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
+            return
         }
 
         if configuration.transport == "ws" {
@@ -1083,6 +1092,55 @@ class ProxyClient {
                     addressHeader: addressHeader
                 ))
             }
+        }
+    }
+    
+    // MARK: - Naive
+
+    /// Connects through a NaiveProxy CONNECT tunnel.
+    ///
+    /// Creates the full stack: NaiveTLSTransport → HTTP2Connection → NaiveProxyConnection.
+    /// The destination `host:port` becomes the HTTP/2 CONNECT target.
+    private func connectWithNaive(
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        let naiveConfig = NaiveConfiguration(
+            proxyHost: configuration.serverAddress,
+            proxyPort: configuration.serverPort,
+            username: configuration.naiveUsername,
+            password: configuration.naivePassword,
+            sni: nil,
+            scheme: .https,
+            insecureTLS: false
+        )
+
+        let transport = NaiveTLSTransport(
+            host: naiveConfig.proxyHost,
+            port: naiveConfig.proxyPort,
+            sni: naiveConfig.effectiveSNI,
+            insecure: naiveConfig.insecureTLS
+        )
+
+        let destination = "\(destinationHost):\(destinationPort)"
+        let http2 = HTTP2Connection(
+            transport: transport,
+            configuration: naiveConfig,
+            destination: destination
+        )
+
+        http2.openTunnel { error in
+            if let error {
+                transport.cancel()
+                completion(.failure(error))
+                return
+            }
+            let conn = NaiveProxyConnection(
+                http2: http2,
+                paddingType: http2.negotiatedPaddingType
+            )
+            completion(.success(conn))
         }
     }
 }

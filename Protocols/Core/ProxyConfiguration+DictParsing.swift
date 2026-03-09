@@ -136,6 +136,9 @@ extension ProxyConfiguration {
         let outboundProtocol = OutboundProtocol(rawValue: protocolStr) ?? .vless
         let ssPassword = configurationDict["ssPassword"] as? String
         let ssMethod = configurationDict["ssMethod"] as? String
+        let naiveUsername = configurationDict["naiveUsername"] as? String
+        let naivePassword = configurationDict["naivePassword"] as? String
+        let naiveScheme = configurationDict["naiveScheme"] as? String
 
         // Parse proxy chain if present
         var chain: [ProxyConfiguration]? = nil
@@ -164,6 +167,9 @@ extension ProxyConfiguration {
             outboundProtocol: outboundProtocol,
             ssPassword: ssPassword,
             ssMethod: ssMethod,
+            naiveUsername: naiveUsername,
+            naivePassword: naivePassword,
+            naiveScheme: naiveScheme,
             chain: chain
         )
     }

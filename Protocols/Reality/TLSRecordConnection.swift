@@ -69,6 +69,15 @@ class TLSRecordConnection {
         self.serverSymmetricKey = SymmetricKey(data: serverKey)
     }
 
+    /// Pre-populates the receive buffer with data that was read during the
+    /// TLS handshake but belongs to the application layer (e.g. NewSessionTicket).
+    /// Must be called before any `receive()` calls.
+    func prependToReceiveBuffer(_ data: Data) {
+        receiveLock.lock()
+        receiveBuffer.append(data)
+        receiveLock.unlock()
+    }
+
     // MARK: - Send (Encrypted)
 
     /// Sends data through the Reality tunnel, encrypting it as a TLS Application Data record.

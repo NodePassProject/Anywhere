@@ -54,7 +54,10 @@ nonisolated enum LatencyTester {
             subscriptionId: configuration.subscriptionId,
             outboundProtocol: configuration.outboundProtocol,
             ssPassword: configuration.ssPassword,
-            ssMethod: configuration.ssMethod
+            ssMethod: configuration.ssMethod,
+            naiveUsername: configuration.naiveUsername,
+            naivePassword: configuration.naivePassword,
+            naiveScheme: configuration.naiveScheme
         )
 
         do {

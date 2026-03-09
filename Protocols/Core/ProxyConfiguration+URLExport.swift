@@ -19,6 +19,8 @@ extension ProxyConfiguration {
             return toShadowsocksURL()
         case .vless:
             return toVLESSURL()
+        case .https, .http2:
+            return toNaiveURL()
         }
     }
 
@@ -123,6 +125,14 @@ extension ProxyConfiguration {
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "ss://\(encoded)@\(serverAddress):\(serverPort)/\(query)#\(fragment)"
+    }
+
+    private func toNaiveURL() -> String {
+        let scheme = naiveScheme ?? "https"
+        let user = (naiveUsername ?? "").addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? ""
+        let pass = (naivePassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        return "\(scheme)://\(user):\(pass)@\(serverAddress):\(serverPort)#\(fragment)"
     }
 
     private func appendTransportParams(to params: inout [String]) {

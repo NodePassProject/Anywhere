@@ -43,6 +43,9 @@ class TLSClient {
     // Certificate validation state
     private var serverCertificates: [SecCertificate] = []
 
+    // Buffer for data received after Server Finished (e.g. NewSessionTicket)
+    private var postHandshakeBuffer: Data?
+
     // MARK: Initialization
 
     /// Creates a new TLS client with the given configuration.
@@ -469,10 +472,21 @@ class TLSClient {
             }
 
             offset += 5 + recordLen
+
+            // Stop processing once Server Finished is found — any subsequent
+            // records (e.g. NewSessionTicket) are encrypted with application keys
+            // and must be handled by TLSRecordConnection, not the handshake loop.
+            if foundServerFinished { break }
         }
 
         let processedOffset = offset
         handshakeTranscript = fullTranscript
+
+        // Preserve any remaining data after the last processed record.
+        // This may include post-handshake messages (NewSessionTicket) that are
+        // encrypted with application keys and must be decrypted by TLSRecordConnection.
+        let remainingBuffer = offset < buffer.count ? Data(buffer[offset...]) : nil
+        self.postHandshakeBuffer = remainingBuffer
 
         if foundServerFinished {
             // Validate server certificate (unless allowInsecure)
@@ -728,6 +742,13 @@ class TLSClient {
             tlsConnection.connection = self.connection
             self.connection = nil
 
+            // Pre-populate with any data received after Server Finished
+            // (e.g. NewSessionTicket records) so TLSRecordConnection can
+            // decrypt them with the correct application keys.
+            if let remaining = self.postHandshakeBuffer, !remaining.isEmpty {
+                tlsConnection.prependToReceiveBuffer(remaining)
+            }
+
             self.clearHandshakeState()
             completion(.success(tlsConnection))
         }
@@ -786,6 +807,7 @@ class TLSClient {
         handshakeSecret = nil
         handshakeKeys = nil
         handshakeTranscript = nil
+        postHandshakeBuffer = nil
         serverCertificates.removeAll()
     }
 }

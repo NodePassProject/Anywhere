@@ -11,15 +11,19 @@ import Foundation
 
 extension ProxyConfiguration {
 
-    /// Parse a VLESS or Shadowsocks URL into configuration.
+    /// Parse a VLESS, Shadowsocks, or NaiveProxy URL into configuration.
     /// Format: vless://uuid@host:port/?type=tcp&encryption=none&security=none
     /// SS format: ss://base64(method:password)@host:port#name
+    /// Naive format: https://user:pass@host:port#name  or  quic://user:pass@host:port#name
     static func parse(url: String) throws -> ProxyConfiguration {
         if url.hasPrefix("ss://") {
             return try parseShadowsocks(url: url)
         }
+        if url.hasPrefix("https://") || url.hasPrefix("quic://") {
+            return try parseNaive(url: url)
+        }
         guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless:// or ss://")
+            throw ProxyError.invalidURL("URL must start with vless://, ss://, https://, or quic://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -221,6 +225,69 @@ extension ProxyConfiguration {
             outboundProtocol: .shadowsocks,
             ssPassword: password,
             ssMethod: method
+        )
+    }
+
+    /// Parse a NaiveProxy URL into configuration.
+    /// Format: https://user:pass@host:port#name
+    ///         quic://user:pass@host:port#name
+    private static func parseNaive(url: String) throws -> ProxyConfiguration {
+        // Determine scheme (https or quic)
+        let scheme: String
+        let urlWithoutScheme: String
+        if url.hasPrefix("https://") {
+            scheme = "https"
+            urlWithoutScheme = String(url.dropFirst("https://".count))
+        } else if url.hasPrefix("quic://") {
+            scheme = "quic"
+            urlWithoutScheme = String(url.dropFirst("quic://".count))
+        } else {
+            throw ProxyError.invalidURL("Naive URL must start with https:// or quic://")
+        }
+
+        var remaining = urlWithoutScheme
+
+        // Extract fragment (#name)
+        var fragmentName: String?
+        if let hashIndex = remaining.lastIndex(of: "#") {
+            fragmentName = String(remaining[remaining.index(after: hashIndex)...])
+                .removingPercentEncoding
+            remaining = String(remaining[..<hashIndex])
+        }
+
+        // Split user:pass@host:port
+        guard let atIndex = remaining.lastIndex(of: "@") else {
+            throw ProxyError.invalidURL("Missing @ separator in naive URL")
+        }
+
+        let userInfo = String(remaining[..<atIndex])
+        var serverPart = String(remaining[remaining.index(after: atIndex)...])
+
+        // Strip trailing path/query
+        if let slashIndex = serverPart.firstIndex(of: "/") {
+            serverPart = String(serverPart[..<slashIndex])
+        }
+
+        // Parse user:pass
+        guard let colonIndex = userInfo.firstIndex(of: ":") else {
+            throw ProxyError.invalidURL("Missing password in naive URL (expected user:pass)")
+        }
+        let username = String(userInfo[..<colonIndex]).removingPercentEncoding ?? String(userInfo[..<colonIndex])
+        let password = String(userInfo[userInfo.index(after: colonIndex)...]).removingPercentEncoding ?? String(userInfo[userInfo.index(after: colonIndex)...])
+
+        // Parse host:port
+        let (host, port) = try parseHostPort(serverPart)
+
+        return ProxyConfiguration(
+            name: fragmentName ?? "Untitled",
+            serverAddress: host,
+            serverPort: port,
+            uuid: UUID(), // placeholder, not used for naive
+            encryption: "none",
+            outboundProtocol: scheme == "https" ? .https : .http2,
+            naiveUsername: username,
+            naivePassword: password,
+            naiveScheme: scheme
         )
     }
 
