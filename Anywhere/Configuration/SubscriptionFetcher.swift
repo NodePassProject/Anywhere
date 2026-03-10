@@ -25,11 +25,11 @@ struct SubscriptionFetcher {
         var errorDescription: String? {
             switch self {
             case .invalidURL:
-                return "Invalid subscription URL."
+                return String(localized: "Invalid subscription URL.")
             case .noConfigurations:
-                return "No valid configurations found in subscription."
+                return String(localized: "No valid configurations found in subscription.")
             case .networkError(let message):
-                return "Network error: \(message)"
+                return String(localized: "Network error: \(message)")
             }
         }
     }

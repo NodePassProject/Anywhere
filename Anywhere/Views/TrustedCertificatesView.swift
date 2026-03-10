@@ -28,6 +28,7 @@ struct TrustedCertificatesView: View {
                 ForEach(store.fingerprints, id: \.self) { fingerprint in
                     Text(fingerprint)
                         .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
                         .contextMenu {
                             Button {
                                 UIPasteboard.general.string = fingerprint

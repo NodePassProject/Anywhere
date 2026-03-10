@@ -278,17 +278,32 @@ extension ProxyConfiguration {
         // Parse host:port
         let (host, port) = try parseHostPort(serverPart)
 
-        return ProxyConfiguration(
-            name: fragmentName ?? "Untitled",
-            serverAddress: host,
-            serverPort: port,
-            uuid: UUID(), // placeholder, not used for naive
-            encryption: "none",
-            outboundProtocol: scheme == "https" ? .https : .http2,
-            naiveUsername: username,
-            naivePassword: password,
-            naiveScheme: scheme
-        )
+        switch scheme {
+        case "https":
+            return ProxyConfiguration(
+                name: fragmentName ?? "Untitled",
+                serverAddress: host,
+                serverPort: port,
+                uuid: UUID(), // placeholder, not used for naive
+                encryption: "none",
+                outboundProtocol: .http2,
+                http2Username: username,
+                http2Password: password
+            )
+        case "quic":
+            return ProxyConfiguration(
+                name: fragmentName ?? "Untitled",
+                serverAddress: host,
+                serverPort: port,
+                uuid: UUID(), // placeholder, not used for naive
+                encryption: "none",
+                outboundProtocol: .http3,
+                http3Username: username,
+                http3Password: password
+            )
+        default:
+            throw ProxyError.invalidURL("Naive URL must start with https:// or quic://")
+        }
     }
 
     // MARK: - Parsing Helpers

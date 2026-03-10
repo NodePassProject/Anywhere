@@ -19,7 +19,7 @@ extension ProxyConfiguration {
             return toShadowsocksURL()
         case .vless:
             return toVLESSURL()
-        case .https, .http2:
+        case .http11, .http2, .http3:
             return toNaiveURL()
         }
     }
@@ -122,9 +122,9 @@ extension ProxyConfiguration {
     }
 
     private func toNaiveURL() -> String {
-        let scheme = naiveScheme ?? "https"
-        let user = (naiveUsername ?? "").addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? ""
-        let pass = (naivePassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        let scheme = outboundProtocol == .http3 ? "quic" : "https"
+        let user = (activeUsername ?? "").addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? ""
+        let pass = (activePassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "\(scheme)://\(user):\(pass)@\(serverAddress):\(serverPort)#\(fragment)"
     }

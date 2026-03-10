@@ -34,7 +34,16 @@ struct ChainEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Name", text: $name)
+                Section {
+                    LabeledContent {
+                        TextField("Name", text: $name)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(titleKey: "Name", systemName: "tag.fill", foregroundColor: .white, backgroundColor: .gray)
+                    }
+                }
 
                 Section {
                     ForEach(Array(selectedProxies.enumerated()), id: \.element.id) { index, proxy in
