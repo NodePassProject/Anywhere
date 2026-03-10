@@ -217,7 +217,6 @@ struct ClashProxyParser {
         let serverName = getString(doc, mapping: node, key: "servername")
             ?? getString(doc, mapping: node, key: "sni")
             ?? server
-        let skipCertVerify = getBool(doc, mapping: node, key: "skip-cert-verify") ?? false
         let clientFP = getString(doc, mapping: node, key: "client-fingerprint")
         let fingerprint = TLSFingerprint(rawValue: mapFingerprint(clientFP)) ?? .chrome120
         let alpn = getStringSequence(doc, mapping: node, key: "alpn")
@@ -228,7 +227,6 @@ struct ClashProxyParser {
             tlsConfig = TLSConfiguration(
                 serverName: serverName,
                 alpn: alpn,
-                allowInsecure: skipCertVerify,
                 fingerprint: fingerprint
             )
         }
@@ -335,7 +333,6 @@ struct ClashProxyParser {
             let sni = getString(doc, mapping: node, key: "servername")
                 ?? getString(doc, mapping: node, key: "sni")
                 ?? server
-            let skipCertVerify = getBool(doc, mapping: node, key: "skip-cert-verify") ?? false
             let alpn = getStringSequence(doc, mapping: node, key: "alpn")
             let clientFP = getString(doc, mapping: node, key: "client-fingerprint")
             let fingerprint = TLSFingerprint(rawValue: mapFingerprint(clientFP)) ?? .chrome120
@@ -343,7 +340,6 @@ struct ClashProxyParser {
             tlsConfig = TLSConfiguration(
                 serverName: sni,
                 alpn: alpn,
-                allowInsecure: skipCertVerify,
                 fingerprint: fingerprint
             )
         }

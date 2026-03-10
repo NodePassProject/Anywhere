@@ -34,7 +34,7 @@ struct SettingsView: View {
     private var bypassCountryCode = ""
 
     @State private var showDoHAlert = false
-    
+
     @State private var shouldRefreshADBlockToggle = true
 
     // Countries with serious internet censorship (must match INCLUDED_COUNTRIES in build_geoip.py)
@@ -110,7 +110,14 @@ struct SettingsView: View {
                 }
             }
             
-            
+            Section("Security") {
+                NavigationLink {
+                    TrustedCertificatesView()
+                } label: {
+                    TextWithColorfulIcon(titleKey: "Trusted Certificates", systemName: "checkmark.seal.fill", foregroundColor: .white, backgroundColor: .green)
+                }
+            }
+
             Section("About") {
                 NavigationLink {
                     AcknowledgementsView()

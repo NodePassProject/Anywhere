@@ -321,7 +321,16 @@ class ProxyClient {
             }
         }
 
-        if configuration.outboundProtocol.isNaive {
+        if configuration.outboundProtocol == .https {
+            if command != .tcp {
+                completion(.failure(ProxyError.dropped))
+                return
+            }
+            connectWithHTTPS(destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
+            return
+        }
+
+        if configuration.outboundProtocol == .http2 {
             if command != .tcp {
                 completion(.failure(ProxyError.dropped))
                 return
@@ -498,7 +507,6 @@ class ProxyClient {
             let wsTlsConfig = TLSConfiguration(
                 serverName: baseTLSConfig.serverName,
                 alpn: ["http/1.1"],
-                allowInsecure: baseTLSConfig.allowInsecure,
                 fingerprint: baseTLSConfig.fingerprint
             )
             let tlsClient = TLSClient(configuration: wsTlsConfig)
@@ -848,7 +856,6 @@ class ProxyClient {
         let tlsConfiguration = TLSConfiguration(
             serverName: baseTLSConfig.serverName,
             alpn: ["http/1.1"],
-            allowInsecure: baseTLSConfig.allowInsecure,
             fingerprint: baseTLSConfig.fingerprint
         )
 
@@ -1095,7 +1102,61 @@ class ProxyClient {
         }
     }
     
-    // MARK: - Naive
+    // MARK: - HTTPS (HTTP/1.1 CONNECT)
+
+    /// Connects through a standard HTTPS proxy using HTTP/1.1 CONNECT.
+    ///
+    /// Creates the stack: BSDSocket/Tunnel → TLSClient → HTTPSProxyConnection.
+    private func connectWithHTTPS(
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        let sni = configuration.serverAddress
+        let tlsConfig = TLSConfiguration(
+            serverName: sni,
+            alpn: ["http/1.1"]
+        )
+        let tlsClient = TLSClient(configuration: tlsConfig)
+
+        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
+            _ = tlsClient  // retain through handshake
+            guard let self else {
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                return
+            }
+
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let tlsConnection):
+                let conn = HTTPSProxyConnection(tlsConnection: tlsConnection)
+                conn.sendConnect(
+                    host: destinationHost,
+                    port: destinationPort,
+                    username: self.configuration.naiveUsername,
+                    password: self.configuration.naivePassword
+                ) { error in
+                    if let error {
+                        conn.cancel()
+                        completion(.failure(error))
+                    } else {
+                        completion(.success(conn))
+                    }
+                }
+            }
+        }
+
+        if let tunnel = self.tunnel {
+            tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
+        } else {
+            let host = configuration.connectAddress
+            let port = configuration.serverPort
+            tlsClient.connect(host: host, port: port, completion: handleTLSResult)
+        }
+    }
+
+    // MARK: - Naive (HTTP/2 CONNECT)
 
     /// Connects through a NaiveProxy CONNECT tunnel.
     ///
@@ -1112,15 +1173,13 @@ class ProxyClient {
             username: configuration.naiveUsername,
             password: configuration.naivePassword,
             sni: nil,
-            scheme: .https,
-            insecureTLS: false
+            scheme: .https
         )
 
         let transport = NaiveTLSTransport(
             host: naiveConfig.proxyHost,
             port: naiveConfig.proxyPort,
-            sni: naiveConfig.effectiveSNI,
-            insecure: naiveConfig.insecureTLS
+            sni: naiveConfig.effectiveSNI
         )
 
         let destination = "\(destinationHost):\(destinationPort)"

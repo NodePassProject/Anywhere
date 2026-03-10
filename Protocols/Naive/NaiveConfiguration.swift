@@ -16,8 +16,6 @@ struct NaiveConfiguration {
     /// TLS SNI override. Defaults to `proxyHost` when `nil`.
     let sni: String?
     let scheme: NaiveScheme
-    /// Skip server certificate validation (for testing only).
-    let insecureTLS: Bool
 
     enum NaiveScheme: String, Codable {
         case https   // HTTP/2 over TLS

@@ -46,9 +46,6 @@ extension ProxyConfiguration {
             if let alpn = tls.alpn, !alpn.isEmpty {
                 params.append("alpn=\(alpn.joined(separator: ",").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? alpn.joined(separator: ","))")
             }
-            if tls.allowInsecure {
-                params.append("allowInsecure=1")
-            }
             if tls.fingerprint != .chrome120 {
                 params.append("fp=\(tls.fingerprint.rawValue)")
             }
@@ -110,9 +107,6 @@ extension ProxyConfiguration {
             }
             if let alpn = tls.alpn, !alpn.isEmpty {
                 params.append("alpn=\(alpn.joined(separator: ",").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? alpn.joined(separator: ","))")
-            }
-            if tls.allowInsecure {
-                params.append("allowInsecure=1")
             }
             if tls.fingerprint != .chrome120 {
                 params.append("fp=\(tls.fingerprint.rawValue)")

@@ -50,7 +50,7 @@ class TLSClient {
 
     /// Creates a new TLS client with the given configuration.
     ///
-    /// - Parameter configuration: The TLS configuration (SNI, ALPN, allowInsecure).
+    /// - Parameter configuration: The TLS configuration (SNI, ALPN, fingerprint).
     init(configuration: TLSConfiguration) {
         self.configuration = configuration
     }
@@ -489,43 +489,39 @@ class TLSClient {
         self.postHandshakeBuffer = remainingBuffer
 
         if foundServerFinished {
-            // Validate server certificate (unless allowInsecure)
-            if !configuration.allowInsecure {
-                guard !serverCertificates.isEmpty else {
-                    completion(.failure(TLSError.certificateValidationFailed("No server certificates received")))
+            // Always validate server certificate (system trust or user-trusted SHA-256)
+            guard !serverCertificates.isEmpty else {
+                completion(.failure(TLSError.certificateValidationFailed("No server certificates received")))
+                return
+            }
+
+            validateCertificate { [weak self] result in
+                guard let self else { return }
+
+                switch result {
+                case .failure(let error):
+                    completion(.failure(error))
                     return
+                case .success:
+                    break
                 }
 
-                validateCertificate { [weak self] result in
-                    guard let self else { return }
-
-                    switch result {
-                    case .failure(let error):
+                // Verify CertificateVerify signature
+                if let transcript = transcriptBeforeCertVerify,
+                   let signature = certificateVerifySignature {
+                    do {
+                        try self.verifyCertificateVerify(
+                            transcript: transcript,
+                            algorithm: certificateVerifyAlgorithm,
+                            signature: signature
+                        )
+                    } catch {
                         completion(.failure(error))
                         return
-                    case .success:
-                        break
                     }
-
-                    // Verify CertificateVerify signature
-                    if let transcript = transcriptBeforeCertVerify,
-                       let signature = certificateVerifySignature {
-                        do {
-                            try self.verifyCertificateVerify(
-                                transcript: transcript,
-                                algorithm: certificateVerifyAlgorithm,
-                                signature: signature
-                            )
-                        } catch {
-                            completion(.failure(error))
-                            return
-                        }
-                    }
-
-                    self.finishHandshake(fullTranscript: fullTranscript, completion: completion)
                 }
-            } else {
-                finishHandshake(fullTranscript: fullTranscript, completion: completion)
+
+                self.finishHandshake(fullTranscript: fullTranscript, completion: completion)
             }
         } else {
             // Need more handshake data
@@ -607,6 +603,10 @@ class TLSClient {
     // MARK: - Certificate Validation
 
     /// Validates the server certificate chain using Apple's Security framework.
+    ///
+    /// First tries standard system trust evaluation. If that fails, checks
+    /// whether the leaf certificate's SHA-256 fingerprint is in the user's
+    /// trusted certificate list (stored in App Group UserDefaults).
     private func validateCertificate(completion: @escaping (Result<Void, Error>) -> Void) {
         var trust: SecTrust?
         let policy = SecPolicyCreateSSL(true, configuration.serverName as CFString)
@@ -627,6 +627,12 @@ class TLSClient {
         if isValid {
             completion(.success(()))
         } else {
+            // System trust failed — check user-trusted certificate fingerprints
+            if let leafCert = serverCertificates.first,
+               Self.isUserTrusted(certificate: leafCert) {
+                completion(.success(()))
+                return
+            }
             let message = (cfError as Error?)?.localizedDescription ?? "Certificate evaluation failed"
             logger.error("[TLS] Certificate validation failed: \(message, privacy: .public)")
             completion(.failure(TLSError.certificateValidationFailed(message)))
@@ -798,6 +804,21 @@ class TLSClient {
     }
 
     // MARK: - Helpers
+
+    /// Checks whether the certificate's SHA-256 fingerprint is in the user's trusted list.
+    ///
+    /// Reads `trustedCertificateSHA256s` from the App Group UserDefaults (shared with
+    /// the main app's ``CertificateStore``).
+    private static func isUserTrusted(certificate: SecCertificate) -> Bool {
+        guard let defaults = UserDefaults(suiteName: "group.com.argsment.Anywhere"),
+              let trusted = defaults.stringArray(forKey: "trustedCertificateSHA256s"),
+              !trusted.isEmpty else {
+            return false
+        }
+        let certData = SecCertificateCopyData(certificate) as Data
+        let sha256 = SHA256.hash(data: certData).map { String(format: "%02x", $0) }.joined()
+        return trusted.contains(sha256)
+    }
 
     /// Frees handshake-only state to reduce memory after the connection is established.
     private func clearHandshakeState() {

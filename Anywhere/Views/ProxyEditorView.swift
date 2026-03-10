@@ -32,7 +32,6 @@ struct ProxyEditorView: View {
     // TLS fields
     @State private var tlsSNI = ""
     @State private var tlsALPN = ""
-    @State private var tlsAllowInsecure = false
 
     // Mux + XUDP
     @State private var muxEnabled = true
@@ -272,9 +271,6 @@ struct ProxyEditorView: View {
                         } label: {
                             TextWithColorfulIcon(titleKey: "ALPN", systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
                         }
-                        Toggle(isOn: $tlsAllowInsecure) {
-                            TextWithColorfulIcon(titleKey: "Allow Insecure", systemName: "exclamationmark.shield.fill", foregroundColor: .white, backgroundColor: .red)
-                        }
                         Picker(selection: $fingerprint) {
                             ForEach(TLSFingerprint.allCases, id: \.self) { fp in
                                 Text(fp.displayName).tag(fp)
@@ -376,7 +372,6 @@ struct ProxyEditorView: View {
         if let tls = configuration.tls {
             tlsSNI = tls.serverName
             tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
-            tlsAllowInsecure = tls.allowInsecure
             fingerprint = tls.fingerprint
         }
 
@@ -452,7 +447,6 @@ struct ProxyEditorView: View {
             tlsConfiguration = TLSConfiguration(
                 serverName: sni,
                 alpn: alpn,
-                allowInsecure: tlsAllowInsecure,
                 fingerprint: fingerprint
             )
         }

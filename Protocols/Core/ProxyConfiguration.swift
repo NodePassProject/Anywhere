@@ -14,7 +14,7 @@ enum OutboundProtocol: String, Codable {
     case https
     case http2
 
-    /// Whether this protocol uses the NaiveProxy stack.
+    /// Whether this protocol requires username/password credentials (HTTPS proxy or NaiveProxy).
     var isNaive: Bool { self == .https || self == .http2 }
 }
 
