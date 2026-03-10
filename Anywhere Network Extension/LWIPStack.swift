@@ -187,6 +187,7 @@ class LWIPStack {
             }
 
             self.domainRouter.loadRoutingConfiguration()
+            self.domainRouter.loadBypassCountryRules()
             self.registerCallbacks()
             lwip_bridge_init()
             self.startTimeoutTimer()
@@ -614,7 +615,9 @@ class LWIPStack {
             return .unreachable
         }
 
-        if let action = domainRouter.matchDomain(entry.domain) {
+        let match = domainRouter.matchDomain(entry.domain)
+
+        if let action = match.userAction {
             switch action {
             case .direct:
                 return .resolved(domain: entry.domain, configOverride: nil, forceBypass: true)
@@ -628,6 +631,12 @@ class LWIPStack {
                 }
                 return .resolved(domain: entry.domain, configOverride: config, forceBypass: false)
             }
+        }
+
+        // Country bypass: domain matched the bypass country's rule set.
+        // User-configured rules above take absolute precedence.
+        if bypassCountry != 0, match.isBypass {
+            return .resolved(domain: entry.domain, configOverride: nil, forceBypass: true)
         }
 
         return .resolved(domain: entry.domain, configOverride: nil, forceBypass: false)

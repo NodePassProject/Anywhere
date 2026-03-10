@@ -113,7 +113,10 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
-        .onChange(of: bypassCountryCode) { notifySettingsChanged() }
+        .onChange(of: bypassCountryCode) {
+            RuleSetStore.shared.syncBypassCountryRules()
+            notifySettingsChanged()
+        }
     }
     
     private func flag(for countryCode: String) -> String {
