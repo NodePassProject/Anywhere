@@ -315,6 +315,11 @@ struct DemoProxyListView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 50, alignment: .trailing)
+        case .insecure:
+            Text("insecure")
+                .font(.caption)
+                .foregroundStyle(.red)
+                .frame(minWidth: 50, alignment: .trailing)
         case nil:
             EmptyView()
         }

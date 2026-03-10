@@ -27,6 +27,10 @@ struct SettingsView: View {
     @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
     private var bypassCountryCode = ""
 
+    @AppStorage("allowInsecure", store: AWCore.userDefaults)
+    private var allowInsecure = false
+
+    @State private var showInsecureAlert = false
     @State private var shouldRefreshADBlockToggle = true
 
     // Countries with serious internet censorship (must match INCLUDED_COUNTRIES in build_geoip.py)
@@ -97,6 +101,19 @@ struct SettingsView: View {
             }
             
             Section("Security") {
+                Toggle(isOn: Binding(
+                    get: { allowInsecure },
+                    set: { newValue in
+                        if newValue {
+                            showInsecureAlert = true
+                        } else {
+                            allowInsecure = false
+                            notifySettingsChanged()
+                        }
+                    }
+                )) {
+                    TextWithColorfulIcon(titleKey: "Allow Insecure", systemName: "exclamationmark.shield.fill", foregroundColor: .white, backgroundColor: .red)
+                }
                 NavigationLink {
                     TrustedCertificatesView()
                 } label: {
@@ -116,6 +133,15 @@ struct SettingsView: View {
         .onChange(of: bypassCountryCode) {
             RuleSetStore.shared.syncBypassCountryRules()
             notifySettingsChanged()
+        }
+        .alert("Allow Insecure", isPresented: $showInsecureAlert) {
+            Button("Allow Anyway", role: .destructive) {
+                allowInsecure = true
+                notifySettingsChanged()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
         }
     }
     

@@ -14,6 +14,7 @@ enum LatencyResult: Sendable {
     case testing
     case success(Int)  // milliseconds
     case failed
+    case insecure
 }
 
 /// Tests full proxy round-trip latency by establishing a proxy connection
@@ -60,7 +61,8 @@ nonisolated enum LatencyTester {
             http2Username: configuration.http2Username,
             http2Password: configuration.http2Password,
             http3Username: configuration.http3Username,
-            http3Password: configuration.http3Password
+            http3Password: configuration.http3Password,
+            chain: configuration.chain
         )
 
         do {
@@ -78,6 +80,13 @@ nonisolated enum LatencyTester {
                 return result
             }
             return .success(ms)
+        } catch let error as TLSError {
+            if case .certificateValidationFailed = error {
+                logger.error("Latency test insecure for \(configuration.name): \(error.localizedDescription)")
+                return .insecure
+            }
+            logger.error("Latency test failed for \(configuration.name): \(error.localizedDescription)")
+            return .failed
         } catch {
             logger.error("Latency test failed for \(configuration.name): \(error.localizedDescription)")
             return .failed

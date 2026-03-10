@@ -275,6 +275,7 @@ class LWIPStack {
         }
 
         self.domainRouter.loadRoutingConfiguration()
+        self.domainRouter.loadBypassCountryRules()
         self.registerCallbacks()
         lwip_bridge_init()
         self.startTimeoutTimer()
