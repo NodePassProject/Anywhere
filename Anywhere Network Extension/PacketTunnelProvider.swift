@@ -33,8 +33,20 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // - Bypass country: only affects per-connection GeoIP checks in LWIPStack.
 
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
-        guard let configurationDict = options?["config"] as? [String: Any],
-              let configuration = Self.parseConfiguration(from: configurationDict) else {
+        // When started from the app, configuration is passed in options.
+        // When started from Settings or Always On (On Demand), options is nil —
+        // fall back to the last configuration saved in the App Group.
+        let configurationDict: [String: Any]?
+        if let dict = options?["config"] as? [String: Any] {
+            configurationDict = dict
+        } else if let savedData = AWCore.userDefaults.data(forKey: "lastConfigurationData"),
+                  let dict = try? JSONSerialization.jsonObject(with: savedData) as? [String: Any] {
+            configurationDict = dict
+        } else {
+            configurationDict = nil
+        }
+
+        guard let configurationDict, let configuration = Self.parseConfiguration(from: configurationDict) else {
             logger.error("[VPN] Invalid or missing configuration in options")
             completionHandler(NSError(domain: "com.argsment.Anywhere", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"]))
             return
@@ -133,16 +145,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             dnsServers = ["1.1.1.1", "1.0.0.1"]
         }
 
-        let encDNSEnabled = AWCore.userDefaults.bool(forKey: "encryptedDNSEnabled")
-        let encDNSProtocol = AWCore.userDefaults.string(forKey: "encryptedDNSProtocol") ?? "doh"
-        let encDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
+        let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: "encryptedDNSEnabled")
+        let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: "encryptedDNSProtocol") ?? "doh"
+        let encryptedDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
 
-        if encDNSEnabled, !encDNSServer.isEmpty {
-            if encDNSProtocol == "dot" {
+        if encryptedDNSEnabled, !encryptedDNSServer.isEmpty {
+            if encryptedDNSProtocol == "dot" {
                 let dnsSettings = NEDNSOverTLSSettings(servers: dnsServers)
-                dnsSettings.serverName = encDNSServer
+                dnsSettings.serverName = encryptedDNSServer
                 settings.dnsSettings = dnsSettings
-            } else if let serverURL = URL(string: encDNSServer) {
+            } else if let serverURL = URL(string: encryptedDNSServer) {
                 let dnsSettings = NEDNSOverHTTPSSettings(servers: dnsServers)
                 dnsSettings.serverURL = serverURL
                 settings.dnsSettings = dnsSettings

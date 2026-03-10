@@ -82,9 +82,6 @@ class RuleSetStore: ObservableObject {
     // MARK: - App Group Sync
 
     func syncToAppGroup(configurations: [ProxyConfiguration], serializeConfiguration: (ProxyConfiguration) -> [String: Any]) {
-        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName) else { return }
-        let routingURL = containerURL.appendingPathComponent("routing.json")
-
         var routingRules: [[String: Any]] = []
         var configurationsDict: [String: Any] = [:]
 
@@ -137,11 +134,8 @@ class RuleSetStore: ObservableObject {
 
         let routing: [String: Any] = ["rules": routingRules, "configs": configurationsDict]
 
-        do {
-            let data = try JSONSerialization.data(withJSONObject: routing, options: [.sortedKeys])
-            try data.write(to: routingURL, options: .atomic)
-        } catch {
-            logger.error("[RuleSetStore] Failed to write routing.json: \(error.localizedDescription, privacy: .public)")
+        if let data = try? JSONSerialization.data(withJSONObject: routing) {
+            AWCore.userDefaults.set(data, forKey: "routingData")
         }
 
         CFNotificationCenterPostNotification(

@@ -23,7 +23,17 @@ struct EncryptedDNSSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle(isOn: $enabled) {
+                Toggle(isOn: Binding(
+                    get: { enabled },
+                    set: { newValue in
+                        if newValue {
+                            showEnableAlert = true
+                        } else {
+                            enabled = false
+                            notifySettingsChanged()
+                        }
+                    }
+                )) {
                     TextWithColorfulIcon(titleKey: "Encrypted DNS", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .teal)
                 }
             }
@@ -52,13 +62,21 @@ struct EncryptedDNSSettingsView: View {
         .navigationTitle("Encrypted DNS")
         .onAppear { editingServer = storedServer }
         .onDisappear { commitServer() }
-        .onChange(of: enabled) { notifySettingsChanged() }
         .onChange(of: dnsProtocol) {
             commitServer()
             notifySettingsChanged()
         }
+        .alert("Encrypted DNS", isPresented: $showEnableAlert) {
+            Button("Enable Anyway", role: .destructive) {
+                enabled = true
+                notifySettingsChanged()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Enabling Encrypted DNS will prevent routing rules from working. Domain-based routing requires plain DNS to intercept queries.")
+        }
     }
-
+    
     private func commitServer() {
         let trimmed = editingServer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed != storedServer else { return }

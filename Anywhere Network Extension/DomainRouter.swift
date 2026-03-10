@@ -30,7 +30,7 @@ class DomainRouter {
     // Proxy configurations for rule-assigned proxies
     private var configurationMap: [UUID: ProxyConfiguration] = [:]
 
-    /// Reads routing.json from the App Group container and compiles rules.
+    /// Reads routing configuration from App Group UserDefaults and compiles rules.
     func loadRoutingConfiguration() {
         exactDomains.removeAll()
         suffixRules.removeAll()
@@ -39,15 +39,9 @@ class DomainRouter {
         ipv6CIDRRules.removeAll()
         configurationMap.removeAll()
 
-        guard let containerURL = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.com.argsment.Anywhere") else {
-            logger.error("[DomainRouter] App Group container not available")
-            return
-        }
-
-        let routingURL = containerURL.appendingPathComponent("routing.json")
-        guard let data = try? Data(contentsOf: routingURL),
+        guard let data = AWCore.userDefaults.data(forKey: "routingData"),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            logger.info("[DomainRouter] No routing.json or invalid format")
+            logger.info("[DomainRouter] No routing data available")
             return
         }
 

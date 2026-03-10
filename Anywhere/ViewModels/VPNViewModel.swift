@@ -597,6 +597,14 @@ class VPNViewModel {
                     if let resolvedIP {
                         configurationDict["resolvedIP"] = resolvedIP
                     }
+
+                    // Persist configuration to App Group so the Network Extension
+                    // can read it when started from Settings or Always On (On Demand),
+                    // where options is nil.
+                    if let jsonData = try? JSONSerialization.data(withJSONObject: configurationDict) {
+                        AWCore.userDefaults.set(jsonData, forKey: "lastConfigurationData")
+                    }
+
                     try manager.connection.startVPNTunnel(options: ["config": configurationDict as NSObject])
                 } catch {
                     Task { @MainActor in self.startError = error.localizedDescription }
@@ -624,6 +632,12 @@ class VPNViewModel {
         guard let session = vpnManager?.connection as? NETunnelProviderSession else { return }
         var configurationDict = serializeConfiguration(configuration)
         Self.resolveAddressesInDict(&configurationDict)
+
+        // Keep App Group in sync so On Demand restarts use the latest selection
+        if let jsonData = try? JSONSerialization.data(withJSONObject: configurationDict) {
+            AWCore.userDefaults.set(jsonData, forKey: "lastConfigurationData")
+        }
+
         guard let data = try? JSONSerialization.data(withJSONObject: configurationDict) else { return }
         try? session.sendProviderMessage(data) { _ in }
     }

@@ -146,9 +146,6 @@ class LWIPStack {
     private func loadBypassCountry() {
         let code = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
         bypassCountry = code.isEmpty ? 0 : GeoIPDatabase.packCountryCode(code)
-        if bypassCountry != 0 {
-            logger.info("[LWIPStack] Bypass country: \(code, privacy: .public)")
-        }
     }
 
     /// Reads encrypted DNS settings from app group UserDefaults.
@@ -165,9 +162,7 @@ class LWIPStack {
     /// - Parameters:
     ///   - packetFlow: The tunnel's packet flow for reading/writing IP packets.
     ///   - configuration: The proxy configuration.
-    func start(packetFlow: NEPacketTunnelFlow,
-               configuration: ProxyConfiguration) {
-        logger.info("[LWIPStack] Starting")
+    func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) {
         LWIPStack.shared = self
         self.packetFlow = packetFlow
         self.configuration = configuration
@@ -197,7 +192,7 @@ class LWIPStack {
             self.startTimeoutTimer()
             self.startUDPCleanupTimer()
             self.startReadingPackets()
-            logger.info("[LWIPStack] Started, mux=\(self.muxManager != nil), bypass=\(self.bypassCountry != 0), encryptedDNS=\(self.encryptedDNSEnabled), ipv6dns=\(self.ipv6DNSEnabled), ipv6connections=\(self.ipv6ConnectionsEnabled)")
+            logger.info("[LWIPStack] Started, mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), ipv6connections=\(self.ipv6ConnectionsEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
         }
 
         startObservingSettings()
@@ -205,7 +200,6 @@ class LWIPStack {
 
     /// Stops the lwIP stack and closes all active flows.
     func stop() {
-        logger.info("[LWIPStack] Stopping")
         stopObservingSettings()
         lwipQueue.sync { [self] in
             self.running = false
@@ -223,7 +217,6 @@ class LWIPStack {
     /// Shuts down the lwIP stack and all VLESS connections, then restarts
     /// with the new configuration using the existing packet flow.
     func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
-        logger.info("[LWIPStack] Switching configuration")
         lwipQueue.async { [self] in
             self.restartStack(configuration: newConfiguration)
         }
@@ -287,7 +280,7 @@ class LWIPStack {
         self.startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.info("[LWIPStack] Restarted, mux=\(self.muxManager != nil), bypass=\(self.bypassCountry != 0), encryptedDNS=\(self.encryptedDNSEnabled), ipv6dns=\(self.ipv6DNSEnabled), ipv6connections=\(self.ipv6ConnectionsEnabled)")
+        logger.info("[LWIPStack] Restarted, mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), ipv6connections=\(self.ipv6ConnectionsEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
     }
 
     // MARK: - Settings Observation
@@ -368,8 +361,7 @@ class LWIPStack {
             if ipv6ConnectionsEnabledChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged {
                 self.onTunnelSettingsNeedReapply?()
             }
-
-            logger.info("[LWIPStack] Settings changed, restarting (bypass=\(bypassCountry != 0), ipv6dns=\(ipv6DNSEnabled), ipv6connections=\(ipv6ConnectionsEnabled), encryptedDNS=\(encryptedDNSEnabled))")
+            
             self.restartStack(configuration: config)
         }
     }
@@ -383,7 +375,6 @@ class LWIPStack {
     private func handleRoutingChanged() {
         lwipQueue.async { [self] in
             guard self.running, let config = self.configuration else { return }
-            logger.info("[LWIPStack] Routing rules changed, restarting")
             self.restartStack(configuration: config)
         }
     }
