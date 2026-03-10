@@ -18,8 +18,9 @@ struct NaiveConfiguration {
     let scheme: NaiveScheme
 
     enum NaiveScheme: String, Codable {
-        case https   // HTTP/2 over TLS
-        case quic    // HTTP/3 over QUIC
+        case http11  = "https11"  // HTTP/1.1 CONNECT over TLS
+        case http2   = "https"    // HTTP/2   CONNECT over TLS
+        case http3   = "quic"     // HTTP/3   CONNECT over QUIC
     }
 
     /// The SNI value to use during the TLS handshake.

@@ -55,9 +55,12 @@ nonisolated enum LatencyTester {
             outboundProtocol: configuration.outboundProtocol,
             ssPassword: configuration.ssPassword,
             ssMethod: configuration.ssMethod,
-            naiveUsername: configuration.naiveUsername,
-            naivePassword: configuration.naivePassword,
-            naiveScheme: configuration.naiveScheme
+            http11Username: configuration.http11Username,
+            http11Password: configuration.http11Password,
+            http2Username: configuration.http2Username,
+            http2Password: configuration.http2Password,
+            http3Username: configuration.http3Username,
+            http3Password: configuration.http3Password
         )
 
         do {

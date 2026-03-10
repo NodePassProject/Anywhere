@@ -45,7 +45,7 @@ enum HTTP2Error: Error, LocalizedError {
 /// 4. Bidirectional DATA relay through the tunnel
 ///
 /// Flow control uses NaiveProxy's window sizes (64 MB stream, 128 MB connection).
-class HTTP2Connection {
+class HTTP2Connection: NaiveTunnel {
 
     // MARK: State
 

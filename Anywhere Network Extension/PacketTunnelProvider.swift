@@ -21,11 +21,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // re-applied live via reapplyTunnelSettings() when settings change.
     //
     // Currently re-applied when:
-    // - IPv6 toggle: adds/removes IPv6 routes and IPv6 DNS servers.
+    // - IPv6 connections toggle: adds/removes IPv6 routes and IPv6 DNS servers.
+    // - Encrypted DNS changes: switches between NEDNSSettings,
+    //   NEDNSOverHTTPSSettings, or NEDNSOverTLSSettings based on protocol
+    //   and custom server configuration.
     //
     // NOT re-applied when (stack restart is sufficient):
-    // - DoH toggle: DDR blocking in LWIPStack controls DoH behavior at the DNS
-    //   interception level; no tunnel settings change needed.
+    // - Encrypted DNS toggle without custom server: DDR blocking in LWIPStack
+    //   controls behavior at the DNS interception level; no tunnel settings
+    //   change needed.
     // - Bypass country: only affects per-connection GeoIP checks in LWIPStack.
 
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
@@ -52,10 +56,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
 
-            let ipv6Enabled = AWCore.userDefaults.bool(forKey: "ipv6Enabled")
             self.lwipStack.start(packetFlow: self.packetFlow,
-                                 configuration: configuration,
-                                 ipv6Enabled: ipv6Enabled)
+                                 configuration: configuration)
             completionHandler(nil)
         }
     }
@@ -63,9 +65,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Tunnel Settings
     //
     // Builds NEPacketTunnelNetworkSettings from current UserDefaults.
-    // Reads: ipv6Enabled (for IPv6 routes and DNS servers).
-    // DNS servers are always plain UDP (1.1.1.1, 1.0.0.1); DoH auto-upgrade is
-    // prevented at the lwIP level by blocking DDR queries, not by DNS settings here.
+    // Reads: ipv6ConnectionsEnabled, encryptedDNSEnabled, encryptedDNSProtocol, encryptedDNSServer.
+    // When encrypted DNS is enabled with a custom server, uses NEDNSOverHTTPSSettings
+    // or NEDNSOverTLSSettings. Otherwise DDR auto-upgrade is controlled at the lwIP level.
 
     // MARK: - Bypass Routes
     //
@@ -111,8 +113,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         ipv4Settings.excludedRoutes = ipv4Exclusions
         settings.ipv4Settings = ipv4Settings
 
-        let ipv6Enabled = AWCore.userDefaults.bool(forKey: "ipv6Enabled")
-        if ipv6Enabled {
+        let ipv6ConnectionsEnabled = AWCore.userDefaults.bool(forKey: "ipv6ConnectionsEnabled")
+        if ipv6ConnectionsEnabled {
             var ipv6Exclusions = Self.bypassIPv6Routes
             if !serverIsIPv4 {
                 ipv6Exclusions.append(NEIPv6Route(destinationAddress: remoteAddress, networkPrefixLength: 128))
@@ -125,20 +127,38 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         let dnsServers: [String]
-        if ipv6Enabled {
+        if ipv6ConnectionsEnabled {
             dnsServers = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
         } else {
             dnsServers = ["1.1.1.1", "1.0.0.1"]
         }
-        let dnsSettings = NEDNSSettings(servers: dnsServers)
-        settings.dnsSettings = dnsSettings
+
+        let encDNSEnabled = AWCore.userDefaults.bool(forKey: "encryptedDNSEnabled")
+        let encDNSProtocol = AWCore.userDefaults.string(forKey: "encryptedDNSProtocol") ?? "doh"
+        let encDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
+
+        if encDNSEnabled, !encDNSServer.isEmpty {
+            if encDNSProtocol == "dot" {
+                let dnsSettings = NEDNSOverTLSSettings(servers: dnsServers)
+                dnsSettings.serverName = encDNSServer
+                settings.dnsSettings = dnsSettings
+            } else if let serverURL = URL(string: encDNSServer) {
+                let dnsSettings = NEDNSOverHTTPSSettings(servers: dnsServers)
+                dnsSettings.serverURL = serverURL
+                settings.dnsSettings = dnsSettings
+            } else {
+                settings.dnsSettings = NEDNSSettings(servers: dnsServers)
+            }
+        } else {
+            settings.dnsSettings = NEDNSSettings(servers: dnsServers)
+        }
         settings.mtu = 1400
 
         return settings
     }
 
     /// Re-applies tunnel network settings with current UserDefaults values.
-    /// Called by LWIPStack via onTunnelSettingsNeedReapply when IPv6 setting changes.
+    /// Called by LWIPStack via onTunnelSettingsNeedReapply when IPv6/encrypted DNS settings change.
     /// Resets the virtual interface and flushes the OS DNS cache.
     private func reapplyTunnelSettings() {
         let settings = buildTunnelSettings()

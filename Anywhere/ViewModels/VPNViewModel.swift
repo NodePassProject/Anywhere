@@ -722,16 +722,13 @@ class VPNViewModel {
             configurationDict["ssMethod"] = ssMethod
         }
 
-        // Add NaiveProxy fields if present
-        if let naiveUsername = configuration.naiveUsername {
-            configurationDict["naiveUsername"] = naiveUsername
-        }
-        if let naivePassword = configuration.naivePassword {
-            configurationDict["naivePassword"] = naivePassword
-        }
-        if let naiveScheme = configuration.naiveScheme {
-            configurationDict["naiveScheme"] = naiveScheme
-        }
+        // Add per-protocol credential fields if present
+        if let v = configuration.http11Username { configurationDict["http11Username"] = v }
+        if let v = configuration.http11Password { configurationDict["http11Password"] = v }
+        if let v = configuration.http2Username  { configurationDict["http2Username"] = v }
+        if let v = configuration.http2Password  { configurationDict["http2Password"] = v }
+        if let v = configuration.http3Username  { configurationDict["http3Username"] = v }
+        if let v = configuration.http3Password  { configurationDict["http3Password"] = v }
 
         // Add Reality configuration if present
         if let reality = configuration.reality {
