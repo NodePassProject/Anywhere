@@ -145,6 +145,34 @@ class RuleSetStore: ObservableObject {
         )
     }
 
+    // MARK: - Bypass Country
+
+    /// Serializes the bypass country's domain rules to App Group UserDefaults
+    /// so the Network Extension can match domains for country-based bypass.
+    func syncBypassCountryRules() {
+        let code = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
+        if code.isEmpty {
+            AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
+            return
+        }
+        let rules = loadRules(for: code)
+        let domainRulesArray: [[String: String]] = rules.compactMap {
+            switch $0.type {
+            case .domain, .domainSuffix, .domainKeyword:
+                return ["type": $0.type.rawValue, "value": $0.value]
+            case .ipCIDR, .ipCIDR6:
+                return nil
+            }
+        }
+        if domainRulesArray.isEmpty {
+            AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
+            return
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: domainRulesArray) {
+            AWCore.userDefaults.set(data, forKey: "bypassCountryDomainRules")
+        }
+    }
+
     // MARK: - Persistence
 
     private func saveAssignments() {

@@ -86,12 +86,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // These IP ranges are always excluded from the VPN tunnel (sent directly).
     // Domain-based entries (localhost, *.local, captive.apple.com) are not
     // expressible as packet-level route exclusions:
-    //   - localhost   → covered by 127.0.0.0/8
+    //   - localhost   → loopback; the OS never routes 127.0.0.0/8 into the tunnel
     //   - *.local     → mDNS/Bonjour; addresses fall in private/link-local ranges below
     //   - captive.apple.com → handled by the OS captive-portal detection layer
 
     private static let bypassIPv4Routes: [NEIPv4Route] = [
-        NEIPv4Route(destinationAddress: "127.0.0.0",     subnetMask: "255.0.0.0"),     // 127.0.0.0/8
         NEIPv4Route(destinationAddress: "10.0.0.0",      subnetMask: "255.0.0.0"),     // 10.0.0.0/8
         NEIPv4Route(destinationAddress: "172.16.0.0",    subnetMask: "255.240.0.0"),   // 172.16.0.0/12
         NEIPv4Route(destinationAddress: "192.168.0.0",   subnetMask: "255.255.0.0"),   // 192.168.0.0/16

@@ -710,6 +710,7 @@ class VPNViewModel {
     /// Builds routing configuration from rulesets and writes to App Group for the NE.
     func syncRoutingConfigurationToNE() {
         ruleSetStore.syncToAppGroup(configurations: configurations, serializeConfiguration: serializeConfiguration)
+        ruleSetStore.syncBypassCountryRules()
     }
 
     // MARK: - Configuration Serialization

@@ -73,7 +73,7 @@ struct EncryptedDNSSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Enabling Encrypted DNS will prevent routing rules from working. Domain-based routing requires plain DNS to intercept queries.")
+            Text("Enabling Encrypted DNS will increase connection wait time and prevent routing rules from working.")
         }
     }
     

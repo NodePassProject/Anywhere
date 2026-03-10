@@ -2191,10 +2191,108 @@
       }
     },
     "Enable Anyway" : {
-
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تفعيل على أي حال"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activar de todos modos"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "فعال‌سازی در هر صورت"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဘယ်လိုပဲဖြစ်ဖြစ် ဖွင့်မည်"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Всё равно включить"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Şonda-da açmak"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vẫn bật"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍然启用"
+          }
+        }
+      }
     },
-    "Enabling Encrypted DNS will prevent routing rules from working. Domain-based routing requires plain DNS to intercept queries." : {
-
+    "Enabling Encrypted DNS will increase connection wait time and prevent routing rules from working." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "سيؤدي تفعيل DNS المشفّر إلى زيادة وقت انتظار الاتصال ومنع قواعد التوجيه من العمل."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activar el DNS cifrado aumentará el tiempo de espera de conexión e impedirá que las reglas de enrutamiento funcionen."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "فعال‌سازی DNS رمزنگاری‌شده زمان انتظار اتصال را افزایش می‌دهد و مانع عملکرد قوانین مسیریابی می‌شود."
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကုဒ်ဝှက်ထားသော DNS ကိုဖွင့်ခြင်းသည် ချိတ်ဆက်မှုစောင့်ဆိုင်းချိန်ကို တိုးမြင့်စေပြီး လမ်းကြောင်းသတ်မှတ်ချက်များ အလုပ်မလုပ်စေပါ။"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включение зашифрованного DNS увеличит время ожидания подключения и помешает работе правил маршрутизации."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Şifrlenen DNS-i açmak birikme wagtyny artdyrar we ugratma düzgünleriniň işlemeginiň öňüni alar."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bật DNS mã hóa sẽ tăng thời gian chờ kết nối và ngăn các quy tắc định tuyến hoạt động."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用加密 DNS 将增加连接等待时间，并导致路由规则无法生效。"
+          }
+        }
+      }
     },
     "Encrypted DNS" : {
       "localizations" : {
