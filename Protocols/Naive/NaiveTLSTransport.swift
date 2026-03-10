@@ -37,7 +37,6 @@ class NaiveTLSTransport {
     private let host: String
     private let port: UInt16
     private let sni: String
-    private let insecure: Bool
 
     private var tlsClient: TLSClient?
     private var tlsConnection: TLSRecordConnection?
@@ -52,12 +51,10 @@ class NaiveTLSTransport {
     ///   - host: The proxy server hostname or IP address.
     ///   - port: The proxy server port.
     ///   - sni: TLS SNI override. Defaults to `host` if `nil`.
-    ///   - insecure: If `true`, skips certificate validation (testing only).
-    init(host: String, port: UInt16, sni: String?, insecure: Bool = false) {
+    init(host: String, port: UInt16, sni: String?) {
         self.host = host
         self.port = port
         self.sni = sni ?? host
-        self.insecure = insecure
     }
 
     // MARK: - Connect
@@ -71,8 +68,7 @@ class NaiveTLSTransport {
     func connect(completion: @escaping (Error?) -> Void) {
         let config = TLSConfiguration(
             serverName: sni,
-            alpn: ["h2"],
-            allowInsecure: insecure
+            alpn: ["h2"]
         )
         let client = TLSClient(configuration: config)
         self.tlsClient = client
