@@ -921,6 +921,110 @@
         }
       }
     },
+    "Allow Anyway" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "السماح على أي حال"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permitir de todos modos"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "به هر حال اجازه بده"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဘာပဲဖြစ်ဖြစ် ခွင့်ပြုပါ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Всё равно разрешить"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Şonda-da rugsat ber"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vẫn cho phép"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仍然允许"
+          }
+        }
+      }
+    },
+    "Allow Insecure" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "السماح بالاتصال غير الآمن"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Permitir inseguro"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اجازه اتصال ناامن"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "မလုံခြုံသော ချိတ်ဆက်မှုကို ခွင့်ပြုပါ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разрешить небезопасное"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Howpsuz birikme rugsat ber"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cho phép không an toàn"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "允许不安全连接"
+          }
+        }
+      }
+    },
     "ALPN" : {
       "shouldTranslate" : false
     },
@@ -2831,6 +2935,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "导入失败"
+          }
+        }
+      }
+    },
+    "insecure" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "غير آمن"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "inseguro"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ناامن"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "မလုံခြုံ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "небезопасно"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "howpsuz"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "không an toàn"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不安全"
           }
         }
       }
@@ -5929,6 +6085,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "以下路由规则使用的代理已被删除，它们已重置为默认: %@"
+          }
+        }
+      }
+    },
+    "This will skip TLS certificate validation, making your connections vulnerable to MITM attacks." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "سيؤدي هذا إلى تخطي التحقق من شهادة TLS، مما يجعل اتصالاتك عرضة لهجمات الوسيط."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Esto omitirá la validación del certificado TLS, haciendo que tus conexiones sean vulnerables a ataques MITM."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "این کار اعتبارسنجی گواهی TLS را رد می‌کند و اتصالات شما را در برابر حملات MITM آسیب‌پذیر می‌کند."
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ဤလုပ်ဆောင်ချက်သည် TLS လက်မှတ် အတည်ပြုခြင်းကို ကျော်သွားမည်ဖြစ်ပြီး သင့်ချိတ်ဆက်မှုများကို MITM တိုက်ခိုက်မှုများအတွက် အားနည်းချက်ဖြစ်စေသည်။"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Это пропустит проверку сертификата TLS, делая ваши соединения уязвимыми для MITM-атак."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bu TLS şahadatnamasynyň barlagyndan geçer, birikmeleriňizi MITM hüjümlerine sezewar eder."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thao tác này sẽ bỏ qua xác thực chứng chỉ TLS, khiến kết nối của bạn dễ bị tấn công MITM."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这将跳过 TLS 证书验证，使您的连接容易受到中间人攻击。"
           }
         }
       }
