@@ -747,7 +747,6 @@ class VPNViewModel {
             if let alpn = tls.alpn {
                 configurationDict["tlsAlpn"] = alpn.joined(separator: ",")
             }
-            configurationDict["tlsAllowInsecure"] = tls.allowInsecure
             configurationDict["tlsFingerprint"] = tls.fingerprint.rawValue
         }
 

@@ -603,6 +603,58 @@
         }
       }
     },
+    "Add Certificate" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إضافة شهادة"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Agregar certificado"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "افزودن گواهی"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လက်မှတ်ထည့်ရန်"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Добавить сертификат"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Şahadatnama goş"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Thêm chứng chỉ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加证书"
+          }
+        }
+      }
+    },
     "Add Configuration" : {
       "localizations" : {
         "ar" : {
@@ -865,58 +917,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "所有商标、服务标识和公司名称均为其各自所有者的财产。"
-          }
-        }
-      }
-    },
-    "Allow Insecure" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "السماح بغير الآمن"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Permitir inseguro"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اجازه ناامن"
-          }
-        },
-        "my" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "မလုံခြုံမှုခွင့်ပြု"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Небезопасное соединение"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Howpsuz däl"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Cho phép không an toàn"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "允许不安全"
           }
         }
       }
@@ -1452,6 +1452,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "继续"
+          }
+        }
+      }
+    },
+    "Copy" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "نسخ"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Copiar"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "کپی"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ကူးယူရန်"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Копировать"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Göçür"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sao chép"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "复制"
           }
         }
       }
@@ -2239,6 +2291,58 @@
         }
       }
     },
+    "Enter the SHA-256 fingerprint (64 hex characters) of the certificate to trust." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "أدخل بصمة SHA-256 (64 حرفًا سداسيًا عشريًا) للشهادة المراد الوثوق بها."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ingrese la huella digital SHA-256 (64 caracteres hexadecimales) del certificado a confiar."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اثر انگشت SHA-256 (۶۴ کاراکتر هگزادسیمال) گواهی مورد اعتماد را وارد کنید."
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ယုံကြည်လိုသော လက်မှတ်၏ SHA-256 လက်ဗွေ (ဟက်စ် အက္ခရာ ၆၄ လုံး) ထည့်ပါ။"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Введите SHA-256 отпечаток (64 шестнадцатеричных символа) сертификата для доверия."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ynanylýan şahadatnamanyň SHA-256 barlag belgisini (64 onaltylyk belgi) giriziň."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nhập dấu vân tay SHA-256 (64 ký tự hex) của chứng chỉ cần tin cậy."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "输入要信任的证书的 SHA-256 指纹（64 个十六进制字符）。"
+          }
+        }
+      }
+    },
     "Entry" : {
       "localizations" : {
         "ar" : {
@@ -2672,6 +2776,110 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "链无效 — 某些代理缺失"
+          }
+        }
+      }
+    },
+    "Invalid Fingerprint" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بصمة غير صالحة"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Huella digital no válida"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اثر انگشت نامعتبر"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လက်ဗွေ မမှန်ကန်ပါ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Недействительный отпечаток"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nädogry barlag belgisi"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vân tay không hợp lệ"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "指纹无效"
+          }
+        }
+      }
+    },
+    "Invalid fingerprint. Must be a 64-character hex string, or it already exists." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بصمة غير صالحة. يجب أن تكون سلسلة سداسية عشرية مكونة من 64 حرفًا، أو أنها موجودة بالفعل."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Huella digital no válida. Debe ser una cadena hexadecimal de 64 caracteres, o ya existe."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اثر انگشت نامعتبر. باید یک رشته هگزادسیمال ۶۴ کاراکتری باشد، یا قبلاً وجود دارد."
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "လက်ဗွေ မမှန်ကန်ပါ။ ဟက်စ် အက္ခရာ ၆၄ လုံး ဖြစ်ရမည်၊ သို့မဟုတ် ရှိပြီးသားဖြစ်နေပါသည်။"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Недействительный отпечаток. Должна быть шестнадцатеричная строка из 64 символов, или он уже существует."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nädogry barlag belgisi. 64 belgili onaltylyk setir bolmaly ýa-da eýýäm bar."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vân tay không hợp lệ. Phải là chuỗi hex 64 ký tự, hoặc đã tồn tại."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "指纹无效。必须是 64 个十六进制字符的字符串，或者已经存在。"
           }
         }
       }
@@ -3302,6 +3510,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无可用代理"
+          }
+        }
+      }
+    },
+    "No trusted certificates" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لا توجد شهادات موثوقة"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No hay certificados de confianza"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "گواهی مورد اعتمادی وجود ندارد"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ယုံကြည်ရသော လက်မှတ်များ မရှိပါ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет доверенных сертификатов"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ynanylýan şahadatnama ýok"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Không có chứng chỉ tin cậy"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "没有受信任的证书"
           }
         }
       }
@@ -4664,6 +4924,58 @@
         }
       }
     },
+    "SHA-256 Fingerprint" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بصمة SHA-256"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Huella SHA-256"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اثر انگشت SHA-256"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SHA-256 လက်ဗွေ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отпечаток SHA-256"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SHA-256 barlag yzy"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dấu vân tay SHA-256"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SHA-256 指纹"
+          }
+        }
+      }
+    },
     "Shadowsocks" : {
       "shouldTranslate" : false
     },
@@ -5253,6 +5565,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "传输"
+          }
+        }
+      }
+    },
+    "Trusted Certificates" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الشهادات الموثوقة"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Certificados de confianza"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "گواهی‌های مورد اعتماد"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ယုံကြည်ရသော လက်မှတ်များ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Доверенные сертификаты"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ynanylýan şahadatnamalar"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Chứng chỉ tin cậy"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "受信任的证书"
           }
         }
       }
