@@ -608,6 +608,13 @@ class TLSClient {
     /// whether the leaf certificate's SHA-256 fingerprint is in the user's
     /// trusted certificate list (stored in App Group UserDefaults).
     private func validateCertificate(completion: @escaping (Result<Void, Error>) -> Void) {
+        if let defaults = UserDefaults(suiteName: "group.com.argsment.Anywhere"),
+           defaults.bool(forKey: "allowInsecure") {
+            logger.warning("[TLS] Certificate validation skipped (Allow Insecure enabled)")
+            completion(.success(()))
+            return
+        }
+
         var trust: SecTrust?
         let policy = SecPolicyCreateSSL(true, configuration.serverName as CFString)
 
