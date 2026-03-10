@@ -10,9 +10,9 @@ import SwiftUI
 /// Settings that affect the Network Extension are stored in App Group UserDefaults
 /// and propagated via Darwin notifications:
 ///
-/// - "settingsChanged": triggers LWIPStack restart. Posted when ipv6, doh, or bypass changes.
+/// - "settingsChanged": triggers LWIPStack restart. Posted when ipv6, encrypted DNS, or bypass changes.
 ///   LWIPStack re-reads all settings from UserDefaults during restart.
-///   IPv6 also triggers tunnel settings re-apply (routes + DNS servers).
+///   IPv6 and encrypted DNS changes also trigger tunnel settings re-apply.
 ///
 /// - "routingChanged": triggers DomainRouter rule reload only (no restart).
 ///   Posted by RuleSetListView when routing rule assignments change.
@@ -24,16 +24,8 @@ struct SettingsView: View {
     @AppStorage("alwaysOnEnabled", store: AWCore.userDefaults)
     private var alwaysOnEnabled = false
 
-    @AppStorage("ipv6Enabled", store: AWCore.userDefaults)
-    private var ipv6Enabled = false
-
-    @AppStorage("dohEnabled", store: AWCore.userDefaults)
-    private var dohEnabled = false
-
     @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
     private var bypassCountryCode = ""
-
-    @State private var showDoHAlert = false
 
     @State private var shouldRefreshADBlockToggle = true
 
@@ -59,21 +51,15 @@ struct SettingsView: View {
             }
             
             Section("Network") {
-                Toggle(isOn: $ipv6Enabled) {
+                NavigationLink {
+                    IPv6SettingsView()
+                } label: {
                     TextWithColorfulIcon(titleKey: "IPv6", systemName: "6.circle.fill", foregroundColor: .white, backgroundColor: .blue)
                 }
-                Toggle(isOn: Binding(
-                    get: { dohEnabled },
-                    set: { newValue in
-                        if newValue {
-                            showDoHAlert = true
-                        } else {
-                            dohEnabled = newValue
-                            notifySettingsChanged()
-                        }
-                    }
-                )) {
-                    TextWithColorfulIcon(titleKey: "DNS over HTTPS", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .teal)
+                NavigationLink {
+                    EncryptedDNSSettingsView()
+                } label: {
+                    TextWithColorfulIcon(titleKey: "Encrypted DNS", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .teal)
                 }
             }
 
@@ -127,18 +113,7 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
-        .onChange(of: ipv6Enabled) { notifySettingsChanged() }
-        .onChange(of: dohEnabled) { notifySettingsChanged() }
         .onChange(of: bypassCountryCode) { notifySettingsChanged() }
-        .alert(String(localized: "DNS over HTTPS"), isPresented: $showDoHAlert) {
-            Button(String(localized: "Enable Anyway"), role: .destructive) {
-                dohEnabled = true
-                notifySettingsChanged()
-            }
-            Button(String(localized: "Cancel"), role: .cancel) {}
-        } message: {
-            Text("Enabling DNS over HTTPS will prevent routing rules from working. Domain-based routing requires plain DNS to intercept queries.")
-        }
     }
     
     private func flag(for countryCode: String) -> String {

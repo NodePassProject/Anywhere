@@ -29,14 +29,19 @@ enum NaiveTLSError: Error, LocalizedError {
 /// TLS transport for NaiveProxy connections using ``BSDSocket`` + ``TLSClient``.
 ///
 /// Reuses Anywhere's existing TLS infrastructure to establish a TLS 1.3 connection
-/// to the proxy server with ALPN `["h2"]` for HTTP/2 negotiation. After the
-/// handshake, all I/O goes through a ``TLSRecordConnection`` which handles
-/// TLS record encryption/decryption over the raw socket.
+/// to the proxy server. The ALPN protocol list is configurable (e.g. `["h2"]` for
+/// HTTP/2, `["http/1.1"]` for HTTP/1.1). After the handshake, all I/O goes through
+/// a ``TLSRecordConnection`` which handles TLS record encryption/decryption.
+///
+/// Supports both direct connections and connections tunneled through an existing
+/// ``ProxyConnection`` (for proxy chaining).
 class NaiveTLSTransport {
 
     private let host: String
     private let port: UInt16
     private let sni: String
+    private let alpn: [String]
+    private let tunnel: ProxyConnection?
 
     private var tlsClient: TLSClient?
     private var tlsConnection: TLSRecordConnection?
@@ -51,29 +56,34 @@ class NaiveTLSTransport {
     ///   - host: The proxy server hostname or IP address.
     ///   - port: The proxy server port.
     ///   - sni: TLS SNI override. Defaults to `host` if `nil`.
-    init(host: String, port: UInt16, sni: String?) {
+    ///   - alpn: ALPN protocol list for TLS negotiation. Defaults to `["h2"]`.
+    ///   - tunnel: Optional proxy connection to tunnel through (for proxy chaining).
+    init(host: String, port: UInt16, sni: String?, alpn: [String] = ["h2"], tunnel: ProxyConnection? = nil) {
         self.host = host
         self.port = port
         self.sni = sni ?? host
+        self.alpn = alpn
+        self.tunnel = tunnel
     }
 
     // MARK: - Connect
 
-    /// Establishes a TLS connection to the proxy server with ALPN `["h2"]`.
+    /// Establishes a TLS connection to the proxy server.
     ///
-    /// Uses ``BSDSocket`` for TCP and ``TLSClient`` for the TLS 1.3 handshake.
-    /// On success, stores the ``TLSRecordConnection`` for subsequent I/O.
+    /// Uses ``BSDSocket`` for TCP (or tunnels through an existing ``ProxyConnection``)
+    /// and ``TLSClient`` for the TLS 1.3 handshake. On success, stores the
+    /// ``TLSRecordConnection`` for subsequent I/O.
     ///
     /// - Parameter completion: Called with `nil` on success or an error on failure.
     func connect(completion: @escaping (Error?) -> Void) {
         let config = TLSConfiguration(
             serverName: sni,
-            alpn: ["h2"]
+            alpn: alpn
         )
         let client = TLSClient(configuration: config)
         self.tlsClient = client
 
-        client.connect(host: host, port: port) { [weak self] result in
+        let handleResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
             guard let self else { return }
             switch result {
             case .success(let connection):
@@ -86,6 +96,12 @@ class NaiveTLSTransport {
                 logger.error("[NaiveTLS] Connection failed: \(error.localizedDescription, privacy: .public)")
                 completion(NaiveTLSError.connectionFailed(error.localizedDescription))
             }
+        }
+
+        if let tunnel {
+            client.connect(overTunnel: tunnel, completion: handleResult)
+        } else {
+            client.connect(host: host, port: port, completion: handleResult)
         }
     }
 

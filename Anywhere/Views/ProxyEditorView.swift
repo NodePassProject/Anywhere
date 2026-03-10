@@ -47,7 +47,7 @@ struct ProxyEditorView: View {
     @State private var ssPassword = ""
     @State private var ssMethod = "aes-128-gcm"
 
-    // Naive fields
+    // Shared credential fields for HTTPS/HTTP2/QUIC (persisted per-protocol at save time)
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
 
@@ -76,17 +76,22 @@ struct ProxyEditorView: View {
         NavigationView {
             Form {
                 Section {
-                    TextField("Name", text: $name)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
+                    LabeledContent {
+                        TextField("Name", text: $name)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(titleKey: "Name", systemName: "tag.fill", foregroundColor: .white, backgroundColor: .gray)
+                    }
                 }
                 
                 Section {
                     Picker(selection: $selectedProtocol) {
                         Text("VLESS").tag(OutboundProtocol.vless)
                         Text("Shadowsocks").tag(OutboundProtocol.shadowsocks)
-                        Text("HTTPS").tag(OutboundProtocol.https)
-                        Text("HTTP/2").tag(OutboundProtocol.http2)
+                        Text("HTTPS").tag(OutboundProtocol.http11)
+                        Text("HTTP2").tag(OutboundProtocol.http2)
                     } label: {
                         TextWithColorfulIcon(titleKey: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
@@ -385,8 +390,8 @@ struct ProxyEditorView: View {
         ssPassword = configuration.ssPassword ?? ""
         ssMethod = configuration.ssMethod ?? "aes-128-gcm"
 
-        naiveUsername = configuration.naiveUsername ?? ""
-        naivePassword = configuration.naivePassword ?? ""
+        naiveUsername = configuration.activeUsername ?? ""
+        naivePassword = configuration.activePassword ?? ""
     }
 
     /// Encodes non-default extra fields from an XHTTPConfiguration back to a JSON string.
@@ -503,9 +508,12 @@ struct ProxyEditorView: View {
             outboundProtocol: selectedProtocol,
             ssPassword: isShadowsocks ? ssPassword : nil,
             ssMethod: isShadowsocks ? ssMethod : nil,
-            naiveUsername: isNaive ? naiveUsername : nil,
-            naivePassword: isNaive ? naivePassword : nil,
-            naiveScheme: isNaive ? selectedProtocol.rawValue : nil
+            http11Username: selectedProtocol == .http11 ? naiveUsername : nil,
+            http11Password: selectedProtocol == .http11 ? naivePassword : nil,
+            http2Username: selectedProtocol == .http2 ? naiveUsername : nil,
+            http2Password: selectedProtocol == .http2 ? naivePassword : nil,
+            http3Username: selectedProtocol == .http3 ? naiveUsername : nil,
+            http3Password: selectedProtocol == .http3 ? naivePassword : nil
         )
 
         onSave(configuration)

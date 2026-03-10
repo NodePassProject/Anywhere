@@ -178,10 +178,15 @@ struct ProxyListView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     HStack(spacing: 4) {
-                        Text(configuration.transport.uppercased())
+                        Text(configuration.outboundProtocol.name)
                         Text("·")
-                        Text(configuration.security.uppercased())
-                        if let flow = configuration.flow, flow.contains("vision") {
+                        Text(configuration.transport.uppercased())
+                        let security = configuration.security.uppercased()
+                        if security != "NONE" {
+                            Text("·")
+                            Text(security)
+                        }
+                        if let flow = configuration.flow, flow.uppercased().contains("VISION") {
                             Text("·")
                             Text("Vision")
                         }

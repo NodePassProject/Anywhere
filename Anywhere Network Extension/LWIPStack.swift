@@ -43,19 +43,23 @@ class LWIPStack {
     // --- Settings (read from App Group UserDefaults) ---
     // These are loaded at start/restart and live-reloaded via Darwin notification.
     //
-    // Setting          │ Where it takes effect             │ On change
-    // ─────────────────┼───────────────────────────────────┼──────────────────────────────
-    // ipv6Enabled      │ Tunnel settings (IPv6 routes),    │ Reapply tunnel settings +
-    //                  │ lwIP stack (fake IPv6 pool)       │ stack restart
-    // dohEnabled       │ lwIP DNS interception (DDR block) │ Stack restart (forces DNS
-    //                  │                                   │ re-discovery with new DDR policy)
-    // bypassCountry    │ lwIP per-connection bypass check  │ Stack restart
-    // routingRules     │ DomainRouter (connection-time)     │ Stack restart (closes connections
-    //                  │                                   │ using outdated proxy configurations;
-    //                  │                                   │ FakeIPPool preserved)
+    // Setting          │ Where it takes effect               │ On change
+    // ─────────────────┼─────────────────────────────────────┼──────────────────────────────
+    // ipv6DNS          │ lwIP DNS interception (AAAA fake IP)│ Stack restart
+    // ipv6Connections  │ Tunnel settings (IPv6 routes),      │ Reapply tunnel settings +
+    //                  │ lwIP stack (accept IPv6 flows)      │ stack restart
+    // encryptedDNS     │ lwIP DNS interception (DDR block),  │ Reapply tunnel settings +
+    //                  │ tunnel DNS settings (DoH/DoT)       │ stack restart
+    // bypassCountry    │ lwIP per-connection bypass check    │ Stack restart
+    // routingRules     │ DomainRouter (connection-time)      │ Stack restart (closes connections
+    //                  │                                     │ using outdated proxy configurations;
+    //                  │                                     │ FakeIPPool preserved)
 
-    private(set) var ipv6Enabled: Bool = false
-    private(set) var dohEnabled: Bool = false
+    private(set) var ipv6DNSEnabled: Bool = false
+    private(set) var ipv6ConnectionsEnabled: Bool = false
+    private(set) var encryptedDNSEnabled: Bool = false
+    private(set) var encryptedDNSProtocol: String = "doh"
+    private(set) var encryptedDNSServer: String = ""
     private var running = false
 
     // lwIP periodic timeout timer
@@ -132,6 +136,12 @@ class LWIPStack {
         return false
     }
 
+    /// Reads IPv6 settings from app group UserDefaults.
+    private func loadIPv6Settings() {
+        ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: "ipv6DNSEnabled")
+        ipv6ConnectionsEnabled = AWCore.userDefaults.bool(forKey: "ipv6ConnectionsEnabled")
+    }
+
     /// Reads the bypass country code from app group UserDefaults and converts to UInt16.
     private func loadBypassCountry() {
         let code = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
@@ -141,9 +151,11 @@ class LWIPStack {
         }
     }
 
-    /// Reads the DoH setting from app group UserDefaults.
-    private func loadDoHSetting() {
-        dohEnabled = AWCore.userDefaults.bool(forKey: "dohEnabled")
+    /// Reads encrypted DNS settings from app group UserDefaults.
+    private func loadEncryptedDNSSetting() {
+        encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: "encryptedDNSEnabled")
+        encryptedDNSProtocol = AWCore.userDefaults.string(forKey: "encryptedDNSProtocol") ?? "doh"
+        encryptedDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
     }
 
     // MARK: - Lifecycle
@@ -152,15 +164,13 @@ class LWIPStack {
     ///
     /// - Parameters:
     ///   - packetFlow: The tunnel's packet flow for reading/writing IP packets.
-    ///   - configuration: The VLESS proxy configuration.
+    ///   - configuration: The proxy configuration.
     func start(packetFlow: NEPacketTunnelFlow,
-               configuration: ProxyConfiguration,
-               ipv6Enabled: Bool = false) {
-        logger.info("[LWIPStack] Starting, ipv6Enabled=\(ipv6Enabled)")
+               configuration: ProxyConfiguration) {
+        logger.info("[LWIPStack] Starting")
         LWIPStack.shared = self
         self.packetFlow = packetFlow
         self.configuration = configuration
-        self.ipv6Enabled = ipv6Enabled
 
         lwipQueue.async { [self] in
             self.running = true
@@ -171,8 +181,9 @@ class LWIPStack {
             if self.geoIPDatabase == nil {
                 self.geoIPDatabase = GeoIPDatabase()
             }
+            self.loadIPv6Settings()
             self.loadBypassCountry()
-            self.loadDoHSetting()
+            self.loadEncryptedDNSSetting()
 
             // Create MuxManager when Vision + Mux is active (matches Xray-core auto-mux for UDP)
             // Mux is not supported with Shadowsocks
@@ -186,7 +197,7 @@ class LWIPStack {
             self.startTimeoutTimer()
             self.startUDPCleanupTimer()
             self.startReadingPackets()
-            logger.info("[LWIPStack] Started, mux=\(self.muxManager != nil), bypass=\(self.bypassCountry != 0), doh=\(self.dohEnabled)")
+            logger.info("[LWIPStack] Started, mux=\(self.muxManager != nil), bypass=\(self.bypassCountry != 0), encryptedDNS=\(self.encryptedDNSEnabled), ipv6dns=\(self.ipv6DNSEnabled), ipv6connections=\(self.ipv6ConnectionsEnabled)")
         }
 
         startObservingSettings()
@@ -211,11 +222,10 @@ class LWIPStack {
     ///
     /// Shuts down the lwIP stack and all VLESS connections, then restarts
     /// with the new configuration using the existing packet flow.
-    func switchConfiguration(_ newConfiguration: ProxyConfiguration, ipv6Enabled: Bool? = nil) {
+    func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
         logger.info("[LWIPStack] Switching configuration")
         lwipQueue.async { [self] in
-            self.restartStack(configuration: newConfiguration,
-                              ipv6Enabled: ipv6Enabled ?? self.ipv6Enabled)
+            self.restartStack(configuration: newConfiguration)
         }
     }
 
@@ -258,13 +268,13 @@ class LWIPStack {
     /// packets queued on lwipQueue during reinit are processed after `lwip_bridge_init()`.
     /// FakeIPPool is preserved across restarts — since all DNS queries get fake IPs and
     /// routing decisions are made at connection time, cached fake IPs remain valid.
-    private func restartStack(configuration: ProxyConfiguration, ipv6Enabled: Bool) {
+    private func restartStack(configuration: ProxyConfiguration) {
         shutdownInternal()
 
         self.configuration = configuration
-        self.ipv6Enabled = ipv6Enabled
+        self.loadIPv6Settings()
         self.loadBypassCountry()
-        self.loadDoHSetting()
+        self.loadEncryptedDNSSetting()
 
         if configuration.outboundProtocol == .vless && configuration.muxEnabled && (configuration.flow == "xtls-rprx-vision" || configuration.flow == "xtls-rprx-vision-udp443") {
             self.muxManager = MuxManager(configuration: configuration, lwipQueue: self.lwipQueue)
@@ -277,7 +287,7 @@ class LWIPStack {
         self.startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.info("[LWIPStack] Restarted, mux=\(self.muxManager != nil), bypass=\(self.bypassCountry != 0), doh=\(self.dohEnabled), ipv6=\(self.ipv6Enabled)")
+        logger.info("[LWIPStack] Restarted, mux=\(self.muxManager != nil), bypass=\(self.bypassCountry != 0), encryptedDNS=\(self.encryptedDNSEnabled), ipv6dns=\(self.ipv6DNSEnabled), ipv6connections=\(self.ipv6ConnectionsEnabled)")
     }
 
     // MARK: - Settings Observation
@@ -328,32 +338,39 @@ class LWIPStack {
         )
     }
 
-    /// Handles the "settingsChanged" notification (ipv6/bypass/doh toggles).
+    /// Handles the "settingsChanged" notification (ipv6/bypass/encrypted DNS toggles).
     /// Compares current values against UserDefaults and restarts the stack if changed.
     /// Stack restart closes all connections, clears FakeIPPool, and re-reads all settings.
     private func handleSettingsChanged() {
         lwipQueue.async { [self] in
             guard self.running, let config = self.configuration else { return }
 
-            let newIPv6 = AWCore.userDefaults.bool(forKey: "ipv6Enabled")
-            let newBypassCode = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
-            let newBypass = newBypassCode.isEmpty ? 0 : GeoIPDatabase.packCountryCode(newBypassCode)
-            let newDoH = AWCore.userDefaults.bool(forKey: "dohEnabled")
+            let ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: "ipv6DNSEnabled")
+            let ipv6ConnectionsEnabled = AWCore.userDefaults.bool(forKey: "ipv6ConnectionsEnabled")
+            let bypassCountryCode = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
+            let bypassCountry = bypassCountryCode.isEmpty ? 0 : GeoIPDatabase.packCountryCode(bypassCountryCode)
+            let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: "encryptedDNSEnabled")
+            let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: "encryptedDNSProtocol") ?? "doh"
+            let encryptedDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
 
-            let ipv6Changed = newIPv6 != self.ipv6Enabled
-            let bypassChanged = newBypass != self.bypassCountry
-            let dohChanged = newDoH != self.dohEnabled
+            let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
+            let ipv6ConnectionsEnabledChanged = ipv6ConnectionsEnabled != self.ipv6ConnectionsEnabled
+            let bypassCountryChanged = bypassCountry != self.bypassCountry
+            let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
+            let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
+            let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer
 
-            guard ipv6Changed || bypassChanged || dohChanged else { return }
+            guard ipv6DNSEnabledChanged || ipv6ConnectionsEnabledChanged || bypassCountryChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else { return }
 
-            // IPv6 toggle affects tunnel network settings (IPv6 routes + DNS servers).
+            // IPv6 connections toggle affects tunnel network settings (IPv6 routes + DNS servers).
+            // Encrypted DNS changes also affect tunnel settings (NEDNSOverHTTPSSettings / NEDNSOverTLSSettings).
             // Must re-apply via PacketTunnelProvider before restarting the stack.
-            if ipv6Changed {
+            if ipv6ConnectionsEnabledChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged {
                 self.onTunnelSettingsNeedReapply?()
             }
 
-            logger.info("[LWIPStack] Settings changed, restarting (bypass=\(newBypass != 0), ipv6=\(newIPv6), doh=\(newDoH))")
-            self.restartStack(configuration: config, ipv6Enabled: newIPv6)
+            logger.info("[LWIPStack] Settings changed, restarting (bypass=\(bypassCountry != 0), ipv6dns=\(ipv6DNSEnabled), ipv6connections=\(ipv6ConnectionsEnabled), encryptedDNS=\(encryptedDNSEnabled))")
+            self.restartStack(configuration: config)
         }
     }
 
@@ -367,7 +384,7 @@ class LWIPStack {
         lwipQueue.async { [self] in
             guard self.running, let config = self.configuration else { return }
             logger.info("[LWIPStack] Routing rules changed, restarting")
-            self.restartStack(configuration: config, ipv6Enabled: self.ipv6Enabled)
+            self.restartStack(configuration: config)
         }
     }
 
@@ -403,7 +420,7 @@ class LWIPStack {
                 return nil
             }
 
-            if isIPv6 != 0 && !shared.ipv6Enabled {
+            if isIPv6 != 0 && !shared.ipv6ConnectionsEnabled {
                 return nil
             }
 
@@ -481,7 +498,7 @@ class LWIPStack {
             guard let shared = LWIPStack.shared,
                   let srcIP, let dstIP, let data else { return }
 
-            if isIPv6 != 0 && !shared.ipv6Enabled {
+            if isIPv6 != 0 && !shared.ipv6ConnectionsEnabled {
                 return
             }
 
@@ -630,10 +647,10 @@ class LWIPStack {
     // DNS queries arriving on UDP port 53 are intercepted here before creating any flow.
     // Two types of interception:
     //
-    // 1. DDR blocking: When DoH is disabled, queries for "_dns.resolver.arpa" (RFC 9462)
-    //    get a NODATA response. This prevents the system from discovering that the DNS
-    //    server supports DoH and auto-upgrading, which would move all DNS to port 443
-    //    and bypass our port-53 interception entirely.
+    // 1. DDR blocking: When encrypted DNS is disabled, queries for "_dns.resolver.arpa"
+    //    (RFC 9462) get a NODATA response. This prevents the system from discovering
+    //    that the DNS server supports DoH/DoT and auto-upgrading, which would bypass
+    //    our port-53 interception entirely.
     //
     // 2. Fake-IP for ALL A/AAAA queries: Every domain gets a synthetic fake IP response.
     //    When TCP/UDP connections later arrive at the fake IP, we look up the original
@@ -655,10 +672,11 @@ class LWIPStack {
         let domain = parsed.domain.lowercased()
         let qtype = parsed.qtype
 
-        // Block DDR (Discovery of Designated Resolvers, RFC 9462) when DoH is disabled
-        // to prevent the system from auto-upgrading to DNS-over-HTTPS, which bypasses
+        // Block DDR (Discovery of Designated Resolvers, RFC 9462) when encrypted DNS is
+        // disabled to prevent the system from auto-upgrading to DoH/DoT, which bypasses
         // port-53 interception needed for fake-IP domain routing.
-        if !dohEnabled, domain == "_dns.resolver.arpa" {
+        if !encryptedDNSEnabled, domain == "_dns.resolver.arpa" {
+            logger.info("[FakeIP] Blocked DDR query (qtype=\(qtype))")
             return sendNODATA(payload: payload, srcIP: srcIP, srcPort: srcPort,
                               dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6, qtype: qtype)
         }
@@ -679,7 +697,7 @@ class LWIPStack {
             // A query → fake IPv4
             let ipv4 = FakeIPPool.ipv4Bytes(offset: offset)
             fakeIPBytes = [ipv4.0, ipv4.1, ipv4.2, ipv4.3]
-        } else if qtype == 28, ipv6Enabled {
+        } else if qtype == 28, ipv6DNSEnabled {
             // AAAA query + IPv6 enabled → fake IPv6
             fakeIPBytes = FakeIPPool.ipv6Bytes(offset: offset)
         }
@@ -722,7 +740,7 @@ class LWIPStack {
             lwip_bridge_udp_sendto(dstIP, dstPort, srcIP, srcPort,
                                     isIPv6 ? 1 : 0, dataBase, Int32(responseData.count))
         }
-        logger.info("[FakeIP] Blocked DDR query (qtype=\(qtype))")
+        
         return true
     }
 

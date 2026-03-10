@@ -10,10 +10,27 @@ import os.log
 
 private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "NaiveProxy")
 
+// MARK: - NaiveTunnel Protocol
+
+/// Abstraction over the underlying HTTP connection used for a CONNECT tunnel.
+///
+/// Implemented by ``HTTP11Connection`` (HTTP/1.1), ``HTTP2Connection`` (HTTP/2),
+/// and ``HTTP3Connection`` (HTTP/3). ``NaiveProxyConnection`` uses this protocol
+/// to send and receive data through the tunnel regardless of the HTTP version.
+protocol NaiveTunnel: AnyObject {
+    var isConnected: Bool { get }
+    var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType { get }
+    func openTunnel(completion: @escaping (Error?) -> Void)
+    func sendData(_ data: Data, completion: @escaping (Error?) -> Void)
+    func receiveData(completion: @escaping (Data?, Error?) -> Void)
+    func close()
+}
+
 // MARK: - NaiveProxyConnection
 
-/// ProxyConnection subclass that wraps an ``HTTP2Connection`` with NaiveProxy padding framing.
+/// ProxyConnection subclass that wraps a ``NaiveTunnel`` with NaiveProxy padding framing.
 ///
+/// Supports HTTP/1.1, HTTP/2, and HTTP/3 tunnels through the ``NaiveTunnel`` protocol.
 /// Applies NaivePaddingFramer on the first 8 reads and writes when the server negotiates
 /// variant-1 padding. After 8 frames, data passes through unframed.
 ///
@@ -21,18 +38,19 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension"
 /// `[255-len, 255]` and medium payloads (400–1024 bytes) are split into 200–300 byte chunks.
 /// The "client" direction (server→client) uses uniform random padding `[0, 255]`.
 class NaiveProxyConnection: ProxyConnection {
-    private let http2: HTTP2Connection
+    private let tunnel: NaiveTunnel
     private var paddingFramer = NaivePaddingFramer()
     private let paddingType: NaivePaddingNegotiator.PaddingType
 
-    init(http2: HTTP2Connection, paddingType: NaivePaddingNegotiator.PaddingType) {
-        self.http2 = http2
+    init(tunnel: NaiveTunnel, paddingType: NaivePaddingNegotiator.PaddingType) {
+        self.tunnel = tunnel
         self.paddingType = paddingType
         super.init()
         self.responseHeaderReceived = true  // No VLESS response header
     }
 
-    override var isConnected: Bool { http2.isConnected }
+    override var isConnected: Bool { tunnel.isConnected }
+    override var outerTLSVersion: TLSVersion? { .tls13 }
 
     // MARK: - Send
 
@@ -45,9 +63,9 @@ class NaiveProxyConnection: ProxyConnection {
             }
             let paddingSize = Self.generateSendPaddingSize(payloadSize: data.count)
             let framed = paddingFramer.write(payload: data, paddingSize: paddingSize)
-            http2.sendData(framed, completion: completion)
+            tunnel.sendData(framed, completion: completion)
         } else {
-            http2.sendData(data, completion: completion)
+            tunnel.sendData(data, completion: completion)
         }
     }
 
@@ -69,7 +87,7 @@ class NaiveProxyConnection: ProxyConnection {
         // Stop fragmenting if we've exhausted padding frames
         guard paddingFramer.isWritePaddingActive else {
             let remaining = Data(data[offset...])
-            http2.sendData(remaining, completion: completion)
+            tunnel.sendData(remaining, completion: completion)
             return
         }
 
@@ -79,7 +97,7 @@ class NaiveProxyConnection: ProxyConnection {
         let paddingSize = Self.generateSendPaddingSize(payloadSize: chunk.count)
         let framed = paddingFramer.write(payload: chunk, paddingSize: paddingSize)
 
-        http2.sendData(framed) { [weak self] error in
+        tunnel.sendData(framed) { [weak self] error in
             if let error {
                 completion(error)
                 return
@@ -91,7 +109,7 @@ class NaiveProxyConnection: ProxyConnection {
     // MARK: - Receive
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        http2.receiveData { [weak self] data, error in
+        tunnel.receiveData { [weak self] data, error in
             guard let self else {
                 completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
@@ -125,7 +143,7 @@ class NaiveProxyConnection: ProxyConnection {
     // MARK: - Cancel
 
     override func cancel() {
-        http2.close()
+        tunnel.close()
     }
 
     // MARK: - Padding Size Generation

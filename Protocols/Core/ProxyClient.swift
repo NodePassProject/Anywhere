@@ -321,16 +321,7 @@ class ProxyClient {
             }
         }
 
-        if configuration.outboundProtocol == .https {
-            if command != .tcp {
-                completion(.failure(ProxyError.dropped))
-                return
-            }
-            connectWithHTTPS(destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
-            return
-        }
-
-        if configuration.outboundProtocol == .http2 {
+        if configuration.outboundProtocol.isNaive {
             if command != .tcp {
                 completion(.failure(ProxyError.dropped))
                 return
@@ -1102,102 +1093,89 @@ class ProxyClient {
         }
     }
     
-    // MARK: - HTTPS (HTTP/1.1 CONNECT)
+    // MARK: - Naive (HTTPS/HTTP2/HTTP3 CONNECT)
 
-    /// Connects through a standard HTTPS proxy using HTTP/1.1 CONNECT.
+    /// Connects through a CONNECT tunnel using HTTP/1.1, HTTP/2, or HTTP/3.
     ///
-    /// Creates the stack: BSDSocket/Tunnel → TLSClient → HTTPSProxyConnection.
-    private func connectWithHTTPS(
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let sni = configuration.serverAddress
-        let tlsConfig = TLSConfiguration(
-            serverName: sni,
-            alpn: ["http/1.1"]
-        )
-        let tlsClient = TLSClient(configuration: tlsConfig)
-
-        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
-            _ = tlsClient  // retain through handshake
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let tlsConnection):
-                let conn = HTTPSProxyConnection(tlsConnection: tlsConnection)
-                conn.sendConnect(
-                    host: destinationHost,
-                    port: destinationPort,
-                    username: self.configuration.naiveUsername,
-                    password: self.configuration.naivePassword
-                ) { error in
-                    if let error {
-                        conn.cancel()
-                        completion(.failure(error))
-                    } else {
-                        completion(.success(conn))
-                    }
-                }
-            }
-        }
-
-        if let tunnel = self.tunnel {
-            tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
-        } else {
-            let host = configuration.connectAddress
-            let port = configuration.serverPort
-            tlsClient.connect(host: host, port: port, completion: handleTLSResult)
-        }
-    }
-
-    // MARK: - Naive (HTTP/2 CONNECT)
-
-    /// Connects through a NaiveProxy CONNECT tunnel.
+    /// The scheme is determined by ``OutboundProtocol``:
+    /// - `.http11` → HTTP/1.1 CONNECT over TLS
+    /// - `.http2` → HTTP/2 CONNECT over TLS (NaiveProxy)
+    /// - `.quic`  → HTTP/3 CONNECT over QUIC (NaiveProxy)
     ///
-    /// Creates the full stack: NaiveTLSTransport → HTTP2Connection → NaiveProxyConnection.
-    /// The destination `host:port` becomes the HTTP/2 CONNECT target.
+    /// All schemes produce a ``NaiveProxyConnection`` wrapping the appropriate ``NaiveTunnel``.
     private func connectWithNaive(
         destinationHost: String,
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        let scheme: NaiveConfiguration.NaiveScheme
+        switch configuration.outboundProtocol {
+        case .http11: scheme = .http11
+        case .http2:  scheme = .http2
+        case .http3:  scheme = .http3
+        default:      scheme = .http2
+        }
+
         let naiveConfig = NaiveConfiguration(
             proxyHost: configuration.serverAddress,
             proxyPort: configuration.serverPort,
-            username: configuration.naiveUsername,
-            password: configuration.naivePassword,
+            username: configuration.activeUsername,
+            password: configuration.activePassword,
             sni: nil,
-            scheme: .https
-        )
-
-        let transport = NaiveTLSTransport(
-            host: naiveConfig.proxyHost,
-            port: naiveConfig.proxyPort,
-            sni: naiveConfig.effectiveSNI
+            scheme: scheme
         )
 
         let destination = "\(destinationHost):\(destinationPort)"
-        let http2 = HTTP2Connection(
-            transport: transport,
-            configuration: naiveConfig,
-            destination: destination
-        )
 
-        http2.openTunnel { error in
+        switch scheme {
+        case .http11:
+            let transport = NaiveTLSTransport(
+                host: configuration.connectAddress,
+                port: configuration.serverPort,
+                sni: naiveConfig.effectiveSNI,
+                alpn: ["http/1.1"],
+                tunnel: self.tunnel
+            )
+            let tunnel = HTTP11Connection(
+                transport: transport,
+                configuration: naiveConfig,
+                destination: destination
+            )
+            openTunnelAndWrap(tunnel, completion: completion)
+
+        case .http2:
+            let transport = NaiveTLSTransport(
+                host: configuration.connectAddress,
+                port: configuration.serverPort,
+                sni: naiveConfig.effectiveSNI,
+                tunnel: self.tunnel
+            )
+            let tunnel = HTTP2Connection(
+                transport: transport,
+                configuration: naiveConfig,
+                destination: destination
+            )
+            openTunnelAndWrap(tunnel, completion: completion)
+
+        case .http3:
+            fatalError("Not implemented")
+        }
+    }
+
+    /// Opens a ``NaiveTunnel`` and wraps it in a ``NaiveProxyConnection``.
+    private func openTunnelAndWrap(
+        _ tunnel: NaiveTunnel,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        tunnel.openTunnel { error in
             if let error {
-                transport.cancel()
+                tunnel.close()
                 completion(.failure(error))
                 return
             }
             let conn = NaiveProxyConnection(
-                http2: http2,
-                paddingType: http2.negotiatedPaddingType
+                tunnel: tunnel,
+                paddingType: tunnel.negotiatedPaddingType
             )
             completion(.success(conn))
         }

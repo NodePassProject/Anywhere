@@ -11,11 +11,27 @@ import Foundation
 enum OutboundProtocol: String, Codable {
     case vless
     case shadowsocks
-    case https
+    case http11
     case http2
+    case http3
 
-    /// Whether this protocol requires username/password credentials (HTTPS proxy or NaiveProxy).
-    var isNaive: Bool { self == .https || self == .http2 }
+    /// Whether this protocol uses a CONNECT tunnel (HTTP/1.1, HTTP/2, or HTTP/3).
+    var isNaive: Bool { self == .http11 || self == .http2 || self == .http3 }
+    
+    var name: String {
+        switch self {
+        case .vless:
+            "VLESS"
+        case .shadowsocks:
+            "Shadowsocks"
+        case .http11:
+            "HTTPS"
+        case .http2:
+            "HTTP/2"
+        case .http3:
+            "QUIC"
+        }
+    }
 }
 
 /// Proxy configuration for VLESS and Shadowsocks outbound protocols.
@@ -60,12 +76,18 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let ssPassword: String?
     /// Shadowsocks method (e.g. "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305").
     let ssMethod: String?
-    /// NaiveProxy username (only when `outboundProtocol.isNaive`).
-    let naiveUsername: String?
-    /// NaiveProxy password (only when `outboundProtocol.isNaive`).
-    let naivePassword: String?
-    /// NaiveProxy scheme: `"https"` (HTTP/2) or `"quic"` (HTTP/3). Default `"https"`.
-    let naiveScheme: String?
+    /// HTTP/1.1 CONNECT username (only when `outboundProtocol == .http11`).
+    let http11Username: String?
+    /// HTTP/1.1 CONNECT password (only when `outboundProtocol == .http11`).
+    let http11Password: String?
+    /// HTTP/2 CONNECT username (only when `outboundProtocol == .http2`).
+    let http2Username: String?
+    /// HTTP/2 CONNECT password (only when `outboundProtocol == .http2`).
+    let http2Password: String?
+    /// HTTP/3 CONNECT username (only when `outboundProtocol == .http3`).
+    let http3Username: String?
+    /// HTTP/3 CONNECT password (only when `outboundProtocol == .http3`).
+    let http3Password: String?
     /// Ordered list of proxy configurations to chain through before reaching this proxy's server.
     /// The first element is the outermost proxy (real TCP connection); the last tunnels to this proxy.
     /// `nil` or empty means a direct connection to the server.
@@ -74,6 +96,26 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     /// The pre-resolved IP if available, otherwise `serverAddress`.
     /// Used only for tunnel settings (route exclusion); actual connections resolve lazily via ``DNSCache``.
     var connectAddress: String { resolvedIP ?? serverAddress }
+
+    /// Username for the active protocol, or `nil` if not applicable.
+    var activeUsername: String? {
+        switch outboundProtocol {
+        case .http11: return http11Username
+        case .http2:  return http2Username
+        case .http3:  return http3Username
+        default:      return nil
+        }
+    }
+
+    /// Password for the active protocol, or `nil` if not applicable.
+    var activePassword: String? {
+        switch outboundProtocol {
+        case .http11: return http11Password
+        case .http2:  return http2Password
+        case .http3:  return http3Password
+        default:      return nil
+        }
+    }
 
     /// Compares configuration content, ignoring `id`, `resolvedIP`, and `subscriptionId`.
     /// Used to detect unchanged configs during subscription updates.
@@ -97,13 +139,16 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         outboundProtocol == other.outboundProtocol &&
         ssPassword == other.ssPassword &&
         ssMethod == other.ssMethod &&
-        naiveUsername == other.naiveUsername &&
-        naivePassword == other.naivePassword &&
-        naiveScheme == other.naiveScheme &&
+        http11Username == other.http11Username &&
+        http11Password == other.http11Password &&
+        http2Username == other.http2Username &&
+        http2Password == other.http2Password &&
+        http3Username == other.http3Username &&
+        http3Password == other.http3Password &&
         chain == other.chain
     }
 
-    init(id: UUID = UUID(), name: String, serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String? = nil, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, naiveUsername: String? = nil, naivePassword: String? = nil, naiveScheme: String? = nil, chain: [ProxyConfiguration]? = nil) {
+    init(id: UUID = UUID(), name: String, serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String? = nil, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, http11Username: String? = nil, http11Password: String? = nil, http2Username: String? = nil, http2Password: String? = nil, http3Username: String? = nil, http3Password: String? = nil, chain: [ProxyConfiguration]? = nil) {
         self.id = id
         self.name = name
         self.serverAddress = serverAddress
@@ -126,15 +171,18 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         self.outboundProtocol = outboundProtocol
         self.ssPassword = ssPassword
         self.ssMethod = ssMethod
-        self.naiveUsername = naiveUsername
-        self.naivePassword = naivePassword
-        self.naiveScheme = naiveScheme
+        self.http11Username = http11Username
+        self.http11Password = http11Password
+        self.http2Username = http2Username
+        self.http2Password = http2Password
+        self.http3Username = http3Username
+        self.http3Password = http3Password
         self.chain = chain
     }
 
     /// Convenience initializer that defaults the name to `"Untitled"`.
-    init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, naiveUsername: String? = nil, naivePassword: String? = nil, naiveScheme: String? = nil, chain: [ProxyConfiguration]? = nil) {
-        self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId, outboundProtocol: outboundProtocol, ssPassword: ssPassword, ssMethod: ssMethod, naiveUsername: naiveUsername, naivePassword: naivePassword, naiveScheme: naiveScheme, chain: chain)
+    init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, http11Username: String? = nil, http11Password: String? = nil, http2Username: String? = nil, http2Password: String? = nil, http3Username: String? = nil, http3Password: String? = nil, chain: [ProxyConfiguration]? = nil) {
+        self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId, outboundProtocol: outboundProtocol, ssPassword: ssPassword, ssMethod: ssMethod, http11Username: http11Username, http11Password: http11Password, http2Username: http2Username, http2Password: http2Password, http3Username: http3Username, http3Password: http3Password, chain: chain)
     }
 
     /// Custom decoder for backward compatibility (old configs may lack newer fields like
@@ -164,9 +212,12 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         outboundProtocol = try container.decodeIfPresent(OutboundProtocol.self, forKey: .outboundProtocol) ?? .vless
         ssPassword = try container.decodeIfPresent(String.self, forKey: .ssPassword)
         ssMethod = try container.decodeIfPresent(String.self, forKey: .ssMethod)
-        naiveUsername = try container.decodeIfPresent(String.self, forKey: .naiveUsername)
-        naivePassword = try container.decodeIfPresent(String.self, forKey: .naivePassword)
-        naiveScheme = try container.decodeIfPresent(String.self, forKey: .naiveScheme)
+        http11Username = try container.decodeIfPresent(String.self, forKey: .http11Username)
+        http11Password = try container.decodeIfPresent(String.self, forKey: .http11Password)
+        http2Username = try container.decodeIfPresent(String.self, forKey: .http2Username)
+        http2Password = try container.decodeIfPresent(String.self, forKey: .http2Password)
+        http3Username = try container.decodeIfPresent(String.self, forKey: .http3Username)
+        http3Password = try container.decodeIfPresent(String.self, forKey: .http3Password)
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
     }
 }
