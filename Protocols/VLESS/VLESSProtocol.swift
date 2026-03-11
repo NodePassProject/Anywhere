@@ -7,8 +7,8 @@
 
 import Foundation
 
-/// VLESS command types
-enum VLESSCommand: UInt8 {
+/// Proxy command types
+enum ProxyCommand: UInt8 {
     case tcp = 0x01
     case udp = 0x02
     case mux = 0x03
@@ -60,7 +60,7 @@ struct VLESSProtocol {
     /// - Variable: Address data
     static func encodeRequestHeader(
         uuid: UUID,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationAddress: String,
         destinationPort: UInt16,
         flow: String? = nil
@@ -74,7 +74,7 @@ struct VLESSProtocol {
     /// Swift fallback implementation
     private static func encodeRequestHeaderSwift(
         uuid: UUID,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationAddress: String,
         destinationPort: UInt16,
         flow: String?

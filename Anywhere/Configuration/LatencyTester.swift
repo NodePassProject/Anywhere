@@ -26,8 +26,10 @@ nonisolated enum LatencyTester {
 
     /// Test a single configuration's proxy round-trip latency.
     ///
-    /// Measures only the HTTP request/response time through the proxy chain,
-    /// excluding DNS resolution and connection setup overhead.
+    /// Measures data transfer RTT: the HTTP request is sent untimed (triggering
+    /// the proxy-to-target connection and protocol handshake), then only the
+    /// receive is timed — capturing the actual network round-trip through the
+    /// full proxy chain. DNS resolution is excluded via pre-warming.
     nonisolated static func test(_ configuration: ProxyConfiguration) async -> LatencyResult {
         // Resolve DNS outside the tunnel
         let resolvedIP = VPNViewModel.resolveServerAddress(configuration.serverAddress)
@@ -114,23 +116,30 @@ nonisolated enum LatencyTester {
     // MARK: - Private
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
+        // Pre-warm DNSCache so DNS resolution is excluded from timing
+        DNSCache.shared.prewarm(configuration.serverAddress)
+        if let chain = configuration.chain {
+            for proxy in chain {
+                DNSCache.shared.prewarm(proxy.serverAddress)
+            }
+        }
+
         let client = ProxyClient(configuration: configuration)
 
         defer { client.cancel() }
 
-        // Phase 1: Establish proxy connection (TCP + TLS/Reality + VLESS/SS handshake).
-        // This is NOT timed
+        // Phase 1 (untimed): Establish proxy connection.
+        // TCP + TLS/Reality + VLESS/SS handshake.
         let proxyConnection: ProxyConnection = try await withCheckedThrowingContinuation { continuation in
             client.connect(to: "www.gstatic.com", port: 80) { result in
                 continuation.resume(with: result)
             }
         }
 
-        // Phase 2: Send HTTP request and measure round-trip through the proxy.
-        // Timer starts here — only the request/response through the established
+        // Phase 2 (untimed): Send the HTTP request.
+        // This triggers the proxy-to-target connection (for both VLESS and SS)
+        // and pushes the request data into the local send buffer.
         let httpRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n".data(using: .utf8)!
-        let clock = ContinuousClock()
-        let requestStart = clock.now
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             proxyConnection.send(data: httpRequest) { error in
@@ -142,7 +151,12 @@ nonisolated enum LatencyTester {
             }
         }
 
-        // Wait for any response data
+        // Phase 3 (timed): Wait for the response.
+        // Timer starts after send completes — measures the actual network
+        // round-trip: data traverses client → proxy chain → gstatic → back.
+        let clock = ContinuousClock()
+        let start = clock.now
+
         let _: Data? = try await withCheckedThrowingContinuation { continuation in
             proxyConnection.receive { data, error in
                 if let error {
@@ -153,7 +167,7 @@ nonisolated enum LatencyTester {
             }
         }
 
-        let elapsed = clock.now - requestStart
+        let elapsed = clock.now - start
         let ms = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
         return ms
     }

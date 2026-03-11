@@ -106,7 +106,7 @@ class ProxyClient {
     /// If the configuration has a chain, builds the chain tunnel first, then connects.
     /// Otherwise, connects directly.
     private func connectThroughChainIfNeeded(
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -225,7 +225,7 @@ class ProxyClient {
     /// For Vision flow, validates TLS 1.3 and wraps with ``VLESSVisionConnection``.
     private func sendProtocolHandshake(
         over connection: ProxyConnection,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -297,7 +297,7 @@ class ProxyClient {
 
     /// Routes the connection through the appropriate transport and security layers.
     private func connectWithCommand(
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -360,7 +360,7 @@ class ProxyClient {
     // MARK: - Direct Connection
 
     private func connectDirect(
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -401,7 +401,7 @@ class ProxyClient {
 
     private func connectWithTLS(
         tlsConfig: TLSConfiguration,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -440,7 +440,7 @@ class ProxyClient {
 
     private func connectWithReality(
         realityConfig: RealityConfiguration,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -479,7 +479,7 @@ class ProxyClient {
 
     /// Connects using WebSocket transport. Routes to WSS (TLS) or plain WS.
     private func connectWithWebSocket(
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -561,7 +561,7 @@ class ProxyClient {
     /// Performs WebSocket upgrade then sends the protocol handshake.
     private func performWebSocketUpgrade(
         wsConnection: WebSocketConnection,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -591,7 +591,7 @@ class ProxyClient {
 
     /// Connects using HTTP upgrade transport. Routes to HTTPS or plain HTTP.
     private func connectWithHTTPUpgrade(
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -667,7 +667,7 @@ class ProxyClient {
     /// Performs HTTP upgrade then sends the protocol handshake.
     private func performHTTPUpgrade(
         huConnection: HTTPUpgradeConnection,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -701,7 +701,7 @@ class ProxyClient {
     /// - Reality → stream-one with HTTP/2
     /// - TLS/none → packet-up (CDN-safe, GET + POST over HTTP/1.1)
     private func connectWithXHTTP(
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -737,7 +737,7 @@ class ProxyClient {
         xhttpConfig: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -832,7 +832,7 @@ class ProxyClient {
         xhttpConfig: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -933,7 +933,7 @@ class ProxyClient {
         xhttpConfig: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -980,7 +980,7 @@ class ProxyClient {
     /// Performs XHTTP setup then sends the protocol handshake.
     private func performXHTTPSetup(
         xhttpConnection: XHTTPConnection,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
         initialData: Data?,
@@ -1038,7 +1038,7 @@ class ProxyClient {
     /// Wraps a bare transport connection with Shadowsocks AEAD encryption.
     private func wrapWithShadowsocks(
         inner: ProxyConnection,
-        command: VLESSCommand,
+        command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16
     ) -> Result<ProxyConnection, Error> {
