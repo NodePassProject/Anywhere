@@ -54,6 +54,7 @@ class VPNViewModel {
     private var subscriptionStoreCancellable: AnyCancellable?
     private var chainStoreCancellable: AnyCancellable?
     private var statsTask: Task<Void, Never>?
+    private(set) var pendingReconnect = false
     /// Suppresses UserDefaults persistence in `selectedConfiguration.didSet`
     /// so that `selectChain` can set the chain ID without the didSet clearing it.
     private var _suppressSelectionPersistence = false
@@ -471,6 +472,9 @@ class VPNViewModel {
                 // Only react to our VPN manager's connection
                 guard connection === self.vpnManager?.connection else { return }
                 self.vpnStatus = connection.status
+                if let manager = self.vpnManager, !self.pendingReconnect {
+                    AWCore.userDefaults.set(manager.isOnDemandEnabled, forKey: "alwaysOnEnabled")
+                }
                 if connection.status == .connected {
                     self.startStatsPolling()
                 } else {
@@ -478,6 +482,10 @@ class VPNViewModel {
                     if connection.status == .disconnected || connection.status == .invalid {
                         self.bytesIn = 0
                         self.bytesOut = 0
+                        if self.pendingReconnect {
+                            self.pendingReconnect = false
+                            self.connectVPN()
+                        }
                     }
                 }
             }
@@ -526,6 +534,7 @@ class VPNViewModel {
             if let manager = managers?.first {
                 self.vpnManager = manager
                 self.vpnStatus = manager.connection.status
+                AWCore.userDefaults.set(manager.isOnDemandEnabled, forKey: "alwaysOnEnabled")
                 if manager.connection.status == .connected {
                     self.startStatsPolling()
                 }
@@ -615,6 +624,21 @@ class VPNViewModel {
 
     func disconnectVPN() {
         guard let manager = vpnManager else { return }
+        if manager.isOnDemandEnabled {
+            manager.isOnDemandEnabled = false
+            manager.saveToPreferences { _ in
+                manager.connection.stopVPNTunnel()
+            }
+        } else {
+            manager.connection.stopVPNTunnel()
+        }
+    }
+
+    func reconnectVPN() {
+        guard let manager = vpnManager,
+              vpnStatus == .connected || vpnStatus == .connecting else { return }
+        pendingReconnect = true
+        // Disable on-demand first to prevent system auto-restart during reconnection
         if manager.isOnDemandEnabled {
             manager.isOnDemandEnabled = false
             manager.saveToPreferences { _ in

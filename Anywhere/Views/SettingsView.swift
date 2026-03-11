@@ -17,7 +17,7 @@ import SwiftUI
 /// - "routingChanged": triggers DomainRouter rule reload only (no restart).
 ///   Posted by RuleSetListView when routing rule assignments change.
 ///
-/// - "alwaysOnEnabled": read by VPNViewModel only; does not affect the running NE.
+/// - "alwaysOnEnabled": triggers VPN reconnect (if connected) so on-demand rules update immediately.
 struct SettingsView: View {
     @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
 
@@ -49,8 +49,16 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("VPN") {
-                Toggle(isOn: $alwaysOnEnabled) {
-                    TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.shield.fill", foregroundColor: .white, backgroundColor: .green)
+                if viewModel.pendingReconnect {
+                    HStack {
+                        TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.shield.fill", foregroundColor: .white, backgroundColor: .green)
+                        Spacer()
+                        ProgressView()
+                    }
+                } else {
+                    Toggle(isOn: $alwaysOnEnabled) {
+                        TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.shield.fill", foregroundColor: .white, backgroundColor: .green)
+                    }
                 }
             }
             
@@ -130,6 +138,9 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .onChange(of: alwaysOnEnabled) {
+            viewModel.reconnectVPN()
+        }
         .onChange(of: bypassCountryCode) {
             RuleSetStore.shared.syncBypassCountryRules()
             notifySettingsChanged()

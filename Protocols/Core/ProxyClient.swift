@@ -171,7 +171,7 @@ class ProxyClient {
             nextHost = configuration.serverAddress
             nextPort = configuration.serverPort
         }
-
+        
         let chainClient = ProxyClient(configuration: chainConfig, tunnel: currentTunnel)
         chainClients.append(chainClient)
 

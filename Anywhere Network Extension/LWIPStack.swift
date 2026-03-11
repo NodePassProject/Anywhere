@@ -433,7 +433,10 @@ class LWIPStack {
                     case .reject:
                         return nil
                     case .proxy(let id):
-                        if let config = shared.domainRouter.resolveConfiguration(action: action) {
+                        if var config = shared.domainRouter.resolveConfiguration(action: action) {
+                            if let chain = defaultConfiguration.chain, !chain.isEmpty, config.chain == nil {
+                                config = config.withChain(chain)
+                            }
                             connectionConfiguration = config
                         } else {
                             logger.warning("[LWIPStack] TCP proxy config \(id) not found for IP \(dstIPString, privacy: .public)")
@@ -442,7 +445,12 @@ class LWIPStack {
                 }
             case .resolved(let domain, let configOverride, let bypass):
                 dstHost = domain
-                if let config = configOverride { connectionConfiguration = config }
+                if var config = configOverride {
+                    if let chain = defaultConfiguration.chain, !chain.isEmpty, config.chain == nil {
+                        config = config.withChain(chain)
+                    }
+                    connectionConfiguration = config
+                }
                 forceBypass = bypass
             case .drop, .unreachable:
                 return nil
@@ -542,7 +550,10 @@ class LWIPStack {
                             udpPayloadLength: Int(len))
                         return
                     case .proxy(let id):
-                        if let config = shared.domainRouter.resolveConfiguration(action: action) {
+                        if var config = shared.domainRouter.resolveConfiguration(action: action) {
+                            if let chain = defaultConfiguration.chain, !chain.isEmpty, config.chain == nil {
+                                config = config.withChain(chain)
+                            }
                             flowConfiguration = config
                         } else {
                             logger.warning("[LWIPStack] UDP proxy config \(id) not found for IP \(dstIPString, privacy: .public)")
@@ -551,7 +562,12 @@ class LWIPStack {
                 }
             case .resolved(let domain, let configOverride, let bypass):
                 dstHost = domain
-                if let config = configOverride { flowConfiguration = config }
+                if var config = configOverride {
+                    if let chain = defaultConfiguration.chain, !chain.isEmpty, config.chain == nil {
+                        config = config.withChain(chain)
+                    }
+                    flowConfiguration = config
+                }
                 forceBypass = bypass
             case .drop:
                 shared.sendICMPPortUnreachable(
@@ -623,7 +639,6 @@ class LWIPStack {
             case .direct:
                 return .resolved(domain: entry.domain, configOverride: nil, forceBypass: true)
             case .reject:
-                logger.info("[FakeIP] \(proto, privacy: .public) rejected for \(entry.domain, privacy: .public)")
                 return .drop
             case .proxy(let id):
                 let config = domainRouter.resolveConfiguration(action: action)
@@ -677,7 +692,19 @@ class LWIPStack {
         // disabled to prevent the system from auto-upgrading to DoH/DoT, which bypasses
         // port-53 interception needed for fake-IP domain routing.
         if !encryptedDNSEnabled, domain == "_dns.resolver.arpa" {
-            logger.info("[FakeIP] Blocked DDR query (qtype=\(qtype))")
+            return sendNODATA(payload: payload, srcIP: srcIP, srcPort: srcPort,
+                              dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6, qtype: qtype)
+        }
+        
+        // Block SVCB/HTTPS (qtype=65, RFC 9460) queries with NODATA.
+        // When proxied to real DNS, these queries follow CNAME chains
+        // (e.g. example.com → example.com.cdn.net), causing the browser to
+        // connect using the CNAME target domain instead of the original.
+        // Since routing/bypass rules match on the original domain, the CNAME
+        // target may not match, sending traffic through the wrong proxy path.
+        // Returning NODATA forces the browser to fall back to A/AAAA records,
+        // which are intercepted by our fake-IP system with correct routing.
+        if qtype == 65 {
             return sendNODATA(payload: payload, srcIP: srcIP, srcPort: srcPort,
                               dstIP: dstIP, dstPort: dstPort, isIPv6: isIPv6, qtype: qtype)
         }

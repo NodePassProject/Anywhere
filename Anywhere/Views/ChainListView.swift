@@ -11,6 +11,7 @@ struct ChainListView: View {
     @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
 
     @State private var showingAddSheet = false
+    @State private var showingNotEnoughProxiesAlert = false
     @State private var chainToEdit: ProxyChain?
 
     var body: some View {
@@ -39,11 +40,14 @@ struct ChainListView: View {
                     }
 
                     Button {
-                        showingAddSheet = true
+                        if viewModel.configurations.count < 2 {
+                            showingNotEnoughProxiesAlert = true
+                        } else {
+                            showingAddSheet = true
+                        }
                     } label: {
                         Label("Add", systemImage: "plus")
                     }
-                    .disabled(viewModel.configurations.count < 2)
                 }
             }
         }
@@ -56,6 +60,11 @@ struct ChainListView: View {
             ChainEditorView(chain: chain) { updated in
                 viewModel.updateChain(updated)
             }
+        }
+        .alert("Not Enough Proxies", isPresented: $showingNotEnoughProxiesAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("A proxy chain needs at least 2 proxies.")
         }
     }
 
