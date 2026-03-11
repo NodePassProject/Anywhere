@@ -108,7 +108,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     ]
 
     private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: remoteAddress)
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.8.0.1")
 
         var sa4 = sockaddr_in()
         let serverIsIPv4 = inet_pton(AF_INET, remoteAddress, &sa4.sin_addr) == 1

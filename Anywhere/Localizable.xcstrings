@@ -291,6 +291,9 @@
         }
       }
     },
+    "A proxy chain needs at least 2 proxies." : {
+
+    },
     "About" : {
       "localizations" : {
         "ar" : {
@@ -4244,6 +4247,9 @@
           }
         }
       }
+    },
+    "Not Enough Proxies" : {
+
     },
     "OK" : {
       "localizations" : {

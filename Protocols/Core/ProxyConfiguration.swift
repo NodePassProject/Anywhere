@@ -180,6 +180,23 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         self.chain = chain
     }
 
+    /// Returns a copy with the given chain, preserving all other fields.
+    func withChain(_ chain: [ProxyConfiguration]?) -> ProxyConfiguration {
+        ProxyConfiguration(
+            id: id, name: name, serverAddress: serverAddress, serverPort: serverPort,
+            uuid: uuid, encryption: encryption, transport: transport, flow: flow,
+            security: security, tls: tls, reality: reality, websocket: websocket,
+            httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed,
+            muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP,
+            subscriptionId: subscriptionId, outboundProtocol: outboundProtocol,
+            ssPassword: ssPassword, ssMethod: ssMethod,
+            http11Username: http11Username, http11Password: http11Password,
+            http2Username: http2Username, http2Password: http2Password,
+            http3Username: http3Username, http3Password: http3Password,
+            chain: chain
+        )
+    }
+
     /// Convenience initializer that defaults the name to `"Untitled"`.
     init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, http11Username: String? = nil, http11Password: String? = nil, http2Username: String? = nil, http2Password: String? = nil, http3Username: String? = nil, http3Password: String? = nil, chain: [ProxyConfiguration]? = nil) {
         self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId, outboundProtocol: outboundProtocol, ssPassword: ssPassword, ssMethod: ssMethod, http11Username: http11Username, http11Password: http11Password, http2Username: http2Username, http2Password: http2Password, http3Username: http3Username, http3Password: http3Password, chain: chain)
