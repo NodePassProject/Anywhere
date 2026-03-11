@@ -246,9 +246,20 @@ static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
  * ======================================================================== */
 
 void lwip_bridge_init(void) {
-    s_log = os_log_create("com.argsment.Anywhere.Network-Extension", "LWIP-Bridge");
+    /* IMPORTANT: lwip_init() must only be called ONCE per process lifetime.
+     * It calls memp_init() which reinitializes all memory pools, corrupting
+     * the sys_timeo timeout linked list that next_timeout still references.
+     * This breaks TCP timers, causing TCP handshakes to silently fail after
+     * a stack restart (routing change, settings change, etc.).
+     * UDP (DNS) keeps working because it doesn't depend on lwIP timers.
+     * See: lwip/src/core/init.c → memp_init(), lwip/src/core/timeouts.c */
+    static int initialized = 0;
 
-    lwip_init();
+    if (!initialized) {
+        s_log = os_log_create("com.argsment.Anywhere.Network-Extension", "LWIP-Bridge");
+        lwip_init();
+        initialized = 1;
+    }
 
     /* Add TUN netif with 0.0.0.0/0 (catch-all for IPv4) */
     ip4_addr_t ipaddr, netmask, gw;
@@ -320,7 +331,6 @@ void lwip_bridge_init(void) {
     } else {
         os_log_error(s_log, "[Bridge] UDP v6 udp_new_ip_type() failed!");
     }
-
 }
 
 void lwip_bridge_shutdown(void) {
