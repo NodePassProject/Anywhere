@@ -292,7 +292,56 @@
       }
     },
     "A proxy chain needs at least 2 proxies." : {
-
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تحتاج سلسلة البروكسي إلى بروكسيين على الأقل."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Una cadena de proxies necesita al menos 2 proxies."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "یک زنجیره پروکسی به حداقل ۲ پروکسی نیاز دارد."
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပရောက်စီချိန်းတစ်ခုတွင် အနည်းဆုံး ပရောက်စီ ၂ ခု လိုအပ်သည်။"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Для цепочки прокси необходимо минимум 2 прокси."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proksi zynjyry üçin azyndan 2 proksi gerek."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Một chuỗi proxy cần ít nhất 2 proxy."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理链至少需要 2 个代理。"
+          }
+        }
+      }
     },
     "About" : {
       "localizations" : {
@@ -4249,7 +4298,56 @@
       }
     },
     "Not Enough Proxies" : {
-
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عدد البروكسيات غير كافٍ"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No hay suficientes proxies"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تعداد پروکسی‌ها کافی نیست"
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ပရောက်စီ မလုံလောက်ပါ"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Недостаточно прокси"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Proksi ýeterlik däl"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Không đủ proxy"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "代理数量不足"
+          }
+        }
+      }
     },
     "OK" : {
       "localizations" : {

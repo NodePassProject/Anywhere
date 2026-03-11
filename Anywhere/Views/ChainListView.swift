@@ -200,7 +200,7 @@ struct ChainListView: View {
         case .insecure:
             Text("insecure")
                 .font(.caption)
-                .foregroundStyle(.red)
+                .foregroundStyle(.secondary)
                 .frame(minWidth: 50, alignment: .trailing)
         case nil:
             EmptyView()
@@ -208,8 +208,8 @@ struct ChainListView: View {
     }
 
     private func latencyColor(_ ms: Int) -> Color {
-        if ms < 300 { return .green }
-        if ms < 600 { return .yellow }
+        if ms < 200 { return .green }
+        if ms < 500 { return .yellow }
         return .red
     }
 }

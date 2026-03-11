@@ -191,6 +191,14 @@ class LWIPUDPFlow {
             }
         }
 
+        // Shadowsocks UDP: always use direct datagrams, even with a chain.
+        // SS per-packet AEAD is designed for UDP datagrams, not TCP streams,
+        // and the SS protocol has no UDP command byte for TCP tunneling.
+        if hasChain && configuration.outboundProtocol == .shadowsocks {
+            connectShadowsocksUDP()
+            return
+        }
+
         // ── General path: ProxyClient (chain-aware) ────────────────────────
         //
         // ProxyClient.connectUDP() calls connectThroughChainIfNeeded(), which

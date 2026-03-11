@@ -78,6 +78,11 @@ final class DNSCache {
         resolveAll(host).first
     }
 
+    /// Pre-resolves and caches a hostname so subsequent lookups are instant.
+    func prewarm(_ host: String) {
+        _ = resolveAll(host)
+    }
+
     /// Resolves a hostname and returns ``BSDSocket/ResolvedAddress`` array ready for TCP connect.
     ///
     /// Uses the DNS cache for domain lookups, then constructs sockaddrs via `getaddrinfo`
