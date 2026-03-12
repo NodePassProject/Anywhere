@@ -55,58 +55,64 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AWCore.swift,
-				Protocols/Core/ProxyClient.swift,
-				Protocols/Core/ProxyConfiguration.swift,
-				"Protocols/Core/ProxyConfiguration+DictParsing.swift",
-				"Protocols/Core/ProxyConfiguration+URLExport.swift",
-				"Protocols/Core/ProxyConfiguration+URLParsing.swift",
-				Protocols/Core/ProxyConnection.swift,
-				Protocols/Core/TunneledTransport.swift,
-				Protocols/Core/UDPFraming.swift,
-				Protocols/Direct/DirectProxyConnection.swift,
-				Protocols/Direct/DirectTCPRelay.swift,
-				Protocols/Direct/DirectUDPRelay.swift,
-				Protocols/HTTPUpgrade/HTTPUpgradeConfiguration.swift,
-				Protocols/HTTPUpgrade/HTTPUpgradeConnection.swift,
-				Protocols/HTTPUpgrade/HTTPUpgradeProxyConnection.swift,
-				Protocols/Mux/MuxClient.swift,
-				Protocols/Mux/MuxFrame.swift,
-				Protocols/Mux/MuxManager.swift,
-				Protocols/Mux/MuxSession.swift,
-				Protocols/Mux/XUDP.swift,
-				Protocols/Naive/HTTP2/HPACKEncoder.swift,
-				Protocols/Naive/HTTP2/HTTP2Connection.swift,
-				Protocols/Naive/HTTP2/HTTP2FlowControl.swift,
-				Protocols/Naive/HTTP2/HTTP2Framer.swift,
-				Protocols/Naive/HTTP11/HTTP11Connection.swift,
-				Protocols/Naive/NaiveConfiguration.swift,
-				Protocols/Naive/NaivePaddingFramer.swift,
-				Protocols/Naive/NaivePaddingNegotiator.swift,
-				Protocols/Naive/NaiveProxyConnection.swift,
-				Protocols/Naive/NaiveTLSTransport.swift,
-				Protocols/Reality/RealityClient.swift,
-				Protocols/Reality/RealityConfiguration.swift,
-				Protocols/Reality/RealityProxyConnection.swift,
-				Protocols/Reality/TLS13KeyDerivation.swift,
-				Protocols/Reality/TLSClientHelloBuilder.swift,
-				Protocols/Reality/TLSRecordConnection.swift,
-				Protocols/Reality/TLSRecordCrypto.swift,
-				Protocols/Shadowsocks/Shadowsocks2022.swift,
-				Protocols/Shadowsocks/ShadowsocksAEAD.swift,
-				Protocols/Shadowsocks/ShadowsocksConnection.swift,
-				Protocols/Shadowsocks/ShadowsocksProtocol.swift,
-				Protocols/Shadowsocks/ShadowsocksUDPRelay.swift,
-				Protocols/TLS/TLSClient.swift,
-				Protocols/TLS/TLSConfiguration.swift,
-				Protocols/TLS/TLSProxyConnection.swift,
-				Protocols/VLESS/VLESSProtocol.swift,
-				Protocols/VLESS/VLESSVision.swift,
-				Protocols/WebSocket/WebSocketConfiguration.swift,
-				Protocols/WebSocket/WebSocketConnection.swift,
-				Protocols/WebSocket/WebSocketProxyConnection.swift,
-				Protocols/XHTTP/XHTTPConfiguration.swift,
-				Protocols/XHTTP/XHTTPConnection.swift,
-				Protocols/XHTTP/XHTTPProxyConnection.swift,
+			);
+			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
+		};
+		CB650E422F6307AF00C85E4A /* Exceptions for "Protocols" folder in "Anywhere Network Extension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Core/ProxyClient.swift,
+				Core/ProxyConfiguration.swift,
+				"Core/ProxyConfiguration+DictParsing.swift",
+				"Core/ProxyConfiguration+URLExport.swift",
+				"Core/ProxyConfiguration+URLParsing.swift",
+				Core/ProxyConnection.swift,
+				Core/TunneledTransport.swift,
+				Core/UDPFraming.swift,
+				Direct/DirectProxyConnection.swift,
+				Direct/DirectTCPRelay.swift,
+				Direct/DirectUDPRelay.swift,
+				HTTPUpgrade/HTTPUpgradeConfiguration.swift,
+				HTTPUpgrade/HTTPUpgradeConnection.swift,
+				HTTPUpgrade/HTTPUpgradeProxyConnection.swift,
+				Mux/MuxClient.swift,
+				Mux/MuxFrame.swift,
+				Mux/MuxManager.swift,
+				Mux/MuxSession.swift,
+				Mux/XUDP.swift,
+				Naive/HTTP2/HPACKEncoder.swift,
+				Naive/HTTP2/HTTP2Connection.swift,
+				Naive/HTTP2/HTTP2FlowControl.swift,
+				Naive/HTTP2/HTTP2Framer.swift,
+				Naive/HTTP11/HTTP11Connection.swift,
+				Naive/NaiveConfiguration.swift,
+				Naive/NaivePaddingFramer.swift,
+				Naive/NaivePaddingNegotiator.swift,
+				Naive/NaiveProxyConnection.swift,
+				Naive/NaiveTLSTransport.swift,
+				Reality/RealityClient.swift,
+				Reality/RealityConfiguration.swift,
+				Reality/RealityProxyConnection.swift,
+				Reality/TLS13KeyDerivation.swift,
+				Reality/TLSClientHelloBuilder.swift,
+				Reality/TLSRecordConnection.swift,
+				Reality/TLSRecordCrypto.swift,
+				Shadowsocks/Shadowsocks2022.swift,
+				Shadowsocks/ShadowsocksAEAD.swift,
+				Shadowsocks/ShadowsocksConnection.swift,
+				Shadowsocks/ShadowsocksProtocol.swift,
+				Shadowsocks/ShadowsocksUDPRelay.swift,
+				TLS/TLSClient.swift,
+				TLS/TLSConfiguration.swift,
+				TLS/TLSProxyConnection.swift,
+				VLESS/VLESSProtocol.swift,
+				VLESS/VLESSVision.swift,
+				WebSocket/WebSocketConfiguration.swift,
+				WebSocket/WebSocketConnection.swift,
+				WebSocket/WebSocketProxyConnection.swift,
+				XHTTP/XHTTPConfiguration.swift,
+				XHTTP/XHTTPConnection.swift,
+				XHTTP/XHTTPProxyConnection.swift,
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 		};
@@ -135,6 +141,14 @@
 				CB1C10832F23B82F00B74CD8 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere Network Extension" target */,
 			);
 			path = "Anywhere Network Extension";
+			sourceTree = "<group>";
+		};
+		CB650DD92F6307AF00C85E4A /* Protocols */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				CB650E422F6307AF00C85E4A /* Exceptions for "Protocols" folder in "Anywhere Network Extension" target */,
+			);
+			path = Protocols;
 			sourceTree = "<group>";
 		};
 		CBDC12652F271BD50021FDA0 /* General */ = {
@@ -167,6 +181,7 @@
 			isa = PBXGroup;
 			children = (
 				CBDC12652F271BD50021FDA0 /* General */,
+				CB650DD92F6307AF00C85E4A /* Protocols */,
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
 				CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */,
 				CB1C10782F23B82F00B74CD8 /* Frameworks */,
@@ -210,6 +225,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
+				CB650DD92F6307AF00C85E4A /* Protocols */,
 				CBDC12652F271BD50021FDA0 /* General */,
 			);
 			name = Anywhere;
@@ -461,7 +477,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 107;
+				CURRENT_PROJECT_VERSION = 108;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -506,7 +522,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 107;
+				CURRENT_PROJECT_VERSION = 108;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -550,7 +566,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 107;
+				CURRENT_PROJECT_VERSION = 108;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -587,7 +603,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 107;
+				CURRENT_PROJECT_VERSION = 108;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (

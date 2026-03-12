@@ -81,7 +81,7 @@ nonisolated enum LatencyTester {
                 group.cancelAll()
                 return result
             }
-            return .success(ms / 2)
+            return .success(ms)
         } catch let error as TLSError {
             if case .certificateValidationFailed = error {
                 logger.error("Latency test insecure for \(configuration.name): \(error.localizedDescription)")
@@ -116,11 +116,11 @@ nonisolated enum LatencyTester {
     // MARK: - Private
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
-        // Pre-warm DNSCache so DNS resolution is excluded from timing
-        DNSCache.shared.prewarm(configuration.serverAddress)
+        // Pre-warm DNS cache so resolution is excluded from timing
+        ProxyDNSCache.shared.prewarm(configuration.serverAddress)
         if let chain = configuration.chain {
             for proxy in chain {
-                DNSCache.shared.prewarm(proxy.serverAddress)
+                ProxyDNSCache.shared.prewarm(proxy.serverAddress)
             }
         }
 

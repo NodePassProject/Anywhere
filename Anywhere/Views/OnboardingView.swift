@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct OnboardingView: View {
-    @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
+    @ObservedObject private var viewModel = VPNViewModel.shared
     @Binding var onboardingCompleted: Bool
 
     @AppStorage("bypassCountryCode", store: AWCore.userDefaults)

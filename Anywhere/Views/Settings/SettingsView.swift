@@ -19,7 +19,7 @@ import SwiftUI
 ///
 /// - "alwaysOnEnabled": triggers VPN reconnect (if connected) so on-demand rules update immediately.
 struct SettingsView: View {
-    @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
+    @ObservedObject private var viewModel = VPNViewModel.shared
 
     @AppStorage("alwaysOnEnabled", store: AWCore.userDefaults)
     private var alwaysOnEnabled = false
