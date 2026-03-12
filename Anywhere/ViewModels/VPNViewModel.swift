@@ -111,6 +111,9 @@ class VPNViewModel {
                     self.orphanedRuleSetNames = affected
                     self.syncRoutingConfigurationToNE()
                 }
+
+                // Keep the extension's proxy address bypass set in sync
+                self.syncProxyServerAddresses()
             }
 
         subscriptionStoreCancellable = subscriptionStore.$subscriptions
@@ -564,7 +567,13 @@ class VPNViewModel {
         // Sync routing rules to App Group before starting tunnel
         syncRoutingConfigurationToNE()
 
-        // Pre-resolve the main proxy address for tunnel settings (route exclusion).
+        // Mark the active proxy domain so DNSCache returns stale IPs on expiry
+        DNSCache.shared.setActiveProxyDomain(configuration.serverAddress)
+
+        // Sync all proxy server addresses so the extension can bypass them at the lwIP level
+        syncProxyServerAddresses()
+
+        // Pre-resolve the main proxy address for the extension (logging, initial bypass).
         // Actual connections resolve lazily via DNSCache at connection time.
         let resolvedIP = Self.resolveServerAddress(configuration.serverAddress)
 
@@ -666,7 +675,7 @@ class VPNViewModel {
         try? session.sendProviderMessage(data) { _ in }
     }
 
-    /// Resolves `serverAddress` to IP for a config dict (main proxy only, for tunnel settings).
+    /// Resolves `serverAddress` to IP for a config dict (main proxy only, for logging/initial bypass).
     /// Chain proxy addresses are resolved lazily via DNSCache at connection time.
     nonisolated private static func resolveAddressesInDict(_ dict: inout [String: Any]) {
         if let addr = dict["serverAddress"] as? String, dict["resolvedIP"] == nil {
@@ -735,6 +744,52 @@ class VPNViewModel {
     func syncRoutingConfigurationToNE() {
         ruleSetStore.syncToAppGroup(configurations: configurations, serializeConfiguration: serializeConfiguration)
         ruleSetStore.syncBypassCountryRules()
+    }
+
+    // MARK: - Proxy Server Address Sync
+
+    /// Collects all proxy server domains from all configurations, marks them as
+    /// proxy in DNSCache (so they resolve via local DNS), and syncs domains plus
+    /// any already-cached resolved IPs to the extension via App Group + IPC.
+    /// Called on config list changes and VPN connect.
+    private func syncProxyServerAddresses() {
+        // Collect all proxy domains (including chain proxies)
+        var domains = Set<String>()
+        for config in configurations {
+            domains.insert(config.serverAddress)
+            if let chain = config.chain {
+                for proxy in chain {
+                    domains.insert(proxy.serverAddress)
+                }
+            }
+        }
+
+        // Mark all as proxy in DNSCache (resolved via local DNS, not VPN tunnel)
+        for domain in domains {
+            DNSCache.shared.markAsProxy(domain)
+        }
+
+        // Collect domains + any already-cached resolved IPs
+        var addresses = domains
+        for domain in domains {
+            if let ips = DNSCache.shared.cachedIPs(for: domain) {
+                addresses.formUnion(ips)
+            }
+        }
+
+        let addressArray = Array(addresses)
+
+        // Persist to App Group so the extension can read them on start (Settings / Always On)
+        if let data = try? JSONSerialization.data(withJSONObject: addressArray) {
+            AWCore.userDefaults.set(data, forKey: "proxyServerAddresses")
+        }
+
+        // Send to running tunnel via IPC
+        guard vpnStatus == .connected,
+              let session = vpnManager?.connection as? NETunnelProviderSession else { return }
+        let message: [String: Any] = ["type": "proxyAddresses", "addresses": addressArray]
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
+        try? session.sendProviderMessage(data) { _ in }
     }
 
     // MARK: - Configuration Serialization

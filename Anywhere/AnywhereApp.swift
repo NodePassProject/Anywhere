@@ -10,8 +10,7 @@ import SwiftUI
 @main
 struct AnywhereApp: App {
     @State private var vpnViewModel = VPNViewModel()
-    @AppStorage("onboardingCompleted", store: AWCore.userDefaults)
-    private var onboardingCompleted = false
+    @State private var onboardingCompleted = AWCore.userDefaults.bool(forKey: "onboardingCompleted")
 
     var body: some Scene {
         WindowGroup {
@@ -19,7 +18,7 @@ struct AnywhereApp: App {
                 ContentView()
                     .environment(vpnViewModel)
             } else {
-                OnboardingView()
+                OnboardingView(onboardingCompleted: $onboardingCompleted)
                     .environment(vpnViewModel)
             }
         }

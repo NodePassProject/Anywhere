@@ -9,8 +9,7 @@ import SwiftUI
 
 struct OnboardingView: View {
     @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
-    @AppStorage("onboardingCompleted", store: AWCore.userDefaults)
-    private var onboardingCompleted = false
+    @Binding var onboardingCompleted: Bool
 
     @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
     private var bypassCountryCode = ""
@@ -38,10 +37,7 @@ struct OnboardingView: View {
                 default: adBlockPage
                 }
             }
-            .transition(.asymmetric(
-                insertion: .move(edge: isGoingForward ? .trailing : .leading),
-                removal: .move(edge: isGoingForward ? .leading : .trailing)
-            ))
+            .animation(.default, value: currentPage)
             
             bottomBar
                 .padding(.horizontal, 24)
@@ -70,7 +66,7 @@ struct OnboardingView: View {
             if currentPage > 0 {
                 Button {
                     isGoingForward = false
-                    withAnimation { currentPage -= 1 }
+                    currentPage -= 1
                 } label: {
                     Text("Back")
                         .fontWeight(.medium)
@@ -83,18 +79,19 @@ struct OnboardingView: View {
             Button {
                 if currentPage < 1 {
                     isGoingForward = true
-                    withAnimation { currentPage += 1 }
+                    currentPage += 1
                 } else {
                     finishOnboarding()
                 }
             } label: {
-                Text(currentPage < 1 ? String(localized: "Next") : String(localized: "Get Started"))
+                Text(currentPage < 1 ? "Next" : "Get Started")
                     .fontWeight(.semibold)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 24)
                     .padding(.vertical, 12)
                     .background(.white.opacity(0.2), in: Capsule())
             }
+            .buttonStyle(.plain)
         }
         .padding(.top, 8)
     }
@@ -242,6 +239,8 @@ struct OnboardingView: View {
         if !bypassCountryCode.isEmpty {
             notifySettingsChanged()
         }
+        
+        AWCore.userDefaults.set(true, forKey: "onboardingCompleted")
 
         withAnimation {
             onboardingCompleted = true
