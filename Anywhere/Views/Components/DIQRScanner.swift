@@ -1,5 +1,5 @@
 //
-//  DIQRScannerView.swift
+//  DIQRScanner.swift
 //  Anywhere
 //
 //  Created by Argsment Limited on 2/16/26.

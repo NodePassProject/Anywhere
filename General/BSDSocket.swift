@@ -145,7 +145,7 @@ class BSDSocket: RawTransport {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let addresses: [ResolvedAddress]
             do {
-                addresses = try DNSCache.shared.resolveTCP(host: host, port: port)
+                addresses = try ProxyDNSCache.shared.resolveTCP(host: host, port: port)
             } catch {
                 socketQueue.async { self.state = .failed(error); completion(error) }
                 return

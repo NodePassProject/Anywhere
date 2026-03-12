@@ -1,5 +1,5 @@
 //
-//  DNSCache.swift
+//  ProxyDNSCache.swift
 //  Network Extension
 //
 //  Created by Argsment Limited on 3/8/26.
@@ -9,7 +9,7 @@ import Foundation
 import dnssd
 import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "DNSCache")
+private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "ProxyDNSCache")
 
 // MARK: - Local DNS Resolution (dns_sd)
 
@@ -57,19 +57,17 @@ private func dnssdAddrInfoCallback(
     }
 }
 
-// MARK: - DNSCache
+// MARK: - ProxyDNSCache
 
-/// Thread-safe DNS cache that wraps `getaddrinfo` with TTL-based caching.
-///
-/// For proxy server domains (marked via ``markAsProxy(_:)``), resolves through
-/// the physical network interface using `DNSServiceGetAddrInfo`, bypassing the
-/// VPN tunnel. Other domains resolve via standard `getaddrinfo`.
+/// Thread-safe DNS cache for proxy server domains. Always resolves through the
+/// physical network interface using `DNSServiceGetAddrInfo`, bypassing the VPN
+/// tunnel to avoid routing loops.
 ///
 /// The active proxy domain (set via ``setActiveProxyDomain(_:)``) returns stale
 /// cached IPs on TTL expiry (to avoid blocking connections) while refreshing in
 /// the background. Non-active domains refresh synchronously.
-final class DNSCache {
-    static let shared = DNSCache()
+final class ProxyDNSCache {
+    static let shared = ProxyDNSCache()
 
     /// Default TTL for cached entries (seconds).
     static let defaultTTL: TimeInterval = 120
@@ -82,29 +80,10 @@ final class DNSCache {
     private var cache: [String: CacheEntry] = [:]
     private let lock = ReadWriteLock()
 
-    /// Domains that should be resolved via local DNS (physical interface), not through VPN.
-    private var proxyDomains: Set<String> = []
-
     /// The currently active proxy domain (returns stale IPs on expiry instead of blocking).
     private var activeProxyDomain: String?
 
     private init() {}
-
-    // MARK: - Proxy Domain Management
-
-    /// Mark a domain as a proxy server. Future resolutions will use local DNS
-    /// (physical interface), bypassing the VPN tunnel.
-    func markAsProxy(_ domain: String) {
-        let key = Self.stripBrackets(domain).lowercased()
-        guard !Self.isIPAddress(key) else { return }
-        lock.withWriteLock { proxyDomains.insert(key) }
-    }
-
-    /// Remove proxy marking for a domain.
-    func unmarkAsProxy(_ domain: String) {
-        let key = Self.stripBrackets(domain).lowercased()
-        lock.withWriteLock { proxyDomains.remove(key) }
-    }
 
     /// Set the currently active proxy domain. It gets stale-IP treatment on TTL
     /// expiry (returns cached IPs immediately, refreshes in background).
@@ -116,13 +95,14 @@ final class DNSCache {
 
     // MARK: - Public API
 
-    /// Resolves a hostname to IP address strings, using the cache when available.
+    /// Resolves a proxy server hostname to IP address strings, using the cache
+    /// when available. Always resolves via local DNS (physical interface),
+    /// bypassing the VPN tunnel.
     ///
     /// - If `host` is already an IP, returns it directly without caching.
-    /// - If `host` is a proxy domain, resolves via local DNS (physical interface).
     /// - If `host` is the active proxy domain and cache is expired, returns stale
     ///   IPs immediately and refreshes in the background.
-    /// - Otherwise, resolves via standard `getaddrinfo` and caches the result.
+    /// - Otherwise, resolves synchronously and caches the result.
     ///
     /// - Returns: All resolved IP addresses (IPv4 and IPv6), or empty on failure.
     func resolveAll(_ host: String) -> [String] {
@@ -133,7 +113,6 @@ final class DNSCache {
 
         let key = bare.lowercased()
 
-        let isProxy: Bool = lock.withReadLock { proxyDomains.contains(key) }
         let isActive: Bool = lock.withReadLock { activeProxyDomain == key }
 
         // Check cache
@@ -154,7 +133,7 @@ final class DNSCache {
         // Active proxy with stale cache — return stale, refresh in background
         if let cached, expired, isActive {
             DispatchQueue.global(qos: .utility).async { [self] in
-                let ips = isProxy ? Self.resolveViaLocalDNS(bare) : Self.resolveViaGetaddrinfo(bare)
+                let ips = Self.resolveViaLocalDNS(bare)
                 if !ips.isEmpty {
                     self.lock.withWriteLock {
                         self.cache[key] = CacheEntry(ips: ips, expiry: Date() + Self.defaultTTL)
@@ -165,7 +144,7 @@ final class DNSCache {
         }
 
         // Cache miss or expired non-active entry — resolve synchronously
-        let ips = isProxy ? Self.resolveViaLocalDNS(bare) : Self.resolveViaGetaddrinfo(bare)
+        let ips = Self.resolveViaLocalDNS(bare)
         guard !ips.isEmpty else {
             // If we have stale IPs, return them as fallback
             if let cached { return cached }

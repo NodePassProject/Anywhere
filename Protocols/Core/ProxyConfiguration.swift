@@ -94,7 +94,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let chain: [ProxyConfiguration]?
 
     /// The pre-resolved IP if available, otherwise `serverAddress`.
-    /// Used for logging; actual connections resolve lazily via ``DNSCache``.
+    /// Used for logging; actual connections resolve lazily via ``ProxyDNSCache``.
     var connectAddress: String { resolvedIP ?? serverAddress }
 
     /// Username for the active protocol, or `nil` if not applicable.

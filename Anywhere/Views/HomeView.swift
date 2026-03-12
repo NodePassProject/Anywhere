@@ -9,7 +9,7 @@ import SwiftUI
 import NetworkExtension
 
 struct HomeView: View {
-    @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
+    @ObservedObject private var viewModel = VPNViewModel.shared
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false

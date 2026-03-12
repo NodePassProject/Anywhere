@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct ContentView: View {
-    @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
+    @ObservedObject private var viewModel = VPNViewModel.shared
 
     private var showOrphanedAlert: Binding<Bool> {
         Binding(

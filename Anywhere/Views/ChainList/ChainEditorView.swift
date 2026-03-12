@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct ChainEditorView: View {
-    @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
+    @ObservedObject private var viewModel = VPNViewModel.shared
     @Environment(\.dismiss) private var dismiss
 
     /// Existing chain to edit, or `nil` for a new chain.

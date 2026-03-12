@@ -87,8 +87,8 @@ class ShadowsocksUDPRelay {
     func connect(serverHost: String, serverPort: UInt16, lwipQueue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async { [self] in
-            // Resolve via DNS cache (shared with BSDSocket/TCP connections)
-            let resolvedHost = DNSCache.shared.resolveHost(serverHost) ?? serverHost
+            // Resolve via proxy DNS cache (shared with BSDSocket/TCP connections)
+            let resolvedHost = ProxyDNSCache.shared.resolveHost(serverHost) ?? serverHost
 
             var hints = addrinfo()
             hints.ai_family = AF_UNSPEC

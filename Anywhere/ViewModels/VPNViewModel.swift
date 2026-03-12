@@ -11,10 +11,12 @@ import Combine
 import SwiftUI
 
 /// ViewModel managing VPN connection state and operations
-@Observable @MainActor
-class VPNViewModel {
-    var vpnStatus: NEVPNStatus = .disconnected
-    var selectedConfiguration: ProxyConfiguration? {
+@MainActor
+class VPNViewModel: ObservableObject {
+    static let shared = VPNViewModel()
+
+    @Published var vpnStatus: NEVPNStatus = .disconnected
+    @Published var selectedConfiguration: ProxyConfiguration? {
         didSet {
             if !_suppressSelectionPersistence {
                 // Direct proxy selection — clear any chain selection
@@ -32,17 +34,17 @@ class VPNViewModel {
             }
         }
     }
-    private(set) var configurations: [ProxyConfiguration] = []
-    private(set) var subscriptions: [Subscription] = []
-    private(set) var chains: [ProxyChain] = []
+    @Published private(set) var configurations: [ProxyConfiguration] = []
+    @Published private(set) var subscriptions: [Subscription] = []
+    @Published private(set) var chains: [ProxyChain] = []
     /// Non-nil when a chain is the active selection.
-    private(set) var selectedChainId: UUID?
-    var latencyResults: [UUID: LatencyResult] = [:]
-    var chainLatencyResults: [UUID: LatencyResult] = [:]
-    var startError: String?
-    var orphanedRuleSetNames: [String] = []
-    var bytesIn: Int64 = 0
-    var bytesOut: Int64 = 0
+    @Published private(set) var selectedChainId: UUID?
+    @Published var latencyResults: [UUID: LatencyResult] = [:]
+    @Published var chainLatencyResults: [UUID: LatencyResult] = [:]
+    @Published var startError: String?
+    @Published var orphanedRuleSetNames: [String] = []
+    @Published var bytesIn: Int64 = 0
+    @Published var bytesOut: Int64 = 0
 
     private let store = ConfigurationStore.shared
     private let subscriptionStore = SubscriptionStore.shared
@@ -54,7 +56,7 @@ class VPNViewModel {
     private var subscriptionStoreCancellable: AnyCancellable?
     private var chainStoreCancellable: AnyCancellable?
     private var statsTask: Task<Void, Never>?
-    private(set) var pendingReconnect = false
+    @Published private(set) var pendingReconnect = false
     /// Suppresses UserDefaults persistence in `selectedConfiguration.didSet`
     /// so that `selectChain` can set the chain ID without the didSet clearing it.
     private var _suppressSelectionPersistence = false
@@ -112,8 +114,6 @@ class VPNViewModel {
                     self.syncRoutingConfigurationToNE()
                 }
 
-                // Keep the extension's proxy address bypass set in sync
-                self.syncProxyServerAddresses()
             }
 
         subscriptionStoreCancellable = subscriptionStore.$subscriptions
@@ -399,6 +399,7 @@ class VPNViewModel {
 
     func testLatency(for configuration: ProxyConfiguration) {
         latencyTask?.cancel()
+        syncProxyServerAddresses(for: configuration)
         let configurationId = configuration.id
         latencyResults[configurationId] = .testing
         latencyTask = Task.detached { [configuration] in
@@ -413,6 +414,7 @@ class VPNViewModel {
         latencyTask?.cancel()
         let allConfigurations = configurations
         for configuration in allConfigurations {
+            syncProxyServerAddresses(for: configuration)
             latencyResults[configuration.id] = .testing
         }
         latencyTask = Task.detached {
@@ -430,6 +432,7 @@ class VPNViewModel {
 
     func testChainLatency(for chain: ProxyChain) {
         guard let resolved = resolveChain(chain) else { return }
+        syncProxyServerAddresses(for: resolved)
         chainLatencyResults[chain.id] = .testing
         let chainId = chain.id
         chainLatencyTask?.cancel()
@@ -446,6 +449,7 @@ class VPNViewModel {
         var resolvedChains: [(UUID, ProxyConfiguration)] = []
         for chain in chains {
             if let resolved = resolveChain(chain) {
+                syncProxyServerAddresses(for: resolved)
                 chainLatencyResults[chain.id] = .testing
                 resolvedChains.append((chain.id, resolved))
             }
@@ -567,14 +571,14 @@ class VPNViewModel {
         // Sync routing rules to App Group before starting tunnel
         syncRoutingConfigurationToNE()
 
-        // Mark the active proxy domain so DNSCache returns stale IPs on expiry
-        DNSCache.shared.setActiveProxyDomain(configuration.serverAddress)
+        // Mark the active proxy domain so ProxyDNSCache returns stale IPs on expiry
+        ProxyDNSCache.shared.setActiveProxyDomain(configuration.serverAddress)
 
-        // Sync all proxy server addresses so the extension can bypass them at the lwIP level
-        syncProxyServerAddresses()
+        // Sync proxy server addresses so the extension can bypass them at the lwIP level
+        syncProxyServerAddresses(for: configuration)
 
         // Pre-resolve the main proxy address for the extension (logging, initial bypass).
-        // Actual connections resolve lazily via DNSCache at connection time.
+        // Actual connections resolve lazily via ProxyDNSCache at connection time.
         let resolvedIP = Self.resolveServerAddress(configuration.serverAddress)
 
         // Configure the VPN
@@ -663,6 +667,10 @@ class VPNViewModel {
     /// Sends the new configuration to the running tunnel extension via app message.
     private func sendConfigurationToTunnel(_ configuration: ProxyConfiguration) {
         guard let session = vpnManager?.connection as? NETunnelProviderSession else { return }
+
+        // Sync proxy addresses so the extension bypasses this config's server at the lwIP level
+        syncProxyServerAddresses(for: configuration)
+
         var configurationDict = serializeConfiguration(configuration)
         Self.resolveAddressesInDict(&configurationDict)
 
@@ -676,7 +684,7 @@ class VPNViewModel {
     }
 
     /// Resolves `serverAddress` to IP for a config dict (main proxy only, for logging/initial bypass).
-    /// Chain proxy addresses are resolved lazily via DNSCache at connection time.
+    /// Chain proxy addresses are resolved lazily via ProxyDNSCache at connection time.
     nonisolated private static func resolveAddressesInDict(_ dict: inout [String: Any]) {
         if let addr = dict["serverAddress"] as? String, dict["resolvedIP"] == nil {
             if let resolved = resolveServerAddress(addr) {
@@ -748,31 +756,22 @@ class VPNViewModel {
 
     // MARK: - Proxy Server Address Sync
 
-    /// Collects all proxy server domains from all configurations, marks them as
-    /// proxy in DNSCache (so they resolve via local DNS), and syncs domains plus
-    /// any already-cached resolved IPs to the extension via App Group + IPC.
-    /// Called on config list changes and VPN connect.
-    private func syncProxyServerAddresses() {
-        // Collect all proxy domains (including chain proxies)
+    /// Syncs proxy server domains for the given configuration (including chain
+    /// proxies) plus any already-cached resolved IPs to the extension via
+    /// App Group + IPC. Called on VPN connect, configuration switch, and latency test.
+    func syncProxyServerAddresses(for configuration: ProxyConfiguration) {
         var domains = Set<String>()
-        for config in configurations {
-            domains.insert(config.serverAddress)
-            if let chain = config.chain {
-                for proxy in chain {
-                    domains.insert(proxy.serverAddress)
-                }
+        domains.insert(configuration.serverAddress)
+        if let chain = configuration.chain {
+            for proxy in chain {
+                domains.insert(proxy.serverAddress)
             }
-        }
-
-        // Mark all as proxy in DNSCache (resolved via local DNS, not VPN tunnel)
-        for domain in domains {
-            DNSCache.shared.markAsProxy(domain)
         }
 
         // Collect domains + any already-cached resolved IPs
         var addresses = domains
         for domain in domains {
-            if let ips = DNSCache.shared.cachedIPs(for: domain) {
+            if let ips = ProxyDNSCache.shared.cachedIPs(for: domain) {
                 addresses.formUnion(ips)
             }
         }

@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct RuleSetListView: View {
-    @Environment(VPNViewModel.self) private var viewModel: VPNViewModel
+    @ObservedObject private var viewModel = VPNViewModel.shared
     // Workaround: SwiftUI view redraw bugs
     @State private var shouldRefreshList: Bool = false
     
