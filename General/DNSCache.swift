@@ -6,17 +6,68 @@
 //
 
 import Foundation
+import dnssd
 import os.log
 
 private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "DNSCache")
 
+// MARK: - Local DNS Resolution (dns_sd)
+
+/// Context object passed through the dns_sd callback's opaque pointer.
+private final class DNSResolveContext {
+    var ips: [String] = []
+    var done = false
+}
+
+/// Callback for `DNSServiceGetAddrInfo`. Extracts IP addresses from each result.
+private func dnssdAddrInfoCallback(
+    _ sdRef: DNSServiceRef?,
+    _ flags: DNSServiceFlags,
+    _ interfaceIndex: UInt32,
+    _ errorCode: DNSServiceErrorType,
+    _ hostname: UnsafePointer<CChar>?,
+    _ address: UnsafePointer<sockaddr>?,
+    _ ttl: UInt32,
+    _ context: UnsafeMutableRawPointer?
+) {
+    guard let context else { return }
+    let ctx = Unmanaged<DNSResolveContext>.fromOpaque(context).takeUnretainedValue()
+
+    if errorCode == kDNSServiceErr_NoError, let address {
+        let family = address.pointee.sa_family
+        if family == sa_family_t(AF_INET) {
+            var addr = address.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+            var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            if inet_ntop(AF_INET, &addr.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
+                let ip = String(cString: buf)
+                if !ctx.ips.contains(ip) { ctx.ips.append(ip) }
+            }
+        } else if family == sa_family_t(AF_INET6) {
+            var addr = address.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+            var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            if inet_ntop(AF_INET6, &addr.sin6_addr, &buf, socklen_t(INET6_ADDRSTRLEN)) != nil {
+                let ip = String(cString: buf)
+                if !ctx.ips.contains(ip) { ctx.ips.append(ip) }
+            }
+        }
+    }
+
+    if (flags & kDNSServiceFlagsMoreComing) == 0 {
+        ctx.done = true
+    }
+}
+
+// MARK: - DNSCache
+
 /// Thread-safe DNS cache that wraps `getaddrinfo` with TTL-based caching.
 ///
-/// Modeled after Xray-core's DNS cache: resolved IP addresses are cached per domain
-/// and re-resolved when the TTL expires. IP addresses bypass the cache entirely.
+/// For proxy server domains (marked via ``markAsProxy(_:)``), resolves through
+/// the physical network interface using `DNSServiceGetAddrInfo`, bypassing the
+/// VPN tunnel. Other domains resolve via standard `getaddrinfo`.
 ///
-/// The cache stores resolved IP strings (not full sockaddrs) so results can be shared
-/// by both TCP (``BSDSocket``) and UDP (``ShadowsocksUDPRelay``) callers.
+/// The active proxy domain (set via ``setActiveProxyDomain(_:)``) returns stale
+/// cached IPs on TTL expiry (to avoid blocking connections) while refreshing in
+/// the background. Non-active domains refresh synchronously.
 final class DNSCache {
     static let shared = DNSCache()
 
@@ -31,15 +82,47 @@ final class DNSCache {
     private var cache: [String: CacheEntry] = [:]
     private let lock = ReadWriteLock()
 
+    /// Domains that should be resolved via local DNS (physical interface), not through VPN.
+    private var proxyDomains: Set<String> = []
+
+    /// The currently active proxy domain (returns stale IPs on expiry instead of blocking).
+    private var activeProxyDomain: String?
+
     private init() {}
+
+    // MARK: - Proxy Domain Management
+
+    /// Mark a domain as a proxy server. Future resolutions will use local DNS
+    /// (physical interface), bypassing the VPN tunnel.
+    func markAsProxy(_ domain: String) {
+        let key = Self.stripBrackets(domain).lowercased()
+        guard !Self.isIPAddress(key) else { return }
+        lock.withWriteLock { proxyDomains.insert(key) }
+    }
+
+    /// Remove proxy marking for a domain.
+    func unmarkAsProxy(_ domain: String) {
+        let key = Self.stripBrackets(domain).lowercased()
+        lock.withWriteLock { proxyDomains.remove(key) }
+    }
+
+    /// Set the currently active proxy domain. It gets stale-IP treatment on TTL
+    /// expiry (returns cached IPs immediately, refreshes in background).
+    func setActiveProxyDomain(_ domain: String?) {
+        lock.withWriteLock {
+            activeProxyDomain = domain.map { Self.stripBrackets($0).lowercased() }
+        }
+    }
 
     // MARK: - Public API
 
     /// Resolves a hostname to IP address strings, using the cache when available.
     ///
     /// - If `host` is already an IP, returns it directly without caching.
-    /// - If `host` is a domain, checks the cache first. On miss or expiry,
-    ///   calls `getaddrinfo` and caches the result with ``defaultTTL``.
+    /// - If `host` is a proxy domain, resolves via local DNS (physical interface).
+    /// - If `host` is the active proxy domain and cache is expired, returns stale
+    ///   IPs immediately and refreshes in the background.
+    /// - Otherwise, resolves via standard `getaddrinfo` and caches the result.
     ///
     /// - Returns: All resolved IP addresses (IPv4 and IPv6), or empty on failure.
     func resolveAll(_ host: String) -> [String] {
@@ -50,18 +133,42 @@ final class DNSCache {
 
         let key = bare.lowercased()
 
-        // Check cache (read lock)
-        let cached: [String]? = lock.withReadLock {
-            if let entry = cache[key], entry.expiry > Date() {
-                return entry.ips
-            }
-            return nil
-        }
-        if let cached { return cached }
+        let isProxy: Bool = lock.withReadLock { proxyDomains.contains(key) }
+        let isActive: Bool = lock.withReadLock { activeProxyDomain == key }
 
-        // Cache miss — resolve via getaddrinfo
-        let ips = Self.resolveViaGetaddrinfo(bare)
+        // Check cache
+        let (cached, expired): ([String]?, Bool) = lock.withReadLock {
+            if let entry = cache[key] {
+                if entry.expiry > Date() {
+                    return (entry.ips, false)
+                } else {
+                    return (entry.ips, true)
+                }
+            }
+            return (nil, false)
+        }
+
+        // Cache hit — not expired
+        if let cached, !expired { return cached }
+
+        // Active proxy with stale cache — return stale, refresh in background
+        if let cached, expired, isActive {
+            DispatchQueue.global(qos: .utility).async { [self] in
+                let ips = isProxy ? Self.resolveViaLocalDNS(bare) : Self.resolveViaGetaddrinfo(bare)
+                if !ips.isEmpty {
+                    self.lock.withWriteLock {
+                        self.cache[key] = CacheEntry(ips: ips, expiry: Date() + Self.defaultTTL)
+                    }
+                }
+            }
+            return cached
+        }
+
+        // Cache miss or expired non-active entry — resolve synchronously
+        let ips = isProxy ? Self.resolveViaLocalDNS(bare) : Self.resolveViaGetaddrinfo(bare)
         guard !ips.isEmpty else {
+            // If we have stale IPs, return them as fallback
+            if let cached { return cached }
             logger.warning("[DNS] Resolution failed for \(bare, privacy: .public)")
             return []
         }
@@ -71,6 +178,15 @@ final class DNSCache {
         }
 
         return ips
+    }
+
+    /// Returns cached IPs for a domain without triggering resolution.
+    /// Returns `nil` if no cache entry exists (not even stale).
+    func cachedIPs(for host: String) -> [String]? {
+        let bare = Self.stripBrackets(host)
+        if Self.isIPAddress(bare) { return [bare] }
+        let key = bare.lowercased()
+        return lock.withReadLock { cache[key]?.ips }
     }
 
     /// Convenience: returns a single resolved IP (first result), or `nil` on failure.
@@ -104,6 +220,96 @@ final class DNSCache {
             throw BSDSocketError.resolutionFailed("No usable addresses for \(host)")
         }
         return addresses
+    }
+
+    // MARK: - Local DNS Resolution
+
+    /// Resolves a domain via system DNS through the physical network interface,
+    /// bypassing the VPN tunnel. Uses `DNSServiceGetAddrInfo` scoped to the
+    /// primary non-tunnel interface (en0 for Wi-Fi, pdp_ip0 for cellular).
+    /// Falls back to `getaddrinfo` if the physical interface can't be determined.
+    private static func resolveViaLocalDNS(_ host: String) -> [String] {
+        guard let ifIndex = physicalInterfaceIndex() else {
+            logger.info("[DNS] No physical interface found, falling back to getaddrinfo for \(host, privacy: .public)")
+            return resolveViaGetaddrinfo(host)
+        }
+
+        let ctx = DNSResolveContext()
+        let ctxPtr = Unmanaged.passRetained(ctx).toOpaque()
+
+        var sdRef: DNSServiceRef?
+        let err = DNSServiceGetAddrInfo(
+            &sdRef,
+            0,
+            ifIndex,
+            DNSServiceProtocol(kDNSServiceProtocol_IPv4 | kDNSServiceProtocol_IPv6),
+            host,
+            dnssdAddrInfoCallback,
+            ctxPtr
+        )
+
+        guard err == kDNSServiceErr_NoError, let ref = sdRef else {
+            Unmanaged<DNSResolveContext>.fromOpaque(ctxPtr).release()
+            logger.warning("[DNS] DNSServiceGetAddrInfo setup failed (\(err)) for \(host, privacy: .public), falling back")
+            return resolveViaGetaddrinfo(host)
+        }
+
+        // Process events on the dns_sd socket with a 5-second timeout
+        let fd = DNSServiceRefSockFD(ref)
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let deadline = CFAbsoluteTimeGetCurrent() + 5.0
+
+        while !ctx.done {
+            let remainingMs = Int32((deadline - CFAbsoluteTimeGetCurrent()) * 1000)
+            if remainingMs <= 0 { break }
+
+            let ret = Darwin.poll(&pfd, 1, min(remainingMs, 1000))
+            if ret > 0 {
+                DNSServiceProcessResult(ref)
+            } else if ret < 0 && errno != EINTR {
+                break
+            }
+        }
+
+        DNSServiceRefDeallocate(ref)
+        Unmanaged<DNSResolveContext>.fromOpaque(ctxPtr).release()
+
+        if ctx.ips.isEmpty {
+            logger.warning("[DNS] Local DNS returned no results for \(host, privacy: .public), falling back")
+            return resolveViaGetaddrinfo(host)
+        }
+
+        return ctx.ips
+    }
+
+    /// Returns the interface index of the primary physical (non-tunnel) network interface.
+    /// Prefers en0 (Wi-Fi), falls back to pdp_ip0 (cellular).
+    private static func physicalInterfaceIndex() -> UInt32? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(first) }
+
+        var enIndex: UInt32?
+        var pdpIndex: UInt32?
+
+        var current: UnsafeMutablePointer<ifaddrs>? = first
+        while let ifa = current {
+            let name = String(cString: ifa.pointee.ifa_name)
+            let flags = Int32(ifa.pointee.ifa_flags)
+            let isUp = (flags & IFF_UP) != 0
+            let isRunning = (flags & IFF_RUNNING) != 0
+
+            if isUp && isRunning {
+                if name == "en0" && enIndex == nil {
+                    enIndex = if_nametoindex(name)
+                } else if name.hasPrefix("pdp_ip") && pdpIndex == nil {
+                    pdpIndex = if_nametoindex(name)
+                }
+            }
+            current = ifa.pointee.ifa_next
+        }
+
+        return enIndex ?? pdpIndex
     }
 
     // MARK: - Internal

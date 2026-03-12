@@ -71,6 +71,11 @@ class LWIPStack {
     /// Packed UInt16 country code to bypass (0 = disabled).
     private(set) var bypassCountry: UInt16 = 0
 
+    /// All proxy server addresses (domains and resolved IPs) from all configurations.
+    /// Updated via IPC from the app when configurations change. The extension also
+    /// resolves domains to IPs so it can match connections by IP address.
+    private var proxyServerAddresses: Set<String> = []
+
     /// Global traffic counters (bytes through the tunnel).
     /// Incremented on lwipQueue / outputQueue; reads from other queues are safe on 64-bit ARM.
     private(set) var totalBytesIn: Int64 = 0
@@ -122,10 +127,15 @@ class LWIPStack {
         return geoIPDatabase?.lookup(host) == bypassCountry
     }
 
-    /// Returns true if the given host matches any proxy server address in the current
-    /// configuration. Prevents routing loops when the server's IP enters the tunnel
-    /// (e.g. after a configuration switch where the route exclusion is stale).
+    /// Returns true if the given host matches any proxy server address across all
+    /// configurations. Prevents routing loops and ensures latency tests bypass the tunnel.
+    ///
+    /// Checks the proxy server address set (domains + resolved IPs synced from the app)
+    /// with a fallback to the active configuration in case IPC hasn't arrived yet.
     private func isProxyServerAddress(_ host: String) -> Bool {
+        // Fast path: direct set lookup (covers domains and resolved IPs)
+        if proxyServerAddresses.contains(host) { return true }
+        // Fallback: check active config in case proxyServerAddresses hasn't been populated yet
         guard let config = configuration else { return false }
         if host == config.serverAddress || host == config.resolvedIP { return true }
         if let chain = config.chain {
@@ -146,6 +156,88 @@ class LWIPStack {
     private func loadBypassCountry() {
         let code = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
         bypassCountry = code.isEmpty ? 0 : GeoIPDatabase.packCountryCode(code)
+    }
+
+    // MARK: - Proxy Server Address Bypass
+
+    /// Loads proxy server addresses from App Group UserDefaults and resolves
+    /// domains to IPs in the background. Called on initial start.
+    private func loadProxyServerAddresses() {
+        guard let data = AWCore.userDefaults.data(forKey: "proxyServerAddresses"),
+              let addresses = try? JSONSerialization.jsonObject(with: data) as? [String] else {
+            return
+        }
+        proxyServerAddresses = Set(addresses)
+        // Resolve domains to IPs in background (getaddrinfo in NE goes through physical interface)
+        Self.resolveProxyDomains(addresses) { [weak self] resolvedIPs in
+            self?.lwipQueue.async {
+                self?.proxyServerAddresses.formUnion(resolvedIPs)
+            }
+        }
+    }
+
+    /// Updates the set of proxy server addresses from the app via IPC.
+    /// Immediately stores domains, then resolves them to IPs in the background.
+    func updateProxyServerAddresses(_ addresses: [String]) {
+        lwipQueue.async { [self] in
+            self.proxyServerAddresses = Set(addresses)
+            logger.info("[LWIPStack] Updated proxy server addresses: \(addresses.count) entries")
+            Self.resolveProxyDomains(addresses) { [weak self] resolvedIPs in
+                self?.lwipQueue.async {
+                    guard let self else { return }
+                    self.proxyServerAddresses.formUnion(resolvedIPs)
+                    logger.info("[LWIPStack] Resolved proxy IPs, total: \(self.proxyServerAddresses.count) entries")
+                }
+            }
+        }
+    }
+
+    /// Resolves an array of addresses (domains and IPs) to IP strings on a background queue.
+    /// IPs pass through unchanged; domains are resolved via `getaddrinfo`.
+    private static func resolveProxyDomains(_ addresses: [String], completion: @escaping (Set<String>) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            var resolvedIPs = Set<String>()
+            for address in addresses {
+                let ips = resolveHostname(address)
+                resolvedIPs.formUnion(ips)
+            }
+            completion(resolvedIPs)
+        }
+    }
+
+    /// Resolves a hostname to IP strings via getaddrinfo. Blocking — call from a background queue.
+    private static func resolveHostname(_ hostname: String) -> [String] {
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(hostname, nil, &hints, &result) == 0, let res = result else { return [] }
+        defer { freeaddrinfo(res) }
+
+        var ips: [String] = []
+        var current: UnsafeMutablePointer<addrinfo>? = res
+        while let info = current {
+            switch info.pointee.ai_family {
+            case AF_INET:
+                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { ptr in
+                    var sinAddr = ptr.pointee.sin_addr
+                    var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                    inet_ntop(AF_INET, &sinAddr, &buf, socklen_t(INET_ADDRSTRLEN))
+                    ips.append(String(cString: buf))
+                }
+            case AF_INET6:
+                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { ptr in
+                    var sin6Addr = ptr.pointee.sin6_addr
+                    var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                    inet_ntop(AF_INET6, &sin6Addr, &buf, socklen_t(INET6_ADDRSTRLEN))
+                    ips.append(String(cString: buf))
+                }
+            default:
+                break
+            }
+            current = info.pointee.ai_next
+        }
+        return ips
     }
 
     /// Reads encrypted DNS settings from app group UserDefaults.
@@ -179,6 +271,7 @@ class LWIPStack {
             self.loadIPv6Settings()
             self.loadBypassCountry()
             self.loadEncryptedDNSSetting()
+            self.loadProxyServerAddresses()
 
             // Create MuxManager when Vision + Mux is active (matches Xray-core auto-mux for UDP)
             // Mux is not supported with Shadowsocks

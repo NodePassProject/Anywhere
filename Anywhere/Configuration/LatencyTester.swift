@@ -81,7 +81,7 @@ nonisolated enum LatencyTester {
                 group.cancelAll()
                 return result
             }
-            return .success(ms)
+            return .success(ms / 2)
         } catch let error as TLSError {
             if case .certificateValidationFailed = error {
                 logger.error("Latency test insecure for \(configuration.name): \(error.localizedDescription)")

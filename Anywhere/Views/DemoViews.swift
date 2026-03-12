@@ -327,7 +327,7 @@ struct DemoProxyListView: View {
 
     private func latencyColor(_ ms: Int) -> Color {
         if ms < 200 { return .green }
-        if ms < 500 { return .yellow }
+        if ms < 400 { return .yellow }
         return .red
     }
 }

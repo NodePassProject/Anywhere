@@ -83,7 +83,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Bypass Routes
     //
-    // These IP ranges are always excluded from the VPN tunnel (sent directly).
+    // These local/private IP ranges are always excluded from the VPN tunnel (sent directly).
+    // Proxy server addresses are NOT excluded here — they are bypassed at the lwIP level
+    // (isProxyServerAddress check) which handles DNS rotation and covers all proxies.
+    //
     // Domain-based entries (localhost, *.local, captive.apple.com) are not
     // expressible as packet-level route exclusions:
     //   - localhost   → loopback; the OS never routes 127.0.0.0/8 into the tunnel
@@ -109,31 +112,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.8.0.1")
-
-        var sa4 = sockaddr_in()
-        let serverIsIPv4 = inet_pton(AF_INET, remoteAddress, &sa4.sin_addr) == 1
-
-        var ipv4Exclusions = Self.bypassIPv4Routes
-        if serverIsIPv4 {
-            ipv4Exclusions.append(NEIPv4Route(destinationAddress: remoteAddress, subnetMask: "255.255.255.255"))
-        }
-        logger.info("[VPN] Bypass IPv4: \(Self.bypassIPv4Routes.map { "\($0.destinationAddress)/\($0.destinationSubnetMask)" }.joined(separator: ", "), privacy: .public)")
-
+        
         let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.0"])
         ipv4Settings.includedRoutes = [NEIPv4Route.default()]
-        ipv4Settings.excludedRoutes = ipv4Exclusions
+        ipv4Settings.excludedRoutes = Self.bypassIPv4Routes
         settings.ipv4Settings = ipv4Settings
 
         let ipv6ConnectionsEnabled = AWCore.userDefaults.bool(forKey: "ipv6ConnectionsEnabled")
         if ipv6ConnectionsEnabled {
-            var ipv6Exclusions = Self.bypassIPv6Routes
-            if !serverIsIPv4 {
-                ipv6Exclusions.append(NEIPv6Route(destinationAddress: remoteAddress, networkPrefixLength: 128))
-            }
-
             let ipv6Settings = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
             ipv6Settings.includedRoutes = [NEIPv6Route.default()]
-            ipv6Settings.excludedRoutes = ipv6Exclusions
+            ipv6Settings.excludedRoutes = Self.bypassIPv6Routes
             settings.ipv6Settings = ipv6Settings
         }
 
@@ -204,6 +193,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             ]
             let data = try? JSONSerialization.data(withJSONObject: response)
             completionHandler?(data)
+            return
+        }
+
+        if messageType == "proxyAddresses" {
+            if let addresses = dict["addresses"] as? [String] {
+                lwipStack.updateProxyServerAddresses(addresses)
+            }
+            completionHandler?(nil)
             return
         }
 
