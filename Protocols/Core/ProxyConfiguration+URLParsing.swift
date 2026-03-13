@@ -15,12 +15,12 @@ extension ProxyConfiguration {
     /// Format: vless://uuid@host:port/?type=tcp&encryption=none&security=none
     /// SS format: ss://base64(method:password)@host:port#name
     /// Naive format: https://user:pass@host:port#name  or  quic://user:pass@host:port#name
-    static func parse(url: String) throws -> ProxyConfiguration {
+    static func parse(url: String, naiveProtocol: OutboundProtocol? = nil) throws -> ProxyConfiguration {
         if url.hasPrefix("ss://") {
             return try parseShadowsocks(url: url)
         }
         if url.hasPrefix("https://") || url.hasPrefix("quic://") {
-            return try parseNaive(url: url)
+            return try parseNaive(url: url, protocolOverride: naiveProtocol)
         }
         guard url.hasPrefix("vless://") else {
             throw ProxyError.invalidURL("URL must start with vless://, ss://, https://, or quic://")
@@ -231,7 +231,7 @@ extension ProxyConfiguration {
     /// Parse a NaiveProxy URL into configuration.
     /// Format: https://user:pass@host:port#name
     ///         quic://user:pass@host:port#name
-    private static func parseNaive(url: String) throws -> ProxyConfiguration {
+    private static func parseNaive(url: String, protocolOverride: OutboundProtocol? = nil) throws -> ProxyConfiguration {
         // Determine scheme (https or quic)
         let scheme: String
         let urlWithoutScheme: String
@@ -280,15 +280,18 @@ extension ProxyConfiguration {
 
         switch scheme {
         case "https":
+            let proto = protocolOverride ?? .http2
             return ProxyConfiguration(
                 name: fragmentName ?? "Untitled",
                 serverAddress: host,
                 serverPort: port,
                 uuid: UUID(), // placeholder, not used for naive
                 encryption: "none",
-                outboundProtocol: .http2,
-                http2Username: username,
-                http2Password: password
+                outboundProtocol: proto,
+                http11Username: proto == .http11 ? username : nil,
+                http11Password: proto == .http11 ? password : nil,
+                http2Username: proto == .http2 ? username : nil,
+                http2Password: proto == .http2 ? password : nil
             )
         case "quic":
             return ProxyConfiguration(

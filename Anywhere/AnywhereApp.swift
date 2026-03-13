@@ -10,7 +10,7 @@ import SwiftUI
 @main
 struct AnywhereApp: App {
     @State private var onboardingCompleted = AWCore.userDefaults.bool(forKey: "onboardingCompleted")
-
+    
     var body: some Scene {
         WindowGroup {
             if onboardingCompleted {
