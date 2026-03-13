@@ -3358,6 +3358,9 @@
         }
       }
     },
+    "Join Telegram Group" : {
+
+    },
     "Leave empty to automatically discover and upgrade to encrypted DNS servers." : {
       "localizations" : {
         "ar" : {

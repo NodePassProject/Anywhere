@@ -130,6 +130,15 @@ struct SettingsView: View {
             }
 
             Section("About") {
+                Link(destination: URL(string: "https://t.me/anywhere_official_group")!) {
+                    HStack {
+                        TextWithColorfulIconAndCustomImage(titleKey: "Join Telegram Group", imageName: "TelegramSymbol", foregroundColor: .white, backgroundColor: .blue)
+                        Spacer()
+                        Image(systemName: "arrow.up.right")
+                            .font(.footnote.bold())
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 NavigationLink {
                     AcknowledgementsView()
                 } label: {

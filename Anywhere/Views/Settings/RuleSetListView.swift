@@ -30,7 +30,7 @@ struct RuleSetListView: View {
     var body: some View {
         List {
             let shouldRefreshList = !shouldRefreshList
-            ForEach(routingRuleSets) { ruleSet in
+            ForEach(routingRuleSets.filter({ $0.id != "Direct" })) { ruleSet in
                 Picker(selection: Binding(
                     get: { ruleSet.assignedConfigurationId },
                     set: { newValue in

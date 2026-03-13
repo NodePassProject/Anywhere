@@ -24,13 +24,15 @@ class RuleSetStore: ObservableObject {
     @Published private(set) var ruleSets: [RuleSet] = []
 
     /// Bundled ruleset names (must match JSON filenames in Resources/).
-    private static let builtIn = ["Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini", "ADBlock"]
+    private static let builtIn = ["Direct", "Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini", "ADBlock"]
     private static let assignmentsKey = "ruleSetAssignments"
+
+    private static let defaultAssignments: [String: String] = ["Direct": "DIRECT"]
 
     private init() {
         let assignments = AWCore.userDefaults.dictionary(forKey: Self.assignmentsKey) as? [String: String] ?? [:]
         ruleSets = Self.builtIn.map { name in
-            RuleSet(id: name, name: name, assignedConfigurationId: assignments[name])
+            RuleSet(id: name, name: name, assignedConfigurationId: assignments[name] ?? Self.defaultAssignments[name])
         }
     }
 

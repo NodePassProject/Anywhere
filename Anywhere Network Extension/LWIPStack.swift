@@ -181,12 +181,10 @@ class LWIPStack {
     func updateProxyServerAddresses(_ addresses: [String]) {
         lwipQueue.async { [self] in
             self.proxyServerAddresses = Set(addresses)
-            logger.info("[LWIPStack] Updated proxy server addresses: \(addresses.count) entries")
             Self.resolveProxyDomains(addresses) { [weak self] resolvedIPs in
                 self?.lwipQueue.async {
                     guard let self else { return }
                     self.proxyServerAddresses.formUnion(resolvedIPs)
-                    logger.info("[LWIPStack] Resolved proxy IPs, total: \(self.proxyServerAddresses.count) entries")
                 }
             }
         }

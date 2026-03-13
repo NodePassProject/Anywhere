@@ -73,3 +73,74 @@ struct TextWithColorfulIcon: View {
         }
     }
 }
+
+struct TextWithColorfulIconAndCustomImage: View {
+    let titleKey: LocalizedStringKey
+    let imageName: String
+    let foregroundColor: Color
+    let backgroundColor: Color
+
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            HStack {
+                Image(imageName)
+                    .interpolation(.high)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 18, height: 18)
+                    .foregroundColor(foregroundColor)
+                    .padding(6)
+                    .background(backgroundColor.gradient)
+                    .cornerRadius(7)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        .white.opacity(0.6),
+                                        .white.opacity(0.3),
+                                        .clear,
+                                        .clear
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.5
+                            )
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        .clear,
+                                        .clear,
+                                        .white.opacity(0.1),
+                                        .white.opacity(0.3)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.5
+                            )
+                    )
+                Text(titleKey)
+            }
+        } else {
+            HStack {
+                Image(imageName)
+                    .interpolation(.high)
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 18, height: 18)
+                    .foregroundColor(foregroundColor)
+                    .padding(6)
+                    .background(backgroundColor.gradient)
+                    .cornerRadius(7)
+                Text(titleKey)
+            }
+        }
+    }
+}

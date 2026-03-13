@@ -413,8 +413,8 @@ class VPNViewModel: ObservableObject {
     func testAllLatencies() {
         latencyTask?.cancel()
         let allConfigurations = configurations
+        syncProxyServerAddresses(for: allConfigurations)
         for configuration in allConfigurations {
-            syncProxyServerAddresses(for: configuration)
             latencyResults[configuration.id] = .testing
         }
         latencyTask = Task.detached {
@@ -449,11 +449,11 @@ class VPNViewModel: ObservableObject {
         var resolvedChains: [(UUID, ProxyConfiguration)] = []
         for chain in chains {
             if let resolved = resolveChain(chain) {
-                syncProxyServerAddresses(for: resolved)
                 chainLatencyResults[chain.id] = .testing
                 resolvedChains.append((chain.id, resolved))
             }
         }
+        syncProxyServerAddresses(for: resolvedChains.map(\.1))
         let configs = resolvedChains.map { $0.1 }
         let idMap = Dictionary(uniqueKeysWithValues: zip(configs.map(\.id), resolvedChains.map(\.0)))
         chainLatencyTask = Task.detached {
@@ -760,11 +760,17 @@ class VPNViewModel: ObservableObject {
     /// proxies) plus any already-cached resolved IPs to the extension via
     /// App Group + IPC. Called on VPN connect, configuration switch, and latency test.
     func syncProxyServerAddresses(for configuration: ProxyConfiguration) {
+        syncProxyServerAddresses(for: [configuration])
+    }
+
+    func syncProxyServerAddresses(for configurations: [ProxyConfiguration]) {
         var domains = Set<String>()
-        domains.insert(configuration.serverAddress)
-        if let chain = configuration.chain {
-            for proxy in chain {
-                domains.insert(proxy.serverAddress)
+        for configuration in configurations {
+            domains.insert(configuration.serverAddress)
+            if let chain = configuration.chain {
+                for proxy in chain {
+                    domains.insert(proxy.serverAddress)
+                }
             }
         }
 
