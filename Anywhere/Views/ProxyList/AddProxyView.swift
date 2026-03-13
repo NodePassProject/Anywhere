@@ -7,9 +7,10 @@
 
 import SwiftUI
 
-fileprivate enum LinkType: String, CaseIterable {
-    case subscription = "subscription"
-    case proxy = "proxy"
+fileprivate enum LinkType:  CaseIterable {
+    case subscription
+    case http11Proxy
+    case http2Proxy
 }
 
 fileprivate enum Method: String, CaseIterable, Identifiable {
@@ -201,7 +202,8 @@ struct AddProxyView: View {
             if linkURL.hasPrefix("http://") || linkURL.hasPrefix("https://") {
                 Picker("Link Type", selection: $linkType) {
                     Text("Subscription").tag(LinkType.subscription)
-                    Text("Proxy").tag(LinkType.proxy)
+                    Text("HTTPS Proxy").tag(LinkType.http11Proxy)
+                    Text("HTTP/2 Proxy").tag(LinkType.http2Proxy)
                 }
                 .pickerStyle(.segmented)
             }
@@ -242,12 +244,18 @@ struct AddProxyView: View {
 
     private func importFromString(_ string: String) {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isHTTP = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
 
         if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") ||
-            ((trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")) && linkType == .proxy) {
+            (isHTTP && linkType != .subscription) {
             // Single proxy link (VLESS, Shadowsocks, or NaiveProxy)
+            let naiveProtocol: OutboundProtocol? = switch linkType {
+            case .http11Proxy: .http11
+            case .http2Proxy: .http2
+            case .subscription: nil
+            }
             do {
-                let configuration = try ProxyConfiguration.parse(url: trimmed)
+                let configuration = try ProxyConfiguration.parse(url: trimmed, naiveProtocol: naiveProtocol)
                 onImport?(configuration)
                 dismiss()
             } catch {
