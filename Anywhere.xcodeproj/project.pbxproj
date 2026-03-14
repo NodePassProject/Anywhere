@@ -9,10 +9,19 @@
 /* Begin PBXBuildFile section */
 		CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
 		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		CB7A00032F65700100C85E4A /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
+		CB7A00062F65700100C85E4A /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
 		CB1C10802F23B82F00B74CD8 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CB1C105D2F23B81500B74CD8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CB1C10762F23B82F00B74CD8;
+			remoteInfo = "Network Extension";
+		};
+		CB7A00042F65700100C85E4A /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = CB1C105D2F23B81500B74CD8 /* Project object */;
 			proxyType = 1;
@@ -33,12 +42,24 @@
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CB7A00072F65700100C85E4A /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				CB7A00062F65700100C85E4A /* Anywhere Network Extension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		CB1C10652F23B81500B74CD8 /* Anywhere.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Anywhere.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Anywhere Network Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
+		CB6538752F65686100C85E4A /* Anywhere TV.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Anywhere TV.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -48,13 +69,6 @@
 				Info.plist,
 				lwip/src/include/lwip/apps/FILES,
 				lwip/src/include/lwip/init.h.cmake.in,
-			);
-			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
-		};
-		CB31D8F72F53548D00962CF6 /* Exceptions for "Anywhere" folder in "Anywhere Network Extension" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				AWCore.swift,
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 		};
@@ -116,6 +130,13 @@
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 		};
+		CB65476A2F65715600C85E4A /* Exceptions for "Shared" folder in "Anywhere Network Extension" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AWCore.swift,
+			);
+			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
+		};
 		CBE5B8662F62E736003CECEF /* Exceptions for "Anywhere" folder in "Anywhere" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -130,7 +151,6 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				CBE5B8662F62E736003CECEF /* Exceptions for "Anywhere" folder in "Anywhere" target */,
-				CB31D8F72F53548D00962CF6 /* Exceptions for "Anywhere" folder in "Anywhere Network Extension" target */,
 			);
 			path = Anywhere;
 			sourceTree = "<group>";
@@ -149,6 +169,19 @@
 				CB650E422F6307AF00C85E4A /* Exceptions for "Protocols" folder in "Anywhere Network Extension" target */,
 			);
 			path = Protocols;
+			sourceTree = "<group>";
+		};
+		CB6538762F65686100C85E4A /* Anywhere TV */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "Anywhere TV";
+			sourceTree = "<group>";
+		};
+		CB7A00022F65700100C85E4A /* Shared */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				CB65476A2F65715600C85E4A /* Exceptions for "Shared" folder in "Anywhere Network Extension" target */,
+			);
+			path = Shared;
 			sourceTree = "<group>";
 		};
 		CBDC12652F271BD50021FDA0 /* General */ = {
@@ -174,16 +207,26 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CB6538722F65686100C85E4A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CB7A00032F65700100C85E4A /* NetworkExtension.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		CB1C105C2F23B81500B74CD8 = {
 			isa = PBXGroup;
 			children = (
+				CB7A00022F65700100C85E4A /* Shared */,
 				CBDC12652F271BD50021FDA0 /* General */,
 				CB650DD92F6307AF00C85E4A /* Protocols */,
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
 				CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */,
+				CB6538762F65686100C85E4A /* Anywhere TV */,
 				CB1C10782F23B82F00B74CD8 /* Frameworks */,
 				CB1C10662F23B81500B74CD8 /* Products */,
 			);
@@ -194,6 +237,7 @@
 			children = (
 				CB1C10652F23B81500B74CD8 /* Anywhere.app */,
 				CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */,
+				CB6538752F65686100C85E4A /* Anywhere TV.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -226,6 +270,7 @@
 			fileSystemSynchronizedGroups = (
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
 				CB650DD92F6307AF00C85E4A /* Protocols */,
+				CB7A00022F65700100C85E4A /* Shared */,
 				CBDC12652F271BD50021FDA0 /* General */,
 			);
 			name = Anywhere;
@@ -258,6 +303,33 @@
 			productReference = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		CB6538742F65686100C85E4A /* Anywhere TV */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CB65387D2F65686100C85E4A /* Build configuration list for PBXNativeTarget "Anywhere TV" */;
+			buildPhases = (
+				CB6538712F65686100C85E4A /* Sources */,
+				CB6538722F65686100C85E4A /* Frameworks */,
+				CB6538732F65686100C85E4A /* Resources */,
+				CB7A00072F65700100C85E4A /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				CB7A00052F65700100C85E4A /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				CB650DD92F6307AF00C85E4A /* Protocols */,
+				CB6538762F65686100C85E4A /* Anywhere TV */,
+				CB7A00022F65700100C85E4A /* Shared */,
+				CBDC12652F271BD50021FDA0 /* General */,
+			);
+			name = "Anywhere TV";
+			packageProductDependencies = (
+			);
+			productName = Anywhere;
+			productReference = CB6538752F65686100C85E4A /* Anywhere TV.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -272,6 +344,9 @@
 						CreatedOnToolsVersion = 26.0.1;
 					};
 					CB1C10762F23B82F00B74CD8 = {
+						CreatedOnToolsVersion = 26.0.1;
+					};
+					CB6538742F65686100C85E4A = {
 						CreatedOnToolsVersion = 26.0.1;
 					};
 				};
@@ -299,6 +374,7 @@
 			projectRoot = "";
 			targets = (
 				CB1C10642F23B81500B74CD8 /* Anywhere */,
+				CB6538742F65686100C85E4A /* Anywhere TV */,
 				CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */,
 			);
 		};
@@ -313,6 +389,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		CB1C10752F23B82F00B74CD8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CB6538732F65686100C85E4A /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -336,6 +419,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CB6538712F65686100C85E4A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -343,6 +433,11 @@
 			isa = PBXTargetDependency;
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 			targetProxy = CB1C10802F23B82F00B74CD8 /* PBXContainerItemProxy */;
+		};
+		CB7A00052F65700100C85E4A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
+			targetProxy = CB7A00042F65700100C85E4A /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -477,7 +572,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 110;
+				CURRENT_PROJECT_VERSION = 111;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -485,7 +580,7 @@
 					"$(inherited)",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Anywhere/libyaml/include";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -501,7 +596,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -522,7 +617,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 110;
+				CURRENT_PROJECT_VERSION = 111;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -530,7 +625,7 @@
 					"$(inherited)",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Anywhere/libyaml/include";
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -546,7 +641,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -566,7 +661,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 110;
+				CURRENT_PROJECT_VERSION = 111;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -582,18 +677,21 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.argsment.Anywhere.Network-Extension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) NETWORK_EXTENSION";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere Network Extension/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1,2,3";
+				TVOS_DEPLOYMENT_TARGET = 17.0;
 			};
 			name = Debug;
 		};
@@ -603,7 +701,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 110;
+				CURRENT_PROJECT_VERSION = 111;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -619,18 +717,101 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.3;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "com.argsment.Anywhere.Network-Extension";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) NETWORK_EXTENSION";
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere Network Extension/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = "1,2";
+				TARGETED_DEVICE_FAMILY = "1,2,3";
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Release;
+		};
+		CB65387E2F65686100C85E4A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 111;
+				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				ENABLE_PREVIEWS = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"HAVE_CONFIG_H=1",
+					"$(inherited)",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
+				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere TV/BridgingHeader.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Debug;
+		};
+		CB65387F2F65686100C85E4A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 111;
+				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				ENABLE_PREVIEWS = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"HAVE_CONFIG_H=1",
+					"$(inherited)",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
+				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere TV/BridgingHeader.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 17.0;
 			};
 			name = Release;
 		};
@@ -660,6 +841,15 @@
 			buildConfigurations = (
 				CB1C10852F23B82F00B74CD8 /* Debug */,
 				CB1C10862F23B82F00B74CD8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CB65387D2F65686100C85E4A /* Build configuration list for PBXNativeTarget "Anywhere TV" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CB65387E2F65686100C85E4A /* Debug */,
+				CB65387F2F65686100C85E4A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

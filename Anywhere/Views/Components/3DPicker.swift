@@ -7,12 +7,6 @@
 
 import SwiftUI
 
-/// Picker Item
-struct PickerItem: Identifiable {
-    let id: UUID
-    let name: String
-}
-
 /// Picker Config
 struct PickerConfig {
     var text: String = ""

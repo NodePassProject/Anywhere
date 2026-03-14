@@ -22,32 +22,27 @@ struct ChainListView: View {
         }
         .overlay {
             if viewModel.chains.isEmpty {
-                ContentUnavailableView(
-                    "No Chains",
-                    systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill",
-                    description: Text("Tap + to create a proxy chain.")
-                )
+                ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
             }
         }
         .navigationTitle("Chains")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                HStack(spacing: 8) {
-                    Button {
-                        viewModel.testAllChainLatencies()
-                    } label: {
-                        Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
+            ToolbarItem {
+                Button {
+                    viewModel.testAllChainLatencies()
+                } label: {
+                    Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
+                }
+            }
+            ToolbarItem {
+                Button {
+                    if viewModel.configurations.count < 2 {
+                        showingNotEnoughProxiesAlert = true
+                    } else {
+                        showingAddSheet = true
                     }
-
-                    Button {
-                        if viewModel.configurations.count < 2 {
-                            showingNotEnoughProxiesAlert = true
-                        } else {
-                            showingAddSheet = true
-                        }
-                    } label: {
-                        Label("Add", systemImage: "plus")
-                    }
+                } label: {
+                    Label("Add", systemImage: "plus")
                 }
             }
         }

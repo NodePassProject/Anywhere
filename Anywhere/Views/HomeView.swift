@@ -37,7 +37,7 @@ struct HomeView: View {
                             .padding(.bottom, 16)
                         
                         Text(viewModel.statusText)
-                            .font(.title3.weight(.medium))
+                            .font(.system(size: 20, weight: .medium))
                             .foregroundStyle(isConnected ? .white : .secondary)
                             .contentTransition(.interpolate)
                             .animation(.easeInOut, value: viewModel.vpnStatus)
