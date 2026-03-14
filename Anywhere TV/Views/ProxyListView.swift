@@ -2,7 +2,7 @@
 //  ProxyListView.swift
 //  Anywhere
 //
-//  Created by Argsment Limited on 3/1/26.
+//  Created by Argsment Limited on 3/14/26.
 //
 
 import SwiftUI
@@ -12,11 +12,11 @@ struct ProxyListView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
 
     @State private var showingAddSheet = false
-    @State private var showingManualAddSheet = false
-    @State private var configurationToEdit: ProxyConfiguration?
     @State private var updatingSubscription: Subscription?
     @State private var showingSubscriptionError = false
     @State private var subscriptionErrorMessage = ""
+    @State private var renamingConfiguration: ProxyConfiguration?
+    @State private var renameText = ""
 
     private var standaloneConfigurations: [ProxyConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }
@@ -59,40 +59,65 @@ struct ProxyListView: View {
                 Button {
                     viewModel.testAllLatencies()
                 } label: {
-                    Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
+                    Image(systemName: "gauge.with.dots.needle.67percent")
+                        .accessibilityLabel("Test All")
                 }
             }
             ToolbarItem {
                 Button {
                     showingAddSheet = true
                 } label: {
-                    Label("Add", systemImage: "plus")
+                    Image(systemName: "plus")
+                        .accessibilityLabel("Add")
                 }
             }
         }
         .sheet(isPresented: $showingAddSheet) {
-            DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet) { configuration in
+            NavigationStack {
+                AddProxyView { configuration in
                     viewModel.addConfiguration(configuration)
                 } onSubscriptionImport: { configurations, subscription in
                     viewModel.addSubscription(configurations: configurations, subscription: subscription)
                 }
             }
         }
-        .sheet(isPresented: $showingManualAddSheet) {
-            ProxyEditorView { configuration in
-                viewModel.addConfiguration(configuration)
-            }
-        }
-        .sheet(item: $configurationToEdit) { configuration in
-            ProxyEditorView(configuration: configuration) { updated in
-                viewModel.updateConfiguration(updated)
-            }
-        }
         .alert("Update Failed", isPresented: $showingSubscriptionError) {
             Button("OK", role: .cancel) { }
         } message: {
             Text(subscriptionErrorMessage)
+        }
+        .alert("Rename", isPresented: Binding(
+            get: { renamingConfiguration != nil },
+            set: { if !$0 { renamingConfiguration = nil } }
+        )) {
+            TextField("Name", text: $renameText)
+            Button("Cancel", role: .cancel) {
+                renamingConfiguration = nil
+            }
+            Button("Done") {
+                if let config = renamingConfiguration {
+                    let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        let renamed = ProxyConfiguration(
+                            id: config.id, name: trimmed,
+                            serverAddress: config.serverAddress, serverPort: config.serverPort,
+                            uuid: config.uuid, encryption: config.encryption,
+                            transport: config.transport, flow: config.flow,
+                            security: config.security, tls: config.tls, reality: config.reality,
+                            websocket: config.websocket, httpUpgrade: config.httpUpgrade,
+                            xhttp: config.xhttp, testseed: config.testseed,
+                            muxEnabled: config.muxEnabled, xudpEnabled: config.xudpEnabled,
+                            subscriptionId: config.subscriptionId,
+                            outboundProtocol: config.outboundProtocol,
+                            ssPassword: config.ssPassword, ssMethod: config.ssMethod
+                        )
+                        viewModel.updateConfiguration(renamed)
+                    }
+                    renamingConfiguration = nil
+                }
+            }
+        } message: {
+            Text("Provide a new name.")
         }
     }
 
@@ -103,31 +128,14 @@ struct ProxyListView: View {
         HStack {
             Text(subscription.name)
             Spacer()
-            HStack(spacing: 20) {
-                if updatingSubscription?.id == subscription.id {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Button {
-                        updateSubscription(subscription)
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
-                }
-                Menu {
-                    Button {
-                        updateSubscription(subscription)
-                    } label: {
-                        Label("Update", systemImage: "arrow.clockwise")
-                    }
-                    Button(role: .destructive) {
-                        viewModel.deleteSubscription(subscription)
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
+            if updatingSubscription?.id == subscription.id {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Button {
+                    updateSubscription(subscription)
                 } label: {
-                    Image(systemName: "ellipsis.circle")
+                    Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
             }
@@ -158,8 +166,8 @@ struct ProxyListView: View {
             viewModel.selectedConfiguration = configuration
         } label: {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
                         Text(configuration.name)
                             .font(.body)
                         if viewModel.selectedConfiguration?.id == configuration.id {
@@ -189,19 +197,13 @@ struct ProxyListView: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 }
-                
+
                 Spacer()
-                
+
                 latencyView(latency)
-                    .onTapGesture {
-                        if viewModel.vpnStatus != .connected {
-                            viewModel.testLatency(for: configuration)
-                        }
-                    }
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
         .contextMenu {
             Button {
                 viewModel.testLatency(for: configuration)
@@ -210,15 +212,10 @@ struct ProxyListView: View {
             }
 
             Button {
-                UIPasteboard.general.string = configuration.toURL()
+                renameText = configuration.name
+                renamingConfiguration = configuration
             } label: {
-                Label("Copy Link", systemImage: "doc.on.doc")
-            }
-
-            Button {
-                configurationToEdit = configuration
-            } label: {
-                Label("Edit", systemImage: "pencil")
+                Label("Rename", systemImage: "pencil")
             }
 
             Button(role: .destructive) {
@@ -226,19 +223,6 @@ struct ProxyListView: View {
             } label: {
                 Label("Delete", systemImage: "trash")
             }
-        }
-        .swipeActions(edge: .trailing) {
-            Button(role: .destructive) {
-                viewModel.deleteConfiguration(configuration)
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
-            Button {
-                configurationToEdit = configuration
-            } label: {
-                Label("Edit", systemImage: "pencil")
-            }
-            .tint(.orange)
         }
     }
 
@@ -248,23 +232,23 @@ struct ProxyListView: View {
         case .testing:
             ProgressView()
                 .controlSize(.small)
-                .frame(width: 50, alignment: .trailing)
+                .frame(width: 80, alignment: .trailing)
         case .success(let ms):
             Text("\(ms) ms")
-                .font(.caption)
+                .font(.callout)
                 .monospacedDigit()
                 .foregroundStyle(latencyColor(ms))
-                .frame(minWidth: 50, alignment: .trailing)
+                .frame(minWidth: 80, alignment: .trailing)
         case .failed:
             Text("timeout")
-                .font(.caption)
+                .font(.callout)
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 50, alignment: .trailing)
+                .frame(minWidth: 80, alignment: .trailing)
         case .insecure:
             Text("insecure")
-                .font(.caption)
+                .font(.callout)
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 50, alignment: .trailing)
+                .frame(minWidth: 80, alignment: .trailing)
         case nil:
             EmptyView()
         }
