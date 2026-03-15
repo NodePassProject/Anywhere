@@ -38,9 +38,15 @@ struct TLS13KeyDerivation {
         return cipherSuite == TLSCipherSuite.TLS_AES_256_GCM_SHA384 ? 48 : 32
     }
 
-    /// Get encryption key length based on cipher suite
+    /// Get encryption key length based on cipher suite (RFC 8446 §B.4)
     var keyLength: Int {
-        return cipherSuite == TLSCipherSuite.TLS_AES_256_GCM_SHA384 ? 32 : 16
+        switch cipherSuite {
+        case TLSCipherSuite.TLS_AES_256_GCM_SHA384,
+             TLSCipherSuite.TLS_CHACHA20_POLY1305_SHA256:
+            return 32
+        default:
+            return 16
+        }
     }
 
     // MARK: - HKDF Primitives

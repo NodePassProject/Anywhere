@@ -39,6 +39,7 @@ class RealityClient {
     private var applicationKeys: TLSApplicationKeys?
     private var handshakeTranscript: Data?
     private var serverHandshakeSeqNum: UInt64 = 0
+    private var serverCertVerified = false
 
     // MARK: Initialization
 
@@ -172,6 +173,7 @@ class RealityClient {
         sessionId[6] = UInt8((timestamp >> 8) & 0xFF)
         sessionId[7] = UInt8(timestamp & 0xFF)
 
+        // Copy shortId into bytes 8-15, zero-padded to 8 bytes (matching Xray-core's fixed [8]byte)
         let shortIdLen = min(configuration.shortId.count, 8)
         for i in 0..<shortIdLen {
             sessionId[8 + i] = configuration.shortId[i]
@@ -461,7 +463,8 @@ class RealityClient {
                         key: SymmetricKey(data: keys.serverKey),
                         iv: keys.serverIV,
                         seqNum: seqNum,
-                        recordHeader: recordHeader
+                        recordHeader: recordHeader,
+                        cipherSuite: kd.cipherSuite
                     )
                     serverHandshakeSeqNum += 1
 
@@ -476,6 +479,11 @@ class RealityClient {
                         let hsMessage = decrypted.subdata(in: hsOffset..<(hsOffset + 4 + hsLen))
                         fullTranscript.append(hsMessage)
 
+                        if hsType == 0x0B { // Certificate
+                            let certBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
+                            serverCertVerified = verifyRealityCertificate(certBody: certBody)
+                        }
+
                         if hsType == 0x14 { // Finished
                             foundServerFinished = true
                         }
@@ -488,12 +496,23 @@ class RealityClient {
             }
 
             offset += 5 + recordLen
+
+            // After Server Finished, subsequent records (e.g. NewSessionTicket) are
+            // encrypted with application keys. Stop here and let TLSRecordConnection
+            // handle them so the sequence numbers stay in sync.
+            if foundServerFinished { break }
         }
 
         let processedOffset = offset
         handshakeTranscript = fullTranscript
 
         if foundServerFinished {
+            guard serverCertVerified else {
+                logger.error("[Reality] Server certificate verification failed - not an authenticated Reality server")
+                completion(.failure(RealityError.authenticationFailed))
+                return
+            }
+
             applicationKeys = kd.deriveApplicationKeys(handshakeSecret: handshakeSecret!, fullTranscript: fullTranscript)
 
             sendClientFinished { [weak self] error in
@@ -515,10 +534,19 @@ class RealityClient {
                     clientKey: appKeys.clientKey,
                     clientIV: appKeys.clientIV,
                     serverKey: appKeys.serverKey,
-                    serverIV: appKeys.serverIV
+                    serverIV: appKeys.serverIV,
+                    cipherSuite: self.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
                 )
                 realityConnection.connection = self.connection
                 self.connection = nil
+
+                // Feed remaining buffer data (post-Finished records like NewSessionTicket)
+                // to TLSRecordConnection so they are decrypted with application keys
+                // and sequence numbers stay in sync.
+                let remaining = buffer.subdata(in: processedOffset..<buffer.count)
+                if !remaining.isEmpty {
+                    realityConnection.prependToReceiveBuffer(remaining)
+                }
 
                 self.clearHandshakeState()
                 completion(.success(realityConnection))
@@ -575,7 +603,8 @@ class RealityClient {
                 plaintext: finishedMsg,
                 key: SymmetricKey(data: keys.clientKey),
                 iv: keys.clientIV,
-                seqNum: 0
+                seqNum: 0,
+                cipherSuite: keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
             )
             ccsRecord.append(finishedRecord)
 
@@ -615,6 +644,126 @@ class RealityClient {
         return false
     }
 
+    // MARK: - Certificate Verification
+
+    /// Verifies the Reality server's certificate using HMAC-SHA512.
+    ///
+    /// The Reality server signs its ed25519 certificate with `HMAC-SHA512(AuthKey, publicKey)`.
+    /// This matches Xray-core's `VerifyPeerCertificate` in `reality.go`.
+    private func verifyRealityCertificate(certBody: Data) -> Bool {
+        guard let authKey else { return false }
+
+        // Extract first certificate DER from TLS Certificate message body
+        guard let certDER = Self.extractFirstCertificate(from: certBody) else { return false }
+
+        // Extract ed25519 public key and signature from the certificate
+        guard let (publicKey, signature) = Self.extractEd25519Components(from: certDER) else {
+            return false
+        }
+
+        // Verify: signature == HMAC-SHA512(AuthKey, publicKey)
+        let hmac = HMAC<SHA512>.authenticationCode(for: publicKey, using: SymmetricKey(data: authKey))
+        return Data(hmac) == signature
+    }
+
+    /// Extracts the first DER certificate from a TLS 1.3 Certificate message body.
+    ///
+    /// Format: contextLen(1) + context + listLen(3) + [certLen(3) + certDER + extLen(2) + ext]*
+    private static func extractFirstCertificate(from certBody: Data) -> Data? {
+        var offset = 0
+
+        // Request context length (0 for server certificate)
+        guard offset < certBody.count else { return nil }
+        let contextLen = Int(certBody[offset])
+        offset += 1 + contextLen
+
+        // Certificate list length (3 bytes)
+        guard offset + 3 <= certBody.count else { return nil }
+        offset += 3
+
+        // First certificate data length (3 bytes)
+        guard offset + 3 <= certBody.count else { return nil }
+        let certLen = Int(certBody[offset]) << 16 | Int(certBody[offset + 1]) << 8 | Int(certBody[offset + 2])
+        offset += 3
+
+        guard certLen > 0, offset + certLen <= certBody.count else { return nil }
+        return certBody.subdata(in: offset..<(offset + certLen))
+    }
+
+    /// Extracts ed25519 public key and signature from a DER X.509 certificate.
+    ///
+    /// Returns `nil` if the certificate does not use ed25519, indicating it's
+    /// a real website certificate rather than a Reality server certificate.
+    private static func extractEd25519Components(from certDER: Data) -> (publicKey: Data, signature: Data)? {
+        var offset = 0
+
+        // Outer SEQUENCE (Certificate)
+        guard parseDERSequence(certDER, offset: &offset) != nil else { return nil }
+
+        // TBSCertificate SEQUENCE
+        let tbsHeaderStart = offset
+        guard let tbsLen = parseDERSequence(certDER, offset: &offset) else { return nil }
+        let tbsEnd = offset + tbsLen
+
+        // Search TBSCertificate for ed25519 OID (1.3.101.112 = 06 03 2b 65 70)
+        // followed by BIT STRING containing 32-byte public key (03 21 00 <32 bytes>)
+        var publicKey: Data?
+        for i in tbsHeaderStart..<tbsEnd {
+            guard i + 40 <= tbsEnd else { break }
+            if certDER[i] == 0x06 && certDER[i + 1] == 0x03 &&
+               certDER[i + 2] == 0x2b && certDER[i + 3] == 0x65 && certDER[i + 4] == 0x70 &&
+               certDER[i + 5] == 0x03 && certDER[i + 6] == 0x21 && certDER[i + 7] == 0x00 {
+                publicKey = certDER.subdata(in: (i + 8)..<(i + 8 + 32))
+                break
+            }
+        }
+        guard let pubKey = publicKey else { return nil }
+
+        // Skip past TBSCertificate
+        offset = tbsEnd
+
+        // signatureAlgorithm SEQUENCE (skip)
+        guard let sigAlgLen = parseDERSequence(certDER, offset: &offset) else { return nil }
+        offset += sigAlgLen
+
+        // signatureValue BIT STRING
+        guard offset < certDER.count, certDER[offset] == 0x03 else { return nil }
+        offset += 1
+        guard let sigBitStringLen = parseDERLength(certDER, offset: &offset) else { return nil }
+        guard sigBitStringLen >= 1, offset < certDER.count, certDER[offset] == 0x00 else { return nil }
+        let signature = certDER.subdata(in: (offset + 1)..<(offset + sigBitStringLen))
+
+        return (pubKey, signature)
+    }
+
+    /// Parses a DER SEQUENCE tag and returns the content length.
+    private static func parseDERSequence(_ data: Data, offset: inout Int) -> Int? {
+        guard offset < data.count, data[offset] == 0x30 else { return nil }
+        offset += 1
+        return parseDERLength(data, offset: &offset)
+    }
+
+    /// Parses a DER length encoding.
+    private static func parseDERLength(_ data: Data, offset: inout Int) -> Int? {
+        guard offset < data.count else { return nil }
+        let first = data[offset]
+        offset += 1
+
+        if first < 0x80 {
+            return Int(first)
+        }
+
+        let numBytes = Int(first & 0x7F)
+        guard numBytes > 0, numBytes <= 3, offset + numBytes <= data.count else { return nil }
+
+        var length = 0
+        for _ in 0..<numBytes {
+            length = (length << 8) | Int(data[offset])
+            offset += 1
+        }
+        return length
+    }
+
     // MARK: - Helpers
 
     /// Frees handshake-only state to reduce memory after the connection is established.
@@ -626,6 +775,7 @@ class RealityClient {
         handshakeSecret = nil
         handshakeKeys = nil
         handshakeTranscript = nil
+        serverCertVerified = false
     }
 
     /// Derives a symmetric key from a shared secret using HKDF.
