@@ -26,38 +26,41 @@ struct AddProxyView: View {
 
     var body: some View {
         NavigationStack {
-            VStack {
-                VStack(spacing: 0) {
+            Form {
+                Section {
                     TextField("Link", text: $linkURL)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
+                } footer: {
                     Text("Supports proxy, subscription and Clash links")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 
-                if linkURL.hasPrefix("http://") || linkURL.hasPrefix("https://") {
-                    Picker("Link Type", selection: $linkType) {
-                        Text("Subscription").tag(LinkType.subscription)
-                        Text("HTTPS Proxy").tag(LinkType.http11Proxy)
-                        Text("HTTP/2 Proxy").tag(LinkType.http2Proxy)
+                Section {
+                    if linkURL.hasPrefix("http://") || linkURL.hasPrefix("https://") {
+                        Picker("Link Type", selection: $linkType) {
+                            Text("Subscription").tag(LinkType.subscription)
+                            Text("HTTPS Proxy").tag(LinkType.http11Proxy)
+                            Text("HTTP/2 Proxy").tag(LinkType.http2Proxy)
+                        }
+                        .pickerStyle(.segmented)
                     }
-                    .pickerStyle(.segmented)
                 }
                 
-                Button {
-                    importFromLink()
-                } label: {
-                    if isLoading {
-                        ProgressView()
-                    } else {
-                        Text("Continue")
+                Section {
+                    Button {
+                        importFromLink()
+                    } label: {
+                        if isLoading {
+                            ProgressView()
+                        } else {
+                            Text("Continue")
+                        }
                     }
+                    .disabled(linkURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
                 }
-                .disabled(linkURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
             }
-            .padding(.horizontal)
         }
+        .padding(.horizontal)
         .navigationTitle("Add Proxy")
         .alert("Import Failed", isPresented: $showingError) {
             Button("OK", role: .cancel) { }

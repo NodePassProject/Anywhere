@@ -35,6 +35,9 @@ class TLSRecordConnection {
     private let serverKey: Data
     private let serverIV: Data
 
+    // Cipher suite for AEAD dispatch (AES-GCM vs ChaCha20-Poly1305)
+    private let cipherSuite: UInt16
+
     // Cached symmetric keys
     private let clientSymmetricKey: SymmetricKey
     private let serverSymmetricKey: SymmetricKey
@@ -60,11 +63,12 @@ class TLSRecordConnection {
     ///   - clientIV: The client-to-server initialization vector.
     ///   - serverKey: The server-to-client encryption key.
     ///   - serverIV: The server-to-client initialization vector.
-    init(clientKey: Data, clientIV: Data, serverKey: Data, serverIV: Data) {
+    init(clientKey: Data, clientIV: Data, serverKey: Data, serverIV: Data, cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256) {
         self.clientKey = clientKey
         self.clientIV = clientIV
         self.serverKey = serverKey
         self.serverIV = serverIV
+        self.cipherSuite = cipherSuite
         self.clientSymmetricKey = SymmetricKey(data: clientKey)
         self.serverSymmetricKey = SymmetricKey(data: serverKey)
     }
@@ -249,14 +253,22 @@ class TLSRecordConnection {
         }
 
         do {
-            let nonceObj = try AES.GCM.Nonce(data: nonce)
             let aad = Data([0x17, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
-            let sealedBox = try AES.GCM.seal(alertPlaintext, using: clientSymmetricKey, nonce: nonceObj, authenticating: aad)
-            guard let combined = sealedBox.combined else { return }
-
             var record = Data(capacity: 5 + encryptedLen)
-            record.append(contentsOf: [0x17, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
-            record.append(combined.suffix(from: 12))
+            record.append(aad)
+
+            if cipherSuite == TLSCipherSuite.TLS_CHACHA20_POLY1305_SHA256 {
+                let nonceObj = try ChaChaPoly.Nonce(data: nonce)
+                let sealedBox = try ChaChaPoly.seal(alertPlaintext, using: clientSymmetricKey, nonce: nonceObj, authenticating: aad)
+                record.append(Data(sealedBox.ciphertext))
+                record.append(Data(sealedBox.tag))
+            } else {
+                let nonceObj = try AES.GCM.Nonce(data: nonce)
+                let sealedBox = try AES.GCM.seal(alertPlaintext, using: clientSymmetricKey, nonce: nonceObj, authenticating: aad)
+                record.append(Data(sealedBox.ciphertext))
+                record.append(Data(sealedBox.tag))
+            }
+
             connection.send(data: record)
         } catch {
             // Best-effort, ignore errors
@@ -469,14 +481,21 @@ class TLSRecordConnection {
                 p[base + i] ^= UInt8((seqNum >> ((7 - i) * 8)) & 0xFF)
             }
         }
-        let nonceObj = try AES.GCM.Nonce(data: nonce)
 
         let tagOffset = ciphertext.count - 16
-        let ct = ciphertext.prefix(tagOffset)
-        let tag = ciphertext.suffix(16)
+        let ct = Data(ciphertext.prefix(tagOffset))
+        let tag = Data(ciphertext.suffix(16))
 
-        let sealedBox = try AES.GCM.SealedBox(nonce: nonceObj, ciphertext: ct, tag: tag)
-        let decrypted = try AES.GCM.open(sealedBox, using: serverSymmetricKey, authenticating: header)
+        let decrypted: Data
+        if cipherSuite == TLSCipherSuite.TLS_CHACHA20_POLY1305_SHA256 {
+            let nonceObj = try ChaChaPoly.Nonce(data: nonce)
+            let sealedBox = try ChaChaPoly.SealedBox(nonce: nonceObj, ciphertext: ct, tag: tag)
+            decrypted = Data(try ChaChaPoly.open(sealedBox, using: serverSymmetricKey, authenticating: header))
+        } else {
+            let nonceObj = try AES.GCM.Nonce(data: nonce)
+            let sealedBox = try AES.GCM.SealedBox(nonce: nonceObj, ciphertext: ct, tag: tag)
+            decrypted = Data(try AES.GCM.open(sealedBox, using: serverSymmetricKey, authenticating: header))
+        }
 
         guard !decrypted.isEmpty else {
             throw RealityError.handshakeFailed("Empty decrypted data")
@@ -524,28 +543,24 @@ class TLSRecordConnection {
 
         let aad = Data([0x17, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
 
-        let nonceObj = try AES.GCM.Nonce(data: nonce)
-        let sealedBox = try AES.GCM.seal(innerPlaintext, using: clientSymmetricKey, nonce: nonceObj, authenticating: aad)
-
-        guard let combined = sealedBox.combined else {
-            throw RealityError.handshakeFailed("Failed to get combined sealed box")
+        let sealedCt: Data
+        let sealedTag: Data
+        if cipherSuite == TLSCipherSuite.TLS_CHACHA20_POLY1305_SHA256 {
+            let nonceObj = try ChaChaPoly.Nonce(data: nonce)
+            let sealedBox = try ChaChaPoly.seal(innerPlaintext, using: clientSymmetricKey, nonce: nonceObj, authenticating: aad)
+            sealedCt = Data(sealedBox.ciphertext)
+            sealedTag = Data(sealedBox.tag)
+        } else {
+            let nonceObj = try AES.GCM.Nonce(data: nonce)
+            let sealedBox = try AES.GCM.seal(innerPlaintext, using: clientSymmetricKey, nonce: nonceObj, authenticating: aad)
+            sealedCt = Data(sealedBox.ciphertext)
+            sealedTag = Data(sealedBox.tag)
         }
 
-        var record = Data(count: 5 + encryptedLen)
-        record.withUnsafeMutableBytes { buffer in
-            let ptr = buffer.bindMemory(to: UInt8.self)
-            buffer[0] = 0x17
-            buffer[1] = 0x03
-            buffer[2] = 0x03
-            buffer[3] = UInt8(encryptedLen >> 8)
-            buffer[4] = UInt8(encryptedLen & 0xFF)
-            combined.withUnsafeBytes { srcBuffer in
-                let src = srcBuffer.bindMemory(to: UInt8.self)
-                for i in 12..<combined.count {
-                    ptr[5 + i - 12] = src[i]
-                }
-            }
-        }
+        var record = Data(capacity: 5 + encryptedLen)
+        record.append(contentsOf: [0x17, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
+        record.append(sealedCt)
+        record.append(sealedTag)
 
         return record
     }
