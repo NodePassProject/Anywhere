@@ -22,6 +22,12 @@ struct ContentView: View {
                         ProxyListView()
                     }
                 }
+
+                Tab("Settings", systemImage: "gearshape") {
+                    NavigationStack {
+                        SettingsView()
+                    }
+                }
             }
         } else {
             TabView {
@@ -34,6 +40,11 @@ struct ContentView: View {
                     ProxyListView()
                 }
                 .tabItem { Label("Proxies", systemImage: "network") }
+
+                NavigationStack {
+                    SettingsView()
+                }
+                .tabItem { Label("Settings", systemImage: "gearshape") }
             }
         }
     }

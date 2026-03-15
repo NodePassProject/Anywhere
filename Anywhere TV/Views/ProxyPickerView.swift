@@ -42,6 +42,8 @@ struct ProxyPickerView: View {
                         }
                     }
                 }
+                .padding(.horizontal)
+                .navigationTitle("Select Proxy")
             } else {
                 ContentUnavailableView("No Proxies", systemImage: "network")
             }

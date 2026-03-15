@@ -420,7 +420,8 @@ class TLSClient {
                         key: SymmetricKey(data: keys.serverKey),
                         iv: keys.serverIV,
                         seqNum: seqNum,
-                        recordHeader: recordHeader
+                        recordHeader: recordHeader,
+                        cipherSuite: kd.cipherSuite
                     )
                     serverHandshakeSeqNum += 1
 
@@ -750,7 +751,8 @@ class TLSClient {
                 clientKey: appKeys.clientKey,
                 clientIV: appKeys.clientIV,
                 serverKey: appKeys.serverKey,
-                serverIV: appKeys.serverIV
+                serverIV: appKeys.serverIV,
+                cipherSuite: self.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
             )
             tlsConnection.connection = self.connection
             self.connection = nil
@@ -796,7 +798,8 @@ class TLSClient {
                 plaintext: finishedMsg,
                 key: SymmetricKey(data: keys.clientKey),
                 iv: keys.clientIV,
-                seqNum: 0
+                seqNum: 0,
+                cipherSuite: keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
             )
             ccsRecord.append(finishedRecord)
 
