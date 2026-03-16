@@ -23,6 +23,10 @@ struct ProxyEditorView: View {
     @State private var flow = ""
     @State private var security = "none"
 
+    // WebSocket fields
+    @State private var wsHost = ""
+    @State private var wsPath = "/"
+
     // XHTTP fields
     @State private var xhttpHost = ""
     @State private var xhttpPath = "/"
@@ -210,6 +214,25 @@ struct ProxyEditorView: View {
                             }
                         }
                     }
+                    if transport == "ws" {
+                        LabeledContent {
+                            TextField("Host", text: $wsHost)
+                                .keyboardType(.URL)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                        LabeledContent {
+                            TextField("/", text: $wsPath)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                    }
                     if transport == "xhttp" {
                         LabeledContent {
                             TextField("Host", text: $xhttpHost)
@@ -364,6 +387,11 @@ struct ProxyEditorView: View {
         flow = configuration.flow ?? ""
         security = configuration.security
 
+        if let ws = configuration.websocket {
+            wsHost = ws.host
+            wsPath = ws.path
+        }
+
         if let xhttp = configuration.xhttp {
             xhttpHost = xhttp.host
             xhttpPath = xhttp.path
@@ -468,6 +496,13 @@ struct ProxyEditorView: View {
             )
         }
 
+        var websocketConfiguration: WebSocketConfiguration?
+        if transport == "ws" {
+            let host = wsHost.isEmpty ? serverAddress : wsHost
+            let path = wsPath.isEmpty ? "/" : wsPath
+            websocketConfiguration = WebSocketConfiguration(host: host, path: path)
+        }
+
         var xhttpConfiguration: XHTTPConfiguration?
         if transport == "xhttp" {
             let host = xhttpHost.isEmpty ? serverAddress : xhttpHost
@@ -502,6 +537,7 @@ struct ProxyEditorView: View {
             security: security,
             tls: tlsConfiguration,
             reality: realityConfiguration,
+            websocket: websocketConfiguration,
             xhttp: xhttpConfiguration,
             muxEnabled: muxEnabled,
             xudpEnabled: xudpEnabled,
