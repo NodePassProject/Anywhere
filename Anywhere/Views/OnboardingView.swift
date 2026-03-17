@@ -5,6 +5,7 @@
 //  Created by Argsment Limited on 3/9/26.
 //
 
+import Foundation
 import SwiftUI
 
 struct OnboardingView: View {
@@ -225,6 +226,10 @@ struct OnboardingView: View {
     // MARK: - Actions
 
     private func finishOnboarding() {
+        // Trigger a network request to prompt the local network permission
+        // dialog on China devices.
+        triggerNetworkPermission()
+
         // Apply AD block setting
         if adBlockEnabled {
             if let adBlock = RuleSetStore.shared.ruleSets.first(where: { $0.name == "ADBlock" }) {
@@ -253,6 +258,13 @@ struct OnboardingView: View {
         String(countryCode.unicodeScalars.compactMap {
             UnicodeScalar(127397 + $0.value)
         }.map(Character.init))
+    }
+
+    /// Fire-and-forget request to 1.1.1.1 to trigger the network permission
+    /// dialog on China-region devices.
+    private func triggerNetworkPermission() {
+        guard let url = URL(string: "http://1.1.1.1") else { return }
+        URLSession.shared.dataTask(with: url) { _, _, _ in }.resume()
     }
 
     private func notifySettingsChanged() {

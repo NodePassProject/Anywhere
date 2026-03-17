@@ -697,9 +697,10 @@ class ProxyClient {
 
     /// Connects using XHTTP transport. Routes to plain HTTP, HTTPS, or Reality.
     ///
-    /// Mode auto-resolution (matching Xray-core dialer.go:280-289):
+    /// Mode & HTTP version resolution (matching Xray-core dialer.go:78-95, 280-289):
     /// - Reality → stream-one with HTTP/2
-    /// - TLS/none → packet-up (CDN-safe, GET + POST over HTTP/1.1)
+    /// - TLS → HTTP version from `decideHTTPVersion`; auto mode uses stream-one for HTTP/2
+    /// - none → packet-up with HTTP/1.1
     private func connectWithXHTTP(
         command: ProxyCommand,
         destinationHost: String,
@@ -712,10 +713,27 @@ class ProxyClient {
             return
         }
 
-        // Resolve mode: auto → actual mode based on security
+        // Determine HTTP version for TLS (matching Xray-core decideHTTPVersion dialer.go:78-95)
+        let useHTTP2ForTLS: Bool
+        if let tlsConfig = configuration.tls, configuration.reality == nil {
+            let alpn = tlsConfig.alpn ?? []
+            if alpn.count == 1 && alpn[0] == "http/1.1" {
+                useHTTP2ForTLS = false
+            } else {
+                useHTTP2ForTLS = true
+            }
+        } else {
+            useHTTP2ForTLS = false
+        }
+
+        // Resolve mode: auto → actual mode based on security and HTTP version
         let resolvedMode: XHTTPMode
         if xhttpConfig.mode == .auto {
-            resolvedMode = configuration.reality != nil ? .streamOne : .packetUp
+            if configuration.reality != nil || useHTTP2ForTLS {
+                resolvedMode = .streamOne
+            } else {
+                resolvedMode = .packetUp
+            }
         } else {
             resolvedMode = xhttpConfig.mode
         }
@@ -725,7 +743,7 @@ class ProxyClient {
         if let realityConfig = configuration.reality {
             connectXHTTPReality(realityConfig: realityConfig, xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         } else if configuration.tls != nil {
-            connectXHTTPS(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            connectXHTTPS(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, useHTTP2: useHTTP2ForTLS, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         } else {
             connectXHTTPPlain(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         }
@@ -832,6 +850,7 @@ class ProxyClient {
         xhttpConfig: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
+        useHTTP2: Bool,
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
@@ -843,12 +862,19 @@ class ProxyClient {
             return
         }
 
-        // Force ALPN to http/1.1 for XHTTP over TLS
-        let tlsConfiguration = TLSConfiguration(
-            serverName: baseTLSConfig.serverName,
-            alpn: ["http/1.1"],
-            fingerprint: baseTLSConfig.fingerprint
-        )
+        // Match Xray-core decideHTTPVersion (dialer.go:78-95):
+        // HTTP/2 → use user's ALPN config (defaults to ["h2", "http/1.1"])
+        // HTTP/1.1 → force ALPN to ["http/1.1"]
+        let tlsConfiguration: TLSConfiguration
+        if useHTTP2 {
+            tlsConfiguration = baseTLSConfig
+        } else {
+            tlsConfiguration = TLSConfiguration(
+                serverName: baseTLSConfig.serverName,
+                alpn: ["http/1.1"],
+                fingerprint: baseTLSConfig.fingerprint
+            )
+        }
 
         let tlsClient = TLSClient(configuration: tlsConfiguration)
 
@@ -862,57 +888,72 @@ class ProxyClient {
                 self.tlsClient = tlsClient
                 self.tlsConnection = tlsConnection
 
-                // Upload connection factory for packet-up and stream-up modes
-                let needsUpload = mode == .packetUp || mode == .streamUp
-                let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = needsUpload ? { [weak self] factoryCompletion in
-                    guard let self else {
-                        factoryCompletion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                        return
-                    }
-                    // Use same http/1.1-forced TLS configuration for upload connection
-                    let uploadTLSClient = TLSClient(configuration: tlsConfiguration)
-                    if let chain = self.configuration.chain, !chain.isEmpty {
-                        self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil) { tunnelResult in
-                            switch tunnelResult {
-                            case .success(let uploadTunnel):
-                                uploadTLSClient.connect(overTunnel: uploadTunnel) { result in
-                                    switch result {
-                                    case .success(let uploadTLSConnection):
-                                        factoryCompletion(.success(TransportClosures(
-                                            send: { data, completion in uploadTLSConnection.send(data: data, completion: completion) },
-                                            receive: { completion in uploadTLSConnection.receive { data, error in completion(data, false, error) } },
-                                            cancel: { uploadTLSConnection.cancel() }
-                                        )))
-                                    case .failure(let error):
-                                        factoryCompletion(.failure(error))
+                if useHTTP2 {
+                    // HTTP/2: single connection, stream-one (same as Reality path)
+                    let xhttpConnection = XHTTPConnection(
+                        tlsConnection: tlsConnection,
+                        configuration: xhttpConfig,
+                        mode: mode,
+                        sessionId: sessionId,
+                        useHTTP2: true
+                    )
+                    self.xhttpConnection = xhttpConnection
+                    self.performXHTTPSetup(
+                        xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
+                        destinationPort: destinationPort, initialData: initialData, completion: completion
+                    )
+                } else {
+                    // HTTP/1.1: separate upload connection for packet-up and stream-up
+                    let needsUpload = mode == .packetUp || mode == .streamUp
+                    let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = needsUpload ? { [weak self] factoryCompletion in
+                        guard let self else {
+                            factoryCompletion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                            return
+                        }
+                        let uploadTLSClient = TLSClient(configuration: tlsConfiguration)
+                        if let chain = self.configuration.chain, !chain.isEmpty {
+                            self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil) { tunnelResult in
+                                switch tunnelResult {
+                                case .success(let uploadTunnel):
+                                    uploadTLSClient.connect(overTunnel: uploadTunnel) { result in
+                                        switch result {
+                                        case .success(let uploadTLSConnection):
+                                            factoryCompletion(.success(TransportClosures(
+                                                send: { data, completion in uploadTLSConnection.send(data: data, completion: completion) },
+                                                receive: { completion in uploadTLSConnection.receive { data, error in completion(data, false, error) } },
+                                                cancel: { uploadTLSConnection.cancel() }
+                                            )))
+                                        case .failure(let error):
+                                            factoryCompletion(.failure(error))
+                                        }
                                     }
+                                case .failure(let error):
+                                    factoryCompletion(.failure(error))
                                 }
-                            case .failure(let error):
-                                factoryCompletion(.failure(error))
+                            }
+                        } else {
+                            uploadTLSClient.connect(host: self.configuration.serverAddress, port: self.configuration.serverPort) { result in
+                                switch result {
+                                case .success(let uploadTLSConnection):
+                                    factoryCompletion(.success(TransportClosures(
+                                        send: { data, completion in uploadTLSConnection.send(data: data, completion: completion) },
+                                        receive: { completion in uploadTLSConnection.receive { data, error in completion(data, false, error) } },
+                                        cancel: { uploadTLSConnection.cancel() }
+                                    )))
+                                case .failure(let error):
+                                    factoryCompletion(.failure(error))
+                                }
                             }
                         }
-                    } else {
-                        uploadTLSClient.connect(host: self.configuration.serverAddress, port: self.configuration.serverPort) { result in
-                            switch result {
-                            case .success(let uploadTLSConnection):
-                                factoryCompletion(.success(TransportClosures(
-                                    send: { data, completion in uploadTLSConnection.send(data: data, completion: completion) },
-                                    receive: { completion in uploadTLSConnection.receive { data, error in completion(data, false, error) } },
-                                    cancel: { uploadTLSConnection.cancel() }
-                                )))
-                            case .failure(let error):
-                                factoryCompletion(.failure(error))
-                            }
-                        }
-                    }
-                } : nil
+                    } : nil
 
-                let xhttpConnection = XHTTPConnection(tlsConnection: tlsConnection, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
-                self.xhttpConnection = xhttpConnection
-                self.performXHTTPSetup(
-                    xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
-                    destinationPort: destinationPort, initialData: initialData, completion: completion
-                )
+                    let xhttpConnection = XHTTPConnection(tlsConnection: tlsConnection, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
+                    self.xhttpConnection = xhttpConnection
+                    self.performXHTTPSetup(
+                        xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
+                        destinationPort: destinationPort, initialData: initialData, completion: completion
+                    )
+                }
 
             case .failure(let error):
                 completion(.failure(error))

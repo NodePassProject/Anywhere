@@ -611,7 +611,6 @@ class TLSClient {
     private func validateCertificate(completion: @escaping (Result<Void, Error>) -> Void) {
         if let defaults = UserDefaults(suiteName: "group.com.argsment.Anywhere"),
            defaults.bool(forKey: "allowInsecure") {
-            logger.warning("[TLS] Certificate validation skipped (Allow Insecure enabled)")
             completion(.success(()))
             return
         }
