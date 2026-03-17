@@ -53,7 +53,7 @@ class XHTTPConnection {
     /// Leftover data after HTTP response headers.
     private var headerBuffer = Data()
 
-    // HTTP/2 state (for Reality + stream-one)
+    // HTTP/2 state
     private let useHTTP2: Bool
     private var h2ReadBuffer = Data()
     private var h2DataBuffer = Data()
@@ -66,6 +66,10 @@ class XHTTPConnection {
     private var h2MaxFrameSize: Int = 16384
     private var h2ResponseReceived = false
     private var h2StreamClosed = false
+
+    // HTTP/2 multiplexing state (for stream-up / packet-up over H2)
+    private var h2UploadStreamId: UInt32 = 3      // Fixed upload stream for stream-up
+    private var h2NextPacketStreamId: UInt32 = 3   // Next stream ID for packet-up uploads
 
     var isConnected: Bool {
         lock.lock()
@@ -274,6 +278,7 @@ class XHTTPConnection {
     ///   and establishes the upload connection via the factory.
     func performSetup(completion: @escaping (Error?) -> Void) {
         if useHTTP2 {
+            // HTTP/2: all modes go through H2 setup with mode-specific stream handling
             performH2Setup(completion: completion)
         } else if mode == .streamOne {
             performStreamOneSetup(completion: completion)
@@ -543,7 +548,14 @@ class XHTTPConnection {
     /// Sends data through the XHTTP connection.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         if useHTTP2 {
-            sendH2Data(data: data, completion: completion)
+            if mode == .packetUp {
+                sendH2PacketUp(data: data, completion: completion)
+            } else if mode == .streamUp {
+                sendH2Data(data: data, streamId: h2UploadStreamId, completion: completion)
+            } else {
+                // stream-one: upload and download share stream 1
+                sendH2Data(data: data, streamId: 1, completion: completion)
+            }
         } else if mode == .streamOne {
             sendStreamOne(data: data, completion: completion)
         } else if mode == .streamUp {
@@ -975,17 +987,40 @@ extension XHTTPConnection {
         return result
     }
 
-    /// Encodes a request header block for stream-one POST.
-    private func encodeH2RequestHeaders() -> Data {
+    /// Encodes a request header block for HTTP/2 HEADERS.
+    ///
+    /// - Parameters:
+    ///   - method: HTTP method ("GET" or "POST")
+    ///   - includeMeta: Whether to include session ID in path/headers (for stream-up/packet-up download)
+    private func encodeH2RequestHeaders(method: String = "POST", includeMeta: Bool = false) -> Data {
         var block = Data()
 
-        // :method POST — static table index 3 (exact match)
-        block.append(0x83)
+        // :method — static table indexed
+        if method == "GET" {
+            block.append(0x82) // GET = index 2
+        } else {
+            block.append(0x83) // POST = index 3
+        }
         // :scheme https — static table index 7 (exact match)
         block.append(0x87)
 
-        // :path — literal without indexing, name index 4
-        let path = configuration.normalizedPath
+        // :path — build with optional session ID metadata
+        var path = configuration.normalizedPath
+        if includeMeta && !sessionId.isEmpty && configuration.sessionPlacement == .path {
+            path = appendToPath(path, sessionId)
+        }
+        if includeMeta && path.last != "/" { path += "/" }
+        // Append query-based metadata to path
+        if includeMeta {
+            var queryParts: [String] = []
+            if !sessionId.isEmpty && configuration.sessionPlacement == .query {
+                queryParts.append("\(configuration.normalizedSessionKey)=\(sessionId)")
+            }
+            if !queryParts.isEmpty {
+                path += "?" + queryParts.joined(separator: "&")
+            }
+        }
+
         if path == "/" {
             block.append(0x84) // Indexed: :path / (index 4)
         } else {
@@ -1002,8 +1037,8 @@ extension XHTTPConnection {
         block.append(contentsOf: authBytes)
         block.append(contentsOf: Self.hpackEncodeString(configuration.host))
 
-        // content-type: application/grpc (if enabled)
-        if !configuration.noGRPCHeader {
+        // content-type: application/grpc (only for POST methods, if enabled)
+        if method != "GET" && !configuration.noGRPCHeader {
             // name index 31
             var ctBytes = Self.hpackEncodeInteger(31, prefixBits: 4)
             ctBytes[0] &= 0x0F
@@ -1011,6 +1046,130 @@ extension XHTTPConnection {
             block.append(contentsOf: Self.hpackEncodeString("application/grpc"))
         }
 
+        // Session metadata in headers/cookies (non-path placements)
+        if includeMeta && !sessionId.isEmpty {
+            switch configuration.sessionPlacement {
+            case .header:
+                block.append(0x00)
+                block.append(contentsOf: Self.hpackEncodeString(configuration.normalizedSessionKey.lowercased()))
+                block.append(contentsOf: Self.hpackEncodeString(sessionId))
+            case .cookie:
+                var cookieBytes = Self.hpackEncodeInteger(32, prefixBits: 4)
+                cookieBytes[0] &= 0x0F
+                block.append(contentsOf: cookieBytes)
+                block.append(contentsOf: Self.hpackEncodeString("\(configuration.normalizedSessionKey)=\(sessionId)"))
+            default:
+                break // path and query handled above
+            }
+        }
+
+        appendH2CommonHeaders(to: &block, path: path)
+
+        return block
+    }
+
+    /// Encodes HEADERS for an upload POST stream (stream-up or packet-up).
+    ///
+    /// - Parameter seq: Sequence number for packet-up (nil for stream-up).
+    private func encodeH2UploadHeaders(seq: Int64?) -> Data {
+        var block = Data()
+
+        // :method POST (or configured method)
+        let method = configuration.uplinkHTTPMethod
+        if method == "POST" {
+            block.append(0x83) // POST = index 3
+        } else if method == "GET" {
+            block.append(0x82) // GET = index 2
+        } else {
+            // Literal :method
+            var methodBytes = Self.hpackEncodeInteger(2, prefixBits: 4)
+            methodBytes[0] &= 0x0F
+            block.append(contentsOf: methodBytes)
+            block.append(contentsOf: Self.hpackEncodeString(method))
+        }
+        // :scheme https
+        block.append(0x87)
+
+        // :path — with session ID and optional seq
+        var path = configuration.normalizedPath
+        if !sessionId.isEmpty && configuration.sessionPlacement == .path {
+            path = appendToPath(path, sessionId)
+        }
+        if let seq, configuration.seqPlacement == .path {
+            path = appendToPath(path, "\(seq)")
+        }
+        // Append query-based metadata to path
+        var queryParts: [String] = []
+        if !sessionId.isEmpty && configuration.sessionPlacement == .query {
+            queryParts.append("\(configuration.normalizedSessionKey)=\(sessionId)")
+        }
+        if let seq, configuration.seqPlacement == .query {
+            queryParts.append("\(configuration.normalizedSeqKey)=\(seq)")
+        }
+        if !queryParts.isEmpty {
+            path += "?" + queryParts.joined(separator: "&")
+        }
+
+        var pathBytes = Self.hpackEncodeInteger(4, prefixBits: 4)
+        pathBytes[0] &= 0x0F
+        block.append(contentsOf: pathBytes)
+        block.append(contentsOf: Self.hpackEncodeString(path))
+
+        // :authority
+        var authBytes = Self.hpackEncodeInteger(1, prefixBits: 4)
+        authBytes[0] &= 0x0F
+        block.append(contentsOf: authBytes)
+        block.append(contentsOf: Self.hpackEncodeString(configuration.host))
+
+        // content-type: application/grpc (if enabled)
+        if !configuration.noGRPCHeader {
+            var ctBytes = Self.hpackEncodeInteger(31, prefixBits: 4)
+            ctBytes[0] &= 0x0F
+            block.append(contentsOf: ctBytes)
+            block.append(contentsOf: Self.hpackEncodeString("application/grpc"))
+        }
+
+        // Session metadata in headers/cookies (non-path placements)
+        if !sessionId.isEmpty {
+            switch configuration.sessionPlacement {
+            case .header:
+                block.append(0x00)
+                block.append(contentsOf: Self.hpackEncodeString(configuration.normalizedSessionKey.lowercased()))
+                block.append(contentsOf: Self.hpackEncodeString(sessionId))
+            case .cookie:
+                var cookieBytes = Self.hpackEncodeInteger(32, prefixBits: 4)
+                cookieBytes[0] &= 0x0F
+                block.append(contentsOf: cookieBytes)
+                block.append(contentsOf: Self.hpackEncodeString("\(configuration.normalizedSessionKey)=\(sessionId)"))
+            default:
+                break
+            }
+        }
+
+        // Seq metadata in headers/cookies (non-path placements)
+        if let seq {
+            switch configuration.seqPlacement {
+            case .header:
+                block.append(0x00)
+                block.append(contentsOf: Self.hpackEncodeString(configuration.normalizedSeqKey.lowercased()))
+                block.append(contentsOf: Self.hpackEncodeString("\(seq)"))
+            case .cookie:
+                var cookieBytes = Self.hpackEncodeInteger(32, prefixBits: 4)
+                cookieBytes[0] &= 0x0F
+                block.append(contentsOf: cookieBytes)
+                block.append(contentsOf: Self.hpackEncodeString("\(configuration.normalizedSeqKey)=\(seq)"))
+            default:
+                break
+            }
+        }
+
+        appendH2CommonHeaders(to: &block, path: path)
+
+        return block
+    }
+
+    /// Appends common HPACK headers (user-agent, padding, custom headers) to a header block.
+    private func appendH2CommonHeaders(to block: inout Data, path: String) {
         // user-agent — name index 58
         let ua = configuration.headers["User-Agent"] ?? defaultUserAgent
         var uaBytes = Self.hpackEncodeInteger(58, prefixBits: 4)
@@ -1019,12 +1178,10 @@ extension XHTTPConnection {
         block.append(contentsOf: Self.hpackEncodeString(ua))
 
         // X-Padding — applied based on configuration
-        // Default (non-obfs): Referer header with x_padding query param
-        // Obfs mode: Uses configured placement (header, queryInHeader, cookie, query)
         let padding = configuration.generatePadding()
         if !configuration.xPaddingObfsMode {
             // Default: Referer (name index 51) with padding in URL query
-            let referer = "https://\(configuration.host)\(configuration.normalizedPath)?\(configuration.xPaddingKey)=\(padding)"
+            let referer = "https://\(configuration.host)\(path)?\(configuration.xPaddingKey)=\(padding)"
             var refBytes = Self.hpackEncodeInteger(51, prefixBits: 4)
             refBytes[0] &= 0x0F
             block.append(contentsOf: refBytes)
@@ -1032,18 +1189,15 @@ extension XHTTPConnection {
         } else {
             switch configuration.xPaddingPlacement {
             case .header:
-                // Custom header with padding value
                 block.append(0x00)
                 block.append(contentsOf: Self.hpackEncodeString(configuration.xPaddingHeader.lowercased()))
                 block.append(contentsOf: Self.hpackEncodeString(padding))
             case .queryInHeader:
-                // Custom header with padding in URL query
-                let headerValue = "https://\(configuration.host)\(configuration.normalizedPath)?\(configuration.xPaddingKey)=\(padding)"
+                let headerValue = "https://\(configuration.host)\(path)?\(configuration.xPaddingKey)=\(padding)"
                 block.append(0x00)
                 block.append(contentsOf: Self.hpackEncodeString(configuration.xPaddingHeader.lowercased()))
                 block.append(contentsOf: Self.hpackEncodeString(headerValue))
             case .cookie:
-                // Cookie header (name index 32)
                 var cookieBytes = Self.hpackEncodeInteger(32, prefixBits: 4)
                 cookieBytes[0] &= 0x0F
                 block.append(contentsOf: cookieBytes)
@@ -1055,13 +1209,10 @@ extension XHTTPConnection {
 
         // Custom headers (literal, new names)
         for (key, value) in configuration.headers where key != "User-Agent" {
-            // 0x00 = literal without indexing, new name
             block.append(0x00)
             block.append(contentsOf: Self.hpackEncodeString(key.lowercased()))
             block.append(contentsOf: Self.hpackEncodeString(value))
         }
-
-        return block
     }
 
     /// Checks if the HEADERS response block starts with :status 200.
@@ -1283,20 +1434,51 @@ extension XHTTPConnection {
         }
     }
 
-    /// Sends the HEADERS frame for the stream-one POST, then waits for the response.
+    /// Sends HEADERS frames based on the current mode, then waits for the download response.
+    ///
+    /// - stream-one: stream 1 = POST (bidirectional)
+    /// - stream-up:  stream 1 = GET (download), stream 3 = POST (upload, streaming)
+    /// - packet-up:  stream 1 = GET (download); upload streams opened per-packet in sendH2PacketUp
     private func sendH2Headers(completion: @escaping (Error?) -> Void) {
-        let headerBlock = encodeH2RequestHeaders()
-        // END_HEADERS (0x04), but NOT END_STREAM (body follows)
-        let headersFrame = buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: 1, payload: headerBlock)
-
-        downloadSend(headersFrame) { [weak self] error in
-            if let error {
-                completion(XHTTPError.setupFailed("H2 HEADERS send failed: \(error.localizedDescription)"))
-                return
+        if mode == .streamOne {
+            // Stream-one: single bidirectional POST on stream 1
+            let headerBlock = encodeH2RequestHeaders(method: "POST", includeMeta: false)
+            let headersFrame = buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: 1, payload: headerBlock)
+            downloadSend(headersFrame) { [weak self] error in
+                if let error {
+                    completion(XHTTPError.setupFailed("H2 HEADERS send failed: \(error.localizedDescription)"))
+                    return
+                }
+                self?.readH2ResponseHeaders(completion: completion)
             }
+        } else {
+            // Stream-up / packet-up: stream 1 = GET download, then open upload stream(s)
+            let downloadHeaders = encodeH2RequestHeaders(method: "GET", includeMeta: true)
+            let downloadFrame = buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: 1, payload: downloadHeaders)
 
-            // Phase 4: Wait for server's HEADERS response (200 OK)
-            self?.readH2ResponseHeaders(completion: completion)
+            downloadSend(downloadFrame) { [weak self] error in
+                guard let self else { return }
+                if let error {
+                    completion(XHTTPError.setupFailed("H2 download HEADERS send failed: \(error.localizedDescription)"))
+                    return
+                }
+
+                if self.mode == .streamUp {
+                    // Stream-up: also open upload POST on stream 3 (streaming, no END_STREAM)
+                    let uploadHeaders = self.encodeH2UploadHeaders(seq: nil)
+                    let uploadFrame = self.buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: self.h2UploadStreamId, payload: uploadHeaders)
+                    self.downloadSend(uploadFrame) { [weak self] error in
+                        if let error {
+                            completion(XHTTPError.setupFailed("H2 upload HEADERS send failed: \(error.localizedDescription)"))
+                            return
+                        }
+                        self?.readH2ResponseHeaders(completion: completion)
+                    }
+                } else {
+                    // Packet-up: upload streams opened per-packet in sendH2PacketUp
+                    self.readH2ResponseHeaders(completion: completion)
+                }
+            }
         }
     }
 
@@ -1395,33 +1577,84 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Send
 
-    /// Sends data as HTTP/2 DATA frame(s) on stream 1.
-    private func sendH2Data(data: Data, completion: @escaping (Error?) -> Void) {
+    /// Sends data as HTTP/2 DATA frame(s) on the given stream.
+    private func sendH2Data(data: Data, streamId: UInt32, completion: @escaping (Error?) -> Void) {
         lock.lock()
         let maxSize = h2MaxFrameSize
         lock.unlock()
 
         if data.count <= maxSize {
-            let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: 1, payload: data)
+            let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: data)
             downloadSend(frame, completion)
         } else {
             // Split into multiple DATA frames
             let firstChunk = data.prefix(maxSize)
             let remaining = data.suffix(from: data.startIndex + maxSize)
-            let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: 1, payload: Data(firstChunk))
+            let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: Data(firstChunk))
             downloadSend(frame) { [weak self] error in
                 if let error {
                     completion(error)
                     return
                 }
-                self?.sendH2Data(data: Data(remaining), completion: completion)
+                self?.sendH2Data(data: Data(remaining), streamId: streamId, completion: completion)
+            }
+        }
+    }
+
+    /// Sends data as a packet-up POST: opens a new HTTP/2 stream with HEADERS + DATA + END_STREAM.
+    private func sendH2PacketUp(data: Data, completion: @escaping (Error?) -> Void) {
+        lock.lock()
+        let streamId = h2NextPacketStreamId
+        h2NextPacketStreamId += 2
+        let seq = nextSeq
+        nextSeq += 1
+        let maxSize = h2MaxFrameSize
+        lock.unlock()
+
+        // Build HEADERS for this upload POST (with session ID + seq metadata)
+        let headerBlock = encodeH2UploadHeaders(seq: seq)
+        // END_HEADERS but NOT END_STREAM (body follows)
+        let headersFrame: Data
+        if data.count <= maxSize {
+            // Small payload: send HEADERS, then DATA+END_STREAM
+            headersFrame = buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: streamId, payload: headerBlock)
+        } else {
+            headersFrame = buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: streamId, payload: headerBlock)
+        }
+
+        downloadSend(headersFrame) { [weak self] error in
+            if let error {
+                completion(error)
+                return
+            }
+            self?.sendH2PacketUpData(data: data, streamId: streamId, maxSize: maxSize, completion: completion)
+        }
+    }
+
+    /// Sends DATA frames for a packet-up upload stream, with END_STREAM on the last frame.
+    private func sendH2PacketUpData(data: Data, streamId: UInt32, maxSize: Int, completion: @escaping (Error?) -> Void) {
+        if data.count <= maxSize {
+            // Last (or only) chunk: set END_STREAM
+            let frame = buildH2Frame(type: Self.h2FrameData, flags: Self.h2FlagEndStream, streamId: streamId, payload: data)
+            downloadSend(frame, completion)
+        } else {
+            let firstChunk = data.prefix(maxSize)
+            let remaining = data.suffix(from: data.startIndex + maxSize)
+            let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: Data(firstChunk))
+            downloadSend(frame) { [weak self] error in
+                if let error {
+                    completion(error)
+                    return
+                }
+                self?.sendH2PacketUpData(data: Data(remaining), streamId: streamId, maxSize: maxSize, completion: completion)
             }
         }
     }
 
     // MARK: HTTP/2 Receive
 
-    /// Receives data from HTTP/2 DATA frames on stream 1.
+    /// Receives data from HTTP/2 DATA frames on the download stream (stream 1).
+    /// Frames for other streams (upload responses) are silently consumed.
     private func receiveH2Data(completion: @escaping (Data?, Error?) -> Void) {
         // Check buffered data first
         lock.lock()
@@ -1451,6 +1684,8 @@ extension XHTTPConnection {
                 completion(nil, nil) // EOF
 
             case .success(let frame):
+                let isDownloadStream = frame.streamId == 0 || frame.streamId == 1
+
                 switch frame.type {
                 case Self.h2FrameData:
                     // Send WINDOW_UPDATE to keep flow control open
@@ -1462,44 +1697,51 @@ extension XHTTPConnection {
                         wuPayload[2] = UInt8((increment >> 8) & 0xFF)
                         wuPayload[3] = UInt8(increment & 0xFF)
                         // Stream-level + connection-level WINDOW_UPDATE
-                        var updates = self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 1, payload: wuPayload)
+                        var updates = self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: frame.streamId, payload: wuPayload)
                         updates.append(self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: wuPayload))
                         self.downloadSend(updates) { _ in }
                     }
 
-                    if frame.flags & Self.h2FlagEndStream != 0 {
-                        self.lock.lock()
-                        self.h2StreamClosed = true
-                        self.lock.unlock()
+                    if isDownloadStream {
+                        if frame.flags & Self.h2FlagEndStream != 0 {
+                            self.lock.lock()
+                            self.h2StreamClosed = true
+                            self.lock.unlock()
+                        }
+
+                        if frame.payload.isEmpty {
+                            if frame.flags & Self.h2FlagEndStream != 0 {
+                                completion(nil, nil)
+                            } else {
+                                self.receiveH2Data(completion: completion)
+                            }
+                        } else {
+                            completion(frame.payload, nil)
+                        }
+                    } else {
+                        // Upload stream response data — ignore
+                        self.receiveH2Data(completion: completion)
                     }
 
-                    if frame.payload.isEmpty {
-                        // Empty DATA frame (possibly END_STREAM)
+                case Self.h2FrameHeaders:
+                    if isDownloadStream {
                         if frame.flags & Self.h2FlagEndStream != 0 {
+                            self.lock.lock()
+                            self.h2StreamClosed = true
+                            self.lock.unlock()
                             completion(nil, nil)
+                        } else if !self.h2ResponseReceived {
+                            if self.checkH2ResponseStatus(frame.payload) == nil {
+                                self.lock.lock()
+                                self.h2ResponseReceived = true
+                                self.lock.unlock()
+                            }
+                            self.receiveH2Data(completion: completion)
                         } else {
                             self.receiveH2Data(completion: completion)
                         }
                     } else {
-                        completion(frame.payload, nil)
-                    }
-
-                case Self.h2FrameHeaders:
-                    // Could be trailing headers (END_STREAM)
-                    if frame.flags & Self.h2FlagEndStream != 0 {
-                        self.lock.lock()
-                        self.h2StreamClosed = true
-                        self.lock.unlock()
-                        completion(nil, nil)
-                    } else if !self.h2ResponseReceived {
-                        // Late response headers
-                        if self.checkH2ResponseStatus(frame.payload) == nil {
-                            self.lock.lock()
-                            self.h2ResponseReceived = true
-                            self.lock.unlock()
-                        }
-                        self.receiveH2Data(completion: completion)
-                    } else {
+                        // Upload stream response headers — ignore
                         self.receiveH2Data(completion: completion)
                     }
 
@@ -1532,10 +1774,15 @@ extension XHTTPConnection {
                     completion(nil, nil)
 
                 case Self.h2FrameRstStream:
-                    self.lock.lock()
-                    self.h2StreamClosed = true
-                    self.lock.unlock()
-                    completion(nil, nil)
+                    if isDownloadStream {
+                        self.lock.lock()
+                        self.h2StreamClosed = true
+                        self.lock.unlock()
+                        completion(nil, nil)
+                    } else {
+                        // Upload stream reset — ignore
+                        self.receiveH2Data(completion: completion)
+                    }
 
                 default:
                     self.receiveH2Data(completion: completion)
