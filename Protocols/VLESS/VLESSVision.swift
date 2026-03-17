@@ -83,13 +83,14 @@ private let reshapeThreshold: Int = 8192 - 21  // 8171
 
 /// Split data that is too large for a single Vision-padded frame.
 /// Tries to split at the last TLS application data boundary; falls back to midpoint.
-/// Matches Xray-core's `ReshapeMultiBuffer`.
+/// Recurses until every chunk is below reshapeThreshold.
+/// Matches Xray-core's `ReshapeMultiBuffer` (which relies on buf.Buffer being capped at buf.Size).
 private func reshapeData(_ data: Data) -> [Data] {
     guard data.count >= reshapeThreshold else {
         return [data]
     }
 
-    // Find last occurrence of TLS application data header (0x17 0x03 0x03)
+    // Find last occurrence of TLS application data header (0x17 0x03 0x03) in valid range
     var splitIndex = data.count / 2
     data.withUnsafeBytes { ptr in
         let bytes = ptr.bindMemory(to: UInt8.self)
@@ -103,7 +104,11 @@ private func reshapeData(_ data: Data) -> [Data] {
         }
     }
 
-    return [data.prefix(splitIndex), data.suffix(from: data.index(data.startIndex, offsetBy: splitIndex))]
+    let first = data.prefix(splitIndex)
+    let second = data.suffix(from: data.index(data.startIndex, offsetBy: splitIndex))
+    // Recurse: either chunk may still exceed reshapeThreshold (unlike Xray-core where
+    // buf.Buffer is inherently capped at buf.Size = 8192 bytes)
+    return reshapeData(first) + reshapeData(second)
 }
 
 // MARK: - Padding Functions
