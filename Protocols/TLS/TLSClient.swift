@@ -490,12 +490,6 @@ class TLSClient {
         self.postHandshakeBuffer = remainingBuffer
 
         if foundServerFinished {
-            // Always validate server certificate (system trust or user-trusted SHA-256)
-            guard !serverCertificates.isEmpty else {
-                completion(.failure(TLSError.certificateValidationFailed("No server certificates received")))
-                return
-            }
-
             validateCertificate { [weak self] result in
                 guard let self else { return }
 
@@ -507,8 +501,9 @@ class TLSClient {
                     break
                 }
 
-                // Verify CertificateVerify signature
-                if let transcript = transcriptBeforeCertVerify,
+                // Verify CertificateVerify signature (skip when allowInsecure — no certs to verify against)
+                if !self.serverCertificates.isEmpty,
+                   let transcript = transcriptBeforeCertVerify,
                    let signature = certificateVerifySignature {
                     do {
                         try self.verifyCertificateVerify(
@@ -612,6 +607,11 @@ class TLSClient {
         if let defaults = UserDefaults(suiteName: "group.com.argsment.Anywhere"),
            defaults.bool(forKey: "allowInsecure") {
             completion(.success(()))
+            return
+        }
+
+        guard !serverCertificates.isEmpty else {
+            completion(.failure(TLSError.certificateValidationFailed("No server certificates received")))
             return
         }
 

@@ -1216,11 +1216,11 @@ class ProxyClient {
                 completion(.failure(error))
                 return
             }
-            let conn = NaiveProxyConnection(
+            let connection = NaiveProxyConnection(
                 tunnel: tunnel,
                 paddingType: tunnel.negotiatedPaddingType
             )
-            completion(.success(conn))
+            completion(.success(connection))
         }
     }
 }
