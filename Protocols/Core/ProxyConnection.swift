@@ -39,6 +39,7 @@ enum TLSVersion: UInt16 {
 class ProxyConnection: ProxyConnectionProtocol {
     var responseHeaderReceived = false
     let lock = UnfairLock()
+    private var pendingResponseHeaderBuffer = Data()
 
     /// The negotiated TLS version of the outer transport, if applicable.
     /// Returns `nil` for non-TLS transports (raw TCP).
@@ -163,31 +164,52 @@ class ProxyConnection: ProxyConnectionProtocol {
     ///   - data: The raw received data that may contain the response header.
     ///   - completion: Called with the payload data (header stripped) or an error.
     func processResponseHeader(data: Data, completion: @escaping (Data?, Error?) -> Void) {
-        lock.lock()
-        let needsHeaderProcessing = !responseHeaderReceived
-        if needsHeaderProcessing {
-            responseHeaderReceived = true
-        }
-        lock.unlock()
+        var output: Data?
+        var shouldReceiveMore = false
 
-        if needsHeaderProcessing {
-            do {
-                let headerLength = try VLESSProtocol.decodeResponseHeader(data: data)
-                if headerLength > 0 && data.count > headerLength {
-                    let remaining = Data(data.suffix(from: headerLength))
-                    completion(remaining, nil)
-                    return
-                } else if headerLength > 0 {
-                    receive(completion: completion)
-                    return
+        lock.lock()
+        if responseHeaderReceived {
+            output = data
+            lock.unlock()
+        } else {
+            pendingResponseHeaderBuffer.append(data)
+
+            let buffer = pendingResponseHeaderBuffer
+            if buffer.count < 2 {
+                shouldReceiveMore = true
+                lock.unlock()
+            } else if buffer[buffer.startIndex] != VLESSProtocol.version {
+                // No response header present; deliver buffered bytes as payload.
+                responseHeaderReceived = true
+                output = buffer
+                pendingResponseHeaderBuffer.removeAll(keepingCapacity: true)
+                lock.unlock()
+            } else {
+                let addonsLength = Int(buffer[buffer.index(buffer.startIndex, offsetBy: 1)])
+                let headerLength = 2 + addonsLength
+                if buffer.count < headerLength {
+                    shouldReceiveMore = true
+                    lock.unlock()
+                } else {
+                    responseHeaderReceived = true
+                    if buffer.count > headerLength {
+                        output = Data(buffer.suffix(from: headerLength))
+                    } else {
+                        shouldReceiveMore = true
+                    }
+                    pendingResponseHeaderBuffer.removeAll(keepingCapacity: true)
+                    lock.unlock()
                 }
-            } catch {
-                completion(nil, error)
-                return
             }
         }
 
-        completion(data, nil)
+        if let output {
+            completion(output, nil)
+        } else if shouldReceiveMore {
+            receive(completion: completion)
+        } else {
+            completion(data, nil)
+        }
     }
 }
 

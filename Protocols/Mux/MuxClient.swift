@@ -79,6 +79,7 @@ class MuxClient {
             network: network,
             targetHost: host,
             targetPort: port,
+            globalID: globalID,
             client: self
         )
         sessions[sessionID] = session
@@ -91,6 +92,13 @@ class MuxClient {
             if let error {
                 self.sessions.removeValue(forKey: sessionID)
                 completion(.failure(error))
+                return
+            }
+
+            // For XUDP, the first UDP payload must be sent on the New frame so the
+            // server parses GlobalID from a data-bearing packet.
+            if globalID != nil {
+                completion(.success(session))
                 return
             }
 

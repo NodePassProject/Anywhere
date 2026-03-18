@@ -372,7 +372,7 @@ class ProxyClient {
             sendProtocolHandshake(
                 over: directProxyConnection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
-                supportsVision: true, completion: completion
+                supportsVision: false, completion: completion
             )
         } else {
             let socket = BSDSocket()
@@ -391,7 +391,7 @@ class ProxyClient {
                 self.sendProtocolHandshake(
                     over: directProxyConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData,
-                    supportsVision: true, completion: completion
+                    supportsVision: false, completion: completion
                 )
             }
         }
@@ -1050,7 +1050,9 @@ class ProxyClient {
     /// Validates that the outer TLS connection is TLS 1.3 when using Vision flow.
     /// Matches Xray-core `outbound.go` lines 346-355.
     private func validateOuterTLSForVision(_ connection: ProxyConnection) -> Error? {
-        guard let version = connection.outerTLSVersion else { return nil }
+        guard let version = connection.outerTLSVersion else {
+            return ProxyError.protocolError("Vision requires outer TLS or REALITY transport")
+        }
         if version != .tls13 {
             return ProxyError.protocolError("Vision requires outer TLS 1.3, found \(version)")
         }
