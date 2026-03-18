@@ -7,15 +7,66 @@
 
 import Foundation
 
+/// Connection-scoped HPACK decoder that persists the dynamic table across
+/// all HEADERS frames on one HTTP/2 connection (RFC 7541 §2.2).
+///
+/// In HTTP/2 the HPACK compression context is shared per-connection, not
+/// per-stream.  The server may encode stream 3's `:status` as a dynamic
+/// table reference that was added while encoding stream 1's response.
+/// A stateless `decodeHeaders` call would fail to resolve that reference.
+///
+/// One instance should be created per ``HTTP2Session`` and used for every
+/// incoming HEADERS frame on that session.
+class HPACKDecoder {
+
+    private var dynamicTable: [(name: String, value: String)] = []
+
+    /// Decodes an HPACK header block, updating the persistent dynamic table.
+    func decodeHeaders(from data: Data) -> [(name: String, value: String)]? {
+        var headers: [(name: String, value: String)] = []
+        var offset = data.startIndex
+
+        while offset < data.endIndex {
+            let byte = data[offset]
+
+            if byte & 0x80 != 0 {
+                // §6.1 Indexed Header Field (1xxxxxxx)
+                let index = HPACKEncoder.decodeInteger(from: data, at: &offset, prefixBits: 7)
+                guard let index, let entry = HPACKEncoder.lookupEntry(index, dynamicTable: dynamicTable) else {
+                    return nil
+                }
+                headers.append(entry)
+
+            } else if byte & 0xC0 == 0x40 {
+                // §6.2.1 Literal with Incremental Indexing (01xxxxxx)
+                guard let (name, value) = HPACKEncoder.decodeLiteral(from: data, at: &offset, prefixBits: 6,
+                                                                     dynamicTable: dynamicTable) else { return nil }
+                headers.append((name, value))
+                dynamicTable.insert((name, value), at: 0)
+
+            } else if byte & 0xF0 == 0x00 || byte & 0xF0 == 0x10 {
+                // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed
+                guard let (name, value) = HPACKEncoder.decodeLiteral(from: data, at: &offset, prefixBits: 4,
+                                                                     dynamicTable: dynamicTable) else { return nil }
+                headers.append((name, value))
+
+            } else if byte & 0xE0 == 0x20 {
+                // §6.3 Dynamic Table Size Update (001xxxxx)
+                let _ = HPACKEncoder.decodeInteger(from: data, at: &offset, prefixBits: 5)
+            } else {
+                return nil
+            }
+        }
+
+        return headers
+    }
+}
+
 /// Minimal HPACK encoder/decoder for the NaiveProxy CONNECT tunnel.
 ///
-/// Only implements the subset needed for a single CONNECT request/response:
-/// - Integer encoding/decoding (RFC 7541 §5.1)
-/// - String encoding (raw only) and decoding (raw + Huffman)
-/// - Indexed header field (1xxxxxxx)
-/// - Literal without indexing (0000xxxx)
-/// - Literal with incremental indexing (01xxxxxx) — decode only
-/// - Static table lookup
+/// Static encoding helpers for CONNECT requests and stateless decoding
+/// for use cases that don't need a persistent dynamic table.
+/// For connection-scoped decoding, use ``HPACKDecoder`` instead.
 enum HPACKEncoder {
 
     // MARK: - CONNECT Request Encoding
@@ -191,7 +242,7 @@ enum HPACKEncoder {
     // MARK: - Literal Header Decoding
 
     /// Decodes a literal header field from `data` at `offset`.
-    private static func decodeLiteral(
+    static func decodeLiteral(
         from data: Data,
         at offset: inout Int,
         prefixBits: Int,
@@ -218,7 +269,7 @@ enum HPACKEncoder {
 
     /// Looks up a header by index (1-based). Static table is indices 1–61,
     /// dynamic table starts at 62.
-    private static func lookupEntry(
+    static func lookupEntry(
         _ index: Int,
         dynamicTable: [(name: String, value: String)]
     ) -> (name: String, value: String)? {

@@ -103,8 +103,8 @@ extension ProxyConfiguration {
             }
         }
 
-        // Parse transport configurations
-        let (wsConfig, huConfig, xhttpConfig) = parseTransportConfigs(from: params, transport: transport, serverAddress: host)
+        // Parse transport configurations (pass TLS/Reality server names for host fallback)
+        let (wsConfig, huConfig, xhttpConfig) = parseTransportConfigs(from: params, transport: transport, serverAddress: host, tlsServerName: tlsConfiguration?.serverName, realityServerName: realityConfiguration?.serverName)
 
         // Parse mux and xudp flags (default true, matching Xray-core behavior)
         let muxEnabled = params["mux"].map { $0 != "false" && $0 != "0" } ?? true
@@ -208,7 +208,7 @@ extension ProxyConfiguration {
             tlsConfiguration = try TLSConfiguration.parse(from: params, serverAddress: host)
         }
 
-        let (wsConfig, huConfig, xhttpConfig) = parseTransportConfigs(from: params, transport: transport, serverAddress: host)
+        let (wsConfig, huConfig, xhttpConfig) = parseTransportConfigs(from: params, transport: transport, serverAddress: host, tlsServerName: tlsConfiguration?.serverName)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
@@ -330,7 +330,9 @@ extension ProxyConfiguration {
     private static func parseTransportConfigs(
         from params: [String: String],
         transport: String,
-        serverAddress: String
+        serverAddress: String,
+        tlsServerName: String? = nil,
+        realityServerName: String? = nil
     ) -> (WebSocketConfiguration?, HTTPUpgradeConfiguration?, XHTTPConfiguration?) {
         var wsConfig: WebSocketConfiguration? = nil
         if transport == "ws" {
@@ -344,7 +346,7 @@ extension ProxyConfiguration {
 
         var xhttpConfig: XHTTPConfiguration? = nil
         if transport == "xhttp" {
-            xhttpConfig = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress)
+            xhttpConfig = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress, tlsServerName: tlsServerName, realityServerName: realityServerName)
         }
 
         return (wsConfig, huConfig, xhttpConfig)

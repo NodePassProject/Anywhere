@@ -110,7 +110,7 @@ extension ProxyConfiguration {
 
         var xhttpConfiguration: XHTTPConfiguration? = nil
         if transport == "xhttp" {
-            let xhttpHost = (configurationDict["xhttpHost"] as? String) ?? serverAddress
+            let xhttpHost = (configurationDict["xhttpHost"] as? String) ?? tlsConfiguration?.serverName ?? realityConfiguration?.serverName ?? serverAddress
             let xhttpPath = (configurationDict["xhttpPath"] as? String) ?? "/"
             let xhttpModeStr = (configurationDict["xhttpMode"] as? String) ?? "auto"
             let xhttpMode = XHTTPMode(rawValue: xhttpModeStr) ?? .auto

@@ -190,6 +190,16 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return p
     }
 
+    /// Normalized query string extracted from path (portion after "?").
+    /// Matches Xray-core `GetNormalizedQuery()` in `config.go`.
+    var normalizedQuery: String {
+        let parts = path.split(separator: "?", maxSplits: 1)
+        if parts.count > 1 {
+            return String(parts[1])
+        }
+        return ""
+    }
+
     /// Normalized session key, auto-determined by placement if not set.
     /// Matches Xray-core `GetNormalizedSessionKey()` in `config.go`.
     var normalizedSessionKey: String {
@@ -240,8 +250,14 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
     /// Parse XHTTP parameters from VLESS URL query parameters.
     ///
     /// Expected parameters: `type=xhttp&host=example.com&path=/xhttp&mode=packet-up&extra={...}`
-    static func parse(from params: [String: String], serverAddress: String) -> XHTTPConfiguration? {
-        let host = params["host"] ?? serverAddress
+    ///
+    /// Host fallback chain matches Xray-core `dialer.go:264-273`:
+    /// 1. Explicit `host` URL parameter
+    /// 2. TLS ServerName (SNI)
+    /// 3. Reality ServerName
+    /// 4. Server address (IP/hostname from URL authority)
+    static func parse(from params: [String: String], serverAddress: String, tlsServerName: String? = nil, realityServerName: String? = nil) -> XHTTPConfiguration? {
+        let host = params["host"] ?? tlsServerName ?? realityServerName ?? serverAddress
         let path = (params["path"] ?? "/").removingPercentEncoding ?? "/"
         let modeStr = params["mode"] ?? "auto"
         let mode = XHTTPMode(rawValue: modeStr) ?? .auto

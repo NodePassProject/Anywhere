@@ -6,6 +6,9 @@
 //
 
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "XHTTP")
 
 /// Default User-Agent matching Xray-core's `utils.ChromeUA` (config.go:51-53).
 private let defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
@@ -183,6 +186,11 @@ class XHTTPConnection {
     private func buildRequestLine(method: String, path: String, queryParts: [String]) -> String {
         var url = path
         var allQuery = queryParts.filter { !$0.isEmpty }
+        // Include config-level query string (from path after "?"), matching Xray-core GetNormalizedQuery
+        let configQuery = configuration.normalizedQuery
+        if !configQuery.isEmpty {
+            allQuery.insert(configQuery, at: 0)
+        }
         // Add query-based padding if in obfs+query mode
         if configuration.xPaddingObfsMode && configuration.xPaddingPlacement == .query {
             let padding = configuration.generatePadding()
@@ -341,7 +349,6 @@ class XHTTPConnection {
                 completion(XHTTPError.setupFailed(error.localizedDescription))
                 return
             }
-
             // Read GET response headers
             self?.receiveResponseHeaders { [weak self] headerError in
                 if let headerError {
@@ -995,30 +1002,41 @@ extension XHTTPConnection {
     private func encodeH2RequestHeaders(method: String = "POST", includeMeta: Bool = false) -> Data {
         var block = Data()
 
+        // Pseudo-header order matches Go's http2.Transport (h2_bundle.go writeHeaders):
+        // :authority, :method, :path, :scheme
+
+        // :authority — literal without indexing, name index 1
+        var authBytes = Self.hpackEncodeInteger(1, prefixBits: 4)
+        authBytes[0] &= 0x0F
+        block.append(contentsOf: authBytes)
+        block.append(contentsOf: Self.hpackEncodeString(configuration.host))
+
         // :method — static table indexed
         if method == "GET" {
             block.append(0x82) // GET = index 2
         } else {
             block.append(0x83) // POST = index 3
         }
-        // :scheme https — static table index 7 (exact match)
-        block.append(0x87)
 
-        // :path — build with optional session ID metadata
+        // :path — build with optional session ID metadata and query string
+        // Matches Go's http2.Transport which uses req.URL.RequestURI() (path + query)
         var path = configuration.normalizedPath
         if includeMeta && !sessionId.isEmpty && configuration.sessionPlacement == .path {
             path = appendToPath(path, sessionId)
         }
-        if includeMeta && path.last != "/" { path += "/" }
-        // Append query-based metadata to path
+        // Append query string: start with config's normalizedQuery, then add metadata
+        var queryParts: [String] = []
+        let configQuery = configuration.normalizedQuery
+        if !configQuery.isEmpty {
+            queryParts.append(configQuery)
+        }
         if includeMeta {
-            var queryParts: [String] = []
             if !sessionId.isEmpty && configuration.sessionPlacement == .query {
                 queryParts.append("\(configuration.normalizedSessionKey)=\(sessionId)")
             }
-            if !queryParts.isEmpty {
-                path += "?" + queryParts.joined(separator: "&")
-            }
+        }
+        if !queryParts.isEmpty {
+            path += "?" + queryParts.joined(separator: "&")
         }
 
         if path == "/" {
@@ -1031,11 +1049,8 @@ extension XHTTPConnection {
             block.append(contentsOf: Self.hpackEncodeString(path))
         }
 
-        // :authority — literal without indexing, name index 1
-        var authBytes = Self.hpackEncodeInteger(1, prefixBits: 4)
-        authBytes[0] &= 0x0F
-        block.append(contentsOf: authBytes)
-        block.append(contentsOf: Self.hpackEncodeString(configuration.host))
+        // :scheme https — static table index 7 (exact match)
+        block.append(0x87)
 
         // content-type: application/grpc (only for POST methods, if enabled)
         if method != "GET" && !configuration.noGRPCHeader {
@@ -1074,6 +1089,15 @@ extension XHTTPConnection {
     private func encodeH2UploadHeaders(seq: Int64?) -> Data {
         var block = Data()
 
+        // Pseudo-header order matches Go's http2.Transport:
+        // :authority, :method, :path, :scheme
+
+        // :authority
+        var authBytes = Self.hpackEncodeInteger(1, prefixBits: 4)
+        authBytes[0] &= 0x0F
+        block.append(contentsOf: authBytes)
+        block.append(contentsOf: Self.hpackEncodeString(configuration.host))
+
         // :method POST (or configured method)
         let method = configuration.uplinkHTTPMethod
         if method == "POST" {
@@ -1087,10 +1111,8 @@ extension XHTTPConnection {
             block.append(contentsOf: methodBytes)
             block.append(contentsOf: Self.hpackEncodeString(method))
         }
-        // :scheme https
-        block.append(0x87)
 
-        // :path — with session ID and optional seq
+        // :path — with session ID, optional seq, and config query string
         var path = configuration.normalizedPath
         if !sessionId.isEmpty && configuration.sessionPlacement == .path {
             path = appendToPath(path, sessionId)
@@ -1098,8 +1120,12 @@ extension XHTTPConnection {
         if let seq, configuration.seqPlacement == .path {
             path = appendToPath(path, "\(seq)")
         }
-        // Append query-based metadata to path
+        // Append query string: start with config's normalizedQuery, then add metadata
         var queryParts: [String] = []
+        let configQuery = configuration.normalizedQuery
+        if !configQuery.isEmpty {
+            queryParts.append(configQuery)
+        }
         if !sessionId.isEmpty && configuration.sessionPlacement == .query {
             queryParts.append("\(configuration.normalizedSessionKey)=\(sessionId)")
         }
@@ -1115,11 +1141,8 @@ extension XHTTPConnection {
         block.append(contentsOf: pathBytes)
         block.append(contentsOf: Self.hpackEncodeString(path))
 
-        // :authority
-        var authBytes = Self.hpackEncodeInteger(1, prefixBits: 4)
-        authBytes[0] &= 0x0F
-        block.append(contentsOf: authBytes)
-        block.append(contentsOf: Self.hpackEncodeString(configuration.host))
+        // :scheme https
+        block.append(0x87)
 
         // content-type: application/grpc (if enabled)
         if !configuration.noGRPCHeader {
@@ -1170,7 +1193,7 @@ extension XHTTPConnection {
 
     /// Appends common HPACK headers (user-agent, padding, custom headers) to a header block.
     private func appendH2CommonHeaders(to block: inout Data, path: String) {
-        // user-agent — name index 58
+        // user-agent — name index 58 (RFC 7541 Appendix A)
         let ua = configuration.headers["User-Agent"] ?? defaultUserAgent
         var uaBytes = Self.hpackEncodeInteger(58, prefixBits: 4)
         uaBytes[0] &= 0x0F
@@ -1208,9 +1231,18 @@ extension XHTTPConnection {
         }
 
         // Custom headers (literal, new names)
-        for (key, value) in configuration.headers where key != "User-Agent" {
+        // Filter hop-by-hop headers forbidden in HTTP/2 (matching Go's http2.Transport behavior:
+        // h2_bundle.go encodeHeaders skips connection, proxy-connection, transfer-encoding,
+        // upgrade, keep-alive, host, and content-length)
+        let h2ForbiddenHeaders: Set<String> = [
+            "host", "connection", "proxy-connection", "transfer-encoding",
+            "upgrade", "keep-alive", "content-length", "user-agent"
+        ]
+        for (key, value) in configuration.headers {
+            let lk = key.lowercased()
+            if h2ForbiddenHeaders.contains(lk) { continue }
             block.append(0x00)
-            block.append(contentsOf: Self.hpackEncodeString(key.lowercased()))
+            block.append(contentsOf: Self.hpackEncodeString(lk))
             block.append(contentsOf: Self.hpackEncodeString(value))
         }
     }
@@ -1249,7 +1281,8 @@ extension XHTTPConnection {
             return "status (indexed \(first & 0x7F))"
         }
 
-        // 2. Literal representations with name index 8 (:status)
+        // 2. Literal representations with :status name index
+        //    HPACK static table entries 8-14 all have name ":status"
         //    0x08 = without indexing, 0x18 = never indexed, 0x48 = incremental indexing
         let nameIndex: UInt8
         if first & 0xF0 == 0x00 {       // Literal without indexing (0000 NNNN)
@@ -1263,7 +1296,8 @@ extension XHTTPConnection {
             return "unknown status (HPACK: \(hex))"
         }
 
-        guard nameIndex == 8, remaining.count >= 2 else {
+        // Static table indices 8-14 all have name ":status" (RFC 7541 Appendix A)
+        guard (8...14).contains(nameIndex), remaining.count >= 2 else {
             let hex = remaining.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
             return "unknown status (HPACK: \(hex))"
         }
@@ -1297,6 +1331,11 @@ extension XHTTPConnection {
     }
 
     /// Huffman-decodes a byte sequence containing only ASCII digits (for HTTP status codes).
+    ///
+    /// RFC 7541 Appendix B / Go hpack/tables.go huffmanCodes:
+    /// '0'=0x00(5), '1'=0x01(5), '2'=0x02(5),
+    /// '3'=0x19(6), '4'=0x1a(6), '5'=0x1b(6), '6'=0x1c(6),
+    /// '7'=0x1d(6), '8'=0x1e(6), '9'=0x1f(6)
     private static func huffmanDecodeDigits(_ data: Data) -> String {
         var result = ""
         var bits: UInt32 = 0
@@ -1315,11 +1354,11 @@ extension XHTTPConnection {
                 numBits -= 5
                 continue
             }
-            // 6-bit codes: '3'=0x18...'9'=0x1e
+            // 6-bit codes: '3'=0x19...'9'=0x1f
             guard numBits >= 6 else { break }
             let top6 = Int((bits >> (numBits - 6)) & 0x3F)
-            if top6 >= 0x18 && top6 <= 0x1E {
-                let digit = top6 - 0x18 + 3 // '3'..'9'
+            if top6 >= 0x19 && top6 <= 0x1F {
+                let digit = top6 - 0x19 + 3 // '3'..'9'
                 result.append(Character(UnicodeScalar(48 + digit)!))
                 numBits -= 6
                 continue
@@ -1337,16 +1376,17 @@ extension XHTTPConnection {
     /// 3. Send HEADERS for the stream-one POST
     /// 4. Wait for server's HEADERS response (200 OK)
     func performH2Setup(completion: @escaping (Error?) -> Void) {
-        // Phase 1: Send connection preface + SETTINGS + WINDOW_UPDATE
+        // Match Go's http2.Transport (h2_bundle.go newClientConn):
+        // Send preface + SETTINGS + WINDOW_UPDATE + HEADERS all at once,
+        // without waiting for server SETTINGS first.
         var initData = Data()
 
         // 1. Connection preface
         initData.append(Self.h2Preface)
 
-        // 2. Client SETTINGS frame (matching Go http2.Transport defaults)
+        // 2. Client SETTINGS frame (matching Go http2.Transport exactly: 3 settings)
+        // Go does NOT send HEADER_TABLE_SIZE (4096 is the default, no need to send)
         var settingsPayload = Data()
-        // HEADER_TABLE_SIZE = 4096 (Go default: initialHeaderTableSize)
-        settingsPayload.append(contentsOf: [0x00, 0x01, 0x00, 0x00, 0x10, 0x00])
         // ENABLE_PUSH = 0
         settingsPayload.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00])
         // INITIAL_WINDOW_SIZE = 4MB (matches Go http2.Transport)
@@ -1360,8 +1400,9 @@ extension XHTTPConnection {
         settingsPayload.append(contentsOf: [0x00, 0x06, 0x00, 0xA0, 0x00, 0x00])
         initData.append(buildH2Frame(type: Self.h2FrameSettings, flags: 0, streamId: 0, payload: settingsPayload))
 
-        // 3. Connection-level WINDOW_UPDATE (increase from default 65535 to 1GB)
-        let windowIncrement = Self.h2ConnWindowSize - 65535
+        // 3. Connection-level WINDOW_UPDATE matching Go's http2.Transport exactly:
+        //    Go sends transportDefaultConnFlow (1<<30) as the raw increment, NOT subtracting initial window
+        let windowIncrement = Self.h2ConnWindowSize
         var wuPayload = Data(count: 4)
         wuPayload[0] = UInt8((windowIncrement >> 24) & 0xFF)
         wuPayload[1] = UInt8((windowIncrement >> 16) & 0xFF)
@@ -1369,20 +1410,20 @@ extension XHTTPConnection {
         wuPayload[3] = UInt8(windowIncrement & 0xFF)
         initData.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: wuPayload))
 
-        // Send preface + settings + window_update (NO HEADERS yet — wait for server settings first)
+        // 4. Send preface + settings + window_update, then wait for server SETTINGS
         downloadSend(initData) { [weak self] error in
             if let error {
                 completion(XHTTPError.setupFailed("H2 preface send failed: \(error.localizedDescription)"))
                 return
             }
 
-            // Phase 2: Read server SETTINGS, then send HEADERS
+            // Wait for server SETTINGS, send ACK, then send HEADERS
             self?.waitForServerSettings(completion: completion)
         }
     }
 
     /// Reads frames until we receive the server's SETTINGS frame, sends ACK,
-    /// then sends the HEADERS frame for the POST request.
+    /// then sends the HEADERS frame for the request.
     private func waitForServerSettings(completion: @escaping (Error?) -> Void) {
         readH2Frame { [weak self] result in
             guard let self else {
@@ -1406,7 +1447,7 @@ extension XHTTPConnection {
                         let ack = self.buildH2Frame(type: Self.h2FrameSettings, flags: Self.h2FlagAck, streamId: 0, payload: Data())
                         self.downloadSend(ack) { _ in }
 
-                        // Phase 3: Now send HEADERS for stream 1
+                        // Now send HEADERS
                         self.sendH2Headers(completion: completion)
                     }
 
@@ -1454,7 +1495,8 @@ extension XHTTPConnection {
         } else {
             // Stream-up / packet-up: stream 1 = GET download, then open upload stream(s)
             let downloadHeaders = encodeH2RequestHeaders(method: "GET", includeMeta: true)
-            let downloadFrame = buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: 1, payload: downloadHeaders)
+            // GET has no body → set END_STREAM along with END_HEADERS (matching Go's http2.Transport)
+            let downloadFrame = buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders | Self.h2FlagEndStream, streamId: 1, payload: downloadHeaders)
 
             downloadSend(downloadFrame) { [weak self] error in
                 guard let self else { return }
@@ -1505,9 +1547,9 @@ extension XHTTPConnection {
                     self.readH2ResponseHeaders(completion: completion)
 
                 case Self.h2FrameHeaders:
-                    // Response headers for stream 1
                     if let statusError = self.checkH2ResponseStatus(frame.payload) {
                         completion(XHTTPError.httpError("H2 response \(statusError)"))
+                        return
                     } else {
                         self.lock.lock()
                         self.h2ResponseReceived = true

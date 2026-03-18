@@ -726,10 +726,10 @@ class ProxyClient {
             useHTTP2ForTLS = false
         }
 
-        // Resolve mode: auto → actual mode based on security and HTTP version
+        // Resolve mode: auto → actual mode
         let resolvedMode: XHTTPMode
         if xhttpConfig.mode == .auto {
-            if configuration.reality != nil || useHTTP2ForTLS {
+            if configuration.reality != nil {
                 resolvedMode = .streamOne
             } else {
                 resolvedMode = .packetUp
@@ -738,7 +738,7 @@ class ProxyClient {
             resolvedMode = xhttpConfig.mode
         }
 
-        let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? UUID().uuidString : ""
+        let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? UUID().uuidString.lowercased() : ""
 
         if let realityConfig = configuration.reality {
             connectXHTTPReality(realityConfig: realityConfig, xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
@@ -862,19 +862,11 @@ class ProxyClient {
             return
         }
 
-        // Match Xray-core decideHTTPVersion (dialer.go:78-95):
-        // HTTP/2 → use user's ALPN config (defaults to ["h2", "http/1.1"])
-        // HTTP/1.1 → force ALPN to ["http/1.1"]
-        let tlsConfiguration: TLSConfiguration
-        if useHTTP2 {
-            tlsConfiguration = baseTLSConfig
-        } else {
-            tlsConfiguration = TLSConfiguration(
-                serverName: baseTLSConfig.serverName,
-                alpn: ["http/1.1"],
-                fingerprint: baseTLSConfig.fingerprint
-            )
-        }
+        // Always use the base TLS config (including original ALPN) to preserve the TLS fingerprint.
+        // The HTTP version is determined at the application layer, not by ALPN.
+        // Xray-core's server uses SetUnencryptedHTTP2 with TLS at listener level,
+        // so it falls back to HTTP/1.1 regardless of ALPN negotiation.
+        let tlsConfiguration = baseTLSConfig
 
         let tlsClient = TLSClient(configuration: tlsConfiguration)
 
@@ -1187,18 +1179,16 @@ class ProxyClient {
             openTunnelAndWrap(tunnel, completion: completion)
 
         case .http2:
-            let transport = NaiveTLSTransport(
+            HTTP2SessionPool.shared.acquireStream(
                 host: configuration.connectAddress,
                 port: configuration.serverPort,
                 sni: naiveConfig.effectiveSNI,
-                tunnel: self.tunnel
-            )
-            let tunnel = HTTP2Connection(
-                transport: transport,
+                tunnel: self.tunnel,
                 configuration: naiveConfig,
                 destination: destination
-            )
-            openTunnelAndWrap(tunnel, completion: completion)
+            ) { [self] stream in
+                openTunnelAndWrap(stream, completion: completion)
+            }
 
         case .http3:
             fatalError("Not implemented")
