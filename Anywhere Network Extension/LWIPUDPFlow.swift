@@ -435,7 +435,7 @@ class LWIPUDPFlow {
         } errorHandler: { [weak self] error in
             guard let self else { return }
             if let error {
-                logger.error("[UDP] Proxy recv error: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                logger.warning("[UDP] Proxy recv error: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
             }
             self.lwipQueue.async {
                 self.close()

@@ -464,11 +464,11 @@ class HTTP2Connection: NaiveTunnel {
                 // Flow control: track received bytes and send WINDOW_UPDATE when needed
                 if frame.payload.count > 0 {
                     let increments = flowControl.consumeRecvWindow(bytes: frame.payload.count)
-                    if let connInc = increments.connectionIncrement {
-                        sendFrame(HTTP2Framer.windowUpdateFrame(streamID: 0, increment: connInc))
+                    if let connectionIncrement = increments.connectionIncrement {
+                        sendFrame(HTTP2Framer.windowUpdateFrame(streamID: 0, increment: connectionIncrement))
                     }
-                    if let streamInc = increments.streamIncrement {
-                        sendFrame(HTTP2Framer.windowUpdateFrame(streamID: 1, increment: streamInc))
+                    if let streamIncrement = increments.streamIncrement {
+                        sendFrame(HTTP2Framer.windowUpdateFrame(streamID: 1, increment: streamIncrement))
                     }
                 }
 

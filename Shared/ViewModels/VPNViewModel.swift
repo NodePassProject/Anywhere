@@ -326,14 +326,16 @@ class VPNViewModel: ObservableObject {
         // Check if selection pointed to a configuration in this subscription
         let selectedWasInSubscription = selectedConfiguration.flatMap { $0.subscriptionId == subscription.id } ?? false
 
-        // Match new configurations against old ones by content to preserve IDs (and routing rules)
+        // Match new configurations against old ones by address and port to preserve IDs (and routing rules)
         let oldConfigurations = configurations(for: subscription)
         var usedOldIds = Set<UUID>()
         var newConfigurations: [ProxyConfiguration] = []
 
         for configuration in result.configurations {
             let matchedOld = oldConfigurations.first { old in
-                !usedOldIds.contains(old.id) && old.contentEquals(configuration)
+                !usedOldIds.contains(old.id) &&
+                old.serverAddress == configuration.serverAddress &&
+                old.serverPort == configuration.serverPort
             }
             let id: UUID
             if let matched = matchedOld {
@@ -371,9 +373,15 @@ class VPNViewModel: ObservableObject {
         }
         subscriptionStore.update(updated)
 
-        // Fix selection if it was pointing to a deleted configuration
+        // Fix selection if it was pointing to a configuration that no longer exists
         if selectedWasInSubscription {
-            selectedConfiguration = configurations(for: subscription).first ?? configurations.first
+            let updatedConfigs = configurations(for: subscription)
+            if let selectedId = selectedConfiguration?.id,
+               let preserved = updatedConfigs.first(where: { $0.id == selectedId }) {
+                selectedConfiguration = preserved
+            } else {
+                selectedConfiguration = updatedConfigs.first ?? configurations.first
+            }
         }
     }
 
