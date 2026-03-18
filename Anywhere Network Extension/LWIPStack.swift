@@ -383,7 +383,7 @@ class LWIPStack {
     // and re-reads settings. FakeIPPool is preserved — routing decisions are
     // made at connection time, so rule changes take effect immediately.
     //
-    // 1. "settingsChanged" — posted by SettingsView when ipv6/bypass/doh toggles change.
+    // 1. "settingsChanged" — posted by SettingsView when IPv6/Encrypted DNS/Country Bypass toggles change.
     //    IPv6 additionally re-applies tunnel network settings (routes + DNS servers).
     //
     // 2. "routingChanged" — posted by RuleSetListView when routing rule assignments change.

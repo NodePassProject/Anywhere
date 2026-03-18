@@ -139,13 +139,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if encryptedDNSEnabled, !encryptedDNSServer.isEmpty {
             if encryptedDNSProtocol == "dot" {
-                let dnsSettings = NEDNSOverTLSSettings(servers: dnsServers)
+                let serverIPs = Self.resolveEncryptedDNSHostname(encryptedDNSServer, includeIPv6: ipv6ConnectionsEnabled)
+                let dnsSettings = NEDNSOverTLSSettings(servers: serverIPs ?? dnsServers)
                 dnsSettings.serverName = encryptedDNSServer
                 settings.dnsSettings = dnsSettings
+                logger.info("[VPN] DoT server: \(encryptedDNSServer, privacy: .public), resolved IPs: \(serverIPs ?? dnsServers, privacy: .public)")
             } else if let serverURL = URL(string: encryptedDNSServer) {
-                let dnsSettings = NEDNSOverHTTPSSettings(servers: dnsServers)
+                let serverIPs = serverURL.host.flatMap { Self.resolveEncryptedDNSHostname($0, includeIPv6: ipv6ConnectionsEnabled) }
+                let dnsSettings = NEDNSOverHTTPSSettings(servers: serverIPs ?? dnsServers)
                 dnsSettings.serverURL = serverURL
                 settings.dnsSettings = dnsSettings
+                logger.info("[VPN] DoH server: \(encryptedDNSServer, privacy: .public), resolved IPs: \(serverIPs ?? dnsServers, privacy: .public)")
             } else {
                 settings.dnsSettings = NEDNSSettings(servers: dnsServers)
             }
@@ -220,6 +224,57 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func wake() {
+    }
+
+    // MARK: - Encrypted DNS Hostname Resolution
+
+    /// Resolves a hostname to IP addresses via getaddrinfo.
+    /// Used to populate the `servers` parameter of NEDNSOverHTTPSSettings / NEDNSOverTLSSettings
+    /// so the system connects to the correct DoH/DoT server IPs (not hardcoded Cloudflare IPs).
+    /// Returns nil if the hostname is already an IP literal or resolution fails.
+    private static func resolveEncryptedDNSHostname(_ hostname: String, includeIPv6: Bool) -> [String]? {
+        // Skip resolution for IP literals — they can be used directly as servers
+        var addr = in_addr()
+        var addr6 = in6_addr()
+        if inet_pton(AF_INET, hostname, &addr) == 1 || inet_pton(AF_INET6, hostname, &addr6) == 1 {
+            return nil
+        }
+
+        var hints = addrinfo()
+        hints.ai_family = includeIPv6 ? AF_UNSPEC : AF_INET
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(hostname, nil, &hints, &result) == 0, let res = result else {
+            logger.warning("[VPN] Failed to resolve encrypted DNS server: \(hostname, privacy: .public)")
+            return nil
+        }
+        defer { freeaddrinfo(res) }
+
+        var ips: [String] = []
+        var current: UnsafeMutablePointer<addrinfo>? = res
+        while let info = current {
+            switch info.pointee.ai_family {
+            case AF_INET:
+                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { ptr in
+                    var sinAddr = ptr.pointee.sin_addr
+                    var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+                    inet_ntop(AF_INET, &sinAddr, &buf, socklen_t(INET_ADDRSTRLEN))
+                    ips.append(String(cString: buf))
+                }
+            case AF_INET6:
+                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { ptr in
+                    var sin6Addr = ptr.pointee.sin6_addr
+                    var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+                    inet_ntop(AF_INET6, &sin6Addr, &buf, socklen_t(INET6_ADDRSTRLEN))
+                    ips.append(String(cString: buf))
+                }
+            default:
+                break
+            }
+            current = info.pointee.ai_next
+        }
+
+        return ips.isEmpty ? nil : ips
     }
 
     // MARK: - Configuration Parsing
