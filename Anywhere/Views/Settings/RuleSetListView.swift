@@ -121,6 +121,7 @@ struct RuleSetListView: View {
         }
         .listRowSpacing(8)
         .navigationTitle("Routing Rules")
+        .navigationBarTitleDisplayMode(.inline)
         .picker3D($pickerConfig, items: pickerItems)
         .onChange(of: pickerConfig.show) {
             if !pickerConfig.show, let editingId = editingRuleSetId {

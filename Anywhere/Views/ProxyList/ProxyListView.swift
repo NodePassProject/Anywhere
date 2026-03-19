@@ -118,9 +118,9 @@ struct ProxyListView: View {
                 }
                 viewModel.toggleSubscriptionCollapsed(subscription)
             } label: {
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     Image(systemName: "chevron.right")
-                        .font(.caption2)
+                        .font(.caption.bold())
                         .frame(width: 10)
                         .rotationEffect(.degrees(collapsedSubscriptions.contains(subscription.id) ? 0 : 90))
                     Text(subscription.name)
