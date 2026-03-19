@@ -9,8 +9,7 @@
 /* Begin PBXBuildFile section */
 		CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
 		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		CB7A00032F65700100C85E4A /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
-		CB7A00062F65700100C85E4A /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		CB2B54B22F6C3E2800F24AC2 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -21,7 +20,7 @@
 			remoteGlobalIDString = CB1C10762F23B82F00B74CD8;
 			remoteInfo = "Network Extension";
 		};
-		CB7A00042F65700100C85E4A /* PBXContainerItemProxy */ = {
+		CB2B54B02F6C3E2800F24AC2 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = CB1C105D2F23B81500B74CD8 /* Project object */;
 			proxyType = 1;
@@ -42,13 +41,13 @@
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		CB7A00072F65700100C85E4A /* Embed Foundation Extensions */ = {
+		CB2B54B32F6C3E2800F24AC2 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				CB7A00062F65700100C85E4A /* Anywhere Network Extension.appex in Embed Foundation Extensions */,
+				CB2B54B22F6C3E2800F24AC2 /* Anywhere Network Extension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -59,7 +58,7 @@
 		CB1C10652F23B81500B74CD8 /* Anywhere.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Anywhere.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Anywhere Network Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
-		CB6538752F65686100C85E4A /* Anywhere TV.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Anywhere TV.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Anywhere TV.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -71,13 +70,6 @@
 				lwip/src/include/lwip/init.h.cmake.in,
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
-		};
-		CB2B36842F68696600F24AC2 /* Exceptions for "Anywhere TV" folder in "Anywhere TV" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = CB6538742F65686100C85E4A /* Anywhere TV */;
 		};
 		CB650E422F6307AF00C85E4A /* Exceptions for "Protocols" folder in "Anywhere Network Extension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
@@ -144,6 +136,10 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AWCore.swift,
+				Blake3/Blake3Hasher.swift,
+				Blake3/blake3.c,
+				Blake3/blake3_dispatch.c,
+				Blake3/blake3_portable.c,
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 		};
@@ -173,20 +169,17 @@
 			path = "Anywhere Network Extension";
 			sourceTree = "<group>";
 		};
+		CB2B549D2F6C3E2700F24AC2 /* Anywhere TV */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = "Anywhere TV";
+			sourceTree = "<group>";
+		};
 		CB650DD92F6307AF00C85E4A /* Protocols */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				CB650E422F6307AF00C85E4A /* Exceptions for "Protocols" folder in "Anywhere Network Extension" target */,
 			);
 			path = Protocols;
-			sourceTree = "<group>";
-		};
-		CB6538762F65686100C85E4A /* Anywhere TV */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				CB2B36842F68696600F24AC2 /* Exceptions for "Anywhere TV" folder in "Anywhere TV" target */,
-			);
-			path = "Anywhere TV";
 			sourceTree = "<group>";
 		};
 		CB7A00022F65700100C85E4A /* Shared */ = {
@@ -220,11 +213,10 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		CB6538722F65686100C85E4A /* Frameworks */ = {
+		CB2B54992F6C3E2700F24AC2 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CB7A00032F65700100C85E4A /* NetworkExtension.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -239,7 +231,7 @@
 				CB650DD92F6307AF00C85E4A /* Protocols */,
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
 				CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */,
-				CB6538762F65686100C85E4A /* Anywhere TV */,
+				CB2B549D2F6C3E2700F24AC2 /* Anywhere TV */,
 				CB1C10782F23B82F00B74CD8 /* Frameworks */,
 				CB1C10662F23B81500B74CD8 /* Products */,
 			);
@@ -250,7 +242,7 @@
 			children = (
 				CB1C10652F23B81500B74CD8 /* Anywhere.app */,
 				CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */,
-				CB6538752F65686100C85E4A /* Anywhere TV.app */,
+				CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -316,23 +308,23 @@
 			productReference = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
-		CB6538742F65686100C85E4A /* Anywhere TV */ = {
+		CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = CB65387D2F65686100C85E4A /* Build configuration list for PBXNativeTarget "Anywhere TV" */;
+			buildConfigurationList = CB2B54AA2F6C3E2800F24AC2 /* Build configuration list for PBXNativeTarget "Anywhere TV" */;
 			buildPhases = (
-				CB6538712F65686100C85E4A /* Sources */,
-				CB6538722F65686100C85E4A /* Frameworks */,
-				CB6538732F65686100C85E4A /* Resources */,
-				CB7A00072F65700100C85E4A /* Embed Foundation Extensions */,
+				CB2B54982F6C3E2700F24AC2 /* Sources */,
+				CB2B54992F6C3E2700F24AC2 /* Frameworks */,
+				CB2B549A2F6C3E2700F24AC2 /* Resources */,
+				CB2B54B32F6C3E2800F24AC2 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				CB7A00052F65700100C85E4A /* PBXTargetDependency */,
+				CB2B54B12F6C3E2800F24AC2 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
+				CB2B549D2F6C3E2700F24AC2 /* Anywhere TV */,
 				CB650DD92F6307AF00C85E4A /* Protocols */,
-				CB6538762F65686100C85E4A /* Anywhere TV */,
 				CB7A00022F65700100C85E4A /* Shared */,
 				CBDC12652F271BD50021FDA0 /* General */,
 			);
@@ -340,7 +332,7 @@
 			packageProductDependencies = (
 			);
 			productName = Anywhere;
-			productReference = CB6538752F65686100C85E4A /* Anywhere TV.app */;
+			productReference = CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -359,7 +351,7 @@
 					CB1C10762F23B82F00B74CD8 = {
 						CreatedOnToolsVersion = 26.0.1;
 					};
-					CB6538742F65686100C85E4A = {
+					CB2B549B2F6C3E2700F24AC2 = {
 						CreatedOnToolsVersion = 26.0.1;
 					};
 				};
@@ -387,7 +379,7 @@
 			projectRoot = "";
 			targets = (
 				CB1C10642F23B81500B74CD8 /* Anywhere */,
-				CB6538742F65686100C85E4A /* Anywhere TV */,
+				CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */,
 				CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */,
 			);
 		};
@@ -408,7 +400,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		CB6538732F65686100C85E4A /* Resources */ = {
+		CB2B549A2F6C3E2700F24AC2 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -432,7 +424,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		CB6538712F65686100C85E4A /* Sources */ = {
+		CB2B54982F6C3E2700F24AC2 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -447,10 +439,10 @@
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 			targetProxy = CB1C10802F23B82F00B74CD8 /* PBXContainerItemProxy */;
 		};
-		CB7A00052F65700100C85E4A /* PBXTargetDependency */ = {
+		CB2B54B12F6C3E2800F24AC2 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
-			targetProxy = CB7A00042F65700100C85E4A /* PBXContainerItemProxy */;
+			targetProxy = CB2B54B02F6C3E2800F24AC2 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -585,7 +577,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 126;
+				CURRENT_PROJECT_VERSION = 127;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -630,7 +622,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 126;
+				CURRENT_PROJECT_VERSION = 127;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -674,7 +666,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 126;
+				CURRENT_PROJECT_VERSION = 127;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -714,7 +706,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 126;
+				CURRENT_PROJECT_VERSION = 127;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -748,27 +740,25 @@
 			};
 			name = Release;
 		};
-		CB65387E2F65686100C85E4A /* Debug */ = {
+		CB2B54AB2F6C3E2800F24AC2 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 126;
+				CURRENT_PROJECT_VERSION = 127;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"HAVE_CONFIG_H=1",
 					"$(inherited)",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
-				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -790,27 +780,25 @@
 			};
 			name = Debug;
 		};
-		CB65387F2F65686100C85E4A /* Release */ = {
+		CB2B54AC2F6C3E2800F24AC2 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 126;
+				CURRENT_PROJECT_VERSION = 127;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"HAVE_CONFIG_H=1",
 					"$(inherited)",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
-				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIMainStoryboardFile = Main;
 				INFOPLIST_KEY_UIUserInterfaceStyle = Automatic;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -862,11 +850,11 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		CB65387D2F65686100C85E4A /* Build configuration list for PBXNativeTarget "Anywhere TV" */ = {
+		CB2B54AA2F6C3E2800F24AC2 /* Build configuration list for PBXNativeTarget "Anywhere TV" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				CB65387E2F65686100C85E4A /* Debug */,
-				CB65387F2F65686100C85E4A /* Release */,
+				CB2B54AB2F6C3E2800F24AC2 /* Debug */,
+				CB2B54AC2F6C3E2800F24AC2 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

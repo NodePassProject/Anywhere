@@ -9,6 +9,6 @@
 #define BridgingHeader_h
 
 #include "./lwip/lwip_bridge.h"
-#include "./Blake3/blake3.h"
+#include "../Shared/Blake3/blake3.h"
 
 #endif /* BridgingHeader_h */
