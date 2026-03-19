@@ -19,6 +19,7 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension"
 /// (TLS, Reality). For the XTLS Vision flow, the connection is wrapped in a ``VLESSVisionConnection``.
 class ProxyClient {
     private let configuration: ProxyConfiguration
+    private let useResolvedAddressForDirectDial: Bool
     private var connection: BSDSocket?
     private var realityClient: RealityClient?
     private var realityConnection: TLSRecordConnection?
@@ -52,9 +53,23 @@ class ProxyClient {
     /// - Parameters:
     ///   - configuration: The proxy server configuration.
     ///   - tunnel: Optional tunnel from a previous chain link (for proxy chaining).
-    init(configuration: ProxyConfiguration, tunnel: ProxyConnection? = nil) {
+    ///   - useResolvedAddressForDirectDial: Whether direct first-hop transports should
+    ///     prefer `resolvedIP` over `serverAddress`. Intended for latency testing only.
+    init(
+        configuration: ProxyConfiguration,
+        tunnel: ProxyConnection? = nil,
+        useResolvedAddressForDirectDial: Bool = false
+    ) {
         self.configuration = configuration
         self.tunnel = tunnel
+        self.useResolvedAddressForDirectDial = useResolvedAddressForDirectDial
+    }
+
+    /// Host used for direct first-hop transport dials when not already tunneled through
+    /// another proxy. Normal VPN traffic keeps using the configured hostname so DNS can
+    /// refresh naturally; latency tests may opt into the pre-resolved IP.
+    private var directDialHost: String {
+        useResolvedAddressForDirectDial ? configuration.connectAddress : configuration.serverAddress
     }
 
     // MARK: - Public API
@@ -172,7 +187,11 @@ class ProxyClient {
             nextPort = configuration.serverPort
         }
         
-        let chainClient = ProxyClient(configuration: chainConfig, tunnel: currentTunnel)
+        let chainClient = ProxyClient(
+            configuration: chainConfig,
+            tunnel: currentTunnel,
+            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial
+        )
         chainClients.append(chainClient)
 
         chainClient.connect(to: nextHost, port: nextPort) { [weak self] result in
@@ -378,7 +397,7 @@ class ProxyClient {
             let socket = BSDSocket()
             self.connection = socket
 
-            socket.connect(host: configuration.serverAddress, port: configuration.serverPort, queue: .global()) { [weak self] error in
+            socket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
                 if let error {
                     completion(.failure(error))
                     return
@@ -432,7 +451,7 @@ class ProxyClient {
         if let tunnel = self.tunnel {
             tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
         } else {
-            tlsClient.connect(host: configuration.serverAddress, port: configuration.serverPort, completion: handleTLSResult)
+            tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
         }
     }
 
@@ -471,7 +490,7 @@ class ProxyClient {
         if let tunnel = self.tunnel {
             realityClient.connect(overTunnel: tunnel, completion: handleRealityResult)
         } else {
-            realityClient.connect(host: configuration.serverAddress, port: configuration.serverPort, completion: handleRealityResult)
+            realityClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleRealityResult)
         }
     }
 
@@ -524,7 +543,7 @@ class ProxyClient {
             if let tunnel = self.tunnel {
                 tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
             } else {
-                tlsClient.connect(host: configuration.serverAddress, port: configuration.serverPort, completion: handleTLSResult)
+                tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
             }
         } else {
             if let tunnel = self.tunnel {
@@ -539,7 +558,7 @@ class ProxyClient {
                 let socket = BSDSocket()
                 self.connection = socket
 
-                socket.connect(host: configuration.serverAddress, port: configuration.serverPort, queue: .global()) { [weak self] error in
+                socket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
                     if let error {
                         completion(.failure(error))
                         return
@@ -630,7 +649,7 @@ class ProxyClient {
             if let tunnel = self.tunnel {
                 tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
             } else {
-                tlsClient.connect(host: configuration.serverAddress, port: configuration.serverPort, completion: handleTLSResult)
+                tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
             }
         } else {
             if let tunnel = self.tunnel {
@@ -645,7 +664,7 @@ class ProxyClient {
                 let socket = BSDSocket()
                 self.connection = socket
 
-                socket.connect(host: configuration.serverAddress, port: configuration.serverPort, queue: .global()) { [weak self] error in
+                socket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
                     if let error {
                         completion(.failure(error))
                         return
@@ -695,11 +714,99 @@ class ProxyClient {
 
     // MARK: - XHTTP Connection
 
+    /// HTTP version selected for XHTTP, matching Xray-core's split HTTP dialer.
+    private enum XHTTPHTTPVersion {
+        case http11
+        case http2
+        case http3
+
+        var logName: String {
+            switch self {
+            case .http11:
+                return "http/1.1"
+            case .http2:
+                return "h2"
+            case .http3:
+                return "h3"
+            }
+        }
+    }
+
+    /// Mirrors Xray-core's `decideHTTPVersion` for split HTTP.
+    ///
+    /// - Reality always uses HTTP/2.
+    /// - No TLS means plain HTTP/1.1.
+    /// - TLS with a single `http/1.1` ALPN stays on HTTP/1.1.
+    /// - TLS with a single `h3` ALPN expects QUIC/HTTP/3.
+    /// - Everything else uses HTTP/2.
+    private func decideXHTTPHTTPVersion() -> XHTTPHTTPVersion {
+        if configuration.reality != nil {
+            return .http2
+        }
+
+        guard let tlsConfig = configuration.tls else {
+            return .http11
+        }
+
+        let alpn = tlsConfig.alpn ?? []
+        guard alpn.count == 1 else {
+            return .http2
+        }
+
+        switch alpn[0].lowercased() {
+        case "http/1.1":
+            return .http11
+        case "h3":
+            return .http3
+        default:
+            return .http2
+        }
+    }
+
+    /// Removes unsupported ALPN entries from XHTTP-over-TCP handshakes.
+    ///
+    /// This client only implements XHTTP over TCP as HTTP/1.1 or HTTP/2. The
+    /// TLS handshake for that path should not advertise protocols such as `h3`
+    /// that require a different transport underneath.
+    private func sanitizedXHTTPTLSConfiguration(
+        from base: TLSConfiguration,
+        httpVersion: XHTTPHTTPVersion
+    ) -> TLSConfiguration {
+        let sanitizedALPN: [String]?
+
+        switch httpVersion {
+        case .http11:
+            sanitizedALPN = ["http/1.1"]
+        case .http2:
+            if let configuredALPN = base.alpn {
+                let filtered = configuredALPN.filter {
+                    $0.caseInsensitiveCompare("h2") == .orderedSame ||
+                    $0.caseInsensitiveCompare("http/1.1") == .orderedSame
+                }
+                if filtered.isEmpty || (filtered.count == 1 && filtered[0].caseInsensitiveCompare("http/1.1") == .orderedSame) {
+                    sanitizedALPN = ["h2", "http/1.1"]
+                } else {
+                    sanitizedALPN = filtered
+                }
+            } else {
+                sanitizedALPN = nil
+            }
+        case .http3:
+            sanitizedALPN = ["h3"]
+        }
+
+        return TLSConfiguration(
+            serverName: base.serverName,
+            alpn: sanitizedALPN,
+            fingerprint: base.fingerprint
+        )
+    }
+
     /// Connects using XHTTP transport. Routes to plain HTTP, HTTPS, or Reality.
     ///
-    /// Mode & HTTP version resolution (matching Xray-core dialer.go:78-95, 280-289):
+    /// Mode & HTTP version resolution follows Xray-core's split HTTP dialer:
     /// - Reality → stream-one with HTTP/2
-    /// - TLS → HTTP version from `decideHTTPVersion`; auto mode uses stream-one for HTTP/2
+    /// - TLS → HTTP/1.1, HTTP/2, or HTTP/3 based on ALPN
     /// - none → packet-up with HTTP/1.1
     private func connectWithXHTTP(
         command: ProxyCommand,
@@ -713,17 +820,12 @@ class ProxyClient {
             return
         }
 
-        // Determine HTTP version for TLS (matching Xray-core decideHTTPVersion dialer.go:78-95)
-        let useHTTP2ForTLS: Bool
-        if let tlsConfig = configuration.tls, configuration.reality == nil {
-            let alpn = tlsConfig.alpn ?? []
-            if alpn.count == 1 && alpn[0] == "http/1.1" {
-                useHTTP2ForTLS = false
-            } else {
-                useHTTP2ForTLS = true
-            }
-        } else {
-            useHTTP2ForTLS = false
+        let httpVersion = decideXHTTPHTTPVersion()
+        if httpVersion == .http3 {
+            completion(.failure(ProxyError.connectionFailed(
+                "XHTTP over TLS with ALPN h3 requires QUIC/HTTP/3, which is not implemented yet"
+            )))
+            return
         }
 
         // Resolve mode: auto → actual mode
@@ -743,7 +845,7 @@ class ProxyClient {
         if let realityConfig = configuration.reality {
             connectXHTTPReality(realityConfig: realityConfig, xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         } else if configuration.tls != nil {
-            connectXHTTPS(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, useHTTP2: useHTTP2ForTLS, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            connectXHTTPS(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, httpVersion: httpVersion, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         } else {
             connectXHTTPPlain(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         }
@@ -795,7 +897,7 @@ class ProxyClient {
         } else {
             let socket = BSDSocket()
             self.connection = socket
-            socket.connect(host: configuration.serverAddress, port: configuration.serverPort, queue: .global()) { error in
+            socket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
                 if let error {
                     completion(.failure(error))
                     return
@@ -830,7 +932,7 @@ class ProxyClient {
             }
         } else {
             let uploadSocket = BSDSocket()
-            uploadSocket.connect(host: configuration.serverAddress, port: configuration.serverPort, queue: .global()) { error in
+            uploadSocket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
                 if let error {
                     factoryCompletion(.failure(error))
                     return
@@ -850,7 +952,7 @@ class ProxyClient {
         xhttpConfig: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
-        useHTTP2: Bool,
+        httpVersion: XHTTPHTTPVersion,
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
@@ -862,12 +964,15 @@ class ProxyClient {
             return
         }
 
-        // Always use the base TLS config (including original ALPN) to preserve the TLS fingerprint.
-        // The HTTP version is determined at the application layer, not by ALPN.
-        // Xray-core's server uses SetUnencryptedHTTP2 with TLS at listener level,
-        // so it falls back to HTTP/1.1 regardless of ALPN negotiation.
-        let tlsConfiguration = baseTLSConfig
+        guard httpVersion != .http3 else {
+            completion(.failure(ProxyError.connectionFailed(
+                "XHTTP over TLS with ALPN h3 requires QUIC/HTTP/3, which is not implemented yet"
+            )))
+            return
+        }
 
+        // Keep the original fingerprint/SNI, but do not advertise h3 on the TCP path.
+        let tlsConfiguration = sanitizedXHTTPTLSConfiguration(from: baseTLSConfig, httpVersion: httpVersion)
         let tlsClient = TLSClient(configuration: tlsConfiguration)
 
         let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
@@ -880,8 +985,8 @@ class ProxyClient {
                 self.tlsClient = tlsClient
                 self.tlsConnection = tlsConnection
 
-                if useHTTP2 {
-                    // HTTP/2: single connection, stream-one (same as Reality path)
+                if httpVersion == .http2 {
+                    // HTTP/2 uses a single TLS connection with H2 framing for all XHTTP modes.
                     let xhttpConnection = XHTTPConnection(
                         tlsConnection: tlsConnection,
                         configuration: xhttpConfig,
@@ -924,7 +1029,7 @@ class ProxyClient {
                                 }
                             }
                         } else {
-                            uploadTLSClient.connect(host: self.configuration.serverAddress, port: self.configuration.serverPort) { result in
+                            uploadTLSClient.connect(host: self.directDialHost, port: self.configuration.serverPort) { result in
                                 switch result {
                                 case .success(let uploadTLSConnection):
                                     factoryCompletion(.success(TransportClosures(
@@ -955,7 +1060,7 @@ class ProxyClient {
         if let tunnel = self.tunnel {
             tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
         } else {
-            tlsClient.connect(host: configuration.serverAddress, port: configuration.serverPort, completion: handleTLSResult)
+            tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
         }
     }
 
@@ -1006,7 +1111,7 @@ class ProxyClient {
         if let tunnel {
             realityClient.connect(overTunnel: tunnel, completion: handleRealityResult)
         } else {
-            realityClient.connect(host: configuration.serverAddress, port: configuration.serverPort, completion: handleRealityResult)
+            realityClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleRealityResult)
         }
     }
 

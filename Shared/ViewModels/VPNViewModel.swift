@@ -407,11 +407,12 @@ class VPNViewModel: ObservableObject {
 
     func testLatency(for configuration: ProxyConfiguration) {
         latencyTask?.cancel()
-        syncProxyServerAddresses(for: configuration)
-        let configurationId = configuration.id
+        let resolved = LatencyTester.resolvedConfiguration(configuration)
+        syncProxyServerAddresses(for: resolved)
+        let configurationId = resolved.id
         latencyResults[configurationId] = .testing
-        latencyTask = Task.detached { [configuration] in
-            let result = await LatencyTester.test(configuration)
+        latencyTask = Task.detached { [resolved] in
+            let result = await LatencyTester.test(resolved)
             await MainActor.run { [weak self] in
                 self?.latencyResults[configurationId] = result
             }
@@ -420,13 +421,13 @@ class VPNViewModel: ObservableObject {
 
     func testAllLatencies() {
         latencyTask?.cancel()
-        let allConfigurations = configurations
-        syncProxyServerAddresses(for: allConfigurations)
-        for configuration in allConfigurations {
+        let resolvedConfigurations = configurations.map(LatencyTester.resolvedConfiguration)
+        syncProxyServerAddresses(for: resolvedConfigurations)
+        for configuration in resolvedConfigurations {
             latencyResults[configuration.id] = .testing
         }
         latencyTask = Task.detached {
-            for await (id, result) in LatencyTester.testAll(allConfigurations) {
+            for await (id, result) in LatencyTester.testAll(resolvedConfigurations) {
                 await MainActor.run { [weak self] in
                     self?.latencyResults[id] = result
                 }
@@ -440,12 +441,13 @@ class VPNViewModel: ObservableObject {
 
     func testChainLatency(for chain: ProxyChain) {
         guard let resolved = resolveChain(chain) else { return }
-        syncProxyServerAddresses(for: resolved)
+        let resolvedForTest = LatencyTester.resolvedConfiguration(resolved)
+        syncProxyServerAddresses(for: resolvedForTest)
         chainLatencyResults[chain.id] = .testing
         let chainId = chain.id
         chainLatencyTask?.cancel()
-        chainLatencyTask = Task.detached { [resolved] in
-            let result = await LatencyTester.test(resolved)
+        chainLatencyTask = Task.detached { [resolvedForTest] in
+            let result = await LatencyTester.test(resolvedForTest)
             await MainActor.run { [weak self] in
                 self?.chainLatencyResults[chainId] = result
             }
@@ -458,7 +460,7 @@ class VPNViewModel: ObservableObject {
         for chain in chains {
             if let resolved = resolveChain(chain) {
                 chainLatencyResults[chain.id] = .testing
-                resolvedChains.append((chain.id, resolved))
+                resolvedChains.append((chain.id, LatencyTester.resolvedConfiguration(resolved)))
             }
         }
         syncProxyServerAddresses(for: resolvedChains.map(\.1))
@@ -773,17 +775,24 @@ class VPNViewModel: ObservableObject {
 
     func syncProxyServerAddresses(for configurations: [ProxyConfiguration]) {
         var domains = Set<String>()
+        var addresses = Set<String>()
         for configuration in configurations {
             domains.insert(configuration.serverAddress)
+            if let resolvedIP = configuration.resolvedIP {
+                addresses.insert(resolvedIP)
+            }
             if let chain = configuration.chain {
                 for proxy in chain {
                     domains.insert(proxy.serverAddress)
+                    if let resolvedIP = proxy.resolvedIP {
+                        addresses.insert(resolvedIP)
+                    }
                 }
             }
         }
 
-        // Collect domains + any already-cached resolved IPs
-        var addresses = domains
+        // Collect domains + any explicit or already-cached resolved IPs
+        addresses.formUnion(domains)
         for domain in domains {
             if let ips = ProxyDNSCache.shared.cachedIPs(for: domain) {
                 addresses.formUnion(ips)

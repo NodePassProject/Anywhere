@@ -31,41 +31,7 @@ nonisolated enum LatencyTester {
     /// receive is timed — capturing the actual network round-trip through the
     /// full proxy chain. DNS resolution is excluded via pre-warming.
     nonisolated static func test(_ configuration: ProxyConfiguration) async -> LatencyResult {
-        // Resolve DNS outside the tunnel
-        let resolvedIP = VPNViewModel.resolveServerAddress(configuration.serverAddress)
-
-        // Create configuration with resolved IP
-        let testConfiguration = await ProxyConfiguration(
-            id: configuration.id,
-            name: configuration.name,
-            serverAddress: configuration.serverAddress,
-            serverPort: configuration.serverPort,
-            uuid: configuration.uuid,
-            encryption: configuration.encryption,
-            transport: configuration.transport,
-            flow: configuration.flow,
-            security: configuration.security,
-            tls: configuration.tls,
-            reality: configuration.reality,
-            websocket: configuration.websocket,
-            httpUpgrade: configuration.httpUpgrade,
-            xhttp: configuration.xhttp,
-            testseed: configuration.testseed,
-            muxEnabled: configuration.muxEnabled,
-            xudpEnabled: configuration.xudpEnabled,
-            resolvedIP: resolvedIP,
-            subscriptionId: configuration.subscriptionId,
-            outboundProtocol: configuration.outboundProtocol,
-            ssPassword: configuration.ssPassword,
-            ssMethod: configuration.ssMethod,
-            http11Username: configuration.http11Username,
-            http11Password: configuration.http11Password,
-            http2Username: configuration.http2Username,
-            http2Password: configuration.http2Password,
-            http3Username: configuration.http3Username,
-            http3Password: configuration.http3Password,
-            chain: configuration.chain
-        )
+        let testConfiguration = resolvedConfiguration(configuration)
 
         do {
             let ms = try await withThrowingTaskGroup(of: Int.self) { group in
@@ -115,6 +81,43 @@ nonisolated enum LatencyTester {
 
     // MARK: - Private
 
+    /// Resolves each proxy hop ahead of time so latency tests can dial the same
+    /// first-hop IPs the tunnel expects, without depending on in-tunnel DNS timing.
+    nonisolated static func resolvedConfiguration(_ configuration: ProxyConfiguration) -> ProxyConfiguration {
+        let resolvedChain = configuration.chain?.map(resolvedConfiguration)
+        return ProxyConfiguration(
+            id: configuration.id,
+            name: configuration.name,
+            serverAddress: configuration.serverAddress,
+            serverPort: configuration.serverPort,
+            uuid: configuration.uuid,
+            encryption: configuration.encryption,
+            transport: configuration.transport,
+            flow: configuration.flow,
+            security: configuration.security,
+            tls: configuration.tls,
+            reality: configuration.reality,
+            websocket: configuration.websocket,
+            httpUpgrade: configuration.httpUpgrade,
+            xhttp: configuration.xhttp,
+            testseed: configuration.testseed,
+            muxEnabled: configuration.muxEnabled,
+            xudpEnabled: configuration.xudpEnabled,
+            resolvedIP: configuration.resolvedIP ?? VPNViewModel.resolveServerAddress(configuration.serverAddress),
+            subscriptionId: configuration.subscriptionId,
+            outboundProtocol: configuration.outboundProtocol,
+            ssPassword: configuration.ssPassword,
+            ssMethod: configuration.ssMethod,
+            http11Username: configuration.http11Username,
+            http11Password: configuration.http11Password,
+            http2Username: configuration.http2Username,
+            http2Password: configuration.http2Password,
+            http3Username: configuration.http3Username,
+            http3Password: configuration.http3Password,
+            chain: resolvedChain
+        )
+    }
+
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
         // Pre-warm DNS cache so resolution is excluded from timing
         ProxyDNSCache.shared.prewarm(configuration.serverAddress)
@@ -124,7 +127,7 @@ nonisolated enum LatencyTester {
             }
         }
 
-        let client = ProxyClient(configuration: configuration)
+        let client = ProxyClient(configuration: configuration, useResolvedAddressForDirectDial: true)
 
         defer { client.cancel() }
 

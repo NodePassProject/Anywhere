@@ -836,7 +836,9 @@ class TLSClient {
         keyDerivation = nil
         handshakeSecret = nil
         handshakeKeys = nil
+        applicationKeys = nil
         handshakeTranscript = nil
+        serverHandshakeSeqNum = 0
         postHandshakeBuffer = nil
         serverCertificates.removeAll()
     }
