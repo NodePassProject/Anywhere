@@ -315,7 +315,12 @@ class VPNViewModel: ObservableObject {
                 tls: configuration.tls, reality: configuration.reality, websocket: configuration.websocket,
                 httpUpgrade: configuration.httpUpgrade, xhttp: configuration.xhttp, testseed: configuration.testseed,
                 muxEnabled: configuration.muxEnabled, xudpEnabled: configuration.xudpEnabled,
-                subscriptionId: subscription.id
+                subscriptionId: subscription.id,
+                outboundProtocol: configuration.outboundProtocol,
+                ssPassword: configuration.ssPassword, ssMethod: configuration.ssMethod,
+                http11Username: configuration.http11Username, http11Password: configuration.http11Password,
+                http2Username: configuration.http2Username, http2Password: configuration.http2Password,
+                http3Username: configuration.http3Username, http3Password: configuration.http3Password
             )
             store.add(tagged)
         }
@@ -331,21 +336,27 @@ class VPNViewModel: ObservableObject {
         // Check if selection pointed to a configuration in this subscription
         let selectedWasInSubscription = selectedConfiguration.flatMap { $0.subscriptionId == subscription.id } ?? false
 
-        // Match new configurations against old ones by address and port to preserve IDs (and routing rules)
+        // Match new configurations against old ones by name to preserve IDs (and routing rules).
+        // When multiple configs share the same name, they are matched positionally within that group.
         let oldConfigurations = configurations(for: subscription)
-        var usedOldIds = Set<UUID>()
+
+        // Group old configs by name, preserving order within each group
+        var oldByName: [String: [ProxyConfiguration]] = [:]
+        for old in oldConfigurations {
+            oldByName[old.name, default: []].append(old)
+        }
+        // Track how many old configs per name have been consumed
+        var oldNameCursor: [String: Int] = [:]
+
         var newConfigurations: [ProxyConfiguration] = []
 
         for configuration in result.configurations {
-            let matchedOld = oldConfigurations.first { old in
-                !usedOldIds.contains(old.id) &&
-                old.serverAddress == configuration.serverAddress &&
-                old.serverPort == configuration.serverPort
-            }
+            let name = configuration.name
+            let cursor = oldNameCursor[name, default: 0]
             let id: UUID
-            if let matched = matchedOld {
-                id = matched.id
-                usedOldIds.insert(id)
+            if let group = oldByName[name], cursor < group.count {
+                id = group[cursor].id
+                oldNameCursor[name] = cursor + 1
             } else {
                 id = configuration.id
             }
@@ -356,7 +367,12 @@ class VPNViewModel: ObservableObject {
                 tls: configuration.tls, reality: configuration.reality, websocket: configuration.websocket,
                 httpUpgrade: configuration.httpUpgrade, xhttp: configuration.xhttp, testseed: configuration.testseed,
                 muxEnabled: configuration.muxEnabled, xudpEnabled: configuration.xudpEnabled,
-                subscriptionId: subscription.id
+                subscriptionId: subscription.id,
+                outboundProtocol: configuration.outboundProtocol,
+                ssPassword: configuration.ssPassword, ssMethod: configuration.ssMethod,
+                http11Username: configuration.http11Username, http11Password: configuration.http11Password,
+                http2Username: configuration.http2Username, http2Password: configuration.http2Password,
+                http3Username: configuration.http3Username, http3Password: configuration.http3Password
             ))
         }
 
