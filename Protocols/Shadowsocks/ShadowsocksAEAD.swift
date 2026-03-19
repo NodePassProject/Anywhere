@@ -151,40 +151,26 @@ enum ShadowsocksKeyDerivation {
     /// Computes the first 16 bytes of BLAKE3 hash of the given data.
     /// Used for identity header pskHash computation.
     static func blake3Hash16(_ data: Data) -> Data {
-        #if NETWORK_EXTENSION
-        return Blake3Hasher.hash(data, count: 16)
-        #else
-        return Data(repeating: 0, count: 16)
-        #endif
+        Blake3Hasher.hash(data, count: 16)
     }
 
     /// Derives an identity subkey using BLAKE3 DeriveKey mode.
     /// context = "shadowsocks 2022 identity subkey", input = psk + salt.
     static func deriveIdentitySubkey(psk: Data, salt: Data, keySize: Int) -> Data {
-        #if NETWORK_EXTENSION
         var input = Data(psk)
         input.append(salt)
         return Blake3Hasher.deriveKey(context: "shadowsocks 2022 identity subkey",
                                      input: input, count: keySize)
-        #else
-        return Data(repeating: 0, count: keySize)
-        #endif
     }
 
     /// Derives a session key using BLAKE3 DeriveKey mode.
     /// context = "shadowsocks 2022 session subkey", input = psk + salt.
     /// Matching sing-shadowsocks SessionKey().
     static func deriveSessionKey(psk: Data, salt: Data, keySize: Int) -> Data {
-        #if NETWORK_EXTENSION
         var input = Data(psk)
         input.append(salt)
         return Blake3Hasher.deriveKey(context: "shadowsocks 2022 session subkey",
                                      input: input, count: keySize)
-        #else
-        // BLAKE3 not available outside Network Extension — SS 2022 won't work
-        // in the main app (latency tester). Return empty data to trigger error.
-        return Data(repeating: 0, count: keySize)
-        #endif
     }
 
     private static func padBase64(_ string: String) -> String {

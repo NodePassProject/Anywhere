@@ -2139,6 +2139,7 @@
       }
     },
     "Done" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -2191,6 +2192,7 @@
       }
     },
     "Download" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -3930,6 +3932,12 @@
         }
       }
     },
+    "Move Down" : {
+
+    },
+    "Move Up" : {
+
+    },
     "Mux" : {
       "shouldTranslate" : false
     },
@@ -4609,6 +4617,9 @@
         }
       }
     },
+    "Off" : {
+
+    },
     "OK" : {
       "localizations" : {
         "ar" : {
@@ -4660,6 +4671,9 @@
           }
         }
       }
+    },
+    "On" : {
+
     },
     "Open Source Libraries" : {
       "localizations" : {
@@ -4977,6 +4991,7 @@
       }
     },
     "Provide a new name." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -5344,7 +5359,11 @@
         }
       }
     },
+    "Remove" : {
+
+    },
     "Rename" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -6874,6 +6893,7 @@
       }
     },
     "Upload" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {

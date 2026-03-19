@@ -15,7 +15,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "CB6538742F65686100C85E4A"
+               BlueprintIdentifier = "CB2B549B2F6C3E2700F24AC2"
                BuildableName = "Anywhere TV.app"
                BlueprintName = "Anywhere TV"
                ReferencedContainer = "container:Anywhere.xcodeproj">
@@ -44,7 +44,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "CB6538742F65686100C85E4A"
+            BlueprintIdentifier = "CB2B549B2F6C3E2700F24AC2"
             BuildableName = "Anywhere TV.app"
             BlueprintName = "Anywhere TV"
             ReferencedContainer = "container:Anywhere.xcodeproj">
@@ -61,7 +61,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "CB6538742F65686100C85E4A"
+            BlueprintIdentifier = "CB2B549B2F6C3E2700F24AC2"
             BuildableName = "Anywhere TV.app"
             BlueprintName = "Anywhere TV"
             ReferencedContainer = "container:Anywhere.xcodeproj">
