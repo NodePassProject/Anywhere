@@ -30,7 +30,7 @@ struct SettingsView: View {
     @AppStorage("allowInsecure", store: AWCore.userDefaults)
     private var allowInsecure = false
 
-    @State private var adBlockEnabled = false
+    @State private var adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
     @State private var showInsecureAlert = false
 
     // Countries with serious internet censorship (must match INCLUDED_COUNTRIES in build_geoip.py)
