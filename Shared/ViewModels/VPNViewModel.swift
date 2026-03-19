@@ -96,10 +96,15 @@ class VPNViewModel: ObservableObject {
                     // Re-resolve chain in case underlying proxies changed
                     self.reResolveSelectedChain()
                 } else {
-                    // Keep selection valid
-                    if let selected = self.selectedConfiguration,
-                       !newConfigurations.contains(where: { $0.id == selected.id }) {
-                        self.selectedConfiguration = newConfigurations.first
+                    // Keep selection valid and refreshed
+                    if let selected = self.selectedConfiguration {
+                        if let refreshed = newConfigurations.first(where: { $0.id == selected.id }) {
+                            if refreshed != selected {
+                                self.selectedConfiguration = refreshed
+                            }
+                        } else {
+                            self.selectedConfiguration = newConfigurations.first
+                        }
                     }
                     if self.selectedConfiguration == nil {
                         self.selectedConfiguration = newConfigurations.first
@@ -355,11 +360,8 @@ class VPNViewModel: ObservableObject {
             ))
         }
 
-        // Replace old configurations with new ones
-        store.deleteConfigurations(for: subscription.id)
-        for configuration in newConfigurations {
-            store.add(configuration)
-        }
+        // Atomically replace old configurations with new ones (single publisher emission)
+        store.replaceConfigurations(for: subscription.id, with: newConfigurations)
 
         // Update subscription metadata
         var updated = subscription
@@ -373,16 +375,21 @@ class VPNViewModel: ObservableObject {
         }
         subscriptionStore.update(updated)
 
-        // Fix selection if it was pointing to a configuration that no longer exists
+        // Fix selection if it was pointing to a configuration in this subscription
         if selectedWasInSubscription {
-            let updatedConfigs = configurations(for: subscription)
             if let selectedId = selectedConfiguration?.id,
-               let preserved = updatedConfigs.first(where: { $0.id == selectedId }) {
+               let preserved = newConfigurations.first(where: { $0.id == selectedId }) {
                 selectedConfiguration = preserved
             } else {
-                selectedConfiguration = updatedConfigs.first ?? configurations.first
+                selectedConfiguration = newConfigurations.first ?? configurations.first
             }
         }
+    }
+
+    func toggleSubscriptionCollapsed(_ subscription: Subscription) {
+        var updated = subscription
+        updated.collapsed.toggle()
+        subscriptionStore.update(updated)
     }
 
     func deleteSubscription(_ subscription: Subscription) {
@@ -489,9 +496,6 @@ class VPNViewModel: ObservableObject {
                 // Only react to our VPN manager's connection
                 guard connection === self.vpnManager?.connection else { return }
                 self.vpnStatus = connection.status
-                if let manager = self.vpnManager, !self.pendingReconnect {
-                    AWCore.userDefaults.set(manager.isOnDemandEnabled, forKey: "alwaysOnEnabled")
-                }
                 if connection.status == .connected {
                     self.startStatsPolling()
                 } else {
@@ -551,7 +555,6 @@ class VPNViewModel: ObservableObject {
             if let manager = managers?.first {
                 self.vpnManager = manager
                 self.vpnStatus = manager.connection.status
-                AWCore.userDefaults.set(manager.isOnDemandEnabled, forKey: "alwaysOnEnabled")
                 if manager.connection.status == .connected {
                     self.startStatsPolling()
                 }

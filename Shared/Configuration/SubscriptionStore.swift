@@ -17,8 +17,9 @@ class SubscriptionStore: ObservableObject {
     private let fileURL: URL
 
     private init() {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        fileURL = documents.appendingPathComponent("subscriptions.json")
+        AWCore.migrateToAppGroup(fileName: "subscriptions.json")
+        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
+        fileURL = container.appendingPathComponent("subscriptions.json")
         subscriptions = loadFromDisk()
     }
 

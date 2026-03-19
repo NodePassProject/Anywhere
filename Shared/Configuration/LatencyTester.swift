@@ -17,12 +17,26 @@ enum LatencyResult: Sendable {
     case insecure
 }
 
+private enum LatencyTestError: Error, LocalizedError {
+    case unexpectedStatus(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .unexpectedStatus(let status): return "Unexpected status: \(status)"
+        }
+    }
+}
+
 /// Tests full proxy round-trip latency by establishing a proxy connection
 /// and sending an HTTP request through the proxy chain.
 nonisolated enum LatencyTester {
 
     /// Per-test timeout.
     private static let timeout: Duration = .seconds(10)
+
+    /// Latency test endpoint.
+    private static let latencyHost = "latency.argsment.com"
+    private static let latencyPort: UInt16 = 443
 
     /// Test a single configuration's proxy round-trip latency.
     ///
@@ -129,49 +143,106 @@ nonisolated enum LatencyTester {
 
         let client = ProxyClient(configuration: configuration, useResolvedAddressForDirectDial: true)
 
-        defer { client.cancel() }
+        return try await withTaskCancellationHandler {
+            defer { client.cancel() }
 
-        // Phase 1 (untimed): Establish proxy connection.
-        // TCP + TLS/Reality + VLESS/SS handshake.
-        let proxyConnection: ProxyConnection = try await withCheckedThrowingContinuation { continuation in
-            client.connect(to: "www.gstatic.com", port: 80) { result in
-                continuation.resume(with: result)
-            }
-        }
-
-        // Phase 2 (untimed): Send the HTTP request.
-        // This triggers the proxy-to-target connection (for both VLESS and SS)
-        // and pushes the request data into the local send buffer.
-        let httpRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n".data(using: .utf8)!
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            proxyConnection.send(data: httpRequest) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+            // Phase 1 (untimed): Establish proxy connection.
+            // TCP + TLS/Reality + VLESS/SS handshake.
+            let proxyConnection: ProxyConnection = try await withCheckedThrowingContinuation { continuation in
+                client.connect(to: Self.latencyHost, port: Self.latencyPort) { result in
+                    continuation.resume(with: result)
                 }
             }
-        }
 
-        // Phase 3 (timed): Wait for the response.
-        // Timer starts after send completes — measures the actual network
-        // round-trip: data traverses client → proxy chain → gstatic → back.
-        let clock = ContinuousClock()
-        let start = clock.now
+            // Phase 2 (untimed): TLS handshake with destination through the proxy tunnel.
+            let destinationTLSConfig = TLSConfiguration(serverName: Self.latencyHost, alpn: ["http/1.1"])
+            let destinationTLSClient = TLSClient(configuration: destinationTLSConfig)
+            defer { destinationTLSClient.cancel() }
 
-        let _: Data? = try await withCheckedThrowingContinuation { continuation in
-            proxyConnection.receive { data, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: data)
+            let tlsConnection: TLSRecordConnection = try await withCheckedThrowingContinuation { continuation in
+                destinationTLSClient.connect(overTunnel: proxyConnection) { result in
+                    switch result {
+                    case .success(let connection):
+                        continuation.resume(returning: connection)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
-        }
 
-        let elapsed = clock.now - start
-        let ms = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
-        return ms
+            // Phase 3 (untimed warmup): Send a first request to drain any TLS 1.3
+            // NewSessionTicket records.
+            let warmupRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: \(Self.latencyHost)\r\n\r\n".data(using: .utf8)!
+
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                tlsConnection.send(data: warmupRequest) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+
+            let warmupData: Data? = try await withCheckedThrowingContinuation { continuation in
+                tlsConnection.receive { data, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: data)
+                    }
+                }
+            }
+
+            // Validate warmup response
+            let warmupStatus = warmupData.flatMap { String(data: $0, encoding: .utf8) }?
+                .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
+            guard let warmupStatus, warmupStatus.contains("204") else {
+                throw LatencyTestError.unexpectedStatus(warmupStatus ?? "no response")
+            }
+
+            // Phase 4 (untimed): Send the timed HTTP request.
+            let httpRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
+
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                tlsConnection.send(data: httpRequest) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
+                }
+            }
+
+            // Phase 5 (timed): Wait for the response.
+            // Timer starts after send completes — measures the actual network
+            // round-trip: data traverses client → proxy chain → target → back.
+            let clock = ContinuousClock()
+            let start = clock.now
+
+            let responseData: Data? = try await withCheckedThrowingContinuation { continuation in
+                tlsConnection.receive { data, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: data)
+                    }
+                }
+            }
+
+            let elapsed = clock.now - start
+
+            // Validate HTTP 204 response
+            let statusLine = responseData.flatMap { String(data: $0, encoding: .utf8) }?
+                .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
+            guard let statusLine, statusLine.contains("204") else {
+                throw LatencyTestError.unexpectedStatus(statusLine ?? "no response")
+            }
+
+            let ms = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
+            return ms
+        } onCancel: {
+            client.cancel()
+        }
     }
 }

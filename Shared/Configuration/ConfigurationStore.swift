@@ -17,8 +17,9 @@ class ConfigurationStore: ObservableObject, ConfigurationProviding {
     private let fileURL: URL
 
     private init() {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        fileURL = documents.appendingPathComponent("configurations.json")
+        AWCore.migrateToAppGroup(fileName: "configurations.json")
+        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
+        fileURL = container.appendingPathComponent("configurations.json")
         configurations = loadFromDisk()
     }
 
@@ -49,6 +50,15 @@ class ConfigurationStore: ObservableObject, ConfigurationProviding {
 
     func deleteConfigurations(for subscriptionId: UUID) {
         configurations.removeAll { $0.subscriptionId == subscriptionId }
+        saveToDisk()
+    }
+
+    /// Atomically replaces all configurations for a subscription in a single assignment,
+    /// so the `@Published` publisher fires only once with the final state.
+    func replaceConfigurations(for subscriptionId: UUID, with newConfigurations: [ProxyConfiguration]) {
+        var updated = configurations.filter { $0.subscriptionId != subscriptionId }
+        updated.append(contentsOf: newConfigurations)
+        configurations = updated
         saveToDisk()
     }
 

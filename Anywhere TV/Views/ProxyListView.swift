@@ -17,6 +17,7 @@ struct ProxyListView: View {
     @State private var subscriptionErrorMessage = ""
     @State private var renamingConfiguration: ProxyConfiguration?
     @State private var renameText = ""
+    @State private var collapsedSubscriptions: Set<UUID> = []
 
     private var standaloneConfigurations: [ProxyConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }
@@ -40,8 +41,10 @@ struct ProxyListView: View {
             }
             ForEach(subscribedGroups, id: \.0.id) { subscription, configurations in
                 Section {
-                    ForEach(configurations) { configuration in
-                        configurationRow(configuration)
+                    if !collapsedSubscriptions.contains(subscription.id) {
+                        ForEach(configurations) { configuration in
+                            configurationRow(configuration)
+                        }
                     }
                 } header: {
                     subscriptionHeader(subscription)
@@ -119,6 +122,9 @@ struct ProxyListView: View {
         } message: {
             Text("Provide a new name.")
         }
+        .onAppear {
+            collapsedSubscriptions = Set(viewModel.subscriptions.filter(\.collapsed).map(\.id))
+        }
     }
 
     // MARK: - Subscription Header
@@ -126,7 +132,26 @@ struct ProxyListView: View {
     @ViewBuilder
     private func subscriptionHeader(_ subscription: Subscription) -> some View {
         HStack {
-            Text(subscription.name)
+            Button {
+                let id = subscription.id
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if collapsedSubscriptions.contains(id) {
+                        collapsedSubscriptions.remove(id)
+                    } else {
+                        collapsedSubscriptions.insert(id)
+                    }
+                }
+                viewModel.toggleSubscriptionCollapsed(subscription)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .frame(width: 10)
+                        .rotationEffect(.degrees(collapsedSubscriptions.contains(subscription.id) ? 0 : 90))
+                    Text(subscription.name)
+                }
+            }
+            .buttonStyle(.plain)
             Spacer()
             if updatingSubscription?.id == subscription.id {
                 ProgressView()

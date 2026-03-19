@@ -17,8 +17,9 @@ class ChainStore: ObservableObject {
     private let fileURL: URL
 
     private init() {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        fileURL = documents.appendingPathComponent("chains.json")
+        AWCore.migrateToAppGroup(fileName: "chains.json")
+        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
+        fileURL = container.appendingPathComponent("chains.json")
         chains = loadFromDisk()
     }
 

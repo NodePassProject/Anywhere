@@ -9,8 +9,6 @@ import SwiftUI
 
 struct RuleSetListView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
-    // Workaround: SwiftUI view redraw bugs
-    @State private var shouldRefreshList: Bool = false
     
     private var standaloneConfigurations: [ProxyConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }
@@ -23,22 +21,12 @@ struct RuleSetListView: View {
         }
     }
 
-    private var routingRuleSets: [RuleSetStore.RuleSet] {
-        RuleSetStore.shared.ruleSets.filter { $0.name != "ADBlock" }
-    }
+    @State var routingRuleSets: [RuleSetStore.RuleSet] = []
 
     var body: some View {
         List {
-            let shouldRefreshList = !shouldRefreshList
-            ForEach(routingRuleSets.filter({ $0.id != "Direct" })) { ruleSet in
-                Picker(selection: Binding(
-                    get: { ruleSet.assignedConfigurationId },
-                    set: { newValue in
-                        RuleSetStore.shared.updateAssignment(ruleSet, configurationId: newValue)
-                        viewModel.syncRoutingConfigurationToNE()
-                        self.shouldRefreshList.toggle()
-                    }
-                )) {
+            ForEach($routingRuleSets) { $ruleSet in
+                Picker(selection: $ruleSet.assignedConfigurationId) {
                     Text("Default").tag(nil as String?)
                     Text("DIRECT").tag("DIRECT" as String?)
                     Text("REJECT").tag("REJECT" as String?)
@@ -61,8 +49,20 @@ struct RuleSetListView: View {
                     }
                 }
             }
+            .onChange(of: routingRuleSets) { oldValue, newValue in
+                for currentRoutingRuleSet in newValue {
+                    let previousRoutingRuleSet = oldValue.first(where: { $0.id == currentRoutingRuleSet.id })!
+                    if currentRoutingRuleSet.assignedConfigurationId != previousRoutingRuleSet.assignedConfigurationId {
+                        RuleSetStore.shared.updateAssignment(currentRoutingRuleSet, configurationId: currentRoutingRuleSet.assignedConfigurationId)
+                    }
+                }
+                viewModel.syncRoutingConfigurationToNE()
+            }
         }
         .listRowSpacing(8)
         .navigationTitle("Routing Rules")
+        .onAppear {
+            routingRuleSets = RuleSetStore.shared.routingRuleSets
+        }
     }
 }

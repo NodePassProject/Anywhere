@@ -518,12 +518,20 @@ class BSDSocket: RawTransport {
                 writeSourceResumed = false
             }
 
+            let pendingRx = pendingReceive
             pendingReceive = nil
+            let pendingTx = pendingSends
             pendingSends.removeAll()
 
             if currentFd >= 0 {
                 Darwin.shutdown(currentFd, SHUT_RDWR)
                 Darwin.close(currentFd)
+            }
+
+            // Deliver cancellation errors to pending callbacks after socket is closed.
+            pendingRx?(nil, true, BSDSocketError.notConnected)
+            for pending in pendingTx {
+                pending.completion?(BSDSocketError.notConnected)
             }
         }
     }

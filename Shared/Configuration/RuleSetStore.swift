@@ -15,13 +15,19 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere", category: "RuleS
 class RuleSetStore: ObservableObject {
     static let shared = RuleSetStore()
 
-    struct RuleSet: Identifiable {
+    struct RuleSet: Identifiable, Equatable {
         let id: String   // = name
         let name: String
         var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
     }
 
     @Published private(set) var ruleSets: [RuleSet] = []
+    var adBlockRuleSet: RuleSet? {
+        ruleSets.first(where: { $0.name == "ADBlock" })
+    }
+    var routingRuleSets: [RuleSetStore.RuleSet] {
+        ruleSets.filter { $0.name != "Direct" && $0.name != "ADBlock" }
+    }
 
     /// Bundled ruleset names (must match JSON filenames in Resources/).
     private static let builtIn = ["Direct", "Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini", "ADBlock"]

@@ -30,21 +30,13 @@ struct SettingsView: View {
     @AppStorage("allowInsecure", store: AWCore.userDefaults)
     private var allowInsecure = false
 
+    @State private var adBlockEnabled = false
     @State private var showInsecureAlert = false
-    @State private var shouldRefreshADBlockToggle = true
 
     // Countries with serious internet censorship (must match INCLUDED_COUNTRIES in build_geoip.py)
     private static let countryCodes: [String] = [
         "AE", "BY", "CN", "CU", "IR", "MM", "RU", "SA", "TM", "VN"
     ]
-    
-    private var adBlockRuleSet: RuleSetStore.RuleSet? {
-        RuleSetStore.shared.ruleSets.first { $0.name == "ADBlock" }
-    }
-
-    private var hasRoutingRules: Bool {
-        RuleSetStore.shared.ruleSets.contains { $0.assignedConfigurationId != nil }
-    }
     
     var body: some View {
         Form {
@@ -84,22 +76,18 @@ struct SettingsView: View {
                 } label: {
                     TextWithColorfulIcon(titleKey: "Country Bypass", systemName: "globe.americas.fill", foregroundColor: .white, backgroundColor: .orange)
                 }
-                if let adBlock = adBlockRuleSet {
-                    let shouldRefreshADBlockToggle = !shouldRefreshADBlockToggle
-                    Toggle(isOn: Binding(
-                        get: { adBlock.assignedConfigurationId == "REJECT" },
-                        set: { newValue in
-                            if newValue {
-                                RuleSetStore.shared.updateAssignment(adBlock, configurationId: "REJECT")
-                            } else {
-                                RuleSetStore.shared.updateAssignment(adBlock, configurationId: nil)
-                            }
-                            viewModel.syncRoutingConfigurationToNE()
-                            self.shouldRefreshADBlockToggle.toggle()
+                Toggle(isOn: $adBlockEnabled) {
+                    TextWithColorfulIcon(titleKey: "AD Blocking", systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
+                }
+                .onChange(of: adBlockEnabled) { _, newValue in
+                    if let adBlockRuleSet = RuleSetStore.shared.adBlockRuleSet {
+                        if newValue {
+                            RuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: "REJECT")
+                        } else {
+                            RuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: nil)
                         }
-                    )) {
-                        TextWithColorfulIcon(titleKey: "AD Blocking", systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
                     }
+                    viewModel.syncRoutingConfigurationToNE()
                 }
                 NavigationLink {
                     RuleSetListView()
@@ -162,6 +150,9 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
+        }
+        .onAppear {
+            adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
         }
     }
     

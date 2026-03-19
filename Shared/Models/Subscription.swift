@@ -16,8 +16,9 @@ struct Subscription: Identifiable, Codable {
     var download: Int64?
     var total: Int64?
     var expire: Date?
+    var collapsed: Bool
 
-    init(id: UUID = UUID(), name: String, url: String, lastUpdate: Date? = nil, upload: Int64? = nil, download: Int64? = nil, total: Int64? = nil, expire: Date? = nil) {
+    init(id: UUID = UUID(), name: String, url: String, lastUpdate: Date? = nil, upload: Int64? = nil, download: Int64? = nil, total: Int64? = nil, expire: Date? = nil, collapsed: Bool = false) {
         self.id = id
         self.name = name
         self.url = url
@@ -26,5 +27,19 @@ struct Subscription: Identifiable, Codable {
         self.download = download
         self.total = total
         self.expire = expire
+        self.collapsed = collapsed
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        url = try container.decode(String.self, forKey: .url)
+        lastUpdate = try container.decodeIfPresent(Date.self, forKey: .lastUpdate)
+        upload = try container.decodeIfPresent(Int64.self, forKey: .upload)
+        download = try container.decodeIfPresent(Int64.self, forKey: .download)
+        total = try container.decodeIfPresent(Int64.self, forKey: .total)
+        expire = try container.decodeIfPresent(Date.self, forKey: .expire)
+        collapsed = (try? container.decode(Bool.self, forKey: .collapsed)) ?? false
     }
 }
