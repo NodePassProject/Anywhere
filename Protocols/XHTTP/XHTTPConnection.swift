@@ -53,6 +53,11 @@ class XHTTPConnection {
     private var _isConnected = false
     private let lock = UnfairLock()
 
+    // Packet-up batching: delay completion to match Xray-core's scMinPostsIntervalMs.
+    // This keeps uploadFlushInFlight=true longer, causing LWIPTCPConnection to
+    // accumulate data in its coalesce buffer, resulting in fewer, larger POSTs.
+    private var lastPacketUpSendTime: UInt64 = 0
+
     /// Leftover data after HTTP response headers.
     private var headerBuffer = Data()
 
@@ -697,8 +702,12 @@ class XHTTPConnection {
         }
         requestData.append(bodyData)
 
-        uploadSend(requestData) { error in
-            completion(error)
+        uploadSend(requestData) { [weak self] error in
+            if let error {
+                completion(error)
+            } else {
+                self?.completePacketUpWithDelay(completion: completion)
+            }
         }
     }
 
@@ -1372,19 +1381,83 @@ extension XHTTPConnection {
             initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: h2UploadStreamId, payload: uploadHeaders))
         }
 
-        downloadSend(initData) { error in
-            // Complete immediately after sending — do NOT wait for the 200 OK
-            // response here. Go's http2.Transport returns the connection right
-            // away; the VLESS layer then writes the header (POST) before reading.
-            // If we block here waiting for the GET response, the server/CDN may
-            // buffer the 200 OK until the backend has body data, which only
-            // arrives after the POST — causing a deadlock.
-            // Server SETTINGS, SETTINGS_ACK, and the 200 OK HEADERS are all
-            // handled by receiveH2Data on the first receive call.
+        downloadSend(initData) { [weak self] error in
             if let error {
                 completion(XHTTPError.setupFailed("H2 setup send failed: \(error.localizedDescription)"))
-            } else {
-                completion(nil)
+                return
+            }
+            // After sending, process the server's SETTINGS and send ACK before
+            // completing. This is required by RFC 7540 §6.5.3 ("MUST immediately
+            // emit a SETTINGS frame with the ACK flag"). Without it, some CDNs
+            // drop subsequent frames because the client hasn't acknowledged.
+            // We do NOT wait for the 200 OK response HEADERS — that would deadlock
+            // with CDNs that buffer the response until the backend produces body
+            // data (which requires the POST that is sent after setup completes).
+            self?.processInitialServerFrames(completion: completion)
+        }
+    }
+
+    /// Reads frames until the server's SETTINGS is received and ACKed.
+    /// Does NOT wait for the 200 OK response — that is handled later by receiveH2Data.
+    /// Any non-SETTINGS frames received here (WINDOW_UPDATE, PING, etc.) are processed
+    /// normally. If the response HEADERS arrives early, it is handled and we complete.
+    private func processInitialServerFrames(completion: @escaping (Error?) -> Void) {
+        readH2Frame { [weak self] result in
+            guard let self else {
+                completion(XHTTPError.connectionClosed)
+                return
+            }
+
+            switch result {
+            case .failure(let error):
+                completion(XHTTPError.setupFailed("H2 setup read failed: \(error.localizedDescription)"))
+
+            case .success(let frame):
+                switch frame.type {
+                case Self.h2FrameSettings:
+                    if frame.flags & Self.h2FlagAck == 0 {
+                        // Server's SETTINGS — parse and send ACK, then complete
+                        self.parseH2Settings(frame.payload)
+                        let ack = self.buildH2Frame(type: Self.h2FrameSettings, flags: Self.h2FlagAck, streamId: 0, payload: Data())
+                        self.downloadSend(ack) { _ in }
+                        completion(nil)
+                    } else {
+                        // SETTINGS ACK for our settings — keep reading
+                        self.processInitialServerFrames(completion: completion)
+                    }
+
+                case Self.h2FrameHeaders:
+                    // Early response HEADERS — process and complete
+                    let isDownload = frame.streamId == 0 || frame.streamId == 1
+                    if isDownload {
+                        if self.checkH2ResponseStatus(frame.payload) == nil {
+                            self.lock.lock()
+                            self.h2ResponseReceived = true
+                            self.lock.unlock()
+                        }
+                    }
+                    completion(nil)
+
+                case Self.h2FrameWindowUpdate:
+                    self.lock.lock()
+                    if frame.payload.count >= 4 {
+                        let increment = (UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])
+                        self.h2PeerWindowSize += Int(increment & 0x7FFFFFFF)
+                    }
+                    self.lock.unlock()
+                    self.processInitialServerFrames(completion: completion)
+
+                case Self.h2FramePing:
+                    let pong = self.buildH2Frame(type: Self.h2FramePing, flags: Self.h2FlagAck, streamId: 0, payload: frame.payload)
+                    self.downloadSend(pong) { _ in }
+                    self.processInitialServerFrames(completion: completion)
+
+                case Self.h2FrameGoaway:
+                    completion(XHTTPError.setupFailed("Server sent GOAWAY"))
+
+                default:
+                    self.processInitialServerFrames(completion: completion)
+                }
             }
         }
     }
@@ -1417,15 +1490,30 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Send
 
+    /// Marks the H2 connection as closed so subsequent sends fail fast.
+    private func markH2Closed() {
+        lock.lock()
+        h2StreamClosed = true
+        lock.unlock()
+    }
+
     /// Sends data as HTTP/2 DATA frame(s) on the given stream.
     private func sendH2Data(data: Data, streamId: UInt32, completion: @escaping (Error?) -> Void) {
         lock.lock()
+        if h2StreamClosed {
+            lock.unlock()
+            completion(XHTTPError.connectionClosed)
+            return
+        }
         let maxSize = h2MaxFrameSize
         lock.unlock()
 
         if data.count <= maxSize {
             let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: data)
-            downloadSend(frame, completion)
+            downloadSend(frame) { [weak self] error in
+                if error != nil { self?.markH2Closed() }
+                completion(error)
+            }
         } else {
             // Split into multiple DATA frames
             let firstChunk = data.prefix(maxSize)
@@ -1433,6 +1521,7 @@ extension XHTTPConnection {
             let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: Data(firstChunk))
             downloadSend(frame) { [weak self] error in
                 if let error {
+                    self?.markH2Closed()
                     completion(error)
                     return
                 }
@@ -1442,8 +1531,17 @@ extension XHTTPConnection {
     }
 
     /// Sends data as a packet-up POST: opens a new HTTP/2 stream with HEADERS + DATA + END_STREAM.
+    ///
+    /// Matches Xray-core's `scMinPostsIntervalMs` delay: the completion is deferred so that
+    /// rapid writes are batched into fewer, larger POSTs by the upstream coalescing buffer
+    /// (LWIPTCPConnection keeps `uploadFlushInFlight` true during the delay).
     private func sendH2PacketUp(data: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
+        if h2StreamClosed {
+            lock.unlock()
+            completion(XHTTPError.connectionClosed)
+            return
+        }
         let streamId = h2NextPacketStreamId
         h2NextPacketStreamId += 2
         let seq = nextSeq
@@ -1460,18 +1558,54 @@ extension XHTTPConnection {
 
         downloadSend(headersFrame) { [weak self] error in
             if let error {
+                self?.markH2Closed()
                 completion(error)
                 return
             }
             guard !data.isEmpty else {
-                completion(nil)
+                self?.completePacketUpWithDelay(completion: completion)
                 return
             }
             guard let self else {
                 completion(XHTTPError.connectionClosed)
                 return
             }
-            self.sendH2PacketUpData(data: data, streamId: streamId, maxSize: maxSize, completion: completion)
+            self.sendH2PacketUpData(data: data, streamId: streamId, maxSize: maxSize) { [weak self] error in
+                if let error {
+                    self?.markH2Closed()
+                    completion(error)
+                } else {
+                    self?.completePacketUpWithDelay(completion: completion)
+                }
+            }
+        }
+    }
+
+    /// Delays the packet-up send completion to enforce `scMinPostsIntervalMs` spacing
+    /// between POSTs, matching Xray-core's behavior. This keeps the caller's send-in-flight
+    /// flag set, causing data to accumulate and batch into larger POSTs.
+    private func completePacketUpWithDelay(completion: @escaping (Error?) -> Void) {
+        let delayMs = configuration.scMinPostsIntervalMs
+        guard delayMs > 0 else {
+            completion(nil)
+            return
+        }
+        let now = DispatchTime.now().uptimeNanoseconds
+        lock.lock()
+        let elapsed = lastPacketUpSendTime == 0 ? UInt64(delayMs) * 1_000_000 : now - lastPacketUpSendTime
+        lastPacketUpSendTime = now
+        lock.unlock()
+
+        let delayNs = UInt64(delayMs) * 1_000_000
+        if elapsed >= delayNs {
+            // Enough time has passed since last POST — complete immediately
+            completion(nil)
+        } else {
+            // Defer completion for the remaining interval
+            let remaining = delayNs - elapsed
+            DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(remaining))) {
+                completion(nil)
+            }
         }
     }
 
@@ -1480,13 +1614,17 @@ extension XHTTPConnection {
         if data.count <= maxSize {
             // Last (or only) chunk: set END_STREAM
             let frame = buildH2Frame(type: Self.h2FrameData, flags: Self.h2FlagEndStream, streamId: streamId, payload: data)
-            downloadSend(frame, completion)
+            downloadSend(frame) { [weak self] error in
+                if error != nil { self?.markH2Closed() }
+                completion(error)
+            }
         } else {
             let firstChunk = data.prefix(maxSize)
             let remaining = data.suffix(from: data.startIndex + maxSize)
             let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: Data(firstChunk))
             downloadSend(frame) { [weak self] error in
                 if let error {
+                    self?.markH2Closed()
                     completion(error)
                     return
                 }
