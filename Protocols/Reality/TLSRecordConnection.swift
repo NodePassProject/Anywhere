@@ -47,6 +47,13 @@ class TLSRecordConnection {
     private var serverSeqNum: UInt64 = 0
     private let seqLock = UnfairLock()
 
+    /// Serialises the encrypt-then-enqueue path so that TLS records arrive at
+    /// the socket queue in sequence-number order.  Without this, two concurrent
+    /// `send` calls can allocate consecutive sequence numbers but enqueue the
+    /// encrypted records in reverse order, causing TLS decryption failures on
+    /// the server and a "Broken pipe" on the next write.
+    private let sendLock = UnfairLock()
+
     /// TLS 1.3 maximum plaintext per record (RFC 8446 §5.1).
     private static let maxRecordPlaintext = 16384
 
@@ -90,14 +97,18 @@ class TLSRecordConnection {
     ///   - data: The plaintext data to encrypt and send.
     ///   - completion: Called with `nil` on success or an error on failure.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
+        sendLock.lock()
         guard let connection else {
+            sendLock.unlock()
             completion(RealityError.connectionFailed("Connection cancelled"))
             return
         }
         do {
             let record = try buildTLSRecords(for: data)
             connection.send(data: record, completion: completion)
+            sendLock.unlock()
         } catch {
+            sendLock.unlock()
             logger.error("[Reality] Encryption error: \(error.localizedDescription, privacy: .public)")
             completion(error)
         }
@@ -107,11 +118,17 @@ class TLSRecordConnection {
     ///
     /// - Parameter data: The plaintext data to encrypt and send.
     func send(data: Data) {
-        guard let connection else { return }
+        sendLock.lock()
+        guard let connection else {
+            sendLock.unlock()
+            return
+        }
         do {
             let record = try buildTLSRecords(for: data)
             connection.send(data: record)
+            sendLock.unlock()
         } catch {
+            sendLock.unlock()
             logger.error("[Reality] Encryption error: \(error.localizedDescription, privacy: .public)")
         }
     }
@@ -232,7 +249,11 @@ class TLSRecordConnection {
 
     /// Sends a TLS close_notify alert record (best-effort, fire-and-forget).
     private func sendCloseNotify() {
-        guard let connection else { return }
+        sendLock.lock()
+        guard let connection else {
+            sendLock.unlock()
+            return
+        }
 
         seqLock.lock()
         let seqNum = clientSeqNum
@@ -270,7 +291,9 @@ class TLSRecordConnection {
             }
 
             connection.send(data: record)
+            sendLock.unlock()
         } catch {
+            sendLock.unlock()
             // Best-effort, ignore errors
         }
     }

@@ -371,12 +371,50 @@ class XHTTPConnection {
                         self?.uploadReceive = closures.receive
                         self?.uploadCancel = closures.cancel
                         self?.lock.unlock()
+                        // Drain HTTP/1.1 POST responses in background to prevent
+                        // TCP receive-buffer saturation (see startUploadResponseDrain).
+                        self?.startUploadResponseDrain()
                         completion(nil)
                     case .failure(let error):
                         completion(XHTTPError.setupFailed("Upload connection failed: \(error.localizedDescription)"))
                     }
                 }
             }
+        }
+    }
+
+    // MARK: Upload Response Drain
+
+    /// Starts a background loop that continuously reads from the upload connection
+    /// and discards all data (HTTP/1.1 responses to POST requests).
+    ///
+    /// In HTTP/1.1 packet-up mode each POST request receives an HTTP response
+    /// (e.g. `HTTP/1.1 200 OK …`).  If these responses are never consumed they
+    /// accumulate in the TCP receive buffer.  Once the buffer fills the server's
+    /// response writes block, preventing it from processing further requests on
+    /// this connection and causing intermittent stalls.
+    ///
+    /// HTTP/2 does not need this because upload-stream responses are consumed
+    /// inline by the shared H2 frame reader (`receiveH2Data`).
+    private func startUploadResponseDrain() {
+        drainNextUploadResponse()
+    }
+
+    private func drainNextUploadResponse() {
+        lock.lock()
+        guard let uploadReceive = self.uploadReceive, _isConnected else {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        uploadReceive { [weak self] data, isComplete, error in
+            guard let self else { return }
+            if error != nil || isComplete {
+                return // Upload connection closed — stop draining.
+            }
+            // Discard the received data (HTTP response bytes) and keep draining.
+            self.drainNextUploadResponse()
         }
     }
 
