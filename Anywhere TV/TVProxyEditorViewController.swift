@@ -26,6 +26,8 @@ class TVProxyEditorViewController: UITableViewController {
     private var security = "none"
     private var wsHost = ""
     private var wsPath = "/"
+    private var huHost = ""
+    private var huPath = "/"
     private var xhttpHost = ""
     private var xhttpPath = "/"
     private var xhttpMode = "auto"
@@ -59,7 +61,7 @@ class TVProxyEditorViewController: UITableViewController {
         case name, address, port, uuid
         case outboundProtocol, encryption, transport, flow, security
         case mux, xudp
-        case wsHost, wsPath, xhttpHost, xhttpPath, xhttpMode
+        case wsHost, wsPath, huHost, huPath, xhttpHost, xhttpPath, xhttpMode
         case tlsSNI, tlsALPN, fingerprint
         case realitySNI, publicKey, shortId
         case ssPassword, ssMethod
@@ -124,6 +126,10 @@ class TVProxyEditorViewController: UITableViewController {
             if transport == "ws" {
                 transportRows.append(.text(label: String(localized: "Host"), value: wsHost, placeholder: "Host", key: .wsHost))
                 transportRows.append(.text(label: String(localized: "Path"), value: wsPath, placeholder: "/", key: .wsPath))
+            }
+            if transport == "httpupgrade" {
+                transportRows.append(.text(label: String(localized: "Host"), value: huHost, placeholder: "Host", key: .huHost))
+                transportRows.append(.text(label: String(localized: "Path"), value: huPath, placeholder: "/", key: .huPath))
             }
             if transport == "xhttp" {
                 transportRows.append(.text(label: String(localized: "Host"), value: xhttpHost, placeholder: "Host", key: .xhttpHost))
@@ -323,6 +329,8 @@ class TVProxyEditorViewController: UITableViewController {
         case .xudp: xudpEnabled = value == "true"
         case .wsHost: wsHost = value
         case .wsPath: wsPath = value
+        case .huHost: huHost = value
+        case .huPath: huPath = value
         case .xhttpHost: xhttpHost = value
         case .xhttpPath: xhttpPath = value
         case .xhttpMode: xhttpMode = value
@@ -358,6 +366,10 @@ class TVProxyEditorViewController: UITableViewController {
         if let ws = config.websocket {
             wsHost = ws.host
             wsPath = ws.path
+        }
+        if let hu = config.httpUpgrade {
+            huHost = hu.host
+            huPath = hu.path
         }
         if let xhttp = config.xhttp {
             xhttpHost = xhttp.host
@@ -425,6 +437,11 @@ class TVProxyEditorViewController: UITableViewController {
             wsConfig = WebSocketConfiguration(host: wsHost.isEmpty ? serverAddress : wsHost, path: wsPath.isEmpty ? "/" : wsPath)
         }
 
+        var huConfig: HTTPUpgradeConfiguration?
+        if transport == "httpupgrade" {
+            huConfig = HTTPUpgradeConfiguration(host: huHost.isEmpty ? serverAddress : huHost, path: huPath.isEmpty ? "/" : huPath)
+        }
+
         var xhttpConfig: XHTTPConfiguration?
         if transport == "xhttp" {
             let host = xhttpHost.isEmpty ? serverAddress : xhttpHost
@@ -448,9 +465,12 @@ class TVProxyEditorViewController: UITableViewController {
             tls: tlsConfiguration,
             reality: realityConfiguration,
             websocket: wsConfig,
+            httpUpgrade: huConfig,
             xhttp: xhttpConfig,
+            testseed: existingConfiguration?.testseed,
             muxEnabled: muxEnabled,
             xudpEnabled: xudpEnabled,
+            subscriptionId: existingConfiguration?.subscriptionId,
             outboundProtocol: selectedProtocol,
             ssPassword: isShadowsocks ? ssPassword : nil,
             ssMethod: isShadowsocks ? ssMethod : nil,

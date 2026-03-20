@@ -27,6 +27,10 @@ struct ProxyEditorView: View {
     @State private var wsHost = ""
     @State private var wsPath = "/"
 
+    // HTTPUpgrade fields
+    @State private var huHost = ""
+    @State private var huPath = "/"
+
     // XHTTP fields
     @State private var xhttpHost = ""
     @State private var xhttpPath = "/"
@@ -233,6 +237,25 @@ struct ProxyEditorView: View {
                             TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
                         }
                     }
+                    if transport == "httpupgrade" {
+                        LabeledContent {
+                            TextField("Host", text: $huHost)
+                                .keyboardType(.URL)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                        LabeledContent {
+                            TextField("/", text: $huPath)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                    }
                     if transport == "xhttp" {
                         LabeledContent {
                             TextField("Host", text: $xhttpHost)
@@ -392,6 +415,11 @@ struct ProxyEditorView: View {
             wsPath = ws.path
         }
 
+        if let hu = configuration.httpUpgrade {
+            huHost = hu.host
+            huPath = hu.path
+        }
+
         if let xhttp = configuration.xhttp {
             xhttpHost = xhttp.host
             xhttpPath = xhttp.path
@@ -503,6 +531,11 @@ struct ProxyEditorView: View {
             websocketConfiguration = WebSocketConfiguration(host: host, path: path)
         }
 
+        var httpUpgradeConfiguration: HTTPUpgradeConfiguration?
+        if transport == "httpupgrade" {
+            httpUpgradeConfiguration = HTTPUpgradeConfiguration(host: huHost.isEmpty ? serverAddress : huHost, path: huPath.isEmpty ? "/" : huPath)
+        }
+
         var xhttpConfiguration: XHTTPConfiguration?
         if transport == "xhttp" {
             let host = xhttpHost.isEmpty ? serverAddress : xhttpHost
@@ -538,9 +571,12 @@ struct ProxyEditorView: View {
             tls: tlsConfiguration,
             reality: realityConfiguration,
             websocket: websocketConfiguration,
+            httpUpgrade: httpUpgradeConfiguration,
             xhttp: xhttpConfiguration,
+            testseed: self.configuration?.testseed,
             muxEnabled: muxEnabled,
             xudpEnabled: xudpEnabled,
+            subscriptionId: self.configuration?.subscriptionId,
             outboundProtocol: selectedProtocol,
             ssPassword: isShadowsocks ? ssPassword : nil,
             ssMethod: isShadowsocks ? ssMethod : nil,

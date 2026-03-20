@@ -16,6 +16,10 @@ class ChainStore: ObservableObject {
 
     private let fileURL: URL
 
+    #if os(tvOS)
+    private static let userDefaultsKey = "store.chains"
+    #endif
+
     private init() {
         AWCore.migrateToAppGroup(fileName: "chains.json")
         let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
@@ -45,14 +49,18 @@ class ChainStore: ObservableObject {
     // MARK: - Persistence
 
     private func loadFromDisk() -> [ProxyChain] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
-        do {
-            let data = try Data(contentsOf: fileURL)
-            return try JSONDecoder().decode([ProxyChain].self, from: data)
-        } catch {
-            print("Failed to load chains: \(error)")
-            return []
+        if FileManager.default.fileExists(atPath: fileURL.path),
+           let data = try? Data(contentsOf: fileURL),
+           let result = try? JSONDecoder().decode([ProxyChain].self, from: data) {
+            return result
         }
+        #if os(tvOS)
+        if let data = AWCore.userDefaults.data(forKey: Self.userDefaultsKey),
+           let result = try? JSONDecoder().decode([ProxyChain].self, from: data) {
+            return result
+        }
+        #endif
+        return []
     }
 
     private func saveToDisk() {
@@ -64,5 +72,10 @@ class ChainStore: ObservableObject {
         } catch {
             print("Failed to save chains: \(error)")
         }
+        #if os(tvOS)
+        if let data = try? JSONEncoder().encode(chains) {
+            AWCore.userDefaults.set(data, forKey: Self.userDefaultsKey)
+        }
+        #endif
     }
 }

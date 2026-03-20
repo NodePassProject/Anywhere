@@ -16,6 +16,10 @@ class SubscriptionStore: ObservableObject {
 
     private let fileURL: URL
 
+    #if os(tvOS)
+    private static let userDefaultsKey = "store.subscriptions"
+    #endif
+
     private init() {
         AWCore.migrateToAppGroup(fileName: "subscriptions.json")
         let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
@@ -46,14 +50,18 @@ class SubscriptionStore: ObservableObject {
     // MARK: - Persistence
 
     private func loadFromDisk() -> [Subscription] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
-        do {
-            let data = try Data(contentsOf: fileURL)
-            return try JSONDecoder().decode([Subscription].self, from: data)
-        } catch {
-            print("Failed to load subscriptions: \(error)")
-            return []
+        if FileManager.default.fileExists(atPath: fileURL.path),
+           let data = try? Data(contentsOf: fileURL),
+           let result = try? JSONDecoder().decode([Subscription].self, from: data) {
+            return result
         }
+        #if os(tvOS)
+        if let data = AWCore.userDefaults.data(forKey: Self.userDefaultsKey),
+           let result = try? JSONDecoder().decode([Subscription].self, from: data) {
+            return result
+        }
+        #endif
+        return []
     }
 
     private func saveToDisk() {
@@ -65,5 +73,10 @@ class SubscriptionStore: ObservableObject {
         } catch {
             print("Failed to save subscriptions: \(error)")
         }
+        #if os(tvOS)
+        if let data = try? JSONEncoder().encode(subscriptions) {
+            AWCore.userDefaults.set(data, forKey: Self.userDefaultsKey)
+        }
+        #endif
     }
 }
