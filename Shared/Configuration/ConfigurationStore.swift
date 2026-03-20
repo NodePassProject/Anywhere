@@ -16,6 +16,10 @@ class ConfigurationStore: ObservableObject, ConfigurationProviding {
 
     private let fileURL: URL
 
+    #if os(tvOS)
+    private static let userDefaultsKey = "store.configurations"
+    #endif
+
     private init() {
         AWCore.migrateToAppGroup(fileName: "configurations.json")
         let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
@@ -65,14 +69,18 @@ class ConfigurationStore: ObservableObject, ConfigurationProviding {
     // MARK: - Persistence
 
     private func loadFromDisk() -> [ProxyConfiguration] {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
-        do {
-            let data = try Data(contentsOf: fileURL)
-            return try JSONDecoder().decode([ProxyConfiguration].self, from: data)
-        } catch {
-            print("Failed to load configurations: \(error)")
-            return []
+        if FileManager.default.fileExists(atPath: fileURL.path),
+           let data = try? Data(contentsOf: fileURL),
+           let result = try? JSONDecoder().decode([ProxyConfiguration].self, from: data) {
+            return result
         }
+        #if os(tvOS)
+        if let data = AWCore.userDefaults.data(forKey: Self.userDefaultsKey),
+           let result = try? JSONDecoder().decode([ProxyConfiguration].self, from: data) {
+            return result
+        }
+        #endif
+        return []
     }
 
     private func saveToDisk() {
@@ -84,5 +92,10 @@ class ConfigurationStore: ObservableObject, ConfigurationProviding {
         } catch {
             print("Failed to save configurations: \(error)")
         }
+        #if os(tvOS)
+        if let data = try? JSONEncoder().encode(configurations) {
+            AWCore.userDefaults.set(data, forKey: Self.userDefaultsKey)
+        }
+        #endif
     }
 }
