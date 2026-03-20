@@ -442,9 +442,9 @@ class VPNViewModel: ObservableObject {
         }
     }
 
-    func testAllLatencies() {
+    func testAllLatencies(for targets: [ProxyConfiguration]? = nil) {
         latencyTask?.cancel()
-        let resolvedConfigurations = configurations.map(LatencyTester.resolvedConfiguration)
+        let resolvedConfigurations = (targets ?? configurations).map(LatencyTester.resolvedConfiguration)
         syncProxyServerAddresses(for: resolvedConfigurations)
         for configuration in resolvedConfigurations {
             latencyResults[configuration.id] = .testing

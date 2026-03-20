@@ -60,7 +60,10 @@ struct ProxyListView: View {
         .toolbar {
             ToolbarItem {
                 Button {
-                    viewModel.testAllLatencies()
+                    let visibleConfigurations = standaloneConfigurations + subscribedGroups
+                        .filter { !collapsedSubscriptions.contains($0.0.id) }
+                        .flatMap(\.1)
+                    viewModel.testAllLatencies(for: visibleConfigurations)
                 } label: {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
                 }

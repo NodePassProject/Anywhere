@@ -271,7 +271,10 @@ class TVProxyListViewController: UITableViewController {
     }
 
     @objc private func testAllTapped() {
-        viewModel.testAllLatencies()
+        let visibleConfigurations = standaloneConfigurations + subscribedGroups
+            .filter { !collapsedSubscriptions.contains($0.0.id) }
+            .flatMap(\.1)
+        viewModel.testAllLatencies(for: visibleConfigurations)
     }
 
     @objc private func toggleSection(_ sender: UIButton) {
