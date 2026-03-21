@@ -386,7 +386,7 @@ class VPNViewModel: ObservableObject {
         updated.download = result.download ?? subscription.download
         updated.total = result.total ?? subscription.total
         updated.expire = result.expire ?? subscription.expire
-        if let name = result.name {
+        if let name = result.name, !updated.isNameCustomized {
             updated.name = name
         }
         subscriptionStore.update(updated)
@@ -405,6 +405,13 @@ class VPNViewModel: ObservableObject {
     func toggleSubscriptionCollapsed(_ subscription: Subscription) {
         var updated = subscription
         updated.collapsed.toggle()
+        subscriptionStore.update(updated)
+    }
+
+    func renameSubscription(_ subscription: Subscription, to newName: String) {
+        var updated = subscription
+        updated.name = newName
+        updated.isNameCustomized = true
         subscriptionStore.update(updated)
     }
 
@@ -442,7 +449,7 @@ class VPNViewModel: ObservableObject {
         }
     }
 
-    func testAllLatencies(for targets: [ProxyConfiguration]? = nil) {
+    func testLatencies(for targets: [ProxyConfiguration]? = nil) {
         latencyTask?.cancel()
         let resolvedConfigurations = (targets ?? configurations).map(LatencyTester.resolvedConfiguration)
         syncProxyServerAddresses(for: resolvedConfigurations)

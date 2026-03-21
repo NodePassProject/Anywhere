@@ -18,6 +18,8 @@ struct ProxyListView: View {
     @State private var showingSubscriptionError = false
     @State private var subscriptionErrorMessage = ""
     @State private var collapsedSubscriptions: Set<UUID> = []
+    @State private var renamingSubscription: Subscription?
+    @State private var renameText = ""
 
     private var standaloneConfigurations: [ProxyConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }
@@ -63,7 +65,7 @@ struct ProxyListView: View {
                     let visibleConfigurations = standaloneConfigurations + subscribedGroups
                         .filter { !collapsedSubscriptions.contains($0.0.id) }
                         .flatMap(\.1)
-                    viewModel.testAllLatencies(for: visibleConfigurations)
+                    viewModel.testLatencies(for: visibleConfigurations)
                 } label: {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
                 }
@@ -99,6 +101,15 @@ struct ProxyListView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(subscriptionErrorMessage)
+        }
+        .alert("Rename", isPresented: Binding(get: { renamingSubscription != nil }, set: { if !$0 { renamingSubscription = nil } })) {
+            TextField("Name", text: $renameText)
+            Button("OK") {
+                if let subscription = renamingSubscription, !renameText.isEmpty {
+                    viewModel.renameSubscription(subscription, to: renameText)
+                }
+            }
+            Button("Cancel", role: .cancel) { }
         }
         .onAppear {
             collapsedSubscriptions = Set(viewModel.subscriptions.filter(\.collapsed).map(\.id))
@@ -144,6 +155,17 @@ struct ProxyListView: View {
                     .buttonStyle(.borderless)
                 }
                 Menu {
+                    Button {
+                        viewModel.testLatencies(for: viewModel.configurations(for: subscription))
+                    } label: {
+                        Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+                    }
+                    Button {
+                        renameText = subscription.name
+                        renamingSubscription = subscription
+                    } label: {
+                        Label("Rename", systemImage: "pencil")
+                    }
                     Button {
                         updateSubscription(subscription)
                     } label: {
