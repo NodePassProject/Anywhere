@@ -189,6 +189,12 @@ class TVProxyListViewController: UITableViewController {
             // Subscription actions
             if let sub = self.viewModel.subscription(for: config) {
                 let subMenu = UIMenu(title: sub.name, children: [
+                    UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { _ in
+                        self.viewModel.testLatencies(for: self.viewModel.configurations(for: sub))
+                    },
+                    UIAction(title: String(localized: "Rename"), image: UIImage(systemName: "pencil")) { _ in
+                        self.presentRenameAlert(for: sub)
+                    },
                     UIAction(title: String(localized: "Update"), image: UIImage(systemName: "arrow.clockwise")) { _ in
                         self.updateSubscription(sub)
                     },
@@ -274,7 +280,7 @@ class TVProxyListViewController: UITableViewController {
         let visibleConfigurations = standaloneConfigurations + subscribedGroups
             .filter { !collapsedSubscriptions.contains($0.0.id) }
             .flatMap(\.1)
-        viewModel.testAllLatencies(for: visibleConfigurations)
+        viewModel.testLatencies(for: visibleConfigurations)
     }
 
     @objc private func toggleSection(_ sender: UIButton) {
@@ -320,6 +326,18 @@ class TVProxyListViewController: UITableViewController {
             updatingSubscription = nil
             tableView.reloadData()
         }
+    }
+
+    private func presentRenameAlert(for subscription: Subscription) {
+        let alert = UIAlertController(title: String(localized: "Rename"), message: nil, preferredStyle: .alert)
+        alert.addTextField { $0.text = subscription.name }
+        alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
+        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default) { [weak self] _ in
+            if let name = alert.textFields?.first?.text, !name.isEmpty {
+                self?.viewModel.renameSubscription(subscription, to: name)
+            }
+        })
+        present(alert, animated: true)
     }
 
     // MARK: - Empty State
