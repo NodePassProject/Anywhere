@@ -8,6 +8,7 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
+import Network
 import os.log
 import Security
 
@@ -17,7 +18,7 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension"
 
 /// Direct UDP relay with Shadowsocks per-packet encryption.
 ///
-/// Creates a UDP socket directly to the SS server and handles per-packet
+/// Creates a UDP connection directly to the SS server and handles per-packet
 /// encryption/decryption. Supports both legacy SS and SS 2022 formats.
 ///
 /// Unlike the TCP-based ``ShadowsocksUDPConnection``, this class sends
@@ -37,15 +38,9 @@ class ShadowsocksUDPRelay {
     private let dstHost: String
     private let dstPort: UInt16
 
-    // UDP socket
-    private var fd: Int32 = -1
-    private let socketQueue = DispatchQueue(label: "com.argsment.Anywhere.ss-udp-relay")
-    private var readSource: DispatchSourceRead?
-    private var readSourceResumed = false
+    // UDP connection
+    private var connection: NWConnection?
     private var cancelled = false
-
-    /// Reusable receive buffer — only accessed from `socketQueue`.
-    private let receiveBuffer = UnsafeMutableRawPointer.allocate(byteCount: 65536, alignment: 1)
 
     // SS 2022 AES session state
     private var sessionID: UInt64 = 0
@@ -83,128 +78,82 @@ class ShadowsocksUDPRelay {
         }
     }
 
-    /// Connects the UDP socket to the Shadowsocks server.
+    /// Connects the UDP connection to the Shadowsocks server.
     func connect(serverHost: String, serverPort: UInt16, lwipQueue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            // Resolve via proxy DNS cache (shared with BSDSocket/TCP connections)
-            let resolvedHost = ProxyDNSCache.shared.resolveHost(serverHost) ?? serverHost
+        // Resolve via proxy DNS cache (shared with NWTransport/TCP connections)
+        let resolvedHost = ProxyDNSCache.shared.resolveHost(serverHost) ?? serverHost
 
-            var hints = addrinfo()
-            hints.ai_family = AF_UNSPEC
-            hints.ai_socktype = SOCK_DGRAM
-            hints.ai_protocol = IPPROTO_UDP
+        let host = NWEndpoint.Host(resolvedHost)
+        guard let port = NWEndpoint.Port(rawValue: serverPort) else {
+            lwipQueue.async { completion(SocketError.connectionFailed("Invalid port")) }
+            return
+        }
 
-            var result: UnsafeMutablePointer<addrinfo>?
-            let status = getaddrinfo(resolvedHost, String(serverPort), &hints, &result)
-            guard status == 0, let info = result else {
-                let msg = status != 0 ? String(cString: gai_strerror(status)) : "No addresses"
-                lwipQueue.async { completion(BSDSocketError.resolutionFailed(msg)) }
-                return
-            }
-            defer { freeaddrinfo(result) }
+        let connection = NWConnection(host: host, port: port, using: .udp)
+        self.connection = connection
 
-            let sockFd = Darwin.socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
-            guard sockFd >= 0 else {
-                lwipQueue.async { completion(BSDSocketError.socketCreationFailed(String(cString: strerror(errno)))) }
-                return
-            }
-
-            let flags = fcntl(sockFd, F_GETFL)
-            _ = fcntl(sockFd, F_SETFL, flags | O_NONBLOCK)
-            var yes: Int32 = 1
-            setsockopt(sockFd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
-
-            let connectResult = Darwin.connect(sockFd, info.pointee.ai_addr, info.pointee.ai_addrlen)
-            if connectResult != 0 {
-                Darwin.close(sockFd)
-                lwipQueue.async { completion(BSDSocketError.connectionFailed(String(cString: strerror(errno)))) }
-                return
-            }
-
-            self.socketQueue.async {
-                guard !self.cancelled else {
-                    Darwin.close(sockFd)
-                    lwipQueue.async { completion(BSDSocketError.notConnected) }
-                    return
-                }
-                self.fd = sockFd
+        var completed = false
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, !self.cancelled, !completed else { return }
+            switch state {
+            case .ready:
+                completed = true
+                connection.stateUpdateHandler = nil
                 lwipQueue.async { completion(nil) }
+            case .failed(let error):
+                completed = true
+                connection.stateUpdateHandler = nil
+                self.connection = nil
+                lwipQueue.async { completion(SocketError.connectionFailed(error.localizedDescription)) }
+            default:
+                break
             }
         }
+
+        connection.start(queue: .global())
     }
 
     /// Encrypts and sends a UDP payload to the SS server.
     func send(data: Data) {
-        socketQueue.async { [self] in
-            guard fd >= 0, !cancelled else { return }
-            do {
-                let encrypted = try encryptPacket(payload: data)
-                encrypted.withUnsafeBytes { buf in
-                    guard let base = buf.baseAddress else { return }
-                    _ = Darwin.send(fd, base, encrypted.count, 0)
-                }
-            } catch {
-                logger.error("[SS-UDP] Encrypt error: \(error.localizedDescription, privacy: .public)")
-            }
+        guard let connection, !cancelled else { return }
+        do {
+            let encrypted = try encryptPacket(payload: data)
+            connection.send(content: encrypted, completion: .contentProcessed({ _ in }))
+        } catch {
+            logger.error("[SS-UDP] Encrypt error: \(error.localizedDescription, privacy: .public)")
         }
     }
 
     /// Starts receiving and decrypting datagrams asynchronously.
     func startReceiving(handler: @escaping (Data) -> Void) {
-        socketQueue.async { [self] in
-            guard fd >= 0, !cancelled else { return }
+        guard let connection, !cancelled else { return }
+        receiveNext(connection: connection, handler: handler)
+    }
 
-            let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: socketQueue)
-            source.setEventHandler { [weak self] in
-                guard let self, self.fd >= 0 else { return }
-                let n = Darwin.recv(self.fd, self.receiveBuffer, 65536, 0)
-                if n > 0 {
-                    do {
-                        let payload = try self.decryptPacket(Data(bytes: self.receiveBuffer, count: n))
-                        handler(payload)
-                    } catch {
-                        logger.error("[SS-UDP] Decrypt error: \(error.localizedDescription, privacy: .public)")
-                    }
+    private func receiveNext(connection: NWConnection, handler: @escaping (Data) -> Void) {
+        connection.receiveMessage { [weak self] data, _, _, error in
+            guard let self, !self.cancelled else { return }
+            if let data, !data.isEmpty {
+                do {
+                    let payload = try self.decryptPacket(data)
+                    handler(payload)
+                } catch {
+                    logger.error("[SS-UDP] Decrypt error: \(error.localizedDescription, privacy: .public)")
                 }
             }
-            source.setCancelHandler { [weak self] in
-                self?.readSource = nil
-                self?.readSourceResumed = false
+            // UDP doesn't have EOF, continue receiving
+            if error == nil {
+                self.receiveNext(connection: connection, handler: handler)
             }
-            readSource = source
-            readSourceResumed = true
-            source.resume()
         }
     }
 
     func cancel() {
-        socketQueue.async { [self] in
-            guard !cancelled else { return }
-            cancelled = true
-
-            let currentFd = fd
-            fd = -1
-
-            if let rs = readSource {
-                if !readSourceResumed { rs.resume() }
-                rs.cancel()
-                readSource = nil
-                readSourceResumed = false
-            }
-
-            if currentFd >= 0 {
-                Darwin.close(currentFd)
-            }
-        }
-    }
-
-    deinit {
-        if fd >= 0 {
-            Darwin.close(fd)
-        }
-        if let rs = readSource, !readSourceResumed { rs.resume() }
-        receiveBuffer.deallocate()
+        guard !cancelled else { return }
+        cancelled = true
+        connection?.forceCancel()
+        connection = nil
     }
 
     // MARK: - Packet Encryption

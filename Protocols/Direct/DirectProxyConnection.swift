@@ -7,7 +7,7 @@
 
 import Foundation
 
-/// Proxy connection over a direct transport (``BSDSocket`` or ``TunneledTransport``).
+/// Proxy connection over a direct transport (``NWTransport`` or ``TunneledTransport``).
 class DirectProxyConnection: ProxyConnection {
     let connection: any RawTransport
 

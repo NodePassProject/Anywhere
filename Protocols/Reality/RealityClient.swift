@@ -22,7 +22,7 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension"
 /// - Derives application-layer encryption keys from the TLS 1.3 handshake transcript.
 ///
 /// After a successful handshake, returns a ``TLSRecordConnection`` that wraps
-/// the underlying ``BSDSocket`` with TLS record encryption/decryption.
+/// the underlying ``NWTransport`` with TLS record encryption/decryption.
 class RealityClient {
     private let configuration: RealityConfiguration
     private var connection: (any RawTransport)?
@@ -65,10 +65,27 @@ class RealityClient {
     ) {
         ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
 
-        let socket = BSDSocket()
-        self.connection = socket
+        guard let privateKey = ephemeralPrivateKey else {
+            completion(.failure(RealityError.handshakeFailed("No ephemeral key")))
+            return
+        }
 
-        socket.connect(host: host, port: port, queue: .global()) { [weak self] error in
+        // Build ClientHello before connecting so it can be sent via TCP Fast Open
+        // (included in the SYN packet, saving one round trip).
+        let clientHello: Data
+        do {
+            clientHello = try buildRealityClientHello(privateKey: privateKey)
+        } catch {
+            logger.error("[Reality] Failed to build ClientHello: \(error.localizedDescription, privacy: .public)")
+            completion(.failure(error))
+            return
+        }
+        storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+        let transport = NWTransport()
+        self.connection = transport
+
+        transport.connect(host: host, port: port, queue: .global(), initialData: clientHello) { [weak self] error in
             if let error {
                 logger.error("[Reality] TCP connection failed: \(error.localizedDescription, privacy: .public)")
                 completion(.failure(RealityError.connectionFailed(error.localizedDescription)))
@@ -80,7 +97,8 @@ class RealityClient {
                 return
             }
 
-            self.performRealityHandshake(completion: completion)
+            // ClientHello already sent via TFO, proceed directly to server response
+            self.receiveServerResponse(completion: completion)
         }
     }
 

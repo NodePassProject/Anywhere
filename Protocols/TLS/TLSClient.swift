@@ -23,7 +23,7 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension"
 /// - Derives application-layer encryption keys from the TLS 1.3 handshake.
 ///
 /// After a successful handshake, returns a ``TLSRecordConnection`` that wraps
-/// the underlying ``BSDSocket`` with TLS record encryption/decryption.
+/// the underlying ``NWTransport`` with TLS record encryption/decryption.
 class TLSClient {
     private let configuration: TLSConfiguration
     private var connection: (any RawTransport)?
@@ -70,10 +70,27 @@ class TLSClient {
     ) {
         ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
 
-        let socket = BSDSocket()
-        self.connection = socket
+        guard let privateKey = ephemeralPrivateKey else {
+            completion(.failure(TLSError.handshakeFailed("No ephemeral key")))
+            return
+        }
 
-        socket.connect(host: host, port: port, queue: .global()) { [weak self] error in
+        // Build ClientHello before connecting so it can be sent via TCP Fast Open
+        // (included in the SYN packet, saving one round trip).
+        let clientHello: Data
+        do {
+            clientHello = try buildTLSClientHello(privateKey: privateKey)
+        } catch {
+            logger.error("[TLS] Failed to build ClientHello: \(error.localizedDescription, privacy: .public)")
+            completion(.failure(error))
+            return
+        }
+        storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+        let transport = NWTransport()
+        self.connection = transport
+
+        transport.connect(host: host, port: port, queue: .global(), initialData: clientHello) { [weak self] error in
             if let error {
                 logger.error("[TLS] TCP connection failed: \(error.localizedDescription, privacy: .public)")
                 completion(.failure(TLSError.connectionFailed(error.localizedDescription)))
@@ -85,7 +102,8 @@ class TLSClient {
                 return
             }
 
-            self.performTLSHandshake(completion: completion)
+            // ClientHello already sent via TFO, proceed directly to server response
+            self.receiveServerResponse(completion: completion)
         }
     }
 

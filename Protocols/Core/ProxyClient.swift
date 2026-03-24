@@ -20,7 +20,7 @@ private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension"
 class ProxyClient {
     private let configuration: ProxyConfiguration
     private let useResolvedAddressForDirectDial: Bool
-    private var connection: BSDSocket?
+    private var connection: NWTransport?
     private var realityClient: RealityClient?
     private var realityConnection: TLSRecordConnection?
     private var tlsClient: TLSClient?
@@ -30,7 +30,7 @@ class ProxyClient {
     private var xhttpConnection: XHTTPConnection?
 
     /// Proxy tunnel from a previous chain link (for proxy chaining).
-    /// When set, all transport connections use this tunnel instead of creating a ``BSDSocket``.
+    /// When set, all transport connections use this tunnel instead of creating a ``NWTransport``.
     private var tunnel: ProxyConnection?
     /// Intermediate chain proxy clients (retained for lifecycle management).
     private var chainClients: [ProxyClient] = []
@@ -386,7 +386,7 @@ class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         if let tunnel = self.tunnel {
-            // Chained: use tunnel instead of BSDSocket
+            // Chained: use tunnel instead of NWTransport
             let directProxyConnection = DirectProxyConnection(connection: TunneledTransport(tunnel: tunnel))
             sendProtocolHandshake(
                 over: directProxyConnection, command: command, destinationHost: destinationHost,
@@ -394,10 +394,10 @@ class ProxyClient {
                 supportsVision: false, completion: completion
             )
         } else {
-            let socket = BSDSocket()
-            self.connection = socket
+            let transport = NWTransport()
+            self.connection = transport
 
-            socket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
+            transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
                 if let error {
                     completion(.failure(error))
                     return
@@ -406,7 +406,7 @@ class ProxyClient {
                     completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
-                let directProxyConnection = DirectProxyConnection(connection: socket)
+                let directProxyConnection = DirectProxyConnection(connection: transport)
                 self.sendProtocolHandshake(
                     over: directProxyConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData,
@@ -555,10 +555,10 @@ class ProxyClient {
                 )
             } else {
                 // Plain WS: TCP → WebSocket → VLESS
-                let socket = BSDSocket()
-                self.connection = socket
+                let transport = NWTransport()
+                self.connection = transport
 
-                socket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
+                transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
                     if let error {
                         completion(.failure(error))
                         return
@@ -567,7 +567,7 @@ class ProxyClient {
                         completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                         return
                     }
-                    let wsConnection = WebSocketConnection(socket: socket, configuration: wsConfig)
+                    let wsConnection = WebSocketConnection(transport: transport, configuration: wsConfig)
                     self.performWebSocketUpgrade(
                         wsConnection: wsConnection, command: command, destinationHost: destinationHost,
                         destinationPort: destinationPort, initialData: initialData, completion: completion
@@ -661,10 +661,10 @@ class ProxyClient {
                 )
             } else {
                 // Plain HTTP Upgrade: TCP → HTTP Upgrade → raw TCP → VLESS
-                let socket = BSDSocket()
-                self.connection = socket
+                let transport = NWTransport()
+                self.connection = transport
 
-                socket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
+                transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
                     if let error {
                         completion(.failure(error))
                         return
@@ -673,7 +673,7 @@ class ProxyClient {
                         completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                         return
                     }
-                    let huConnection = HTTPUpgradeConnection(socket: socket, configuration: huConfig)
+                    let huConnection = HTTPUpgradeConnection(transport: transport, configuration: huConfig)
                     self.performHTTPUpgrade(
                         huConnection: huConnection, command: command, destinationHost: destinationHost,
                         destinationPort: destinationPort, initialData: initialData, completion: completion
@@ -883,7 +883,7 @@ class ProxyClient {
             if let tunnel = self.tunnel {
                 xhttpConnection = XHTTPConnection(tunnel: tunnel, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
             } else {
-                xhttpConnection = XHTTPConnection(socket: transport as! BSDSocket, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
+                xhttpConnection = XHTTPConnection(transport: transport as! NWTransport, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
             }
             self.xhttpConnection = xhttpConnection
             self.performXHTTPSetup(
@@ -895,14 +895,14 @@ class ProxyClient {
         if let tunnel = self.tunnel {
             setupXHTTP(TunneledTransport(tunnel: tunnel))
         } else {
-            let socket = BSDSocket()
-            self.connection = socket
-            socket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
+            let transport = NWTransport()
+            self.connection = transport
+            transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
                 if let error {
                     completion(.failure(error))
                     return
                 }
-                setupXHTTP(socket)
+                setupXHTTP(transport)
             }
         }
     }
@@ -931,16 +931,16 @@ class ProxyClient {
                 }
             }
         } else {
-            let uploadSocket = BSDSocket()
-            uploadSocket.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
+            let uploadTransport = NWTransport()
+            uploadTransport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
                 if let error {
                     factoryCompletion(.failure(error))
                     return
                 }
                 factoryCompletion(.success(TransportClosures(
-                    send: { data, completion in uploadSocket.send(data: data, completion: completion) },
-                    receive: { completion in uploadSocket.receive(maximumLength: 65536, completion: completion) },
-                    cancel: { uploadSocket.forceCancel() }
+                    send: { data, completion in uploadTransport.send(data: data, completion: completion) },
+                    receive: { completion in uploadTransport.receive(maximumLength: 65536, completion: completion) },
+                    cancel: { uploadTransport.forceCancel() }
                 )))
             }
         }

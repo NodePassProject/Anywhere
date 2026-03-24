@@ -11,11 +11,11 @@ import os.log
 private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "DirectTCP")
 
 class DirectTCPRelay {
-    private let socket: BSDSocket
+    private let transport: NWTransport
     private var cancelled = false
 
     init() {
-        self.socket = BSDSocket()
+        self.transport = NWTransport()
     }
 
     /// Connects to the destination host:port asynchronously.
@@ -23,14 +23,14 @@ class DirectTCPRelay {
     /// - Parameters:
     ///   - host: Destination hostname or IP address.
     ///   - port: Destination port.
-    ///   - queue: Queue for the completion callback (passed to BSDSocket for API compat).
+    ///   - queue: Queue for the completion callback (passed to NWTransport for API compat).
     ///   - completion: Called with `nil` on success or an error on failure.
     func connect(host: String, port: UInt16, queue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
-        socket.connect(host: host, port: port, queue: queue, completion: completion)
+        transport.connect(host: host, port: port, queue: queue, completion: completion)
     }
 
-    /// Receives up to 64KB from the socket.
+    /// Receives up to 64KB from the transport.
     ///
     /// Completion signature matches ProxyConnection's receive pattern:
     /// - `(data, nil)` — data received
@@ -38,10 +38,10 @@ class DirectTCPRelay {
     /// - `(nil, error)` — error
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         guard !cancelled else {
-            completion(nil, BSDSocketError.notConnected)
+            completion(nil, SocketError.notConnected)
             return
         }
-        socket.receive(maximumLength: 65536) { data, isComplete, error in
+        transport.receive(maximumLength: 65536) { data, isComplete, error in
             if let error {
                 completion(nil, error)
             } else if isComplete {
@@ -55,15 +55,15 @@ class DirectTCPRelay {
     /// Sends data to the destination.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         guard !cancelled else {
-            completion(BSDSocketError.notConnected)
+            completion(SocketError.notConnected)
             return
         }
-        socket.send(data: data, completion: completion)
+        transport.send(data: data, completion: completion)
     }
 
     func cancel() {
         guard !cancelled else { return }
         cancelled = true
-        socket.forceCancel()
+        transport.forceCancel()
     }
 }

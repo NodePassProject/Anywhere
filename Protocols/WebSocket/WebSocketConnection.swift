@@ -11,7 +11,7 @@ import Foundation
 
 /// WebSocket connection implementing RFC 6455 framing over an arbitrary transport.
 ///
-/// Closure-based transport abstraction avoids modifying ``BSDSocket`` or ``TLSRecordConnection``.
+/// Closure-based transport abstraction avoids modifying ``NWTransport`` or ``TLSRecordConnection``.
 class WebSocketConnection {
 
     // MARK: Transport closures
@@ -52,17 +52,17 @@ class WebSocketConnection {
 
     // MARK: - Initializers
 
-    /// Creates a WebSocket connection over a plain BSD socket.
-    init(socket: BSDSocket, configuration: WebSocketConfiguration) {
+    /// Creates a WebSocket connection over a plain NWTransport.
+    init(transport: NWTransport, configuration: WebSocketConfiguration) {
         self.configuration = configuration
         self.transportSend = { data, completion in
-            socket.send(data: data, completion: completion)
+            transport.send(data: data, completion: completion)
         }
         self.transportReceive = { completion in
-            socket.receive(maximumLength: 65536, completion: completion)
+            transport.receive(maximumLength: 65536, completion: completion)
         }
         self.transportCancel = {
-            socket.forceCancel()
+            transport.forceCancel()
         }
         self._isConnected = true
     }

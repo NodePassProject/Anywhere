@@ -12,7 +12,7 @@ import Foundation
 /// HTTP upgrade connection that performs an HTTP upgrade handshake and then
 /// passes data through as raw TCP bytes (no WebSocket framing).
 ///
-/// Closure-based transport abstraction avoids modifying ``BSDSocket`` or ``TLSRecordConnection``.
+/// Closure-based transport abstraction avoids modifying ``NWTransport`` or ``TLSRecordConnection``.
 class HTTPUpgradeConnection {
 
     // MARK: Transport closures
@@ -51,17 +51,17 @@ class HTTPUpgradeConnection {
 
     // MARK: - Initializers
 
-    /// Creates an HTTP upgrade connection over a plain BSD socket.
-    init(socket: BSDSocket, configuration: HTTPUpgradeConfiguration) {
+    /// Creates an HTTP upgrade connection over a plain NWTransport.
+    init(transport: NWTransport, configuration: HTTPUpgradeConfiguration) {
         self.configuration = configuration
         self.transportSend = { data, completion in
-            socket.send(data: data, completion: completion)
+            transport.send(data: data, completion: completion)
         }
         self.transportReceive = { completion in
-            socket.receive(maximumLength: 65536, completion: completion)
+            transport.receive(maximumLength: 65536, completion: completion)
         }
         self.transportCancel = {
-            socket.forceCancel()
+            transport.forceCancel()
         }
         self._isConnected = true
     }

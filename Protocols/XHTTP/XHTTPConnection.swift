@@ -15,7 +15,7 @@ private let defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleW
 
 // MARK: - Transport Closures
 
-/// Type alias for the set of closures that abstract the underlying transport (BSDSocket / TLSRecordConnection).
+/// Type alias for the set of closures that abstract the underlying transport (NWTransport / TLSRecordConnection).
 struct TransportClosures {
     let send: (Data, @escaping (Error?) -> Void) -> Void
     let receive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
@@ -207,23 +207,23 @@ class XHTTPConnection {
         return "\(method) \(url) HTTP/1.1\r\n"
     }
 
-    // MARK: - Initializers (BSDSocket)
+    // MARK: - Initializers (NWTransport)
 
-    /// Creates an XHTTP connection over a plain BSD socket (security=none).
-    init(socket: BSDSocket, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
+    /// Creates an XHTTP connection over a plain NWTransport (security=none).
+    init(transport: NWTransport, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
         self.configuration = configuration
         self.mode = mode
         self.sessionId = sessionId
         self.useHTTP2 = useHTTP2
         self.uploadConnectionFactory = uploadConnectionFactory
         self.downloadSend = { data, completion in
-            socket.send(data: data, completion: completion)
+            transport.send(data: data, completion: completion)
         }
         self.downloadReceive = { completion in
-            socket.receive(maximumLength: 65536, completion: completion)
+            transport.receive(maximumLength: 65536, completion: completion)
         }
         self.downloadCancel = {
-            socket.forceCancel()
+            transport.forceCancel()
         }
         self._isConnected = true
     }

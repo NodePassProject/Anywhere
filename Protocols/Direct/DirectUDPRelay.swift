@@ -6,136 +6,83 @@
 //
 
 import Foundation
+import Network
 import os.log
 
 private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "DirectUDP")
 
 class DirectUDPRelay {
-    private var fd: Int32 = -1
-    private let socketQueue = DispatchQueue(label: "com.argsment.Anywhere.direct-udp")
-    private var readSource: DispatchSourceRead?
-    private var readSourceResumed = false
+    private var connection: NWConnection?
     private var cancelled = false
-    /// Reusable receive buffer — only accessed from `socketQueue`.
-    private let receiveBuffer = UnsafeMutableRawPointer.allocate(byteCount: 65536, alignment: 1)
 
     init() {}
 
-    /// Creates a UDP socket and connects it to the destination.
+    /// Creates a UDP connection to the destination.
     ///
-    /// DNS resolution runs on a global concurrent queue. The completion
-    /// is called on `lwipQueue` with nil on success or an error on failure.
+    /// The completion is called on `lwipQueue` with nil on success or an error on failure.
     func connect(dstHost: String, dstPort: UInt16, lwipQueue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            var hints = addrinfo()
-            hints.ai_family = AF_UNSPEC
-            hints.ai_socktype = SOCK_DGRAM
-            hints.ai_protocol = IPPROTO_UDP
+        let host = NWEndpoint.Host(dstHost)
+        guard let port = NWEndpoint.Port(rawValue: dstPort) else {
+            lwipQueue.async { completion(SocketError.connectionFailed("Invalid port")) }
+            return
+        }
 
-            var result: UnsafeMutablePointer<addrinfo>?
-            let status = getaddrinfo(dstHost, String(dstPort), &hints, &result)
-            guard status == 0, let info = result else {
-                let msg = status != 0 ? String(cString: gai_strerror(status)) : "No addresses"
-                lwipQueue.async { completion(BSDSocketError.resolutionFailed(msg)) }
-                return
-            }
-            defer { freeaddrinfo(result) }
+        let connection = NWConnection(host: host, port: port, using: .udp)
+        self.connection = connection
 
-            let sockFd = Darwin.socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
-            guard sockFd >= 0 else {
-                lwipQueue.async { completion(BSDSocketError.socketCreationFailed(String(cString: strerror(errno)))) }
-                return
-            }
-
-            // Non-blocking + SO_NOSIGPIPE
-            let flags = fcntl(sockFd, F_GETFL)
-            _ = fcntl(sockFd, F_SETFL, flags | O_NONBLOCK)
-            var yes: Int32 = 1
-            setsockopt(sockFd, SOL_SOCKET, SO_NOSIGPIPE, &yes, socklen_t(MemoryLayout<Int32>.size))
-
-            // connect() on a UDP socket sets the default destination
-            let connectResult = Darwin.connect(sockFd, info.pointee.ai_addr, info.pointee.ai_addrlen)
-            if connectResult != 0 {
-                Darwin.close(sockFd)
-                lwipQueue.async { completion(BSDSocketError.connectionFailed(String(cString: strerror(errno)))) }
-                return
-            }
-
-            self.socketQueue.async {
-                guard !self.cancelled else {
-                    Darwin.close(sockFd)
-                    lwipQueue.async { completion(BSDSocketError.notConnected) }
-                    return
-                }
-                self.fd = sockFd
+        var completed = false
+        connection.stateUpdateHandler = { [weak self] state in
+            guard let self, !self.cancelled, !completed else { return }
+            switch state {
+            case .ready:
+                completed = true
+                connection.stateUpdateHandler = nil
                 lwipQueue.async { completion(nil) }
+            case .failed(let error):
+                completed = true
+                connection.stateUpdateHandler = nil
+                self.connection = nil
+                lwipQueue.async { completion(SocketError.connectionFailed(error.localizedDescription)) }
+            default:
+                break
             }
         }
+
+        connection.start(queue: .global())
     }
 
     /// Sends a UDP datagram to the connected destination.
     func send(data: Data) {
-        socketQueue.async { [self] in
-            guard fd >= 0, !cancelled else { return }
-            data.withUnsafeBytes { buf in
-                guard let base = buf.baseAddress else { return }
-                _ = Darwin.send(fd, base, data.count, 0)
-            }
-        }
+        guard let connection, !cancelled else { return }
+        connection.send(content: data, completion: .contentProcessed({ _ in }))
     }
 
-    /// Starts receiving datagrams asynchronously via a DispatchSource.
-    /// The handler is called on `socketQueue`; callers should dispatch to lwipQueue.
+    /// Starts receiving datagrams asynchronously.
+    /// The handler is called on the connection's internal queue;
+    /// callers should dispatch to lwipQueue.
     func startReceiving(handler: @escaping (Data) -> Void) {
-        socketQueue.async { [self] in
-            guard fd >= 0, !cancelled else { return }
+        guard let connection, !cancelled else { return }
+        receiveNext(connection: connection, handler: handler)
+    }
 
-            let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: socketQueue)
-            source.setEventHandler { [weak self] in
-                guard let self, self.fd >= 0 else { return }
-                let n = Darwin.recv(self.fd, self.receiveBuffer, 65536, 0)
-                if n > 0 {
-                    handler(Data(bytes: self.receiveBuffer, count: n))
-                }
-                // UDP doesn't have EOF, ignore errors and zero-length reads
+    private func receiveNext(connection: NWConnection, handler: @escaping (Data) -> Void) {
+        connection.receiveMessage { [weak self] data, _, _, error in
+            guard let self, !self.cancelled else { return }
+            if let data, !data.isEmpty {
+                handler(data)
             }
-            source.setCancelHandler { [weak self] in
-                self?.readSource = nil
-                self?.readSourceResumed = false
+            // UDP doesn't have EOF, continue receiving
+            if error == nil {
+                self.receiveNext(connection: connection, handler: handler)
             }
-            readSource = source
-            readSourceResumed = true
-            source.resume()
         }
     }
 
     func cancel() {
-        socketQueue.async { [self] in
-            guard !cancelled else { return }
-            cancelled = true
-
-            let currentFd = fd
-            fd = -1
-
-            if let rs = readSource {
-                if !readSourceResumed { rs.resume() }
-                rs.cancel()
-                readSource = nil
-                readSourceResumed = false
-            }
-
-            if currentFd >= 0 {
-                Darwin.close(currentFd)
-            }
-        }
-    }
-
-    deinit {
-        if fd >= 0 {
-            Darwin.close(fd)
-        }
-        if let rs = readSource, !readSourceResumed { rs.resume() }
-        receiveBuffer.deallocate()
+        guard !cancelled else { return }
+        cancelled = true
+        connection?.forceCancel()
+        connection = nil
     }
 }

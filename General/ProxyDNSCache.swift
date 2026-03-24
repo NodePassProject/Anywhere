@@ -131,29 +131,6 @@ final class ProxyDNSCache {
         _ = resolveAll(host)
     }
 
-    /// Resolves a hostname and returns ``BSDSocket/ResolvedAddress`` array ready for TCP connect.
-    ///
-    /// Uses the DNS cache for domain lookups, then constructs sockaddrs via `getaddrinfo`
-    /// with each cached IP (which is instant — no DNS involved).
-    func resolveTCP(host: String, port: UInt16) throws -> [BSDSocket.ResolvedAddress] {
-        let ips = resolveAll(host)
-        guard !ips.isEmpty else {
-            throw BSDSocketError.resolutionFailed("DNS resolution failed for \(host)")
-        }
-
-        var addresses: [BSDSocket.ResolvedAddress] = []
-        for ip in ips {
-            if let addrs = try? BSDSocket.resolveAddresses(host: ip, port: port) {
-                addresses.append(contentsOf: addrs)
-            }
-        }
-
-        guard !addresses.isEmpty else {
-            throw BSDSocketError.resolutionFailed("No usable addresses for \(host)")
-        }
-        return addresses
-    }
-    
     // MARK: - Internal
 
     private static func stripBrackets(_ host: String) -> String {
