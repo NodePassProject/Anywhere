@@ -273,8 +273,10 @@ class RealityClient {
         buffer: Data,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
-        guard buffer.count >= 100 else {
-            // Need more data
+        // Wait until we have a complete TLS record containing ServerHello.
+        // The server may split the response across multiple TCP segments,
+        // so we must check the record's declared length before parsing.
+        if !bufferContainsCompleteServerHello(buffer) {
             guard let connection else {
                 completion(.failure(RealityError.connectionFailed("Connection cancelled")))
                 return
@@ -338,6 +340,31 @@ class RealityClient {
     }
 
     // MARK: - ServerHello Parsing
+
+    /// Returns `true` when the buffer contains at least one complete TLS Handshake
+    /// record whose payload starts with a ServerHello (type 0x02).
+    ///
+    /// Returns `false` when a record header indicates more bytes than are
+    /// currently buffered — the caller should read more data and retry.
+    private func bufferContainsCompleteServerHello(_ buffer: Data) -> Bool {
+        var offset = 0
+        while offset + 5 <= buffer.count {
+            let recordLen = Int(buffer[offset + 3]) << 8 | Int(buffer[offset + 4])
+
+            // Incomplete record — need more data from the network
+            if offset + 5 + recordLen > buffer.count { return false }
+
+            // Complete Handshake record containing a ServerHello
+            if buffer[offset] == 0x16 && offset + 5 < buffer.count && buffer[offset + 5] == 0x02 {
+                return true
+            }
+
+            offset += 5 + recordLen
+        }
+
+        // All records complete but no ServerHello found — let parseServerHello handle the error
+        return offset > 0
+    }
 
     /// Extracts the ServerHello handshake message from the buffer (without TLS record header).
     private func extractServerHelloMessage(from buffer: Data) -> Data {
