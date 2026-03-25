@@ -353,7 +353,8 @@ struct TLSClientHelloBuilder {
         sessionId: Data,
         serverName: String,
         publicKey: Data,
-        alpn: [String]? = nil
+        alpn: [String]? = nil,
+        omitPQKeyShares: Bool = false
     ) -> Data {
         let resolved: TLSFingerprint
         if fingerprint == .random {
@@ -368,7 +369,8 @@ struct TLSClientHelloBuilder {
             random: random,
             serverName: serverName,
             publicKey: publicKey,
-            alpn: alpn
+            alpn: alpn,
+            omitPQKeyShares: omitPQKeyShares
         )
 
         return assembleClientHello(
@@ -429,14 +431,15 @@ struct TLSClientHelloBuilder {
         random: Data,
         serverName: String,
         publicKey: Data,
-        alpn: [String]?
+        alpn: [String]?,
+        omitPQKeyShares: Bool = false
     ) -> (cipherSuites: Data, extensions: Data, needsPadding: Bool) {
         switch fingerprint {
-        case .chrome133:  return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
+        case .chrome133:  return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)
         case .chrome120:  return buildChrome120(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
-        case .firefox148: return buildFirefox148(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
+        case .firefox148: return buildFirefox148(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)
         case .firefox120: return buildFirefox120(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
-        case .safari26:   return buildSafari26(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
+        case .safari26:   return buildSafari26(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)
         case .safari16:   return buildSafari16(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .ios14:      return buildIOS14(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .edge85:     return buildEdge85(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
@@ -451,7 +454,7 @@ struct TLSClientHelloBuilder {
     // MARK: - Chrome 133 (HelloChrome_Auto)
 
     private static func buildChrome133(
-        random: Data, serverName: String, publicKey: Data, alpn: [String]?
+        random: Data, serverName: String, publicKey: Data, alpn: [String]?, omitPQKeyShares: Bool = false
     ) -> (Data, Data, Bool) {
         let gCipher  = grease(random[24])
         let gExt1    = grease(random[25])
@@ -471,14 +474,27 @@ struct TLSClientHelloBuilder {
         ])
 
         let protocols = alpn ?? ["h2", "http/1.1"]
-        let mlkemKey = mlkem768HybridKeyShare(random: random, publicKey: publicKey)
+
+        let supportedGroups: [UInt16]
+        var keyShares: [(group: UInt16, keyData: Data)] = [
+            (group: gGroup, keyData: Data([0x00])),           // GREASE key share
+        ]
+
+        if omitPQKeyShares {
+            supportedGroups = [gGroup, 0x001D, 0x0017, 0x0018]
+        } else {
+            let mlkemKey = mlkem768HybridKeyShare(random: random, publicKey: publicKey)
+            supportedGroups = [gGroup, 0x11EC, 0x001D, 0x0017, 0x0018]
+            keyShares.append((group: 0x11EC, keyData: mlkemKey))
+        }
+        keyShares.append((group: 0x001D, keyData: publicKey))
 
         var exts: [Data] = [
             greaseExt(gExt1),
             buildSNIExtension(serverName: serverName),
             extendedMasterSecretExt(),
             renegotiationInfoExt(),
-            supportedGroupsExt([gGroup, 0x11EC, 0x001D, 0x0017, 0x0018]),  // GREASE, X25519MLKEM768, X25519, P256, P384
+            supportedGroupsExt(supportedGroups),
             ecPointFormatsExt(),
             sessionTicketExt(),
             alpnExt(protocols),
@@ -489,11 +505,7 @@ struct TLSClientHelloBuilder {
                 0x0806, 0x0601           // PSS-SHA512, PKCS1-SHA512
             ]),
             sctExt(),
-            keyShareExt([
-                (group: gGroup, keyData: Data([0x00])),       // GREASE key share
-                (group: 0x11EC, keyData: mlkemKey),           // X25519MLKEM768 hybrid (1216 bytes)
-                (group: 0x001D, keyData: publicKey)           // X25519
-            ]),
+            keyShareExt(keyShares),
             pskKeyExchangeModesExt(),
             supportedVersionsExt([gVersion, 0x0304, 0x0303]),
             compressCertExt([0x0002]),                        // Brotli
@@ -577,7 +589,7 @@ struct TLSClientHelloBuilder {
     // MARK: - Firefox 148 (HelloFirefox_Auto)
 
     private static func buildFirefox148(
-        random: Data, serverName: String, publicKey: Data, alpn: [String]?
+        random: Data, serverName: String, publicKey: Data, alpn: [String]?, omitPQKeyShares: Bool = false
     ) -> (Data, Data, Bool) {
         let suites = cipherSuitesData([
             0x1301, 0x1303, 0x1302,                           // TLS 1.3 (ChaCha20 before AES-256)
@@ -592,27 +604,31 @@ struct TLSClientHelloBuilder {
 
         let protocols = alpn ?? ["h2", "http/1.1"]
         let p256PublicKey = deriveP256PublicKey(from: random)
-        let mlkemKey = mlkem768HybridKeyShare(random: random, publicKey: publicKey)
 
-        // Firefox reuses the X25519 key from the hybrid entry as a separate share
+        let supportedGroups: [UInt16]
+        var keyShares: [(group: UInt16, keyData: Data)] = []
+
+        if omitPQKeyShares {
+            supportedGroups = [0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101]
+        } else {
+            let mlkemKey = mlkem768HybridKeyShare(random: random, publicKey: publicKey)
+            supportedGroups = [0x11EC, 0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101]
+            keyShares.append((group: 0x11EC, keyData: mlkemKey))
+        }
+        keyShares.append((group: 0x001D, keyData: publicKey))
+        keyShares.append((group: 0x0017, keyData: p256PublicKey))
+
         let exts: [Data] = [
             buildSNIExtension(serverName: serverName),
             extendedMasterSecretExt(),
             renegotiationInfoExt(),
-            supportedGroupsExt([
-                0x11EC, 0x001D, 0x0017, 0x0018, 0x0019,      // X25519MLKEM768, X25519, P256, P384, P521
-                0x0100, 0x0101                                // ffdhe2048, ffdhe3072
-            ]),
+            supportedGroupsExt(supportedGroups),
             ecPointFormatsExt(),
             alpnExt(protocols),
             statusRequestExt(),
             delegatedCredentialsExt([0x0403, 0x0503, 0x0603, 0x0203]),
             sctExt(),
-            keyShareExt([
-                (group: 0x11EC, keyData: mlkemKey),           // X25519MLKEM768 hybrid
-                (group: 0x001D, keyData: publicKey),          // X25519
-                (group: 0x0017, keyData: p256PublicKey)        // P256
-            ]),
+            keyShareExt(keyShares),
             supportedVersionsExt([0x0304, 0x0303]),
             signatureAlgorithmsExt([
                 0x0403, 0x0503, 0x0603,                       // ECDSA P256/P384/P521
@@ -690,7 +706,7 @@ struct TLSClientHelloBuilder {
     // MARK: - Safari 26.3 (HelloSafari_Auto)
 
     private static func buildSafari26(
-        random: Data, serverName: String, publicKey: Data, alpn: [String]?
+        random: Data, serverName: String, publicKey: Data, alpn: [String]?, omitPQKeyShares: Bool = false
     ) -> (Data, Data, Bool) {
         let gCipher  = grease(random[24])
         let gExt1    = grease(random[25])
@@ -712,14 +728,27 @@ struct TLSClientHelloBuilder {
         ])
 
         let protocols = alpn ?? ["h2", "http/1.1"]
-        let mlkemKey = mlkem768HybridKeyShare(random: random, publicKey: publicKey)
+
+        let supportedGroups: [UInt16]
+        var keyShares: [(group: UInt16, keyData: Data)] = [
+            (group: gGroup, keyData: Data([0x00])),           // GREASE key share
+        ]
+
+        if omitPQKeyShares {
+            supportedGroups = [gGroup, 0x001D, 0x0017, 0x0018, 0x0019]
+        } else {
+            let mlkemKey = mlkem768HybridKeyShare(random: random, publicKey: publicKey)
+            supportedGroups = [gGroup, 0x11EC, 0x001D, 0x0017, 0x0018, 0x0019]
+            keyShares.append((group: 0x11EC, keyData: mlkemKey))
+        }
+        keyShares.append((group: 0x001D, keyData: publicKey))
 
         let exts: [Data] = [
             greaseExt(gExt1),
             buildSNIExtension(serverName: serverName),
             extendedMasterSecretExt(),
             renegotiationInfoExt(),
-            supportedGroupsExt([gGroup, 0x11EC, 0x001D, 0x0017, 0x0018, 0x0019]),  // GREASE, X25519MLKEM768, X25519, P256, P384, P521
+            supportedGroupsExt(supportedGroups),
             ecPointFormatsExt(),
             alpnExt(protocols),
             statusRequestExt(),
@@ -731,11 +760,7 @@ struct TLSClientHelloBuilder {
                 0x0201
             ]),
             sctExt(),
-            keyShareExt([
-                (group: gGroup, keyData: Data([0x00])),       // GREASE key share
-                (group: 0x11EC, keyData: mlkemKey),           // X25519MLKEM768 hybrid
-                (group: 0x001D, keyData: publicKey)           // X25519
-            ]),
+            keyShareExt(keyShares),
             pskKeyExchangeModesExt(),
             supportedVersionsExt([gVersion, 0x0304, 0x0303]),
             compressCertExt([0x0001]),                        // Zlib
