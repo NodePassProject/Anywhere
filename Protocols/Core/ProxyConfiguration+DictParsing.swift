@@ -46,8 +46,8 @@ extension ProxyConfiguration {
            publicKey.count == 32 {
             let shortIdHex = (configurationDict["realityShortId"] as? String) ?? ""
             let shortId = Data(hexString: shortIdHex) ?? Data()
-            let fpString = (configurationDict["realityFingerprint"] as? String) ?? "chrome_120"
-            let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
+            let fpString = (configurationDict["realityFingerprint"] as? String) ?? "chrome_133"
+            let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
 
             realityConfiguration = RealityConfiguration(
                 serverName: serverName,
@@ -65,8 +65,8 @@ extension ProxyConfiguration {
             if let alpnString = configurationDict["tlsAlpn"] as? String, !alpnString.isEmpty {
                 alpn = alpnString.split(separator: ",").map { String($0) }
             }
-            let fpString = (configurationDict["tlsFingerprint"] as? String) ?? "chrome_120"
-            let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
+            let fpString = (configurationDict["tlsFingerprint"] as? String) ?? "chrome_133"
+            let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
 
             tlsConfiguration = TLSConfiguration(
                 serverName: sni,

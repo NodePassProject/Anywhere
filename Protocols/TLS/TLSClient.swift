@@ -8,6 +8,7 @@
 import Foundation
 import CryptoKit
 import Security
+import Compression
 import os.log
 
 private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "TLS")
@@ -45,6 +46,14 @@ class TLSClient {
 
     // Buffer for data received after Server Finished (e.g. NewSessionTicket)
     private var postHandshakeBuffer: Data?
+
+    /// RFC 8446 §4.1.3: HelloRetryRequest is signaled by this special random value.
+    private static let helloRetryRequestRandom = Data([
+        0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+        0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+        0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+        0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+    ])
 
     // MARK: Initialization
 
@@ -350,6 +359,8 @@ class TLSClient {
 
     /// Parses the ServerHello to extract the server's X25519 key share and cipher suite.
     ///
+    /// Detects HelloRetryRequest (RFC 8446 §4.1.3) and TLS version mismatches.
+    ///
     /// - Parameter data: The raw TLS data containing the ServerHello record.
     /// - Returns: A tuple of (keyShare, cipherSuite) or `nil` if parsing fails.
     private func parseServerHello(data: Data) -> (keyShare: Data, cipherSuite: UInt16)? {
@@ -368,8 +379,18 @@ class TLSClient {
                 continue
             }
 
-            // Skip handshake type (1) + length (3) + version (2) + random (32)
-            var shOffset = offset + 1 + 3 + 2 + 32
+            // Skip handshake type (1) + length (3) + version (2)
+            let randomOffset = offset + 1 + 3 + 2
+            guard randomOffset + 32 <= data.count else { return nil }
+
+            // Check for HelloRetryRequest (RFC 8446 §4.1.3)
+            let serverRandom = data.subdata(in: randomOffset..<(randomOffset + 32))
+            if serverRandom == Self.helloRetryRequestRandom {
+                logger.error("[TLS] Server sent HelloRetryRequest (not supported)")
+                return nil
+            }
+
+            var shOffset = randomOffset + 32
             guard shOffset < data.count else { return nil }
 
             // Session ID
@@ -392,25 +413,52 @@ class TLSClient {
             let extEnd = shOffset + extLen
             guard extEnd <= data.count else { return nil }
 
-            // Find key_share extension (0x0033)
-            while shOffset + 4 <= extEnd {
-                let extType = Int(data[shOffset]) << 8 | Int(data[shOffset + 1])
-                let extDataLen = Int(data[shOffset + 2]) << 8 | Int(data[shOffset + 3])
-                shOffset += 4
+            // Check supported_versions (0x002B) and key_share (0x0033)
+            var foundVersion: UInt16 = 0
+            var keyShareData: Data?
 
-                if extType == 0x0033 {
-                    guard shOffset + 4 <= data.count else { return nil }
-                    let group = Int(data[shOffset]) << 8 | Int(data[shOffset + 1])
-                    let keyLen = Int(data[shOffset + 2]) << 8 | Int(data[shOffset + 3])
-                    shOffset += 4
+            var extOffset = shOffset
+            while extOffset + 4 <= extEnd {
+                let extType = UInt16(data[extOffset]) << 8 | UInt16(data[extOffset + 1])
+                let extDataLen = Int(data[extOffset + 2]) << 8 | Int(data[extOffset + 3])
+                extOffset += 4
 
-                    if group == 0x001d && keyLen == 32 {
-                        guard shOffset + 32 <= data.count else { return nil }
-                        return (data.subdata(in: shOffset..<(shOffset + 32)), cipherSuite)
+                switch extType {
+                case 0x002B: // supported_versions
+                    if extDataLen == 2, extOffset + 2 <= extEnd {
+                        foundVersion = UInt16(data[extOffset]) << 8 | UInt16(data[extOffset + 1])
                     }
+
+                case 0x0033: // key_share
+                    if extOffset + 4 <= data.count {
+                        let group = UInt16(data[extOffset]) << 8 | UInt16(data[extOffset + 1])
+                        let keyLen = Int(data[extOffset + 2]) << 8 | Int(data[extOffset + 3])
+                        if group == 0x001D && keyLen == 32, extOffset + 4 + 32 <= data.count {
+                            keyShareData = data.subdata(in: (extOffset + 4)..<(extOffset + 4 + 32))
+                        }
+                    }
+
+                default:
+                    break
                 }
 
-                shOffset += extDataLen
+                extOffset += extDataLen
+            }
+
+            // TLS 1.3 requires supported_versions extension with 0x0304
+            if foundVersion != 0 && foundVersion != 0x0304 {
+                logger.error("[TLS] Server selected TLS version 0x\(String(format: "%04x", foundVersion)) (only TLS 1.3 supported)")
+                return nil
+            }
+
+            // If no supported_versions extension, server is TLS 1.2 or below
+            if foundVersion == 0 {
+                logger.error("[TLS] Server did not include supported_versions extension (TLS 1.2 or below not supported)")
+                return nil
+            }
+
+            if let keyShare = keyShareData {
+                return (keyShare, cipherSuite)
             }
 
             break
@@ -503,8 +551,28 @@ class TLSClient {
                             }
 
                         case 0x14: // Finished
+                            // Verify Server Finished BEFORE adding to transcript (RFC 8446 §4.4.4)
+                            if let keys = self.handshakeKeys {
+                                let expectedVerifyData = kd.computeFinishedVerifyData(
+                                    trafficSecret: keys.serverTrafficSecret,
+                                    transcript: fullTranscript
+                                )
+                                guard hsBody == expectedVerifyData else {
+                                    logger.error("[TLS] Server Finished verification failed")
+                                    completion(.failure(TLSError.handshakeFailed("Server Finished verification failed")))
+                                    return
+                                }
+                            }
                             fullTranscript.append(hsMessage)
                             foundServerFinished = true
+
+                        case 0x19: // CompressedCertificate (RFC 8879)
+                            fullTranscript.append(hsMessage)
+                            if let decompressed = decompressCertificate(hsBody) {
+                                parseCertificateMessage(decompressed)
+                            } else {
+                                logger.warning("[TLS] Failed to decompress CompressedCertificate")
+                            }
 
                         default:
                             fullTranscript.append(hsMessage)
@@ -811,6 +879,58 @@ class TLSClient {
             self.clearHandshakeState()
             completion(.success(tlsConnection))
         }
+    }
+
+    // MARK: - CompressedCertificate (RFC 8879)
+
+    /// Decompresses a CompressedCertificate message body.
+    ///
+    /// Format: algorithm(2) + uncompressed_length(3) + compressed_data(...)
+    /// Returns the inner Certificate message body (without the handshake header).
+    private func decompressCertificate(_ body: Data) -> Data? {
+        guard body.count >= 5 else { return nil }
+
+        let algorithm = UInt16(body[0]) << 8 | UInt16(body[1])
+        let uncompressedLength = Int(body[2]) << 16 | Int(body[3]) << 8 | Int(body[4])
+        let compressed = body.subdata(in: 5..<body.count)
+
+        guard uncompressedLength > 0 && uncompressedLength <= 1 << 24 else { return nil }
+
+        switch algorithm {
+        case 0x0001: // zlib
+            return zlibDecompress(compressed, expectedSize: uncompressedLength)
+        case 0x0002: // brotli — not natively available on Apple platforms
+            logger.warning("[TLS] Brotli certificate compression not supported")
+            return nil
+        case 0x0003: // zstd — not natively available on Apple platforms
+            logger.warning("[TLS] Zstd certificate compression not supported")
+            return nil
+        default:
+            logger.warning("[TLS] Unknown certificate compression algorithm: 0x\(String(format: "%04x", algorithm))")
+            return nil
+        }
+    }
+
+    /// Decompresses zlib-compressed data using the Apple Compression framework.
+    private func zlibDecompress(_ compressed: Data, expectedSize: Int) -> Data? {
+        var decompressed = Data(count: expectedSize)
+        let decodedSize = decompressed.withUnsafeMutableBytes { destPtr in
+            compressed.withUnsafeBytes { srcPtr in
+                compression_decode_buffer(
+                    destPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    expectedSize,
+                    srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    compressed.count,
+                    nil,
+                    COMPRESSION_ZLIB
+                )
+            }
+        }
+        guard decodedSize > 0 else {
+            logger.warning("[TLS] zlib decompression failed")
+            return nil
+        }
+        return Data(decompressed.prefix(decodedSize))
     }
 
     // MARK: - Client Finished

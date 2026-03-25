@@ -38,7 +38,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var sni = ""
     private var publicKey = ""
     private var shortId = ""
-    private var fingerprint: TLSFingerprint = .chrome120
+    private var fingerprint: TLSFingerprint = .chrome133
     private var ssPassword = ""
     private var ssMethod = "aes-128-gcm"
     private var naiveUsername = ""

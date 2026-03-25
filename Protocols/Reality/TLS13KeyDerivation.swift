@@ -15,6 +15,7 @@ struct TLSHandshakeKeys {
     let serverKey: Data
     let serverIV: Data
     let clientTrafficSecret: Data
+    let serverTrafficSecret: Data
 }
 
 /// TLS 1.3 application traffic keys
@@ -142,7 +143,8 @@ struct TLS13KeyDerivation {
         let keys = TLSHandshakeKeys(
             clientKey: clientKey, clientIV: clientIV,
             serverKey: serverKey, serverIV: serverIV,
-            clientTrafficSecret: clientHTS
+            clientTrafficSecret: clientHTS,
+            serverTrafficSecret: serverHTS
         )
         return (hsPRK, keys)
     }
@@ -169,10 +171,10 @@ struct TLS13KeyDerivation {
         )
     }
 
-    /// Compute Client Finished verify data
-    func computeFinishedVerifyData(clientTrafficSecret: Data, transcript: Data) -> Data {
-        let ctsKey = SymmetricKey(data: clientTrafficSecret)
-        let finishedKey = hkdfExpandLabel(key: ctsKey, label: "finished", context: Data(), length: hashLength)
+    /// Compute Finished verify data for a given traffic secret (client or server).
+    func computeFinishedVerifyData(trafficSecret: Data, transcript: Data) -> Data {
+        let tsKey = SymmetricKey(data: trafficSecret)
+        let finishedKey = hkdfExpandLabel(key: tsKey, label: "finished", context: Data(), length: hashLength)
         let transcriptHash = self.transcriptHash(transcript)
 
         let key = SymmetricKey(data: finishedKey)
@@ -181,5 +183,10 @@ struct TLS13KeyDerivation {
         } else {
             return Data(HMAC<SHA256>.authenticationCode(for: transcriptHash, using: key))
         }
+    }
+
+    /// Compute Client Finished verify data (convenience wrapper).
+    func computeFinishedVerifyData(clientTrafficSecret: Data, transcript: Data) -> Data {
+        computeFinishedVerifyData(trafficSecret: clientTrafficSecret, transcript: transcript)
     }
 }

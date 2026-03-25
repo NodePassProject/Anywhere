@@ -49,7 +49,7 @@ struct ProxyEditorView: View {
     @State private var sni = ""
     @State private var publicKey = ""
     @State private var shortId = ""
-    @State private var fingerprint: TLSFingerprint = .chrome120
+    @State private var fingerprint: TLSFingerprint = .chrome133
 
     // Shadowsocks fields
     @State private var ssPassword = ""

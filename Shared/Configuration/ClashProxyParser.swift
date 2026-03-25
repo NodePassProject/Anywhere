@@ -218,7 +218,7 @@ struct ClashProxyParser {
             ?? getString(doc, mapping: node, key: "sni")
             ?? server
         let clientFP = getString(doc, mapping: node, key: "client-fingerprint")
-        let fingerprint = TLSFingerprint(rawValue: mapFingerprint(clientFP)) ?? .chrome120
+        let fingerprint = TLSFingerprint(rawValue: mapFingerprint(clientFP)) ?? .chrome133
         let alpn = getStringSequence(doc, mapping: node, key: "alpn")
 
         // Build TLS configuration
@@ -335,7 +335,7 @@ struct ClashProxyParser {
                 ?? server
             let alpn = getStringSequence(doc, mapping: node, key: "alpn")
             let clientFP = getString(doc, mapping: node, key: "client-fingerprint")
-            let fingerprint = TLSFingerprint(rawValue: mapFingerprint(clientFP)) ?? .chrome120
+            let fingerprint = TLSFingerprint(rawValue: mapFingerprint(clientFP)) ?? .chrome133
 
             tlsConfig = TLSConfiguration(
                 serverName: sni,
@@ -395,13 +395,16 @@ struct ClashProxyParser {
     /// Maps Clash `client-fingerprint` strings to `TLSFingerprint` raw values.
     private static func mapFingerprint(_ fp: String?) -> String {
         switch fp?.lowercased() {
-        case "chrome":  return TLSFingerprint.chrome120.rawValue
-        case "firefox": return TLSFingerprint.firefox120.rawValue
-        case "safari":  return TLSFingerprint.safari16.rawValue
+        case "chrome":  return TLSFingerprint.chrome133.rawValue
+        case "firefox": return TLSFingerprint.firefox148.rawValue
+        case "safari":  return TLSFingerprint.safari26.rawValue
         case "ios":     return TLSFingerprint.ios14.rawValue
-        case "edge":    return TLSFingerprint.edge106.rawValue
+        case "edge":    return TLSFingerprint.edge85.rawValue
+        case "android": return TLSFingerprint.android11.rawValue
+        case "qq":      return TLSFingerprint.qq11.rawValue
+        case "360":     return TLSFingerprint.browser360.rawValue
         case "random":  return TLSFingerprint.random.rawValue
-        default:        return fp ?? TLSFingerprint.chrome120.rawValue
+        default:        return fp ?? TLSFingerprint.chrome133.rawValue
         }
     }
 }

@@ -13,7 +13,7 @@ struct TLSConfiguration {
     let alpn: [String]?                 // ALPN protocols (e.g. ["h2", "http/1.1"])
     let fingerprint: TLSFingerprint     // Browser fingerprint to mimic
 
-    init(serverName: String, alpn: [String]? = nil, fingerprint: TLSFingerprint = .chrome120) {
+    init(serverName: String, alpn: [String]? = nil, fingerprint: TLSFingerprint = .chrome133) {
         self.serverName = serverName
         self.alpn = alpn
         self.fingerprint = fingerprint
@@ -21,7 +21,7 @@ struct TLSConfiguration {
 
     /// Parse TLS parameters from VLESS URL query parameters.
     ///
-    /// Expected parameters: `security=tls&sni=example.com&alpn=h2,http/1.1&fp=chrome_120`
+    /// Expected parameters: `security=tls&sni=example.com&alpn=h2,http/1.1&fp=chrome_133`
     static func parse(from params: [String: String], serverAddress: String) throws -> TLSConfiguration? {
         guard params["security"] == "tls" else { return nil }
 
@@ -32,8 +32,8 @@ struct TLSConfiguration {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
 
-        let fpString = params["fp"] ?? "chrome_120"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
+        let fpString = params["fp"] ?? "chrome_133"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
 
         return TLSConfiguration(
             serverName: sni,
@@ -52,7 +52,7 @@ extension TLSConfiguration: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         serverName = try container.decode(String.self, forKey: .serverName)
         alpn = try container.decodeIfPresent([String].self, forKey: .alpn)
-        fingerprint = try container.decodeIfPresent(TLSFingerprint.self, forKey: .fingerprint) ?? .chrome120
+        fingerprint = try container.decodeIfPresent(TLSFingerprint.self, forKey: .fingerprint) ?? .chrome133
     }
 }
 
