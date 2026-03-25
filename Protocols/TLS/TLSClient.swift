@@ -199,7 +199,8 @@ class TLSClient {
             sessionId: sessionId,
             serverName: configuration.serverName,
             publicKey: privateKey.publicKey.rawRepresentation,
-            alpn: configuration.alpn ?? ["h2", "http/1.1"]
+            alpn: configuration.alpn ?? ["h2", "http/1.1"],
+            omitPQKeyShares: true
         )
 
         return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: rawClientHello)
@@ -896,38 +897,30 @@ class TLSClient {
 
         guard uncompressedLength > 0 && uncompressedLength <= 1 << 24 else { return nil }
 
+        let compressionAlgorithm: compression_algorithm
         switch algorithm {
-        case 0x0001: // zlib
-            return zlibDecompress(compressed, expectedSize: uncompressedLength)
-        case 0x0002: // brotli — not natively available on Apple platforms
-            logger.warning("[TLS] Brotli certificate compression not supported")
-            return nil
-        case 0x0003: // zstd — not natively available on Apple platforms
-            logger.warning("[TLS] Zstd certificate compression not supported")
-            return nil
+        case 0x0001: compressionAlgorithm = COMPRESSION_ZLIB
+        case 0x0002: compressionAlgorithm = COMPRESSION_BROTLI
         default:
             logger.warning("[TLS] Unknown certificate compression algorithm: 0x\(String(format: "%04x", algorithm))")
             return nil
         }
-    }
 
-    /// Decompresses zlib-compressed data using the Apple Compression framework.
-    private func zlibDecompress(_ compressed: Data, expectedSize: Int) -> Data? {
-        var decompressed = Data(count: expectedSize)
+        var decompressed = Data(count: uncompressedLength)
         let decodedSize = decompressed.withUnsafeMutableBytes { destPtr in
             compressed.withUnsafeBytes { srcPtr in
                 compression_decode_buffer(
                     destPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                    expectedSize,
+                    uncompressedLength,
                     srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
                     compressed.count,
                     nil,
-                    COMPRESSION_ZLIB
+                    compressionAlgorithm
                 )
             }
         }
         guard decodedSize > 0 else {
-            logger.warning("[TLS] zlib decompression failed")
+            logger.warning("[TLS] Certificate decompression failed (algorithm: 0x\(String(format: "%04x", algorithm)))")
             return nil
         }
         return Data(decompressed.prefix(decodedSize))
