@@ -1,11 +1,127 @@
 import Foundation
 import CryptoKit
 
-/// TLS 1.3 cipher suite constants
+/// TLS cipher suite constants (1.2 and 1.3)
 enum TLSCipherSuite {
+    // TLS 1.3
     static let TLS_AES_128_GCM_SHA256: UInt16 = 0x1301
     static let TLS_AES_256_GCM_SHA384: UInt16 = 0x1302
     static let TLS_CHACHA20_POLY1305_SHA256: UInt16 = 0x1303
+
+    // TLS 1.2 ECDHE AEAD
+    static let TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256: UInt16 = 0xC02B
+    static let TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384: UInt16 = 0xC02C
+    static let TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256: UInt16 = 0xC02F
+    static let TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384: UInt16 = 0xC030
+    static let TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256: UInt16 = 0xCCA9
+    static let TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256: UInt16 = 0xCCA8
+
+    // TLS 1.2 ECDHE CBC
+    static let TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA: UInt16 = 0xC009
+    static let TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA: UInt16 = 0xC00A
+    static let TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA: UInt16 = 0xC013
+    static let TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA: UInt16 = 0xC014
+    static let TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256: UInt16 = 0xC023
+    static let TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384: UInt16 = 0xC024
+    static let TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256: UInt16 = 0xC027
+    static let TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384: UInt16 = 0xC028
+
+    // TLS 1.2 RSA AEAD
+    static let TLS_RSA_WITH_AES_128_GCM_SHA256: UInt16 = 0x009C
+    static let TLS_RSA_WITH_AES_256_GCM_SHA384: UInt16 = 0x009D
+
+    // TLS 1.2 RSA CBC
+    static let TLS_RSA_WITH_AES_128_CBC_SHA: UInt16 = 0x002F
+    static let TLS_RSA_WITH_AES_256_CBC_SHA: UInt16 = 0x0035
+    static let TLS_RSA_WITH_AES_128_CBC_SHA256: UInt16 = 0x003C
+    static let TLS_RSA_WITH_AES_256_CBC_SHA256: UInt16 = 0x003D
+
+    // MARK: - Cipher Suite Properties
+
+    /// Whether this cipher suite uses ECDHE key exchange
+    static func isECDHE(_ suite: UInt16) -> Bool {
+        switch suite {
+        case 0xC009, 0xC00A, 0xC013, 0xC014,
+             0xC023, 0xC024, 0xC027, 0xC028,
+             0xC02B, 0xC02C, 0xC02F, 0xC030,
+             0xCCA8, 0xCCA9:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether this cipher suite uses AEAD (GCM or ChaCha20-Poly1305) vs CBC+HMAC
+    static func isAEAD(_ suite: UInt16) -> Bool {
+        switch suite {
+        case 0x1301, 0x1302, 0x1303,                   // TLS 1.3
+             0xC02B, 0xC02C, 0xC02F, 0xC030,           // ECDHE GCM
+             0xCCA8, 0xCCA9,                             // ECDHE ChaCha20
+             0x009C, 0x009D:                             // RSA GCM
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether this cipher suite uses ChaCha20-Poly1305
+    static func isChaCha20(_ suite: UInt16) -> Bool {
+        switch suite {
+        case 0x1303, 0xCCA8, 0xCCA9:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Whether this cipher suite uses SHA-384 (vs SHA-256)
+    static func usesSHA384(_ suite: UInt16) -> Bool {
+        switch suite {
+        case 0x1302,                                     // TLS 1.3 AES-256-GCM
+             0xC02C, 0xC030,                             // ECDHE AES-256-GCM
+             0xC024, 0xC028,                             // ECDHE AES-256-CBC-SHA384
+             0x009D:                                     // RSA AES-256-GCM
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Encryption key length in bytes for TLS 1.2 cipher suites
+    static func keyLength(_ suite: UInt16) -> Int {
+        switch suite {
+        // 32-byte key (AES-256 or ChaCha20)
+        case 0xC00A, 0xC014, 0xC024, 0xC028,           // ECDHE AES-256-CBC
+             0xC02C, 0xC030,                             // ECDHE AES-256-GCM
+             0xCCA8, 0xCCA9,                             // ECDHE ChaCha20
+             0x0035, 0x003D,                             // RSA AES-256-CBC
+             0x009D,                                     // RSA AES-256-GCM
+             0x1302, 0x1303:                             // TLS 1.3
+            return 32
+        // 16-byte key (AES-128)
+        default:
+            return 16
+        }
+    }
+
+    /// IV length in bytes for TLS 1.2 cipher suites (implicit nonce for AEAD, full IV for CBC)
+    static func ivLength(_ suite: UInt16) -> Int {
+        if isChaCha20(suite) { return 12 }               // 12-byte implicit nonce
+        if isAEAD(suite) { return 4 }                    // 4-byte implicit nonce (GCM)
+        return 16                                         // 16-byte IV (AES-CBC block size)
+    }
+
+    /// MAC key length in bytes (0 for AEAD suites)
+    static func macLength(_ suite: UInt16) -> Int {
+        if isAEAD(suite) { return 0 }
+        if usesSHA384(suite) { return 48 }                // HMAC-SHA384
+        switch suite {
+        case 0xC023, 0xC027, 0x003C, 0x003D:             // SHA256 MAC suites
+            return 32
+        default:
+            return 20                                     // HMAC-SHA1
+        }
+    }
 }
 
 /// TLS 1.3 handshake traffic keys

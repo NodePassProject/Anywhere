@@ -34,9 +34,9 @@ nonisolated enum LatencyTester {
     /// Per-test timeout.
     private static let timeout: Duration = .seconds(10)
 
-    /// Latency test endpoint.
-    private static let latencyHost = "latency.argsment.com"
-    private static let latencyPort: UInt16 = 443
+    /// Latency test endpoint
+    private static let latencyHost = "cp.cloudflare.com"
+    private static let latencyPort: UInt16 = 80
 
     /// Test a single configuration's proxy round-trip latency.
     ///
@@ -154,28 +154,12 @@ nonisolated enum LatencyTester {
                 }
             }
 
-            // Phase 2 (untimed): TLS handshake with destination through the proxy tunnel.
-            let destinationTLSConfig = TLSConfiguration(serverName: Self.latencyHost, alpn: ["http/1.1"])
-            let destinationTLSClient = TLSClient(configuration: destinationTLSConfig)
-            defer { destinationTLSClient.cancel() }
-
-            let tlsConnection: TLSRecordConnection = try await withCheckedThrowingContinuation { continuation in
-                destinationTLSClient.connect(overTunnel: proxyConnection) { result in
-                    switch result {
-                    case .success(let connection):
-                        continuation.resume(returning: connection)
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
-                    }
-                }
-            }
-
-            // Phase 3 (untimed warmup): Send a first request to drain any TLS 1.3
-            // NewSessionTicket records.
+            // Phase 2 (untimed warmup): Send a first request to prime the
+            // proxy-to-target connection.
             let warmupRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: \(Self.latencyHost)\r\n\r\n".data(using: .utf8)!
 
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                tlsConnection.send(data: warmupRequest) { error in
+                proxyConnection.send(data: warmupRequest) { error in
                     if let error {
                         continuation.resume(throwing: error)
                     } else {
@@ -185,7 +169,7 @@ nonisolated enum LatencyTester {
             }
 
             let warmupData: Data? = try await withCheckedThrowingContinuation { continuation in
-                tlsConnection.receive { data, error in
+                proxyConnection.receive { data, error in
                     if let error {
                         continuation.resume(throwing: error)
                     } else {
@@ -201,11 +185,11 @@ nonisolated enum LatencyTester {
                 throw LatencyTestError.unexpectedStatus(warmupStatus ?? "no response")
             }
 
-            // Phase 4 (untimed): Send the timed HTTP request.
+            // Phase 3 (untimed): Send the timed HTTP request.
             let httpRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
 
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                tlsConnection.send(data: httpRequest) { error in
+                proxyConnection.send(data: httpRequest) { error in
                     if let error {
                         continuation.resume(throwing: error)
                     } else {
@@ -214,14 +198,14 @@ nonisolated enum LatencyTester {
                 }
             }
 
-            // Phase 5 (timed): Wait for the response.
+            // Phase 4 (timed): Wait for the response.
             // Timer starts after send completes — measures the actual network
             // round-trip: data traverses client → proxy chain → target → back.
             let clock = ContinuousClock()
             let start = clock.now
 
             let responseData: Data? = try await withCheckedThrowingContinuation { continuation in
-                tlsConnection.receive { data, error in
+                proxyConnection.receive { data, error in
                     if let error {
                         continuation.resume(throwing: error)
                     } else {

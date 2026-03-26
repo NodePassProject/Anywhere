@@ -18,8 +18,8 @@ class TLSProxyConnection: ProxyConnection {
         self.tlsConnection = tlsConnection
     }
 
-    /// Standard TLS always negotiates TLS 1.3 (we only support 1.3).
-    override var outerTLSVersion: TLSVersion? { .tls13 }
+    /// The negotiated TLS version from the handshake.
+    override var outerTLSVersion: TLSVersion? { TLSVersion(rawValue: tlsConnection.tlsVersion) }
 
     override var isConnected: Bool {
         tlsConnection.connection?.isTransportReady ?? false

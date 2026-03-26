@@ -27,7 +27,9 @@ protocol ProxyConnectionProtocol: AnyObject {
 // MARK: - ProxyConnection
 
 /// TLS version constants matching TLS protocol version numbers.
-enum TLSVersion: UInt16 {
+enum TLSVersion: UInt16, Codable {
+    case tls10 = 0x0301
+    case tls11 = 0x0302
     case tls12 = 0x0303
     case tls13 = 0x0304
 }
