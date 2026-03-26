@@ -55,6 +55,12 @@ struct SettingsView: View {
             }
 
             Section("Routing") {
+                Picker(selection: $viewModel.proxyMode) {
+                    Text("Global").tag("global")
+                    Text("Rule").tag("rule")
+                } label: {
+                    TextWithColorfulIcon(titleKey: "Proxy Mode", systemName: "arrow.triangle.branch", foregroundColor: .white, backgroundColor: .purple)
+                }
                 Picker(selection: $bypassCountryCode) {
                     Text("Disable").tag("")
                     ForEach(Self.countryCodes, id: \.self) { code in
