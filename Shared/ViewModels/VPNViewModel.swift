@@ -45,6 +45,12 @@ class VPNViewModel: ObservableObject {
     @Published var orphanedRuleSetNames: [String] = []
     @Published var bytesIn: Int64 = 0
     @Published var bytesOut: Int64 = 0
+    @Published var proxyMode: String = AWCore.userDefaults.string(forKey: "proxyMode") ?? "rule" {
+        didSet {
+            AWCore.userDefaults.set(proxyMode, forKey: "proxyMode")
+            notifySettingsChanged()
+        }
+    }
 
     private let store = ConfigurationStore.shared
     private let subscriptionStore = SubscriptionStore.shared
@@ -927,5 +933,15 @@ class VPNViewModel: ObservableObject {
         }
 
         return configurationDict
+    }
+
+    // MARK: - Notifications
+
+    private func notifySettingsChanged() {
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName("com.argsment.Anywhere.settingsChanged" as CFString),
+            nil, nil, true
+        )
     }
 }
