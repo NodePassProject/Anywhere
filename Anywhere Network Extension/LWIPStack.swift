@@ -57,6 +57,7 @@ class LWIPStack {
     private(set) var encryptedDNSEnabled: Bool = false
     private(set) var encryptedDNSProtocol: String = "doh"
     private(set) var encryptedDNSServer: String = ""
+    private(set) var proxyMode: String = "rule"
     private var running = false
 
     // lwIP periodic timeout timer
@@ -120,6 +121,7 @@ class LWIPStack {
     /// then falls back to GeoIP country-based bypass.
     func shouldBypass(host: String) -> Bool {
         if isProxyServerAddress(host) { return true }
+        if proxyMode == "global" { return false }
         guard bypassCountry != 0 else { return false }
         return geoIPDatabase?.lookup(host) == bypassCountry
     }
@@ -241,6 +243,10 @@ class LWIPStack {
         encryptedDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
     }
 
+    private func loadProxyModeSetting() {
+        proxyMode = AWCore.userDefaults.string(forKey: "proxyMode") ?? "rule"
+    }
+
     // MARK: - Lifecycle
 
     /// Starts the lwIP stack and begins reading packets from the tunnel.
@@ -265,6 +271,7 @@ class LWIPStack {
             self.loadIPv6Settings()
             self.loadBypassCountry()
             self.loadEncryptedDNSSetting()
+            self.loadProxyModeSetting()
             self.loadProxyServerAddresses()
 
             // Create MuxManager when Vision + Mux is active (matches Xray-core auto-mux for UDP)
@@ -280,7 +287,7 @@ class LWIPStack {
             self.startTimeoutTimer()
             self.startUDPCleanupTimer()
             self.startReadingPackets()
-            logger.info("[LWIPStack] Started, mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
+            logger.info("[LWIPStack] Started, mode=\(self.proxyMode), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
         }
 
         startObservingSettings()
@@ -356,6 +363,7 @@ class LWIPStack {
         self.loadIPv6Settings()
         self.loadBypassCountry()
         self.loadEncryptedDNSSetting()
+        self.loadProxyModeSetting()
 
         if configuration.outboundProtocol == .vless && configuration.muxEnabled && (configuration.flow == "xtls-rprx-vision" || configuration.flow == "xtls-rprx-vision-udp443") {
             self.muxManager = MuxManager(configuration: configuration, lwipQueue: self.lwipQueue)
@@ -369,7 +377,7 @@ class LWIPStack {
         self.startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.info("[LWIPStack] Restarted, mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
+        logger.info("[LWIPStack] Restarted, mode=\(self.proxyMode), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
     }
 
     // MARK: - Settings Observation
@@ -433,14 +441,16 @@ class LWIPStack {
             let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: "encryptedDNSEnabled")
             let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: "encryptedDNSProtocol") ?? "doh"
             let encryptedDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
+            let proxyMode = AWCore.userDefaults.string(forKey: "proxyMode") ?? "rule"
 
             let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
             let bypassCountryChanged = bypassCountry != self.bypassCountry
             let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
             let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
             let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer
+            let proxyModeChanged = proxyMode != self.proxyMode
 
-            guard ipv6DNSEnabledChanged || bypassCountryChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else { return }
+            guard ipv6DNSEnabledChanged || bypassCountryChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || proxyModeChanged else { return }
 
             // IPv6 connections toggle affects tunnel network settings (IPv6 routes + DNS servers).
             // Encrypted DNS changes also affect tunnel settings (NEDNSOverHTTPSSettings / NEDNSOverTLSSettings).
@@ -728,7 +738,7 @@ class LWIPStack {
 
         // Country bypass: domain matched the bypass country's rule set.
         // User-configured rules above take absolute precedence.
-        if bypassCountry != 0, match.isBypass {
+        if proxyMode != "global", bypassCountry != 0, match.isBypass {
             return .resolved(domain: entry.domain, configOverride: nil, forceBypass: true)
         }
 
