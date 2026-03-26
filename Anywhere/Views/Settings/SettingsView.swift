@@ -103,16 +103,8 @@ struct SettingsView: View {
                     TextWithColorfulIcon(titleKey: "Trusted Certificates", systemName: "checkmark.seal.fill", foregroundColor: .white, backgroundColor: .green)
                 }
             }
-            
-            Section {
-                NavigationLink {
-                    AdvancedSettingsView()
-                } label: {
-                    TextWithColorfulIcon(titleKey: "Advanced Settings", systemName: "gear", foregroundColor: .white, backgroundColor: .gray)
-                }
-            }
 
-            Section("About") {
+            Section {
                 Link(destination: URL(string: "https://t.me/anywhere_official_group")!) {
                     HStack {
                         TextWithColorfulIconAndCustomImage(titleKey: "Join Telegram Group", imageName: "TelegramSymbol", foregroundColor: .white, backgroundColor: .blue)
@@ -127,6 +119,23 @@ struct SettingsView: View {
                 } label: {
                     TextWithColorfulIcon(titleKey: "Acknowledgements", systemName: "doc.text.fill", foregroundColor: .white, backgroundColor: .gray)
                 }
+            } header: {
+                Text("About")
+            } footer: {
+                NavigationLink {
+                    AdvancedSettingsView()
+                } label: {
+                    HStack {
+                        Text("Advanced Settings")
+                            .font(.body)
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.bold())
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
             }
         }
         .navigationTitle("Settings")
