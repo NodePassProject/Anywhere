@@ -9,39 +9,18 @@ import SwiftUI
 
 struct IPv6SettingsView: View {
     @AppStorage("ipv6DNSEnabled", store: AWCore.userDefaults)
-    private var dnsEnabled = false
-
-    @AppStorage("ipv6ConnectionsEnabled", store: AWCore.userDefaults)
-    private var connectionsEnabled = false
+    private var ipv6DNSEnabled = false
 
     var body: some View {
         Form {
             Section {
-                Toggle(isOn: $connectionsEnabled) {
-                    TextWithColorfulIcon(titleKey: "IPv6 Connections", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                }
+                Toggle("IPv6 DNS Lookup", isOn: $ipv6DNSEnabled)
             } footer: {
-                Text("Route IPv6 connections through the tunnel.")
-            }
-
-            if connectionsEnabled {
-                Section {
-                    Toggle(isOn: $dnsEnabled) {
-                        TextWithColorfulIcon(titleKey: "IPv6 DNS Lookup", systemName: "magnifyingglass", foregroundColor: .white, backgroundColor: .blue)
-                    }
-                } footer: {
-                    Text("Respond to AAAA DNS queries with IPv6 addresses.")
-                }
+                Text("Send and respond to AAAA DNS queries.")
             }
         }
         .navigationTitle("IPv6")
-        .onChange(of: connectionsEnabled) {
-            if connectionsEnabled {
-                dnsEnabled = true
-            }
-            notifySettingsChanged()
-        }
-        .onChange(of: dnsEnabled) { notifySettingsChanged() }
+        .onChange(of: ipv6DNSEnabled) { notifySettingsChanged() }
     }
 
     private func notifySettingsChanged() {

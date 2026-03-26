@@ -23,7 +23,7 @@ struct EncryptedDNSSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle(isOn: Binding(
+                Toggle("Encrypted DNS", isOn: Binding(
                     get: { enabled },
                     set: { newValue in
                         if newValue {
@@ -33,18 +33,16 @@ struct EncryptedDNSSettingsView: View {
                             notifySettingsChanged()
                         }
                     }
-                )) {
-                    TextWithColorfulIcon(titleKey: "Encrypted DNS", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .teal)
-                }
+                ))
+            } footer: {
+                Text("Not recommended.")
             }
 
             if enabled {
                 Section {
-                    Picker(selection: $dnsProtocol) {
+                    Picker("Protocol", selection: $dnsProtocol) {
                         Text("DNS over HTTPS").tag("doh")
                         Text("DNS over TLS").tag("dot")
-                    } label: {
-                        TextWithColorfulIcon(titleKey: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
                 }
                 

@@ -35,7 +35,7 @@ nonisolated enum LatencyTester {
     private static let timeout: Duration = .seconds(10)
 
     /// Latency test endpoint
-    private static let latencyHost = "cp.cloudflare.com"
+    private static let latencyHost = "captive.apple.com"
     private static let latencyPort: UInt16 = 80
 
     /// Test a single configuration's proxy round-trip latency.
@@ -156,7 +156,7 @@ nonisolated enum LatencyTester {
 
             // Phase 2 (untimed warmup): Send a first request to prime the
             // proxy-to-target connection.
-            let warmupRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: \(Self.latencyHost)\r\n\r\n".data(using: .utf8)!
+            let warmupRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\n\r\n".data(using: .utf8)!
 
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 proxyConnection.send(data: warmupRequest) { error in
@@ -181,12 +181,12 @@ nonisolated enum LatencyTester {
             // Validate warmup response
             let warmupStatus = warmupData.flatMap { String(data: $0, encoding: .utf8) }?
                 .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
-            guard let warmupStatus, warmupStatus.contains("204") else {
+            guard let warmupStatus, warmupStatus.contains("200") else {
                 throw LatencyTestError.unexpectedStatus(warmupStatus ?? "no response")
             }
 
             // Phase 3 (untimed): Send the timed HTTP request.
-            let httpRequest = "HEAD /generate_204 HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
+            let httpRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
 
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 proxyConnection.send(data: httpRequest) { error in
@@ -216,10 +216,10 @@ nonisolated enum LatencyTester {
 
             let elapsed = clock.now - start
 
-            // Validate HTTP 204 response
+            // Validate HTTP 200 response
             let statusLine = responseData.flatMap { String(data: $0, encoding: .utf8) }?
                 .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
-            guard let statusLine, statusLine.contains("204") else {
+            guard let statusLine, statusLine.contains("200") else {
                 throw LatencyTestError.unexpectedStatus(statusLine ?? "no response")
             }
 

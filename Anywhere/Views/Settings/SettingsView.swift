@@ -53,19 +53,6 @@ struct SettingsView: View {
                     }
                 }
             }
-            
-            Section("Network") {
-                NavigationLink {
-                    IPv6SettingsView()
-                } label: {
-                    TextWithColorfulIcon(titleKey: "IPv6", systemName: "6.circle.fill", foregroundColor: .white, backgroundColor: .blue)
-                }
-                NavigationLink {
-                    EncryptedDNSSettingsView()
-                } label: {
-                    TextWithColorfulIcon(titleKey: "Encrypted DNS", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .teal)
-                }
-            }
 
             Section("Routing") {
                 Picker(selection: $bypassCountryCode) {
@@ -114,6 +101,14 @@ struct SettingsView: View {
                     TrustedCertificatesView()
                 } label: {
                     TextWithColorfulIcon(titleKey: "Trusted Certificates", systemName: "checkmark.seal.fill", foregroundColor: .white, backgroundColor: .green)
+                }
+            }
+            
+            Section {
+                NavigationLink {
+                    AdvancedSettingsView()
+                } label: {
+                    TextWithColorfulIcon(titleKey: "Advanced Settings", systemName: "gear", foregroundColor: .white, backgroundColor: .gray)
                 }
             }
 

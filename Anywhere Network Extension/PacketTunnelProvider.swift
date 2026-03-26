@@ -77,7 +77,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Tunnel Settings
     //
     // Builds NEPacketTunnelNetworkSettings from current UserDefaults.
-    // Reads: ipv6ConnectionsEnabled, encryptedDNSEnabled, encryptedDNSProtocol, encryptedDNSServer.
+    // Reads: encryptedDNSEnabled, encryptedDNSProtocol, encryptedDNSServer.
     // When encrypted DNS is enabled with a custom server, uses NEDNSOverHTTPSSettings
     // or NEDNSOverTLSSettings. Otherwise DDR auto-upgrade is controlled at the lwIP level.
 
@@ -118,16 +118,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         ipv4Settings.excludedRoutes = Self.bypassIPv4Routes
         settings.ipv4Settings = ipv4Settings
 
-        let ipv6ConnectionsEnabled = AWCore.userDefaults.bool(forKey: "ipv6ConnectionsEnabled")
-        if ipv6ConnectionsEnabled {
-            let ipv6Settings = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
-            ipv6Settings.includedRoutes = [NEIPv6Route.default()]
-            ipv6Settings.excludedRoutes = Self.bypassIPv6Routes
-            settings.ipv6Settings = ipv6Settings
-        }
-
         let dnsServers: [String]
-        if ipv6ConnectionsEnabled {
+        let ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: "ipv6DNSEnabled")
+        if ipv6DNSEnabled {
             dnsServers = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
         } else {
             dnsServers = ["1.1.1.1", "1.0.0.1"]
@@ -139,13 +132,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if encryptedDNSEnabled, !encryptedDNSServer.isEmpty {
             if encryptedDNSProtocol == "dot" {
-                let serverIPs = Self.resolveEncryptedDNSHostname(encryptedDNSServer, includeIPv6: ipv6ConnectionsEnabled)
+                let serverIPs = Self.resolveEncryptedDNSHostname(encryptedDNSServer, includeIPv6: ipv6DNSEnabled)
                 let dnsSettings = NEDNSOverTLSSettings(servers: serverIPs ?? dnsServers)
                 dnsSettings.serverName = encryptedDNSServer
                 settings.dnsSettings = dnsSettings
                 logger.info("[VPN] DoT server: \(encryptedDNSServer, privacy: .public), resolved IPs: \(serverIPs ?? dnsServers, privacy: .public)")
             } else if let serverURL = URL(string: encryptedDNSServer) {
-                let serverIPs = serverURL.host.flatMap { Self.resolveEncryptedDNSHostname($0, includeIPv6: ipv6ConnectionsEnabled) }
+                let serverIPs = serverURL.host.flatMap { Self.resolveEncryptedDNSHostname($0, includeIPv6: ipv6DNSEnabled) }
                 let dnsSettings = NEDNSOverHTTPSSettings(servers: serverIPs ?? dnsServers)
                 dnsSettings.serverURL = serverURL
                 settings.dnsSettings = dnsSettings
