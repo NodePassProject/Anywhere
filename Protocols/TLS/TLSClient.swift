@@ -1941,11 +1941,15 @@ class TLSClient {
 
     /// Decompresses a CompressedCertificate message body.
     private func decompressCertificate(_ body: Data) -> Data? {
-        guard body.count >= 5 else { return nil }
+        // RFC 8879 CompressedCertificate layout:
+        //   algorithm (2) + uncompressed_length (3) + compressed_message length (3) + data
+        guard body.count >= 8 else { return nil }
 
         let algorithm = UInt16(body[0]) << 8 | UInt16(body[1])
         let uncompressedLength = Int(body[2]) << 16 | Int(body[3]) << 8 | Int(body[4])
-        let compressed = body.subdata(in: 5..<body.count)
+        let compressedLength = Int(body[5]) << 16 | Int(body[6]) << 8 | Int(body[7])
+        guard 8 + compressedLength <= body.count else { return nil }
+        let compressed = body.subdata(in: 8..<(8 + compressedLength))
 
         guard uncompressedLength > 0 && uncompressedLength <= 1 << 24 else { return nil }
 
