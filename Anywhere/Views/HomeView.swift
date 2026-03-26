@@ -24,42 +24,42 @@ struct HomeView: View {
     }
 
     var body: some View {
-        ZStack {
-            backgroundGradient
-                .ignoresSafeArea()
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 0) {
+                    Spacer()
 
-            GeometryReader { geometry in
-                ScrollView {
-                    VStack(spacing: 0) {
-                        Spacer()
-                        
-                        powerButton
-                            .padding(.bottom, 16)
-                        
-                        Text(viewModel.statusText)
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(isConnected ? .white : .secondary)
-                            .contentTransition(.interpolate)
-                            .animation(.easeInOut, value: viewModel.vpnStatus)
-                            .padding(.bottom, isConnected ? 20 : 40)
-                        
-                        if isConnected {
-                            trafficStats
-                                .padding(.horizontal, 24)
-                                .padding(.bottom, 20)
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
-                        }
-                        
-                        configurationCard
+                    powerButton
+                        .padding(.bottom, 16)
+
+                    Text(viewModel.statusText)
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(isConnected ? .accent : .secondary)
+                        .contentTransition(.interpolate)
+                        .animation(.easeInOut, value: viewModel.vpnStatus)
+                        .padding(.bottom, isConnected ? 20 : 40)
+
+                    if isConnected {
+                        trafficStats
                             .padding(.horizontal, 24)
-                        
-                        Spacer()
+                            .padding(.bottom, 20)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
-                    .frame(minHeight: geometry.size.height)
-                    .animation(.easeInOut(duration: 0.4), value: isConnected)
+
+                    modeSelector
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 12)
+
+                    configurationCard
+                        .padding(.horizontal, 24)
+
+                    Spacer()
                 }
+                .frame(minHeight: geometry.size.height)
+                .animation(.easeInOut(duration: 0.4), value: isConnected)
             }
         }
+        .background(Color(.systemBackground))
         .picker3D($pickerConfig, items: viewModel.allPickerItems)
         .onChange(of: pickerConfig.show) {
             if !pickerConfig.show, let id = pickerConfig.selectedId {
@@ -94,27 +94,6 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - Background
-
-    @ViewBuilder
-    private var backgroundGradient: some View {
-        if isConnected {
-            LinearGradient(
-                colors: [Color("GradientStart"), Color("GradientEnd")],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .transition(.blurReplace)
-        } else {
-            LinearGradient(
-                colors: [Color("GradientDisconnectedStart"), Color("GradientDisconnectedEnd")],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            .transition(.blurReplace)
-        }
-    }
-
     // MARK: - Power Button
 
     private var powerButton: some View {
@@ -125,44 +104,18 @@ struct HomeView: View {
         } label: {
             ZStack {
                 Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [isConnected ? .cyan.opacity(0.25) : .clear, .clear],
-                            center: .center,
-                            startRadius: 50,
-                            endRadius: 110
-                        )
-                    )
-                    .frame(width: 200, height: 200)
-                    .phaseAnimator([false, true]) { content, phase in
-                        content
-                            .scaleEffect(phase ? 1.15 : 0.95)
-                            .opacity(phase ? 0.5 : 1.0)
-                    } animation: { _ in
-                        .easeInOut(duration: 2)
-                    }
-
-                if #available(iOS 26.0, *) {
-                    Circle()
-                        .fill(.clear)
-                        .frame(width: 140, height: 140)
-                        .glassEffect(.clear, in: .circle)
-                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
-                } else {
-                    Circle()
-                        .fill(.white.opacity(0.2))
-                        .frame(width: 140, height: 140)
-                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
-                }
+                    .fill(isConnected ? Color.accentColor.opacity(0.12) : Color(.secondarySystemFill))
+                    .frame(width: 140, height: 140)
+                    .shadow(color: isConnected ? .accentColor.opacity(0.3) : .clear, radius: 16)
 
                 if isTransitioning {
                     ProgressView()
                         .controlSize(.large)
-                        .tint(isConnected ? .white : .accentColor)
+                        .tint(isConnected ? .accentColor : .secondary)
                 } else {
                     Image(systemName: "power")
                         .font(.system(size: 44, weight: .light))
-                        .foregroundStyle(isConnected ? .white : .accentColor)
+                        .foregroundStyle(isConnected ? .accentColor : .secondary)
                 }
             }
             .contentShape(Circle())
@@ -170,37 +123,45 @@ struct HomeView: View {
         .buttonStyle(.plain)
         .disabled(viewModel.isButtonDisabled)
         .sensoryFeedback(.impact(weight: .medium), trigger: isConnected)
-        .animation(.easeInOut(duration: 0.6), value: isConnected)
+        .animation(.easeInOut(duration: 0.4), value: isConnected)
+    }
+
+    // MARK: - Mode Selector
+
+    private var modeSelector: some View {
+        Picker("Mode", selection: $viewModel.proxyMode) {
+            Text("Global").tag("global")
+            Text("Rule").tag("rule")
+        }
+        .pickerStyle(.segmented)
     }
 
     // MARK: - Traffic Stats
 
     private var trafficStats: some View {
-        cardContent {
-            HStack {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.up")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.7))
-                    Text(Self.formatBytes(viewModel.bytesOut))
-                        .font(.callout.monospacedDigit())
-                        .foregroundStyle(.white)
-                        .contentTransition(.numericText())
-                }
-                Spacer()
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.7))
-                    Text(Self.formatBytes(viewModel.bytesIn))
-                        .font(.callout.monospacedDigit())
-                        .foregroundStyle(.white)
-                        .contentTransition(.numericText())
-                }
+        HStack {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(Self.formatBytes(viewModel.bytesOut))
+                    .font(.callout.monospacedDigit())
+                    .contentTransition(.numericText())
             }
-            .animation(.default, value: viewModel.bytesIn)
-            .animation(.default, value: viewModel.bytesOut)
+            Spacer()
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(Self.formatBytes(viewModel.bytesIn))
+                    .font(.callout.monospacedDigit())
+                    .contentTransition(.numericText())
+            }
         }
+        .padding(16)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .animation(.default, value: viewModel.bytesIn)
+        .animation(.default, value: viewModel.bytesOut)
     }
 
     private static let byteFormatter: ByteCountFormatter = {
@@ -229,28 +190,25 @@ struct HomeView: View {
             pickerConfig.text = configuration.name
             pickerConfig.show = true
         } label: {
-            cardContent {
-                VStack(spacing: 12) {
-                    HStack {
-                        Image(systemName: "antenna.radiowaves.left.and.right")
-                            .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
-                            .frame(width: 24)
-                        Text(configuration.name)
-                            .font(.body.weight(.medium))
-                            .foregroundStyle(isConnected ? .white : .primary)
-                            .onGeometryChange(for: CGRect.self) { proxy in
-                                proxy.frame(in: .global)
-                            } action: { newValue in
-                                pickerConfig.sourceFrame = newValue
-                            }
-                            .opacity(pickerConfig.show ? 0 : 1)
-                        Spacer()
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(isConnected ? Color.white.opacity(0.4) : Color.secondary.opacity(0.4))
+            HStack {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24)
+                Text(configuration.name)
+                    .font(.body.weight(.medium))
+                    .onGeometryChange(for: CGRect.self) { proxy in
+                        proxy.frame(in: .global)
+                    } action: { newValue in
+                        pickerConfig.sourceFrame = newValue
                     }
-                }
+                    .opacity(pickerConfig.show ? 0 : 1)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
+            .padding(16)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -259,38 +217,20 @@ struct HomeView: View {
         Button {
             showingAddSheet = true
         } label: {
-            cardContent {
-                HStack(spacing: 12) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.tint)
-                    Text("Add a Configuration")
-                        .font(.body.weight(.medium))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
+            HStack(spacing: 12) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.tint)
+                Text("Add a Configuration")
+                    .font(.body.weight(.medium))
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
+            .padding(16)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
         .buttonStyle(.plain)
-    }
-
-    @ViewBuilder
-    private func cardContent<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content()
-                .padding(16)
-                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .glassEffect(.clear.interactive(), in: .rect(cornerRadius: 16))
-        } else {
-            content()
-                .padding(16)
-                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(.white.opacity(0.2))
-                )
-        }
     }
 }

@@ -25,12 +25,15 @@ class RuleSetStore: ObservableObject {
     var adBlockRuleSet: RuleSet? {
         ruleSets.first(where: { $0.name == "ADBlock" })
     }
+    var webRTCRuleSet: RuleSet? {
+        ruleSets.first(where: { $0.name == "WebRTC" })
+    }
     var routingRuleSets: [RuleSetStore.RuleSet] {
         ruleSets.filter { $0.name != "Direct" && $0.name != "ADBlock" }
     }
 
     /// Bundled ruleset names (must match JSON filenames in Resources/).
-    private static let builtIn = ["Direct", "Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini", "ADBlock"]
+    private static let builtIn = ["Direct", "Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini", "ADBlock", "WebRTC"]
     private static let assignmentsKey = "ruleSetAssignments"
 
     private static let defaultAssignments: [String: String] = ["Direct": "DIRECT"]
@@ -163,7 +166,7 @@ class RuleSetStore: ObservableObject {
             AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
             return
         }
-        let rules = loadRules(for: code)
+        let rules = loadBypassRules(for: code)
         let domainRulesArray: [[String: String]] = rules.compactMap {
             switch $0.type {
             case .domain, .domainSuffix, .domainKeyword:
@@ -179,6 +182,92 @@ class RuleSetStore: ObservableObject {
         if let data = try? JSONSerialization.data(withJSONObject: domainRulesArray) {
             AWCore.userDefaults.set(data, forKey: "bypassCountryDomainRules")
         }
+    }
+
+    // MARK: - Remote Rule Download
+
+    /// Downloads domain rules from a remote URL and saves them to the App Group container.
+    /// Used for China bypass rules (ChinaMax from GitHub CDN).
+    /// The file is in Shadowrocket/Surge list format: TYPE,value,action
+    /// Example: DOMAIN-SUFFIX,baidu.com,DIRECT
+    func downloadRemoteRules(from url: URL, fileName: String, completion: @escaping (Bool) -> Void) {
+        URLSession.shared.dataTask(with: url) { data, response, error in
+            guard let data, error == nil,
+                  let text = String(data: data, encoding: .utf8) else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+
+            let rules = Self.parseSurgeList(text)
+            guard !rules.isEmpty else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+
+            // Save as JSON to App Group container
+            guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName) else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            let fileURL = container.appendingPathComponent(fileName)
+            do {
+                let jsonData = try JSONEncoder().encode(rules)
+                try jsonData.write(to: fileURL)
+                logger.info("[RuleSetStore] Downloaded \(rules.count) rules to \(fileName, privacy: .public)")
+                DispatchQueue.main.async { completion(true) }
+            } catch {
+                logger.error("[RuleSetStore] Failed to save remote rules: \(error.localizedDescription, privacy: .public)")
+                DispatchQueue.main.async { completion(false) }
+            }
+        }.resume()
+    }
+
+    /// Parses a Surge/Shadowrocket rule list into DomainRule array.
+    /// Supports: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, IP-CIDR, IP-CIDR6
+    private static func parseSurgeList(_ text: String) -> [DomainRule] {
+        var rules: [DomainRule] = []
+        for line in text.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") || trimmed.hasPrefix("//") { continue }
+
+            let parts = trimmed.components(separatedBy: ",")
+            guard parts.count >= 2 else { continue }
+
+            let typeStr = parts[0].trimmingCharacters(in: .whitespaces)
+            let value = parts[1].trimmingCharacters(in: .whitespaces).lowercased()
+
+            let type: DomainRuleType?
+            switch typeStr {
+            case "DOMAIN": type = .domain
+            case "DOMAIN-SUFFIX": type = .domainSuffix
+            case "DOMAIN-KEYWORD": type = .domainKeyword
+            case "IP-CIDR": type = .ipCIDR
+            case "IP-CIDR6": type = .ipCIDR6
+            default: type = nil
+            }
+
+            if let type {
+                // For IP-CIDR, preserve original case (CIDR notation)
+                let ruleValue = (type == .ipCIDR || type == .ipCIDR6) ? parts[1].trimmingCharacters(in: .whitespaces) : value
+                rules.append(DomainRule(type: type, value: ruleValue))
+            }
+        }
+        return rules
+    }
+
+    /// Loads rules for a bypass country. Tries downloaded remote rules first, falls back to bundled.
+    func loadBypassRules(for countryCode: String) -> [DomainRule] {
+        // Try remote rules from App Group container first
+        if let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName) {
+            let remoteURL = container.appendingPathComponent("\(countryCode)_remote.json")
+            if let data = try? Data(contentsOf: remoteURL),
+               let rules = try? JSONDecoder().decode([DomainRule].self, from: data),
+               !rules.isEmpty {
+                return rules
+            }
+        }
+        // Fall back to bundled rules
+        return loadRules(for: countryCode)
     }
 
     // MARK: - Persistence

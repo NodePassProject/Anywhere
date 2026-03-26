@@ -57,6 +57,8 @@ class LWIPStack {
     private(set) var encryptedDNSEnabled: Bool = false
     private(set) var encryptedDNSProtocol: String = "doh"
     private(set) var encryptedDNSServer: String = ""
+    private(set) var proxyMode: String = "rule"  // "global" or "rule"
+    private(set) var blockPrivateIP: Bool = false
     private var running = false
 
     // lwIP periodic timeout timer
@@ -120,6 +122,7 @@ class LWIPStack {
     /// then falls back to GeoIP country-based bypass.
     func shouldBypass(host: String) -> Bool {
         if isProxyServerAddress(host) { return true }
+        if proxyMode == "global" { return false }
         guard bypassCountry != 0 else { return false }
         return geoIPDatabase?.lookup(host) == bypassCountry
     }
@@ -241,6 +244,11 @@ class LWIPStack {
         encryptedDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
     }
 
+    private func loadProxyModeSetting() {
+        proxyMode = AWCore.userDefaults.string(forKey: "proxyMode") ?? "rule"
+        blockPrivateIP = AWCore.userDefaults.bool(forKey: "blockPrivateIP")
+    }
+
     // MARK: - Lifecycle
 
     /// Starts the lwIP stack and begins reading packets from the tunnel.
@@ -265,6 +273,7 @@ class LWIPStack {
             self.loadIPv6Settings()
             self.loadBypassCountry()
             self.loadEncryptedDNSSetting()
+            self.loadProxyModeSetting()
             self.loadProxyServerAddresses()
 
             // Create MuxManager when Vision + Mux is active (matches Xray-core auto-mux for UDP)
@@ -280,7 +289,7 @@ class LWIPStack {
             self.startTimeoutTimer()
             self.startUDPCleanupTimer()
             self.startReadingPackets()
-            logger.info("[LWIPStack] Started, mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
+            logger.info("[LWIPStack] Started, mode=\(self.proxyMode), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0), blockPrivateIP=\(self.blockPrivateIP)")
         }
 
         startObservingSettings()
@@ -356,6 +365,7 @@ class LWIPStack {
         self.loadIPv6Settings()
         self.loadBypassCountry()
         self.loadEncryptedDNSSetting()
+        self.loadProxyModeSetting()
 
         if configuration.outboundProtocol == .vless && configuration.muxEnabled && (configuration.flow == "xtls-rprx-vision" || configuration.flow == "xtls-rprx-vision-udp443") {
             self.muxManager = MuxManager(configuration: configuration, lwipQueue: self.lwipQueue)
@@ -369,7 +379,7 @@ class LWIPStack {
         self.startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.info("[LWIPStack] Restarted, mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
+        logger.info("[LWIPStack] Restarted, mode=\(self.proxyMode), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0), blockPrivateIP=\(self.blockPrivateIP)")
     }
 
     // MARK: - Settings Observation
@@ -433,14 +443,18 @@ class LWIPStack {
             let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: "encryptedDNSEnabled")
             let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: "encryptedDNSProtocol") ?? "doh"
             let encryptedDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
+            let proxyMode = AWCore.userDefaults.string(forKey: "proxyMode") ?? "rule"
+            let blockPrivateIP = AWCore.userDefaults.bool(forKey: "blockPrivateIP")
 
             let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
             let bypassCountryChanged = bypassCountry != self.bypassCountry
             let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
             let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
             let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer
+            let proxyModeChanged = proxyMode != self.proxyMode
+            let blockPrivateIPChanged = blockPrivateIP != self.blockPrivateIP
 
-            guard ipv6DNSEnabledChanged || bypassCountryChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else { return }
+            guard ipv6DNSEnabledChanged || bypassCountryChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || proxyModeChanged || blockPrivateIPChanged else { return }
 
             // IPv6 connections toggle affects tunnel network settings (IPv6 routes + DNS servers).
             // Encrypted DNS changes also affect tunnel settings (NEDNSOverHTTPSSettings / NEDNSOverTLSSettings).
@@ -499,6 +513,10 @@ class LWIPStack {
             }
 
             let dstIPString = LWIPStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
+
+            if shared.blockPrivateIP && !FakeIPPool.isFakeIP(dstIPString) && Self.isPrivateIP(dstIPString) {
+                return nil
+            }
 
             var dstHost = dstIPString
             var connectionConfiguration = defaultConfiguration
@@ -595,6 +613,10 @@ class LWIPStack {
 
             let srcHost = LWIPStack.ipAddrToString(srcIP, isIPv6: isIPv6 != 0)
             let dstIPString = LWIPStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
+
+            if shared.blockPrivateIP && dstPort != 53 && !FakeIPPool.isFakeIP(dstIPString) && Self.isPrivateIP(dstIPString) {
+                return
+            }
 
             // Fast path: deliver to an existing flow without re-resolving the fake IP.
             // The flow already has the resolved domain from when it was created.
@@ -728,7 +750,8 @@ class LWIPStack {
 
         // Country bypass: domain matched the bypass country's rule set.
         // User-configured rules above take absolute precedence.
-        if bypassCountry != 0, match.isBypass {
+        // In global mode, skip country bypass — all unmatched traffic goes through proxy.
+        if proxyMode != "global", bypassCountry != 0, match.isBypass {
             return .resolved(domain: entry.domain, configOverride: nil, forceBypass: true)
         }
 
@@ -1116,6 +1139,27 @@ class LWIPStack {
     ///   - addr: Pointer to the raw IP address bytes (4 bytes for IPv4, 16 bytes for IPv6).
     ///   - isIPv6: Whether the address is IPv6.
     /// - Returns: A string representation (e.g. "192.168.1.1" or "2001:db8::1").
+    static func isPrivateIP(_ ip: String) -> Bool {
+        let parts = ip.split(separator: ".", maxSplits: 4, omittingEmptySubsequences: false)
+        guard parts.count == 4, let a = UInt8(parts[0]) else { return false }
+        switch a {
+        case 10: return true
+        case 100:
+            guard let b = UInt8(parts[1]) else { return false }
+            return b >= 64 && b <= 127
+        case 169:
+            guard let b = UInt8(parts[1]) else { return false }
+            return b == 254
+        case 172:
+            guard let b = UInt8(parts[1]) else { return false }
+            return b >= 16 && b <= 31
+        case 192:
+            guard let b = UInt8(parts[1]) else { return false }
+            return b == 168
+        default: return false
+        }
+    }
+
     static func ipAddrToString(_ addr: UnsafeRawPointer, isIPv6: Bool) -> String {
         var buf = (
             Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0), Int8(0),

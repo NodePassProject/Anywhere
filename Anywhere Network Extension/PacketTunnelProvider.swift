@@ -115,7 +115,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         
         let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.0"])
         ipv4Settings.includedRoutes = [NEIPv4Route.default()]
-        ipv4Settings.excludedRoutes = Self.bypassIPv4Routes
+        let blockPrivateIP = AWCore.userDefaults.bool(forKey: "blockPrivateIP")
+        ipv4Settings.excludedRoutes = blockPrivateIP ? [] : Self.bypassIPv4Routes
         settings.ipv4Settings = ipv4Settings
 
         let dnsServers: [String]

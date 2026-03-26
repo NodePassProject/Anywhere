@@ -9,15 +9,23 @@ import SwiftUI
 
 @main
 struct AnywhereApp: App {
-    @State private var onboardingCompleted = AWCore.userDefaults.bool(forKey: "onboardingCompleted")
-    
+    init() {
+        if !AWCore.userDefaults.bool(forKey: "initialSetupDone") {
+            AWCore.userDefaults.set(true, forKey: "initialSetupDone")
+            let languageToCountry: [String: String] = [
+                "ar": "SA", "fa": "IR", "my": "MM", "ru": "RU",
+                "tk": "TM", "vi": "VN", "zh": "CN", "be": "BY",
+            ]
+            if let langCode = Locale.current.language.languageCode?.identifier,
+               let country = languageToCountry[langCode] {
+                AWCore.userDefaults.set(country, forKey: "bypassCountryCode")
+            }
+        }
+    }
+
     var body: some Scene {
         WindowGroup {
-            if onboardingCompleted {
-                ContentView()
-            } else {
-                OnboardingView(onboardingCompleted: $onboardingCompleted)
-            }
+            ContentView()
         }
     }
 }

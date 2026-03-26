@@ -30,7 +30,15 @@ struct SettingsView: View {
     @AppStorage("allowInsecure", store: AWCore.userDefaults)
     private var allowInsecure = false
 
+    @AppStorage("blockWebRTC", store: AWCore.userDefaults)
+    private var blockWebRTC = false
+
+    @AppStorage("blockPrivateIP", store: AWCore.userDefaults)
+    private var blockPrivateIP = false
+
     @State private var adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+    @State private var webRTCEnabled = RuleSetStore.shared.webRTCRuleSet?.assignedConfigurationId == "REJECT"
+    @State private var isDownloadingRules = false
     @State private var showInsecureAlert = false
 
     // Countries with serious internet censorship (must match INCLUDED_COUNTRIES in build_geoip.py)
@@ -63,6 +71,20 @@ struct SettingsView: View {
                 } label: {
                     TextWithColorfulIcon(titleKey: "Country Bypass", systemName: "globe.americas.fill", foregroundColor: .white, backgroundColor: .orange)
                 }
+                if bypassCountryCode == "CN" {
+                    Button {
+                        downloadChinaRules()
+                    } label: {
+                        HStack {
+                            TextWithColorfulIcon(titleKey: "Update China Rules", systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .cyan)
+                            Spacer()
+                            if isDownloadingRules {
+                                ProgressView()
+                            }
+                        }
+                    }
+                    .disabled(isDownloadingRules)
+                }
                 Toggle(isOn: $adBlockEnabled) {
                     TextWithColorfulIcon(titleKey: "AD Blocking", systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
                 }
@@ -84,6 +106,25 @@ struct SettingsView: View {
             }
             
             Section("Security") {
+                Toggle(isOn: $webRTCEnabled) {
+                    TextWithColorfulIcon(titleKey: "Block WebRTC", systemName: "eye.slash.fill", foregroundColor: .white, backgroundColor: .indigo)
+                }
+                .onChange(of: webRTCEnabled) { _, newValue in
+                    if let webRTCRuleSet = RuleSetStore.shared.webRTCRuleSet {
+                        if newValue {
+                            RuleSetStore.shared.updateAssignment(webRTCRuleSet, configurationId: "REJECT")
+                        } else {
+                            RuleSetStore.shared.updateAssignment(webRTCRuleSet, configurationId: nil)
+                        }
+                    }
+                    viewModel.syncRoutingConfigurationToNE()
+                }
+                Toggle(isOn: $blockPrivateIP) {
+                    TextWithColorfulIcon(titleKey: "Block Private IP", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .brown)
+                }
+                .onChange(of: blockPrivateIP) {
+                    notifySettingsChanged()
+                }
                 Toggle(isOn: Binding(
                     get: { allowInsecure },
                     set: { newValue in
@@ -157,6 +198,7 @@ struct SettingsView: View {
         }
         .onAppear {
             adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+            webRTCEnabled = RuleSetStore.shared.webRTCRuleSet?.assignedConfigurationId == "REJECT"
         }
     }
     
@@ -166,6 +208,21 @@ struct SettingsView: View {
         }.map(Character.init))
     }
     
+    private func downloadChinaRules() {
+        isDownloadingRules = true
+        guard let url = URL(string: "https://cdn.jsdelivr.net/gh/blackmatrix7/ios_rule_script@master/rule/Shadowrocket/ChinaMax/ChinaMax.list") else {
+            isDownloadingRules = false
+            return
+        }
+        RuleSetStore.shared.downloadRemoteRules(from: url, fileName: "CN_remote.json") { success in
+            isDownloadingRules = false
+            if success {
+                RuleSetStore.shared.syncBypassCountryRules()
+                notifySettingsChanged()
+            }
+        }
+    }
+
     private func notifySettingsChanged() {
         CFNotificationCenterPostNotification(
             CFNotificationCenterGetDarwinNotifyCenter(),
