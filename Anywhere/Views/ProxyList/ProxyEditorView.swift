@@ -59,7 +59,12 @@ struct ProxyEditorView: View {
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
 
+    // SOCKS5 fields
+    @State private var socks5Username = ""
+    @State private var socks5Password = ""
+
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
+    private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isNaive: Bool { selectedProtocol.isNaive }
     private var isReality: Bool { security == "reality" }
     private var isTLS: Bool { security == "tls" }
@@ -68,6 +73,9 @@ struct ProxyEditorView: View {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
         if isNaive {
             return !naiveUsername.isEmpty && !naivePassword.isEmpty
+        }
+        if isSOCKS5 {
+            return true // username/password optional for SOCKS5
         }
         if isShadowsocks {
             return !ssPassword.isEmpty
@@ -98,13 +106,14 @@ struct ProxyEditorView: View {
                     Picker(selection: $selectedProtocol) {
                         Text("VLESS").tag(OutboundProtocol.vless)
                         Text("Shadowsocks").tag(OutboundProtocol.shadowsocks)
+                        Text("SOCKS5").tag(OutboundProtocol.socks5)
                         Text("HTTPS").tag(OutboundProtocol.http11)
                         Text("HTTP2").tag(OutboundProtocol.http2)
                     } label: {
                         TextWithColorfulIcon(titleKey: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
                     .onChange(of: selectedProtocol) {
-                        if isShadowsocks || isNaive {
+                        if isShadowsocks || isNaive || isSOCKS5 {
                             flow = ""
                             security = security == "reality" ? "none" : security
                         }
@@ -139,6 +148,23 @@ struct ProxyEditorView: View {
                         }
                         LabeledContent {
                             SecureField("Password", text: $naivePassword)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                    } else if isSOCKS5 {
+                        LabeledContent {
+                            TextField("Username", text: $socks5Username)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Username", systemName: "person.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                        LabeledContent {
+                            SecureField("Password", text: $socks5Password)
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
@@ -182,7 +208,7 @@ struct ProxyEditorView: View {
                     }
                 }
                 
-                if !isNaive { Section("Transport") {
+                if !isNaive && !isSOCKS5 { Section("Transport") {
                     Picker(selection: $transport) {
                         Text("TCP").tag("tcp")
                         Text("WebSocket").tag("ws")
@@ -298,7 +324,7 @@ struct ProxyEditorView: View {
                     Picker(selection: $security) {
                         Text("None").tag("none")
                         Text("TLS").tag("tls")
-                        if !isShadowsocks {
+                        if !isShadowsocks && !isSOCKS5 {
                             Text("Reality").tag("reality")
                         }
                     } label: {
@@ -448,6 +474,9 @@ struct ProxyEditorView: View {
 
         naiveUsername = configuration.activeUsername ?? ""
         naivePassword = configuration.activePassword ?? ""
+
+        socks5Username = configuration.socks5Username ?? ""
+        socks5Password = configuration.socks5Password ?? ""
     }
 
     /// Encodes non-default extra fields from an XHTTPConfiguration back to a JSON string.
@@ -494,7 +523,7 @@ struct ProxyEditorView: View {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isShadowsocks || isNaive {
+        if isShadowsocks || isNaive || isSOCKS5 {
             parsedUUID = self.configuration?.uuid ?? UUID()
         } else {
             guard let u = UUID(uuidString: uuid) else { return }
@@ -585,7 +614,9 @@ struct ProxyEditorView: View {
             http2Username: selectedProtocol == .http2 ? naiveUsername : nil,
             http2Password: selectedProtocol == .http2 ? naivePassword : nil,
             http3Username: selectedProtocol == .http3 ? naiveUsername : nil,
-            http3Password: selectedProtocol == .http3 ? naivePassword : nil
+            http3Password: selectedProtocol == .http3 ? naivePassword : nil,
+            socks5Username: isSOCKS5 && !socks5Username.isEmpty ? socks5Username : nil,
+            socks5Password: isSOCKS5 && !socks5Password.isEmpty ? socks5Password : nil
         )
 
         onSave(configuration)

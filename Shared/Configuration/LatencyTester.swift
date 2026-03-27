@@ -128,6 +128,8 @@ nonisolated enum LatencyTester {
             http2Password: configuration.http2Password,
             http3Username: configuration.http3Username,
             http3Password: configuration.http3Password,
+            socks5Username: configuration.socks5Username,
+            socks5Password: configuration.socks5Password,
             chain: resolvedChain
         )
     }

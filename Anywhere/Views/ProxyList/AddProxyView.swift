@@ -247,8 +247,9 @@ struct AddProxyView: View {
         let isHTTP = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
 
         if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") ||
+            trimmed.hasPrefix("socks5://") || trimmed.hasPrefix("socks://") ||
             (isHTTP && linkType != .subscription) {
-            // Single proxy link (VLESS, Shadowsocks, or NaiveProxy)
+            // Single proxy link (VLESS, Shadowsocks, SOCKS5, or NaiveProxy)
             let naiveProtocol: OutboundProtocol? = switch linkType {
             case .http11Proxy: .http11
             case .http2Proxy: .http2

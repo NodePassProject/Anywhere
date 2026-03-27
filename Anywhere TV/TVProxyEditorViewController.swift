@@ -43,8 +43,11 @@ class TVProxyEditorViewController: UITableViewController {
     private var ssMethod = "aes-128-gcm"
     private var naiveUsername = ""
     private var naivePassword = ""
+    private var socks5Username = ""
+    private var socks5Password = ""
 
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
+    private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isNaive: Bool { selectedProtocol.isNaive }
     private var isReality: Bool { security == "reality" }
     private var isTLS: Bool { security == "tls" }
@@ -66,6 +69,7 @@ class TVProxyEditorViewController: UITableViewController {
         case realitySNI, publicKey, shortId
         case ssPassword, ssMethod
         case naiveUsername, naivePassword
+        case socks5Username, socks5Password
     }
 
     private var formSections: [(title: String?, rows: [RowType])] {
@@ -78,7 +82,7 @@ class TVProxyEditorViewController: UITableViewController {
 
         // Protocol
         let protocolOptions: [(String, String)] = [
-            ("VLESS", "vless"), ("Shadowsocks", "shadowsocks"), ("HTTPS", "http11"), ("HTTP2", "http2"),
+            ("VLESS", "vless"), ("Shadowsocks", "shadowsocks"), ("SOCKS5", "socks5"), ("HTTPS", "http11"), ("HTTP2", "http2"),
         ]
         sections.append((String(localized: "Protocol"), [
             .selection(label: String(localized: "Protocol"), value: selectedProtocol.name, options: protocolOptions, key: .outboundProtocol),
@@ -92,6 +96,9 @@ class TVProxyEditorViewController: UITableViewController {
         if isNaive {
             serverRows.append(.text(label: String(localized: "Username"), value: naiveUsername, placeholder: "Username", key: .naiveUsername))
             serverRows.append(.text(label: String(localized: "Password"), value: naivePassword, placeholder: "Password", key: .naivePassword, secure: true))
+        } else if isSOCKS5 {
+            serverRows.append(.text(label: String(localized: "Username"), value: socks5Username, placeholder: "Username", key: .socks5Username))
+            serverRows.append(.text(label: String(localized: "Password"), value: socks5Password, placeholder: "Password", key: .socks5Password, secure: true))
         } else if isShadowsocks {
             serverRows.append(.text(label: String(localized: "Password"), value: ssPassword, placeholder: "Password", key: .ssPassword, secure: true))
             let methods: [(String, String)] = [
@@ -107,8 +114,8 @@ class TVProxyEditorViewController: UITableViewController {
         }
         sections.append((String(localized: "Server"), serverRows))
 
-        // Transport (hidden for Naive)
-        if !isNaive {
+        // Transport (hidden for Naive and SOCKS5)
+        if !isNaive && !isSOCKS5 {
             var transportRows: [RowType] = [
                 .selection(label: String(localized: "Transport"), value: transport.uppercased(), options: [
                     ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("XHTTP", "xhttp"),
@@ -146,7 +153,7 @@ class TVProxyEditorViewController: UITableViewController {
             var tlsRows: [RowType] = [
                 .selection(label: String(localized: "Security"), value: security.uppercased(), options: {
                     var opts: [(String, String)] = [("None", "none"), ("TLS", "tls")]
-                    if !isShadowsocks { opts.append(("Reality", "reality")) }
+                    if !isShadowsocks && !isSOCKS5 { opts.append(("Reality", "reality")) }
                     return opts
                 }(), key: .security),
             ]
@@ -178,6 +185,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
         if isNaive { return !naiveUsername.isEmpty && !naivePassword.isEmpty }
+        if isSOCKS5 { return true }
         if isShadowsocks { return !ssPassword.isEmpty }
         return UUID(uuidString: uuid) != nil && (!isReality || (!sni.isEmpty && !publicKey.isEmpty))
     }
@@ -312,7 +320,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .outboundProtocol:
             if let proto = OutboundProtocol(rawValue: value) {
                 selectedProtocol = proto
-                if isShadowsocks || isNaive {
+                if isShadowsocks || isNaive || isSOCKS5 {
                     flow = ""
                     if security == "reality" { security = "none" }
                 }
@@ -345,6 +353,8 @@ class TVProxyEditorViewController: UITableViewController {
         case .ssMethod: ssMethod = value
         case .naiveUsername: naiveUsername = value
         case .naivePassword: naivePassword = value
+        case .socks5Username: socks5Username = value
+        case .socks5Password: socks5Password = value
         }
     }
 
@@ -392,6 +402,8 @@ class TVProxyEditorViewController: UITableViewController {
         ssMethod = config.ssMethod ?? "aes-128-gcm"
         naiveUsername = config.activeUsername ?? ""
         naivePassword = config.activePassword ?? ""
+        socks5Username = config.socks5Username ?? ""
+        socks5Password = config.socks5Password ?? ""
     }
 
     // MARK: - Actions
@@ -411,7 +423,7 @@ class TVProxyEditorViewController: UITableViewController {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isShadowsocks || isNaive {
+        if isShadowsocks || isNaive || isSOCKS5 {
             parsedUUID = existingConfiguration?.uuid ?? UUID()
         } else {
             guard let u = UUID(uuidString: uuid) else { return }
@@ -479,7 +491,9 @@ class TVProxyEditorViewController: UITableViewController {
             http2Username: selectedProtocol == .http2 ? naiveUsername : nil,
             http2Password: selectedProtocol == .http2 ? naivePassword : nil,
             http3Username: selectedProtocol == .http3 ? naiveUsername : nil,
-            http3Password: selectedProtocol == .http3 ? naivePassword : nil
+            http3Password: selectedProtocol == .http3 ? naivePassword : nil,
+            socks5Username: isSOCKS5 && !socks5Username.isEmpty ? socks5Username : nil,
+            socks5Password: isSOCKS5 && !socks5Password.isEmpty ? socks5Password : nil
         )
 
         onSave(config)

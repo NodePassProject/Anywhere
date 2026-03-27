@@ -7,6 +7,11 @@
 
 import Foundation
 
+enum ProxyMode: String, CaseIterable {
+    case rule
+    case global
+}
+
 final class AWCore {
     static let suiteName = "group.com.argsment.Anywhere"
     static let userDefaults = UserDefaults(suiteName: suiteName)!

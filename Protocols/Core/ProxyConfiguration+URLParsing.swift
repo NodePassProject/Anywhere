@@ -11,19 +11,23 @@ import Foundation
 
 extension ProxyConfiguration {
 
-    /// Parse a VLESS, Shadowsocks, or NaiveProxy URL into configuration.
+    /// Parse a VLESS, Shadowsocks, SOCKS5, or NaiveProxy URL into configuration.
     /// Format: vless://uuid@host:port/?type=tcp&encryption=none&security=none
     /// SS format: ss://base64(method:password)@host:port#name
+    /// SOCKS5 format: socks5://user:pass@host:port#name  or  socks5://host:port#name
     /// Naive format: https://user:pass@host:port#name  or  quic://user:pass@host:port#name
     static func parse(url: String, naiveProtocol: OutboundProtocol? = nil) throws -> ProxyConfiguration {
         if url.hasPrefix("ss://") {
             return try parseShadowsocks(url: url)
         }
+        if url.hasPrefix("socks5://") || url.hasPrefix("socks://") {
+            return try parseSOCKS5(url: url)
+        }
         if url.hasPrefix("https://") || url.hasPrefix("quic://") {
             return try parseNaive(url: url, protocolOverride: naiveProtocol)
         }
         guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless://, ss://, https://, or quic://")
+            throw ProxyError.invalidURL("URL must start with vless://, ss://, socks5://, https://, or quic://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -307,6 +311,69 @@ extension ProxyConfiguration {
         default:
             throw ProxyError.invalidURL("Naive URL must start with https:// or quic://")
         }
+    }
+
+    /// Parse a SOCKS5 URL into configuration.
+    /// Format: socks5://user:pass@host:port#name  or  socks5://host:port#name
+    private static func parseSOCKS5(url: String) throws -> ProxyConfiguration {
+        let urlWithoutScheme: String
+        if url.hasPrefix("socks5://") {
+            urlWithoutScheme = String(url.dropFirst("socks5://".count))
+        } else if url.hasPrefix("socks://") {
+            urlWithoutScheme = String(url.dropFirst("socks://".count))
+        } else {
+            throw ProxyError.invalidURL("SOCKS5 URL must start with socks5:// or socks://")
+        }
+
+        var remaining = urlWithoutScheme
+
+        // Extract fragment (#name)
+        var fragmentName: String?
+        if let hashIndex = remaining.lastIndex(of: "#") {
+            fragmentName = String(remaining[remaining.index(after: hashIndex)...])
+                .removingPercentEncoding
+            remaining = String(remaining[..<hashIndex])
+        }
+
+        // Check for user:pass@host:port or just host:port
+        let username: String?
+        let password: String?
+        let serverPart: String
+
+        if let atIndex = remaining.lastIndex(of: "@") {
+            let userInfo = String(remaining[..<atIndex])
+            serverPart = String(remaining[remaining.index(after: atIndex)...])
+
+            if let colonIndex = userInfo.firstIndex(of: ":") {
+                username = String(userInfo[..<colonIndex]).removingPercentEncoding ?? String(userInfo[..<colonIndex])
+                password = String(userInfo[userInfo.index(after: colonIndex)...]).removingPercentEncoding ?? String(userInfo[userInfo.index(after: colonIndex)...])
+            } else {
+                username = userInfo.removingPercentEncoding ?? userInfo
+                password = nil
+            }
+        } else {
+            username = nil
+            password = nil
+            // Strip trailing path/query
+            if let slashIndex = remaining.firstIndex(of: "/") {
+                serverPart = String(remaining[..<slashIndex])
+            } else {
+                serverPart = remaining
+            }
+        }
+
+        let (host, port) = try parseHostPort(serverPart)
+
+        return ProxyConfiguration(
+            name: fragmentName ?? "Untitled",
+            serverAddress: host,
+            serverPort: port,
+            uuid: UUID(), // placeholder, not used for SOCKS5
+            encryption: "none",
+            outboundProtocol: .socks5,
+            socks5Username: username,
+            socks5Password: password
+        )
     }
 
     // MARK: - Parsing Helpers

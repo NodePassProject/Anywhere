@@ -140,6 +140,8 @@ extension ProxyConfiguration {
         let http2Password = configurationDict["http2Password"] as? String
         let http3Username = configurationDict["http3Username"] as? String
         let http3Password = configurationDict["http3Password"] as? String
+        let socks5Username = configurationDict["socks5Username"] as? String
+        let socks5Password = configurationDict["socks5Password"] as? String
 
         // Parse proxy chain if present
         var chain: [ProxyConfiguration]? = nil
@@ -174,6 +176,8 @@ extension ProxyConfiguration {
             http2Password: http2Password,
             http3Username: http3Username,
             http3Password: http3Password,
+            socks5Username: socks5Username,
+            socks5Password: socks5Password,
             chain: chain
         )
     }

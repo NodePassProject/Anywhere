@@ -175,6 +175,9 @@ struct ClashProxyParser {
         if proxyType == "ss" {
             return parseShadowsocksProxy(doc, node: node)
         }
+        if proxyType == "socks5" {
+            return parseSOCKS5Proxy(doc, node: node)
+        }
         guard proxyType == "vless" else { return nil }
 
         guard
@@ -295,6 +298,32 @@ struct ClashProxyParser {
             tls: tlsConfig,
             reality: realityConfig,
             websocket: wsConfig
+        )
+    }
+
+    // MARK: - SOCKS5 proxy parsing
+
+    private static func parseSOCKS5Proxy(
+        _ doc: UnsafeMutablePointer<yaml_document_t>,
+        node: UnsafeMutablePointer<yaml_node_t>
+    ) -> ProxyConfiguration? {
+        guard
+            let name = getString(doc, mapping: node, key: "name"),
+            let server = getString(doc, mapping: node, key: "server"),
+            let portInt = getInt(doc, mapping: node, key: "port"),
+            portInt > 0, portInt <= Int(UInt16.max)
+        else { return nil }
+        let username = getString(doc, mapping: node, key: "username")
+        let password = getString(doc, mapping: node, key: "password")
+        return ProxyConfiguration(
+            name: name,
+            serverAddress: server,
+            serverPort: UInt16(portInt),
+            uuid: UUID(),
+            encryption: "none",
+            outboundProtocol: .socks5,
+            socks5Username: username,
+            socks5Password: password
         )
     }
 

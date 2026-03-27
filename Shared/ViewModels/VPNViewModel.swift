@@ -326,7 +326,8 @@ class VPNViewModel: ObservableObject {
                 ssPassword: configuration.ssPassword, ssMethod: configuration.ssMethod,
                 http11Username: configuration.http11Username, http11Password: configuration.http11Password,
                 http2Username: configuration.http2Username, http2Password: configuration.http2Password,
-                http3Username: configuration.http3Username, http3Password: configuration.http3Password
+                http3Username: configuration.http3Username, http3Password: configuration.http3Password,
+                socks5Username: configuration.socks5Username, socks5Password: configuration.socks5Password
             )
             store.add(tagged)
         }
@@ -378,7 +379,8 @@ class VPNViewModel: ObservableObject {
                 ssPassword: configuration.ssPassword, ssMethod: configuration.ssMethod,
                 http11Username: configuration.http11Username, http11Password: configuration.http11Password,
                 http2Username: configuration.http2Username, http2Password: configuration.http2Password,
-                http3Username: configuration.http3Username, http3Password: configuration.http3Password
+                http3Username: configuration.http3Username, http3Password: configuration.http3Password,
+                socks5Username: configuration.socks5Username, socks5Password: configuration.socks5Password
             ))
         }
 
@@ -877,6 +879,8 @@ class VPNViewModel: ObservableObject {
         if let v = configuration.http2Password  { configurationDict["http2Password"] = v }
         if let v = configuration.http3Username  { configurationDict["http3Username"] = v }
         if let v = configuration.http3Password  { configurationDict["http3Password"] = v }
+        if let v = configuration.socks5Username { configurationDict["socks5Username"] = v }
+        if let v = configuration.socks5Password { configurationDict["socks5Password"] = v }
 
         // Add Reality configuration if present
         if let reality = configuration.reality {

@@ -11,19 +11,22 @@ import Foundation
 enum OutboundProtocol: String, Codable {
     case vless
     case shadowsocks
+    case socks5
     case http11
     case http2
     case http3
 
     /// Whether this protocol uses a CONNECT tunnel (HTTP/1.1, HTTP/2, or HTTP/3).
     var isNaive: Bool { self == .http11 || self == .http2 || self == .http3 }
-    
+
     var name: String {
         switch self {
         case .vless:
             "VLESS"
         case .shadowsocks:
             "Shadowsocks"
+        case .socks5:
+            "SOCKS5"
         case .http11:
             "HTTPS"
         case .http2:
@@ -88,6 +91,10 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let http3Username: String?
     /// HTTP/3 CONNECT password (only when `outboundProtocol == .http3`).
     let http3Password: String?
+    /// SOCKS5 username (only when `outboundProtocol == .socks5`).
+    let socks5Username: String?
+    /// SOCKS5 password (only when `outboundProtocol == .socks5`).
+    let socks5Password: String?
     /// Ordered list of proxy configurations to chain through before reaching this proxy's server.
     /// The first element is the outermost proxy (real TCP connection); the last tunnels to this proxy.
     /// `nil` or empty means a direct connection to the server.
@@ -103,6 +110,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case .http11: return http11Username
         case .http2:  return http2Username
         case .http3:  return http3Username
+        case .socks5: return socks5Username
         default:      return nil
         }
     }
@@ -113,6 +121,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case .http11: return http11Password
         case .http2:  return http2Password
         case .http3:  return http3Password
+        case .socks5: return socks5Password
         default:      return nil
         }
     }
@@ -145,10 +154,12 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         http2Password == other.http2Password &&
         http3Username == other.http3Username &&
         http3Password == other.http3Password &&
+        socks5Username == other.socks5Username &&
+        socks5Password == other.socks5Password &&
         chain == other.chain
     }
 
-    init(id: UUID = UUID(), name: String, serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String? = nil, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, http11Username: String? = nil, http11Password: String? = nil, http2Username: String? = nil, http2Password: String? = nil, http3Username: String? = nil, http3Password: String? = nil, chain: [ProxyConfiguration]? = nil) {
+    init(id: UUID = UUID(), name: String, serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String? = nil, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, http11Username: String? = nil, http11Password: String? = nil, http2Username: String? = nil, http2Password: String? = nil, http3Username: String? = nil, http3Password: String? = nil, socks5Username: String? = nil, socks5Password: String? = nil, chain: [ProxyConfiguration]? = nil) {
         self.id = id
         self.name = name
         self.serverAddress = serverAddress
@@ -177,6 +188,8 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         self.http2Password = http2Password
         self.http3Username = http3Username
         self.http3Password = http3Password
+        self.socks5Username = socks5Username
+        self.socks5Password = socks5Password
         self.chain = chain
     }
 
@@ -193,13 +206,14 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             http11Username: http11Username, http11Password: http11Password,
             http2Username: http2Username, http2Password: http2Password,
             http3Username: http3Username, http3Password: http3Password,
+            socks5Username: socks5Username, socks5Password: socks5Password,
             chain: chain
         )
     }
 
     /// Convenience initializer that defaults the name to `"Untitled"`.
-    init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, http11Username: String? = nil, http11Password: String? = nil, http2Username: String? = nil, http2Password: String? = nil, http3Username: String? = nil, http3Password: String? = nil, chain: [ProxyConfiguration]? = nil) {
-        self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId, outboundProtocol: outboundProtocol, ssPassword: ssPassword, ssMethod: ssMethod, http11Username: http11Username, http11Password: http11Password, http2Username: http2Username, http2Password: http2Password, http3Username: http3Username, http3Password: http3Password, chain: chain)
+    init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, http11Username: String? = nil, http11Password: String? = nil, http2Username: String? = nil, http2Password: String? = nil, http3Username: String? = nil, http3Password: String? = nil, socks5Username: String? = nil, socks5Password: String? = nil, chain: [ProxyConfiguration]? = nil) {
+        self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId, outboundProtocol: outboundProtocol, ssPassword: ssPassword, ssMethod: ssMethod, http11Username: http11Username, http11Password: http11Password, http2Username: http2Username, http2Password: http2Password, http3Username: http3Username, http3Password: http3Password, socks5Username: socks5Username, socks5Password: socks5Password, chain: chain)
     }
 
     /// Custom decoder for backward compatibility (old configs may lack newer fields like
@@ -235,6 +249,8 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         http2Password = try container.decodeIfPresent(String.self, forKey: .http2Password)
         http3Username = try container.decodeIfPresent(String.self, forKey: .http3Username)
         http3Password = try container.decodeIfPresent(String.self, forKey: .http3Password)
+        socks5Username = try container.decodeIfPresent(String.self, forKey: .socks5Username)
+        socks5Password = try container.decodeIfPresent(String.self, forKey: .socks5Password)
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
     }
 }

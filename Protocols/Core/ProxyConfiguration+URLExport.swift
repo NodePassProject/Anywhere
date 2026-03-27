@@ -19,6 +19,8 @@ extension ProxyConfiguration {
             return toShadowsocksURL()
         case .vless:
             return toVLESSURL()
+        case .socks5:
+            return toSOCKS5URL()
         case .http11, .http2, .http3:
             return toNaiveURL()
         }
@@ -119,6 +121,16 @@ extension ProxyConfiguration {
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "ss://\(encoded)@\(serverAddress):\(serverPort)/\(query)#\(fragment)"
+    }
+
+    private func toSOCKS5URL() -> String {
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        if let user = socks5Username, !user.isEmpty {
+            let encodedUser = user.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? user
+            let encodedPass = (socks5Password ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+            return "socks5://\(encodedUser):\(encodedPass)@\(serverAddress):\(serverPort)#\(fragment)"
+        }
+        return "socks5://\(serverAddress):\(serverPort)#\(fragment)"
     }
 
     private func toNaiveURL() -> String {

@@ -24,6 +24,9 @@ struct SettingsView: View {
     @AppStorage("alwaysOnEnabled", store: AWCore.userDefaults)
     private var alwaysOnEnabled = false
 
+    @AppStorage("proxyMode", store: AWCore.userDefaults)
+    private var proxyMode = ProxyMode.rule
+    
     @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
     private var bypassCountryCode = ""
 
@@ -41,51 +44,37 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section("VPN") {
-                if viewModel.pendingReconnect {
-                    HStack {
-                        TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.shield.fill", foregroundColor: .white, backgroundColor: .green)
-                        Spacer()
-                        ProgressView()
-                    }
-                } else {
-                    Toggle(isOn: $alwaysOnEnabled) {
-                        TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.shield.fill", foregroundColor: .white, backgroundColor: .green)
-                    }
+                Toggle(isOn: $alwaysOnEnabled) {
+                    TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.shield.fill", foregroundColor: .white, backgroundColor: .green)
                 }
+                .disabled(viewModel.pendingReconnect)
             }
 
             Section("Routing") {
-                Picker(selection: $viewModel.proxyMode) {
-                    Text("Global").tag("global")
-                    Text("Rule").tag("rule")
-                } label: {
-                    TextWithColorfulIcon(titleKey: "Proxy Mode", systemName: "arrow.triangle.branch", foregroundColor: .white, backgroundColor: .purple)
+                Toggle(isOn: Binding(get: {
+                    proxyMode == .global
+                }, set: { newValue in
+                    if newValue { proxyMode = .global } else { proxyMode = .rule }
+                })) {
+                    TextWithColorfulIcon(titleKey: "Global Mode", systemName: "arrow.trianglehead.merge", foregroundColor: .white, backgroundColor: .orange)
                 }
-                Picker(selection: $bypassCountryCode) {
-                    Text("Disable").tag("")
-                    ForEach(Self.countryCodes, id: \.self) { code in
-                        Text("\(flag(for: code)) \(Locale.current.localizedString(forRegionCode: code) ?? code)").tag(code)
+                if proxyMode != .global {
+                    Toggle(isOn: $adBlockEnabled) {
+                        TextWithColorfulIcon(titleKey: "AD Blocking", systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
                     }
-                } label: {
-                    TextWithColorfulIcon(titleKey: "Country Bypass", systemName: "globe.americas.fill", foregroundColor: .white, backgroundColor: .orange)
-                }
-                Toggle(isOn: $adBlockEnabled) {
-                    TextWithColorfulIcon(titleKey: "AD Blocking", systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
-                }
-                .onChange(of: adBlockEnabled) { _, newValue in
-                    if let adBlockRuleSet = RuleSetStore.shared.adBlockRuleSet {
-                        if newValue {
-                            RuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: "REJECT")
-                        } else {
-                            RuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: nil)
+                    Picker(selection: $bypassCountryCode) {
+                        Text("Disable").tag("")
+                        ForEach(Self.countryCodes, id: \.self) { code in
+                            Text("\(flag(for: code)) \(Locale.current.localizedString(forRegionCode: code) ?? code)").tag(code)
                         }
+                    } label: {
+                        TextWithColorfulIcon(titleKey: "Country Bypass", systemName: "globe.americas.fill", foregroundColor: .white, backgroundColor: .blue)
                     }
-                    viewModel.syncRoutingConfigurationToNE()
-                }
-                NavigationLink {
-                    RuleSetListView()
-                } label: {
-                    TextWithColorfulIcon(titleKey: "Routing Rules", systemName: "arrow.triangle.branch", foregroundColor: .white, backgroundColor: .purple)
+                    NavigationLink {
+                        RuleSetListView()
+                    } label: {
+                        TextWithColorfulIcon(titleKey: "Routing Rules", systemName: "arrow.triangle.branch", foregroundColor: .white, backgroundColor: .purple)
+                    }
                 }
             }
             
@@ -147,6 +136,19 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .onChange(of: alwaysOnEnabled) {
             viewModel.reconnectVPN()
+        }
+        .onChange(of: proxyMode) {
+            notifySettingsChanged()
+        }
+        .onChange(of: adBlockEnabled) { _, newValue in
+            if let adBlockRuleSet = RuleSetStore.shared.adBlockRuleSet {
+                if newValue {
+                    RuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: "REJECT")
+                } else {
+                    RuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: nil)
+                }
+            }
+            viewModel.syncRoutingConfigurationToNE()
         }
         .onChange(of: bypassCountryCode) {
             RuleSetStore.shared.syncBypassCountryRules()

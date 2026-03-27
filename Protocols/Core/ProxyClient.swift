@@ -349,6 +349,15 @@ class ProxyClient {
             return
         }
 
+        if configuration.outboundProtocol == .socks5 {
+            if command == .mux {
+                completion(.failure(ProxyError.protocolError("Mux is not supported with SOCKS5")))
+                return
+            }
+            connectWithSOCKS5(command: command, destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
+            return
+        }
+
         if configuration.transport == "ws" {
             if isVisionFlow {
                 completion(.failure(ProxyError.protocolError("Vision flow is not supported over WebSocket transport")))
@@ -1316,6 +1325,173 @@ class ProxyClient {
                 paddingType: tunnel.negotiatedPaddingType
             )
             completion(.success(connection))
+        }
+    }
+
+    // MARK: - SOCKS5
+
+    /// Connects through a SOCKS5 proxy server.
+    ///
+    /// Supports three modes:
+    /// - **TCP CONNECT**: SOCKS5 handshake → raw bidirectional tunnel.
+    /// - **UDP ASSOCIATE**: SOCKS5 handshake → UDP relay via ``SOCKS5UDPProxyConnection``.
+    /// - **TLS**: When `security == "tls"`, wraps the TCP connection with TLS before the handshake.
+    private func connectWithSOCKS5(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        if let tlsConfig = configuration.tls, configuration.security == "tls" {
+            connectSOCKS5WithTLS(
+                tlsConfig: tlsConfig, command: command,
+                destinationHost: destinationHost, destinationPort: destinationPort,
+                completion: completion
+            )
+        } else {
+            connectSOCKS5Direct(
+                command: command,
+                destinationHost: destinationHost, destinationPort: destinationPort,
+                completion: completion
+            )
+        }
+    }
+
+    /// SOCKS5 over plain TCP: TCP → SOCKS5 handshake.
+    private func connectSOCKS5Direct(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        let onTransportReady: (any RawTransport) -> Void = { [weak self] transport in
+            self?.performSOCKS5Handshake(
+                transport: transport, tlsClient: nil, tlsConnection: nil,
+                command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, completion: completion
+            )
+        }
+
+        if let tunnel = self.tunnel {
+            onTransportReady(TunneledTransport(tunnel: tunnel))
+        } else {
+            let transport = NWTransport()
+            self.connection = transport
+            transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                onTransportReady(transport)
+            }
+        }
+    }
+
+    /// SOCKS5 over TLS: TCP → TLS handshake → SOCKS5 handshake.
+    private func connectSOCKS5WithTLS(
+        tlsConfig: TLSConfiguration,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        let tlsClient = TLSClient(configuration: tlsConfig)
+
+        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
+            guard let self else {
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                return
+            }
+            switch result {
+            case .success(let tlsConn):
+                self.tlsClient = tlsClient
+                self.tlsConnection = tlsConn
+                let transport = TLSRecordTransport(tlsConnection: tlsConn)
+                self.performSOCKS5Handshake(
+                    transport: transport, tlsClient: tlsClient, tlsConnection: tlsConn,
+                    command: command, destinationHost: destinationHost,
+                    destinationPort: destinationPort, completion: completion
+                )
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
+
+        if let tunnel = self.tunnel {
+            tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
+        } else {
+            tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
+        }
+    }
+
+    /// Performs the SOCKS5 handshake and returns the appropriate connection.
+    private func performSOCKS5Handshake(
+        transport: any RawTransport,
+        tlsClient: TLSClient?,
+        tlsConnection: TLSRecordConnection?,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        guard let self = Optional(self) else {
+            completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+            return
+        }
+
+        let buffer = SOCKS5Buffer(transport: transport)
+
+        if command == .udp {
+            SOCKS5Handshake.performUDPAssociate(
+                buffer: buffer,
+                transport: transport,
+                username: configuration.socks5Username,
+                password: configuration.socks5Password,
+                serverAddress: configuration.connectAddress
+            ) { result in
+                switch result {
+                case .success(let relay):
+                    let udpConnection = SOCKS5UDPProxyConnection(
+                        tcpTransport: transport,
+                        tlsClient: tlsClient,
+                        tlsConnection: tlsConnection,
+                        destinationHost: destinationHost,
+                        destinationPort: destinationPort
+                    )
+                    udpConnection.connectRelay(relayHost: relay.host, relayPort: relay.port) { error in
+                        if let error {
+                            completion(.failure(error))
+                        } else {
+                            completion(.success(udpConnection))
+                        }
+                    }
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+        } else {
+            SOCKS5Handshake.perform(
+                buffer: buffer,
+                transport: transport,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                username: configuration.socks5Username,
+                password: configuration.socks5Password
+            ) { error in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                let wrappedTransport: any RawTransport
+                if let excess = buffer.remaining {
+                    wrappedTransport = SOCKS5Transport(inner: transport, initialData: excess)
+                } else {
+                    wrappedTransport = transport
+                }
+                let proxyConnection = DirectProxyConnection(connection: wrappedTransport)
+                proxyConnection.responseHeaderReceived = true
+                completion(.success(proxyConnection))
+            }
         }
     }
 }

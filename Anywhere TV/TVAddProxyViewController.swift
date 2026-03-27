@@ -239,6 +239,7 @@ class TVAddProxyViewController: UITableViewController {
         let isHTTP = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
 
         if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") ||
+            trimmed.hasPrefix("socks5://") || trimmed.hasPrefix("socks://") ||
             (isHTTP && linkType != .subscription) {
             let naiveProtocol: OutboundProtocol? = switch linkType {
             case .http11: .http11

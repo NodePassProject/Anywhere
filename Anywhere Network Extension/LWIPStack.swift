@@ -57,7 +57,7 @@ class LWIPStack {
     private(set) var encryptedDNSEnabled: Bool = false
     private(set) var encryptedDNSProtocol: String = "doh"
     private(set) var encryptedDNSServer: String = ""
-    private(set) var proxyMode: String = "rule"
+    private(set) var proxyMode: ProxyMode = .rule
     private var running = false
 
     // lwIP periodic timeout timer
@@ -121,7 +121,7 @@ class LWIPStack {
     /// then falls back to GeoIP country-based bypass.
     func shouldBypass(host: String) -> Bool {
         if isProxyServerAddress(host) { return true }
-        if proxyMode == "global" { return false }
+        if proxyMode == .global { return false }
         guard bypassCountry != 0 else { return false }
         return geoIPDatabase?.lookup(host) == bypassCountry
     }
@@ -244,7 +244,7 @@ class LWIPStack {
     }
 
     private func loadProxyModeSetting() {
-        proxyMode = AWCore.userDefaults.string(forKey: "proxyMode") ?? "rule"
+        proxyMode = AWCore.userDefaults.string(forKey: "proxyMode").flatMap(ProxyMode.init) ?? .rule
     }
 
     // MARK: - Lifecycle
@@ -280,14 +280,17 @@ class LWIPStack {
                 self.muxManager = MuxManager(configuration: configuration, lwipQueue: self.lwipQueue)
             }
 
-            self.domainRouter.loadRoutingConfiguration()
-            self.domainRouter.loadBypassCountryRules()
+            // Global mode: skip all routing rules — proxy everything.
+            if self.proxyMode != .global {
+                self.domainRouter.loadRoutingConfiguration()
+                self.domainRouter.loadBypassCountryRules()
+            }
             self.registerCallbacks()
             lwip_bridge_init()
             self.startTimeoutTimer()
             self.startUDPCleanupTimer()
             self.startReadingPackets()
-            logger.info("[LWIPStack] Started, mode=\(self.proxyMode), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
+            logger.info("[LWIPStack] Started, mode=\(self.proxyMode.rawValue), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
         }
 
         startObservingSettings()
@@ -369,15 +372,17 @@ class LWIPStack {
             self.muxManager = MuxManager(configuration: configuration, lwipQueue: self.lwipQueue)
         }
 
-        self.domainRouter.loadRoutingConfiguration()
-        self.domainRouter.loadBypassCountryRules()
+        if self.proxyMode != .global {
+            self.domainRouter.loadRoutingConfiguration()
+            self.domainRouter.loadBypassCountryRules()
+        }
         self.registerCallbacks()
         lwip_bridge_init()
         self.startTimeoutTimer()
         self.startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.info("[LWIPStack] Restarted, mode=\(self.proxyMode), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
+        logger.info("[LWIPStack] Restarted, mode=\(self.proxyMode.rawValue), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
     }
 
     // MARK: - Settings Observation
@@ -441,7 +446,7 @@ class LWIPStack {
             let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: "encryptedDNSEnabled")
             let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: "encryptedDNSProtocol") ?? "doh"
             let encryptedDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
-            let proxyMode = AWCore.userDefaults.string(forKey: "proxyMode") ?? "rule"
+            let proxyMode = AWCore.userDefaults.string(forKey: "proxyMode").flatMap(ProxyMode.init) ?? .rule
 
             let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
             let bypassCountryChanged = bypassCountry != self.bypassCountry
@@ -737,8 +742,7 @@ class LWIPStack {
         }
 
         // Country bypass: domain matched the bypass country's rule set.
-        // User-configured rules above take absolute precedence.
-        if proxyMode != "global", bypassCountry != 0, match.isBypass {
+        if proxyMode != .global, bypassCountry != 0, match.isBypass {
             return .resolved(domain: entry.domain, configOverride: nil, forceBypass: true)
         }
 
