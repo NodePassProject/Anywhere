@@ -77,6 +77,9 @@ enum SecurityLayer: Hashable {
 struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let id: UUID
     let name: String
+    var displayName: String {
+        DeviceCensorship.deCensoredText(name)
+    }
     let serverAddress: String
     let serverPort: UInt16
     /// Pre-resolved IP address for `serverAddress`. When set, socket connections and tunnel

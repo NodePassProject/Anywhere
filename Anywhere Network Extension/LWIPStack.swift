@@ -135,9 +135,9 @@ class LWIPStack {
         // Fast path: direct set lookup (covers domains and resolved IPs)
         if proxyServerAddresses.contains(host) { return true }
         // Fallback: check active config in case proxyServerAddresses hasn't been populated yet
-        guard let config = configuration else { return false }
-        if host == config.serverAddress || host == config.resolvedIP { return true }
-        if let chain = config.chain {
+        guard let configuration = configuration else { return false }
+        if host == configuration.serverAddress || host == configuration.resolvedIP { return true }
+        if let chain = configuration.chain {
             for proxy in chain {
                 if host == proxy.serverAddress || host == proxy.resolvedIP { return true }
             }
@@ -438,7 +438,7 @@ class LWIPStack {
     /// Stack restart closes all connections, clears FakeIPPool, and re-reads all settings.
     private func handleSettingsChanged() {
         lwipQueue.async { [self] in
-            guard self.running, let config = self.configuration else { return }
+            guard self.running, let configuration = self.configuration else { return }
 
             let ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: "ipv6DNSEnabled")
             let bypassCountryCode = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
@@ -464,7 +464,7 @@ class LWIPStack {
                 self.onTunnelSettingsNeedReapply?()
             }
             
-            self.restartStack(configuration: config)
+            self.restartStack(configuration: configuration)
         }
     }
 
@@ -476,8 +476,8 @@ class LWIPStack {
     /// Routing changes do not alter NEPacketTunnelNetworkSettings.
     private func handleRoutingChanged() {
         lwipQueue.async { [self] in
-            guard self.running, let config = self.configuration else { return }
-            self.restartStack(configuration: config)
+            guard self.running, let configuration = self.configuration else { return }
+            self.restartStack(configuration: configuration)
         }
     }
 
@@ -529,23 +529,23 @@ class LWIPStack {
                     case .reject:
                         return nil
                     case .proxy(let id):
-                        if var config = shared.domainRouter.resolveConfiguration(action: action) {
-                            if let chain = defaultConfiguration.chain, !chain.isEmpty, config.chain == nil {
-                                config = config.withChain(chain)
+                        if var configuration = shared.domainRouter.resolveConfiguration(action: action) {
+                            if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
+                                configuration = configuration.withChain(chain)
                             }
-                            connectionConfiguration = config
+                            connectionConfiguration = configuration
                         } else {
                             logger.warning("[LWIPStack] TCP proxy config \(id) not found for IP \(dstIPString, privacy: .public)")
                         }
                     }
                 }
-            case .resolved(let domain, let configOverride, let bypass):
+            case .resolved(let domain, let configurationOverride, let bypass):
                 dstHost = domain
-                if var config = configOverride {
-                    if let chain = defaultConfiguration.chain, !chain.isEmpty, config.chain == nil {
-                        config = config.withChain(chain)
+                if var configuration = configurationOverride {
+                    if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
+                        configuration = configuration.withChain(chain)
                     }
-                    connectionConfiguration = config
+                    connectionConfiguration = configuration
                 }
                 forceBypass = bypass
             case .drop, .unreachable:
@@ -642,23 +642,23 @@ class LWIPStack {
                             udpPayloadLength: Int(len))
                         return
                     case .proxy(let id):
-                        if var config = shared.domainRouter.resolveConfiguration(action: action) {
-                            if let chain = defaultConfiguration.chain, !chain.isEmpty, config.chain == nil {
-                                config = config.withChain(chain)
+                        if var configuration = shared.domainRouter.resolveConfiguration(action: action) {
+                            if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
+                                configuration = configuration.withChain(chain)
                             }
-                            flowConfiguration = config
+                            flowConfiguration = configuration
                         } else {
                             logger.warning("[LWIPStack] UDP proxy config \(id) not found for IP \(dstIPString, privacy: .public)")
                         }
                     }
                 }
-            case .resolved(let domain, let configOverride, let bypass):
+            case .resolved(let domain, let configurationOverride, let bypass):
                 dstHost = domain
-                if var config = configOverride {
-                    if let chain = defaultConfiguration.chain, !chain.isEmpty, config.chain == nil {
-                        config = config.withChain(chain)
+                if var configuration = configurationOverride {
+                    if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
+                        configuration = configuration.withChain(chain)
                     }
-                    flowConfiguration = config
+                    flowConfiguration = configuration
                 }
                 forceBypass = bypass
             case .drop:
@@ -708,7 +708,7 @@ class LWIPStack {
         /// IP is not a fake IP — use original IP as host, default config, no bypass.
         case passthrough
         /// Resolved to a domain with optional config override and bypass flag.
-        case resolved(domain: String, configOverride: ProxyConfiguration?, forceBypass: Bool)
+        case resolved(domain: String, configurationOverride: ProxyConfiguration?, forceBypass: Bool)
         /// Connection should be dropped (rejected by rule).
         case drop
         /// Fake IP not in pool (stale from previous session) — drop and signal unreachable.
@@ -729,24 +729,24 @@ class LWIPStack {
         if let action = match.userAction {
             switch action {
             case .direct:
-                return .resolved(domain: entry.domain, configOverride: nil, forceBypass: true)
+                return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: true)
             case .reject:
                 return .drop
             case .proxy(let id):
-                let config = domainRouter.resolveConfiguration(action: action)
-                if config == nil {
+                let configuration = domainRouter.resolveConfiguration(action: action)
+                if configuration == nil {
                     logger.warning("[FakeIP] \(proto, privacy: .public) proxy config \(id) not found for \(entry.domain, privacy: .public)")
                 }
-                return .resolved(domain: entry.domain, configOverride: config, forceBypass: false)
+                return .resolved(domain: entry.domain, configurationOverride: configuration, forceBypass: false)
             }
         }
 
         // Country bypass: domain matched the bypass country's rule set.
         if proxyMode != .global, bypassCountry != 0, match.isBypass {
-            return .resolved(domain: entry.domain, configOverride: nil, forceBypass: true)
+            return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: true)
         }
 
-        return .resolved(domain: entry.domain, configOverride: nil, forceBypass: false)
+        return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: false)
     }
 
     // MARK: - DNS Interception (Fake-IP)

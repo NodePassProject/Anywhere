@@ -58,7 +58,7 @@ struct ChainEditorView: View {
                                 )
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(proxy.name)
+                                Text(proxy.displayName)
                                     .font(.body)
                                 Text("\(proxy.serverAddress):\(proxy.serverPort, format: .number.grouping(.never))")
                                     .font(.caption)
@@ -106,7 +106,7 @@ struct ChainEditorView: View {
                                     Image(systemName: "arrow.right")
                                         .font(.caption2)
                                         .foregroundStyle(.tertiary)
-                                    Text(proxy.name)
+                                    Text(proxy.displayName)
                                         .font(.caption.weight(.medium))
                                         .lineLimit(1)
                                 }
@@ -207,7 +207,7 @@ private struct ProxyPickerView: View {
                         dismiss()
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(proxy.name)
+                            Text(proxy.displayName)
                                 .font(.body)
                                 .foregroundStyle(.primary)
                             Text("\(proxy.serverAddress):\(proxy.serverPort, format: .number.grouping(.never))")
@@ -222,11 +222,7 @@ private struct ProxyPickerView: View {
             }
             .overlay {
                 if available.isEmpty {
-                    ContentUnavailableView(
-                        "No Proxies Available",
-                        systemImage: "network.slash",
-                        description: Text("All proxies are already in this chain.")
-                    )
+                    ContentUnavailableView("No Proxies", systemImage: "network.slash")
                 }
             }
             .navigationTitle("Select Proxy")

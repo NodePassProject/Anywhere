@@ -84,4 +84,11 @@ public enum DeviceCensorship {
         }
         return true
     }
+    
+    public static func deCensoredText(_ text: String) -> String {
+        guard isChinaDevice() else { return text }
+        var text: String = text
+        text.replace("🇹🇼", with: "🇼🇸")
+        return text
+    }
 }

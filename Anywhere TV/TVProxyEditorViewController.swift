@@ -210,8 +210,8 @@ class TVProxyEditorViewController: UITableViewController {
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped))
         navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .save, target: self, action: #selector(saveTapped))
 
-        if let config = existingConfiguration {
-            populateFromExisting(config)
+        if let configuration = existingConfiguration {
+            populateFromExisting(configuration)
         }
         updateSaveButton()
     }
@@ -360,45 +360,45 @@ class TVProxyEditorViewController: UITableViewController {
 
     // MARK: - Populate
 
-    private func populateFromExisting(_ config: ProxyConfiguration) {
-        selectedProtocol = config.outboundProtocol
-        name = config.name
-        serverAddress = config.serverAddress
-        serverPort = String(config.serverPort)
-        uuid = config.uuid.uuidString
-        encryption = config.encryption
-        transport = config.transport
-        flow = config.flow ?? ""
-        security = config.security
-        muxEnabled = config.muxEnabled
-        xudpEnabled = config.xudpEnabled
+    private func populateFromExisting(_ configuration: ProxyConfiguration) {
+        selectedProtocol = configuration.outboundProtocol
+        name = configuration.name
+        serverAddress = configuration.serverAddress
+        serverPort = String(configuration.serverPort)
+        uuid = configuration.uuid.uuidString
+        encryption = configuration.encryption
+        transport = configuration.transport
+        flow = configuration.flow ?? ""
+        security = configuration.security
+        muxEnabled = configuration.muxEnabled
+        xudpEnabled = configuration.xudpEnabled
 
-        if let ws = config.websocket {
+        if let ws = configuration.websocket {
             wsHost = ws.host
             wsPath = ws.path
         }
-        if let hu = config.httpUpgrade {
+        if let hu = configuration.httpUpgrade {
             huHost = hu.host
             huPath = hu.path
         }
-        if let xhttp = config.xhttp {
+        if let xhttp = configuration.xhttp {
             xhttpHost = xhttp.host
             xhttpPath = xhttp.path
             xhttpMode = xhttp.mode.rawValue
         }
-        if let tls = config.tls {
+        if let tls = configuration.tls {
             tlsSNI = tls.serverName
             tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
             fingerprint = tls.fingerprint
         }
-        if let reality = config.reality {
+        if let reality = configuration.reality {
             sni = reality.serverName
             publicKey = reality.publicKey.base64URLEncodedString()
             shortId = reality.shortId.hexEncodedString()
             fingerprint = reality.fingerprint
         }
 
-        switch config.outbound {
+        switch configuration.outbound {
         case .shadowsocks(let password, let method):
             ssPassword = password
             ssMethod = method
@@ -501,7 +501,7 @@ class TVProxyEditorViewController: UITableViewController {
         else if let tlsConfiguration { securityLayer = .tls(tlsConfiguration) }
         else { securityLayer = .none }
 
-        let config = ProxyConfiguration(
+        let configuration = ProxyConfiguration(
             id: existingConfiguration?.id ?? UUID(),
             name: name,
             serverAddress: bareAddress,
@@ -515,7 +515,7 @@ class TVProxyEditorViewController: UITableViewController {
             xudpEnabled: xudpEnabled
         )
 
-        onSave(config)
+        onSave(configuration)
         dismiss(animated: true)
     }
 }

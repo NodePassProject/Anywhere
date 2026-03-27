@@ -485,37 +485,37 @@ struct ProxyEditorView: View {
     }
 
     /// Encodes non-default extra fields from an XHTTPConfiguration back to a JSON string.
-    private static func encodeExtra(from config: XHTTPConfiguration) -> String {
+    private static func encodeExtra(from configuration: XHTTPConfiguration) -> String {
         var dict: [String: Any] = [:]
 
-        if !config.headers.isEmpty { dict["headers"] = config.headers }
-        if config.noGRPCHeader { dict["noGRPCHeader"] = true }
-        if config.scMaxEachPostBytes != 1_000_000 { dict["scMaxEachPostBytes"] = config.scMaxEachPostBytes }
-        if config.scMinPostsIntervalMs != 30 { dict["scMinPostsIntervalMs"] = config.scMinPostsIntervalMs }
-        if config.xPaddingBytesFrom != 100 || config.xPaddingBytesTo != 1000 {
-            dict["xPaddingBytes"] = ["from": config.xPaddingBytesFrom, "to": config.xPaddingBytesTo]
+        if !configuration.headers.isEmpty { dict["headers"] = configuration.headers }
+        if configuration.noGRPCHeader { dict["noGRPCHeader"] = true }
+        if configuration.scMaxEachPostBytes != 1_000_000 { dict["scMaxEachPostBytes"] = configuration.scMaxEachPostBytes }
+        if configuration.scMinPostsIntervalMs != 30 { dict["scMinPostsIntervalMs"] = configuration.scMinPostsIntervalMs }
+        if configuration.xPaddingBytesFrom != 100 || configuration.xPaddingBytesTo != 1000 {
+            dict["xPaddingBytes"] = ["from": configuration.xPaddingBytesFrom, "to": configuration.xPaddingBytesTo]
         }
-        if config.xPaddingObfsMode { dict["xPaddingObfsMode"] = true }
-        if config.xPaddingKey != "x_padding" { dict["xPaddingKey"] = config.xPaddingKey }
-        if config.xPaddingHeader != "X-Padding" { dict["xPaddingHeader"] = config.xPaddingHeader }
-        if config.xPaddingPlacement != .queryInHeader { dict["xPaddingPlacement"] = config.xPaddingPlacement.rawValue }
-        if config.xPaddingMethod != .repeatX { dict["xPaddingMethod"] = config.xPaddingMethod.rawValue }
-        if config.uplinkHTTPMethod != "POST" { dict["uplinkHTTPMethod"] = config.uplinkHTTPMethod }
-        if config.sessionPlacement != .path { dict["sessionPlacement"] = config.sessionPlacement.rawValue }
-        if !config.sessionKey.isEmpty { dict["sessionKey"] = config.sessionKey }
-        if config.seqPlacement != .path { dict["seqPlacement"] = config.seqPlacement.rawValue }
-        if !config.seqKey.isEmpty { dict["seqKey"] = config.seqKey }
-        if config.uplinkDataPlacement != .body { dict["uplinkDataPlacement"] = config.uplinkDataPlacement.rawValue }
+        if configuration.xPaddingObfsMode { dict["xPaddingObfsMode"] = true }
+        if configuration.xPaddingKey != "x_padding" { dict["xPaddingKey"] = configuration.xPaddingKey }
+        if configuration.xPaddingHeader != "X-Padding" { dict["xPaddingHeader"] = configuration.xPaddingHeader }
+        if configuration.xPaddingPlacement != .queryInHeader { dict["xPaddingPlacement"] = configuration.xPaddingPlacement.rawValue }
+        if configuration.xPaddingMethod != .repeatX { dict["xPaddingMethod"] = configuration.xPaddingMethod.rawValue }
+        if configuration.uplinkHTTPMethod != "POST" { dict["uplinkHTTPMethod"] = configuration.uplinkHTTPMethod }
+        if configuration.sessionPlacement != .path { dict["sessionPlacement"] = configuration.sessionPlacement.rawValue }
+        if !configuration.sessionKey.isEmpty { dict["sessionKey"] = configuration.sessionKey }
+        if configuration.seqPlacement != .path { dict["seqPlacement"] = configuration.seqPlacement.rawValue }
+        if !configuration.seqKey.isEmpty { dict["seqKey"] = configuration.seqKey }
+        if configuration.uplinkDataPlacement != .body { dict["uplinkDataPlacement"] = configuration.uplinkDataPlacement.rawValue }
         // Compare against placement-dependent defaults (Xray-core Build())
         let defaultDataKey: String
         let defaultChunkSize: Int
-        switch config.uplinkDataPlacement {
+        switch configuration.uplinkDataPlacement {
         case .header: defaultDataKey = "X-Data"; defaultChunkSize = 4096
         case .cookie: defaultDataKey = "x_data"; defaultChunkSize = 3072
         default: defaultDataKey = ""; defaultChunkSize = 0
         }
-        if config.uplinkDataKey != defaultDataKey { dict["uplinkDataKey"] = config.uplinkDataKey }
-        if config.uplinkChunkSize != defaultChunkSize { dict["uplinkChunkSize"] = config.uplinkChunkSize }
+        if configuration.uplinkDataKey != defaultDataKey { dict["uplinkDataKey"] = configuration.uplinkDataKey }
+        if configuration.uplinkChunkSize != defaultChunkSize { dict["uplinkChunkSize"] = configuration.uplinkChunkSize }
 
         guard !dict.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys, .prettyPrinted]),

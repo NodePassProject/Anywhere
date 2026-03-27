@@ -334,7 +334,7 @@ class TVProxyPickerViewController: UITableViewController {
         super.viewDidLayoutSubviews()
         if available.isEmpty {
             let label = UILabel()
-            label.text = String(localized: "No Proxies Available")
+            label.text = String(localized: "No Proxies")
             label.textColor = .secondaryLabel
             label.font = .systemFont(ofSize: 28, weight: .medium)
             label.textAlignment = .center

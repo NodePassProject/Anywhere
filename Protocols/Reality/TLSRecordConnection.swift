@@ -441,7 +441,6 @@ class TLSRecordConnection {
                 do {
                     let decrypted = try decryptTLSRecord(ciphertext: body, header: header, seqNum: seqNum)
                     receiveBuffer.removeSubrange(headerStart..<bodyEnd)
-                    if receiveBuffer.isEmpty { receiveBuffer = Data() }
                     if !decrypted.isEmpty {
                         batchedData.append(decrypted)
                     }
@@ -465,6 +464,14 @@ class TLSRecordConnection {
                 // Other content types (ChangeCipherSpec, etc.) are skipped
                 receiveBuffer.removeSubrange(headerStart..<bodyEnd)
             }
+        }
+
+        // Compact once after the loop: removeSubrange from the start creates
+        // slice views that retain the entire original backing store.
+        if receiveBuffer.isEmpty {
+            receiveBuffer = Data()
+        } else if recordsProcessed > 0 {
+            receiveBuffer = Data(receiveBuffer)
         }
 
         if let error = hasError {

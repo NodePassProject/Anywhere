@@ -65,8 +65,8 @@ struct ClashProxyParser {
                 let nodeIdx = ip.pointee
                 if let proxyNode = yaml_document_get_node(doc, nodeIdx),
                    proxyNode.pointee.type == YAML_MAPPING_NODE,
-                   let config = parseProxy(doc, node: proxyNode) {
-                    configurations.append(config)
+                   let configuration = parseProxy(doc, node: proxyNode) {
+                    configurations.append(configuration)
                 } else {
                     skippedCount += 1
                 }

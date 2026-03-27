@@ -264,28 +264,28 @@ struct DemoProxyListView: View {
     }
 
     @ViewBuilder
-    private func configRow(_ config: ProxyConfiguration) -> some View {
-        let latency = sampleLatencyResults[config.id]
+    private func configRow(_ configuration: ProxyConfiguration) -> some View {
+        let latency = sampleLatencyResults[configuration.id]
 
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
-                    Text(config.name)
+                    Text(configuration.name)
                         .font(.body)
-                    if config.id == selectedId {
+                    if configuration.id == selectedId {
                         Image(systemName: "checkmark")
                             .font(.caption.bold())
                             .foregroundStyle(.tint)
                     }
                 }
-                Text("\(config.serverAddress):\(config.serverPort, format: .number.grouping(.never))")
+                Text("\(configuration.serverAddress):\(configuration.serverPort, format: .number.grouping(.never))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 4) {
-                    Text(config.transport.uppercased())
+                    Text(configuration.transport.uppercased())
                     Text("·")
-                    Text(config.security.uppercased())
-                    if let flow = config.flow, flow.contains("vision") {
+                    Text(configuration.security.uppercased())
+                    if let flow = configuration.flow, flow.contains("vision") {
                         Text("·")
                         Text("Vision")
                     }

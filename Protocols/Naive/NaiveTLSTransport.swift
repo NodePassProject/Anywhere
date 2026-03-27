@@ -76,11 +76,11 @@ class NaiveTLSTransport {
     ///
     /// - Parameter completion: Called with `nil` on success or an error on failure.
     func connect(completion: @escaping (Error?) -> Void) {
-        let config = TLSConfiguration(
+        let configuration = TLSConfiguration(
             serverName: sni,
             alpn: alpn
         )
-        let client = TLSClient(configuration: config)
+        let client = TLSClient(configuration: configuration)
         self.tlsClient = client
 
         let handleResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in

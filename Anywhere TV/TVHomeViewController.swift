@@ -402,8 +402,8 @@ class TVHomeViewController: UIViewController {
         configButton.isHidden = !hasConfig
         emptyButton.isHidden = hasConfig
 
-        if let config = viewModel.selectedConfiguration {
-            configNameLabel.text = config.name
+        if let configuration = viewModel.selectedConfiguration {
+            configNameLabel.text = configuration.name
             UIView.animate(withDuration: 0.3) {
                 self.configIcon.tintColor = self.isConnected ? UIColor.white.withAlphaComponent(0.7) : .secondaryLabel
                 self.configNameLabel.textColor = self.isConnected ? .white : .label

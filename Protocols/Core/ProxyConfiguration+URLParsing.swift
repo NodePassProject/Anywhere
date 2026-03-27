@@ -384,13 +384,13 @@ extension ProxyConfiguration {
     ) -> TransportLayer {
         switch transport {
         case "ws":
-            if let config = WebSocketConfiguration.parse(from: params, serverAddress: serverAddress) {
-                return .ws(config)
+            if let configuration = WebSocketConfiguration.parse(from: params, serverAddress: serverAddress) {
+                return .ws(configuration)
             }
             return .tcp
         case "httpupgrade":
-            if let config = HTTPUpgradeConfiguration.parse(from: params, serverAddress: serverAddress) {
-                return .httpUpgrade(config)
+            if let configuration = HTTPUpgradeConfiguration.parse(from: params, serverAddress: serverAddress) {
+                return .httpUpgrade(configuration)
             }
             return .tcp
         case "xhttp":
@@ -400,8 +400,8 @@ extension ProxyConfiguration {
             let realityServerName: String?
             if case .reality(let reality) = securityLayer { realityServerName = reality.serverName }
             else { realityServerName = nil }
-            if let config = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress, tlsServerName: tlsServerName, realityServerName: realityServerName) {
-                return .xhttp(config)
+            if let configuration = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress, tlsServerName: tlsServerName, realityServerName: realityServerName) {
+                return .xhttp(configuration)
             }
             return .tcp
         default:
