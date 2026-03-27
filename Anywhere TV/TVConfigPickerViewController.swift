@@ -54,8 +54,8 @@ class TVConfigPickerViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         let item = items[indexPath.row]
-        if let config = viewModel.configurations.first(where: { $0.id == item.id }) {
-            viewModel.selectedConfiguration = config
+        if let configuration = viewModel.configurations.first(where: { $0.id == item.id }) {
+            viewModel.selectedConfiguration = configuration
         } else if let chain = viewModel.chains.first(where: { $0.id == item.id }) {
             viewModel.selectChain(chain)
         }

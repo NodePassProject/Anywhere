@@ -44,8 +44,9 @@ class SOCKS5Buffer {
     /// Reads exactly `count` bytes from the buffer, fetching from the transport as needed.
     func readExact(count: Int, completion: @escaping (Data?, Error?) -> Void) {
         if data.count >= count {
-            let result = Data(data.prefix(count))
+            let result = data.subdata(in: data.startIndex..<data.startIndex + count)
             data.removeFirst(count)
+            if data.isEmpty { data = Data() } else { data = Data(data) }
             completion(result, nil)
             return
         }

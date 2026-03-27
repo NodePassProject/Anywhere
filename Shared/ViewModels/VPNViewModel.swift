@@ -291,11 +291,24 @@ class VPNViewModel: ObservableObject {
 
     /// All items available for the Home picker (proxies + chains).
     var allPickerItems: [PickerItem] {
-        var items = configurations.map { PickerItem(id: $0.id, name: $0.name) }
+        var items: [PickerItem] = []
         for chain in chains {
             let proxies = chain.proxyIds.compactMap { id in configurations.first(where: { $0.id == id }) }
             guard proxies.count == chain.proxyIds.count, proxies.count >= 2 else { continue }
             items.append(PickerItem(id: chain.id, name: chain.name))
+        }
+        let standaloneConfigurations: [ProxyConfiguration] = configurations.filter { $0.subscriptionId == nil }
+        for configuration in standaloneConfigurations {
+            items.append(PickerItem(id: configuration.id, name: configuration.displayName))
+        }
+        let subscribedGroups: [(Subscription, [ProxyConfiguration])] = subscriptions.compactMap { subscription in
+            let configurations = configurations(for: subscription)
+            return configurations.isEmpty ? nil : (subscription, configurations)
+        }
+        for (_, configurations) in subscribedGroups {
+            for configuration in configurations {
+                items.append(PickerItem(id: configuration.id, name: configuration.displayName))
+            }
         }
         return items
     }

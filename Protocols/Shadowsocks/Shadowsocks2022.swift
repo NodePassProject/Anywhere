@@ -296,7 +296,7 @@ class Shadowsocks2022Connection: ProxyConnection {
 
         let fixedChunk = readBuffer[fixedChunkStart..<(fixedChunkStart + fixedChunkLen)]
         readBuffer.removeFirst(keySize + fixedChunkLen)
-        if readBuffer.isEmpty { readBuffer = Data() }
+        if readBuffer.isEmpty { readBuffer = Data() } else { readBuffer = Data(readBuffer) }
 
         let fixedHeader = try ShadowsocksAEADCrypto.open(
             cipher: cipher, key: sessionKey, nonce: readNonce.next(), ciphertext: fixedChunk
@@ -357,7 +357,7 @@ class Shadowsocks2022Connection: ProxyConnection {
 
         let varChunk = readBuffer.prefix(varChunkLen)
         readBuffer.removeFirst(varChunkLen)
-        if readBuffer.isEmpty { readBuffer = Data() }
+        if readBuffer.isEmpty { readBuffer = Data() } else { readBuffer = Data(readBuffer) }
 
         guard let subkey = readSubkey else {
             throw ShadowsocksError.decryptionFailed
@@ -423,8 +423,8 @@ class Shadowsocks2022Connection: ProxyConnection {
         // Compact buffer once
         if offset > 0 {
             readBuffer.removeFirst(offset)
+            if readBuffer.isEmpty { readBuffer = Data() } else { readBuffer = Data(readBuffer) }
         }
-        if readBuffer.isEmpty { readBuffer = Data() }
 
         return output
     }

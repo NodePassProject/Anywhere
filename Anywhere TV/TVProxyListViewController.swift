@@ -102,19 +102,19 @@ class TVProxyListViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
-        let configs = configurations(for: indexPath.section)
-        let config = configs[indexPath.row]
-        let isSelected = viewModel.selectedConfiguration?.id == config.id && viewModel.selectedChainId == nil
+        let configurations = configurations(for: indexPath.section)
+        let configuration = configurations[indexPath.row]
+        let isSelected = viewModel.selectedConfiguration?.id == configuration.id && viewModel.selectedChainId == nil
 
         var content = cell.defaultContentConfiguration()
-        content.text = config.name
+        content.text = configuration.name
 
-        var details = "\(config.serverAddress):\(config.serverPort)"
-        details += " · \(config.outboundProtocol.name)"
-        details += " · \(config.transport.uppercased())"
-        let security = config.security.uppercased()
+        var details = "\(configuration.serverAddress):\(configuration.serverPort)"
+        details += " · \(configuration.outboundProtocol.name)"
+        details += " · \(configuration.transport.uppercased())"
+        let security = configuration.security.uppercased()
         if security != "NONE" { details += " · \(security)" }
-        if let flow = config.flow, flow.uppercased().contains("VISION") { details += " · Vision" }
+        if let flow = configuration.flow, flow.uppercased().contains("VISION") { details += " · Vision" }
         content.secondaryText = details
         content.secondaryTextProperties.color = .secondaryLabel
         content.secondaryTextProperties.font = .systemFont(ofSize: 22)
@@ -127,7 +127,7 @@ class TVProxyListViewController: UITableViewController {
         cell.contentConfiguration = content
 
         // Latency accessory
-        if let result = viewModel.latencyResults[config.id] {
+        if let result = viewModel.latencyResults[configuration.id] {
             let label = UILabel()
             label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
             switch result {
@@ -158,16 +158,16 @@ class TVProxyListViewController: UITableViewController {
     // MARK: - Selection
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        let config = configurations(for: indexPath.section)[indexPath.row]
-        viewModel.selectedConfiguration = config
+        let configuration = configurations(for: indexPath.section)[indexPath.row]
+        viewModel.selectedConfiguration = configuration
         tableView.deselectRow(at: indexPath, animated: true)
     }
 
     // MARK: - Context Menu
 
     override func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
-        let configs = configurations(for: indexPath.section)
-        let config = configs[indexPath.row]
+        let configurations = configurations(for: indexPath.section)
+        let configuration = configurations[indexPath.row]
 
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             guard let self else { return nil }
@@ -175,31 +175,31 @@ class TVProxyListViewController: UITableViewController {
             var actions: [UIAction] = []
 
             actions.append(UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { _ in
-                self.viewModel.testLatency(for: config)
+                self.viewModel.testLatency(for: configuration)
             })
 
             actions.append(UIAction(title: String(localized: "Edit"), image: UIImage(systemName: "pencil")) { _ in
-                self.presentEditor(for: config)
+                self.presentEditor(for: configuration)
             })
 
             actions.append(UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                self.viewModel.deleteConfiguration(config)
+                self.viewModel.deleteConfiguration(configuration)
             })
 
             // Subscription actions
-            if let sub = self.viewModel.subscription(for: config) {
-                let subMenu = UIMenu(title: sub.name, children: [
+            if let subscription = self.viewModel.subscription(for: configuration) {
+                let subMenu = UIMenu(title: subscription.name, children: [
                     UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { _ in
-                        self.viewModel.testLatencies(for: self.viewModel.configurations(for: sub))
+                        self.viewModel.testLatencies(for: self.viewModel.configurations(for: subscription))
                     },
                     UIAction(title: String(localized: "Rename"), image: UIImage(systemName: "pencil")) { _ in
-                        self.presentRenameAlert(for: sub)
+                        self.presentRenameAlert(for: subscription)
                     },
                     UIAction(title: String(localized: "Update"), image: UIImage(systemName: "arrow.clockwise")) { _ in
-                        self.updateSubscription(sub)
+                        self.updateSubscription(subscription)
                     },
                     UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                        self.viewModel.deleteSubscription(sub)
+                        self.viewModel.deleteSubscription(subscription)
                     },
                 ])
                 actions.append(contentsOf: [UIAction]())
@@ -302,8 +302,8 @@ class TVProxyListViewController: UITableViewController {
         updateSubscription(sub)
     }
 
-    private func presentEditor(for config: ProxyConfiguration) {
-        let editor = TVProxyEditorViewController(configuration: config) { [weak self] updated in
+    private func presentEditor(for configuration: ProxyConfiguration) {
+        let editor = TVProxyEditorViewController(configuration: configuration) { [weak self] updated in
             self?.viewModel.updateConfiguration(updated)
         }
         let nav = UINavigationController(rootViewController: editor)

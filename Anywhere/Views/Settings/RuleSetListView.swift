@@ -37,13 +37,8 @@ struct RuleSetListView: View {
             PickerItem(id: Self.directUUID, name: "DIRECT"),
             PickerItem(id: Self.rejectUUID, name: "REJECT"),
         ]
-        for configuration in standaloneConfigurations {
-            items.append(PickerItem(id: configuration.id, name: configuration.name))
-        }
-        for (_, configurations) in subscribedGroups {
-            for configuration in configurations {
-                items.append(PickerItem(id: configuration.id, name: configuration.name))
-            }
+        for pickerItem in viewModel.allPickerItems {
+            items.append(pickerItem)
         }
         return items
     }
@@ -55,8 +50,8 @@ struct RuleSetListView: View {
         case "REJECT": return "REJECT"
         default:
             if let uuid = UUID(uuidString: configurationId!),
-               let config = viewModel.configurations.first(where: { $0.id == uuid }) {
-                return config.name
+               let configuration = viewModel.configurations.first(where: { $0.id == uuid }) {
+                return configuration.displayName
             }
             return "Default"
         }

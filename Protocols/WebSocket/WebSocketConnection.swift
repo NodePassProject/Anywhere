@@ -387,15 +387,18 @@ class WebSocketConnection {
             payload = Data(bytes)
         } else {
             let payloadStart = receiveBuffer.startIndex + headerSize
-            payload = Data(receiveBuffer[payloadStart..<payloadStart + Int(payloadLength)])
+            payload = receiveBuffer.subdata(in: payloadStart..<payloadStart + Int(payloadLength))
         }
 
-        // Consume the frame from the buffer
+        // Consume the frame from the buffer.
+        // removeFirst produces a slice that retains the entire original
+        // backing store; always compact into a fresh allocation so the
+        // old memory is released immediately.
         receiveBuffer.removeFirst(totalFrameSize)
-        // Release backing store when buffer is fully consumed to prevent
-        // Data's sliced view from holding the entire original allocation.
         if receiveBuffer.isEmpty {
             receiveBuffer = Data()
+        } else {
+            receiveBuffer = Data(receiveBuffer)
         }
 
         let opcode = byte0 & 0x0F

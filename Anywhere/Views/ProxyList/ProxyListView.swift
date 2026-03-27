@@ -210,7 +210,7 @@ struct ProxyListView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        Text(configuration.name)
+                        Text(configuration.displayName)
                             .font(.body)
                         if viewModel.selectedConfiguration?.id == configuration.id {
                             Image(systemName: "checkmark")

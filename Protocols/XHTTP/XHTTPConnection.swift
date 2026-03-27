@@ -904,11 +904,12 @@ extension XHTTPConnection {
         let totalSize = Self.h2FrameHeaderSize + Int(length)
         guard h2ReadBuffer.count >= totalSize else { return nil }
 
-        let payload = Data(h2ReadBuffer[h2ReadBuffer.startIndex + Self.h2FrameHeaderSize ..< h2ReadBuffer.startIndex + totalSize])
+        let payload = h2ReadBuffer.subdata(in: h2ReadBuffer.startIndex + Self.h2FrameHeaderSize ..< h2ReadBuffer.startIndex + totalSize)
         h2ReadBuffer.removeFirst(totalSize)
-        // Release backing store when buffer is fully consumed
         if h2ReadBuffer.isEmpty {
             h2ReadBuffer = Data()
+        } else {
+            h2ReadBuffer = Data(h2ReadBuffer)
         }
 
         return (type, flags, sid, payload)
@@ -1885,11 +1886,11 @@ struct ChunkedTransferDecoder {
             return nil // Need more data
         }
 
-        let chunkData = Data(buffer[dataStart..<dataStart + Int(chunkSize)])
+        let chunkData = buffer.subdata(in: dataStart..<dataStart + Int(chunkSize))
 
         // Consume the chunk from the buffer (size line + \r\n + data + \r\n)
         buffer.removeFirst(needed - buffer.startIndex)
-        if buffer.isEmpty { buffer = Data() }
+        if buffer.isEmpty { buffer = Data() } else { buffer = Data(buffer) }
 
         return chunkData
     }
