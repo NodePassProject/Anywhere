@@ -11,7 +11,7 @@ import Foundation
 
 extension ProxyConfiguration {
 
-    /// Parses a VLESS configuration from a serialized dictionary.
+    /// Parses a configuration from a serialized dictionary.
     ///
     /// Used by PacketTunnelProvider (from tunnel start options / app messages)
     /// and DomainRouter (from routing.json configs).
@@ -19,10 +19,6 @@ extension ProxyConfiguration {
         guard let serverAddress = configurationDict["serverAddress"] as? String else {
             return nil
         }
-        // UUID is required for VLESS but optional for Shadowsocks
-        let uuidString = configurationDict["uuid"] as? String
-        let uuid = uuidString.flatMap { UUID(uuidString: $0) } ?? UUID()
-        let encryption = (configurationDict["encryption"] as? String) ?? "none"
 
         // serverPort may arrive as UInt16 (from startTunnel options) or Int (from JSON)
         let serverPort: UInt16
@@ -34,11 +30,52 @@ extension ProxyConfiguration {
             return nil
         }
 
-        let flow = (configurationDict["flow"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        let security = (configurationDict["security"] as? String) ?? "none"
+        let muxEnabled = (configurationDict["muxEnabled"] as? Bool) ?? true
+        let xudpEnabled = (configurationDict["xudpEnabled"] as? Bool) ?? true
+        let resolvedIP = configurationDict["resolvedIP"] as? String
 
-        // Parse Reality configuration if present
-        var realityConfiguration: RealityConfiguration? = nil
+        // Parse outbound protocol
+        let protocolStr = (configurationDict["outboundProtocol"] as? String) ?? "vless"
+        let proto = OutboundProtocol(rawValue: protocolStr) ?? .vless
+
+        let outbound: Outbound
+        switch proto {
+        case .vless:
+            let uuidString = configurationDict["uuid"] as? String
+            let uuid = uuidString.flatMap { UUID(uuidString: $0) } ?? UUID()
+            let encryption = (configurationDict["encryption"] as? String) ?? "none"
+            let flow = (configurationDict["flow"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            outbound = .vless(uuid: uuid, encryption: encryption, flow: flow)
+        case .shadowsocks:
+            let password = (configurationDict["ssPassword"] as? String) ?? ""
+            let method = (configurationDict["ssMethod"] as? String) ?? ""
+            outbound = .shadowsocks(password: password, method: method)
+        case .socks5:
+            outbound = .socks5(
+                username: configurationDict["socks5Username"] as? String,
+                password: configurationDict["socks5Password"] as? String
+            )
+        case .http11:
+            outbound = .http11(
+                username: (configurationDict["http11Username"] as? String) ?? "",
+                password: (configurationDict["http11Password"] as? String) ?? ""
+            )
+        case .http2:
+            outbound = .http2(
+                username: (configurationDict["http2Username"] as? String) ?? "",
+                password: (configurationDict["http2Password"] as? String) ?? ""
+            )
+        case .http3:
+            outbound = .http3(
+                username: (configurationDict["http3Username"] as? String) ?? "",
+                password: (configurationDict["http3Password"] as? String) ?? ""
+            )
+        }
+
+        // Parse security layer
+        let security = (configurationDict["security"] as? String) ?? "none"
+        let securityLayer: SecurityLayer
+
         if security == "reality",
            let serverName = configurationDict["realityServerName"] as? String,
            let publicKeyBase64 = configurationDict["realityPublicKey"] as? String,
@@ -48,18 +85,11 @@ extension ProxyConfiguration {
             let shortId = Data(hexString: shortIdHex) ?? Data()
             let fpString = (configurationDict["realityFingerprint"] as? String) ?? "chrome_133"
             let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
-
-            realityConfiguration = RealityConfiguration(
-                serverName: serverName,
-                publicKey: publicKey,
-                shortId: shortId,
-                fingerprint: fingerprint
-            )
-        }
-
-        // Parse TLS configuration if present
-        var tlsConfiguration: TLSConfiguration? = nil
-        if security == "tls" {
+            securityLayer = .reality(RealityConfiguration(
+                serverName: serverName, publicKey: publicKey,
+                shortId: shortId, fingerprint: fingerprint
+            ))
+        } else if security == "tls" {
             let sni = (configurationDict["tlsServerName"] as? String) ?? serverAddress
             var alpn: [String]? = nil
             if let alpnString = configurationDict["tlsAlpn"] as? String, !alpnString.isEmpty {
@@ -67,81 +97,55 @@ extension ProxyConfiguration {
             }
             let fpString = (configurationDict["tlsFingerprint"] as? String) ?? "chrome_133"
             let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
-
-            tlsConfiguration = TLSConfiguration(
-                serverName: sni,
-                alpn: alpn,
-                fingerprint: fingerprint
-            )
+            securityLayer = .tls(TLSConfiguration(
+                serverName: sni, alpn: alpn, fingerprint: fingerprint
+            ))
+        } else {
+            securityLayer = .none
         }
 
-        // Parse transport configuration
+        // Parse transport layer
         let transport = (configurationDict["transport"] as? String) ?? "tcp"
+        let transportLayer: TransportLayer
 
-        var wsConfiguration: WebSocketConfiguration? = nil
-        if transport == "ws" {
+        switch transport {
+        case "ws":
             let wsHost = (configurationDict["wsHost"] as? String) ?? serverAddress
             let wsPath = (configurationDict["wsPath"] as? String) ?? "/"
             let wsHeaders = parseHeaders(configurationDict["wsHeaders"] as? String)
             let wsMaxEarlyData = (configurationDict["wsMaxEarlyData"] as? Int) ?? 0
             let wsEarlyDataHeaderName = (configurationDict["wsEarlyDataHeaderName"] as? String) ?? "Sec-WebSocket-Protocol"
-
-            wsConfiguration = WebSocketConfiguration(
-                host: wsHost,
-                path: wsPath,
-                headers: wsHeaders,
-                maxEarlyData: wsMaxEarlyData,
-                earlyDataHeaderName: wsEarlyDataHeaderName
-            )
-        }
-
-        var httpUpgradeConfiguration: HTTPUpgradeConfiguration? = nil
-        if transport == "httpupgrade" {
+            transportLayer = .ws(WebSocketConfiguration(
+                host: wsHost, path: wsPath, headers: wsHeaders,
+                maxEarlyData: wsMaxEarlyData, earlyDataHeaderName: wsEarlyDataHeaderName
+            ))
+        case "httpupgrade":
             let huHost = (configurationDict["huHost"] as? String) ?? serverAddress
             let huPath = (configurationDict["huPath"] as? String) ?? "/"
             let huHeaders = parseHeaders(configurationDict["huHeaders"] as? String)
-
-            httpUpgradeConfiguration = HTTPUpgradeConfiguration(
-                host: huHost,
-                path: huPath,
-                headers: huHeaders
-            )
-        }
-
-        var xhttpConfiguration: XHTTPConfiguration? = nil
-        if transport == "xhttp" {
-            let xhttpHost = (configurationDict["xhttpHost"] as? String) ?? tlsConfiguration?.serverName ?? realityConfiguration?.serverName ?? serverAddress
+            transportLayer = .httpUpgrade(HTTPUpgradeConfiguration(
+                host: huHost, path: huPath, headers: huHeaders
+            ))
+        case "xhttp":
+            let tlsServerName: String?
+            if case .tls(let tls) = securityLayer { tlsServerName = tls.serverName }
+            else { tlsServerName = nil }
+            let realityServerName: String?
+            if case .reality(let reality) = securityLayer { realityServerName = reality.serverName }
+            else { realityServerName = nil }
+            let xhttpHost = (configurationDict["xhttpHost"] as? String) ?? tlsServerName ?? realityServerName ?? serverAddress
             let xhttpPath = (configurationDict["xhttpPath"] as? String) ?? "/"
             let xhttpModeStr = (configurationDict["xhttpMode"] as? String) ?? "auto"
             let xhttpMode = XHTTPMode(rawValue: xhttpModeStr) ?? .auto
             let xhttpHeaders = parseHeaders(configurationDict["xhttpHeaders"] as? String)
             let xhttpNoGRPCHeader = (configurationDict["xhttpNoGRPCHeader"] as? Bool) ?? false
-
-            xhttpConfiguration = XHTTPConfiguration(
-                host: xhttpHost,
-                path: xhttpPath,
-                mode: xhttpMode,
-                headers: xhttpHeaders,
-                noGRPCHeader: xhttpNoGRPCHeader
-            )
+            transportLayer = .xhttp(XHTTPConfiguration(
+                host: xhttpHost, path: xhttpPath, mode: xhttpMode,
+                headers: xhttpHeaders, noGRPCHeader: xhttpNoGRPCHeader
+            ))
+        default:
+            transportLayer = .tcp
         }
-
-        let muxEnabled = (configurationDict["muxEnabled"] as? Bool) ?? true
-        let xudpEnabled = (configurationDict["xudpEnabled"] as? Bool) ?? true
-        let resolvedIP = configurationDict["resolvedIP"] as? String
-
-        let protocolStr = (configurationDict["outboundProtocol"] as? String) ?? "vless"
-        let outboundProtocol = OutboundProtocol(rawValue: protocolStr) ?? .vless
-        let ssPassword = configurationDict["ssPassword"] as? String
-        let ssMethod = configurationDict["ssMethod"] as? String
-        let http11Username = configurationDict["http11Username"] as? String
-        let http11Password = configurationDict["http11Password"] as? String
-        let http2Username = configurationDict["http2Username"] as? String
-        let http2Password = configurationDict["http2Password"] as? String
-        let http3Username = configurationDict["http3Username"] as? String
-        let http3Password = configurationDict["http3Password"] as? String
-        let socks5Username = configurationDict["socks5Username"] as? String
-        let socks5Password = configurationDict["socks5Password"] as? String
 
         // Parse proxy chain if present
         var chain: [ProxyConfiguration]? = nil
@@ -154,30 +158,12 @@ extension ProxyConfiguration {
             name: (configurationDict["name"] as? String) ?? serverAddress,
             serverAddress: serverAddress,
             serverPort: serverPort,
-            uuid: uuid,
-            encryption: encryption,
-            transport: transport,
-            flow: flow,
-            security: security,
-            tls: tlsConfiguration,
-            reality: realityConfiguration,
-            websocket: wsConfiguration,
-            httpUpgrade: httpUpgradeConfiguration,
-            xhttp: xhttpConfiguration,
+            resolvedIP: resolvedIP,
+            outbound: outbound,
+            transportLayer: transportLayer,
+            securityLayer: securityLayer,
             muxEnabled: muxEnabled,
             xudpEnabled: xudpEnabled,
-            resolvedIP: resolvedIP,
-            outboundProtocol: outboundProtocol,
-            ssPassword: ssPassword,
-            ssMethod: ssMethod,
-            http11Username: http11Username,
-            http11Password: http11Password,
-            http2Username: http2Username,
-            http2Password: http2Password,
-            http3Username: http3Username,
-            http3Password: http3Password,
-            socks5Username: socks5Username,
-            socks5Password: socks5Password,
             chain: chain
         )
     }

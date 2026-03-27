@@ -286,18 +286,19 @@ struct ClashProxyParser {
             wsConfig = WebSocketConfiguration(host: wsHost, path: wsPath, headers: wsHeaders)
         }
 
+        let transportLayer: TransportLayer = wsConfig.map { .ws($0) } ?? .tcp
+        let securityLayer: SecurityLayer
+        if let realityConfig { securityLayer = .reality(realityConfig) }
+        else if let tlsConfig { securityLayer = .tls(tlsConfig) }
+        else { securityLayer = .none }
+
         return ProxyConfiguration(
             name: name,
             serverAddress: server,
             serverPort: port,
-            uuid: uuid,
-            encryption: encryption,
-            transport: transport,
-            flow: flow,
-            security: security,
-            tls: tlsConfig,
-            reality: realityConfig,
-            websocket: wsConfig
+            outbound: .vless(uuid: uuid, encryption: encryption, flow: flow),
+            transportLayer: transportLayer,
+            securityLayer: securityLayer
         )
     }
 
@@ -319,11 +320,7 @@ struct ClashProxyParser {
             name: name,
             serverAddress: server,
             serverPort: UInt16(portInt),
-            uuid: UUID(),
-            encryption: "none",
-            outboundProtocol: .socks5,
-            socks5Username: username,
-            socks5Password: password
+            outbound: .socks5(username: username, password: password)
         )
     }
 
@@ -405,19 +402,16 @@ struct ClashProxyParser {
             wsConfig = WebSocketConfiguration(host: wsHost, path: wsPath, headers: wsHeaders)
         }
 
+        let transportLayer: TransportLayer = wsConfig.map { .ws($0) } ?? .tcp
+        let securityLayer: SecurityLayer = tlsConfig.map { .tls($0) } ?? .none
+
         return ProxyConfiguration(
             name: name,
             serverAddress: server,
             serverPort: port,
-            uuid: UUID(), // placeholder
-            encryption: "none",
-            transport: transport,
-            security: security,
-            tls: tlsConfig,
-            websocket: wsConfig,
-            outboundProtocol: .shadowsocks,
-            ssPassword: password,
-            ssMethod: cipher
+            outbound: .shadowsocks(password: password, method: cipher),
+            transportLayer: transportLayer,
+            securityLayer: securityLayer
         )
     }
 

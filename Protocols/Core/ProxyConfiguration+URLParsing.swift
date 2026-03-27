@@ -77,7 +77,7 @@ extension ProxyConfiguration {
         let encryption = params["encryption"] ?? "none"
         let flow = params["flow"]
         let security = params["security"] ?? "none"
-        let transport = params["type"] ?? "tcp"
+        let transportStr = params["type"] ?? "tcp"
 
         // Parse testseed (comma-separated 4 uint32 values, e.g. "900,500,900,256")
         var testseed: [UInt32]? = nil
@@ -88,27 +88,34 @@ extension ProxyConfiguration {
             }
         }
 
-        // Parse security configurations
-        var realityConfiguration: RealityConfiguration? = nil
+        // Parse security layer
+        let securityLayer: SecurityLayer
         if security == "reality" {
             do {
-                realityConfiguration = try RealityConfiguration.parse(from: params)
+                if let realityConfig = try RealityConfiguration.parse(from: params) {
+                    securityLayer = .reality(realityConfig)
+                } else {
+                    securityLayer = .none
+                }
             } catch {
                 throw ProxyError.invalidURL("Reality configuration error: \(error.localizedDescription)")
             }
-        }
-
-        var tlsConfiguration: TLSConfiguration? = nil
-        if security == "tls" {
+        } else if security == "tls" {
             do {
-                tlsConfiguration = try TLSConfiguration.parse(from: params, serverAddress: host)
+                if let tlsConfig = try TLSConfiguration.parse(from: params, serverAddress: host) {
+                    securityLayer = .tls(tlsConfig)
+                } else {
+                    securityLayer = .none
+                }
             } catch {
                 throw ProxyError.invalidURL("TLS configuration error: \(error.localizedDescription)")
             }
+        } else {
+            securityLayer = .none
         }
 
-        // Parse transport configurations (pass TLS/Reality server names for host fallback)
-        let (wsConfig, huConfig, xhttpConfig) = parseTransportConfigs(from: params, transport: transport, serverAddress: host, tlsServerName: tlsConfiguration?.serverName, realityServerName: realityConfiguration?.serverName)
+        // Parse transport layer
+        let transportLayer = parseTransportLayer(from: params, transport: transportStr, serverAddress: host, securityLayer: securityLayer)
 
         // Parse mux and xudp flags (default true, matching Xray-core behavior)
         let muxEnabled = params["mux"].map { $0 != "false" && $0 != "0" } ?? true
@@ -118,16 +125,9 @@ extension ProxyConfiguration {
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
-            uuid: uuid,
-            encryption: encryption,
-            transport: transport,
-            flow: flow,
-            security: security,
-            tls: tlsConfiguration,
-            reality: realityConfiguration,
-            websocket: wsConfig,
-            httpUpgrade: huConfig,
-            xhttp: xhttpConfig,
+            outbound: .vless(uuid: uuid, encryption: encryption, flow: flow),
+            transportLayer: transportLayer,
+            securityLayer: securityLayer,
             testseed: testseed,
             muxEnabled: muxEnabled,
             xudpEnabled: xudpEnabled
@@ -204,31 +204,25 @@ extension ProxyConfiguration {
         }
 
         let params = parseQueryParams(queryString)
-        let transport = params["type"] ?? "tcp"
+        let transportStr = params["type"] ?? "tcp"
         let security = params["security"] ?? "none"
 
-        var tlsConfiguration: TLSConfiguration? = nil
-        if security == "tls" {
-            tlsConfiguration = try TLSConfiguration.parse(from: params, serverAddress: host)
+        let securityLayer: SecurityLayer
+        if security == "tls", let tlsConfig = try TLSConfiguration.parse(from: params, serverAddress: host) {
+            securityLayer = .tls(tlsConfig)
+        } else {
+            securityLayer = .none
         }
 
-        let (wsConfig, huConfig, xhttpConfig) = parseTransportConfigs(from: params, transport: transport, serverAddress: host, tlsServerName: tlsConfiguration?.serverName)
+        let transportLayer = parseTransportLayer(from: params, transport: transportStr, serverAddress: host, securityLayer: securityLayer)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
-            uuid: UUID(), // placeholder, not used for SS
-            encryption: "none",
-            transport: transport,
-            security: security,
-            tls: tlsConfiguration,
-            websocket: wsConfig,
-            httpUpgrade: huConfig,
-            xhttp: xhttpConfig,
-            outboundProtocol: .shadowsocks,
-            ssPassword: password,
-            ssMethod: method
+            outbound: .shadowsocks(password: password, method: method),
+            transportLayer: transportLayer,
+            securityLayer: securityLayer
         )
     }
 
@@ -282,35 +276,27 @@ extension ProxyConfiguration {
         // Parse host:port
         let (host, port) = try parseHostPort(serverPart)
 
+        let outbound: Outbound
         switch scheme {
         case "https":
             let proto = protocolOverride ?? .http2
-            return ProxyConfiguration(
-                name: fragmentName ?? "Untitled",
-                serverAddress: host,
-                serverPort: port,
-                uuid: UUID(), // placeholder, not used for naive
-                encryption: "none",
-                outboundProtocol: proto,
-                http11Username: proto == .http11 ? username : nil,
-                http11Password: proto == .http11 ? password : nil,
-                http2Username: proto == .http2 ? username : nil,
-                http2Password: proto == .http2 ? password : nil
-            )
+            switch proto {
+            case .http11: outbound = .http11(username: username, password: password)
+            case .http2:  outbound = .http2(username: username, password: password)
+            default:      outbound = .http2(username: username, password: password)
+            }
         case "quic":
-            return ProxyConfiguration(
-                name: fragmentName ?? "Untitled",
-                serverAddress: host,
-                serverPort: port,
-                uuid: UUID(), // placeholder, not used for naive
-                encryption: "none",
-                outboundProtocol: .http3,
-                http3Username: username,
-                http3Password: password
-            )
+            outbound = .http3(username: username, password: password)
         default:
             throw ProxyError.invalidURL("Naive URL must start with https:// or quic://")
         }
+
+        return ProxyConfiguration(
+            name: fragmentName ?? "Untitled",
+            serverAddress: host,
+            serverPort: port,
+            outbound: outbound
+        )
     }
 
     /// Parse a SOCKS5 URL into configuration.
@@ -368,11 +354,7 @@ extension ProxyConfiguration {
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
-            uuid: UUID(), // placeholder, not used for SOCKS5
-            encryption: "none",
-            outboundProtocol: .socks5,
-            socks5Username: username,
-            socks5Password: password
+            outbound: .socks5(username: username, password: password)
         )
     }
 
@@ -393,30 +375,38 @@ extension ProxyConfiguration {
         return params
     }
 
-    /// Parses transport-specific configurations from URL parameters.
-    private static func parseTransportConfigs(
+    /// Parses transport layer from URL parameters.
+    private static func parseTransportLayer(
         from params: [String: String],
         transport: String,
         serverAddress: String,
-        tlsServerName: String? = nil,
-        realityServerName: String? = nil
-    ) -> (WebSocketConfiguration?, HTTPUpgradeConfiguration?, XHTTPConfiguration?) {
-        var wsConfig: WebSocketConfiguration? = nil
-        if transport == "ws" {
-            wsConfig = WebSocketConfiguration.parse(from: params, serverAddress: serverAddress)
+        securityLayer: SecurityLayer
+    ) -> TransportLayer {
+        switch transport {
+        case "ws":
+            if let config = WebSocketConfiguration.parse(from: params, serverAddress: serverAddress) {
+                return .ws(config)
+            }
+            return .tcp
+        case "httpupgrade":
+            if let config = HTTPUpgradeConfiguration.parse(from: params, serverAddress: serverAddress) {
+                return .httpUpgrade(config)
+            }
+            return .tcp
+        case "xhttp":
+            let tlsServerName: String?
+            if case .tls(let tls) = securityLayer { tlsServerName = tls.serverName }
+            else { tlsServerName = nil }
+            let realityServerName: String?
+            if case .reality(let reality) = securityLayer { realityServerName = reality.serverName }
+            else { realityServerName = nil }
+            if let config = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress, tlsServerName: tlsServerName, realityServerName: realityServerName) {
+                return .xhttp(config)
+            }
+            return .tcp
+        default:
+            return .tcp
         }
-
-        var huConfig: HTTPUpgradeConfiguration? = nil
-        if transport == "httpupgrade" {
-            huConfig = HTTPUpgradeConfiguration.parse(from: params, serverAddress: serverAddress)
-        }
-
-        var xhttpConfig: XHTTPConfiguration? = nil
-        if transport == "xhttp" {
-            xhttpConfig = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress, tlsServerName: tlsServerName, realityServerName: realityServerName)
-        }
-
-        return (wsConfig, huConfig, xhttpConfig)
     }
 
     /// Pads a base64 string to a multiple of 4 characters.

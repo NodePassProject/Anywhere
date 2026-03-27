@@ -260,22 +260,12 @@ class VPNViewModel: ObservableObject {
             name: chain.name,
             serverAddress: exitProxy.serverAddress,
             serverPort: exitProxy.serverPort,
-            uuid: exitProxy.uuid,
-            encryption: exitProxy.encryption,
-            transport: exitProxy.transport,
-            flow: exitProxy.flow,
-            security: exitProxy.security,
-            tls: exitProxy.tls,
-            reality: exitProxy.reality,
-            websocket: exitProxy.websocket,
-            httpUpgrade: exitProxy.httpUpgrade,
-            xhttp: exitProxy.xhttp,
+            outbound: exitProxy.outbound,
+            transportLayer: exitProxy.transportLayer,
+            securityLayer: exitProxy.securityLayer,
             testseed: exitProxy.testseed,
             muxEnabled: exitProxy.muxEnabled,
             xudpEnabled: exitProxy.xudpEnabled,
-            outboundProtocol: exitProxy.outboundProtocol,
-            ssPassword: exitProxy.ssPassword,
-            ssMethod: exitProxy.ssMethod,
             chain: chainProxies
         )
     }
@@ -315,19 +305,12 @@ class VPNViewModel: ObservableObject {
     func addSubscription(configurations newConfigurations: [ProxyConfiguration], subscription: Subscription) {
         for configuration in newConfigurations {
             let tagged = ProxyConfiguration(
-                id: configuration.id, name: configuration.name, serverAddress: configuration.serverAddress,
-                serverPort: configuration.serverPort, uuid: configuration.uuid, encryption: configuration.encryption,
-                transport: configuration.transport, flow: configuration.flow, security: configuration.security,
-                tls: configuration.tls, reality: configuration.reality, websocket: configuration.websocket,
-                httpUpgrade: configuration.httpUpgrade, xhttp: configuration.xhttp, testseed: configuration.testseed,
-                muxEnabled: configuration.muxEnabled, xudpEnabled: configuration.xudpEnabled,
+                id: configuration.id, name: configuration.name,
+                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
                 subscriptionId: subscription.id,
-                outboundProtocol: configuration.outboundProtocol,
-                ssPassword: configuration.ssPassword, ssMethod: configuration.ssMethod,
-                http11Username: configuration.http11Username, http11Password: configuration.http11Password,
-                http2Username: configuration.http2Username, http2Password: configuration.http2Password,
-                http3Username: configuration.http3Username, http3Password: configuration.http3Password,
-                socks5Username: configuration.socks5Username, socks5Password: configuration.socks5Password
+                outbound: configuration.outbound, transportLayer: configuration.transportLayer,
+                securityLayer: configuration.securityLayer, testseed: configuration.testseed,
+                muxEnabled: configuration.muxEnabled, xudpEnabled: configuration.xudpEnabled
             )
             store.add(tagged)
         }
@@ -368,19 +351,12 @@ class VPNViewModel: ObservableObject {
                 id = configuration.id
             }
             newConfigurations.append(ProxyConfiguration(
-                id: id, name: configuration.name, serverAddress: configuration.serverAddress,
-                serverPort: configuration.serverPort, uuid: configuration.uuid, encryption: configuration.encryption,
-                transport: configuration.transport, flow: configuration.flow, security: configuration.security,
-                tls: configuration.tls, reality: configuration.reality, websocket: configuration.websocket,
-                httpUpgrade: configuration.httpUpgrade, xhttp: configuration.xhttp, testseed: configuration.testseed,
-                muxEnabled: configuration.muxEnabled, xudpEnabled: configuration.xudpEnabled,
+                id: id, name: configuration.name,
+                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
                 subscriptionId: subscription.id,
-                outboundProtocol: configuration.outboundProtocol,
-                ssPassword: configuration.ssPassword, ssMethod: configuration.ssMethod,
-                http11Username: configuration.http11Username, http11Password: configuration.http11Password,
-                http2Username: configuration.http2Username, http2Password: configuration.http2Password,
-                http3Username: configuration.http3Username, http3Password: configuration.http3Password,
-                socks5Username: configuration.socks5Username, socks5Password: configuration.socks5Password
+                outbound: configuration.outbound, transportLayer: configuration.transportLayer,
+                securityLayer: configuration.securityLayer, testseed: configuration.testseed,
+                muxEnabled: configuration.muxEnabled, xudpEnabled: configuration.xudpEnabled
             ))
         }
 
@@ -864,23 +840,25 @@ class VPNViewModel: ObservableObject {
             "outboundProtocol": configuration.outboundProtocol.rawValue,
         ]
 
-        // Add Shadowsocks fields if present
-        if let ssPassword = configuration.ssPassword {
-            configurationDict["ssPassword"] = ssPassword
+        // Add protocol-specific credential fields
+        switch configuration.outbound {
+        case .vless: break
+        case .shadowsocks(let password, let method):
+            configurationDict["ssPassword"] = password
+            configurationDict["ssMethod"] = method
+        case .socks5(let username, let password):
+            if let username { configurationDict["socks5Username"] = username }
+            if let password { configurationDict["socks5Password"] = password }
+        case .http11(let username, let password):
+            configurationDict["http11Username"] = username
+            configurationDict["http11Password"] = password
+        case .http2(let username, let password):
+            configurationDict["http2Username"] = username
+            configurationDict["http2Password"] = password
+        case .http3(let username, let password):
+            configurationDict["http3Username"] = username
+            configurationDict["http3Password"] = password
         }
-        if let ssMethod = configuration.ssMethod {
-            configurationDict["ssMethod"] = ssMethod
-        }
-
-        // Add per-protocol credential fields if present
-        if let v = configuration.http11Username { configurationDict["http11Username"] = v }
-        if let v = configuration.http11Password { configurationDict["http11Password"] = v }
-        if let v = configuration.http2Username  { configurationDict["http2Username"] = v }
-        if let v = configuration.http2Password  { configurationDict["http2Password"] = v }
-        if let v = configuration.http3Username  { configurationDict["http3Username"] = v }
-        if let v = configuration.http3Password  { configurationDict["http3Password"] = v }
-        if let v = configuration.socks5Username { configurationDict["socks5Username"] = v }
-        if let v = configuration.socks5Password { configurationDict["socks5Password"] = v }
 
         // Add Reality configuration if present
         if let reality = configuration.reality {
