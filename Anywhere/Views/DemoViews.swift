@@ -14,14 +14,17 @@ import SwiftUI
 
 private let sampleSubscriptionId = UUID()
 
+private let dummyReality = SecurityLayer.reality(RealityConfiguration(serverName: "example.com", publicKey: Data(repeating: 0, count: 32), shortId: Data()))
+private let dummyTLS = SecurityLayer.tls(TLSConfiguration(serverName: "example.com"))
+
 private let sampleConfigurations: [ProxyConfiguration] = [
-    ProxyConfiguration(name: "Tokyo", serverAddress: "jp-tok.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "tcp", flow: "xtls-rprx-vision", security: "reality"),
-    ProxyConfiguration(name: "Seoul", serverAddress: "kr.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "ws", security: "tls"),
-    ProxyConfiguration(name: "US - New York", serverAddress: "us-ny.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "tcp", flow: "xtls-rprx-vision", security: "reality", subscriptionId: sampleSubscriptionId),
-    ProxyConfiguration(name: "US - Los Angeles", serverAddress: "us-la.example.com", serverPort: 443, uuid: UUID(), encryption: "none", transport: "tcp", flow: "xtls-rprx-vision", security: "reality", subscriptionId: sampleSubscriptionId),
-    ProxyConfiguration(name: "JP - Tokyo", serverAddress: "jp-tok.example.net", serverPort: 443, uuid: UUID(), encryption: "none", transport: "ws", security: "tls", subscriptionId: sampleSubscriptionId),
-    ProxyConfiguration(name: "DE - Frankfurt", serverAddress: "de-fra.example.net", serverPort: 443, uuid: UUID(), encryption: "none", transport: "httpupgrade", security: "tls", subscriptionId: sampleSubscriptionId),
-    ProxyConfiguration(name: "SG - Singapore", serverAddress: "sg.example.net", serverPort: 443, uuid: UUID(), encryption: "none", transport: "xhttp", security: "reality", subscriptionId: sampleSubscriptionId),
+    ProxyConfiguration(name: "Tokyo", serverAddress: "jp-tok.example.com", serverPort: 443, outbound: .vless(uuid: UUID(), encryption: "none", flow: "xtls-rprx-vision"), securityLayer: dummyReality),
+    ProxyConfiguration(name: "Seoul", serverAddress: "kr.example.com", serverPort: 443, outbound: .vless(uuid: UUID(), encryption: "none", flow: nil), transportLayer: .ws(WebSocketConfiguration(host: "kr.example.com", path: "/")), securityLayer: dummyTLS),
+    ProxyConfiguration(name: "US - New York", serverAddress: "us-ny.example.com", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: "xtls-rprx-vision"), securityLayer: dummyReality),
+    ProxyConfiguration(name: "US - Los Angeles", serverAddress: "us-la.example.com", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: "xtls-rprx-vision"), securityLayer: dummyReality),
+    ProxyConfiguration(name: "JP - Tokyo", serverAddress: "jp-tok.example.net", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: nil), transportLayer: .ws(WebSocketConfiguration(host: "jp-tok.example.net", path: "/")), securityLayer: dummyTLS),
+    ProxyConfiguration(name: "DE - Frankfurt", serverAddress: "de-fra.example.net", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: nil), transportLayer: .httpUpgrade(HTTPUpgradeConfiguration(host: "de-fra.example.net", path: "/")), securityLayer: dummyTLS),
+    ProxyConfiguration(name: "SG - Singapore", serverAddress: "sg.example.net", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: nil), transportLayer: .xhttp(XHTTPConfiguration(host: "sg.example.net", path: "/")), securityLayer: dummyReality),
 ]
 
 private let sampleSubscription = Subscription(

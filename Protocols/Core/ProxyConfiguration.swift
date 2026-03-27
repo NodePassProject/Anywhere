@@ -37,7 +37,43 @@ enum OutboundProtocol: String, Codable {
     }
 }
 
-/// Proxy configuration for VLESS and Shadowsocks outbound protocols.
+// MARK: - Outbound Protocol Configuration
+
+/// Type-safe outbound protocol with associated credentials and settings.
+/// Replaces the flat `outboundProtocol` + per-protocol credential fields.
+enum Outbound: Hashable {
+    case vless(uuid: UUID, encryption: String, flow: String?)
+    case shadowsocks(password: String, method: String)
+    case socks5(username: String?, password: String?)
+    case http11(username: String, password: String)
+    case http2(username: String, password: String)
+    case http3(username: String, password: String)
+}
+
+// MARK: - Transport Layer Configuration
+
+/// Type-safe transport layer (mutually exclusive).
+/// Replaces the flat `transport` string + optional transport configs.
+enum TransportLayer: Hashable {
+    case tcp
+    case ws(WebSocketConfiguration)
+    case httpUpgrade(HTTPUpgradeConfiguration)
+    case xhttp(XHTTPConfiguration)
+}
+
+// MARK: - Security Layer Configuration
+
+/// Type-safe security layer (mutually exclusive).
+/// Replaces the flat `security` string + optional security configs.
+enum SecurityLayer: Hashable {
+    case none
+    case tls(TLSConfiguration)
+    case reality(RealityConfiguration)
+}
+
+// MARK: - ProxyConfiguration
+
+/// Proxy configuration for all supported outbound protocols.
 struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let id: UUID
     let name: String
@@ -47,20 +83,14 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     /// routing use this IP instead of the domain name to avoid DNS-over-tunnel routing loops.
     /// Populated at connect time by the app; `nil` when `serverAddress` is already an IP.
     let resolvedIP: String?
-    let uuid: UUID
-    let encryption: String
-    /// Transport type: `"tcp"` (default), `"ws"`, `"httpupgrade"`, or `"xhttp"`.
-    let transport: String
-    let flow: String?
-    let security: String
-    let tls: TLSConfiguration?
-    let reality: RealityConfiguration?
-    /// WebSocket configuration when `transport == "ws"`.
-    let websocket: WebSocketConfiguration?
-    /// HTTP upgrade configuration when `transport == "httpupgrade"`.
-    let httpUpgrade: HTTPUpgradeConfiguration?
-    /// XHTTP configuration when `transport == "xhttp"`.
-    let xhttp: XHTTPConfiguration?
+    /// The subscription this configuration belongs to, if any.
+    let subscriptionId: UUID?
+    /// Protocol-specific settings and credentials.
+    let outbound: Outbound
+    /// Transport layer: TCP (default), WebSocket, HTTP Upgrade, or XHTTP.
+    let transportLayer: TransportLayer
+    /// Security layer: none (default), TLS, or Reality.
+    let securityLayer: SecurityLayer
     /// Vision padding seed: `[contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]`.
     /// Default `[900, 500, 900, 256]` matches Xray-core.
     let testseed: [UInt32]
@@ -70,31 +100,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     /// Whether to use XUDP (GlobalID-based flow identification) for muxed UDP.
     /// Only effective when `muxEnabled` is `true`. Default `true` matches Xray-core behavior.
     let xudpEnabled: Bool
-    /// The subscription this configuration belongs to, if any.
-    let subscriptionId: UUID?
-
-    /// The outbound protocol. Default `.vless`.
-    let outboundProtocol: OutboundProtocol
-    /// Shadowsocks password (only when `outboundProtocol == .shadowsocks`).
-    let ssPassword: String?
-    /// Shadowsocks method (e.g. "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305").
-    let ssMethod: String?
-    /// HTTP/1.1 CONNECT username (only when `outboundProtocol == .http11`).
-    let http11Username: String?
-    /// HTTP/1.1 CONNECT password (only when `outboundProtocol == .http11`).
-    let http11Password: String?
-    /// HTTP/2 CONNECT username (only when `outboundProtocol == .http2`).
-    let http2Username: String?
-    /// HTTP/2 CONNECT password (only when `outboundProtocol == .http2`).
-    let http2Password: String?
-    /// HTTP/3 CONNECT username (only when `outboundProtocol == .http3`).
-    let http3Username: String?
-    /// HTTP/3 CONNECT password (only when `outboundProtocol == .http3`).
-    let http3Password: String?
-    /// SOCKS5 username (only when `outboundProtocol == .socks5`).
-    let socks5Username: String?
-    /// SOCKS5 password (only when `outboundProtocol == .socks5`).
-    let socks5Password: String?
     /// Ordered list of proxy configurations to chain through before reaching this proxy's server.
     /// The first element is the outermost proxy (real TCP connection); the last tunnels to this proxy.
     /// `nil` or empty means a direct connection to the server.
@@ -104,26 +109,44 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     /// Used by opt-in first-hop dials (for example latency testing) and logging.
     var connectAddress: String { resolvedIP ?? serverAddress }
 
-    /// Username for the active protocol, or `nil` if not applicable.
-    var activeUsername: String? {
-        switch outboundProtocol {
-        case .http11: return http11Username
-        case .http2:  return http2Username
-        case .http3:  return http3Username
-        case .socks5: return socks5Username
-        default:      return nil
-        }
+    init(
+        id: UUID = UUID(),
+        name: String,
+        serverAddress: String,
+        serverPort: UInt16,
+        resolvedIP: String? = nil,
+        subscriptionId: UUID? = nil,
+        outbound: Outbound,
+        transportLayer: TransportLayer = .tcp,
+        securityLayer: SecurityLayer = .none,
+        testseed: [UInt32]? = nil,
+        muxEnabled: Bool = true,
+        xudpEnabled: Bool = true,
+        chain: [ProxyConfiguration]? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.serverAddress = serverAddress
+        self.serverPort = serverPort
+        self.resolvedIP = resolvedIP
+        self.subscriptionId = subscriptionId
+        self.outbound = outbound
+        self.transportLayer = transportLayer
+        self.securityLayer = securityLayer
+        self.testseed = (testseed?.count ?? 0) >= 4 ? testseed! : [900, 500, 900, 256]
+        self.muxEnabled = muxEnabled
+        self.xudpEnabled = xudpEnabled
+        self.chain = chain
     }
 
-    /// Password for the active protocol, or `nil` if not applicable.
-    var activePassword: String? {
-        switch outboundProtocol {
-        case .http11: return http11Password
-        case .http2:  return http2Password
-        case .http3:  return http3Password
-        case .socks5: return socks5Password
-        default:      return nil
-        }
+    /// Returns a copy with the given chain, preserving all other fields.
+    func withChain(_ chain: [ProxyConfiguration]?) -> ProxyConfiguration {
+        ProxyConfiguration(
+            id: id, name: name, serverAddress: serverAddress, serverPort: serverPort,
+            resolvedIP: resolvedIP, subscriptionId: subscriptionId,
+            outbound: outbound, transportLayer: transportLayer, securityLayer: securityLayer,
+            testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, chain: chain
+        )
     }
 
     /// Compares configuration content, ignoring `id`, `resolvedIP`, and `subscriptionId`.
@@ -132,126 +155,309 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         name == other.name &&
         serverAddress == other.serverAddress &&
         serverPort == other.serverPort &&
-        uuid == other.uuid &&
-        encryption == other.encryption &&
-        transport == other.transport &&
-        flow == other.flow &&
-        security == other.security &&
-        tls == other.tls &&
-        reality == other.reality &&
-        websocket == other.websocket &&
-        httpUpgrade == other.httpUpgrade &&
-        xhttp == other.xhttp &&
+        outbound == other.outbound &&
+        transportLayer == other.transportLayer &&
+        securityLayer == other.securityLayer &&
         testseed == other.testseed &&
         muxEnabled == other.muxEnabled &&
         xudpEnabled == other.xudpEnabled &&
-        outboundProtocol == other.outboundProtocol &&
-        ssPassword == other.ssPassword &&
-        ssMethod == other.ssMethod &&
-        http11Username == other.http11Username &&
-        http11Password == other.http11Password &&
-        http2Username == other.http2Username &&
-        http2Password == other.http2Password &&
-        http3Username == other.http3Username &&
-        http3Password == other.http3Password &&
-        socks5Username == other.socks5Username &&
-        socks5Password == other.socks5Password &&
         chain == other.chain
     }
 
-    init(id: UUID = UUID(), name: String, serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String? = nil, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, http11Username: String? = nil, http11Password: String? = nil, http2Username: String? = nil, http2Password: String? = nil, http3Username: String? = nil, http3Password: String? = nil, socks5Username: String? = nil, socks5Password: String? = nil, chain: [ProxyConfiguration]? = nil) {
-        self.id = id
-        self.name = name
-        self.serverAddress = serverAddress
-        self.serverPort = serverPort
-        self.resolvedIP = resolvedIP
-        self.uuid = uuid
-        self.encryption = encryption
-        self.transport = transport
-        self.flow = flow
-        self.security = security
-        self.tls = tls
-        self.reality = reality
-        self.websocket = websocket
-        self.httpUpgrade = httpUpgrade
-        self.xhttp = xhttp
-        self.testseed = (testseed?.count ?? 0) >= 4 ? testseed! : [900, 500, 900, 256]
-        self.muxEnabled = muxEnabled
-        self.xudpEnabled = xudpEnabled
-        self.subscriptionId = subscriptionId
-        self.outboundProtocol = outboundProtocol
-        self.ssPassword = ssPassword
-        self.ssMethod = ssMethod
-        self.http11Username = http11Username
-        self.http11Password = http11Password
-        self.http2Username = http2Username
-        self.http2Password = http2Password
-        self.http3Username = http3Username
-        self.http3Password = http3Password
-        self.socks5Username = socks5Username
-        self.socks5Password = socks5Password
-        self.chain = chain
+    // MARK: - Backward-Compatible Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, serverAddress, serverPort, resolvedIP, subscriptionId
+        case outboundProtocol, uuid, encryption, flow
+        case ssPassword, ssMethod
+        case http11Username, http11Password
+        case http2Username, http2Password
+        case http3Username, http3Password
+        case socks5Username, socks5Password
+        case transport, websocket, httpUpgrade, xhttp
+        case security, tls, reality
+        case testseed, muxEnabled, xudpEnabled
+        case chain
     }
 
-    /// Returns a copy with the given chain, preserving all other fields.
-    func withChain(_ chain: [ProxyConfiguration]?) -> ProxyConfiguration {
-        ProxyConfiguration(
-            id: id, name: name, serverAddress: serverAddress, serverPort: serverPort,
-            uuid: uuid, encryption: encryption, transport: transport, flow: flow,
-            security: security, tls: tls, reality: reality, websocket: websocket,
-            httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed,
-            muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP,
-            subscriptionId: subscriptionId, outboundProtocol: outboundProtocol,
-            ssPassword: ssPassword, ssMethod: ssMethod,
-            http11Username: http11Username, http11Password: http11Password,
-            http2Username: http2Username, http2Password: http2Password,
-            http3Username: http3Username, http3Password: http3Password,
-            socks5Username: socks5Username, socks5Password: socks5Password,
-            chain: chain
-        )
-    }
-
-    /// Convenience initializer that defaults the name to `"Untitled"`.
-    init(serverAddress: String, serverPort: UInt16, uuid: UUID, encryption: String, transport: String = "tcp", flow: String?, security: String = "none", tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil, websocket: WebSocketConfiguration? = nil, httpUpgrade: HTTPUpgradeConfiguration? = nil, xhttp: XHTTPConfiguration? = nil, testseed: [UInt32]? = nil, muxEnabled: Bool = true, xudpEnabled: Bool = true, resolvedIP: String? = nil, subscriptionId: UUID? = nil, outboundProtocol: OutboundProtocol = .vless, ssPassword: String? = nil, ssMethod: String? = nil, http11Username: String? = nil, http11Password: String? = nil, http2Username: String? = nil, http2Password: String? = nil, http3Username: String? = nil, http3Password: String? = nil, socks5Username: String? = nil, socks5Password: String? = nil, chain: [ProxyConfiguration]? = nil) {
-        self.init(name: "Untitled", serverAddress: serverAddress, serverPort: serverPort, uuid: uuid, encryption: encryption, transport: transport, flow: flow, security: security, tls: tls, reality: reality, websocket: websocket, httpUpgrade: httpUpgrade, xhttp: xhttp, testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, resolvedIP: resolvedIP, subscriptionId: subscriptionId, outboundProtocol: outboundProtocol, ssPassword: ssPassword, ssMethod: ssMethod, http11Username: http11Username, http11Password: http11Password, http2Username: http2Username, http2Password: http2Password, http3Username: http3Username, http3Password: http3Password, socks5Username: socks5Username, socks5Password: socks5Password, chain: chain)
-    }
-
-    /// Custom decoder for backward compatibility (old configs may lack newer fields like
-    /// `xudpEnabled` or `resolvedIP`). Uses `decodeIfPresent` with sensible defaults.
+    /// Custom decoder for backward compatibility. Reads flat legacy keys and
+    /// reconstructs the `Outbound`, `TransportLayer`, and `SecurityLayer` enums.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+
         id = try container.decode(UUID.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
         serverAddress = try container.decode(String.self, forKey: .serverAddress)
         serverPort = try container.decode(UInt16.self, forKey: .serverPort)
         resolvedIP = try container.decodeIfPresent(String.self, forKey: .resolvedIP)
-        uuid = try container.decode(UUID.self, forKey: .uuid)
-        encryption = try container.decode(String.self, forKey: .encryption)
-        transport = try container.decode(String.self, forKey: .transport)
-        flow = try container.decodeIfPresent(String.self, forKey: .flow)
-        security = try container.decode(String.self, forKey: .security)
-        tls = try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)
-        reality = try container.decodeIfPresent(RealityConfiguration.self, forKey: .reality)
-        websocket = try container.decodeIfPresent(WebSocketConfiguration.self, forKey: .websocket)
-        httpUpgrade = try container.decodeIfPresent(HTTPUpgradeConfiguration.self, forKey: .httpUpgrade)
-        xhttp = try container.decodeIfPresent(XHTTPConfiguration.self, forKey: .xhttp)
+        subscriptionId = try container.decodeIfPresent(UUID.self, forKey: .subscriptionId)
+
+        // Reconstruct outbound from flat protocol-specific fields
+        let proto = try container.decodeIfPresent(OutboundProtocol.self, forKey: .outboundProtocol) ?? .vless
+        switch proto {
+        case .vless:
+            outbound = .vless(
+                uuid: try container.decode(UUID.self, forKey: .uuid),
+                encryption: try container.decode(String.self, forKey: .encryption),
+                flow: try container.decodeIfPresent(String.self, forKey: .flow)
+            )
+        case .shadowsocks:
+            outbound = .shadowsocks(
+                password: try container.decodeIfPresent(String.self, forKey: .ssPassword) ?? "",
+                method: try container.decodeIfPresent(String.self, forKey: .ssMethod) ?? ""
+            )
+        case .socks5:
+            outbound = .socks5(
+                username: try container.decodeIfPresent(String.self, forKey: .socks5Username),
+                password: try container.decodeIfPresent(String.self, forKey: .socks5Password)
+            )
+        case .http11:
+            outbound = .http11(
+                username: try container.decodeIfPresent(String.self, forKey: .http11Username) ?? "",
+                password: try container.decodeIfPresent(String.self, forKey: .http11Password) ?? ""
+            )
+        case .http2:
+            outbound = .http2(
+                username: try container.decodeIfPresent(String.self, forKey: .http2Username) ?? "",
+                password: try container.decodeIfPresent(String.self, forKey: .http2Password) ?? ""
+            )
+        case .http3:
+            outbound = .http3(
+                username: try container.decodeIfPresent(String.self, forKey: .http3Username) ?? "",
+                password: try container.decodeIfPresent(String.self, forKey: .http3Password) ?? ""
+            )
+        }
+
+        // Reconstruct transport from flat fields
+        let transportStr = try container.decodeIfPresent(String.self, forKey: .transport) ?? "tcp"
+        switch transportStr {
+        case "ws":
+            transportLayer = (try container.decodeIfPresent(WebSocketConfiguration.self, forKey: .websocket)).map { .ws($0) } ?? .tcp
+        case "httpupgrade":
+            transportLayer = (try container.decodeIfPresent(HTTPUpgradeConfiguration.self, forKey: .httpUpgrade)).map { .httpUpgrade($0) } ?? .tcp
+        case "xhttp":
+            transportLayer = (try container.decodeIfPresent(XHTTPConfiguration.self, forKey: .xhttp)).map { .xhttp($0) } ?? .tcp
+        default:
+            transportLayer = .tcp
+        }
+
+        // Reconstruct security from flat fields
+        let securityStr = try container.decodeIfPresent(String.self, forKey: .security) ?? "none"
+        switch securityStr {
+        case "tls":
+            securityLayer = (try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)).map { .tls($0) } ?? .none
+        case "reality":
+            securityLayer = (try container.decodeIfPresent(RealityConfiguration.self, forKey: .reality)).map { .reality($0) } ?? .none
+        default:
+            securityLayer = .none
+        }
+
         let ts = try container.decodeIfPresent([UInt32].self, forKey: .testseed)
         testseed = (ts?.count ?? 0) >= 4 ? ts! : [900, 500, 900, 256]
         muxEnabled = try container.decodeIfPresent(Bool.self, forKey: .muxEnabled) ?? true
         xudpEnabled = try container.decodeIfPresent(Bool.self, forKey: .xudpEnabled) ?? true
-        subscriptionId = try container.decodeIfPresent(UUID.self, forKey: .subscriptionId)
-        outboundProtocol = try container.decodeIfPresent(OutboundProtocol.self, forKey: .outboundProtocol) ?? .vless
-        ssPassword = try container.decodeIfPresent(String.self, forKey: .ssPassword)
-        ssMethod = try container.decodeIfPresent(String.self, forKey: .ssMethod)
-        http11Username = try container.decodeIfPresent(String.self, forKey: .http11Username)
-        http11Password = try container.decodeIfPresent(String.self, forKey: .http11Password)
-        http2Username = try container.decodeIfPresent(String.self, forKey: .http2Username)
-        http2Password = try container.decodeIfPresent(String.self, forKey: .http2Password)
-        http3Username = try container.decodeIfPresent(String.self, forKey: .http3Username)
-        http3Password = try container.decodeIfPresent(String.self, forKey: .http3Password)
-        socks5Username = try container.decodeIfPresent(String.self, forKey: .socks5Username)
-        socks5Password = try container.decodeIfPresent(String.self, forKey: .socks5Password)
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
+    }
+
+    /// Custom encoder that flattens enums back to legacy JSON keys for backward compatibility.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(serverAddress, forKey: .serverAddress)
+        try container.encode(serverPort, forKey: .serverPort)
+        try container.encodeIfPresent(resolvedIP, forKey: .resolvedIP)
+        try container.encodeIfPresent(subscriptionId, forKey: .subscriptionId)
+
+        // Flatten outbound to legacy keys
+        try container.encode(outboundProtocol, forKey: .outboundProtocol)
+        switch outbound {
+        case .vless(let uuid, let encryption, let flow):
+            try container.encode(uuid, forKey: .uuid)
+            try container.encode(encryption, forKey: .encryption)
+            try container.encodeIfPresent(flow, forKey: .flow)
+        case .shadowsocks(let password, let method):
+            try container.encode(id, forKey: .uuid)
+            try container.encode("none", forKey: .encryption)
+            try container.encode(password, forKey: .ssPassword)
+            try container.encode(method, forKey: .ssMethod)
+        case .socks5(let username, let password):
+            try container.encode(id, forKey: .uuid)
+            try container.encode("none", forKey: .encryption)
+            try container.encodeIfPresent(username, forKey: .socks5Username)
+            try container.encodeIfPresent(password, forKey: .socks5Password)
+        case .http11(let username, let password):
+            try container.encode(id, forKey: .uuid)
+            try container.encode("none", forKey: .encryption)
+            try container.encode(username, forKey: .http11Username)
+            try container.encode(password, forKey: .http11Password)
+        case .http2(let username, let password):
+            try container.encode(id, forKey: .uuid)
+            try container.encode("none", forKey: .encryption)
+            try container.encode(username, forKey: .http2Username)
+            try container.encode(password, forKey: .http2Password)
+        case .http3(let username, let password):
+            try container.encode(id, forKey: .uuid)
+            try container.encode("none", forKey: .encryption)
+            try container.encode(username, forKey: .http3Username)
+            try container.encode(password, forKey: .http3Password)
+        }
+
+        // Flatten transport to legacy keys
+        try container.encode(transport, forKey: .transport)
+        switch transportLayer {
+        case .tcp: break
+        case .ws(let config): try container.encode(config, forKey: .websocket)
+        case .httpUpgrade(let config): try container.encode(config, forKey: .httpUpgrade)
+        case .xhttp(let config): try container.encode(config, forKey: .xhttp)
+        }
+
+        // Flatten security to legacy keys
+        try container.encode(security, forKey: .security)
+        switch securityLayer {
+        case .none: break
+        case .tls(let config): try container.encode(config, forKey: .tls)
+        case .reality(let config): try container.encode(config, forKey: .reality)
+        }
+
+        try container.encode(testseed, forKey: .testseed)
+        try container.encode(muxEnabled, forKey: .muxEnabled)
+        try container.encode(xudpEnabled, forKey: .xudpEnabled)
+        try container.encodeIfPresent(chain, forKey: .chain)
+    }
+}
+
+// MARK: - Compatibility Bridges
+//
+// Computed properties that expose the old flat-field API. Consumers that only
+// *read* individual fields can continue to use these without changes.
+
+extension ProxyConfiguration {
+
+    /// Protocol type discriminator.
+    var outboundProtocol: OutboundProtocol {
+        switch outbound {
+        case .vless:        .vless
+        case .shadowsocks:  .shadowsocks
+        case .socks5:       .socks5
+        case .http11:       .http11
+        case .http2:        .http2
+        case .http3:        .http3
+        }
+    }
+
+    /// VLESS UUID (returns `id` as stable fallback for non-VLESS protocols).
+    var uuid: UUID {
+        if case .vless(let uuid, _, _) = outbound { return uuid }
+        return id
+    }
+
+    /// Encryption type (always `"none"` for non-VLESS).
+    var encryption: String {
+        if case .vless(_, let encryption, _) = outbound { return encryption }
+        return "none"
+    }
+
+    /// VLESS flow (e.g. `"xtls-rprx-vision"`). `nil` for non-VLESS.
+    var flow: String? {
+        if case .vless(_, _, let flow) = outbound { return flow }
+        return nil
+    }
+
+    /// Shadowsocks password. `nil` for non-Shadowsocks.
+    var ssPassword: String? {
+        if case .shadowsocks(let password, _) = outbound { return password }
+        return nil
+    }
+
+    /// Shadowsocks method. `nil` for non-Shadowsocks.
+    var ssMethod: String? {
+        if case .shadowsocks(_, let method) = outbound { return method }
+        return nil
+    }
+
+    /// SOCKS5 username. `nil` for non-SOCKS5.
+    var socks5Username: String? {
+        if case .socks5(let username, _) = outbound { return username }
+        return nil
+    }
+
+    /// SOCKS5 password. `nil` for non-SOCKS5.
+    var socks5Password: String? {
+        if case .socks5(_, let password) = outbound { return password }
+        return nil
+    }
+
+    /// Username for the active protocol, or `nil` if not applicable.
+    var activeUsername: String? {
+        switch outbound {
+        case .http11(let u, _): u
+        case .http2(let u, _):  u
+        case .http3(let u, _):  u
+        case .socks5(let u, _): u
+        default: nil
+        }
+    }
+
+    /// Password for the active protocol, or `nil` if not applicable.
+    var activePassword: String? {
+        switch outbound {
+        case .http11(_, let p): p
+        case .http2(_, let p):  p
+        case .http3(_, let p):  p
+        case .socks5(_, let p): p
+        default: nil
+        }
+    }
+
+    /// Transport type string.
+    var transport: String {
+        switch transportLayer {
+        case .tcp:          "tcp"
+        case .ws:           "ws"
+        case .httpUpgrade:  "httpupgrade"
+        case .xhttp:        "xhttp"
+        }
+    }
+
+    /// Security type string.
+    var security: String {
+        switch securityLayer {
+        case .none:     "none"
+        case .tls:      "tls"
+        case .reality:  "reality"
+        }
+    }
+
+    /// TLS configuration, if active.
+    var tls: TLSConfiguration? {
+        if case .tls(let config) = securityLayer { return config }
+        return nil
+    }
+
+    /// Reality configuration, if active.
+    var reality: RealityConfiguration? {
+        if case .reality(let config) = securityLayer { return config }
+        return nil
+    }
+
+    /// WebSocket configuration, if active.
+    var websocket: WebSocketConfiguration? {
+        if case .ws(let config) = transportLayer { return config }
+        return nil
+    }
+
+    /// HTTP upgrade configuration, if active.
+    var httpUpgrade: HTTPUpgradeConfiguration? {
+        if case .httpUpgrade(let config) = transportLayer { return config }
+        return nil
+    }
+
+    /// XHTTP configuration, if active.
+    var xhttp: XHTTPConfiguration? {
+        if case .xhttp(let config) = transportLayer { return config }
+        return nil
     }
 }
 

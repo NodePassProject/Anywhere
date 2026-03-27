@@ -398,12 +398,19 @@ class TVProxyEditorViewController: UITableViewController {
             fingerprint = reality.fingerprint
         }
 
-        ssPassword = config.ssPassword ?? ""
-        ssMethod = config.ssMethod ?? "aes-128-gcm"
-        naiveUsername = config.activeUsername ?? ""
-        naivePassword = config.activePassword ?? ""
-        socks5Username = config.socks5Username ?? ""
-        socks5Password = config.socks5Password ?? ""
+        switch config.outbound {
+        case .shadowsocks(let password, let method):
+            ssPassword = password
+            ssMethod = method
+        case .socks5(let user, let pass):
+            socks5Username = user ?? ""
+            socks5Password = pass ?? ""
+        case .http11(let user, let pass), .http2(let user, let pass), .http3(let user, let pass):
+            naiveUsername = user
+            naivePassword = pass
+        case .vless:
+            break
+        }
     }
 
     // MARK: - Actions
@@ -464,36 +471,48 @@ class TVProxyEditorViewController: UITableViewController {
         let bareAddress = serverAddress.hasPrefix("[") && serverAddress.hasSuffix("]")
             ? String(serverAddress.dropFirst().dropLast()) : serverAddress
 
+        let outbound: Outbound
+        switch selectedProtocol {
+        case .vless:
+            outbound = .vless(uuid: parsedUUID, encryption: encryption, flow: flow.isEmpty ? nil : flow)
+        case .shadowsocks:
+            outbound = .shadowsocks(password: ssPassword, method: ssMethod)
+        case .socks5:
+            outbound = .socks5(
+                username: socks5Username.isEmpty ? nil : socks5Username,
+                password: socks5Password.isEmpty ? nil : socks5Password
+            )
+        case .http11:
+            outbound = .http11(username: naiveUsername, password: naivePassword)
+        case .http2:
+            outbound = .http2(username: naiveUsername, password: naivePassword)
+        case .http3:
+            outbound = .http3(username: naiveUsername, password: naivePassword)
+        }
+
+        let transportLayer: TransportLayer
+        if let wsConfig { transportLayer = .ws(wsConfig) }
+        else if let huConfig { transportLayer = .httpUpgrade(huConfig) }
+        else if let xhttpConfig { transportLayer = .xhttp(xhttpConfig) }
+        else { transportLayer = .tcp }
+
+        let securityLayer: SecurityLayer
+        if let realityConfiguration { securityLayer = .reality(realityConfiguration) }
+        else if let tlsConfiguration { securityLayer = .tls(tlsConfiguration) }
+        else { securityLayer = .none }
+
         let config = ProxyConfiguration(
             id: existingConfiguration?.id ?? UUID(),
             name: name,
             serverAddress: bareAddress,
             serverPort: port,
-            uuid: parsedUUID,
-            encryption: encryption,
-            transport: transport,
-            flow: flow.isEmpty ? nil : flow,
-            security: security,
-            tls: tlsConfiguration,
-            reality: realityConfiguration,
-            websocket: wsConfig,
-            httpUpgrade: huConfig,
-            xhttp: xhttpConfig,
+            subscriptionId: existingConfiguration?.subscriptionId,
+            outbound: outbound,
+            transportLayer: transportLayer,
+            securityLayer: securityLayer,
             testseed: existingConfiguration?.testseed,
             muxEnabled: muxEnabled,
-            xudpEnabled: xudpEnabled,
-            subscriptionId: existingConfiguration?.subscriptionId,
-            outboundProtocol: selectedProtocol,
-            ssPassword: isShadowsocks ? ssPassword : nil,
-            ssMethod: isShadowsocks ? ssMethod : nil,
-            http11Username: selectedProtocol == .http11 ? naiveUsername : nil,
-            http11Password: selectedProtocol == .http11 ? naivePassword : nil,
-            http2Username: selectedProtocol == .http2 ? naiveUsername : nil,
-            http2Password: selectedProtocol == .http2 ? naivePassword : nil,
-            http3Username: selectedProtocol == .http3 ? naiveUsername : nil,
-            http3Password: selectedProtocol == .http3 ? naivePassword : nil,
-            socks5Username: isSOCKS5 && !socks5Username.isEmpty ? socks5Username : nil,
-            socks5Password: isSOCKS5 && !socks5Password.isEmpty ? socks5Password : nil
+            xudpEnabled: xudpEnabled
         )
 
         onSave(config)
