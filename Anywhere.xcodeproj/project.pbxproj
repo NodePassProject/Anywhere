@@ -10,6 +10,9 @@
 		CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */; };
 		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		CB2B54B22F6C3E2800F24AC2 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		CB2B9C922F77722600F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C912F77722600F24AC2 /* BLAKE3 */; };
+		CB2B9C942F77724D00F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C932F77724D00F24AC2 /* BLAKE3 */; };
+		CB2B9C962F77725900F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C952F77725900F24AC2 /* BLAKE3 */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -138,9 +141,6 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AWCore.swift,
-				Blake3/blake3_dispatch.c,
-				Blake3/blake3_portable.c,
-				Blake3/blake3.c,
 				Blake3/Blake3Hasher.swift,
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
@@ -214,6 +214,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CB2B9C942F77724D00F24AC2 /* BLAKE3 in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -221,6 +222,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CB2B9C922F77722600F24AC2 /* BLAKE3 in Frameworks */,
 				CB1C107A2F23B82F00B74CD8 /* NetworkExtension.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -229,6 +231,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				CB2B9C962F77725900F24AC2 /* BLAKE3 in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -292,6 +295,7 @@
 			);
 			name = Anywhere;
 			packageProductDependencies = (
+				CB2B9C932F77724D00F24AC2 /* BLAKE3 */,
 			);
 			productName = Anywhere;
 			productReference = CB1C10652F23B81500B74CD8 /* Anywhere.app */;
@@ -315,6 +319,7 @@
 			);
 			name = "Anywhere Network Extension";
 			packageProductDependencies = (
+				CB2B9C912F77722600F24AC2 /* BLAKE3 */,
 			);
 			productName = "Network Extension";
 			productReference = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */;
@@ -342,6 +347,7 @@
 			);
 			name = "Anywhere TV";
 			packageProductDependencies = (
+				CB2B9C952F77725900F24AC2 /* BLAKE3 */,
 			);
 			productName = Anywhere;
 			productReference = CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */;
@@ -385,6 +391,9 @@
 			);
 			mainGroup = CB1C105C2F23B81500B74CD8;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CB1C10662F23B81500B74CD8 /* Products */;
 			projectDirPath = "";
@@ -589,7 +598,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 143;
+				CURRENT_PROJECT_VERSION = 144;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -634,7 +643,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 143;
+				CURRENT_PROJECT_VERSION = 144;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -678,7 +687,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 143;
+				CURRENT_PROJECT_VERSION = 144;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -718,7 +727,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 143;
+				CURRENT_PROJECT_VERSION = 144;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -759,7 +768,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 143;
+				CURRENT_PROJECT_VERSION = 144;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"HAVE_CONFIG_H=1",
@@ -801,7 +810,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 143;
+				CURRENT_PROJECT_VERSION = 144;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"HAVE_CONFIG_H=1",
@@ -876,6 +885,35 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Argsment/BLAKE3.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		CB2B9C912F77722600F24AC2 /* BLAKE3 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
+			productName = BLAKE3;
+		};
+		CB2B9C932F77724D00F24AC2 /* BLAKE3 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
+			productName = BLAKE3;
+		};
+		CB2B9C952F77725900F24AC2 /* BLAKE3 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
+			productName = BLAKE3;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = CB1C105D2F23B81500B74CD8 /* Project object */;
 }
