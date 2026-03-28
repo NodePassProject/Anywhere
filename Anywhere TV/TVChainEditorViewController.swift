@@ -42,6 +42,8 @@ class TVChainEditorViewController: UITableViewController {
         super.viewDidLoad()
         title = existingChain != nil ? String(localized: "Edit Chain") : String(localized: "New Chain")
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 80
 
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped))
         navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .save, target: self, action: #selector(saveTapped))
@@ -165,6 +167,20 @@ class TVChainEditorViewController: UITableViewController {
         }
 
         return cell
+    }
+
+    // MARK: - Focus
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        coordinator.addCoordinatedAnimations {
+            if let cell = context.nextFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .light
+            }
+            if let cell = context.previouslyFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .unspecified
+            }
+        }
     }
 
     // MARK: - Selection
@@ -298,6 +314,8 @@ class TVProxyPickerViewController: UITableViewController {
         super.viewDidLoad()
         title = String(localized: "Select Proxy")
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 80
 
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped)
@@ -323,6 +341,18 @@ class TVProxyPickerViewController: UITableViewController {
         cell.contentConfiguration = content
 
         return cell
+    }
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        coordinator.addCoordinatedAnimations {
+            if let cell = context.nextFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .light
+            }
+            if let cell = context.previouslyFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .unspecified
+            }
+        }
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {

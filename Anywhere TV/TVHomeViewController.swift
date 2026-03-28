@@ -24,13 +24,12 @@ class TVHomeViewController: UIViewController {
     private let powerButton = UIButton(type: .custom)
     private let powerIcon = UIImageView()
     private let activityIndicator = UIActivityIndicatorView(style: .large)
-    private let glowLayer = CALayer()
 
     // Status
     private let statusLabel = UILabel()
 
     // Traffic stats
-    private let statsCard = UIView()
+    private let statsButton = UIButton(type: .custom)
     private let uploadIcon = UIImageView()
     private let uploadLabel = UILabel()
     private let downloadIcon = UIImageView()
@@ -108,37 +107,25 @@ class TVHomeViewController: UIViewController {
     private func setupPowerButton() {
         powerButton.translatesAutoresizingMaskIntoConstraints = false
         powerButton.backgroundColor = UIColor.white.withAlphaComponent(0.15)
-        powerButton.layer.cornerRadius = 90
+        powerButton.layer.cornerRadius = 130
         powerButton.clipsToBounds = false
         powerButton.addTarget(self, action: #selector(powerButtonTapped), for: .primaryActionTriggered)
 
-        // Glow layer behind button
-        glowLayer.frame = CGRect(x: -30, y: -30, width: 240, height: 240)
-        glowLayer.cornerRadius = 120
-        glowLayer.backgroundColor = UIColor.cyan.withAlphaComponent(0.15).cgColor
-        glowLayer.shadowColor = UIColor.cyan.cgColor
-        glowLayer.shadowRadius = 40
-        glowLayer.shadowOpacity = 0
-        glowLayer.shadowOffset = .zero
-        powerButton.layer.insertSublayer(glowLayer, at: 0)
-
         // Power icon
-        let iconConfig = UIImage.SymbolConfiguration(pointSize: 60, weight: .light)
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 90, weight: .light)
         powerIcon.image = UIImage(systemName: "power", withConfiguration: iconConfig)
-        powerIcon.tintColor = .systemCyan
         powerIcon.contentMode = .scaleAspectFit
         powerIcon.translatesAutoresizingMaskIntoConstraints = false
         powerButton.addSubview(powerIcon)
 
         // Activity indicator
         activityIndicator.hidesWhenStopped = true
-        activityIndicator.color = .systemCyan
         activityIndicator.translatesAutoresizingMaskIntoConstraints = false
         powerButton.addSubview(activityIndicator)
 
         NSLayoutConstraint.activate([
-            powerButton.widthAnchor.constraint(equalToConstant: 180),
-            powerButton.heightAnchor.constraint(equalToConstant: 180),
+            powerButton.widthAnchor.constraint(equalToConstant: 260),
+            powerButton.heightAnchor.constraint(equalToConstant: 260),
             powerIcon.centerXAnchor.constraint(equalTo: powerButton.centerXAnchor),
             powerIcon.centerYAnchor.constraint(equalTo: powerButton.centerYAnchor),
             activityIndicator.centerXAnchor.constraint(equalTo: powerButton.centerXAnchor),
@@ -149,7 +136,7 @@ class TVHomeViewController: UIViewController {
     // MARK: - Status Label
 
     private func setupStatusLabel() {
-        statusLabel.font = .systemFont(ofSize: 32, weight: .medium)
+        statusLabel.font = .systemFont(ofSize: 44, weight: .medium)
         statusLabel.textAlignment = .center
         statusLabel.textColor = .secondaryLabel
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -158,32 +145,33 @@ class TVHomeViewController: UIViewController {
     // MARK: - Stats Card
 
     private func setupStatsCard() {
-        statsCard.translatesAutoresizingMaskIntoConstraints = false
-        statsCard.backgroundColor = UIColor.white.withAlphaComponent(0.12)
-        statsCard.layer.cornerRadius = 20
+        statsButton.translatesAutoresizingMaskIntoConstraints = false
+        statsButton.backgroundColor = UIColor.white.withAlphaComponent(0.12)
+        statsButton.layer.cornerRadius = 28
 
-        let uploadArrow = UIImageView(image: UIImage(systemName: "arrow.up"))
+        let arrowConfig = UIImage.SymbolConfiguration(pointSize: 28, weight: .medium)
+        let uploadArrow = UIImageView(image: UIImage(systemName: "arrow.up", withConfiguration: arrowConfig))
         uploadArrow.tintColor = UIColor.white.withAlphaComponent(0.7)
         uploadArrow.setContentHuggingPriority(.required, for: .horizontal)
 
-        uploadLabel.font = .monospacedDigitSystemFont(ofSize: 24, weight: .regular)
+        uploadLabel.font = .monospacedDigitSystemFont(ofSize: 34, weight: .regular)
         uploadLabel.textColor = .white
         uploadLabel.text = Self.formatBytes(0)
 
-        let downloadArrow = UIImageView(image: UIImage(systemName: "arrow.down"))
+        let downloadArrow = UIImageView(image: UIImage(systemName: "arrow.down", withConfiguration: arrowConfig))
         downloadArrow.tintColor = UIColor.white.withAlphaComponent(0.7)
         downloadArrow.setContentHuggingPriority(.required, for: .horizontal)
 
-        downloadLabel.font = .monospacedDigitSystemFont(ofSize: 24, weight: .regular)
+        downloadLabel.font = .monospacedDigitSystemFont(ofSize: 34, weight: .regular)
         downloadLabel.textColor = .white
         downloadLabel.text = Self.formatBytes(0)
 
         let uploadStack = UIStackView(arrangedSubviews: [uploadArrow, uploadLabel])
-        uploadStack.spacing = 8
+        uploadStack.spacing = 12
         uploadStack.alignment = .center
 
         let downloadStack = UIStackView(arrangedSubviews: [downloadArrow, downloadLabel])
-        downloadStack.spacing = 8
+        downloadStack.spacing = 12
         downloadStack.alignment = .center
 
         let spacer = UIView()
@@ -191,16 +179,17 @@ class TVHomeViewController: UIViewController {
 
         let hStack = UIStackView(arrangedSubviews: [uploadStack, spacer, downloadStack])
         hStack.translatesAutoresizingMaskIntoConstraints = false
-        statsCard.addSubview(hStack)
+        hStack.isUserInteractionEnabled = false
+        statsButton.addSubview(hStack)
 
         NSLayoutConstraint.activate([
-            hStack.leadingAnchor.constraint(equalTo: statsCard.leadingAnchor, constant: 24),
-            hStack.trailingAnchor.constraint(equalTo: statsCard.trailingAnchor, constant: -24),
-            hStack.topAnchor.constraint(equalTo: statsCard.topAnchor, constant: 16),
-            hStack.bottomAnchor.constraint(equalTo: statsCard.bottomAnchor, constant: -16),
+            hStack.leadingAnchor.constraint(equalTo: statsButton.leadingAnchor, constant: 32),
+            hStack.trailingAnchor.constraint(equalTo: statsButton.trailingAnchor, constant: -32),
+            hStack.topAnchor.constraint(equalTo: statsButton.topAnchor, constant: 22),
+            hStack.bottomAnchor.constraint(equalTo: statsButton.bottomAnchor, constant: -22),
         ])
 
-        statsCard.isHidden = true
+        statsButton.isHidden = true
     }
 
     // MARK: - Config Card
@@ -208,40 +197,41 @@ class TVHomeViewController: UIViewController {
     private func setupConfigCard() {
         configButton.translatesAutoresizingMaskIntoConstraints = false
         configButton.backgroundColor = UIColor.white.withAlphaComponent(0.12)
-        configButton.layer.cornerRadius = 20
+        configButton.layer.cornerRadius = 28
         configButton.layer.shadowColor = UIColor.black.cgColor
         configButton.layer.shadowOffset = CGSize(width: 0, height: 4)
         configButton.layer.shadowRadius = 10
         configButton.layer.shadowOpacity = 0
         configButton.addTarget(self, action: #selector(configCardTapped), for: .primaryActionTriggered)
 
-        configIcon.image = UIImage(systemName: "antenna.radiowaves.left.and.right")
+        let configIconConfig = UIImage.SymbolConfiguration(pointSize: 30, weight: .medium)
+        configIcon.image = UIImage(systemName: "antenna.radiowaves.left.and.right", withConfiguration: configIconConfig)
         configIcon.tintColor = .secondaryLabel
         configIcon.setContentHuggingPriority(.required, for: .horizontal)
         configIcon.translatesAutoresizingMaskIntoConstraints = false
 
-        configNameLabel.font = .systemFont(ofSize: 28, weight: .medium)
+        configNameLabel.font = .systemFont(ofSize: 38, weight: .medium)
         configNameLabel.textColor = .white
         configNameLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let chevronConfig = UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+        let chevronConfig = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
         configChevron.image = UIImage(systemName: "chevron.up.chevron.down", withConfiguration: chevronConfig)
         configChevron.tintColor = UIColor.white.withAlphaComponent(0.4)
         configChevron.setContentHuggingPriority(.required, for: .horizontal)
         configChevron.translatesAutoresizingMaskIntoConstraints = false
 
         let cardContent = UIStackView(arrangedSubviews: [configIcon, configNameLabel, configChevron])
-        cardContent.spacing = 12
+        cardContent.spacing = 16
         cardContent.alignment = .center
         cardContent.translatesAutoresizingMaskIntoConstraints = false
         cardContent.isUserInteractionEnabled = false
         configButton.addSubview(cardContent)
 
         NSLayoutConstraint.activate([
-            cardContent.leadingAnchor.constraint(equalTo: configButton.leadingAnchor, constant: 24),
-            cardContent.trailingAnchor.constraint(equalTo: configButton.trailingAnchor, constant: -24),
-            cardContent.topAnchor.constraint(equalTo: configButton.topAnchor, constant: 18),
-            cardContent.bottomAnchor.constraint(equalTo: configButton.bottomAnchor, constant: -18),
+            cardContent.leadingAnchor.constraint(equalTo: configButton.leadingAnchor, constant: 32),
+            cardContent.trailingAnchor.constraint(equalTo: configButton.trailingAnchor, constant: -32),
+            cardContent.topAnchor.constraint(equalTo: configButton.topAnchor, constant: 24),
+            cardContent.bottomAnchor.constraint(equalTo: configButton.bottomAnchor, constant: -24),
         ])
     }
 
@@ -250,24 +240,25 @@ class TVHomeViewController: UIViewController {
     private func setupEmptyCard() {
         emptyButton.translatesAutoresizingMaskIntoConstraints = false
         emptyButton.backgroundColor = UIColor.white.withAlphaComponent(0.12)
-        emptyButton.layer.cornerRadius = 20
+        emptyButton.layer.cornerRadius = 28
         emptyButton.layer.shadowColor = UIColor.black.cgColor
         emptyButton.layer.shadowOffset = CGSize(width: 0, height: 4)
         emptyButton.layer.shadowRadius = 10
         emptyButton.layer.shadowOpacity = 0
         emptyButton.addTarget(self, action: #selector(addConfigTapped), for: .primaryActionTriggered)
 
-        let plusIcon = UIImageView(image: UIImage(systemName: "plus.circle.fill"))
+        let plusConfig = UIImage.SymbolConfiguration(pointSize: 30, weight: .medium)
+        let plusIcon = UIImageView(image: UIImage(systemName: "plus.circle.fill", withConfiguration: plusConfig))
         plusIcon.tintColor = .systemBlue
         plusIcon.setContentHuggingPriority(.required, for: .horizontal)
 
         let addLabel = UILabel()
         addLabel.text = String(localized: "Add a Configuration")
-        addLabel.font = .systemFont(ofSize: 28, weight: .medium)
+        addLabel.font = .systemFont(ofSize: 38, weight: .medium)
         addLabel.textColor = .white
 
-        let chevronConfig = UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-        let rightChevron = UIImageView(image: UIImage(systemName: "chevron.right", withConfiguration: chevronConfig))
+        let emptyChevronConfig = UIImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+        let rightChevron = UIImageView(image: UIImage(systemName: "chevron.right", withConfiguration: emptyChevronConfig))
         rightChevron.tintColor = .tertiaryLabel
         rightChevron.setContentHuggingPriority(.required, for: .horizontal)
 
@@ -275,46 +266,70 @@ class TVHomeViewController: UIViewController {
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let content = UIStackView(arrangedSubviews: [plusIcon, addLabel, spacer, rightChevron])
-        content.spacing = 12
+        content.spacing = 16
         content.alignment = .center
         content.translatesAutoresizingMaskIntoConstraints = false
         content.isUserInteractionEnabled = false
         emptyButton.addSubview(content)
 
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: emptyButton.leadingAnchor, constant: 24),
-            content.trailingAnchor.constraint(equalTo: emptyButton.trailingAnchor, constant: -24),
-            content.topAnchor.constraint(equalTo: emptyButton.topAnchor, constant: 18),
-            content.bottomAnchor.constraint(equalTo: emptyButton.bottomAnchor, constant: -18),
+            content.leadingAnchor.constraint(equalTo: emptyButton.leadingAnchor, constant: 32),
+            content.trailingAnchor.constraint(equalTo: emptyButton.trailingAnchor, constant: -32),
+            content.topAnchor.constraint(equalTo: emptyButton.topAnchor, constant: 24),
+            content.bottomAnchor.constraint(equalTo: emptyButton.bottomAnchor, constant: -24),
         ])
     }
 
     // MARK: - Layout
 
     private func setupLayout() {
-        let centerContainer = UIView()
-        centerContainer.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(centerContainer)
+        // Left side: power button + status label
+        let leftStack = UIStackView(arrangedSubviews: [powerButton, statusLabel])
+        leftStack.axis = .vertical
+        leftStack.alignment = .center
+        leftStack.spacing = 40
+        leftStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let stack = UIStackView(arrangedSubviews: [powerButton, statusLabel, statsCard, configButton, emptyButton])
-        stack.axis = .vertical
-        stack.alignment = .center
-        stack.spacing = 20
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        centerContainer.addSubview(stack)
+        let leftContainer = UIView()
+        leftContainer.translatesAutoresizingMaskIntoConstraints = false
+        leftContainer.addSubview(leftStack)
+
+        // Right side: stats card, config/empty card
+        let rightStack = UIStackView(arrangedSubviews: [statsButton, configButton, emptyButton])
+        rightStack.axis = .vertical
+        rightStack.alignment = .center
+        rightStack.spacing = 28
+        rightStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let rightContainer = UIView()
+        rightContainer.translatesAutoresizingMaskIntoConstraints = false
+        rightContainer.addSubview(rightStack)
+
+        view.addSubview(leftContainer)
+        view.addSubview(rightContainer)
 
         NSLayoutConstraint.activate([
-            centerContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            centerContainer.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            // Left container: left half of the screen, vertically centered
+            leftContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            leftContainer.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.5),
+            leftContainer.topAnchor.constraint(equalTo: view.topAnchor),
+            leftContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            stack.topAnchor.constraint(equalTo: centerContainer.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: centerContainer.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: centerContainer.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: centerContainer.trailingAnchor),
+            leftStack.centerXAnchor.constraint(equalTo: leftContainer.centerXAnchor),
+            leftStack.centerYAnchor.constraint(equalTo: leftContainer.centerYAnchor),
 
-            statsCard.widthAnchor.constraint(equalToConstant: 450),
-            configButton.widthAnchor.constraint(equalToConstant: 450),
-            emptyButton.widthAnchor.constraint(equalToConstant: 450),
+            // Right container: right half of the screen, vertically centered
+            rightContainer.leadingAnchor.constraint(equalTo: leftContainer.trailingAnchor),
+            rightContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            rightContainer.topAnchor.constraint(equalTo: view.topAnchor),
+            rightContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            rightStack.centerXAnchor.constraint(equalTo: rightContainer.centerXAnchor),
+            rightStack.centerYAnchor.constraint(equalTo: rightContainer.centerYAnchor),
+
+            statsButton.widthAnchor.constraint(equalToConstant: 620),
+            configButton.widthAnchor.constraint(equalToConstant: 620),
+            emptyButton.widthAnchor.constraint(equalToConstant: 620),
         ])
     }
 
@@ -368,14 +383,7 @@ class TVHomeViewController: UIViewController {
 
         UIView.animate(withDuration: 0.4) {
             self.powerButton.backgroundColor = UIColor.white.withAlphaComponent(self.isConnected ? 0.25 : 0.15)
-            self.powerIcon.tintColor = self.isConnected ? .white : .systemCyan
-            self.activityIndicator.color = self.isConnected ? .white : .systemCyan
         }
-
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.6)
-        glowLayer.shadowOpacity = isConnected ? 0.6 : 0
-        CATransaction.commit()
     }
 
     private func updateStatusLabel() {
@@ -387,10 +395,10 @@ class TVHomeViewController: UIViewController {
 
     private func updateTrafficStats() {
         let shouldShow = isConnected
-        if statsCard.isHidden == shouldShow {
+        if statsButton.isHidden == shouldShow {
             UIView.animate(withDuration: 0.3) {
-                self.statsCard.isHidden = !shouldShow
-                self.statsCard.alpha = shouldShow ? 1 : 0
+                self.statsButton.isHidden = !shouldShow
+                self.statsButton.alpha = shouldShow ? 1 : 0
             }
         }
         uploadLabel.text = Self.formatBytes(viewModel.bytesOut)
@@ -441,7 +449,7 @@ class TVHomeViewController: UIViewController {
         super.didUpdateFocus(in: context, with: coordinator)
 
         coordinator.addCoordinatedAnimations {
-            for button in [self.powerButton, self.configButton, self.emptyButton] {
+            for button in [self.powerButton, self.statsButton, self.configButton, self.emptyButton] {
                 let isFocused = context.nextFocusedView === button
                 let wasUnfocused = context.previouslyFocusedView === button
 
@@ -450,7 +458,6 @@ class TVHomeViewController: UIViewController {
                     button.transform = CGAffineTransform(scaleX: scale, y: scale)
                     button.layer.shadowOpacity = 0.4
                     button.layer.shadowRadius = button === self.powerButton ? 30 : 15
-                    button.layer.shadowColor = (button === self.powerButton ? UIColor.cyan : UIColor.white).cgColor
                 }
                 if wasUnfocused {
                     button.transform = .identity

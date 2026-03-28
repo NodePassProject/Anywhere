@@ -1236,6 +1236,9 @@
         }
       }
     },
+    "Automatically reconnect VPN when it is disconnected." : {
+
+    },
     "Back" : {
       "localizations" : {
         "ar" : {
