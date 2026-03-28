@@ -1237,7 +1237,56 @@
       }
     },
     "Automatically reconnect VPN when it is disconnected." : {
-
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "إعادة الاتصال تلقائيًا بشبكة VPN عند انقطاعها."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reconectar automáticamente la VPN cuando se desconecte."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اتصال مجدد خودکار VPN هنگام قطع شدن."
+          }
+        },
+        "my" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN ချိတ်ဆက်မှု ပြတ်တောက်သွားသောအခါ အလိုအလျောက် ပြန်လည်ချိတ်ဆက်ပါ။"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Автоматически переподключать VPN при разрыве соединения."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "VPN kesilen wagty awtomatiki täzeden birikdirmek."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tự động kết nối lại VPN khi bị ngắt."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当 VPN 断开时自动重新连接。"
+          }
+        }
+      }
     },
     "Back" : {
       "localizations" : {
@@ -3518,59 +3567,6 @@
     },
     "IPv6" : {
       "shouldTranslate" : false
-    },
-    "IPv6 Connections" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اتصالات IPv6"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Conexiones IPv6"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اتصالات IPv6"
-          }
-        },
-        "my" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6 ချိတ်ဆက်မှုများ"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Подключения IPv6"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6 birikmeleri"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Kết nối IPv6"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6 连接"
-          }
-        }
-      }
     },
     "IPv6 DNS Lookup" : {
       "localizations" : {

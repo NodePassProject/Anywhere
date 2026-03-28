@@ -1,5 +1,5 @@
 {
-  "originHash" : "f0dea1a28504b642e95580257dc9cd2a48bdc9d743c4cd86906d8b8c9276864e",
+  "originHash" : "efc1c44e2ab38ead717b43765e63306ce7c513276a4ab368b0e93718a9fac3d9",
   "pins" : [
     {
       "identity" : "blake3",
@@ -7,7 +7,16 @@
       "location" : "https://github.com/Argsment/BLAKE3.git",
       "state" : {
         "branch" : "main",
-        "revision" : "6fae94454b741112b186dca0389175a7226eb1e8"
+        "revision" : "c1b7c2b71c9873b2140951a32ed95d19f18f2f0c"
+      }
+    },
+    {
+      "identity" : "yaml",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Argsment/YAML.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "1cc58b32e84fa7259a49b046072fa3a44701e4b7"
       }
     }
   ],
