@@ -13,6 +13,8 @@
 		CB2B9C922F77722600F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C912F77722600F24AC2 /* BLAKE3 */; };
 		CB2B9C942F77724D00F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C932F77724D00F24AC2 /* BLAKE3 */; };
 		CB2B9C962F77725900F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C952F77725900F24AC2 /* BLAKE3 */; };
+		CB2BA8542F7821F400F24AC2 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = CB2BA8532F7821F400F24AC2 /* YAML */; };
+		CB2BA8562F78220C00F24AC2 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = CB2BA8552F78220C00F24AC2 /* YAML */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -215,6 +217,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CB2B9C942F77724D00F24AC2 /* BLAKE3 in Frameworks */,
+				CB2BA8542F7821F400F24AC2 /* YAML in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -232,6 +235,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CB2B9C962F77725900F24AC2 /* BLAKE3 in Frameworks */,
+				CB2BA8562F78220C00F24AC2 /* YAML in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -296,6 +300,7 @@
 			name = Anywhere;
 			packageProductDependencies = (
 				CB2B9C932F77724D00F24AC2 /* BLAKE3 */,
+				CB2BA8532F7821F400F24AC2 /* YAML */,
 			);
 			productName = Anywhere;
 			productReference = CB1C10652F23B81500B74CD8 /* Anywhere.app */;
@@ -348,6 +353,7 @@
 			name = "Anywhere TV";
 			packageProductDependencies = (
 				CB2B9C952F77725900F24AC2 /* BLAKE3 */,
+				CB2BA8552F78220C00F24AC2 /* YAML */,
 			);
 			productName = Anywhere;
 			productReference = CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */;
@@ -393,6 +399,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */,
+				CB2BA8522F7821F400F24AC2 /* XCRemoteSwiftPackageReference "YAML" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CB1C10662F23B81500B74CD8 /* Products */;
@@ -598,15 +605,10 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 145;
+				CURRENT_PROJECT_VERSION = 146;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"HAVE_CONFIG_H=1",
-					"$(inherited)",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -629,7 +631,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -643,15 +644,10 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 145;
+				CURRENT_PROJECT_VERSION = 146;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"HAVE_CONFIG_H=1",
-					"$(inherited)",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -674,7 +670,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -687,7 +682,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 145;
+				CURRENT_PROJECT_VERSION = 146;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -727,7 +722,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 145;
+				CURRENT_PROJECT_VERSION = 146;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -768,14 +763,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 145;
+				CURRENT_PROJECT_VERSION = 146;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"HAVE_CONFIG_H=1",
-					"$(inherited)",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -795,7 +785,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere TV/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -810,14 +799,9 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 145;
+				CURRENT_PROJECT_VERSION = 146;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
-				GCC_PREPROCESSOR_DEFINITIONS = (
-					"HAVE_CONFIG_H=1",
-					"$(inherited)",
-				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "$(SRCROOT)/Shared/libyaml/include";
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -837,7 +821,6 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere TV/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -895,6 +878,14 @@
 				kind = branch;
 			};
 		};
+		CB2BA8522F7821F400F24AC2 /* XCRemoteSwiftPackageReference "YAML" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Argsment/YAML.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -912,6 +903,16 @@
 			isa = XCSwiftPackageProductDependency;
 			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
 			productName = BLAKE3;
+		};
+		CB2BA8532F7821F400F24AC2 /* YAML */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CB2BA8522F7821F400F24AC2 /* XCRemoteSwiftPackageReference "YAML" */;
+			productName = YAML;
+		};
+		CB2BA8552F78220C00F24AC2 /* YAML */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = CB2BA8522F7821F400F24AC2 /* XCRemoteSwiftPackageReference "YAML" */;
+			productName = YAML;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
