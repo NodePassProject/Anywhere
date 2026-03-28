@@ -41,6 +41,8 @@ class TVProxyListViewController: UITableViewController {
         title = String(localized: "Proxies")
         tableView = UITableView(frame: .zero, style: .grouped)
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 80
 
         navigationItem.rightBarButtonItems = [
             UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addTapped)),
@@ -55,7 +57,10 @@ class TVProxyListViewController: UITableViewController {
         viewModel.$configurations
             .combineLatest(viewModel.$subscriptions, viewModel.$selectedConfiguration, viewModel.$latencyResults)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.tableView.reloadData() }
+            .sink { [weak self] _ in
+                guard let self, self.tableView.numberOfSections > 0 else { return }
+                self.tableView.reloadSections(IndexSet(0..<self.tableView.numberOfSections), with: .none)
+            }
             .store(in: &cancellables)
     }
 
@@ -106,25 +111,69 @@ class TVProxyListViewController: UITableViewController {
         let configuration = configurations[indexPath.row]
         let isSelected = viewModel.selectedConfiguration?.id == configuration.id && viewModel.selectedChainId == nil
 
-        var content = cell.defaultContentConfiguration()
-        content.text = configuration.name
+        cell.contentConfiguration = nil
 
-        var details = "\(configuration.serverAddress):\(configuration.serverPort)"
-        details += " · \(configuration.outboundProtocol.name)"
-        details += " · \(configuration.transport.uppercased())"
-        let security = configuration.security.uppercased()
-        if security != "NONE" { details += " · \(security)" }
-        if let flow = configuration.flow, flow.uppercased().contains("VISION") { details += " · Vision" }
-        content.secondaryText = details
-        content.secondaryTextProperties.color = .secondaryLabel
-        content.secondaryTextProperties.font = .systemFont(ofSize: 22)
-
-        if isSelected {
-            content.image = UIImage(systemName: "checkmark.circle.fill")
-            content.imageProperties.tintColor = .systemBlue
+        let vStackTag = 1001
+        let vStack: UIStackView
+        if let existing = cell.contentView.viewWithTag(vStackTag) as? UIStackView {
+            vStack = existing
+            vStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        } else {
+            vStack = UIStackView()
+            vStack.tag = vStackTag
+            vStack.axis = .vertical
+            vStack.alignment = .leading
+            vStack.spacing = 8
+            vStack.translatesAutoresizingMaskIntoConstraints = false
+            cell.contentView.addSubview(vStack)
+            NSLayoutConstraint.activate([
+                vStack.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor, constant: 40),
+                vStack.trailingAnchor.constraint(lessThanOrEqualTo: cell.contentView.trailingAnchor, constant: -40),
+                vStack.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 16),
+                vStack.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -16),
+            ])
         }
 
-        cell.contentConfiguration = content
+        // Name row
+        let nameRow = UIStackView()
+        nameRow.axis = .horizontal
+        nameRow.spacing = 12
+        nameRow.alignment = .center
+
+        let nameLabel = UILabel()
+        nameLabel.text = configuration.name
+        nameLabel.font = .systemFont(ofSize: 32, weight: .medium)
+        nameLabel.textColor = .label
+        nameLabel.setContentHuggingPriority(.required, for: .horizontal)
+        nameRow.addArrangedSubview(nameLabel)
+
+        if isSelected {
+            let checkmarkConfig = UIImage.SymbolConfiguration(pointSize: 32, weight: .medium)
+            let checkmark = UIImageView(image: UIImage(systemName: "checkmark", withConfiguration: checkmarkConfig))
+            checkmark.tintColor = .systemBlue
+            checkmark.setContentHuggingPriority(.required, for: .horizontal)
+            nameRow.addArrangedSubview(checkmark)
+        }
+
+        vStack.addArrangedSubview(nameRow)
+
+        // Detail tags row
+        let tagsRow = UIStackView()
+        tagsRow.axis = .horizontal
+        tagsRow.spacing = 8
+        tagsRow.alignment = .center
+
+        tagsRow.addArrangedSubview(makeDetailTag(configuration.outboundProtocol.name))
+        tagsRow.addArrangedSubview(makeDetailTag(configuration.transport.uppercased()))
+        let security = configuration.security.uppercased()
+        if security != "NONE" {
+            tagsRow.addArrangedSubview(makeDetailTag(security))
+        }
+        if let flow = configuration.flow, flow.uppercased().contains("VISION") {
+            tagsRow.addArrangedSubview(makeDetailTag("Vision"))
+        }
+
+        vStack.addArrangedSubview(tagsRow)
 
         // Latency accessory
         if let result = viewModel.latencyResults[configuration.id] {
@@ -153,6 +202,40 @@ class TVProxyListViewController: UITableViewController {
         }
 
         return cell
+    }
+
+    private func makeDetailTag(_ text: String) -> UIView {
+        let label = UILabel()
+        label.text = text
+        label.font = .systemFont(ofSize: 20, weight: .medium)
+        label.textColor = .secondaryLabel
+
+        let container = UIView()
+        container.backgroundColor = UIColor { $0.userInterfaceStyle == .light ? UIColor.black.withAlphaComponent(0.1) : UIColor.white.withAlphaComponent(0.1) }
+        container.layer.cornerRadius = 8
+        label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4),
+        ])
+        return container
+    }
+
+    // MARK: - Focus
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        coordinator.addCoordinatedAnimations {
+            if let cell = context.nextFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .light
+            }
+            if let cell = context.previouslyFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .unspecified
+            }
+        }
     }
 
     // MARK: - Selection

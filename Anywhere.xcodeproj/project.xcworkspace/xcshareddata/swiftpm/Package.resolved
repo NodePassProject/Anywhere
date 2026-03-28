@@ -1,0 +1,15 @@
+{
+  "originHash" : "f0dea1a28504b642e95580257dc9cd2a48bdc9d743c4cd86906d8b8c9276864e",
+  "pins" : [
+    {
+      "identity" : "blake3",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Argsment/BLAKE3.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "6fae94454b741112b186dca0389175a7226eb1e8"
+      }
+    }
+  ],
+  "version" : 3
+}

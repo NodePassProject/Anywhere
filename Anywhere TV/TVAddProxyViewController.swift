@@ -48,6 +48,8 @@ class TVAddProxyViewController: UITableViewController {
         title = String(localized: "Add Proxy")
         tableView = UITableView(frame: .zero, style: .grouped)
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 80
 
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped)
@@ -135,6 +137,22 @@ class TVAddProxyViewController: UITableViewController {
 
         return cell
     }
+
+    // MARK: - Focus
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        coordinator.addCoordinatedAnimations {
+            if let cell = context.nextFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .light
+            }
+            if let cell = context.previouslyFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .unspecified
+            }
+        }
+    }
+
+    // MARK: - Selection
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
