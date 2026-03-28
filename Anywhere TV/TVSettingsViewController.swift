@@ -8,29 +8,39 @@
 import UIKit
 import Combine
 
-/// Settings page with tvOS split layout:
-/// - Left half: symbol + description
-/// - Right half: the form (Allow Insecure toggle only)
 class TVSettingsViewController: UIViewController {
 
+    private let viewModel = VPNViewModel.shared
     private var cancellable: AnyCancellable?
 
     // Left side
     private let iconView = UIImageView()
-    private let titleLabel = UILabel()
     private let descriptionLabel = UILabel()
 
     // Right side
-    private let toggleButton = UIButton(type: .custom)
-    private let toggleLabel = UILabel()
-    private let valueLabel = UILabel()
+    private let alwaysOnButton = UIButton(type: .custom)
+    private let alwaysOnLabel = UILabel()
+    private let alwaysOnValueLabel = UILabel()
+
+    private let insecureButton = UIButton(type: .custom)
+    private let insecureLabel = UILabel()
+    private let insecureValueLabel = UILabel()
+
+    private var alwaysOnEnabled: Bool {
+        get { AWCore.userDefaults.bool(forKey: "alwaysOnEnabled") }
+        set {
+            AWCore.userDefaults.set(newValue, forKey: "alwaysOnEnabled")
+            viewModel.reconnectVPN()
+            updateAppearance()
+        }
+    }
 
     private var allowInsecure: Bool {
         get { AWCore.userDefaults.bool(forKey: "allowInsecure") }
         set {
             AWCore.userDefaults.set(newValue, forKey: "allowInsecure")
             notifySettingsChanged()
-            updateToggleAppearance()
+            updateAppearance()
         }
     }
 
@@ -43,116 +53,149 @@ class TVSettingsViewController: UIViewController {
         setupLeftSide()
         setupRightSide()
         setupLayout()
-        updateToggleAppearance()
+        updateAppearance()
     }
 
     // MARK: - Left Side
 
     private func setupLeftSide() {
-        let iconConfig = UIImage.SymbolConfiguration(pointSize: 80, weight: .medium)
-        iconView.image = UIImage(systemName: "exclamationmark.shield.fill", withConfiguration: iconConfig)
-        iconView.tintColor = .systemRed
+        iconView.image = UIImage(named: "AnywhereSymbol")
         iconView.contentMode = .scaleAspectFit
         iconView.translatesAutoresizingMaskIntoConstraints = false
 
-        titleLabel.text = String(localized: "Allow Insecure")
-        titleLabel.font = .systemFont(ofSize: 38, weight: .semibold)
-        titleLabel.textColor = .label
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        descriptionLabel.text = String(localized: "This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
-        descriptionLabel.font = .systemFont(ofSize: 24)
+        descriptionLabel.font = .systemFont(ofSize: 30)
         descriptionLabel.textColor = .secondaryLabel
         descriptionLabel.numberOfLines = 0
+        descriptionLabel.textAlignment = .center
+        descriptionLabel.alpha = 0
         descriptionLabel.translatesAutoresizingMaskIntoConstraints = false
     }
 
     // MARK: - Right Side
 
     private func setupRightSide() {
-        toggleLabel.text = String(localized: "Allow Insecure")
-        toggleLabel.font = .systemFont(ofSize: 32, weight: .medium)
-        toggleLabel.textColor = .label
-        toggleLabel.translatesAutoresizingMaskIntoConstraints = false
+        configureToggleButton(
+            button: alwaysOnButton,
+            label: alwaysOnLabel,
+            valueLabel: alwaysOnValueLabel,
+            title: String(localized: "Always On"),
+            action: #selector(alwaysOnTapped)
+        )
+
+        configureToggleButton(
+            button: insecureButton,
+            label: insecureLabel,
+            valueLabel: insecureValueLabel,
+            title: String(localized: "Allow Insecure"),
+            action: #selector(insecureTapped)
+        )
+    }
+
+    private func configureToggleButton(button: UIButton, label: UILabel, valueLabel: UILabel, title: String, action: Selector) {
+        label.text = title
+        label.font = .systemFont(ofSize: 32, weight: .medium)
+        label.textColor = .label
+        label.translatesAutoresizingMaskIntoConstraints = false
 
         valueLabel.font = .systemFont(ofSize: 28)
         valueLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        toggleButton.translatesAutoresizingMaskIntoConstraints = false
-        toggleButton.backgroundColor = UIColor.white.withAlphaComponent(0.1)
-        toggleButton.layer.cornerRadius = 16
-        toggleButton.addTarget(self, action: #selector(toggleTapped), for: .primaryActionTriggered)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.backgroundColor = UIColor.white.withAlphaComponent(0.1)
+        button.layer.cornerRadius = 16
+        button.addTarget(self, action: action, for: .primaryActionTriggered)
 
-        let content = UIStackView(arrangedSubviews: [toggleLabel, valueLabel])
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let content = UIStackView(arrangedSubviews: [label, spacer, valueLabel])
         content.axis = .horizontal
         content.spacing = 16
         content.translatesAutoresizingMaskIntoConstraints = false
         content.isUserInteractionEnabled = false
-        toggleButton.addSubview(content)
+        button.addSubview(content)
 
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: toggleButton.leadingAnchor, constant: 30),
-            content.trailingAnchor.constraint(equalTo: toggleButton.trailingAnchor, constant: -30),
-            content.topAnchor.constraint(equalTo: toggleButton.topAnchor, constant: 20),
-            content.bottomAnchor.constraint(equalTo: toggleButton.bottomAnchor, constant: -20),
+            content.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 30),
+            content.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -30),
+            content.topAnchor.constraint(equalTo: button.topAnchor, constant: 20),
+            content.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -20),
         ])
     }
 
     // MARK: - Layout
 
     private func setupLayout() {
-        // Left container
-        let leftStack = UIStackView(arrangedSubviews: [iconView, titleLabel, descriptionLabel])
-        leftStack.axis = .vertical
-        leftStack.spacing = 20
-        leftStack.alignment = .center
-        leftStack.translatesAutoresizingMaskIntoConstraints = false
+        // Left container: icon fixed at center, description fills below
+        let leftContainer = UIView()
+        leftContainer.translatesAutoresizingMaskIntoConstraints = false
+        leftContainer.addSubview(iconView)
+        leftContainer.addSubview(descriptionLabel)
 
         // Right container
+        let rightStack = UIStackView(arrangedSubviews: [alwaysOnButton, insecureButton])
+        rightStack.axis = .vertical
+        rightStack.spacing = 20
+        rightStack.translatesAutoresizingMaskIntoConstraints = false
+
         let rightContainer = UIView()
         rightContainer.translatesAutoresizingMaskIntoConstraints = false
-        rightContainer.addSubview(toggleButton)
+        rightContainer.addSubview(rightStack)
 
-        // Main horizontal split
-        let hStack = UIStackView(arrangedSubviews: [leftStack, rightContainer])
-        hStack.axis = .horizontal
-        hStack.distribution = .fillEqually
-        hStack.spacing = 60
-        hStack.alignment = .center
-        hStack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(hStack)
+        view.addSubview(leftContainer)
+        view.addSubview(rightContainer)
 
         NSLayoutConstraint.activate([
-            hStack.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 80),
-            hStack.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -80),
-            hStack.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            // Left half
+            leftContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            leftContainer.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.5),
+            leftContainer.topAnchor.constraint(equalTo: view.topAnchor),
+            leftContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            iconView.heightAnchor.constraint(equalToConstant: 100),
-            descriptionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 500),
+            // Icon: fixed at center of left half
+            iconView.centerXAnchor.constraint(equalTo: leftContainer.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: leftContainer.centerYAnchor),
+            iconView.heightAnchor.constraint(equalToConstant: 300),
 
-            toggleButton.leadingAnchor.constraint(equalTo: rightContainer.leadingAnchor),
-            toggleButton.trailingAnchor.constraint(equalTo: rightContainer.trailingAnchor),
-            toggleButton.centerYAnchor.constraint(equalTo: rightContainer.centerYAnchor),
+            // Description: below icon, fills remaining space
+            descriptionLabel.topAnchor.constraint(equalTo: iconView.bottomAnchor, constant: 40),
+            descriptionLabel.centerXAnchor.constraint(equalTo: leftContainer.centerXAnchor),
+            descriptionLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 700),
+            descriptionLabel.bottomAnchor.constraint(lessThanOrEqualTo: leftContainer.bottomAnchor, constant: -60),
+
+            // Right half
+            rightContainer.leadingAnchor.constraint(equalTo: leftContainer.trailingAnchor),
+            rightContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            rightContainer.topAnchor.constraint(equalTo: view.topAnchor),
+            rightContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            rightStack.leadingAnchor.constraint(equalTo: rightContainer.leadingAnchor, constant: 80),
+            rightStack.trailingAnchor.constraint(equalTo: rightContainer.trailingAnchor, constant: -80),
+            rightStack.centerYAnchor.constraint(equalTo: rightContainer.centerYAnchor),
         ])
     }
 
     // MARK: - Updates
 
-    private func updateToggleAppearance() {
-        let isOn = allowInsecure
-        valueLabel.text = isOn ? String(localized: "On") : String(localized: "Off")
-        valueLabel.textColor = isOn ? .systemRed : .secondaryLabel
-        toggleButton.backgroundColor = UIColor.white.withAlphaComponent(isOn ? 0.15 : 0.08)
+    private func updateAppearance() {
+        let isOn = alwaysOnEnabled
+        alwaysOnValueLabel.text = isOn ? String(localized: "On") : String(localized: "Off")
+        alwaysOnValueLabel.textColor = isOn ? .systemGreen : .secondaryLabel
+
+        let insecureOn = allowInsecure
+        insecureValueLabel.text = insecureOn ? String(localized: "On") : String(localized: "Off")
+        insecureValueLabel.textColor = insecureOn ? .systemRed : .secondaryLabel
     }
 
     // MARK: - Actions
 
-    @objc private func toggleTapped() {
+    @objc private func alwaysOnTapped() {
+        alwaysOnEnabled.toggle()
+    }
+
+    @objc private func insecureTapped() {
         if allowInsecure {
-            // Turn off — no confirmation needed
             allowInsecure = false
         } else {
-            // Turn on — show confirmation
             let alert = UIAlertController(
                 title: String(localized: "Allow Insecure"),
                 message: String(localized: "This will skip TLS certificate validation, making your connections vulnerable to MITM attacks."),
@@ -169,22 +212,45 @@ class TVSettingsViewController: UIViewController {
     // MARK: - Focus
 
     override var preferredFocusEnvironments: [UIFocusEnvironment] {
-        [toggleButton]
+        [alwaysOnButton]
     }
 
     override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
         super.didUpdateFocus(in: context, with: coordinator)
+
         coordinator.addCoordinatedAnimations {
-            if context.nextFocusedView === self.toggleButton {
-                self.toggleButton.transform = CGAffineTransform(scaleX: 1.05, y: 1.05)
-                self.toggleButton.layer.shadowColor = UIColor.white.cgColor
-                self.toggleButton.layer.shadowRadius = 15
-                self.toggleButton.layer.shadowOpacity = 0.2
-                self.toggleButton.layer.shadowOffset = .zero
+            for button in [self.alwaysOnButton, self.insecureButton] {
+                let isFocused = context.nextFocusedView === button
+                let wasUnfocused = context.previouslyFocusedView === button
+
+                if isFocused {
+                    button.transform = CGAffineTransform(scaleX: 1.05, y: 1.05)
+                    button.layer.shadowColor = UIColor.white.cgColor
+                    button.layer.shadowRadius = 15
+                    button.layer.shadowOpacity = 0.2
+                    button.layer.shadowOffset = .zero
+                }
+                if wasUnfocused {
+                    button.transform = .identity
+                    button.layer.shadowOpacity = 0
+                }
             }
-            if context.previouslyFocusedView === self.toggleButton {
-                self.toggleButton.transform = .identity
-                self.toggleButton.layer.shadowOpacity = 0
+
+            // Update description based on focused button
+            let newText: String?
+            if context.nextFocusedView === self.alwaysOnButton {
+                newText = String(localized: "Automatically reconnect VPN when it is disconnected.")
+            } else if context.nextFocusedView === self.insecureButton {
+                newText = String(localized: "This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
+            } else {
+                newText = nil
+            }
+
+            if let newText {
+                self.descriptionLabel.text = newText
+                self.descriptionLabel.alpha = 1
+            } else {
+                self.descriptionLabel.alpha = 0
             }
         }
     }

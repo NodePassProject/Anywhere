@@ -18,10 +18,6 @@ build/
 *.ipa
 *.app.dSYM.zip
 
-# Swift Package Manager
-.build/
-Package.resolved
-
 # macOS
 .DS_Store
 .AppleDouble

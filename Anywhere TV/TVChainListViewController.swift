@@ -20,6 +20,8 @@ class TVChainListViewController: UITableViewController {
         title = String(localized: "Chains")
         tableView = UITableView(frame: .zero, style: .grouped)
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 80
 
         navigationItem.rightBarButtonItems = [
             UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addTapped)),
@@ -33,7 +35,10 @@ class TVChainListViewController: UITableViewController {
         viewModel.$chains
             .combineLatest(viewModel.$configurations, viewModel.$selectedChainId, viewModel.$chainLatencyResults)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.tableView.reloadData() }
+            .sink { [weak self] _ in
+                guard let self, self.tableView.numberOfSections > 0 else { return }
+                self.tableView.reloadSections(IndexSet(0..<self.tableView.numberOfSections), with: .none)
+            }
             .store(in: &cancellables)
     }
 
@@ -50,31 +55,103 @@ class TVChainListViewController: UITableViewController {
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
         let isSelected = viewModel.selectedChainId == chain.id
 
-        var content = cell.defaultContentConfiguration()
-        content.text = chain.name
+        cell.contentConfiguration = nil
 
-        if isValid {
-            let route = proxies.map(\.name).joined(separator: " → ")
-            var detail = route
-            if let entry = proxies.first, let exit = proxies.last {
-                detail += "\n\(proxies.count) proxies · \(entry.serverAddress) → \(exit.serverAddress)"
-            }
-            content.secondaryText = detail
-            content.secondaryTextProperties.color = .secondaryLabel
-            content.secondaryTextProperties.font = .systemFont(ofSize: 22)
-            content.secondaryTextProperties.numberOfLines = 2
+        let vStackTag = 1001
+        let vStack: UIStackView
+        if let existing = cell.contentView.viewWithTag(vStackTag) as? UIStackView {
+            vStack = existing
+            vStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         } else {
-            content.secondaryText = String(localized: "Invalid chain — some proxies are missing")
-            content.secondaryTextProperties.color = .systemRed
-            content.secondaryTextProperties.font = .systemFont(ofSize: 22)
+            vStack = UIStackView()
+            vStack.tag = vStackTag
+            vStack.axis = .vertical
+            vStack.alignment = .leading
+            vStack.spacing = 8
+            vStack.translatesAutoresizingMaskIntoConstraints = false
+            cell.contentView.addSubview(vStack)
+            NSLayoutConstraint.activate([
+                vStack.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor, constant: 40),
+                vStack.trailingAnchor.constraint(lessThanOrEqualTo: cell.contentView.trailingAnchor, constant: -40),
+                vStack.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 16),
+                vStack.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -16),
+            ])
         }
+
+        // Name row
+        let nameRow = UIStackView()
+        nameRow.axis = .horizontal
+        nameRow.spacing = 12
+        nameRow.alignment = .center
+
+        let nameLabel = UILabel()
+        nameLabel.text = chain.name
+        nameLabel.font = .systemFont(ofSize: 32, weight: .medium)
+        nameLabel.textColor = .label
+        nameLabel.setContentHuggingPriority(.required, for: .horizontal)
+        nameRow.addArrangedSubview(nameLabel)
 
         if isSelected {
-            content.image = UIImage(systemName: "checkmark.circle.fill")
-            content.imageProperties.tintColor = .systemBlue
+            let checkmarkConfig = UIImage.SymbolConfiguration(pointSize: 32, weight: .medium)
+            let checkmark = UIImageView(image: UIImage(systemName: "checkmark", withConfiguration: checkmarkConfig))
+            checkmark.tintColor = .systemBlue
+            checkmark.setContentHuggingPriority(.required, for: .horizontal)
+            nameRow.addArrangedSubview(checkmark)
         }
 
-        cell.contentConfiguration = content
+        vStack.addArrangedSubview(nameRow)
+
+        if isValid {
+            // Route preview row: proxy1 → proxy2 → proxy3
+            let routeRow = UIStackView()
+            routeRow.axis = .horizontal
+            routeRow.spacing = 6
+            routeRow.alignment = .center
+
+            let arrowConfig = UIImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+            for (index, proxy) in proxies.enumerated() {
+                if index > 0 {
+                    let arrow = UIImageView(image: UIImage(systemName: "arrow.right", withConfiguration: arrowConfig))
+                    arrow.tintColor = .tertiaryLabel
+                    arrow.setContentHuggingPriority(.required, for: .horizontal)
+                    routeRow.addArrangedSubview(arrow)
+                }
+                let proxyLabel = UILabel()
+                proxyLabel.text = proxy.displayName
+                proxyLabel.font = .systemFont(ofSize: 22, weight: .regular)
+                proxyLabel.textColor = .secondaryLabel
+                proxyLabel.lineBreakMode = .byTruncatingTail
+                proxyLabel.setContentHuggingPriority(.required, for: .horizontal)
+                routeRow.addArrangedSubview(proxyLabel)
+            }
+
+            vStack.addArrangedSubview(routeRow)
+
+            // Info row: proxy count · entry → exit
+            let infoRow = UIStackView()
+            infoRow.axis = .horizontal
+            infoRow.spacing = 6
+            infoRow.alignment = .center
+
+            var infoText = "\(proxies.count) proxies"
+            if let entry = proxies.first, let exit = proxies.last {
+                infoText += " · \(entry.serverAddress) → \(exit.serverAddress)"
+            }
+            let infoLabel = UILabel()
+            infoLabel.text = infoText
+            infoLabel.font = .systemFont(ofSize: 20, weight: .regular)
+            infoLabel.textColor = .tertiaryLabel
+            infoLabel.lineBreakMode = .byTruncatingTail
+            infoRow.addArrangedSubview(infoLabel)
+
+            vStack.addArrangedSubview(infoRow)
+        } else {
+            let errorLabel = UILabel()
+            errorLabel.text = String(localized: "Invalid chain — some proxies are missing")
+            errorLabel.font = .systemFont(ofSize: 22, weight: .regular)
+            errorLabel.textColor = .systemRed
+            vStack.addArrangedSubview(errorLabel)
+        }
 
         // Alpha for invalid chains
         cell.contentView.alpha = isValid ? 1.0 : 0.6
@@ -105,6 +182,20 @@ class TVChainListViewController: UITableViewController {
         }
 
         return cell
+    }
+
+    // MARK: - Focus
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        coordinator.addCoordinatedAnimations {
+            if let cell = context.nextFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .light
+            }
+            if let cell = context.previouslyFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .unspecified
+            }
+        }
     }
 
     // MARK: - Selection

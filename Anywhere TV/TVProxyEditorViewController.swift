@@ -206,6 +206,8 @@ class TVProxyEditorViewController: UITableViewController {
         super.viewDidLoad()
         title = existingConfiguration != nil ? String(localized: "Edit Configuration") : String(localized: "Add Configuration")
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.rowHeight = UITableView.automaticDimension
+        tableView.estimatedRowHeight = 80
 
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped))
         navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .save, target: self, action: #selector(saveTapped))
@@ -270,6 +272,22 @@ class TVProxyEditorViewController: UITableViewController {
         return cell
     }
 
+    // MARK: - Focus
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        coordinator.addCoordinatedAnimations {
+            if let cell = context.nextFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .light
+            }
+            if let cell = context.previouslyFocusedView as? UITableViewCell {
+                cell.overrideUserInterfaceStyle = .unspecified
+            }
+        }
+    }
+
+    // MARK: - Selection
+
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         let row = formSections[indexPath.section].rows[indexPath.row]
@@ -304,7 +322,7 @@ class TVProxyEditorViewController: UITableViewController {
 
         case .toggle(_, let isOn, let key):
             updateField(key, value: isOn ? "false" : "true")
-            tableView.reloadData()
+            tableView.reloadSections(IndexSet(integer: indexPath.section), with: .none)
             updateSaveButton()
         }
     }
