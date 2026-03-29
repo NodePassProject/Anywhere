@@ -94,10 +94,11 @@ enum DNSPacket {
 
             var response = Data(count: responseLen)
             response.withUnsafeMutableBytes { ptr in
-                let p = ptr.bindMemory(to: UInt8.self).baseAddress!
+                guard let p = ptr.bindMemory(to: UInt8.self).baseAddress,
+                      let src = queryData.baseAddress else { return }
 
                 // Copy header + question section
-                memcpy(p, queryData.baseAddress!, questionEnd)
+                memcpy(p, src, questionEnd)
 
                 // Response flags: QR=1, AA=1, RD=1, RA=1
                 p[2] = 0x85; p[3] = 0x80
@@ -126,8 +127,9 @@ enum DNSPacket {
             // NODATA response (ANCOUNT=0) — build directly into Data
             var response = Data(count: questionEnd)
             response.withUnsafeMutableBytes { ptr in
-                let p = ptr.bindMemory(to: UInt8.self).baseAddress!
-                memcpy(p, queryData.baseAddress!, questionEnd)
+                guard let p = ptr.bindMemory(to: UInt8.self).baseAddress,
+                      let src = queryData.baseAddress else { return }
+                memcpy(p, src, questionEnd)
                 p[2] = 0x85; p[3] = 0x80
                 p[6] = 0x00; p[7] = 0x00
                 p[8] = 0x00; p[9] = 0x00; p[10] = 0x00; p[11] = 0x00

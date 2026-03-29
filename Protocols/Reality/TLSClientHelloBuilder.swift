@@ -447,7 +447,9 @@ struct TLSClientHelloBuilder {
         case .android11:  return buildAndroid11(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .qq11:       return buildQQ11(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .browser360: return build360_7(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
-        case .random: fatalError("random fingerprint must be resolved before dispatch")
+        case .random:
+            assertionFailure("random fingerprint must be resolved before dispatch")
+            return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)
         }
     }
 

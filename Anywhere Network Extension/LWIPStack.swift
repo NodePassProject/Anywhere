@@ -75,7 +75,8 @@ class LWIPStack {
     private var proxyServerAddresses: Set<String> = []
 
     /// Global traffic counters (bytes through the tunnel).
-    /// Incremented on lwipQueue / outputQueue; reads from other queues are safe on 64-bit ARM.
+    /// Incremented on lwipQueue; read from the NE provider message handler thread.
+    /// Small races are tolerable — these are only used for UI display.
     private(set) var totalBytesIn: Int64 = 0
     private(set) var totalBytesOut: Int64 = 0
 

@@ -14,6 +14,9 @@ class MuxClient {
     let configuration: ProxyConfiguration
     let lwipQueue: DispatchQueue
 
+    /// Key for identifying the lwipQueue (used by removeSession to detect current queue).
+    private static let queueKey = DispatchSpecificKey<Bool>()
+
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
     private var sessions: [UInt16: MuxSession] = [:]
@@ -44,6 +47,7 @@ class MuxClient {
     init(configuration: ProxyConfiguration, lwipQueue: DispatchQueue) {
         self.configuration = configuration
         self.lwipQueue = lwipQueue
+        lwipQueue.setSpecific(key: Self.queueKey, value: true)
     }
 
     // MARK: - Session Management
@@ -134,10 +138,21 @@ class MuxClient {
     }
 
     /// Removes a session from the map (called by MuxSession on close).
+    /// Safe to call from any thread — dispatches to lwipQueue if needed.
     func removeSession(_ sessionID: UInt16) {
-        sessions.removeValue(forKey: sessionID)
-        if sessions.isEmpty {
-            resetIdleTimer()
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            sessions.removeValue(forKey: sessionID)
+            if sessions.isEmpty {
+                resetIdleTimer()
+            }
+        } else {
+            lwipQueue.async { [weak self] in
+                guard let self else { return }
+                self.sessions.removeValue(forKey: sessionID)
+                if self.sessions.isEmpty {
+                    self.resetIdleTimer()
+                }
+            }
         }
     }
 

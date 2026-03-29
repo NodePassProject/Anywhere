@@ -19,7 +19,7 @@ class TVChainListViewController: UITableViewController {
         super.viewDidLoad()
         title = String(localized: "Chains")
         tableView = UITableView(frame: .zero, style: .grouped)
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.register(TVChainCell.self, forCellReuseIdentifier: TVChainCell.reuseIdentifier)
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
 
@@ -36,8 +36,7 @@ class TVChainListViewController: UITableViewController {
             .combineLatest(viewModel.$configurations, viewModel.$selectedChainId, viewModel.$chainLatencyResults)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                guard let self, self.tableView.numberOfSections > 0 else { return }
-                self.tableView.reloadSections(IndexSet(0..<self.tableView.numberOfSections), with: .none)
+                self?.tableView.reloadData()
             }
             .store(in: &cancellables)
     }
@@ -49,115 +48,26 @@ class TVChainListViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
+        let cell = tableView.dequeueReusableCell(withIdentifier: TVChainCell.reuseIdentifier, for: indexPath) as! TVChainCell
         let chain = viewModel.chains[indexPath.row]
         let proxies = chain.proxyIds.compactMap { id in viewModel.configurations.first(where: { $0.id == id }) }
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
         let isSelected = viewModel.selectedChainId == chain.id
 
-        cell.contentConfiguration = nil
-
-        let vStackTag = 1001
-        let vStack: UIStackView
-        if let existing = cell.contentView.viewWithTag(vStackTag) as? UIStackView {
-            vStack = existing
-            vStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        } else {
-            vStack = UIStackView()
-            vStack.tag = vStackTag
-            vStack.axis = .vertical
-            vStack.alignment = .leading
-            vStack.spacing = 8
-            vStack.translatesAutoresizingMaskIntoConstraints = false
-            cell.contentView.addSubview(vStack)
-            NSLayoutConstraint.activate([
-                vStack.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor, constant: 40),
-                vStack.trailingAnchor.constraint(lessThanOrEqualTo: cell.contentView.trailingAnchor, constant: -40),
-                vStack.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 16),
-                vStack.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -16),
-            ])
+        var infoText = "\(proxies.count) proxies"
+        if let entry = proxies.first, let exit = proxies.last {
+            infoText += " · \(entry.serverAddress) → \(exit.serverAddress)"
         }
 
-        // Name row
-        let nameRow = UIStackView()
-        nameRow.axis = .horizontal
-        nameRow.spacing = 12
-        nameRow.alignment = .center
-
-        let nameLabel = UILabel()
-        nameLabel.text = chain.name
-        nameLabel.font = .systemFont(ofSize: 32, weight: .medium)
-        nameLabel.textColor = .label
-        nameLabel.setContentHuggingPriority(.required, for: .horizontal)
-        nameRow.addArrangedSubview(nameLabel)
-
-        if isSelected {
-            let checkmarkConfig = UIImage.SymbolConfiguration(pointSize: 32, weight: .medium)
-            let checkmark = UIImageView(image: UIImage(systemName: "checkmark", withConfiguration: checkmarkConfig))
-            checkmark.tintColor = .systemBlue
-            checkmark.setContentHuggingPriority(.required, for: .horizontal)
-            nameRow.addArrangedSubview(checkmark)
-        }
-
-        vStack.addArrangedSubview(nameRow)
-
-        if isValid {
-            // Route preview row: proxy1 → proxy2 → proxy3
-            let routeRow = UIStackView()
-            routeRow.axis = .horizontal
-            routeRow.spacing = 6
-            routeRow.alignment = .center
-
-            let arrowConfig = UIImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-            for (index, proxy) in proxies.enumerated() {
-                if index > 0 {
-                    let arrow = UIImageView(image: UIImage(systemName: "arrow.right", withConfiguration: arrowConfig))
-                    arrow.tintColor = .tertiaryLabel
-                    arrow.setContentHuggingPriority(.required, for: .horizontal)
-                    routeRow.addArrangedSubview(arrow)
-                }
-                let proxyLabel = UILabel()
-                proxyLabel.text = proxy.displayName
-                proxyLabel.font = .systemFont(ofSize: 22, weight: .regular)
-                proxyLabel.textColor = .secondaryLabel
-                proxyLabel.lineBreakMode = .byTruncatingTail
-                proxyLabel.setContentHuggingPriority(.required, for: .horizontal)
-                routeRow.addArrangedSubview(proxyLabel)
-            }
-
-            vStack.addArrangedSubview(routeRow)
-
-            // Info row: proxy count · entry → exit
-            let infoRow = UIStackView()
-            infoRow.axis = .horizontal
-            infoRow.spacing = 6
-            infoRow.alignment = .center
-
-            var infoText = "\(proxies.count) proxies"
-            if let entry = proxies.first, let exit = proxies.last {
-                infoText += " · \(entry.serverAddress) → \(exit.serverAddress)"
-            }
-            let infoLabel = UILabel()
-            infoLabel.text = infoText
-            infoLabel.font = .systemFont(ofSize: 20, weight: .regular)
-            infoLabel.textColor = .tertiaryLabel
-            infoLabel.lineBreakMode = .byTruncatingTail
-            infoRow.addArrangedSubview(infoLabel)
-
-            vStack.addArrangedSubview(infoRow)
-        } else {
-            let errorLabel = UILabel()
-            errorLabel.text = String(localized: "Invalid chain — some proxies are missing")
-            errorLabel.font = .systemFont(ofSize: 22, weight: .regular)
-            errorLabel.textColor = .systemRed
-            vStack.addArrangedSubview(errorLabel)
-        }
-
-        // Alpha for invalid chains
-        cell.contentView.alpha = isValid ? 1.0 : 0.6
+        cell.configure(
+            name: chain.name,
+            isSelected: isSelected,
+            proxyNames: proxies.map(\.name),
+            isValid: isValid,
+            infoText: infoText
+        )
 
         // Latency
-        cell.accessoryView = nil
         if isValid, let result = viewModel.chainLatencyResults[chain.id] {
             let label = UILabel()
             label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
@@ -168,7 +78,7 @@ class TVChainListViewController: UITableViewController {
                 cell.accessoryView = spinner
                 return cell
             case .success(let ms):
-                label.text = "\(ms) ms"
+                label.text = String(localized: "\(ms) ms")
                 label.textColor = ms < 300 ? .systemGreen : ms < 500 ? .systemYellow : .systemRed
             case .failed:
                 label.text = String(localized: "timeout")

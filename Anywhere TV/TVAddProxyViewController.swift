@@ -50,6 +50,7 @@ class TVAddProxyViewController: UITableViewController {
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
+        tableView.remembersLastFocusedIndexPath = true
 
         navigationItem.leftBarButtonItem = UIBarButtonItem(
             barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped)
