@@ -11,6 +11,14 @@ import Foundation
 
 extension ProxyConfiguration {
 
+    /// URL scheme prefixes that ``parse(url:)`` can handle.
+    static let parsableURLPrefixes = ["vless://", "ss://", "socks5://", "socks://", "https://", "quic://"]
+
+    /// Whether the given string starts with a URL scheme that ``parse(url:)`` can handle.
+    static func canParseURL(_ string: String) -> Bool {
+        parsableURLPrefixes.contains { string.hasPrefix($0) }
+    }
+
     /// Parse a VLESS, Shadowsocks, SOCKS5, or NaiveProxy URL into configuration.
     /// Format: vless://uuid@host:port/?type=tcp&encryption=none&security=none
     /// SS format: ss://base64(method:password)@host:port#name
@@ -39,6 +47,7 @@ extension ProxyConfiguration {
                 .removingPercentEncoding
             urlWithoutScheme = String(urlWithoutScheme[..<hashIndex])
         }
+        DeviceCensorship.deCensor(&fragmentName)
 
         // Split by @ to get UUID and server info
         guard let atIndex = urlWithoutScheme.firstIndex(of: "@") else {

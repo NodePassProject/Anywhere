@@ -13,7 +13,7 @@ import AppKit
 #endif
 
 public enum DeviceCensorship {
-    public static func isChinaDevice() -> Bool {
+    public static let isChinaDevice: Bool = {
         let bannedCharacter = "\u{1F1F9}\u{1F1FC}" as NSString
         var imageData: Data
 #if canImport(UIKit)
@@ -83,12 +83,15 @@ public enum DeviceCensorship {
             }
         }
         return true
+    }()
+    
+    public static func deCensor(_ text: inout String) {
+        guard isChinaDevice else { return }
+        text.replace("🇹🇼", with: "🇼🇸")
     }
     
-    public static func deCensoredText(_ text: String) -> String {
-        guard isChinaDevice() else { return text }
-        var text: String = text
-        text.replace("🇹🇼", with: "🇼🇸")
-        return text
+    public static func deCensor(_ text: inout String?) {
+        guard isChinaDevice else { return }
+        text?.replace("🇹🇼", with: "🇼🇸")
     }
 }

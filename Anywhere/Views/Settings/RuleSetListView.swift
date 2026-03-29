@@ -51,7 +51,7 @@ struct RuleSetListView: View {
         default:
             if let uuid = UUID(uuidString: configurationId!),
                let configuration = viewModel.configurations.first(where: { $0.id == uuid }) {
-                return configuration.displayName
+                return configuration.name
             }
             return "Default"
         }

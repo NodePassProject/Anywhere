@@ -58,7 +58,7 @@ struct ChainEditorView: View {
                                 )
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(proxy.displayName)
+                                Text(proxy.name)
                                     .font(.body)
                                 Text("\(proxy.serverAddress):\(proxy.serverPort, format: .number.grouping(.never))")
                                     .font(.caption)
@@ -106,7 +106,7 @@ struct ChainEditorView: View {
                                     Image(systemName: "arrow.right")
                                         .font(.caption2)
                                         .foregroundStyle(.tertiary)
-                                    Text(proxy.displayName)
+                                    Text(proxy.name)
                                         .font(.caption.weight(.medium))
                                         .lineLimit(1)
                                 }
@@ -207,7 +207,7 @@ private struct ProxyPickerView: View {
                         dismiss()
                     } label: {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(proxy.displayName)
+                            Text(proxy.name)
                                 .font(.body)
                                 .foregroundStyle(.primary)
                             Text("\(proxy.serverAddress):\(proxy.serverPort, format: .number.grouping(.never))")

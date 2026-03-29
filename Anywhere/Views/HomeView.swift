@@ -226,7 +226,7 @@ struct HomeView: View {
 
     private func selectedConfigurationCard(_ configuration: ProxyConfiguration) -> some View {
         Button {
-            pickerConfig.text = configuration.displayName
+            pickerConfig.text = configuration.name
             pickerConfig.show = true
         } label: {
             cardContent {
@@ -235,7 +235,7 @@ struct HomeView: View {
                         Image(systemName: "antenna.radiowaves.left.and.right")
                             .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
                             .frame(width: 24)
-                        Text(configuration.displayName)
+                        Text(configuration.name)
                             .font(.body.weight(.medium))
                             .foregroundStyle(isConnected ? .white : .primary)
                             .onGeometryChange(for: CGRect.self) { proxy in

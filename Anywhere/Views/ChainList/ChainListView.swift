@@ -99,7 +99,7 @@ struct ChainListView: View {
                                     Image(systemName: "arrow.right")
                                         .font(.system(size: 8))
                                 }
-                                Text(proxy.displayName)
+                                Text(proxy.name)
                                     .lineLimit(1)
                             }
                         }

@@ -20,6 +20,9 @@ import SwiftUI
 /// - "alwaysOnEnabled": triggers VPN reconnect (if connected) so on-demand rules update immediately.
 struct SettingsView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
+    
+    @AppStorage("experimentalEnabled", store: AWCore.userDefaults)
+    private var experimentalEnabled = false
 
     @AppStorage("alwaysOnEnabled", store: AWCore.userDefaults)
     private var alwaysOnEnabled = false
@@ -45,18 +48,28 @@ struct SettingsView: View {
         Form {
             Section("VPN") {
                 Toggle(isOn: $alwaysOnEnabled) {
-                    TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.shield.fill", foregroundColor: .white, backgroundColor: .green)
+                    TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.circle.fill", foregroundColor: .white, backgroundColor: .green)
                 }
                 .disabled(viewModel.pendingReconnect)
             }
 
             Section("Routing") {
-                Toggle(isOn: Binding(get: {
-                    proxyMode == .global
-                }, set: { newValue in
-                    if newValue { proxyMode = .global } else { proxyMode = .rule }
-                })) {
-                    TextWithColorfulIcon(titleKey: "Global Mode", systemName: "arrow.trianglehead.merge", foregroundColor: .white, backgroundColor: .orange)
+                if experimentalEnabled {
+                    Toggle(isOn: Binding(get: {
+                        proxyMode == .rule
+                    }, set: { newValue in
+                        if newValue { proxyMode = .rule } else { proxyMode = .global }
+                    })) {
+                        TextWithColorfulIconAndCustomImage(titleKey: "ASR™ Smart Routing", imageName: "ASR", foregroundColor: .white, backgroundColor: .orange)
+                    }
+                } else {
+                    Toggle(isOn: Binding(get: {
+                        proxyMode == .global
+                    }, set: { newValue in
+                        if newValue { proxyMode = .global } else { proxyMode = .rule }
+                    })) {
+                        TextWithColorfulIcon(titleKey: "Global Mode", systemName: "arrow.trianglehead.merge", foregroundColor: .white, backgroundColor: .orange)
+                    }
                 }
                 if proxyMode != .global {
                     Toggle(isOn: $adBlockEnabled) {

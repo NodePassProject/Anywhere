@@ -1629,8 +1629,8 @@ extension XHTTPConnection {
             completion(nil)
             return
         }
-        let now = DispatchTime.now().uptimeNanoseconds
         lock.lock()
+        let now = DispatchTime.now().uptimeNanoseconds
         let elapsed = lastPacketUpSendTime == 0 ? UInt64(delayMs) * 1_000_000 : now - lastPacketUpSendTime
         lastPacketUpSendTime = now
         lock.unlock()

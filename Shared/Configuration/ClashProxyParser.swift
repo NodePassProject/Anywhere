@@ -175,32 +175,13 @@ struct ClashProxyParser {
             )
         }
 
-        // Build WebSocket configuration
-        var wsConfig: WebSocketConfiguration? = nil
+        // Build transport layer from ws-opts (WebSocket or HTTP Upgrade)
+        let transportLayer: TransportLayer
         if transport == "ws" {
-            var wsPath = "/"
-            var wsHost = server
-            var wsHeaders: [String: String] = [:]
-
-            let wsOpts = node["ws-opts"]
-            if wsOpts.type == .map {
-                wsPath = getString(wsOpts, key: "path") ?? "/"
-
-                let headers = wsOpts["headers"]
-                if headers.type == .map {
-                    for pair in headers {
-                        let k = pair[0].scalar
-                        let v = pair[1].scalar
-                        wsHeaders[k] = v
-                        if k == "Host" { wsHost = v }
-                    }
-                }
-            }
-
-            wsConfig = WebSocketConfiguration(host: wsHost, path: wsPath, headers: wsHeaders)
+            transportLayer = parseWSTransportLayer(from: node, server: server)
+        } else {
+            transportLayer = .tcp
         }
-
-        let transportLayer: TransportLayer = wsConfig.map { .ws($0) } ?? .tcp
         let securityLayer: SecurityLayer
         if let realityConfig { securityLayer = .reality(realityConfig) }
         else if let tlsConfig { securityLayer = .tls(tlsConfig) }
@@ -277,31 +258,13 @@ struct ClashProxyParser {
             )
         }
 
-        // WebSocket
-        var wsConfig: WebSocketConfiguration? = nil
+        // Build transport layer from ws-opts (WebSocket or HTTP Upgrade)
+        let transportLayer: TransportLayer
         if transport == "ws" {
-            var wsPath = "/"
-            var wsHost = server
-            var wsHeaders: [String: String] = [:]
-
-            let wsOpts = node["ws-opts"]
-            if wsOpts.type == .map {
-                wsPath = getString(wsOpts, key: "path") ?? "/"
-                let headers = wsOpts["headers"]
-                if headers.type == .map {
-                    for pair in headers {
-                        let k = pair[0].scalar
-                        let v = pair[1].scalar
-                        wsHeaders[k] = v
-                        if k == "Host" { wsHost = v }
-                    }
-                }
-            }
-
-            wsConfig = WebSocketConfiguration(host: wsHost, path: wsPath, headers: wsHeaders)
+            transportLayer = parseWSTransportLayer(from: node, server: server)
+        } else {
+            transportLayer = .tcp
         }
-
-        let transportLayer: TransportLayer = wsConfig.map { .ws($0) } ?? .tcp
         let securityLayer: SecurityLayer = tlsConfig.map { .tls($0) } ?? .none
 
         return ProxyConfiguration(
@@ -312,6 +275,53 @@ struct ClashProxyParser {
             transportLayer: transportLayer,
             securityLayer: securityLayer
         )
+    }
+
+    // MARK: - WebSocket / HTTP Upgrade transport parsing
+
+    /// Parses `ws-opts` from a Clash proxy node and returns the appropriate transport layer.
+    /// When `v2ray-http-upgrade` is set, returns `.httpUpgrade`; otherwise `.ws`.
+    private static func parseWSTransportLayer(from node: Node, server: String) -> TransportLayer {
+        var wsPath = "/"
+        var wsHost = server
+        var wsHeaders: [String: String] = [:]
+        var isHttpUpgrade = false
+        var maxEarlyData = 0
+        var earlyDataHeaderName = "Sec-WebSocket-Protocol"
+
+        let wsOpts = node["ws-opts"]
+        if wsOpts.type == .map {
+            wsPath = getString(wsOpts, key: "path") ?? "/"
+            isHttpUpgrade = getBool(wsOpts, key: "v2ray-http-upgrade") ?? false
+            maxEarlyData = getInt(wsOpts, key: "max-early-data") ?? 0
+            earlyDataHeaderName = getString(wsOpts, key: "early-data-header-name") ?? "Sec-WebSocket-Protocol"
+
+            let headers = wsOpts["headers"]
+            if headers.type == .map {
+                for pair in headers {
+                    let k = pair[0].scalar
+                    let v = pair[1].scalar
+                    wsHeaders[k] = v
+                    if k == "Host" { wsHost = v }
+                }
+            }
+        }
+
+        if isHttpUpgrade {
+            return .httpUpgrade(HTTPUpgradeConfiguration(
+                host: wsHost,
+                path: wsPath,
+                headers: wsHeaders
+            ))
+        } else {
+            return .ws(WebSocketConfiguration(
+                host: wsHost,
+                path: wsPath,
+                headers: wsHeaders,
+                maxEarlyData: maxEarlyData,
+                earlyDataHeaderName: earlyDataHeaderName
+            ))
+        }
     }
 
     /// Maps Clash `client-fingerprint` strings to `TLSFingerprint` raw values.

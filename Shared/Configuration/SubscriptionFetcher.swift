@@ -62,7 +62,7 @@ struct SubscriptionFetcher {
         let bodyString: String
         if let decoded = Data(base64Encoded: data, options: .ignoreUnknownCharacters),
            let decodedString = String(data: decoded, encoding: .utf8),
-           decodedString.contains("vless://") || decodedString.contains("ss://") {
+           ProxyConfiguration.parsableURLPrefixes.contains(where: { decodedString.contains($0) }) {
             bodyString = decodedString
         } else if let rawString = String(data: data, encoding: .utf8) {
             bodyString = rawString
@@ -90,7 +90,7 @@ struct SubscriptionFetcher {
         let configurations = bodyString
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { $0.hasPrefix("vless://") || $0.hasPrefix("ss://") }
+            .filter { ProxyConfiguration.canParseURL($0) }
             .compactMap { try? ProxyConfiguration.parse(url: $0) }
 
         guard !configurations.isEmpty else {

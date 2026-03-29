@@ -299,7 +299,7 @@ class VPNViewModel: ObservableObject {
         }
         let standaloneConfigurations: [ProxyConfiguration] = configurations.filter { $0.subscriptionId == nil }
         for configuration in standaloneConfigurations {
-            items.append(PickerItem(id: configuration.id, name: configuration.displayName))
+            items.append(PickerItem(id: configuration.id, name: configuration.name))
         }
         let subscribedGroups: [(Subscription, [ProxyConfiguration])] = subscriptions.compactMap { subscription in
             let configurations = configurations(for: subscription)
@@ -307,7 +307,7 @@ class VPNViewModel: ObservableObject {
         }
         for (_, configurations) in subscribedGroups {
             for configuration in configurations {
-                items.append(PickerItem(id: configuration.id, name: configuration.displayName))
+                items.append(PickerItem(id: configuration.id, name: configuration.name))
             }
         }
         return items
