@@ -68,12 +68,30 @@ class XHTTPConnection {
 
     /// Maximum h2ReadBuffer size (2 MB). Protects against unbounded growth
     private static let maxH2ReadBufferSize = 2_097_152
-    private var h2PeerWindowSize: Int = 65535
+    /// Connection-level send window (RFC 7540 §6.9: stream 0).
+    /// Updated by WINDOW_UPDATE on stream 0 only.
+    private var h2PeerConnectionWindow: Int = 65535
+    /// Stream-level send window for the active upload stream (stream-up / stream-one).
+    /// Updated by SETTINGS INITIAL_WINDOW_SIZE and stream-level WINDOW_UPDATE.
+    private var h2PeerStreamSendWindow: Int = 65535
     private var h2PeerInitialWindowSize: Int = 65535
-    private var h2LocalWindowSize: Int = 65535
+    private var h2LocalWindowSize: Int = Int(h2StreamWindowSize)  // Match our advertised INITIAL_WINDOW_SIZE
     private var h2MaxFrameSize: Int = 16384
     private var h2ResponseReceived = false
     private var h2StreamClosed = false
+
+    /// Continuation stored when a send is blocked by flow control (window == 0).
+    /// Invoked by the WINDOW_UPDATE handler to resume sending without polling.
+    private var h2FlowResumption: (() -> Void)?
+
+    /// Bytes received but not yet acknowledged via WINDOW_UPDATE (connection level).
+    private var h2ConnectionReceiveConsumed: Int = 0
+    /// Bytes received but not yet acknowledged via WINDOW_UPDATE (stream level, download stream).
+    private var h2StreamReceiveConsumed: Int = 0
+
+    /// Counts consecutive synchronous frame parses in readH2Frame to trampoline
+    /// only every Nth call, avoiding both stack overflow and per-frame dispatch overhead.
+    private var h2ReadDepth: Int = 0
 
     // HTTP/2 multiplexing state (for stream-up / packet-up over H2)
     private var h2UploadStreamId: UInt32 = 3      // Fixed upload stream for stream-up
@@ -862,7 +880,7 @@ extension XHTTPConnection {
 
     // Go http2 transport defaults
     private static let h2StreamWindowSize: UInt32 = 4_194_304  // 4MB
-    private static let h2ConnWindowSize: UInt32 = 1_073_741_824  // 1GB
+    private static let h2ConnectionWindowSize: UInt32 = 1_073_741_824  // 1GB
 
     // MARK: HTTP/2 Frame I/O
 
@@ -920,10 +938,20 @@ extension XHTTPConnection {
     private func readH2Frame(completion: @escaping (Result<(type: UInt8, flags: UInt8, streamId: UInt32, payload: Data), Error>) -> Void) {
         lock.lock()
         if let frame = parseH2Frame() {
+            // Trampoline every 16th consecutive synchronous parse to prevent
+            // stack overflow, while keeping inline dispatch for normal cases.
+            h2ReadDepth += 1
+            let needsTrampoline = h2ReadDepth >= 16
+            if needsTrampoline { h2ReadDepth = 0 }
             lock.unlock()
-            completion(.success(frame))
+            if needsTrampoline {
+                DispatchQueue.global().async { completion(.success(frame)) }
+            } else {
+                completion(.success(frame))
+            }
             return
         }
+        h2ReadDepth = 0  // Reset on actual I/O
         lock.unlock()
 
         downloadReceive { [weak self] data, _, error in
@@ -1394,7 +1422,7 @@ extension XHTTPConnection {
         initData.append(buildH2Frame(type: Self.h2FrameSettings, flags: 0, streamId: 0, payload: settingsPayload))
 
         // 3. Connection-level WINDOW_UPDATE (1GB, matching Go's transportDefaultConnFlow)
-        let windowIncrement = Self.h2ConnWindowSize
+        let windowIncrement = Self.h2ConnectionWindowSize
         var wuPayload = Data(count: 4)
         wuPayload[0] = UInt8((windowIncrement >> 24) & 0xFF)
         wuPayload[1] = UInt8((windowIncrement >> 16) & 0xFF)
@@ -1480,10 +1508,17 @@ extension XHTTPConnection {
                 case Self.h2FrameWindowUpdate:
                     self.lock.lock()
                     if frame.payload.count >= 4 {
-                        let increment = (UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])
-                        self.h2PeerWindowSize += Int(increment & 0x7FFFFFFF)
+                        let increment = Int(((UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])) & 0x7FFFFFFF)
+                        if frame.streamId == 0 {
+                            self.h2PeerConnectionWindow += increment
+                        } else {
+                            self.h2PeerStreamSendWindow += increment
+                        }
                     }
+                    let resumption = self.h2FlowResumption
+                    self.h2FlowResumption = nil
                     self.lock.unlock()
+                    resumption?()
                     self.processInitialServerFrames(completion: completion)
 
                 case Self.h2FramePing:
@@ -1511,11 +1546,11 @@ extension XHTTPConnection {
             offset += 6
 
             switch id {
-            case 0x04: // INITIAL_WINDOW_SIZE (RFC 7540 §6.9.2: adjust by delta)
+            case 0x04: // INITIAL_WINDOW_SIZE (RFC 7540 §6.9.2: affects stream windows only)
                 lock.lock()
                 let delta = Int(value) - h2PeerInitialWindowSize
                 h2PeerInitialWindowSize = Int(value)
-                h2PeerWindowSize += delta
+                h2PeerStreamSendWindow += delta
                 lock.unlock()
             case 0x05: // MAX_FRAME_SIZE
                 lock.lock()
@@ -1536,8 +1571,14 @@ extension XHTTPConnection {
         lock.unlock()
     }
 
-    /// Sends data as HTTP/2 DATA frame(s) on the given stream.
-    private func sendH2Data(data: Data, streamId: UInt32, completion: @escaping (Error?) -> Void) {
+    /// Sends data as HTTP/2 DATA frame(s) on the given stream, respecting peer flow control.
+    /// Batches as many frames as the window allows into a single transport write.
+    private func sendH2Data(data: Data, streamId: UInt32, offset: Int = 0, completion: @escaping (Error?) -> Void) {
+        guard offset < data.count else {
+            completion(nil)
+            return
+        }
+
         lock.lock()
         if h2StreamClosed {
             lock.unlock()
@@ -1545,26 +1586,48 @@ extension XHTTPConnection {
             return
         }
         let maxSize = h2MaxFrameSize
+        let window = min(h2PeerConnectionWindow, h2PeerStreamSendWindow)
+
+        guard window > 0 else {
+            h2FlowResumption = { [weak self] in
+                self?.sendH2Data(data: data, streamId: streamId, offset: offset, completion: completion)
+            }
+            lock.unlock()
+            return
+        }
+
+        // Batch multiple DATA frames into a single write
+        var frames = Data()
+        var currentOffset = offset
+        var windowRemaining = window
+
+        while currentOffset < data.count {
+            let remaining = data.count - currentOffset
+            let chunkSize = min(remaining, min(maxSize, windowRemaining))
+            guard chunkSize > 0 else { break }
+
+            let chunk = Data(data[data.startIndex + currentOffset ..< data.startIndex + currentOffset + chunkSize])
+            frames.append(buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: chunk))
+            currentOffset += chunkSize
+            windowRemaining -= chunkSize
+        }
+
+        let totalSent = window - windowRemaining
+        h2PeerConnectionWindow -= totalSent
+        h2PeerStreamSendWindow -= totalSent
         lock.unlock()
 
-        if data.count <= maxSize {
-            let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: data)
-            downloadSend(frame) { [weak self] error in
-                if error != nil { self?.markH2Closed() }
+        let nextOffset = currentOffset
+        downloadSend(frames) { [weak self] error in
+            if let error {
+                self?.markH2Closed()
                 completion(error)
+                return
             }
-        } else {
-            // Split into multiple DATA frames
-            let firstChunk = data.prefix(maxSize)
-            let remaining = data.suffix(from: data.startIndex + maxSize)
-            let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: Data(firstChunk))
-            downloadSend(frame) { [weak self] error in
-                if let error {
-                    self?.markH2Closed()
-                    completion(error)
-                    return
-                }
-                self?.sendH2Data(data: Data(remaining), streamId: streamId, completion: completion)
+            if nextOffset < data.count {
+                self?.sendH2Data(data: data, streamId: streamId, offset: nextOffset, completion: completion)
+            } else {
+                completion(nil)
             }
         }
     }
@@ -1586,36 +1649,73 @@ extension XHTTPConnection {
         let seq = nextSeq
         nextSeq += 1
         let maxSize = h2MaxFrameSize
-        lock.unlock()
+        // Packet-up: each new stream has h2PeerInitialWindowSize; only conn window is shared.
+        let streamWindow = h2PeerInitialWindowSize
+        let connectionWindow = h2PeerConnectionWindow
 
         // Build HEADERS for this upload POST (with session ID + seq metadata)
         let headerBlock = encodeH2UploadHeaders(seq: seq, contentLength: data.count)
         let headerFlags: UInt8 = data.isEmpty
             ? (Self.h2FlagEndHeaders | Self.h2FlagEndStream)
             : Self.h2FlagEndHeaders
-        let headersFrame = buildH2Frame(type: Self.h2FrameHeaders, flags: headerFlags, streamId: streamId, payload: headerBlock)
+        var outbound = buildH2Frame(type: Self.h2FrameHeaders, flags: headerFlags, streamId: streamId, payload: headerBlock)
 
-        downloadSend(headersFrame) { [weak self] error in
-            if let error {
-                self?.markH2Closed()
-                completion(error)
-                return
-            }
-            guard !data.isEmpty else {
-                self?.completePacketUpWithDelay(completion: completion)
-                return
-            }
-            guard let self else {
-                completion(XHTTPError.connectionClosed)
-                return
-            }
-            self.sendH2PacketUpData(data: data, streamId: streamId, maxSize: maxSize) { [weak self] error in
+        guard !data.isEmpty else {
+            lock.unlock()
+            downloadSend(outbound) { [weak self] error in
                 if let error {
                     self?.markH2Closed()
                     completion(error)
                 } else {
                     self?.completePacketUpWithDelay(completion: completion)
                 }
+            }
+            return
+        }
+
+        // Batch DATA frames with HEADERS into a single write when window allows
+        let window = min(connectionWindow, streamWindow)
+        var currentOffset = 0
+        var windowRemaining = window
+
+        while currentOffset < data.count {
+            let remaining = data.count - currentOffset
+            let chunkSize = min(remaining, min(maxSize, windowRemaining))
+            guard chunkSize > 0 else { break }
+
+            let isLast = (currentOffset + chunkSize) >= data.count
+            let flags: UInt8 = isLast ? Self.h2FlagEndStream : 0
+            let chunk = Data(data[data.startIndex + currentOffset ..< data.startIndex + currentOffset + chunkSize])
+            outbound.append(buildH2Frame(type: Self.h2FrameData, flags: flags, streamId: streamId, payload: chunk))
+            currentOffset += chunkSize
+            windowRemaining -= chunkSize
+        }
+
+        let totalSent = window - windowRemaining
+        h2PeerConnectionWindow -= totalSent
+        // Stream window for this stream is not tracked globally (short-lived)
+        let perStreamRemaining = streamWindow - totalSent
+        lock.unlock()
+
+        let nextOffset = currentOffset
+        downloadSend(outbound) { [weak self] error in
+            if let error {
+                self?.markH2Closed()
+                completion(error)
+                return
+            }
+            if nextOffset < data.count {
+                // Remaining data needs more window — continue via sendH2PacketUpData
+                self?.sendH2PacketUpData(data: data, streamId: streamId, offset: nextOffset, maxSize: maxSize, streamWindow: perStreamRemaining) { [weak self] error in
+                    if let error {
+                        self?.markH2Closed()
+                        completion(error)
+                    } else {
+                        self?.completePacketUpWithDelay(completion: completion)
+                    }
+                }
+            } else {
+                self?.completePacketUpWithDelay(completion: completion)
             }
         }
     }
@@ -1649,25 +1749,63 @@ extension XHTTPConnection {
     }
 
     /// Sends DATA frames for a packet-up upload stream, with END_STREAM on the last frame.
-    private func sendH2PacketUpData(data: Data, streamId: UInt32, maxSize: Int, completion: @escaping (Error?) -> Void) {
-        if data.count <= maxSize {
-            // Last (or only) chunk: set END_STREAM
-            let frame = buildH2Frame(type: Self.h2FrameData, flags: Self.h2FlagEndStream, streamId: streamId, payload: data)
-            downloadSend(frame) { [weak self] error in
-                if error != nil { self?.markH2Closed() }
-                completion(error)
+    /// Batches as many frames as the window allows into a single transport write.
+    /// `streamWindow` tracks the per-stream remaining window (not stored globally since packet-up streams are short-lived).
+    private func sendH2PacketUpData(data: Data, streamId: UInt32, offset: Int = 0, maxSize: Int, streamWindow: Int, completion: @escaping (Error?) -> Void) {
+        guard offset < data.count else {
+            completion(nil)
+            return
+        }
+
+        lock.lock()
+        if h2StreamClosed {
+            lock.unlock()
+            completion(XHTTPError.connectionClosed)
+            return
+        }
+        let window = min(h2PeerConnectionWindow, streamWindow)
+
+        guard window > 0 else {
+            h2FlowResumption = { [weak self] in
+                self?.sendH2PacketUpData(data: data, streamId: streamId, offset: offset, maxSize: maxSize, streamWindow: streamWindow, completion: completion)
             }
-        } else {
-            let firstChunk = data.prefix(maxSize)
-            let remaining = data.suffix(from: data.startIndex + maxSize)
-            let frame = buildH2Frame(type: Self.h2FrameData, flags: 0, streamId: streamId, payload: Data(firstChunk))
-            downloadSend(frame) { [weak self] error in
-                if let error {
-                    self?.markH2Closed()
-                    completion(error)
-                    return
-                }
-                self?.sendH2PacketUpData(data: Data(remaining), streamId: streamId, maxSize: maxSize, completion: completion)
+            lock.unlock()
+            return
+        }
+
+        var frames = Data()
+        var currentOffset = offset
+        var windowRemaining = window
+
+        while currentOffset < data.count {
+            let remaining = data.count - currentOffset
+            let chunkSize = min(remaining, min(maxSize, windowRemaining))
+            guard chunkSize > 0 else { break }
+
+            let isLast = (currentOffset + chunkSize) >= data.count
+            let flags: UInt8 = isLast ? Self.h2FlagEndStream : 0
+            let chunk = Data(data[data.startIndex + currentOffset ..< data.startIndex + currentOffset + chunkSize])
+            frames.append(buildH2Frame(type: Self.h2FrameData, flags: flags, streamId: streamId, payload: chunk))
+            currentOffset += chunkSize
+            windowRemaining -= chunkSize
+        }
+
+        let totalSent = window - windowRemaining
+        h2PeerConnectionWindow -= totalSent
+        let newStreamWindow = streamWindow - totalSent
+        lock.unlock()
+
+        let nextOffset = currentOffset
+        downloadSend(frames) { [weak self] error in
+            if let error {
+                self?.markH2Closed()
+                completion(error)
+                return
+            }
+            if nextOffset < data.count {
+                self?.sendH2PacketUpData(data: data, streamId: streamId, offset: nextOffset, maxSize: maxSize, streamWindow: newStreamWindow, completion: completion)
+            } else {
+                completion(nil)
             }
         }
     }
@@ -1709,27 +1847,43 @@ extension XHTTPConnection {
 
                 switch frame.type {
                 case Self.h2FrameData:
-                    // Send WINDOW_UPDATE to keep flow control open.
+                    // Batch WINDOW_UPDATEs: accumulate consumed bytes and send
+                    // when >= 50% of window is consumed (matches Go http2 behavior).
                     // Only send stream-level WINDOW_UPDATE for the download stream;
                     // upload streams may already be closed, and sending WINDOW_UPDATE
                     // for a closed stream triggers RST_STREAM (STREAM_CLOSED) from
                     // the server, which would disrupt the connection.
                     if !frame.payload.isEmpty {
-                        let increment = UInt32(frame.payload.count)
-                        var wuPayload = Data(count: 4)
-                        wuPayload[0] = UInt8((increment >> 24) & 0xFF)
-                        wuPayload[1] = UInt8((increment >> 16) & 0xFF)
-                        wuPayload[2] = UInt8((increment >> 8) & 0xFF)
-                        wuPayload[3] = UInt8(increment & 0xFF)
+                        self.lock.lock()
+                        self.h2ConnectionReceiveConsumed += frame.payload.count
                         if isDownloadStream {
-                            // Stream-level + connection-level WINDOW_UPDATE
-                            var updates = self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: frame.streamId, payload: wuPayload)
-                            updates.append(self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: wuPayload))
+                            self.h2StreamReceiveConsumed += frame.payload.count
+                        }
+                        let windowSize = self.h2LocalWindowSize
+                        let connConsumed = self.h2ConnectionReceiveConsumed
+                        let streamConsumed = self.h2StreamReceiveConsumed
+                        let threshold = windowSize / 2
+                        if connConsumed >= threshold { self.h2ConnectionReceiveConsumed = 0 }
+                        if streamConsumed >= threshold { self.h2StreamReceiveConsumed = 0 }
+                        self.lock.unlock()
+
+                        var updates = Data()
+                        if connConsumed >= threshold {
+                            let inc = UInt32(connConsumed)
+                            var p = Data(count: 4)
+                            p[0] = UInt8((inc >> 24) & 0xFF); p[1] = UInt8((inc >> 16) & 0xFF)
+                            p[2] = UInt8((inc >> 8) & 0xFF); p[3] = UInt8(inc & 0xFF)
+                            updates.append(self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: p))
+                        }
+                        if isDownloadStream && streamConsumed >= threshold {
+                            let inc = UInt32(streamConsumed)
+                            var p = Data(count: 4)
+                            p[0] = UInt8((inc >> 24) & 0xFF); p[1] = UInt8((inc >> 16) & 0xFF)
+                            p[2] = UInt8((inc >> 8) & 0xFF); p[3] = UInt8(inc & 0xFF)
+                            updates.append(self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: frame.streamId, payload: p))
+                        }
+                        if !updates.isEmpty {
                             self.downloadSend(updates) { _ in }
-                        } else {
-                            // Connection-level only (upload stream may be closed)
-                            let update = self.buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: wuPayload)
-                            self.downloadSend(update) { _ in }
                         }
                     }
 
@@ -1789,10 +1943,17 @@ extension XHTTPConnection {
                 case Self.h2FrameWindowUpdate:
                     self.lock.lock()
                     if frame.payload.count >= 4 {
-                        let increment = (UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])
-                        self.h2PeerWindowSize += Int(increment & 0x7FFFFFFF)
+                        let increment = Int(((UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])) & 0x7FFFFFFF)
+                        if frame.streamId == 0 {
+                            self.h2PeerConnectionWindow += increment
+                        } else {
+                            self.h2PeerStreamSendWindow += increment
+                        }
                     }
+                    let resumption = self.h2FlowResumption
+                    self.h2FlowResumption = nil
                     self.lock.unlock()
+                    resumption?()
                     self.receiveH2Data(completion: completion)
 
                 case Self.h2FramePing:

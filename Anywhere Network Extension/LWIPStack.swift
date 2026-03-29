@@ -39,6 +39,9 @@ class LWIPStack {
     private var outputPackets: [Data] = []
     private var outputProtocols: [NSNumber] = []
     private var outputFlushScheduled = false
+    /// True while a writePackets call is executing on outputQueue.
+    /// Prevents piling up multiple writes that overwhelm the TUN device buffer.
+    private var outputWriteInFlight = false
 
     // --- Settings (read from App Group UserDefaults) ---
     // These are loaded at start/restart and live-reloaded via Darwin notification.
@@ -341,6 +344,7 @@ class LWIPStack {
         self.outputPackets.removeAll(keepingCapacity: true)
         self.outputProtocols.removeAll(keepingCapacity: true)
         self.outputFlushScheduled = false
+        self.outputWriteInFlight = false
 
         self.muxManager?.closeAll()
         self.muxManager = nil
@@ -1048,15 +1052,27 @@ class LWIPStack {
     /// Flushes accumulated output packets to the TUN device in a single writePackets call.
     /// Called via deferred lwipQueue.async after the current batch of lwip_bridge_input
     /// calls completes. Reduces kernel crossings from N to 1 per processing cycle.
+    ///
+    /// Only one writePackets call is in flight at a time. While a write is executing,
+    /// new packets accumulate and are flushed when the previous write completes.
+    /// This prevents overwhelming the kernel's utun buffer (ENOSPC).
     private func flushOutputPackets() {
         outputFlushScheduled = false
-        guard !outputPackets.isEmpty else { return }
+        guard !outputPackets.isEmpty, !outputWriteInFlight else { return }
         let packets = outputPackets
         let protocols = outputProtocols
         outputPackets.removeAll(keepingCapacity: true)
         outputProtocols.removeAll(keepingCapacity: true)
+        outputWriteInFlight = true
         outputQueue.async { [weak self] in
             self?.packetFlow?.writePackets(packets, withProtocols: protocols)
+            self?.lwipQueue.async {
+                guard let self else { return }
+                self.outputWriteInFlight = false
+                if !self.outputPackets.isEmpty {
+                    self.flushOutputPackets()
+                }
+            }
         }
     }
 

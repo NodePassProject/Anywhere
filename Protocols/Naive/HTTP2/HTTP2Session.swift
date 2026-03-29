@@ -393,8 +393,10 @@ class HTTP2Session {
         }
 
         if frames.isEmpty {
-            logger.warning("[HTTP2Session] Send blocked by flow control on stream \(stream.streamID)")
-            completion(HTTP2Error.protocolError("Flow control blocked"))
+            // Flow control window exhausted — wait for WINDOW_UPDATE and retry
+            queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+                self?.sendData(data, on: stream, offset: offset, completion: completion)
+            }
             return
         }
 
