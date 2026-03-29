@@ -177,7 +177,10 @@ static err_t tcp_recv_cb(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t 
                 s_tcp_recv_fn(arg, buf, p->tot_len);
                 mem_free(buf);
             } else {
-                os_log_error(s_log, "[Bridge] tcp_recv_cb: mem_malloc failed for %u bytes", p->tot_len);
+                os_log_error(s_log, "[Bridge] tcp_recv_cb: mem_malloc failed for %u bytes, returning ERR_MEM", p->tot_len);
+                /* Don't free p — lwIP retains ownership when we return an error,
+                 * and will redeliver the segment later. */
+                return ERR_MEM;
             }
         } else {
             s_tcp_recv_fn(arg, p->payload, p->tot_len);

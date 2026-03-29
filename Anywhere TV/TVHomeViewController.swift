@@ -346,8 +346,8 @@ class TVHomeViewController: UIViewController {
             .sink { [weak self] _ in self?.updateConfigCard() }
             .store(in: &cancellables)
 
-        viewModel.$bytesIn
-            .combineLatest(viewModel.$bytesOut)
+        ConnectionStatsModel.shared.$bytesIn
+            .combineLatest(ConnectionStatsModel.shared.$bytesOut)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateTrafficStats() }
             .store(in: &cancellables)
@@ -356,6 +356,22 @@ class TVHomeViewController: UIViewController {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateConfigCard() }
             .store(in: &cancellables)
+
+        viewModel.$startError
+            .compactMap { $0 }
+            .receive(on: RunLoop.main)
+            .sink { [weak self] message in
+                self?.presentStartError(message)
+            }
+            .store(in: &cancellables)
+    }
+
+    private func presentStartError(_ message: String) {
+        let alert = UIAlertController(title: "VPN Error", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
+            self?.viewModel.startError = nil
+        })
+        present(alert, animated: true)
     }
 
     // MARK: - UI Updates
@@ -401,8 +417,8 @@ class TVHomeViewController: UIViewController {
                 self.statsButton.alpha = shouldShow ? 1 : 0
             }
         }
-        uploadLabel.text = Self.formatBytes(viewModel.bytesOut)
-        downloadLabel.text = Self.formatBytes(viewModel.bytesIn)
+        uploadLabel.text = Self.formatBytes(ConnectionStatsModel.shared.bytesOut)
+        downloadLabel.text = Self.formatBytes(ConnectionStatsModel.shared.bytesIn)
     }
 
     private func updateConfigCard() {

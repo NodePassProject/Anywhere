@@ -10,8 +10,7 @@ import os
 
 private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "XHTTP")
 
-/// Default User-Agent matching Xray-core's `utils.ChromeUA` (config.go:51-53).
-private let defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
+private let defaultUserAgent = ProxyUserAgent.chrome
 
 // MARK: - Transport Closures
 
@@ -80,9 +79,13 @@ class XHTTPConnection {
     private var h2ResponseReceived = false
     private var h2StreamClosed = false
 
-    /// Continuation stored when a send is blocked by flow control (window == 0).
-    /// Invoked by the WINDOW_UPDATE handler to resume sending without polling.
-    private var h2FlowResumption: (() -> Void)?
+    /// Continuations stored when sends are blocked by flow control (window == 0).
+    /// All are invoked by the WINDOW_UPDATE handler; each re-checks its own window.
+    private var h2FlowResumptions: [() -> Void] = []
+    /// Per-stream send windows for packet-up streams that are blocked on flow control.
+    /// Keyed by stream ID; entries are created when a packet-up send blocks, updated by
+    /// stream-level WINDOW_UPDATE, and removed when the send resumes.
+    private var h2PacketStreamWindows: [UInt32: Int] = [:]
 
     /// Bytes received but not yet acknowledged via WINDOW_UPDATE (connection level).
     private var h2ConnectionReceiveConsumed: Int = 0
@@ -1497,11 +1500,13 @@ extension XHTTPConnection {
                     // Early response HEADERS — process and complete
                     let isDownload = frame.streamId == 0 || frame.streamId == 1
                     if isDownload {
-                        if self.checkH2ResponseStatus(frame.payload) == nil {
-                            self.lock.lock()
-                            self.h2ResponseReceived = true
-                            self.lock.unlock()
+                        if let rejection = self.checkH2ResponseStatus(frame.payload) {
+                            completion(XHTTPError.setupFailed("H2 response rejected: \(rejection)"))
+                            return
                         }
+                        self.lock.lock()
+                        self.h2ResponseReceived = true
+                        self.lock.unlock()
                     }
                     completion(nil)
 
@@ -1511,14 +1516,16 @@ extension XHTTPConnection {
                         let increment = Int(((UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])) & 0x7FFFFFFF)
                         if frame.streamId == 0 {
                             self.h2PeerConnectionWindow += increment
+                        } else if self.h2PacketStreamWindows[frame.streamId] != nil {
+                            self.h2PacketStreamWindows[frame.streamId]! += increment
                         } else {
                             self.h2PeerStreamSendWindow += increment
                         }
                     }
-                    let resumption = self.h2FlowResumption
-                    self.h2FlowResumption = nil
+                    let resumptions = self.h2FlowResumptions
+                    self.h2FlowResumptions.removeAll()
                     self.lock.unlock()
-                    resumption?()
+                    for r in resumptions { r() }
                     self.processInitialServerFrames(completion: completion)
 
                 case Self.h2FramePing:
@@ -1589,7 +1596,7 @@ extension XHTTPConnection {
         let window = min(h2PeerConnectionWindow, h2PeerStreamSendWindow)
 
         guard window > 0 else {
-            h2FlowResumption = { [weak self] in
+            h2FlowResumptions.append { [weak self] in
                 self?.sendH2Data(data: data, streamId: streamId, offset: offset, completion: completion)
             }
             lock.unlock()
@@ -1763,11 +1770,14 @@ extension XHTTPConnection {
             completion(XHTTPError.connectionClosed)
             return
         }
-        let window = min(h2PeerConnectionWindow, streamWindow)
+        // Use window updated by WINDOW_UPDATE if this send was previously blocked.
+        let effectiveStreamWindow = h2PacketStreamWindows.removeValue(forKey: streamId) ?? streamWindow
+        let window = min(h2PeerConnectionWindow, effectiveStreamWindow)
 
         guard window > 0 else {
-            h2FlowResumption = { [weak self] in
-                self?.sendH2PacketUpData(data: data, streamId: streamId, offset: offset, maxSize: maxSize, streamWindow: streamWindow, completion: completion)
+            h2PacketStreamWindows[streamId] = effectiveStreamWindow
+            h2FlowResumptions.append { [weak self] in
+                self?.sendH2PacketUpData(data: data, streamId: streamId, offset: offset, maxSize: maxSize, streamWindow: effectiveStreamWindow, completion: completion)
             }
             lock.unlock()
             return
@@ -1792,7 +1802,7 @@ extension XHTTPConnection {
 
         let totalSent = window - windowRemaining
         h2PeerConnectionWindow -= totalSent
-        let newStreamWindow = streamWindow - totalSent
+        let newStreamWindow = effectiveStreamWindow - totalSent
         lock.unlock()
 
         let nextOffset = currentOffset
@@ -1839,8 +1849,8 @@ extension XHTTPConnection {
             }
 
             switch result {
-            case .failure:
-                completion(nil, nil) // EOF
+            case .failure(let error):
+                completion(nil, error)
 
             case .success(let frame):
                 let isDownloadStream = frame.streamId == 0 || frame.streamId == 1
@@ -1946,14 +1956,16 @@ extension XHTTPConnection {
                         let increment = Int(((UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])) & 0x7FFFFFFF)
                         if frame.streamId == 0 {
                             self.h2PeerConnectionWindow += increment
+                        } else if self.h2PacketStreamWindows[frame.streamId] != nil {
+                            self.h2PacketStreamWindows[frame.streamId]! += increment
                         } else {
                             self.h2PeerStreamSendWindow += increment
                         }
                     }
-                    let resumption = self.h2FlowResumption
-                    self.h2FlowResumption = nil
+                    let resumptions = self.h2FlowResumptions
+                    self.h2FlowResumptions.removeAll()
                     self.lock.unlock()
-                    resumption?()
+                    for r in resumptions { r() }
                     self.receiveH2Data(completion: completion)
 
                 case Self.h2FramePing:

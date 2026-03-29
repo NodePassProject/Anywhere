@@ -118,8 +118,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         ipv4Settings.excludedRoutes = Self.bypassIPv4Routes
         settings.ipv4Settings = ipv4Settings
 
-        let dnsServers: [String]
         let ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: "ipv6DNSEnabled")
+        if ipv6DNSEnabled {
+            let ipv6Settings = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
+            ipv6Settings.includedRoutes = [NEIPv6Route.default()]
+            ipv6Settings.excludedRoutes = Self.bypassIPv6Routes
+            settings.ipv6Settings = ipv6Settings
+        }
+
+        let dnsServers: [String]
         if ipv6DNSEnabled {
             dnsServers = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
         } else {

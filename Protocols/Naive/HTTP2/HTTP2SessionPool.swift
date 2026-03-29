@@ -28,6 +28,10 @@ class HTTP2SessionPool {
     /// Sessions keyed by "host:port:sni".
     private var sessions: [String: [HTTP2Session]] = [:]
 
+    /// Dedicated (non-pooled) sessions for chained connections.
+    /// Retained here so the session stays alive while its streams are in use.
+    private var dedicatedSessions: [ObjectIdentifier: HTTP2Session] = [:]
+
     private init() {}
 
     // MARK: - Acquire
@@ -62,6 +66,17 @@ class HTTP2SessionPool {
                 host: host, port: port, sni: sni,
                 tunnel: tunnel, configuration: configuration
             )
+            let sessionID = ObjectIdentifier(session)
+            lock.lock()
+            dedicatedSessions[sessionID] = session
+            lock.unlock()
+            session.onClose = { [weak self] in
+                guard let self else { return }
+                self.lock.lock()
+                self.dedicatedSessions.removeValue(forKey: sessionID)
+                self.lock.unlock()
+                logger.info("[HTTP2Pool] Evicted dedicated session")
+            }
             session.queue.async {
                 let stream = session.createStream(destination: destination)
                 completion(stream)
@@ -73,10 +88,17 @@ class HTTP2SessionPool {
         let session: HTTP2Session
 
         lock.lock()
-        // Evict closed sessions
-        sessions[key]?.removeAll { $0.state == .closed }
+        // Evict closed and GOAWAY sessions.
+        // GOAWAY sessions move to dedicatedSessions so they stay alive
+        // while their existing streams drain.
+        if let array = sessions[key] {
+            for s in array where s.poolIsGoingAway {
+                dedicatedSessions[ObjectIdentifier(s)] = s
+            }
+        }
+        sessions[key]?.removeAll { $0.poolIsClosed || $0.poolIsGoingAway }
 
-        if let existing = sessions[key]?.first(where: { $0.hasCapacity }) {
+        if let existing = sessions[key]?.first(where: { $0.tryReserveStream() }) {
             session = existing
         } else {
             let new = HTTP2Session(
@@ -107,6 +129,8 @@ class HTTP2SessionPool {
         if sessions[key]?.isEmpty == true {
             sessions.removeValue(forKey: key)
         }
+        // Also clean up if the session was draining after GOAWAY
+        dedicatedSessions.removeValue(forKey: ObjectIdentifier(session))
         lock.unlock()
         logger.info("[HTTP2Pool] Evicted session for \(key, privacy: .public)")
     }
@@ -115,10 +139,15 @@ class HTTP2SessionPool {
     func closeAll() {
         lock.lock()
         let all = sessions.values.flatMap { $0 }
+        let dedicated = Array(dedicatedSessions.values)
         sessions.removeAll()
+        dedicatedSessions.removeAll()
         lock.unlock()
 
         for session in all {
+            session.close()
+        }
+        for session in dedicated {
             session.close()
         }
     }

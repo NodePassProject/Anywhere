@@ -42,9 +42,8 @@ struct SubscriptionFetcher {
         var request = URLRequest(url: url)
         request.setValue("Anywhere", forHTTPHeaderField: "User-Agent")
 
-        // Use a delegate that accepts untrusted certificates — subscription
-        // servers commonly run on IP addresses with self-signed certs.
-        let delegate = InsecureSessionDelegate()
+        let allowInsecure = AWCore.userDefaults.bool(forKey: "allowInsecure")
+        let delegate: InsecureSessionDelegate? = allowInsecure ? InsecureSessionDelegate() : nil
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await URLSession(configuration: .default, delegate: delegate, delegateQueue: nil).data(for: request)
@@ -160,7 +159,7 @@ struct SubscriptionFetcher {
     }
 }
 
-// MARK: - URLSession delegate that accepts self-signed certificates
+// MARK: - URLSession delegate that accepts self-signed certificates (used only when Allow Insecure is enabled)
 
 private final class InsecureSessionDelegate: NSObject, URLSessionDelegate {
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {

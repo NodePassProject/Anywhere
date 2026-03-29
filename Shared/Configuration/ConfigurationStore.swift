@@ -84,18 +84,22 @@ class ConfigurationStore: ObservableObject, ConfigurationProviding {
     }
 
     private func saveToDisk() {
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(configurations)
-            try data.write(to: fileURL, options: .atomic)
-        } catch {
-            print("Failed to save configurations: \(error)")
+        let snapshot = configurations
+        let url = fileURL
+        Task.detached {
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let data = try encoder.encode(snapshot)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                print("Failed to save configurations: \(error)")
+            }
+            #if os(tvOS)
+            if let data = try? JSONEncoder().encode(snapshot) {
+                AWCore.userDefaults.set(data, forKey: ConfigurationStore.userDefaultsKey)
+            }
+            #endif
         }
-        #if os(tvOS)
-        if let data = try? JSONEncoder().encode(configurations) {
-            AWCore.userDefaults.set(data, forKey: Self.userDefaultsKey)
-        }
-        #endif
     }
 }

@@ -138,11 +138,13 @@ class HTTP2Stream: NaiveTunnel {
 
             if !receiveQueue.isEmpty {
                 let data = receiveQueue.removeFirst()
+                self.acknowledgeConsumedData(count: data.count)
                 completion(data, nil)
                 return
             }
 
             if endStreamReceived {
+                state = .closed
                 completion(nil, nil)  // EOF
                 return
             }
@@ -160,8 +162,16 @@ class HTTP2Stream: NaiveTunnel {
         guard let session else { return }
         session.queue.async { [self] in
             guard state != .closed else { return }
+            let needsRst = (state == .open || state == .connectSent)
             state = .closed
             session.removeStream(self)
+
+            // Inform the peer so it can reclaim its stream slot.
+            if needsRst {
+                session.sendControlFrame(
+                    HTTP2Framer.rstStreamFrame(streamID: streamID, errorCode: 0x8 /* CANCEL */)
+                )
+            }
 
             if let cb = connectCompletion {
                 connectCompletion = nil
@@ -209,18 +219,6 @@ class HTTP2Stream: NaiveTunnel {
 
     /// Handles a DATA frame payload routed to this stream by the session.
     func handleData(_ payload: Data, endStream: Bool) {
-        // Per-stream receive flow control
-        if payload.count > 0 {
-            recvConsumed += payload.count
-            if recvConsumed >= recvWindowSize / 2 {
-                let increment = UInt32(recvConsumed)
-                recvConsumed = 0
-                session?.sendControlFrame(
-                    HTTP2Framer.windowUpdateFrame(streamID: streamID, increment: increment)
-                )
-            }
-        }
-
         if endStream {
             endStreamReceived = true
         }
@@ -228,10 +226,12 @@ class HTTP2Stream: NaiveTunnel {
         if let pending = pendingReceive {
             if !payload.isEmpty {
                 pendingReceive = nil
+                acknowledgeConsumedData(count: payload.count)
                 pending(payload, nil)
             } else if endStream {
                 pendingReceive = nil
                 state = .closed
+                session?.removeStream(self)
                 pending(nil, nil)  // EOF
             }
             // Empty DATA without END_STREAM: keep waiting
@@ -239,6 +239,13 @@ class HTTP2Stream: NaiveTunnel {
             receiveQueue.append(payload)
         } else if endStream && receiveQueue.isEmpty {
             state = .closed
+            session?.removeStream(self)
+        }
+
+        // No more frames will arrive; free the session slot now even if
+        // buffered data still needs to be consumed by receiveData().
+        if endStream && state != .closed {
+            session?.removeStream(self)
         }
     }
 
@@ -270,6 +277,20 @@ class HTTP2Stream: NaiveTunnel {
     }
 
     // MARK: - Flow Control (called by session on session.queue)
+
+    /// Acknowledges data the consumer has actually read, opening per-stream
+    /// and connection-level receive windows. Must be called on `session.queue`.
+    private func acknowledgeConsumedData(count: Int) {
+        recvConsumed += count
+        if recvConsumed >= recvWindowSize / 2 {
+            let increment = UInt32(recvConsumed)
+            recvConsumed = 0
+            session?.sendControlFrame(
+                HTTP2Framer.windowUpdateFrame(streamID: streamID, increment: increment)
+            )
+        }
+        session?.acknowledgeReceivedData(count: count)
+    }
 
     func consumeSendWindow(_ bytes: Int) {
         sendWindow -= bytes

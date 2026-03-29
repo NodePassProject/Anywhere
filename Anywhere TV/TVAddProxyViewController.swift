@@ -172,8 +172,12 @@ class TVAddProxyViewController: UITableViewController {
                     let nav = UINavigationController(rootViewController: editor)
                     nav.modalPresentationStyle = .fullScreen
                     // Present from the tab bar controller
-                    if let tabBar = UIApplication.shared.keyWindow?.rootViewController {
-                        tabBar.present(nav, animated: true)
+                    if let windowScene = UIApplication.shared.connectedScenes
+                        .compactMap({ $0 as? UIWindowScene })
+                        .first(where: { $0.activationState == .foregroundActive }),
+                       let rootViewController = windowScene.windows
+                        .first(where: { $0.isKeyWindow })?.rootViewController {
+                        rootViewController.present(nav, animated: true)
                     }
                 }
                 return

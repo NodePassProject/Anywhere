@@ -75,16 +75,27 @@ nonisolated enum LatencyTester {
         }
     }
 
-    /// Test all configurations concurrently, emitting results as each test finishes.
+    /// Maximum number of latency tests running at the same time.
+    private static let maxConcurrentTests = 6
+
+    /// Test all configurations concurrently (capped), emitting results as each test finishes.
     nonisolated static func testAll(_ configurations: [ProxyConfiguration]) -> AsyncStream<(UUID, LatencyResult)> {
         AsyncStream { continuation in
             let task = Task {
                 await withTaskGroup(of: (UUID, LatencyResult).self) { group in
-                    for configuration in configurations {
-                        group.addTask { (configuration.id, await Self.test(configuration)) }
+                    var iterator = configurations.makeIterator()
+
+                    for _ in 0..<min(Self.maxConcurrentTests, configurations.count) {
+                        if let config = iterator.next() {
+                            group.addTask { (config.id, await Self.test(config)) }
+                        }
                     }
+
                     for await pair in group {
                         continuation.yield(pair)
+                        if let config = iterator.next() {
+                            group.addTask { (config.id, await Self.test(config)) }
+                        }
                     }
                 }
                 continuation.finish()
