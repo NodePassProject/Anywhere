@@ -238,7 +238,7 @@ struct OnboardingView: View {
         }
 
         // Sync routing to network extension
-        viewModel.syncRoutingConfigurationToNE()
+        Task { await viewModel.syncRoutingConfigurationToNE() }
 
         // Notify settings changed for country bypass
         if !bypassCountryCode.isEmpty {

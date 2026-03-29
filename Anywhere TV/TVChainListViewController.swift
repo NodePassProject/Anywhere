@@ -32,11 +32,20 @@ class TVChainListViewController: UITableViewController {
     }
 
     private func bindViewModel() {
+        // Structural changes — full reload
         viewModel.$chains
-            .combineLatest(viewModel.$configurations, viewModel.$selectedChainId, viewModel.$chainLatencyResults)
+            .combineLatest(viewModel.$configurations, viewModel.$selectedChainId)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.tableView.reloadData()
+            }
+            .store(in: &cancellables)
+
+        // Latency changes — update only visible cells
+        viewModel.$chainLatencyResults
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateVisibleLatencyAccessories()
             }
             .store(in: &cancellables)
     }
@@ -67,29 +76,7 @@ class TVChainListViewController: UITableViewController {
             infoText: infoText
         )
 
-        // Latency
-        if isValid, let result = viewModel.chainLatencyResults[chain.id] {
-            let label = UILabel()
-            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
-            switch result {
-            case .testing:
-                let spinner = UIActivityIndicatorView(style: .medium)
-                spinner.startAnimating()
-                cell.accessoryView = spinner
-                return cell
-            case .success(let ms):
-                label.text = String(localized: "\(ms) ms")
-                label.textColor = ms < 300 ? .systemGreen : ms < 500 ? .systemYellow : .systemRed
-            case .failed:
-                label.text = String(localized: "timeout")
-                label.textColor = .secondaryLabel
-            case .insecure:
-                label.text = String(localized: "insecure")
-                label.textColor = .secondaryLabel
-            }
-            label.sizeToFit()
-            cell.accessoryView = label
-        }
+        applyLatencyAccessory(to: cell, chainId: chain.id, isValid: isValid)
 
         return cell
     }
@@ -180,6 +167,53 @@ class TVChainListViewController: UITableViewController {
         let nav = UINavigationController(rootViewController: editor)
         nav.modalPresentationStyle = .fullScreen
         present(nav, animated: true)
+    }
+
+    // MARK: - Latency Accessories
+
+    private func applyLatencyAccessory(to cell: UITableViewCell, chainId: UUID, isValid: Bool) {
+        guard isValid, let result = viewModel.chainLatencyResults[chainId] else {
+            cell.accessoryView = nil
+            return
+        }
+        switch result {
+        case .testing:
+            let spinner = UIActivityIndicatorView(style: .medium)
+            spinner.startAnimating()
+            cell.accessoryView = spinner
+        case .success(let ms):
+            let label = UILabel()
+            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
+            label.text = String(localized: "\(ms) ms")
+            label.textColor = ms < 300 ? .systemGreen : ms < 500 ? .systemYellow : .systemRed
+            label.sizeToFit()
+            cell.accessoryView = label
+        case .failed:
+            let label = UILabel()
+            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
+            label.text = String(localized: "timeout")
+            label.textColor = .secondaryLabel
+            label.sizeToFit()
+            cell.accessoryView = label
+        case .insecure:
+            let label = UILabel()
+            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
+            label.text = String(localized: "insecure")
+            label.textColor = .secondaryLabel
+            label.sizeToFit()
+            cell.accessoryView = label
+        }
+    }
+
+    private func updateVisibleLatencyAccessories() {
+        for cell in tableView.visibleCells {
+            guard let indexPath = tableView.indexPath(for: cell) else { continue }
+            guard indexPath.row < viewModel.chains.count else { continue }
+            let chain = viewModel.chains[indexPath.row]
+            let proxies = chain.proxyIds.compactMap { id in viewModel.configurations.first(where: { $0.id == id }) }
+            let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
+            applyLatencyAccessory(to: cell, chainId: chain.id, isValid: isValid)
+        }
     }
 
     // MARK: - Empty State

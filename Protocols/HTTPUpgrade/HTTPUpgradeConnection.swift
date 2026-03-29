@@ -29,18 +29,7 @@ class HTTPUpgradeConnection {
     private let lock = UnfairLock()
     private var _isConnected = false
 
-    /// Chrome User-Agent string matching Xray-core's `utils.ChromeUA`.
-    /// Uses a fixed base version (Chrome 144, released 2026-01-13) and advances
-    /// by one version every ~35 days (midpoint of Xray-core's 25-45 day range).
-    static let chromeUserAgent: String = {
-        let baseVersion = 144
-        let baseDate = DateComponents(calendar: Calendar(identifier: .gregorian),
-                                      timeZone: TimeZone(identifier: "UTC"),
-                                      year: 2026, month: 1, day: 13).date!
-        let daysSinceBase = max(0, Int(Date().timeIntervalSince(baseDate) / 86400))
-        let version = baseVersion + daysSinceBase / 35
-        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/\(version).0.0.0 Safari/537.36"
-    }()
+    static let chromeUserAgent = ProxyUserAgent.chrome
 
     var isConnected: Bool {
         lock.lock()
@@ -121,15 +110,15 @@ class HTTPUpgradeConnection {
         request += "Connection: Upgrade\r\n"
         request += "Upgrade: websocket\r\n"
 
-        // Default User-Agent (Chrome UA) if not set in custom headers.
-        // Matches Xray-core's httpupgrade dialer which sets utils.ChromeUA.
-        if configuration.headers["User-Agent"] == nil {
-            request += "User-Agent: \(Self.chromeUserAgent)\r\n"
-        }
-
         // Custom headers from configuration
         for (key, value) in configuration.headers {
             request += "\(key): \(value)\r\n"
+        }
+
+        // Default User-Agent (Chrome UA) if not set in custom headers.
+        // Matches Xray-core's httpupgrade dialer which sets utils.ChromeUA.
+        if !configuration.headers.keys.contains(where: { $0.lowercased() == "user-agent" }) {
+            request += "User-Agent: \(Self.chromeUserAgent)\r\n"
         }
 
         request += "\r\n"

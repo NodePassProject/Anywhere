@@ -105,6 +105,7 @@ struct SettingsView: View {
                 )) {
                     TextWithColorfulIcon(titleKey: "Allow Insecure", systemName: "exclamationmark.shield.fill", foregroundColor: .white, backgroundColor: .red)
                 }
+                .tint(.red)
                 NavigationLink {
                     TrustedCertificatesView()
                 } label: {
@@ -161,10 +162,10 @@ struct SettingsView: View {
                     RuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: nil)
                 }
             }
-            viewModel.syncRoutingConfigurationToNE()
+            Task { await viewModel.syncRoutingConfigurationToNE() }
         }
         .onChange(of: bypassCountryCode) {
-            RuleSetStore.shared.syncBypassCountryRules()
+            Task { await RuleSetStore.shared.syncBypassCountryRules() }
             notifySettingsChanged()
         }
         .alert("Allow Insecure", isPresented: $showInsecureAlert) {

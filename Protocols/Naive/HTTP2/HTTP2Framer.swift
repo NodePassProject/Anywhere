@@ -166,6 +166,16 @@ enum HTTP2Framer {
         return HTTP2Frame(type: HTTP2FrameType.data, flags: flags, streamID: streamID, payload: payload)
     }
 
+    /// Creates a RST_STREAM frame with the given error code.
+    static func rstStreamFrame(streamID: UInt32, errorCode: UInt32) -> HTTP2Frame {
+        var payload = Data(capacity: 4)
+        payload.append(UInt8((errorCode >> 24) & 0xFF))
+        payload.append(UInt8((errorCode >> 16) & 0xFF))
+        payload.append(UInt8((errorCode >> 8) & 0xFF))
+        payload.append(UInt8(errorCode & 0xFF))
+        return HTTP2Frame(type: HTTP2FrameType.rstStream, flags: 0, streamID: streamID, payload: payload)
+    }
+
     /// Creates a PING ACK frame echoing back the opaque data.
     static func pingAckFrame(opaqueData: Data) -> HTTP2Frame {
         HTTP2Frame(type: HTTP2FrameType.ping, flags: HTTP2FrameFlags.ack, streamID: 0, payload: opaqueData)

@@ -47,6 +47,13 @@ class HTTP2Session {
 
     private(set) var state: State = .idle
 
+    // Pool-visible snapshot protected by `_poolLock`.
+    // HTTP2SessionPool reads these off-queue; the session updates them on `queue`.
+    private let _poolLock = UnfairLock()
+    private var _poolState: State = .idle
+    private var _poolStreamCount: Int = 0
+    private var _poolMaxConcurrent: UInt32 = 100
+
     /// Serial queue protecting all mutable state (session + streams).
     let queue = DispatchQueue(label: "com.argsment.Anywhere.http2session")
 
@@ -98,9 +105,49 @@ class HTTP2Session {
     /// Number of active streams on this session.
     var activeStreamCount: Int { streams.count }
 
-    /// Whether the session can accept another stream.
+    /// Whether the session can accept another stream (on-queue only).
     var hasCapacity: Bool {
         state == .ready && UInt32(streams.count) < maxConcurrentStreams
+    }
+
+    /// Thread-safe: whether this session appears closed to the pool.
+    var poolIsClosed: Bool {
+        _poolLock.withLock { _poolState == .closed }
+    }
+
+    /// Thread-safe: whether this session has received GOAWAY.
+    var poolIsGoingAway: Bool {
+        _poolLock.withLock { _poolState == .goingAway }
+    }
+
+    /// Thread-safe: atomically checks capacity and reserves a stream slot.
+    /// Returns `true` if a slot was reserved; caller must follow up with
+    /// `createStream` on `queue`.
+    ///
+    /// Accepts sessions that are still setting up (`.idle`, `.connecting`,
+    /// `.prefaceSent`) so that burst requests coalesce behind a single
+    /// TLS/H2 handshake instead of each spawning its own session.
+    func tryReserveStream() -> Bool {
+        _poolLock.withLock {
+            switch _poolState {
+            case .idle, .connecting, .prefaceSent, .ready:
+                break
+            case .goingAway, .closed:
+                return false
+            }
+            guard UInt32(_poolStreamCount) < _poolMaxConcurrent else { return false }
+            _poolStreamCount += 1
+            return true
+        }
+    }
+
+    /// Syncs the pool-visible snapshot with current state. Must be called on `queue`.
+    private func updatePoolSnapshot() {
+        _poolLock.withLock {
+            _poolState = state
+            _poolStreamCount = streams.count
+            _poolMaxConcurrent = maxConcurrentStreams
+        }
     }
 
     // MARK: - Session Setup
@@ -123,11 +170,13 @@ class HTTP2Session {
 
     private func beginSetup() {
         state = .connecting
+        updatePoolSnapshot()
         transport.connect { [weak self] error in
             guard let self else { return }
             self.queue.async {
                 if let error {
                     self.state = .closed
+                    self.updatePoolSnapshot()
                     self.completeReadyCallbacks(error)
                     return
                 }
@@ -150,6 +199,7 @@ class HTTP2Session {
             destination: destination
         )
         streams[streamID] = stream
+        updatePoolSnapshot()
         return stream
     }
 
@@ -157,6 +207,7 @@ class HTTP2Session {
     /// Must be called on `queue`.
     func removeStream(_ stream: HTTP2Stream) {
         streams.removeValue(forKey: stream.streamID)
+        updatePoolSnapshot()
     }
 
     // MARK: - Connection Preface
@@ -195,10 +246,12 @@ class HTTP2Session {
             self.queue.async {
                 if let error {
                     self.state = .closed
+                    self.updatePoolSnapshot()
                     self.completeReadyCallbacks(error)
                     return
                 }
                 self.state = .prefaceSent
+                self.updatePoolSnapshot()
                 self.startReadLoop()
             }
         }
@@ -296,11 +349,13 @@ class HTTP2Session {
             state = .ready
             completeReadyCallbacks(nil)
         }
+        updatePoolSnapshot()
     }
 
     private func handleGoaway(_ frame: HTTP2Frame) {
         let previousState = state
         state = .goingAway
+        updatePoolSnapshot()
         if let parsed = HTTP2Framer.parseGoaway(payload: frame.payload) {
             logger.warning("[HTTP2Session] GOAWAY: lastStreamID=\(parsed.lastStreamID), errorCode=\(parsed.errorCode)")
             // Streams with ID > lastStreamID are rejected by the server
@@ -325,18 +380,19 @@ class HTTP2Session {
 
     private func handleDataFrame(_ frame: HTTP2Frame, stream: HTTP2Stream) {
         let endStream = frame.hasFlag(HTTP2FrameFlags.endStream)
-
-        // Connection-level receive flow control
-        if frame.payload.count > 0 {
-            connectionRecvConsumed += frame.payload.count
-            if connectionRecvConsumed >= connectionRecvWindowSize / 2 {
-                let increment = UInt32(connectionRecvConsumed)
-                connectionRecvConsumed = 0
-                sendControlFrame(HTTP2Framer.windowUpdateFrame(streamID: 0, increment: increment))
-            }
-        }
-
         stream.handleData(frame.payload, endStream: endStream)
+    }
+
+    /// Acknowledges consumed receive data at the connection level.
+    /// Called by streams when data is actually delivered to the consumer.
+    /// Must be called on `queue`.
+    func acknowledgeReceivedData(count: Int) {
+        connectionRecvConsumed += count
+        if connectionRecvConsumed >= connectionRecvWindowSize / 2 {
+            let increment = UInt32(connectionRecvConsumed)
+            connectionRecvConsumed = 0
+            sendControlFrame(HTTP2Framer.windowUpdateFrame(streamID: 0, increment: increment))
+        }
     }
 
     // MARK: - Send (called by streams)
@@ -462,6 +518,7 @@ class HTTP2Session {
             stream.handleSessionError(error)
         }
         streams.removeAll()
+        updatePoolSnapshot()
         onClose?()
     }
 
@@ -483,6 +540,7 @@ class HTTP2Session {
                 stream.handleSessionError(HTTP2Error.connectionFailed("Session closed"))
             }
             streams.removeAll()
+            updatePoolSnapshot()
             onClose?()
         }
     }

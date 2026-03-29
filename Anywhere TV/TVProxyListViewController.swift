@@ -54,11 +54,20 @@ class TVProxyListViewController: UITableViewController {
     }
 
     private func bindViewModel() {
+        // Structural changes — full reload
         viewModel.$configurations
-            .combineLatest(viewModel.$subscriptions, viewModel.$selectedConfiguration, viewModel.$latencyResults)
+            .combineLatest(viewModel.$subscriptions, viewModel.$selectedConfiguration)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.tableView.reloadData()
+            }
+            .store(in: &cancellables)
+
+        // Latency changes — update only visible cells
+        viewModel.$latencyResults
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateVisibleLatencyAccessories()
             }
             .store(in: &cancellables)
     }
@@ -119,29 +128,7 @@ class TVProxyListViewController: UITableViewController {
             flow: configuration.flow
         )
 
-        // Latency accessory
-        if let result = viewModel.latencyResults[configuration.id] {
-            let label = UILabel()
-            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
-            switch result {
-            case .testing:
-                let spinner = UIActivityIndicatorView(style: .medium)
-                spinner.startAnimating()
-                cell.accessoryView = spinner
-                return cell
-            case .success(let ms):
-                label.text = String(localized: "\(ms) ms")
-                label.textColor = ms < 300 ? .systemGreen : ms < 500 ? .systemYellow : .systemRed
-            case .failed:
-                label.text = String(localized: "timeout")
-                label.textColor = .secondaryLabel
-            case .insecure:
-                label.text = String(localized: "insecure")
-                label.textColor = .secondaryLabel
-            }
-            label.sizeToFit()
-            cell.accessoryView = label
-        }
+        applyLatencyAccessory(to: cell, result: viewModel.latencyResults[configuration.id])
 
         return cell
     }
@@ -385,6 +372,51 @@ class TVProxyListViewController: UITableViewController {
             }
         })
         present(alert, animated: true)
+    }
+
+    // MARK: - Latency Accessories
+
+    private func applyLatencyAccessory(to cell: UITableViewCell, result: LatencyResult?) {
+        guard let result else {
+            cell.accessoryView = nil
+            return
+        }
+        switch result {
+        case .testing:
+            let spinner = UIActivityIndicatorView(style: .medium)
+            spinner.startAnimating()
+            cell.accessoryView = spinner
+        case .success(let ms):
+            let label = UILabel()
+            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
+            label.text = String(localized: "\(ms) ms")
+            label.textColor = ms < 300 ? .systemGreen : ms < 500 ? .systemYellow : .systemRed
+            label.sizeToFit()
+            cell.accessoryView = label
+        case .failed:
+            let label = UILabel()
+            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
+            label.text = String(localized: "timeout")
+            label.textColor = .secondaryLabel
+            label.sizeToFit()
+            cell.accessoryView = label
+        case .insecure:
+            let label = UILabel()
+            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
+            label.text = String(localized: "insecure")
+            label.textColor = .secondaryLabel
+            label.sizeToFit()
+            cell.accessoryView = label
+        }
+    }
+
+    private func updateVisibleLatencyAccessories() {
+        for cell in tableView.visibleCells {
+            guard let indexPath = tableView.indexPath(for: cell) else { continue }
+            let configs = configurations(for: indexPath.section)
+            guard indexPath.row < configs.count else { continue }
+            applyLatencyAccessory(to: cell, result: viewModel.latencyResults[configs[indexPath.row].id])
+        }
     }
 
     // MARK: - Empty State

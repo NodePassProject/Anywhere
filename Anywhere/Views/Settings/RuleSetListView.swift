@@ -9,7 +9,7 @@ import SwiftUI
 
 struct RuleSetListView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
-
+    
     private var standaloneConfigurations: [ProxyConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }
     }
@@ -22,114 +22,45 @@ struct RuleSetListView: View {
     }
 
     @State var routingRuleSets: [RuleSetStore.RuleSet] = RuleSetStore.shared.routingRuleSets
-    @State private var pickerConfig = PickerConfig()
-    @State private var editingRuleSetId: String?
-    @State private var rowFrames: [String: CGRect] = [:]
-
-    // Deterministic UUIDs for special picker items
-    private static let defaultUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")!
-    private static let directUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
-    private static let rejectUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
-
-    private var pickerItems: [PickerItem] {
-        var items: [PickerItem] = [
-            PickerItem(id: Self.defaultUUID, name: "Default"),
-            PickerItem(id: Self.directUUID, name: "DIRECT"),
-            PickerItem(id: Self.rejectUUID, name: "REJECT"),
-        ]
-        for pickerItem in viewModel.allPickerItems {
-            items.append(pickerItem)
-        }
-        return items
-    }
-
-    private func displayName(for configurationId: String?) -> String {
-        switch configurationId {
-        case nil: return "Default"
-        case "DIRECT": return "DIRECT"
-        case "REJECT": return "REJECT"
-        default:
-            if let uuid = UUID(uuidString: configurationId!),
-               let configuration = viewModel.configurations.first(where: { $0.id == uuid }) {
-                return configuration.name
-            }
-            return "Default"
-        }
-    }
-
-    private func pickerUUID(for configurationId: String?) -> UUID {
-        switch configurationId {
-        case nil: return Self.defaultUUID
-        case "DIRECT": return Self.directUUID
-        case "REJECT": return Self.rejectUUID
-        default:
-            if let uuid = UUID(uuidString: configurationId!) {
-                return uuid
-            }
-            return Self.defaultUUID
-        }
-    }
-
-    private func configurationId(for uuid: UUID?) -> String? {
-        switch uuid {
-        case Self.defaultUUID: return nil
-        case Self.directUUID: return "DIRECT"
-        case Self.rejectUUID: return "REJECT"
-        default: return uuid?.uuidString
-        }
-    }
 
     var body: some View {
         List {
-            ForEach(routingRuleSets) { ruleSet in
-                Button {
-                    editingRuleSetId = ruleSet.id
-                    pickerConfig.text = displayName(for: ruleSet.assignedConfigurationId)
-                    pickerConfig.selectedId = pickerUUID(for: ruleSet.assignedConfigurationId)
-                    pickerConfig.sourceFrame = rowFrames[ruleSet.id] ?? .zero
-                    pickerConfig.show = true
+            ForEach($routingRuleSets) { $ruleSet in
+                Picker(selection: $ruleSet.assignedConfigurationId) {
+                    Text("Default").tag(nil as String?)
+                    Text("DIRECT").tag("DIRECT" as String?)
+                    Text("REJECT").tag("REJECT" as String?)
+                    ForEach(standaloneConfigurations) { configuration in
+                        Text(configuration.name).tag(configuration.id.uuidString as String?)
+                    }
+                    ForEach(subscribedGroups, id: \.0.id) { subscription, configurations in
+                        Section {
+                            ForEach(configurations) { configuration in
+                                Text(configuration.name).tag(configuration.id.uuidString as String?)
+                            }
+                        } header: {
+                            Text(subscription.name)
+                        }
+                    }
                 } label: {
                     HStack {
                         AppIconView(ruleSet.name)
                         Text(ruleSet.name)
-                        Spacer()
-                        HStack(spacing: 4) {
-                            Text(displayName(for: ruleSet.assignedConfigurationId))
-                                .foregroundStyle(.secondary)
-                                .onGeometryChange(for: CGRect.self) { proxy in
-                                    proxy.frame(in: .global)
-                                } action: { newValue in
-                                    rowFrames[ruleSet.id] = newValue
-                                    if editingRuleSetId == ruleSet.id {
-                                        pickerConfig.sourceFrame = newValue
-                                    }
-                                }
-                                .opacity(pickerConfig.show && editingRuleSetId == ruleSet.id ? 0 : 1)
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
                     }
                 }
-                .buttonStyle(.plain)
+            }
+            .onChange(of: routingRuleSets) { oldValue, newValue in
+                for currentRoutingRuleSet in newValue {
+                    let previousRoutingRuleSet = oldValue.first(where: { $0.id == currentRoutingRuleSet.id })
+                    if currentRoutingRuleSet.assignedConfigurationId != previousRoutingRuleSet?.assignedConfigurationId {
+                        RuleSetStore.shared.updateAssignment(currentRoutingRuleSet, configurationId: currentRoutingRuleSet.assignedConfigurationId)
+                    }
+                }
+                Task { await viewModel.syncRoutingConfigurationToNE() }
             }
         }
         .listRowSpacing(8)
         .navigationTitle("Routing Rules")
-        .navigationBarTitleDisplayMode(.inline)
-        .picker3D($pickerConfig, items: pickerItems)
-        .onChange(of: pickerConfig.show) {
-            if !pickerConfig.show, let editingId = editingRuleSetId {
-                let newConfigId = configurationId(for: pickerConfig.selectedId)
-                if let index = routingRuleSets.firstIndex(where: { $0.id == editingId }),
-                   routingRuleSets[index].assignedConfigurationId != newConfigId {
-                    routingRuleSets[index].assignedConfigurationId = newConfigId
-                    RuleSetStore.shared.updateAssignment(routingRuleSets[index], configurationId: newConfigId)
-                }
-                viewModel.syncRoutingConfigurationToNE()
-                editingRuleSetId = nil
-            }
-        }
         .onAppear {
             routingRuleSets = RuleSetStore.shared.routingRuleSets
         }

@@ -169,8 +169,9 @@ class LWIPStack {
               let addresses = try? JSONSerialization.jsonObject(with: data) as? [String] else {
             return
         }
+        // Use stale IPs temporarily
         proxyServerAddresses = Set(addresses)
-        // Resolve domains to IPs in background (getaddrinfo in NE goes through physical interface)
+        // Resolve domains to IPs in background
         Self.resolveProxyDomains(addresses) { [weak self] resolvedIPs in
             self?.lwipQueue.async {
                 self?.proxyServerAddresses.formUnion(resolvedIPs)
@@ -182,7 +183,9 @@ class LWIPStack {
     /// Immediately stores domains, then resolves them to IPs in the background.
     func updateProxyServerAddresses(_ addresses: [String]) {
         lwipQueue.async { [self] in
+            // Use stale IPs temporarily
             self.proxyServerAddresses = Set(addresses)
+            // Resolve domains to IPs in background
             Self.resolveProxyDomains(addresses) { [weak self] resolvedIPs in
                 self?.lwipQueue.async {
                     guard let self else { return }
@@ -465,7 +468,7 @@ class LWIPStack {
             // IPv6 connections toggle affects tunnel network settings (IPv6 routes + DNS servers).
             // Encrypted DNS changes also affect tunnel settings (NEDNSOverHTTPSSettings / NEDNSOverTLSSettings).
             // Must re-apply via PacketTunnelProvider before restarting the stack.
-            if encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged {
+            if ipv6DNSEnabledChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged {
                 self.onTunnelSettingsNeedReapply?()
             }
             
@@ -1096,9 +1099,8 @@ class LWIPStack {
                         lwip_bridge_input(baseAddress, Int32(buffer.count))
                     }
                 }
+                self.startReadingPackets()
             }
-
-            self.startReadingPackets()
         }
     }
 

@@ -31,6 +31,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var xhttpHost = ""
     private var xhttpPath = "/"
     private var xhttpMode = "auto"
+    private var xhttpExtra = ""
     private var tlsSNI = ""
     private var tlsALPN = ""
     private var muxEnabled = true
@@ -404,6 +405,7 @@ class TVProxyEditorViewController: UITableViewController {
             xhttpHost = xhttp.host
             xhttpPath = xhttp.path
             xhttpMode = xhttp.mode.rawValue
+            xhttpExtra = Self.encodeExtra(from: xhttp)
         }
         if let tls = configuration.tls {
             tlsSNI = tls.serverName
@@ -446,6 +448,45 @@ class TVProxyEditorViewController: UITableViewController {
         navigationItem.rightBarButtonItem?.isEnabled = isValid
     }
 
+    private static func encodeExtra(from configuration: XHTTPConfiguration) -> String {
+        var dict: [String: Any] = [:]
+
+        if !configuration.headers.isEmpty { dict["headers"] = configuration.headers }
+        if configuration.noGRPCHeader { dict["noGRPCHeader"] = true }
+        if configuration.scMaxEachPostBytes != 1_000_000 { dict["scMaxEachPostBytes"] = configuration.scMaxEachPostBytes }
+        if configuration.scMinPostsIntervalMs != 30 { dict["scMinPostsIntervalMs"] = configuration.scMinPostsIntervalMs }
+        if configuration.xPaddingBytesFrom != 100 || configuration.xPaddingBytesTo != 1000 {
+            dict["xPaddingBytes"] = ["from": configuration.xPaddingBytesFrom, "to": configuration.xPaddingBytesTo]
+        }
+        if configuration.xPaddingObfsMode { dict["xPaddingObfsMode"] = true }
+        if configuration.xPaddingKey != "x_padding" { dict["xPaddingKey"] = configuration.xPaddingKey }
+        if configuration.xPaddingHeader != "X-Padding" { dict["xPaddingHeader"] = configuration.xPaddingHeader }
+        if configuration.xPaddingPlacement != .queryInHeader { dict["xPaddingPlacement"] = configuration.xPaddingPlacement.rawValue }
+        if configuration.xPaddingMethod != .repeatX { dict["xPaddingMethod"] = configuration.xPaddingMethod.rawValue }
+        if configuration.uplinkHTTPMethod != "POST" { dict["uplinkHTTPMethod"] = configuration.uplinkHTTPMethod }
+        if configuration.sessionPlacement != .path { dict["sessionPlacement"] = configuration.sessionPlacement.rawValue }
+        if !configuration.sessionKey.isEmpty { dict["sessionKey"] = configuration.sessionKey }
+        if configuration.seqPlacement != .path { dict["seqPlacement"] = configuration.seqPlacement.rawValue }
+        if !configuration.seqKey.isEmpty { dict["seqKey"] = configuration.seqKey }
+        if configuration.uplinkDataPlacement != .body { dict["uplinkDataPlacement"] = configuration.uplinkDataPlacement.rawValue }
+        let defaultDataKey: String
+        let defaultChunkSize: Int
+        switch configuration.uplinkDataPlacement {
+        case .header: defaultDataKey = "X-Data"; defaultChunkSize = 4096
+        case .cookie: defaultDataKey = "x_data"; defaultChunkSize = 3072
+        default: defaultDataKey = ""; defaultChunkSize = 0
+        }
+        if configuration.uplinkDataKey != defaultDataKey { dict["uplinkDataKey"] = configuration.uplinkDataKey }
+        if configuration.uplinkChunkSize != defaultChunkSize { dict["uplinkChunkSize"] = configuration.uplinkChunkSize }
+
+        guard !dict.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys, .prettyPrinted]),
+              let str = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return str
+    }
+
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
@@ -484,7 +525,11 @@ class TVProxyEditorViewController: UITableViewController {
         if transport == "xhttp" {
             let host = xhttpHost.isEmpty ? serverAddress : xhttpHost
             let mode = XHTTPMode(rawValue: xhttpMode) ?? .auto
-            xhttpConfig = XHTTPConfiguration.parse(from: ["host": host, "path": xhttpPath, "mode": mode.rawValue], serverAddress: serverAddress)
+            var params: [String: String] = ["host": host, "path": xhttpPath, "mode": mode.rawValue]
+            if !xhttpExtra.isEmpty {
+                params["extra"] = xhttpExtra
+            }
+            xhttpConfig = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress)
         }
 
         let bareAddress = serverAddress.hasPrefix("[") && serverAddress.hasSuffix("]")
