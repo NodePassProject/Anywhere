@@ -426,9 +426,10 @@ class HTTP2Connection: NaiveTunnel {
         }
 
         if frames.isEmpty {
-            // Flow control blocked — should be extremely rare with 64 MB windows
-            logger.warning("[HTTP2] Send blocked by flow control")
-            completion(HTTP2Error.protocolError("Flow control blocked"))
+            // Flow control window exhausted — wait for WINDOW_UPDATE and retry
+            queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+                self?.sendDataFrames(data: data, offset: offset, completion: completion)
+            }
             return
         }
 

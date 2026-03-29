@@ -143,16 +143,23 @@ class LWIPTCPConnection {
             return
         }
 
-        // If a flush is still in-flight or buffer is full, send per-segment for backpressure
-        if uploadFlushInFlight || uploadCoalesceRecvLen + data.count > Self.maxCoalesceSize {
+        // If buffer is full, send per-segment for backpressure
+        if uploadCoalesceRecvLen + data.count > Self.maxCoalesceSize {
             sendSegmentDirect(data)
             return
         }
 
+        // Always coalesce — even while a flush is in-flight. This matches
+        // Xray-core's buffered-pipe design where data accumulates during the
+        // scMinPostsIntervalMs sleep and is sent as one large POST.
+        // Without this, each individual TCP segment (~1-2 KB) would become its
+        // own POST request during the delay, causing massive HTTP overhead.
         uploadCoalesceBuffer.append(data)
         uploadCoalesceRecvLen += data.count
 
-        if !uploadCoalesceScheduled {
+        // Schedule flush only when no send is in-flight (data accumulated
+        // during an in-flight send will be flushed when it completes).
+        if !uploadFlushInFlight && !uploadCoalesceScheduled {
             uploadCoalesceScheduled = true
             lwipQueue.async { [weak self] in
                 self?.flushUploadBuffer()
@@ -226,6 +233,13 @@ class LWIPTCPConnection {
                     remaining -= Int(chunk)
                     lwip_bridge_tcp_recved(self.pcb, chunk)
                 }
+                // Immediately flush data that accumulated during the in-flight send.
+                // This is the key to matching Xray-core's batched upload behavior:
+                // data coalesces while the previous POST + delay runs, then flushes
+                // as one large POST instead of many small per-segment POSTs.
+                if self.uploadCoalesceRecvLen > 0 {
+                    self.flushUploadBuffer()
+                }
             }
         }
 
@@ -297,7 +311,7 @@ class LWIPTCPConnection {
                 }
 
                 if let initialData {
-                    let count = UInt16(clamping: initialData.count)
+                    let totalReceiveLength = initialData.count
                     relay.send(data: initialData) { [weak self] error in
                         guard let self else { return }
                         if let error {
@@ -306,7 +320,12 @@ class LWIPTCPConnection {
                         } else {
                             self.lwipQueue.async {
                                 guard !self.closed else { return }
-                                lwip_bridge_tcp_recved(self.pcb, count)
+                                var remaining = totalReceiveLength
+                                while remaining > 0 {
+                                    let chunk = UInt16(min(remaining, Int(UInt16.max)))
+                                    remaining -= Int(chunk)
+                                    lwip_bridge_tcp_recved(self.pcb, chunk)
+                                }
                             }
                         }
                     }
@@ -315,7 +334,7 @@ class LWIPTCPConnection {
                 if !self.pendingData.isEmpty {
                     let dataToSend = self.pendingData
                     self.pendingData.removeAll(keepingCapacity: true)
-                    let count = UInt16(clamping: dataToSend.count)
+                    let totalReceiveLength = dataToSend.count
                     relay.send(data: dataToSend) { [weak self] error in
                         guard let self else { return }
                         if let error {
@@ -324,7 +343,12 @@ class LWIPTCPConnection {
                         } else {
                             self.lwipQueue.async {
                                 guard !self.closed else { return }
-                                lwip_bridge_tcp_recved(self.pcb, count)
+                                var remaining = totalReceiveLength
+                                while remaining > 0 {
+                                    let chunk = UInt16(min(remaining, Int(UInt16.max)))
+                                    remaining -= Int(chunk)
+                                    lwip_bridge_tcp_recved(self.pcb, chunk)
+                                }
                             }
                         }
                     }
@@ -380,7 +404,7 @@ class LWIPTCPConnection {
                     if !self.pendingData.isEmpty {
                         let dataToSend = self.pendingData
                         self.pendingData.removeAll(keepingCapacity: true)
-                        let count = UInt16(clamping: dataToSend.count)
+                        let totalReceiveLength = dataToSend.count
                         proxyConnection.send(data: dataToSend) { [weak self] error in
                             guard let self else { return }
                             if let error {
@@ -393,7 +417,12 @@ class LWIPTCPConnection {
                             } else {
                                 self.lwipQueue.async {
                                     guard !self.closed else { return }
-                                    lwip_bridge_tcp_recved(self.pcb, count)
+                                    var remaining = totalReceiveLength
+                                    while remaining > 0 {
+                                        let chunk = UInt16(min(remaining, Int(UInt16.max)))
+                                        remaining -= Int(chunk)
+                                        lwip_bridge_tcp_recved(self.pcb, chunk)
+                                    }
                                 }
                             }
                         }
