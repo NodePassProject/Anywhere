@@ -176,7 +176,9 @@ class RealityClient {
     /// - Returns: A complete TLS record containing the ClientHello.
     private func buildRealityClientHello(privateKey: Curve25519.KeyAgreement.PrivateKey) throws -> Data {
         var random = Data(count: 32)
-        _ = random.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
+        guard random.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
+            throw RealityError.handshakeFailed("Failed to generate random bytes")
+        }
 
         // Build SessionId with Reality metadata in first 16 bytes
         var sessionId = Data(count: 32)

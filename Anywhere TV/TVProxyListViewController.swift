@@ -40,7 +40,7 @@ class TVProxyListViewController: UITableViewController {
         super.viewDidLoad()
         title = String(localized: "Proxies")
         tableView = UITableView(frame: .zero, style: .grouped)
-        tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
+        tableView.register(TVProxyCell.self, forCellReuseIdentifier: TVProxyCell.reuseIdentifier)
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
 
@@ -58,8 +58,7 @@ class TVProxyListViewController: UITableViewController {
             .combineLatest(viewModel.$subscriptions, viewModel.$selectedConfiguration, viewModel.$latencyResults)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                guard let self, self.tableView.numberOfSections > 0 else { return }
-                self.tableView.reloadSections(IndexSet(0..<self.tableView.numberOfSections), with: .none)
+                self?.tableView.reloadData()
             }
             .store(in: &cancellables)
     }
@@ -106,74 +105,19 @@ class TVProxyListViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
+        let cell = tableView.dequeueReusableCell(withIdentifier: TVProxyCell.reuseIdentifier, for: indexPath) as! TVProxyCell
         let configurations = configurations(for: indexPath.section)
         let configuration = configurations[indexPath.row]
         let isSelected = viewModel.selectedConfiguration?.id == configuration.id && viewModel.selectedChainId == nil
 
-        cell.contentConfiguration = nil
-
-        let vStackTag = 1001
-        let vStack: UIStackView
-        if let existing = cell.contentView.viewWithTag(vStackTag) as? UIStackView {
-            vStack = existing
-            vStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        } else {
-            vStack = UIStackView()
-            vStack.tag = vStackTag
-            vStack.axis = .vertical
-            vStack.alignment = .leading
-            vStack.spacing = 8
-            vStack.translatesAutoresizingMaskIntoConstraints = false
-            cell.contentView.addSubview(vStack)
-            NSLayoutConstraint.activate([
-                vStack.leadingAnchor.constraint(equalTo: cell.contentView.leadingAnchor, constant: 40),
-                vStack.trailingAnchor.constraint(lessThanOrEqualTo: cell.contentView.trailingAnchor, constant: -40),
-                vStack.topAnchor.constraint(equalTo: cell.contentView.topAnchor, constant: 16),
-                vStack.bottomAnchor.constraint(equalTo: cell.contentView.bottomAnchor, constant: -16),
-            ])
-        }
-
-        // Name row
-        let nameRow = UIStackView()
-        nameRow.axis = .horizontal
-        nameRow.spacing = 12
-        nameRow.alignment = .center
-
-        let nameLabel = UILabel()
-        nameLabel.text = configuration.name
-        nameLabel.font = .systemFont(ofSize: 32, weight: .medium)
-        nameLabel.textColor = .label
-        nameLabel.setContentHuggingPriority(.required, for: .horizontal)
-        nameRow.addArrangedSubview(nameLabel)
-
-        if isSelected {
-            let checkmarkConfig = UIImage.SymbolConfiguration(pointSize: 32, weight: .medium)
-            let checkmark = UIImageView(image: UIImage(systemName: "checkmark", withConfiguration: checkmarkConfig))
-            checkmark.tintColor = .systemBlue
-            checkmark.setContentHuggingPriority(.required, for: .horizontal)
-            nameRow.addArrangedSubview(checkmark)
-        }
-
-        vStack.addArrangedSubview(nameRow)
-
-        // Detail tags row
-        let tagsRow = UIStackView()
-        tagsRow.axis = .horizontal
-        tagsRow.spacing = 8
-        tagsRow.alignment = .center
-
-        tagsRow.addArrangedSubview(makeDetailTag(configuration.outboundProtocol.name))
-        tagsRow.addArrangedSubview(makeDetailTag(configuration.transport.uppercased()))
-        let security = configuration.security.uppercased()
-        if security != "NONE" {
-            tagsRow.addArrangedSubview(makeDetailTag(security))
-        }
-        if let flow = configuration.flow, flow.uppercased().contains("VISION") {
-            tagsRow.addArrangedSubview(makeDetailTag("Vision"))
-        }
-
-        vStack.addArrangedSubview(tagsRow)
+        cell.configure(
+            name: configuration.name,
+            isSelected: isSelected,
+            protocolName: configuration.outboundProtocol.name,
+            transport: configuration.transport,
+            security: configuration.security,
+            flow: configuration.flow
+        )
 
         // Latency accessory
         if let result = viewModel.latencyResults[configuration.id] {
@@ -186,7 +130,7 @@ class TVProxyListViewController: UITableViewController {
                 cell.accessoryView = spinner
                 return cell
             case .success(let ms):
-                label.text = "\(ms) ms"
+                label.text = String(localized: "\(ms) ms")
                 label.textColor = ms < 300 ? .systemGreen : ms < 500 ? .systemYellow : .systemRed
             case .failed:
                 label.text = String(localized: "timeout")
@@ -197,31 +141,9 @@ class TVProxyListViewController: UITableViewController {
             }
             label.sizeToFit()
             cell.accessoryView = label
-        } else {
-            cell.accessoryView = nil
         }
 
         return cell
-    }
-
-    private func makeDetailTag(_ text: String) -> UIView {
-        let label = UILabel()
-        label.text = text
-        label.font = .systemFont(ofSize: 20, weight: .medium)
-        label.textColor = .secondaryLabel
-
-        let container = UIView()
-        container.backgroundColor = UIColor { $0.userInterfaceStyle == .light ? UIColor.black.withAlphaComponent(0.1) : UIColor.white.withAlphaComponent(0.1) }
-        container.layer.cornerRadius = 8
-        label.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
-            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4),
-        ])
-        return container
     }
 
     // MARK: - Focus
@@ -301,18 +223,25 @@ class TVProxyListViewController: UITableViewController {
         let header = UIView()
         let isCollapsed = collapsedSubscriptions.contains(sub.id)
 
-        let button = UIButton(type: .system)
-        let chevron = isCollapsed ? "chevron.right" : "chevron.down"
-        button.setImage(UIImage(systemName: chevron), for: .normal)
-        button.setTitle("  " + sub.name, for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 24, weight: .semibold)
-        button.contentHorizontalAlignment = .leading
-        button.tag = section
-        button.addTarget(self, action: #selector(toggleSection(_:)), for: .primaryActionTriggered)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        header.addSubview(button)
+        // Collapse toggle button
+        var collapseConfig = UIButton.Configuration.plain()
+        collapseConfig.image = UIImage(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+        collapseConfig.title = sub.name
+        collapseConfig.imagePadding = 10
+        collapseConfig.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+            var outgoing = incoming
+            outgoing.font = UIFont.systemFont(ofSize: 24, weight: .semibold)
+            return outgoing
+        }
+        let collapseBtn = UIButton(configuration: collapseConfig)
+        collapseBtn.tag = section
+        collapseBtn.addTarget(self, action: #selector(toggleSection(_:)), for: .primaryActionTriggered)
+        collapseBtn.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(collapseBtn)
 
-        let updateBtn = UIButton(type: .system)
+        // Right-side buttons
+        let trailingAnchorView: UIView
+
         if updatingSubscription?.id == sub.id {
             let spinner = UIActivityIndicatorView(style: .medium)
             spinner.startAnimating()
@@ -322,31 +251,66 @@ class TVProxyListViewController: UITableViewController {
                 spinner.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -40),
                 spinner.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             ])
+            trailingAnchorView = spinner
         } else {
-            updateBtn.setImage(UIImage(systemName: "arrow.clockwise"), for: .normal)
+            // Ellipsis menu button
+            var menuConfig = UIButton.Configuration.plain()
+            menuConfig.image = UIImage(systemName: "ellipsis.circle")
+            let menuBtn = UIButton(configuration: menuConfig)
+            menuBtn.showsMenuAsPrimaryAction = true
+            menuBtn.menu = subscriptionMenu(for: sub, section: section)
+            menuBtn.translatesAutoresizingMaskIntoConstraints = false
+            header.addSubview(menuBtn)
+
+            // Update button
+            var updateConfig = UIButton.Configuration.plain()
+            updateConfig.image = UIImage(systemName: "arrow.clockwise")
+            let updateBtn = UIButton(configuration: updateConfig)
             updateBtn.tag = section
             updateBtn.addTarget(self, action: #selector(updateSubscriptionFromHeader(_:)), for: .primaryActionTriggered)
             updateBtn.translatesAutoresizingMaskIntoConstraints = false
             header.addSubview(updateBtn)
+
             NSLayoutConstraint.activate([
-                updateBtn.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -40),
+                menuBtn.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -40),
+                menuBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+                updateBtn.trailingAnchor.constraint(equalTo: menuBtn.leadingAnchor, constant: -20),
                 updateBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-                updateBtn.widthAnchor.constraint(equalToConstant: 60),
             ])
+            trailingAnchorView = updateBtn
         }
 
         NSLayoutConstraint.activate([
-            button.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 40),
-            button.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            collapseBtn.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 40),
+            collapseBtn.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchorView.leadingAnchor, constant: -20),
+            collapseBtn.centerYAnchor.constraint(equalTo: header.centerYAnchor),
         ])
 
         return header
     }
 
+    private func subscriptionMenu(for subscription: Subscription, section: Int) -> UIMenu {
+        UIMenu(children: [
+            UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { [weak self] _ in
+                guard let self else { return }
+                self.viewModel.testLatencies(for: self.viewModel.configurations(for: subscription))
+            },
+            UIAction(title: String(localized: "Rename"), image: UIImage(systemName: "pencil")) { [weak self] _ in
+                self?.presentRenameAlert(for: subscription)
+            },
+            UIAction(title: String(localized: "Update"), image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+                self?.updateSubscription(subscription)
+            },
+            UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { [weak self] _ in
+                self?.viewModel.deleteSubscription(subscription)
+            },
+        ])
+    }
+
     override func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
         switch sectionType(for: section) {
         case .standalone: return UITableView.automaticDimension
-        case .subscription: return 66
+        case .subscription: return 100
         }
     }
 
@@ -376,7 +340,7 @@ class TVProxyListViewController: UITableViewController {
             collapsedSubscriptions.insert(id)
         }
         viewModel.toggleSubscriptionCollapsed(sub)
-        tableView.reloadSections(IndexSet(integer: section), with: .automatic)
+        tableView.reloadData()
     }
 
     @objc private func updateSubscriptionFromHeader(_ sender: UIButton) {

@@ -10,39 +10,6 @@
 
 import SwiftUI
 
-// MARK: - Sample Data
-
-private let sampleSubscriptionId = UUID()
-
-private let dummyReality = SecurityLayer.reality(RealityConfiguration(serverName: "example.com", publicKey: Data(repeating: 0, count: 32), shortId: Data()))
-private let dummyTLS = SecurityLayer.tls(TLSConfiguration(serverName: "example.com"))
-
-private let sampleConfigurations: [ProxyConfiguration] = [
-    ProxyConfiguration(name: "Tokyo", serverAddress: "jp-tok.example.com", serverPort: 443, outbound: .vless(uuid: UUID(), encryption: "none", flow: "xtls-rprx-vision"), securityLayer: dummyReality),
-    ProxyConfiguration(name: "Seoul", serverAddress: "kr.example.com", serverPort: 443, outbound: .vless(uuid: UUID(), encryption: "none", flow: nil), transportLayer: .ws(WebSocketConfiguration(host: "kr.example.com", path: "/")), securityLayer: dummyTLS),
-    ProxyConfiguration(name: "US - New York", serverAddress: "us-ny.example.com", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: "xtls-rprx-vision"), securityLayer: dummyReality),
-    ProxyConfiguration(name: "US - Los Angeles", serverAddress: "us-la.example.com", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: "xtls-rprx-vision"), securityLayer: dummyReality),
-    ProxyConfiguration(name: "JP - Tokyo", serverAddress: "jp-tok.example.net", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: nil), transportLayer: .ws(WebSocketConfiguration(host: "jp-tok.example.net", path: "/")), securityLayer: dummyTLS),
-    ProxyConfiguration(name: "DE - Frankfurt", serverAddress: "de-fra.example.net", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: nil), transportLayer: .httpUpgrade(HTTPUpgradeConfiguration(host: "de-fra.example.net", path: "/")), securityLayer: dummyTLS),
-    ProxyConfiguration(name: "SG - Singapore", serverAddress: "sg.example.net", serverPort: 443, subscriptionId: sampleSubscriptionId, outbound: .vless(uuid: UUID(), encryption: "none", flow: nil), transportLayer: .xhttp(XHTTPConfiguration(host: "sg.example.net", path: "/")), securityLayer: dummyReality),
-]
-
-private let sampleSubscription = Subscription(
-    id: sampleSubscriptionId,
-    name: "Subscription",
-    url: "https://example.com/subscribe"
-)
-
-private let sampleLatencyResults: [UUID: LatencyResult] = [
-    sampleConfigurations[0].id: .success(85),
-    sampleConfigurations[1].id: .success(142),
-    sampleConfigurations[2].id: .success(210),
-    sampleConfigurations[3].id: .success(450),
-    sampleConfigurations[4].id: .success(620),
-    sampleConfigurations[5].id: .failed,
-    sampleConfigurations[6].id: .testing,
-]
-
 // MARK: - Demo Home View (Connected with Traffic Stats)
 
 struct DemoHomeView: View {
@@ -200,34 +167,26 @@ struct DemoHomeView: View {
 struct DemoProxyListView: View {
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
-    
-    private let selectedId = sampleConfigurations[0].id
 
-    private var standalone: [ProxyConfiguration] {
-        sampleConfigurations.filter { $0.subscriptionId == nil }
-    }
-
-    private var subscriptionConfigs: [ProxyConfiguration] {
-        sampleConfigurations.filter { $0.subscriptionId == sampleSubscriptionId }
-    }
+    private let selectedId = SampleData.configurations[0].id
 
     var body: some View {
         NavigationStack {
             List {
-                if !standalone.isEmpty {
+                if !SampleData.standaloneConfigurations.isEmpty {
                     Section {
-                        ForEach(standalone) { config in
+                        ForEach(SampleData.standaloneConfigurations) { config in
                             configRow(config)
                         }
                     }
                 }
                 Section {
-                    ForEach(subscriptionConfigs) { config in
+                    ForEach(SampleData.subscriptionConfigurations) { config in
                         configRow(config)
                     }
                 } header: {
                     HStack {
-                        Text(sampleSubscription.name)
+                        Text(SampleData.subscription.name)
                         Spacer()
                         Image(systemName: "arrow.clockwise")
                             .foregroundStyle(.secondary)
@@ -243,7 +202,7 @@ struct DemoProxyListView: View {
                         Button {} label: {
                             Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
                         }
-                        
+
                         Button {
                             showingAddSheet = true
                         } label: {
@@ -265,7 +224,7 @@ struct DemoProxyListView: View {
 
     @ViewBuilder
     private func configRow(_ configuration: ProxyConfiguration) -> some View {
-        let latency = sampleLatencyResults[configuration.id]
+        let latency = SampleData.latencyResults[configuration.id]
 
         HStack {
             VStack(alignment: .leading, spacing: 2) {

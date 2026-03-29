@@ -518,8 +518,6 @@ class ProxyClient {
             return
         }
 
-        let useTLS = configuration.tls != nil
-
         if let baseTLSConfig = configuration.tls {
             // WSS: TCP → TLS → WebSocket → VLESS
             // Force ALPN to http/1.1 (Xray-core tls.WithNextProto("http/1.1"))
@@ -629,8 +627,6 @@ class ProxyClient {
             completion(.failure(ProxyError.connectionFailed("HTTP upgrade transport specified but no configuration")))
             return
         }
-
-        let useTLS = configuration.tls != nil
 
         if let tlsConfiguration = configuration.tls {
             // HTTPS Upgrade: TCP → TLS → HTTP Upgrade → raw TCP over TLS → VLESS
@@ -892,7 +888,11 @@ class ProxyClient {
             if let tunnel = self.tunnel {
                 xhttpConnection = XHTTPConnection(tunnel: tunnel, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
             } else {
-                xhttpConnection = XHTTPConnection(transport: transport as! NWTransport, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
+                guard let nwTransport = transport as? NWTransport else {
+                    completion(.failure(ProxyError.connectionFailed("Expected NWTransport for plain XHTTP")))
+                    return
+                }
+                xhttpConnection = XHTTPConnection(transport: nwTransport, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
             }
             self.xhttpConnection = xhttpConnection
             self.performXHTTPSetup(
@@ -1305,7 +1305,7 @@ class ProxyClient {
             }
 
         case .http3:
-            fatalError("Not implemented")
+            completion(.failure(ProxyError.protocolError("HTTP/3 (QUIC) is not implemented")))
         }
     }
 
@@ -1434,11 +1434,6 @@ class ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard let self = Optional(self) else {
-            completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-            return
-        }
-
         let buffer = SOCKS5Buffer(transport: transport)
 
         if command == .udp {

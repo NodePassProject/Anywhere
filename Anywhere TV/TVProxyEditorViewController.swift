@@ -208,6 +208,7 @@ class TVProxyEditorViewController: UITableViewController {
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
+        tableView.remembersLastFocusedIndexPath = true
 
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped))
         navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .save, target: self, action: #selector(saveTapped))
@@ -322,7 +323,7 @@ class TVProxyEditorViewController: UITableViewController {
 
         case .toggle(_, let isOn, let key):
             updateField(key, value: isOn ? "false" : "true")
-            tableView.reloadSections(IndexSet(integer: indexPath.section), with: .none)
+            tableView.reloadData()
             updateSaveButton()
         }
     }

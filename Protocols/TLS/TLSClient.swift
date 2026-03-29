@@ -214,12 +214,16 @@ class TLSClient {
     /// - Returns: A complete TLS record containing the ClientHello.
     private func buildTLSClientHello(privateKey: Curve25519.KeyAgreement.PrivateKey) throws -> Data {
         var random = Data(count: 32)
-        _ = random.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
+        guard random.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
+            throw TLSError.handshakeFailed("Failed to generate random bytes")
+        }
         clientRandom = random
 
         // Standard TLS: random 32-byte session ID (no Reality metadata)
         var sessionId = Data(count: 32)
-        _ = sessionId.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
+        guard sessionId.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
+            throw TLSError.handshakeFailed("Failed to generate session ID")
+        }
 
         let rawClientHello = TLSClientHelloBuilder.buildRawClientHello(
             fingerprint: configuration.fingerprint,
@@ -642,7 +646,9 @@ class TLSClient {
                                     trafficSecret: keys.serverTrafficSecret,
                                     transcript: fullTranscript
                                 )
-                                guard hsBody == expectedVerifyData else {
+                                // Constant-time comparison to prevent timing attacks
+                                guard hsBody.count == expectedVerifyData.count,
+                                      constantTimeEqual(hsBody, expectedVerifyData) else {
                                     logger.error("[TLS] Server Finished verification failed")
                                     completion(.failure(TLSError.handshakeFailed("Server Finished verification failed")))
                                     return
@@ -1226,8 +1232,10 @@ class TLSClient {
         var preMasterSecret = Data(count: 48)
         preMasterSecret[0] = 0x03
         preMasterSecret[1] = 0x03
-        _ = preMasterSecret.withUnsafeMutableBytes { ptr in
+        guard preMasterSecret.withUnsafeMutableBytes({ ptr in
             SecRandomCopyBytes(kSecRandomDefault, 46, ptr.baseAddress! + 2)
+        }) == errSecSuccess else {
+            throw TLSError.handshakeFailed("Failed to generate pre-master secret")
         }
 
         // RSA-PKCS1 encrypt
@@ -1494,7 +1502,9 @@ class TLSClient {
             data.append(contentsOf: [UInt8](repeating: UInt8(paddingLen - 1), count: paddingLen))
 
             var iv = Data(count: blockSize)
-            _ = iv.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, blockSize, $0.baseAddress!) }
+            guard iv.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, blockSize, $0.baseAddress!) }) == errSecSuccess else {
+                throw TLSError.handshakeFailed("Failed to generate IV")
+            }
 
             var encrypted = Data(count: data.count)
             var numBytesEncrypted = 0
@@ -1607,10 +1617,12 @@ class TLSClient {
                 let recordBody = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
 
                 do {
+                    let seqNum = serverSeqNum
+                    serverSeqNum += 1
                     let decrypted = try decryptTLS12HandshakeRecord(
                         ciphertext: recordBody,
                         contentType: 0x16,
-                        seqNum: serverSeqNum,
+                        seqNum: seqNum,
                         serverKey: keys.serverKey,
                         serverIV: keys.serverIV,
                         serverMACKey: keys.serverMACKey
@@ -1635,7 +1647,9 @@ class TLSClient {
                         handshakeHash: transcriptHash, useSHA384: useSHA384
                     )
 
-                    guard verifyData == expectedVerifyData else {
+                    // Constant-time comparison to prevent timing attacks
+                    guard verifyData.count == expectedVerifyData.count,
+                          constantTimeEqual(verifyData, expectedVerifyData) else {
                         return .failure(TLSError.handshakeFailed("Server Finished verification failed"))
                     }
 
@@ -1751,10 +1765,20 @@ class TLSClient {
 
             decrypted = decrypted.prefix(numBytesDecrypted)
 
-            // Strip and validate padding
+            // Validate and strip padding (constant-time to mitigate Lucky13)
             let paddingByte = Int(decrypted.last ?? 0)
             let paddingLen = paddingByte + 1
-            guard paddingLen <= decrypted.count else {
+
+            var paddingGood: UInt8 = 0
+            if paddingLen > decrypted.count {
+                paddingGood = 1
+            } else {
+                for i in (decrypted.count - paddingLen)..<decrypted.count {
+                    paddingGood |= decrypted[i] ^ UInt8(paddingByte)
+                }
+            }
+
+            guard paddingGood == 0 else {
                 throw TLSError.handshakeFailed("Invalid CBC padding")
             }
             decrypted = decrypted.prefix(decrypted.count - paddingLen)
@@ -1786,7 +1810,9 @@ class TLSClient {
                 payload: payload, useSHA384: useSHA384, useSHA256: useSHA256
             )
 
-            guard receivedMAC == expectedMAC else {
+            // Constant-time comparison to prevent timing attacks
+            guard receivedMAC.count == expectedMAC.count,
+                  constantTimeEqual(receivedMAC, expectedMAC) else {
                 throw TLSError.handshakeFailed("MAC verification failed")
             }
 
@@ -1983,6 +2009,16 @@ class TLSClient {
     }
 
     // MARK: - Helpers
+
+    /// Constant-time comparison of two Data values to prevent timing side-channel attacks.
+    private func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count else { return false }
+        var result: UInt8 = 0
+        for i in 0..<a.count {
+            result |= a[a.startIndex + i] ^ b[b.startIndex + i]
+        }
+        return result == 0
+    }
 
     /// Checks whether the certificate's SHA-256 fingerprint is in the user's trusted list.
     private static func isUserTrusted(certificate: SecCertificate) -> Bool {

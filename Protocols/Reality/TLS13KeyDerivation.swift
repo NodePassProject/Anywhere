@@ -242,7 +242,7 @@ struct TLS13KeyDerivation {
 
     /// Derive TLS 1.3 handshake keys from shared secret
     func deriveHandshakeKeys(sharedSecret: Data, transcript: Data) -> (handshakeSecret: Data, keys: TLSHandshakeKeys) {
-        let (earlyPRK, earlyKey) = hkdfExtract(salt: Data(), ikm: Data(repeating: 0, count: hashLength))
+        let (_, earlyKey) = hkdfExtract(salt: Data(), ikm: Data(repeating: 0, count: hashLength))
         let derivedEarly = deriveSecret(key: earlyKey, label: "derived", messages: Data())
         let (hsPRK, hsKey) = hkdfExtract(salt: derivedEarly, ikm: sharedSecret)
 

@@ -44,6 +44,7 @@ class TVChainEditorViewController: UITableViewController {
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
+        tableView.remembersLastFocusedIndexPath = true
 
         navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .cancel, target: self, action: #selector(cancelTapped))
         navigationItem.rightBarButtonItem = UIBarButtonItem(barButtonSystemItem: .save, target: self, action: #selector(saveTapped))
@@ -68,7 +69,8 @@ class TVChainEditorViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        switch Section(rawValue: section)! {
+        guard let section = Section(rawValue: section) else { return 0 }
+        switch section {
         case .name: return 1
         case .proxies: return selectedProxies.count + 1 // proxies + "Add Proxy" button
         case .routePreview: return 1
@@ -76,7 +78,8 @@ class TVChainEditorViewController: UITableViewController {
     }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        switch Section(rawValue: section)! {
+        guard let section = Section(rawValue: section) else { return nil }
+        switch section {
         case .name: return nil
         case .proxies: return String(localized: "Proxies")
         case .routePreview: return String(localized: "Route Preview")
@@ -95,7 +98,8 @@ class TVChainEditorViewController: UITableViewController {
         cell.accessoryType = .none
         cell.accessoryView = nil
 
-        switch Section(rawValue: indexPath.section)! {
+        guard let sectionType = Section(rawValue: indexPath.section) else { return cell }
+        switch sectionType {
         case .name:
             var content = cell.defaultContentConfiguration()
             content.text = String(localized: "Name")
@@ -188,7 +192,8 @@ class TVChainEditorViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
 
-        switch Section(rawValue: indexPath.section)! {
+        guard let sectionType = Section(rawValue: indexPath.section) else { return }
+        switch sectionType {
         case .name:
             let inputVC = TVTextInputViewController(
                 title: String(localized: "Name"),

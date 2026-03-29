@@ -23,6 +23,9 @@ class FakeIPPool {
     // IPv6: fc00:: + offset (same offset range as IPv4)
     // fc00::1 through fc00::1:ffff
 
+    /// Protects all mutable state (maps, LRU list, nextOffset).
+    private let lock = UnfairLock()
+
     // Bidirectional maps
     private var domainToOffset: [String: Int] = [:]
     private var offsetToEntry: [Int: Entry] = [:]
@@ -80,49 +83,55 @@ class FakeIPPool {
     /// Allocate (or reuse) an offset for the given domain.
     /// Use `ipv4Bytes(offset:)` or `ipv6Bytes(offset:)` to get the actual address bytes.
     func allocate(domain: String) -> Int {
-        // Already allocated? Touch LRU and return existing offset
-        if let offset = domainToOffset[domain] {
-            touchLRU(offset)
+        lock.withLock {
+            // Already allocated? Touch LRU and return existing offset
+            if let offset = domainToOffset[domain] {
+                touchLRU(offset)
+                return offset
+            }
+
+            // Need a new offset
+            let offset: Int
+            if nextOffset <= Self.poolSize {
+                offset = nextOffset
+                nextOffset += 1
+            } else {
+                // Pool full — evict LRU
+                offset = evictLRU()
+            }
+
+            domainToOffset[domain] = offset
+            offsetToEntry[offset] = Entry(domain: domain)
+            appendLRU(offset)
+
             return offset
         }
-
-        // Need a new offset
-        let offset: Int
-        if nextOffset <= Self.poolSize {
-            offset = nextOffset
-            nextOffset += 1
-        } else {
-            // Pool full — evict LRU
-            offset = evictLRU()
-        }
-
-        domainToOffset[domain] = offset
-        offsetToEntry[offset] = Entry(domain: domain)
-        appendLRU(offset)
-        
-        return offset
     }
 
     /// Look up an entry by its fake IP string (IPv4 or IPv6).
     func lookup(ip: String) -> Entry? {
-        guard let offset = ipToOffset(ip) else { return nil }
-        guard let entry = offsetToEntry[offset] else { return nil }
-        touchLRU(offset)
-        return entry
+        lock.withLock {
+            guard let offset = ipToOffset(ip) else { return nil }
+            guard let entry = offsetToEntry[offset] else { return nil }
+            touchLRU(offset)
+            return entry
+        }
     }
 
     /// Clear all mappings (called on full stop).
     func reset() {
-        domainToOffset.removeAll()
-        offsetToEntry.removeAll()
-        offsetToNode.removeAll()
-        lruHead = nil
-        lruTail = nil
-        nextOffset = 1
+        lock.withLock {
+            domainToOffset.removeAll()
+            offsetToEntry.removeAll()
+            offsetToNode.removeAll()
+            lruHead = nil
+            lruTail = nil
+            nextOffset = 1
+        }
     }
 
     /// Returns the number of active entries.
-    var count: Int { domainToOffset.count }
+    var count: Int { lock.withLock { domainToOffset.count } }
 
     // MARK: - IP ↔ Offset Conversion
 
@@ -201,7 +210,12 @@ class FakeIPPool {
     }
 
     private func evictLRU() -> Int {
-        guard let tail = lruTail else { fatalError("evictLRU called on empty list") }
+        guard let tail = lruTail else {
+            // Should never happen — pool is full so LRU list cannot be empty.
+            // Fall back to offset 1 rather than crashing.
+            logger.error("[FakeIPPool] evictLRU called on empty list, falling back to offset 1")
+            return 1
+        }
         let offset = tail.offset
         removeNode(tail)
         offsetToNode.removeValue(forKey: offset)

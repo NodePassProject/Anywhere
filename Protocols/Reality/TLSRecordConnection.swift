@@ -395,6 +395,9 @@ class TLSRecordConnection {
     /// Processes all complete TLS records in the receive buffer.
     ///
     /// Returns batched decrypted data from multiple records to reduce callback overhead.
+    /// Uses an offset to track consumed bytes and compacts once at the end, avoiding
+    /// per-record `removeSubrange` calls that create intermediate slices retaining
+    /// the entire original backing store.
     /// Must be called while holding `receiveLock`.
     private func processBuffer() -> BufferResult? {
         if receiveBuffer.count == 0 {
@@ -406,24 +409,24 @@ class TLSRecordConnection {
         var recordsProcessed = 0
         var failedRecordData: Data? = nil
 
-        while receiveBuffer.count >= 5 {
+        // Track how many bytes from the front have been consumed
+        var consumed = 0
+
+        while receiveBuffer.count - consumed >= 5 {
             var contentType: UInt8 = 0
             var recordLen: UInt16 = 0
 
-            let hasHeader = receiveBuffer.withUnsafeBytes { ptr -> Bool in
-                guard ptr.count >= 5 else { return false }
+            receiveBuffer.withUnsafeBytes { ptr in
                 let p = ptr.bindMemory(to: UInt8.self)
-                contentType = p[0]
-                recordLen = UInt16(p[3]) << 8 | UInt16(p[4])
-                return true
+                contentType = p[consumed]
+                recordLen = UInt16(p[consumed + 3]) << 8 | UInt16(p[consumed + 4])
             }
 
-            guard hasHeader else { break }
-
             let totalLen = 5 + Int(recordLen)
-            guard receiveBuffer.count >= totalLen else { break }
+            guard receiveBuffer.count - consumed >= totalLen else { break }
 
-            let headerStart = receiveBuffer.startIndex
+            let base = receiveBuffer.startIndex
+            let headerStart = base + consumed
             let headerEnd = headerStart + 5
             let bodyEnd = headerStart + totalLen
 
@@ -440,38 +443,36 @@ class TLSRecordConnection {
 
                 do {
                     let decrypted = try decryptTLSRecord(ciphertext: body, header: header, seqNum: seqNum)
-                    receiveBuffer.removeSubrange(headerStart..<bodyEnd)
+                    consumed += totalLen
                     if !decrypted.isEmpty {
                         batchedData.append(decrypted)
                     }
                 } catch {
-                    // Reconstruct full record only on failure (rare path)
-                    var failed = Data(receiveBuffer[headerStart..<bodyEnd])
-                    receiveBuffer.removeSubrange(headerStart..<bodyEnd)
-                    if !receiveBuffer.isEmpty {
-                        failed.append(receiveBuffer)
-                        receiveBuffer.removeAll()
-                    }
+                    // Reconstruct full record + any trailing data for fallback (rare path)
+                    var failed = Data(receiveBuffer[(base + consumed)...])
+                    receiveBuffer.removeAll()
+                    consumed = 0
                     failedRecordData = failed
                     hasError = error
                     break
                 }
             } else if contentType == 0x15 { // Alert
-                receiveBuffer.removeSubrange(headerStart..<bodyEnd)
+                consumed += totalLen
                 hasError = RealityError.connectionFailed("TLS Alert received")
                 break
             } else {
                 // Other content types (ChangeCipherSpec, etc.) are skipped
-                receiveBuffer.removeSubrange(headerStart..<bodyEnd)
+                consumed += totalLen
             }
         }
 
-        // Compact once after the loop: removeSubrange from the start creates
-        // slice views that retain the entire original backing store.
-        if receiveBuffer.isEmpty {
-            receiveBuffer = Data()
-        } else if recordsProcessed > 0 {
-            receiveBuffer = Data(receiveBuffer)
+        // Single compaction: remove all consumed bytes at once
+        if consumed > 0 {
+            if consumed >= receiveBuffer.count {
+                receiveBuffer = Data()
+            } else {
+                receiveBuffer = Data(receiveBuffer.suffix(from: receiveBuffer.startIndex + consumed))
+            }
         }
 
         if let error = hasError {
@@ -724,7 +725,9 @@ class TLSRecordConnection {
 
         // Generate random IV
         var iv = Data(count: blockSize)
-        _ = iv.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, blockSize, $0.baseAddress!) }
+        guard iv.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, blockSize, $0.baseAddress!) }) == errSecSuccess else {
+            throw RealityError.handshakeFailed("Failed to generate IV")
+        }
 
         // AES-CBC encrypt (no PKCS7 padding — we handle it ourselves)
         var encrypted = Data(count: data.count)
@@ -911,11 +914,23 @@ class TLSRecordConnection {
             payload: payload, useSHA384: useSHA384, useSHA256: useSHA256
         )
 
-        guard receivedMAC == expectedMAC else {
+        // Constant-time comparison to prevent timing attacks
+        guard receivedMAC.count == expectedMAC.count,
+              constantTimeEqual(receivedMAC, expectedMAC) else {
             throw RealityError.handshakeFailed("MAC verification failed")
         }
 
         return payload
+    }
+
+    /// Constant-time comparison of two Data values to prevent timing side-channel attacks.
+    private func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count else { return false }
+        var result: UInt8 = 0
+        for i in 0..<a.count {
+            result |= a[a.startIndex + i] ^ b[b.startIndex + i]
+        }
+        return result == 0
     }
 
     // MARK: - AEAD Helpers
