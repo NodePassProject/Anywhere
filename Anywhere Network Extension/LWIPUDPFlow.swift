@@ -44,9 +44,6 @@ class LWIPUDPFlow {
     private var pendingBufferSize = 0      // current total size of pendingData
     private var closed = false
 
-    /// Maximum buffer size for queued UDP datagrams (matches Xray-core's DiscardOverflow 16KB limit).
-    /// Datagrams that would exceed this limit are silently dropped (standard UDP behavior).
-    private static let maxUDPBufferSize = 16 * 1024  // 16 KB
 
     init(flowKey: LWIPStack.UDPFlowKey,
          srcHost: String, srcPort: UInt16,
@@ -168,7 +165,7 @@ class LWIPUDPFlow {
 
     private func bufferPayload(data: Data, payloadLength: Int) {
         // Drop datagram if buffer limit would be exceeded (DiscardOverflow)
-        if pendingBufferSize + payloadLength > Self.maxUDPBufferSize {
+        if pendingBufferSize + payloadLength > TunnelConstants.udpMaxBufferSize {
             return
         }
 

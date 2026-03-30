@@ -30,23 +30,6 @@ class LWIPTCPConnection {
     /// Data that couldn't fit in lwIP's TCP send buffer.
     /// Acts as the equivalent of Xray-core's pipe buffer between reader and writer.
     private var overflowBuffer = Data()
-    
-    /// When the buffer exceeds this size, `receivePaused` is set to `true` to
-    /// stop reading from the remote side, applying backpressure. The buffer is
-    /// NOT hard-capped: a single in-flight receive may push it slightly over.
-    ///
-    /// **CAUTION — do NOT abort when this limit is exceeded.**
-    /// Aborting causes unnecessary RSTs under heavy load (e.g. speed tests)
-    /// where `ERR_MEM` is transient. The backpressure mechanism
-    /// (`receivePaused` + `drainOverflowBuffer`) is the correct recovery path.
-    private static let maxOverflowBufferSize = 512 * 1024  // 512 KB
-
-    /// Maximum bytes per tcp_write call. Limits pbuf/segment allocation pressure:
-    /// 16 KB ≈ 12 TCP segments (TCP_MSS=1360). With MEMP_NUM_TCP_SEG=4096 globally,
-    /// this allows many concurrent connections to make progress without exhausting
-    /// the segment pool (a 65 KB write would need ~49 segments — all-or-nothing).
-    /// See also: MEMP_NUM_TCP_SEG in lwipopts.h (must stay in sync).
-    private static let maxWriteSize = 16 * 1024
 
     /// Whether the proxy receive loop is paused due to a full lwIP send buffer.
     private var receivePaused = false
@@ -61,25 +44,6 @@ class LWIPTCPConnection {
     private var uploadCoalesceRecvLen: Int = 0
     private var uploadCoalesceScheduled = false
     private var uploadFlushInFlight = false
-
-    /// Maximum coalesce buffer size. Capped at UInt16.max because downstream
-    /// protocols (Vision padding) use 2-byte content length fields.
-    private static let maxCoalesceSize = Int(UInt16.max)
-
-    // MARK: Activity Timeout (matches Xray-core policy defaults)
-
-    /// Inactivity timeout for the connection (Xray-core `connIdle`, default 300s).
-    private static let connectionIdleTimeout: TimeInterval = 300
-
-    /// Timeout after uplink (local → remote) finishes (Xray-core `downlinkOnly`, default 1s).
-    private static let downlinkOnlyTimeout: TimeInterval = 1
-
-    /// Timeout after downlink (remote → local) finishes (Xray-core `uplinkOnly`, default 1s).
-    private static let uplinkOnlyTimeout: TimeInterval = 1
-
-    /// Handshake timeout matching Xray-core's `Timeout.Handshake` (60 seconds).
-    /// Bounds the entire connection setup phase (TCP + TLS + WS/HTTPUpgrade + VLESS header).
-    private static let handshakeTimeout: TimeInterval = 60
 
     private var activityTimer: ActivityTimer?
     private var handshakeTimer: DispatchWorkItem?
@@ -107,7 +71,7 @@ class LWIPTCPConnection {
             }
         }
         handshakeTimer = timer
-        lwipQueue.asyncAfter(deadline: .now() + Self.handshakeTimeout, execute: timer)
+        lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.handshakeTimeout, execute: timer)
 
         if bypass {
             connectDirect()
@@ -144,7 +108,7 @@ class LWIPTCPConnection {
 
         // Buffer would overflow — flush accumulated data first to
         // maintain stream ordering, then fall back to per-segment sends.
-        if uploadCoalesceRecvLen + data.count > Self.maxCoalesceSize {
+        if uploadCoalesceRecvLen + data.count > TunnelConstants.tcpMaxCoalesceSize {
             if uploadCoalesceRecvLen > 0 && !uploadFlushInFlight {
                 flushUploadBuffer()
             }
@@ -271,7 +235,7 @@ class LWIPTCPConnection {
         if downlinkDone {
             close()
         } else {
-            activityTimer?.setTimeout(Self.downlinkOnlyTimeout)
+            activityTimer?.setTimeout(TunnelConstants.downlinkOnlyTimeout)
         }
     }
 
@@ -350,7 +314,7 @@ class LWIPTCPConnection {
                 self.handshakeTimer = nil
                 self.activityTimer = ActivityTimer(
                     queue: self.lwipQueue,
-                    timeout: Self.connectionIdleTimeout
+                    timeout: TunnelConstants.connectionIdleTimeout
                 ) { [weak self] in
                     guard let self, !self.closed else { return }
                     self.close()
@@ -441,7 +405,7 @@ class LWIPTCPConnection {
                     self.handshakeTimer = nil
                     self.activityTimer = ActivityTimer(
                         queue: self.lwipQueue,
-                        timeout: Self.connectionIdleTimeout
+                        timeout: TunnelConstants.connectionIdleTimeout
                     ) { [weak self] in
                         guard let self, !self.closed else { return }
                         self.close()
@@ -514,7 +478,7 @@ class LWIPTCPConnection {
                         if self.uplinkDone {
                             self.close()
                         } else {
-                            self.activityTimer?.setTimeout(Self.uplinkOnlyTimeout)
+                            self.activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
                         }
                         return
                     }
@@ -548,7 +512,7 @@ class LWIPTCPConnection {
                     if self.uplinkDone {
                         self.close()
                     } else {
-                        self.activityTimer?.setTimeout(Self.uplinkOnlyTimeout)
+                        self.activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
                     }
                     return
                 }
@@ -580,7 +544,7 @@ class LWIPTCPConnection {
                 }
                 guard sndbuf > 0 else { break }
             }
-            let chunkSize = min(min(sndbuf, count - offset), Self.maxWriteSize)
+            let chunkSize = min(min(sndbuf, count - offset), TunnelConstants.tcpMaxWriteSize)
             let err = lwip_bridge_tcp_write(pcb, base + offset, UInt16(chunkSize))
             if err != 0 {
                 if err == -1 { break }  // ERR_MEM: transient
@@ -608,7 +572,7 @@ class LWIPTCPConnection {
             // receive was already pre-issued by the pipelined callback; when
             // it fires and finds receivePaused == true it will still write to
             // the overflow buffer, but won't issue yet another receive.
-            if overflowBuffer.count >= Self.maxOverflowBufferSize {
+            if overflowBuffer.count >= TunnelConstants.tcpOverflowBufferSize {
                 receivePaused = true
             }
             return
@@ -640,7 +604,7 @@ class LWIPTCPConnection {
         // receive loop pre-issues the next receive before calling writeToLWIP,
         // so we only need to set the pause flag here; the already-outstanding
         // receive's callback will respect it and stop issuing further receives.
-        if overflowBuffer.count >= Self.maxOverflowBufferSize {
+        if overflowBuffer.count >= TunnelConstants.tcpOverflowBufferSize {
             receivePaused = true
         }
     }
@@ -678,13 +642,13 @@ class LWIPTCPConnection {
         } else if !overflowBuffer.isEmpty {
             // Nothing drained (ERR_MEM with empty send buffer) — no handleSent will
             // fire for this connection, so schedule a delayed retry.
-            lwipQueue.asyncAfter(deadline: .now() + .milliseconds(100)) { [weak self] in
+            lwipQueue.asyncAfter(deadline: .now() + .milliseconds(TunnelConstants.drainRetryDelayMs)) { [weak self] in
                 guard let self, !self.closed else { return }
                 self.drainOverflowBuffer()
             }
         }
 
-        if receivePaused && overflowBuffer.count < Self.maxOverflowBufferSize {
+        if receivePaused && overflowBuffer.count < TunnelConstants.tcpOverflowBufferSize {
             receivePaused = false
             requestNextReceive()
         }

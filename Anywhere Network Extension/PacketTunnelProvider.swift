@@ -75,7 +75,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let configurationDict: [String: Any]?
         if let dict = options?["config"] as? [String: Any] {
             configurationDict = dict
-        } else if let savedData = AWCore.userDefaults.data(forKey: "lastConfigurationData"),
+        } else if let savedData = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.lastConfigurationData),
                   let dict = try? JSONSerialization.jsonObject(with: savedData) as? [String: Any] {
             configurationDict = dict
         } else {
@@ -148,16 +148,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     ]
 
     private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.8.0.1")
-        
-        let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.0"])
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: TunnelConstants.tunnelRemoteAddress)
+
+        let ipv4Settings = NEIPv4Settings(addresses: [TunnelConstants.tunnelLocalIPv4Address], subnetMasks: [TunnelConstants.tunnelSubnetMask])
         ipv4Settings.includedRoutes = [NEIPv4Route.default()]
         ipv4Settings.excludedRoutes = Self.bypassIPv4Routes
         settings.ipv4Settings = ipv4Settings
 
-        let ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: "ipv6DNSEnabled")
+        let ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.ipv6DNSEnabled)
         if ipv6DNSEnabled {
-            let ipv6Settings = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
+            let ipv6Settings = NEIPv6Settings(addresses: [TunnelConstants.tunnelLocalIPv6Address], networkPrefixLengths: [TunnelConstants.tunnelIPv6PrefixLength])
             ipv6Settings.includedRoutes = [NEIPv6Route.default()]
             ipv6Settings.excludedRoutes = Self.bypassIPv6Routes
             settings.ipv6Settings = ipv6Settings
@@ -165,14 +165,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let dnsServers: [String]
         if ipv6DNSEnabled {
-            dnsServers = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
+            dnsServers = TunnelConstants.dnsServersIPv4 + TunnelConstants.dnsServersIPv6
         } else {
-            dnsServers = ["1.1.1.1", "1.0.0.1"]
+            dnsServers = TunnelConstants.dnsServersIPv4
         }
 
-        let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: "encryptedDNSEnabled")
-        let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: "encryptedDNSProtocol") ?? "doh"
-        let encryptedDNSServer = AWCore.userDefaults.string(forKey: "encryptedDNSServer") ?? ""
+        let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSEnabled)
+        let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSProtocol) ?? TunnelConstants.defaultEncryptedDNSProtocol
+        let encryptedDNSServer = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSServer) ?? ""
 
         if encryptedDNSEnabled, !encryptedDNSServer.isEmpty {
             if encryptedDNSProtocol == "dot" {
@@ -194,7 +194,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         } else {
             settings.dnsSettings = NEDNSSettings(servers: dnsServers)
         }
-        settings.mtu = 1400
+        settings.mtu = TunnelConstants.tunnelMTU
 
         return settings
     }

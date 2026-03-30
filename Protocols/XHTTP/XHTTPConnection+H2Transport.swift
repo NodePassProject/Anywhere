@@ -127,7 +127,10 @@ extension XHTTPConnection {
                 case Self.h2FrameWindowUpdate:
                     self.lock.lock()
                     if frame.payload.count >= 4 {
-                        let increment = Int(((UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])) & 0x7FFFFFFF)
+                        let raw = frame.payload.prefix(4).withUnsafeBytes {
+                            $0.load(as: UInt32.self).bigEndian
+                        }
+                        let increment = Int(raw & 0x7FFFFFFF)
                         if frame.streamId == 0 {
                             self.h2PeerConnectionWindow += increment
                         } else if self.h2PacketStreamWindows[frame.streamId] != nil {
@@ -513,7 +516,10 @@ extension XHTTPConnection {
                 case Self.h2FrameWindowUpdate:
                     self.lock.lock()
                     if frame.payload.count >= 4 {
-                        let increment = Int(((UInt32(frame.payload[0]) << 24) | (UInt32(frame.payload[1]) << 16) | (UInt32(frame.payload[2]) << 8) | UInt32(frame.payload[3])) & 0x7FFFFFFF)
+                        let raw = frame.payload.prefix(4).withUnsafeBytes {
+                            $0.load(as: UInt32.self).bigEndian
+                        }
+                        let increment = Int(raw & 0x7FFFFFFF)
                         if frame.streamId == 0 {
                             self.h2PeerConnectionWindow += increment
                         } else if self.h2PacketStreamWindows[frame.streamId] != nil {

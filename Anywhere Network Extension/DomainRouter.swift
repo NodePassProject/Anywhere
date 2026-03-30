@@ -87,7 +87,7 @@ class DomainRouter {
         ipv6CIDRRules.removeAll()
         configurationMap.removeAll()
 
-        guard let data = AWCore.userDefaults.data(forKey: "routingData"),
+        guard let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.routingData),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             logger.debug("[DomainRouter] No routing data available")
             return
@@ -179,7 +179,7 @@ class DomainRouter {
     func loadBypassCountryRules() {
         var count = 0
 
-        if let data = AWCore.userDefaults.data(forKey: "bypassCountryDomainRules"),
+        if let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.bypassCountryDomainRules),
            let rules = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] {
             for rule in rules {
                 guard let typeStr = rule["type"], let value = rule["value"] else { continue }
