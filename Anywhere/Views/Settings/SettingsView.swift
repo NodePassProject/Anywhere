@@ -38,11 +38,6 @@ struct SettingsView: View {
 
     @State private var adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
     @State private var showInsecureAlert = false
-
-    // Countries with serious internet censorship (must match INCLUDED_COUNTRIES in build_geoip.py)
-    private static let countryCodes: [String] = [
-        "AE", "BY", "CN", "CU", "IR", "MM", "RU", "SA", "TM", "VN"
-    ]
     
     var body: some View {
         Form {
@@ -77,7 +72,7 @@ struct SettingsView: View {
                     }
                     Picker(selection: $bypassCountryCode) {
                         Text("Disable").tag("")
-                        ForEach(Self.countryCodes, id: \.self) { code in
+                        ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
                             Text("\(flag(for: code)) \(Locale.current.localizedString(forRegionCode: code) ?? code)").tag(code)
                         }
                     } label: {
@@ -164,9 +159,11 @@ struct SettingsView: View {
             }
             Task { await viewModel.syncRoutingConfigurationToNE() }
         }
-        .onChange(of: bypassCountryCode) {
-            Task { await RuleSetStore.shared.syncBypassCountryRules() }
-            notifySettingsChanged()
+        .onChange(of: bypassCountryCode) { _, newValue in
+            Task {
+                await RuleSetStore.shared.syncBypassCountryRules(countryCode: newValue)
+                notifySettingsChanged()
+            }
         }
         .alert("Allow Insecure", isPresented: $showInsecureAlert) {
             Button("Allow Anyway", role: .destructive) {

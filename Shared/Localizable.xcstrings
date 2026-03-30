@@ -36,12 +36,6 @@
             "value": "%1$@ %2$@"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ %2$@"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -49,6 +43,12 @@
           }
         },
         "tk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ %2$@"
+          }
+        },
+        "tr": {
           "stringUnit": {
             "state": "translated",
             "value": "%1$@ %2$@"
@@ -94,12 +94,6 @@
             "value": "%1$@ → %2$@"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@ → %2$@"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -107,6 +101,12 @@
           }
         },
         "tk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ → %2$@"
+          }
+        },
+        "tr": {
           "stringUnit": {
             "state": "translated",
             "value": "%1$@ → %2$@"
@@ -152,12 +152,6 @@
             "value": "%1$@:%2$@"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$@:%2$@"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -165,6 +159,12 @@
           }
         },
         "tk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@:%2$@"
+          }
+        },
+        "tr": {
           "stringUnit": {
             "state": "translated",
             "value": "%1$@:%2$@"
@@ -213,12 +213,6 @@
             "value": "%lld میلی‌ثانیه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld ms"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -226,6 +220,12 @@
           }
         },
         "tk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld ms"
+          }
+        },
+        "tr": {
           "stringUnit": {
             "state": "translated",
             "value": "%lld ms"
@@ -271,12 +271,6 @@
             "value": "%lld پروکسی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီ %lld ခု"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -287,6 +281,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "%lld proksi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld proxy"
           }
         },
         "vi": {
@@ -329,12 +329,6 @@
             "value": "یک زنجیره پروکسی به حداقل ۲ پروکسی نیاز دارد."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီချိန်းတစ်ခုတွင် အနည်းဆုံး ပရောက်စီ ၂ ခု လိုအပ်သည်။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -345,6 +339,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Proksi zynjyry üçin azyndan 2 proksi gerek."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bir proxy zinciri için en az 2 proxy gerekir."
           }
         },
         "vi": {
@@ -387,12 +387,6 @@
             "value": "درباره"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အကြောင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -403,6 +397,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Hakynda"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hakkında"
           }
         },
         "vi": {
@@ -445,12 +445,6 @@
             "value": "قدردانی‌ها"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကျေးဇူးတင်လွှာ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -461,6 +455,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Minnetdarlyklar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Teşekkürler"
           }
         },
         "vi": {
@@ -503,12 +503,6 @@
             "value": "مسدودسازی تبلیغات"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကြော်ငြာပိတ်ဆို့ခြင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -519,6 +513,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Mahabat blokirlemek"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reklam Engelleme"
           }
         },
         "vi": {
@@ -561,12 +561,6 @@
             "value": "افزودن"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ထည့်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -577,6 +571,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Goş"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ekle"
           }
         },
         "vi": {
@@ -619,12 +619,6 @@
             "value": "افزودن پیکربندی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖွဲ့စည်းမှုတစ်ခုထည့်ပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -635,6 +629,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Konfigurasiýa goşuň"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bir Yapılandırma Ekle"
           }
         },
         "vi": {
@@ -677,12 +677,6 @@
             "value": "حداقل ۲ پروکسی اضافه کنید تا یک زنجیره بسازید."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုတစ်ခုဖွဲ့စည်းရန် ပရောက်စီအနည်းဆုံး ၂ ခုထည့်ပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -693,6 +687,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Zynjyr döretmek üçin azyndan 2 proksi goşuň."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bir zincir oluşturmak için en az 2 proxy ekleyin."
           }
         },
         "vi": {
@@ -735,12 +735,6 @@
             "value": "افزودن گواهی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လက်မှတ်ထည့်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -751,6 +745,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Şahadatnama goş"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sertifika Ekle"
           }
         },
         "vi": {
@@ -793,12 +793,6 @@
             "value": "افزودن پیکربندی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖွဲ့စည်းမှုထည့်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -809,6 +803,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Konfigurasiýa goş"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yapılandırma Ekle"
           }
         },
         "vi": {
@@ -851,12 +851,6 @@
             "value": "افزودن پروکسی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီထည့်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -867,6 +861,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Proksi goş"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proxy Ekle"
           }
         },
         "vi": {
@@ -909,12 +909,6 @@
             "value": "آدرس"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လိပ်စာ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -925,6 +919,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Salgy"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Adres"
           }
         },
         "vi": {
@@ -967,12 +967,6 @@
             "value": "تنظیمات پیشرفته"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အဆင့်မြင့် ဆက်တင်များ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -983,6 +977,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Giňişleýin sazlamalar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gelişmiş Ayarlar"
           }
         },
         "vi": {
@@ -1031,12 +1031,6 @@
             "value": "تمامی علائم تجاری، علائم خدماتی و نام‌های شرکت‌ها متعلق به صاحبان مربوطه آن‌ها است."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကုန်အမှတ်တံဆိပ်များ၊ ဝန်ဆောင်မှုအမှတ်တံဆိပ်များနှင့် ကုမ္ပဏီအမည်များအားလုံးသည် သက်ဆိုင်ရာပိုင်ရှင်များ၏ ပိုင်ဆိုင်မှုဖြစ်ပါသည်။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1047,6 +1041,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ähli haryt nyşanlary, hyzmat nyşanlary we kompaniýa atlary degişli eýeleriniň emlägidir."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tüm ticari markalar, hizmet markaları ve şirket adları ilgili sahiplerinin mülkiyetindedir."
           }
         },
         "vi": {
@@ -1089,12 +1089,6 @@
             "value": "به هر حال اجازه بده"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဘာပဲဖြစ်ဖြစ် ခွင့်ပြုပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1105,6 +1099,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Şonda-da rugsat ber"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yine de İzin Ver"
           }
         },
         "vi": {
@@ -1147,12 +1147,6 @@
             "value": "اجازه اتصال ناامن"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မလုံခြုံသော ချိတ်ဆက်မှုကို ခွင့်ပြုပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1163,6 +1157,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Howpsuz birikme rugsat ber"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Güvensize İzin Ver"
           }
         },
         "vi": {
@@ -1208,12 +1208,6 @@
             "value": "همیشه روشن"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အမြဲဖွင့်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1224,6 +1218,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Hemişe açyk"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Her Zaman Açık"
           }
         },
         "vi": {
@@ -1266,12 +1266,6 @@
             "value": "Anywhere یک پروژه مستقل است و هیچ‌گونه وابستگی، تأیید یا حمایت مالی از سوی شرکت‌های ذکر شده در زیر ندارد."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Anywhere သည် လွတ်လပ်သောပရောဂျက်တစ်ခုဖြစ်ပြီး အောက်တွင်ဖော်ပြထားသော ကုမ္ပဏီတစ်ခုခုနှင့် ဆက်စပ်ခြင်း၊ ထောက်ခံခြင်း သို့မဟုတ် ပံ့ပိုးကူညီခြင်းမရှိပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1282,6 +1276,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Anywhere garaşsyz taslamadyr we aşakda görkezilen kompaniýalaryň hiç biri bilen baglanyşykly, goldanýan ýa-da maliýeleşdirilýän däldir."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anywhere bağımsız bir projedir ve aşağıda listelenen şirketlerin hiçbiriyle ilişkili değildir, onlar tarafından onaylanmaz veya desteklenmez."
           }
         },
         "vi": {
@@ -1324,12 +1324,6 @@
             "value": "برنامه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အက်ပ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1340,6 +1334,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Programma"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uygulama"
           }
         },
         "vi": {
@@ -1382,12 +1382,6 @@
             "value": "ASR™ مسیریابی هوشمند"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ASR™ စမတ်လမ်းကြောင်းရွေးချယ်မှု"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1398,6 +1392,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "ASR™ Akylly marşrutizasiýa"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ASR™ Akıllı Yönlendirme"
           }
         },
         "vi": {
@@ -1440,12 +1440,6 @@
             "value": "خودکار"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အလိုအလျောက်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1456,6 +1450,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Awto"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Otomatik"
           }
         },
         "vi": {
@@ -1498,12 +1498,6 @@
             "value": "اتصال مجدد خودکار VPN هنگام قطع شدن."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN ချိတ်ဆက်မှု ပြတ်တောက်သွားသောအခါ အလိုအလျောက် ပြန်လည်ချိတ်ဆက်ပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1514,6 +1508,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "VPN kesilen wagty awtomatiki täzeden birikdirmek."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "VPN bağlantısı kesildiğinde otomatik olarak yeniden bağlan."
           }
         },
         "vi": {
@@ -1556,12 +1556,6 @@
             "value": "بازگشت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "နောက်သို့"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1572,6 +1566,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Yza"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geri"
           }
         },
         "vi": {
@@ -1623,12 +1623,6 @@
             "value": "مسدودسازی تبلیغات و ردیاب‌ها در سطح شبکه برای تجربه مرور پاک‌تر."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကွန်ရက်အဆင့်တွင် ကြော်ငြာနှင့် ခြေရာခံများကို ပိတ်ဆို့ပြီး ပိုသန့်ရှင်းသော ဘရောက်ဆာအတွေ့အကြုံကို ရယူပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1639,6 +1633,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Arassa görmek tejribesi üçin tor derejesinde mahabatlary we yzarlaýjylary blokirläň."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Daha temiz bir gezinme deneyimi için ağ düzeyinde reklamları ve izleyicileri engelleyin."
           }
         },
         "vi": {
@@ -1681,12 +1681,6 @@
             "value": "لغو"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပယ်ဖျက်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1697,6 +1691,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ýatyr"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "İptal"
           }
         },
         "vi": {
@@ -1742,12 +1742,6 @@
             "value": "زنجیره‌ها"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုများ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1758,6 +1752,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Zynjyrlar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zincirler"
           }
         },
         "vi": {
@@ -1800,12 +1800,6 @@
             "value": "متصل"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်ပြီး"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1816,6 +1810,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Birikdirildi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlı"
           }
         },
         "vi": {
@@ -1858,12 +1858,6 @@
             "value": "در حال اتصال..."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်နေသည်..."
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1874,6 +1868,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Birikdirilýär..."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlanıyor..."
           }
         },
         "vi": {
@@ -1916,12 +1916,6 @@
             "value": "ادامه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဆက်လုပ်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1932,6 +1926,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Dowam et"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Devam Et"
           }
         },
         "vi": {
@@ -1974,12 +1974,6 @@
             "value": "کپی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကူးယူရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -1990,6 +1984,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Göçür"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kopyala"
           }
         },
         "vi": {
@@ -2032,12 +2032,6 @@
             "value": "کپی (%lld)"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကူးယူ (%lld)"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2048,6 +2042,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Göçür (%lld)"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kopyala (%lld)"
           }
         },
         "vi": {
@@ -2090,12 +2090,6 @@
             "value": "کپی لینک"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လင့်ခ်ကူးယူရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2106,6 +2100,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Baglanyşygy göçür"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlantıyı Kopyala"
           }
         },
         "vi": {
@@ -2148,12 +2148,6 @@
             "value": "دور زدن کشور"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "နိုင်ငံရှောင်ကွင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2164,6 +2158,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ýurt aýlaw"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ülke İstisnası"
           }
         },
         "vi": {
@@ -2206,12 +2206,6 @@
             "value": "پیش‌فرض"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မူရင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2222,6 +2216,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Bellenen"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Varsayılan"
           }
         },
         "vi": {
@@ -2264,12 +2264,6 @@
             "value": "حذف"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖျက်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2280,6 +2274,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Poz"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sil"
           }
         },
         "vi": {
@@ -2322,12 +2322,6 @@
             "value": "عیب‌یابی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ရောဂါရှာဖွေခြင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2338,6 +2332,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Diagnostika"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tanılama"
           }
         },
         "vi": {
@@ -2380,12 +2380,6 @@
             "value": "مستقیم"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "တိုက်ရိုက်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2396,6 +2390,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Göni"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Doğrudan"
           }
         },
         "vi": {
@@ -2438,12 +2438,6 @@
             "value": "غیرفعال"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပိတ်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2454,6 +2448,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Öçür"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Devre Dışı Bırak"
           }
         },
         "vi": {
@@ -2496,12 +2496,6 @@
             "value": "قطع شده"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုပြတ်ပြီး"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2512,6 +2506,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Aýryldy"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlantı Kesildi"
           }
         },
         "vi": {
@@ -2554,12 +2554,6 @@
             "value": "در حال قطع..."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုဖြတ်နေသည်..."
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2570,6 +2564,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Aýrylýar..."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlantı Kesiliyor..."
           }
         },
         "vi": {
@@ -2618,12 +2618,6 @@
             "value": "سرور DNS"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "DNS ဆာဗာ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2634,6 +2628,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "DNS serweri"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "DNS Sunucusu"
           }
         },
         "vi": {
@@ -2677,12 +2677,6 @@
             "value": "تمام"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပြီးပါပြီ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2693,6 +2687,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Taýýar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bitti"
           }
         },
         "vi": {
@@ -2736,12 +2736,6 @@
             "value": "دانلود"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဒေါင်းလုဒ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2752,6 +2746,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ýüklemek"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "İndir"
           }
         },
         "vi": {
@@ -2794,12 +2794,6 @@
             "value": "ویرایش"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "တည်းဖြတ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2810,6 +2804,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Üýtget"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Düzenle"
           }
         },
         "vi": {
@@ -2852,12 +2852,6 @@
             "value": "ویرایش زنجیره"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုပြင်ဆင်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2868,6 +2862,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Zynjyry redaktirle"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zinciri Düzenle"
           }
         },
         "vi": {
@@ -2910,12 +2910,6 @@
             "value": "ویرایش پیکربندی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖွဲ့စည်းမှုတည်းဖြတ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2926,6 +2920,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Konfigurasiýany üýtget"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yapılandırmayı Düzenle"
           }
         },
         "vi": {
@@ -2968,12 +2968,6 @@
             "value": "فعال‌سازی مسدودسازی تبلیغات"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကြော်ငြာပိတ်ဆို့ခြင်းကို ဖွင့်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -2984,6 +2978,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Mahabat blokirlemegi açmak"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reklam Engellemeyi Etkinleştir"
           }
         },
         "vi": {
@@ -3026,12 +3026,6 @@
             "value": "فعال‌سازی در هر صورت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဘယ်လိုပဲဖြစ်ဖြစ် ဖွင့်မည်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3042,6 +3036,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Şonda-da açmak"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yine de Etkinleştir"
           }
         },
         "vi": {
@@ -3084,12 +3084,6 @@
             "value": "فعال‌سازی DNS رمزنگاری‌شده زمان انتظار اتصال را افزایش می‌دهد و مانع عملکرد قوانین مسیریابی می‌شود."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကုဒ်ဝှက်ထားသော DNS ကိုဖွင့်ခြင်းသည် ချိတ်ဆက်မှုစောင့်ဆိုင်းချိန်ကို တိုးမြင့်စေပြီး လမ်းကြောင်းသတ်မှတ်ချက်များ အလုပ်မလုပ်စေပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3100,6 +3094,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Şifrlenen DNS-i açmak birikme wagtyny artdyrar we ugratma düzgünleriniň işlemeginiň öňüni alar."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Şifreli DNS'i etkinleştirmek bağlantı bekleme süresini artırır ve yönlendirme kurallarının çalışmasını engeller."
           }
         },
         "vi": {
@@ -3142,12 +3142,6 @@
             "value": "DNS رمزنگاری‌شده"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကုဒ်ဝှက်ထားသော DNS"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3158,6 +3152,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Şifrlenen DNS"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Şifreli DNS"
           }
         },
         "vi": {
@@ -3200,12 +3200,6 @@
             "value": "رمزگذاری"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကုဒ်ဝှက်ခြင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3216,6 +3210,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Şifrlemek"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Şifreleme"
           }
         },
         "vi": {
@@ -3258,12 +3258,6 @@
             "value": "اثر انگشت SHA-256 (۶۴ کاراکتر هگزادسیمال) گواهی مورد اعتماد را وارد کنید."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ယုံကြည်လိုသော လက်မှတ်၏ SHA-256 လက်ဗွေ (ဟက်စ် အက္ခရာ ၆၄ လုံး) ထည့်ပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3274,6 +3268,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ynanylýan şahadatnamanyň SHA-256 barlag belgisini (64 onaltylyk belgi) giriziň."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Güvenilecek sertifikanın SHA-256 parmak izini (64 onaltılık karakter) girin."
           }
         },
         "vi": {
@@ -3316,12 +3316,6 @@
             "value": "ورودی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဝင်ပေါက်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3329,6 +3323,12 @@
           }
         },
         "tk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Giriş"
+          }
+        },
+        "tr": {
           "stringUnit": {
             "state": "translated",
             "value": "Giriş"
@@ -3374,12 +3374,6 @@
             "value": "خروجی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ထွက်ပေါက်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3390,6 +3384,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Çykyş"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Çıkış"
           }
         },
         "vi": {
@@ -3432,12 +3432,6 @@
             "value": "ویژگی‌های آزمایشی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "စမ်းသပ်ဆဲ လုပ်ဆောင်ချက်များ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3448,6 +3442,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Synag aýratynlyklary"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deneysel Özellikler"
           }
         },
         "vi": {
@@ -3499,12 +3499,6 @@
             "value": "شروع"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "စတင်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3515,6 +3509,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Başla"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Başlayın"
           }
         },
         "vi": {
@@ -3557,12 +3557,6 @@
             "value": "حالت سراسری"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကမ္ဘာလုံးဆိုင်ရာမုဒ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3573,6 +3567,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Global tertip"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Küresel Mod"
           }
         },
         "vi": {
@@ -3615,12 +3615,6 @@
             "value": "رفتن به تنظیمات"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဆက်တင်သို့သွားရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3631,6 +3625,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sazlamalara git"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ayarlara Git"
           }
         },
         "vi": {
@@ -3676,12 +3676,6 @@
             "value": "خانه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပင်မ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3692,6 +3686,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Baş sahypa"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ana Sayfa"
           }
         },
         "vi": {
@@ -3734,12 +3734,6 @@
             "value": "میزبان"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Host"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3747,6 +3741,12 @@
           }
         },
         "tk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Host"
+          }
+        },
+        "tr": {
           "stringUnit": {
             "state": "translated",
             "value": "Host"
@@ -3792,12 +3792,6 @@
             "value": "پروکسی HTTP/2"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "HTTP/2 ပရောက်စီ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3808,6 +3802,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "HTTP/2 Proksi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HTTP/2 Proxy"
           }
         },
         "vi": {
@@ -3856,12 +3856,6 @@
             "value": "پروکسی HTTPS"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "HTTPS ပရောက်စီ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3872,6 +3866,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "HTTPS Proksi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HTTPS Proxy"
           }
         },
         "vi": {
@@ -3917,12 +3917,6 @@
             "value": "وارد کردن ناموفق بود"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "တင်သွင်းမှု မအောင်မြင်ပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3933,6 +3927,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Import şowsuz"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "İçe Aktarma Başarısız"
           }
         },
         "vi": {
@@ -3975,12 +3975,6 @@
             "value": "ناامن"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မလုံခြုံ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -3991,6 +3985,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "howpsuz"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "güvensiz"
           }
         },
         "vi": {
@@ -4033,12 +4033,6 @@
             "value": "زنجیره نامعتبر — برخی پروکسی‌ها وجود ندارند"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုမမှန်ကန်ပါ — ပရောက်စီအချို့ပျောက်ဆုံးနေသည်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4049,6 +4043,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nädogry zynjyr — käbir proksiler ýok"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geçersiz zincir — bazı proxy'ler eksik"
           }
         },
         "vi": {
@@ -4091,12 +4091,6 @@
             "value": "اثر انگشت نامعتبر"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လက်ဗွေ မမှန်ကန်ပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4107,6 +4101,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nädogry barlag belgisi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geçersiz Parmak İzi"
           }
         },
         "vi": {
@@ -4149,12 +4149,6 @@
             "value": "اثر انگشت نامعتبر. باید یک رشته هگزادسیمال ۶۴ کاراکتری باشد، یا قبلاً وجود دارد."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လက်ဗွေ မမှန်ကန်ပါ။ ဟက်စ် အက္ခရာ ၆၄ လုံး ဖြစ်ရမည်၊ သို့မဟုတ် ရှိပြီးသားဖြစ်နေပါသည်။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4165,6 +4159,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nädogry barlag belgisi. 64 belgili onaltylyk setir bolmaly ýa-da eýýäm bar."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geçersiz parmak izi. 64 karakterlik bir onaltılık dize olmalı ya da zaten mevcut."
           }
         },
         "vi": {
@@ -4207,12 +4207,6 @@
             "value": "نشانی اشتراک نامعتبر است."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "စာရင်းသွင်း URL မမှန်ကန်ပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4223,6 +4217,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nädogry abuna URL-i."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geçersiz abonelik URL'si."
           }
         },
         "vi": {
@@ -4268,12 +4268,6 @@
             "value": "جستجوی DNS با IPv6"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "IPv6 DNS ရှာဖွေမှု"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4284,6 +4278,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "IPv6 DNS gözlegi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "IPv6 DNS Araması"
           }
         },
         "vi": {
@@ -4326,12 +4326,6 @@
             "value": "عضویت در گروه تلگرام"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Telegram အုပ်စုသို့ ဝင်ရောက်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4342,6 +4336,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Telegram toparyna goşulyň"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Telegram Grubuna Katıl"
           }
         },
         "vi": {
@@ -4384,12 +4384,6 @@
             "value": "برای کشف و ارتقاء خودکار به سرورهای DNS رمزنگاری‌شده، خالی بگذارید."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကုဒ်ဝှက်ထားသော DNS ဆာဗာများကို အလိုအလျောက် ရှာဖွေပြီး အဆင့်မြှင့်ရန် ဗလာထားပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4400,6 +4394,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Şifrlenen DNS serwerleri awtomatiki tapmak we geçmek üçin boş goýuň."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Şifreli DNS sunucularını otomatik olarak keşfetmek ve yükseltmek için boş bırakın."
           }
         },
         "vi": {
@@ -4442,12 +4442,6 @@
             "value": "لینک"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လင့်ခ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4458,6 +4452,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Salgy"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlantı"
           }
         },
         "vi": {
@@ -4500,12 +4500,6 @@
             "value": "نوع لینک"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လင့်ခ်အမျိုးအစား"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4516,6 +4510,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Salgy görnüşi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlantı Türü"
           }
         },
         "vi": {
@@ -4558,12 +4558,6 @@
             "value": "گزارش‌ها"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မှတ်တမ်းများ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4574,6 +4568,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Loglar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Günlükler"
           }
         },
         "vi": {
@@ -4616,12 +4616,6 @@
             "value": "دستی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကိုယ်တိုင်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4632,6 +4626,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "El bilen"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Manuel"
           }
         },
         "vi": {
@@ -4674,12 +4674,6 @@
             "value": "روش"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "နည်းလမ်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4690,6 +4684,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Usul"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yöntem"
           }
         },
         "vi": {
@@ -4732,12 +4732,6 @@
             "value": "حالت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မုဒ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4748,6 +4742,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tertip"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mod"
           }
         },
         "vi": {
@@ -4790,12 +4790,6 @@
             "value": "انتقال به پایین"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အောက်သို့ ရွှေ့ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4806,6 +4800,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Aşak süýşür"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aşağı Taşı"
           }
         },
         "vi": {
@@ -4848,12 +4848,6 @@
             "value": "انتقال به بالا"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အထက်သို့ ရွှေ့ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4864,6 +4858,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ýokary süýşür"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yukarı Taşı"
           }
         },
         "vi": {
@@ -4909,12 +4909,6 @@
             "value": "نام"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အမည်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4925,6 +4919,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ady"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ad"
           }
         },
         "vi": {
@@ -4967,12 +4967,6 @@
             "value": "شبکه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကွန်ရက်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -4983,6 +4977,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tor"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ağ"
           }
         },
         "vi": {
@@ -5025,12 +5025,6 @@
             "value": "خطای شبکه: %@"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကွန်ရက် အမှား: %@"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5041,6 +5035,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Tor ýalňyşlygy: %@"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ağ hatası: %@"
           }
         },
         "vi": {
@@ -5083,12 +5083,6 @@
             "value": "زنجیره جدید"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုအသစ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5099,6 +5093,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Täze zynjyr"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yeni Zincir"
           }
         },
         "vi": {
@@ -5141,12 +5141,6 @@
             "value": "بعدی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "နောက်တစ်ခု"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5157,6 +5151,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Indiki"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "İleri"
           }
         },
         "vi": {
@@ -5199,12 +5199,6 @@
             "value": "بدون زنجیره"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ချိတ်ဆက်မှုမရှိပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5215,6 +5209,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Zynjyr ýok"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zincir Yok"
           }
         },
         "vi": {
@@ -5257,12 +5257,6 @@
             "value": "بدون پروکسی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီမရှိပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5273,6 +5267,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Proksi ýok"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proxy Yok"
           }
         },
         "vi": {
@@ -5315,12 +5315,6 @@
             "value": "گزارش اخیری وجود ندارد"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မကြာသေးမီ မှတ်တမ်းမရှိပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5331,6 +5325,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Soňky loglar ýok"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Son Günlükler Yok"
           }
         },
         "vi": {
@@ -5373,12 +5373,6 @@
             "value": "گواهی مورد اعتمادی وجود ندارد"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ယုံကြည်ရသော လက်မှတ်များ မရှိပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5389,6 +5383,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ynanylýan şahadatnama ýok"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Güvenilir sertifika yok"
           }
         },
         "vi": {
@@ -5431,12 +5431,6 @@
             "value": "هیچ پیکربندی معتبری در اشتراک یافت نشد."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "စာရင်းသွင်းမှုတွင် မှန်ကန်သော ပြင်ဆင်မှုများ မတွေ့ပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5447,6 +5441,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Abunada dogry sazlamalar tapylmady."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abonelikte geçerli yapılandırma bulunamadı."
           }
         },
         "vi": {
@@ -5489,12 +5489,6 @@
             "value": "هیچ"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မရှိ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5505,6 +5499,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ýok"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yok"
           }
         },
         "vi": {
@@ -5547,12 +5547,6 @@
             "value": "پیکربندی نشده"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖွဲ့စည်းမထားပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5563,6 +5557,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sazlanmadyk"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yapılandırılmadı"
           }
         },
         "vi": {
@@ -5605,12 +5605,6 @@
             "value": "تعداد پروکسی‌ها کافی نیست"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီ မလုံလောက်ပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5621,6 +5615,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Proksi ýeterlik däl"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yeterli Proxy Yok"
           }
         },
         "vi": {
@@ -5663,12 +5663,6 @@
             "value": "توصیه نمی‌شود."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အကြံပြုမထားပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5679,6 +5673,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Maslahat berilmeýär."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Önerilmez."
           }
         },
         "vi": {
@@ -5721,12 +5721,6 @@
             "value": "خاموش"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပိတ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5737,6 +5731,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Öçük"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kapalı"
           }
         },
         "vi": {
@@ -5779,12 +5779,6 @@
             "value": "تأیید"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အိုကေ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5795,6 +5789,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Bolýar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tamam"
           }
         },
         "vi": {
@@ -5837,12 +5837,6 @@
             "value": "روشن"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖွင့်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5853,6 +5847,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Açyk"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Açık"
           }
         },
         "vi": {
@@ -5895,12 +5895,6 @@
             "value": "کتابخانه‌های متن‌باز"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အခမဲ့ရင်းမြစ်စာကြည့်တိုက်များ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5911,6 +5905,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Açyk çeşme kitaphanalary"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Açık Kaynak Kütüphaneleri"
           }
         },
         "vi": {
@@ -5956,12 +5956,6 @@
             "value": "رمز عبور"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "စကားဝှက်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -5972,6 +5966,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Parol"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Parola"
           }
         },
         "vi": {
@@ -6014,12 +6014,6 @@
             "value": "مسیر"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လမ်းကြောင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6030,6 +6024,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ýol"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yol"
           }
         },
         "vi": {
@@ -6072,12 +6072,6 @@
             "value": "اجازه رد شد"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ခွင့်ပြုချက်ငြင်းပယ်ခံရသည်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6088,6 +6082,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Rugsat berilmedi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "İzin reddedildi"
           }
         },
         "vi": {
@@ -6130,12 +6130,6 @@
             "value": "پورت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပို့တ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6146,6 +6140,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Port"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bağlantı Noktası"
           }
         },
         "vi": {
@@ -6188,12 +6188,6 @@
             "value": "پروتکل"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရိုတိုကော"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6201,6 +6195,12 @@
           }
         },
         "tk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Protokol"
+          }
+        },
+        "tr": {
           "stringUnit": {
             "state": "translated",
             "value": "Protokol"
@@ -6246,12 +6246,6 @@
             "value": "پروکسی‌ها"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီများ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6262,6 +6256,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Proksiler"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proxy'ler"
           }
         },
         "vi": {
@@ -6305,12 +6305,6 @@
             "value": "پروکسی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6321,6 +6315,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Proksi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proxy"
           }
         },
         "vi": {
@@ -6363,12 +6363,6 @@
             "value": "کلید عمومی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အများသုံးသော့"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6379,6 +6373,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Açyk açar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Açık Anahtar"
           }
         },
         "vi": {
@@ -6421,12 +6421,6 @@
             "value": "کد QR"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "QR ကုဒ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6437,6 +6431,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "QR kod"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "QR Kodu"
           }
         },
         "vi": {
@@ -6482,12 +6482,6 @@
             "value": "در حال اتصال مجدد..."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပြန်လည်ချိတ်ဆက်နေသည်..."
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6498,6 +6492,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Täzeden birikdirilýär..."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yeniden Bağlanıyor..."
           }
         },
         "vi": {
@@ -6540,12 +6540,6 @@
             "value": "مسدود"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပိတ်ဆို့"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6556,6 +6550,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ret et"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reddet"
           }
         },
         "vi": {
@@ -6598,12 +6598,6 @@
             "value": "حذف"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဖယ်ရှားရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6614,6 +6608,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Aýyrmak"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kaldır"
           }
         },
         "vi": {
@@ -6656,12 +6656,6 @@
             "value": "تغییر نام"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အမည်ပြောင်းရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6672,6 +6666,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ady üýtgetmek"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yeniden Adlandır"
           }
         },
         "vi": {
@@ -6714,12 +6714,6 @@
             "value": "پیش‌نمایش مسیر"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လမ်းကြောင်းအကြိုကြည့်ရှုခြင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6730,6 +6724,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ugur syn"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rota Önizlemesi"
           }
         },
         "vi": {
@@ -6772,12 +6772,6 @@
             "value": "ترافیک به کشور خود را مستقیماً هدایت کنید و پروکسی را برای دسترسی سریع‌تر دور بزنید."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပိုမြန်သော ပြည်တွင်းဝင်ရောက်မှုအတွက် ပရောက်စီကို ကျော်ပြီး သင့်နိုင်ငံသို့ တိုက်ရိုက်လမ်းကြောင်းပေးပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6788,6 +6782,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ýerli elýeterliligi çaltlaşdyrmak üçin proksi aýlanyp, traffigi öz ýurduňyza gönüden-göni ugrugyň."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yerel erişimi hızlandırmak için trafiği proxy'yi atlayarak doğrudan kendi ülkenize yönlendirin."
           }
         },
         "vi": {
@@ -6830,12 +6830,6 @@
             "value": "مسیریابی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လမ်းကြောင်းသတ်မှတ်ခြင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6846,6 +6840,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ugratma"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yönlendirme"
           }
         },
         "vi": {
@@ -6888,12 +6888,6 @@
             "value": "قوانین مسیریابی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လမ်းကြောင်းသတ်မှတ်ချက်များ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6904,6 +6898,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ugratma düzgünleri"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yönlendirme Kuralları"
           }
         },
         "vi": {
@@ -6946,12 +6946,6 @@
             "value": "قوانین مسیریابی به‌روزرسانی شد"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လမ်းကြောင်းသတ်မှတ်ချက်များ အပ်ဒိတ်လုပ်ပြီးပါပြီ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -6962,6 +6956,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ugratma düzgünleri täzelendi"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yönlendirme Kuralları Güncellendi"
           }
         },
         "vi": {
@@ -7004,12 +7004,6 @@
             "value": "ذخیره"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "သိမ်းရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7020,6 +7014,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sakla"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kaydet"
           }
         },
         "vi": {
@@ -7062,12 +7062,6 @@
             "value": "کد QR خود را اسکن کنید"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "သင့် QR ကုဒ်ကိုစကင်ဖတ်ပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7078,6 +7072,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "QR koduňyzy skanirläň"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "QR kodunuzu tarayın"
           }
         },
         "vi": {
@@ -7120,12 +7120,6 @@
             "value": "امنیت"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "လုံခြုံရေး"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7136,6 +7130,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Howpsuzlyk"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Güvenlik"
           }
         },
         "vi": {
@@ -7178,12 +7178,6 @@
             "value": "انتخاب"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ရွေးချယ်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7194,6 +7188,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Saýla"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Seç"
           }
         },
         "vi": {
@@ -7236,12 +7236,6 @@
             "value": "انتخاب پروکسی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီရွေးချယ်ရန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7252,6 +7246,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Proksi saýla"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proxy Seç"
           }
         },
         "vi": {
@@ -7294,12 +7294,6 @@
             "value": "ارسال و پاسخ به درخواست‌های DNS از نوع AAAA."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "AAAA DNS မေးမြန်းချက်များ ပေးပို့ပြီး တုံ့ပြန်ပါ။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7310,6 +7304,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "AAAA DNS soraglaryny ibermek we jogap bermek."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "AAAA DNS sorgularını gönderin ve yanıtlayın."
           }
         },
         "vi": {
@@ -7352,12 +7352,6 @@
             "value": "سرور"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဆာဗာ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7368,6 +7362,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Serwer"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sunucu"
           }
         },
         "vi": {
@@ -7410,12 +7410,6 @@
             "value": "تنظیمات"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဆက်တင်များ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7426,6 +7420,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Sazlamalar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ayarlar"
           }
         },
         "vi": {
@@ -7468,12 +7468,6 @@
             "value": "اثر انگشت SHA-256"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "SHA-256 လက်ဗွေ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7484,6 +7478,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "SHA-256 barlag yzy"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SHA-256 Parmak İzi"
           }
         },
         "vi": {
@@ -7544,12 +7544,6 @@
             "value": "اشتراک"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "စာရင်းသွင်း"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7560,6 +7554,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Abuna"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abonelik"
           }
         },
         "vi": {
@@ -7602,12 +7602,6 @@
             "value": "پشتیبانی از لینک‌های پروکسی، اشتراک و Clash"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပရောက်စီ၊ စာရင်းသွင်းနှင့် Clash လင့်ခ်များကို ပံ့ပိုးသည်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7618,6 +7612,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Proksi, abuna we Clash salgylaryny goldaýar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proxy, abonelik ve Clash bağlantılarını destekler"
           }
         },
         "vi": {
@@ -7660,12 +7660,6 @@
             "value": "مقصد"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ပစ်မှတ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7676,6 +7670,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Maksat"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hedef"
           }
         },
         "vi": {
@@ -7721,12 +7721,6 @@
             "value": "آزمایش همه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အားလုံးစမ်းသပ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7737,6 +7731,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Hemmesini barla"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tümünü Test Et"
           }
         },
         "vi": {
@@ -7779,12 +7779,6 @@
             "value": "آزمایش تأخیر"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Latency စမ်းသပ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7795,6 +7789,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Gijikdirmäni barla"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gecikmeyi Test Et"
           }
         },
         "vi": {
@@ -7837,12 +7837,6 @@
             "value": "پروکسی استفاده‌شده در قوانین مسیریابی زیر حذف شد. آن‌ها به پیش‌فرض بازنشانی شده‌اند: %@"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အောက်ပါ လမ်းကြောင်းသတ်မှတ်ချက်များတွင် အသုံးပြုထားသော ပရောက်စီကို ဖျက်လိုက်ပါပြီ။ ၎င်းတို့ကို မူရင်းသို့ ပြန်လည်သတ်မှတ်ထားပါသည်: %@"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7853,6 +7847,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Aşakdaky ugratma düzgünleri tarapyndan ulanylýan proksi pozuldy. Olar Bellenen-e gaýtaryldy: %@"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aşağıdaki yönlendirme kurallarında kullanılan proxy silindi. Varsayılana sıfırlandılar: %@"
           }
         },
         "vi": {
@@ -7895,12 +7895,6 @@
             "value": "این کار اعتبارسنجی گواهی TLS را رد می‌کند و اتصالات شما را در برابر حملات MITM آسیب‌پذیر می‌کند."
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ဤလုပ်ဆောင်ချက်သည် TLS လက်မှတ် အတည်ပြုခြင်းကို ကျော်သွားမည်ဖြစ်ပြီး သင့်ချိတ်ဆက်မှုများကို MITM တိုက်ခိုက်မှုများအတွက် အားနည်းချက်ဖြစ်စေသည်။"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7911,6 +7905,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Bu TLS şahadatnamasynyň barlagyndan geçer, birikmeleriňizi MITM hüjümlerine sezewar eder."
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bu, TLS sertifika doğrulamasını atlayarak bağlantılarınızı MITM saldırılarına karşı savunmasız hale getirir."
           }
         },
         "vi": {
@@ -7953,12 +7953,6 @@
             "value": "وقفه"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အချိန်ကုန်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -7969,6 +7963,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "wagt gutardy"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "zaman aşımı"
           }
         },
         "vi": {
@@ -8014,12 +8014,6 @@
             "value": "علائم تجاری"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ကုန်အမှတ်တံဆိပ်များ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8030,6 +8024,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Haryt nyşanlary"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ticari Markalar"
           }
         },
         "vi": {
@@ -8072,12 +8072,6 @@
             "value": "انتقال"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အပို့အဆောင်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8088,6 +8082,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Transport"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aktarım"
           }
         },
         "vi": {
@@ -8130,12 +8130,6 @@
             "value": "گواهی‌های مورد اعتماد"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ယုံကြည်ရသော လက်မှတ်များ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8146,6 +8140,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ynanylýan şahadatnamalar"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Güvenilir Sertifikalar"
           }
         },
         "vi": {
@@ -8188,12 +8188,6 @@
             "value": "نامشخص"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "မသိ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8204,6 +8198,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Näbelli"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bilinmiyor"
           }
         },
         "vi": {
@@ -8246,12 +8246,6 @@
             "value": "به‌روزرسانی"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အပ်ဒိတ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8262,6 +8256,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Täzele"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Güncelle"
           }
         },
         "vi": {
@@ -8304,12 +8304,6 @@
             "value": "به‌روزرسانی ناموفق بود"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အပ်ဒိတ် မအောင်မြင်ပါ"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8320,6 +8314,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Täzelemek şowsuz"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Güncelleme Başarısız"
           }
         },
         "vi": {
@@ -8363,12 +8363,6 @@
             "value": "آپلود"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အပ်လုဒ်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8379,6 +8373,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ýüklemek"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yükle"
           }
         },
         "vi": {
@@ -8421,12 +8421,6 @@
             "value": "نام کاربری"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "အသုံးပြုသူအမည်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8437,6 +8431,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Ulanyjy ady"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kullanıcı Adı"
           }
         },
         "vi": {
@@ -8491,12 +8491,6 @@
             "value": "VPN"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8504,6 +8498,12 @@
           }
         },
         "tk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "VPN"
+          }
+        },
+        "tr": {
           "stringUnit": {
             "state": "translated",
             "value": "VPN"
@@ -8549,12 +8549,6 @@
             "value": "خطای VPN"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "VPN အမှား"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8565,6 +8559,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "VPN ýalňyşlygy"
+          }
+        },
+        "tr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "VPN Hatası"
           }
         },
         "vi": {
@@ -8616,12 +8616,6 @@
             "value": "شما"
           }
         },
-        "my": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "သင်"
-          }
-        },
         "ru": {
           "stringUnit": {
             "state": "translated",
@@ -8629,6 +8623,12 @@
           }
         },
         "tk": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Siz"
+          }
+        },
+        "tr": {
           "stringUnit": {
             "state": "translated",
             "value": "Siz"

@@ -52,7 +52,8 @@ extension LWIPStack {
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
             case .passthrough:
                 // Real IP — check IP CIDR rules, then GeoIP bypass
-                if let action = shared.domainRouter.matchIP(dstIPString) {
+                let match = shared.domainRouter.matchIP(dstIPString)
+                if let action = match.userAction {
                     switch action {
                     case .direct:
                         forceBypass = true
@@ -68,6 +69,8 @@ extension LWIPStack {
                             logger.warning("[TCP] Routing config not found for \(dstIPString)")
                         }
                     }
+                } else if shared.proxyMode != .global, shared.bypassCountry != 0, match.isBypass {
+                    forceBypass = true
                 }
             case .resolved(let domain, let configurationOverride, let bypass):
                 dstHost = domain
@@ -168,7 +171,8 @@ extension LWIPStack {
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "UDP") {
             case .passthrough:
                 // Real IP — check IP CIDR rules, then GeoIP bypass
-                if let action = shared.domainRouter.matchIP(dstIPString) {
+                let match = shared.domainRouter.matchIP(dstIPString)
+                if let action = match.userAction {
                     switch action {
                     case .direct:
                         forceBypass = true
@@ -192,6 +196,8 @@ extension LWIPStack {
                             logger.warning("[UDP] Routing config not found for \(dstIPString)")
                         }
                     }
+                } else if shared.proxyMode != .global, shared.bypassCountry != 0, match.isBypass {
+                    forceBypass = true
                 }
             case .resolved(let domain, let configurationOverride, let bypass):
                 dstHost = domain
