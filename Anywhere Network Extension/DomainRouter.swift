@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "DomainRouter")
+private let logger = TunnelLogger(category: "DomainRouter")
 
 enum RouteAction {
     case direct
@@ -90,7 +89,7 @@ class DomainRouter {
 
         guard let data = AWCore.userDefaults.data(forKey: "routingData"),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            logger.info("[DomainRouter] No routing data available")
+            logger.debug("[DomainRouter] No routing data available")
             return
         }
 
@@ -107,7 +106,7 @@ class DomainRouter {
 
         // Parse rules
         guard let rules = json["rules"] as? [[String: Any]] else {
-            logger.warning("[DomainRouter] routing.json has no 'rules' array")
+            logger.warning("[VPN] Routing data malformed: missing rules")
             return
         }
         var ipRuleCount = 0
@@ -171,7 +170,7 @@ class DomainRouter {
             }
         }
 
-        logger.info("[DomainRouter] Loaded \(self.domainRuleCount) domain rules, \(ipRuleCount) IP rules, \(self.configurationMap.count) configurations")
+        logger.debug("[DomainRouter] Loaded \(self.domainRuleCount) domain rules, \(ipRuleCount) IP rules, \(self.configurationMap.count) configurations")
     }
 
     /// Reads bypass country domain rules from App Group UserDefaults and adds them
@@ -205,7 +204,7 @@ class DomainRouter {
         acBuild()
 
         if count > 0 {
-            logger.info("[DomainRouter] Loaded \(count) bypass country domain rules")
+            logger.debug("[DomainRouter] Loaded \(count) bypass country domain rules")
         }
     }
 

@@ -12,8 +12,6 @@ import Combine
 /// Isolated model for VPN traffic statistics.
 ///
 /// Publishes `bytesIn`/`bytesOut` every second while connected.
-/// Only views that actually display traffic stats need to observe this,
-/// keeping the high-frequency polling out of ``VPNViewModel``.
 @MainActor
 class ConnectionStatsModel: ObservableObject {
     static let shared = ConnectionStatsModel()

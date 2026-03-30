@@ -1,7 +1,6 @@
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "GeoIP")
+private let logger = TunnelLogger(category: "GeoIP")
 
 struct GeoIPDatabase {
     private let data: Data
@@ -12,26 +11,26 @@ struct GeoIPDatabase {
     init?(bundleResource: String = "geoip") {
         guard let url = Bundle.main.url(forResource: bundleResource, withExtension: "dat"),
               let data = try? Data(contentsOf: url) else {
-            logger.error("[GeoIP] Failed to load \(bundleResource).dat from bundle")
+            logger.error("[VPN] GeoIP database failed to load")
             return nil
         }
         guard data.count >= Self.headerSize else {
-            logger.error("[GeoIP] File too small: \(data.count) bytes")
+            logger.error("[VPN] GeoIP database corrupt")
             return nil
         }
         // Verify magic "GEO1"
         guard data[0] == 0x47, data[1] == 0x45, data[2] == 0x4F, data[3] == 0x31 else {
-            logger.error("[GeoIP] Invalid magic header")
+            logger.error("[VPN] GeoIP database corrupt")
             return nil
         }
         let count = Int(data[4]) << 24 | Int(data[5]) << 16 | Int(data[6]) << 8 | Int(data[7])
         guard data.count >= Self.headerSize + count * Self.entrySize else {
-            logger.error("[GeoIP] File truncated: expected \(Self.headerSize + count * Self.entrySize) bytes, got \(data.count)")
+            logger.error("[VPN] GeoIP database corrupt")
             return nil
         }
         self.data = data
         self.entryCount = count
-        logger.info("[GeoIP] Loaded \(count) entries")
+        logger.debug("[GeoIP] Loaded \(count) entries")
     }
 
     /// Looks up the country for an IPv4 address string.

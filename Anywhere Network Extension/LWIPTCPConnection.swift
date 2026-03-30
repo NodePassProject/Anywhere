@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "LWIP-TCP")
+private let logger = TunnelLogger(category: "LWIP-TCP")
 
 class LWIPTCPConnection {
     let pcb: UnsafeMutableRawPointer
@@ -103,7 +102,7 @@ class LWIPTCPConnection {
         let timer = DispatchWorkItem { [weak self] in
             guard let self, !self.closed else { return }
             if self.proxyConnecting || self.directConnecting {
-                logger.error("[TCP] Handshake timeout for \(self.dstHost, privacy: .public):\(self.dstPort)")
+                logger.error("[TCP] Handshake timeout for \(self.dstHost):\(self.dstPort)")
                 self.abort()
             }
         }
@@ -143,9 +142,23 @@ class LWIPTCPConnection {
             return
         }
 
-        // If buffer is full, send per-segment for backpressure
+        // Buffer would overflow — flush accumulated data first to
+        // maintain stream ordering, then fall back to per-segment sends.
         if uploadCoalesceRecvLen + data.count > Self.maxCoalesceSize {
-            sendSegmentDirect(data)
+            if uploadCoalesceRecvLen > 0 && !uploadFlushInFlight {
+                flushUploadBuffer()
+            }
+            if uploadCoalesceRecvLen == 0 {
+                // Buffer is empty (was empty or just flushed) — safe to
+                // send per-segment for backpressure without reordering.
+                sendSegmentDirect(data)
+            } else {
+                // A flush is in-flight and the buffer has unsent data.
+                // Coalesce to preserve ordering; the chain-flush on
+                // completion will send it after the in-flight data.
+                uploadCoalesceBuffer.append(data)
+                uploadCoalesceRecvLen += data.count
+            }
             return
         }
 
@@ -175,11 +188,7 @@ class LWIPTCPConnection {
             self.lwipQueue.async {
                 guard !self.closed else { return }
                 if let error {
-                    if error is HTTP2Error {
-                        logger.info("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
-                    } else {
-                        logger.error("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
-                    }
+                    self.logTransportFailure("Send", error: error)
                     self.abort()
                     return
                 }
@@ -218,11 +227,7 @@ class LWIPTCPConnection {
                 self.uploadFlushInFlight = false
                 guard !self.closed else { return }
                 if let error {
-                    if error is HTTP2Error {
-                        logger.info("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
-                    } else {
-                        logger.error("[TCP] Proxy send error for \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
-                    }
+                    self.logTransportFailure("Send", error: error)
                     self.abort()
                     return
                 }
@@ -275,6 +280,47 @@ class LWIPTCPConnection {
         releaseProxy()
     }
 
+    private var endpointDescription: String {
+        "\(dstHost):\(dstPort)"
+    }
+
+    private static func conciseErrorDescription(_ error: Error) -> String {
+        var message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        let redundantPrefixes = [
+            "Connection failed: ",
+            "Send failed: ",
+            "Receive failed: ",
+            "DNS resolution failed: "
+        ]
+
+        for prefix in redundantPrefixes where message.hasPrefix(prefix) {
+            message.removeFirst(prefix.count)
+            break
+        }
+
+        return message
+    }
+
+    private func logTransportFailure(_ operation: String, error: Error) {
+        let errorDescription = Self.conciseErrorDescription(error)
+
+        if error is HTTP2Error {
+            logger.debug("[TCP] \(operation) error: \(endpointDescription): \(errorDescription)")
+            return
+        }
+
+        if let interruption = LWIPStack.shared?.recentTunnelInterruptionContext() {
+            if interruption.level == .info {
+                logger.debug("[TCP] \(operation) ended after \(interruption.summary): \(endpointDescription): \(errorDescription)")
+            } else {
+                logger.warning("[TCP] \(operation) interrupted after \(interruption.summary): \(endpointDescription) (\(errorDescription))")
+            }
+            return
+        }
+
+        logger.error("[TCP] \(operation) failed: \(endpointDescription): \(errorDescription)")
+    }
+
     // MARK: - Direct Connection (bypass)
 
     private func connectDirect() {
@@ -296,7 +342,7 @@ class LWIPTCPConnection {
                 guard !self.closed else { return }
 
                 if let error {
-                    logger.error("[TCP] Direct connect failed: \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    self.logTransportFailure("Connect", error: error)
                     self.abort()
                     return
                 }
@@ -315,7 +361,7 @@ class LWIPTCPConnection {
                     relay.send(data: initialData) { [weak self] error in
                         guard let self else { return }
                         if let error {
-                            logger.error("[TCP] Direct initial send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                            self.logTransportFailure("Send", error: error)
                             self.lwipQueue.async { self.abort() }
                         } else {
                             self.lwipQueue.async {
@@ -338,7 +384,7 @@ class LWIPTCPConnection {
                     relay.send(data: dataToSend) { [weak self] error in
                         guard let self else { return }
                         if let error {
-                            logger.error("[TCP] Direct pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                            self.logTransportFailure("Send", error: error)
                             self.lwipQueue.async { self.abort() }
                         } else {
                             self.lwipQueue.async {
@@ -408,11 +454,7 @@ class LWIPTCPConnection {
                         proxyConnection.send(data: dataToSend) { [weak self] error in
                             guard let self else { return }
                             if let error {
-                                if error is HTTP2Error {
-                                    logger.info("[TCP] Proxy pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                                } else {
-                                    logger.error("[TCP] Proxy pending send error for \(self.dstHost, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                                }
+                                self.logTransportFailure("Send", error: error)
                                 self.lwipQueue.async { self.abort() }
                             } else {
                                 self.lwipQueue.async {
@@ -431,7 +473,7 @@ class LWIPTCPConnection {
                     self.requestNextReceive()
 
                 case .failure(let error):
-                    logger.error("[TCP] connect failed: \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    self.logTransportFailure("Connect", error: error)
                     self.abort()
                 }
             }
@@ -456,7 +498,7 @@ class LWIPTCPConnection {
                     guard !self.closed else { return }
 
                     if let error {
-                        logger.error("[TCP] Direct recv error: \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                        self.logTransportFailure("Recv", error: error)
                         self.abort()
                         return
                     }
@@ -487,7 +529,7 @@ class LWIPTCPConnection {
                 guard !self.closed else { return }
 
                 if let error {
-                    logger.error("[TCP] Proxy recv error: \(self.dstHost, privacy: .public):\(self.dstPort): \(error.localizedDescription, privacy: .public)")
+                    self.logTransportFailure("Recv", error: error)
                     self.abort()
                     return
                 }
@@ -562,7 +604,7 @@ class LWIPTCPConnection {
             guard let base = buffer.baseAddress else { return }
             let written = feedLWIP(base, count: data.count, retryOnEmpty: true)
             if written == -1 {
-                logger.error("[TCP] tcp_write error for \(self.dstHost, privacy: .public):\(self.dstPort)")
+                logger.error("[TCP] Write failed: \(self.dstHost):\(self.dstPort)")
                 self.abort()
                 return
             }
@@ -597,7 +639,7 @@ class LWIPTCPConnection {
             guard let base = buffer.baseAddress else { return 0 }
             let written = feedLWIP(base, count: count)
             if written == -1 {
-                logger.error("[TCP] tcp_write error for \(self.dstHost, privacy: .public):\(self.dstPort)")
+                logger.error("[TCP] Write failed: \(self.dstHost):\(self.dstPort)")
                 self.abort()
                 return 0
             }

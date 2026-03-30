@@ -7,13 +7,49 @@
 
 import NetworkExtension
 import Network
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "PacketTunnel")
+private let logger = TunnelLogger(category: "PacketTunnel")
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     private let lwipStack = LWIPStack()
     private var remoteAddress: String = ""
+    private let pathMonitorQueue = DispatchQueue(label: "com.argsment.Anywhere.path-monitor")
+    private var pathMonitor: NWPathMonitor?
+    private var lastPathSnapshot: PathSnapshot?
+
+    private struct PathSnapshot: Equatable {
+        let status: Network.NWPath.Status
+        let unsatisfiedReason: String?
+        let interfaceSummary: String
+        let supportsIPv4: Bool
+        let supportsIPv6: Bool
+        let isExpensive: Bool
+        let isConstrained: Bool
+
+        var summary: String {
+            var parts = [interfaceSummary]
+
+            switch (supportsIPv4, supportsIPv6) {
+            case (true, true):
+                parts.append("IPv4/IPv6")
+            case (true, false):
+                parts.append("IPv4")
+            case (false, true):
+                parts.append("IPv6")
+            case (false, false):
+                break
+            }
+
+            if isExpensive {
+                parts.append("expensive")
+            }
+            if isConstrained {
+                parts.append("constrained")
+            }
+
+            return parts.joined(separator: ", ")
+        }
+    }
 
     // MARK: - Tunnel Lifecycle
     //
@@ -47,13 +83,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         guard let configurationDict, let configuration = Self.parseConfiguration(from: configurationDict) else {
-            logger.error("[VPN] Invalid or missing configuration in options")
+            logger.error("[VPN] Invalid or missing configuration")
             completionHandler(NSError(domain: "com.argsment.Anywhere", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"]))
             return
         }
 
         remoteAddress = configuration.connectAddress
-        logger.info("[VPN] Starting tunnel to \(configuration.serverAddress, privacy: .public):\(configuration.serverPort, privacy: .public) (connect: \(self.remoteAddress, privacy: .public)), security: \(configuration.security, privacy: .public), transport: \(configuration.transport, privacy: .public)")
+        logger.info("[VPN] Tunnel starting: \(configuration.serverAddress):\(configuration.serverPort)")
 
         lwipStack.onTunnelSettingsNeedReapply = { [weak self] in
             self?.reapplyTunnelSettings()
@@ -63,13 +99,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         setTunnelNetworkSettings(settings) { error in
             if let error {
-                logger.error("[VPN] Failed to set tunnel settings: \(error.localizedDescription, privacy: .public)")
+                logger.error("[VPN] Failed to set tunnel settings: \(error.localizedDescription)")
                 completionHandler(error)
                 return
             }
 
             self.lwipStack.start(packetFlow: self.packetFlow,
                                  configuration: configuration)
+            self.startMonitoringPath()
             completionHandler(nil)
         }
     }
@@ -143,15 +180,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 let dnsSettings = NEDNSOverTLSSettings(servers: serverIPs ?? dnsServers)
                 dnsSettings.serverName = encryptedDNSServer
                 settings.dnsSettings = dnsSettings
-                logger.info("[VPN] DoT server: \(encryptedDNSServer, privacy: .public), resolved IPs: \(serverIPs ?? dnsServers, privacy: .public)")
+                logger.info("[VPN] DNS: DoT \(encryptedDNSServer)")
             } else if let serverURL = URL(string: encryptedDNSServer) {
                 let serverIPs = serverURL.host.flatMap { Self.resolveEncryptedDNSHostname($0, includeIPv6: ipv6DNSEnabled) }
                 let dnsSettings = NEDNSOverHTTPSSettings(servers: serverIPs ?? dnsServers)
                 dnsSettings.serverURL = serverURL
                 settings.dnsSettings = dnsSettings
-                logger.info("[VPN] DoH server: \(encryptedDNSServer, privacy: .public), resolved IPs: \(serverIPs ?? dnsServers, privacy: .public)")
+                logger.info("[VPN] DNS: DoH \(encryptedDNSServer)")
             } else {
                 settings.dnsSettings = NEDNSSettings(servers: dnsServers)
+                logger.warning("[VPN] Invalid DoH URL, falling back to plain DNS")
             }
         } else {
             settings.dnsSettings = NEDNSSettings(servers: dnsServers)
@@ -168,7 +206,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let settings = buildTunnelSettings()
         setTunnelNetworkSettings(settings) { error in
             if let error {
-                logger.error("[VPN] Failed to reapply tunnel settings: \(error.localizedDescription, privacy: .public)")
+                logger.error("[VPN] Failed to reapply tunnel settings: \(error.localizedDescription)")
             } else {
                 logger.info("[VPN] Tunnel settings reapplied")
             }
@@ -176,6 +214,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        stopMonitoringPath()
+        logTunnelStop(reason: reason)
         lwipStack.stop()
         completionHandler()
     }
@@ -200,6 +240,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
+        if messageType == "logs" {
+            let logs = lwipStack.fetchLogs()
+            let response: [String: Any] = ["logs": logs]
+            let data = try? JSONSerialization.data(withJSONObject: response)
+            completionHandler?(data)
+            return
+        }
+
         if messageType == "proxyAddresses" {
             if let addresses = dict["addresses"] as? [String] {
                 lwipStack.updateProxyServerAddresses(addresses)
@@ -214,16 +262,213 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        logger.info("[VPN] Received configuration switch request")
         lwipStack.switchConfiguration(configuration)
         completionHandler?(nil)
     }
 
     override func sleep(completionHandler: @escaping () -> Void) {
+        logger.warning("[VPN] Device going to sleep; active connections may pause")
+        lwipStack.noteRecentTunnelInterruption(summary: "device sleep", level: .warning)
         completionHandler()
     }
 
     override func wake() {
+        logger.info("[VPN] Device woke up")
+    }
+
+    // MARK: - Path Monitoring
+
+    private func startMonitoringPath() {
+        guard pathMonitor == nil else { return }
+
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            self?.handlePathUpdate(path)
+        }
+        monitor.start(queue: pathMonitorQueue)
+        pathMonitor = monitor
+    }
+
+    private func stopMonitoringPath() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        lastPathSnapshot = nil
+    }
+
+    private func handlePathUpdate(_ path: Network.NWPath) {
+        let snapshot = Self.makePathSnapshot(from: path)
+        let previous = lastPathSnapshot
+        lastPathSnapshot = snapshot
+
+        guard previous != snapshot else { return }
+
+        if previous == nil {
+            logger.info("[VPN] Network path ready: \(snapshot.summary)")
+            return
+        }
+
+        switch snapshot.status {
+        case .satisfied:
+            if previous?.status == .satisfied {
+                logger.warning("[VPN] Network path changed to \(snapshot.summary); active connections may reconnect")
+                lwipStack.noteRecentTunnelInterruption(summary: "network path change", level: .warning)
+            } else {
+                logger.info("[VPN] Network path restored: \(snapshot.summary)")
+            }
+
+        case .requiresConnection:
+            let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
+            logger.warning("[VPN] Network path waiting for attachment\(reasonSuffix); active connections may pause")
+            lwipStack.noteRecentTunnelInterruption(summary: "network path waiting for attachment", level: .warning)
+
+        case .unsatisfied:
+            let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
+            logger.warning("[VPN] Network path unavailable\(reasonSuffix); active connections interrupted")
+            lwipStack.noteRecentTunnelInterruption(summary: "network path unavailable", level: .warning)
+
+        @unknown default:
+            logger.warning("[VPN] Network path changed unexpectedly; active connections may reconnect")
+            lwipStack.noteRecentTunnelInterruption(summary: "unexpected network path change", level: .warning)
+        }
+    }
+
+    private func logTunnelStop(reason: NEProviderStopReason) {
+        let message: String
+        let level: LWIPStack.LogLevel
+        let summary: String?
+
+        switch reason {
+        case .userInitiated:
+            message = "[VPN] Tunnel stopped by user"
+            level = .info
+            summary = nil
+        case .providerFailed:
+            message = "[VPN] Tunnel stopped because the provider failed"
+            level = .error
+            summary = "provider failure"
+        case .noNetworkAvailable:
+            message = "[VPN] Tunnel stopped because the network became unavailable"
+            level = .warning
+            summary = "network unavailable"
+        case .unrecoverableNetworkChange:
+            message = "[VPN] Tunnel stopped because the network path changed"
+            level = .warning
+            summary = "network path change"
+        case .providerDisabled:
+            message = "[VPN] Tunnel stopped because the provider was disabled"
+            level = .warning
+            summary = "provider disabled"
+        case .authenticationCanceled:
+            message = "[VPN] Tunnel stopped because authentication was canceled"
+            level = .warning
+            summary = "authentication canceled"
+        case .configurationFailed:
+            message = "[VPN] Tunnel stopped because configuration failed"
+            level = .error
+            summary = "configuration failure"
+        case .idleTimeout:
+            message = "[VPN] Tunnel stopped after being idle"
+            level = .warning
+            summary = "idle timeout"
+        case .configurationDisabled:
+            message = "[VPN] Tunnel stopped because the configuration was disabled"
+            level = .warning
+            summary = "configuration disabled"
+        case .configurationRemoved:
+            message = "[VPN] Tunnel stopped because the configuration was removed"
+            level = .warning
+            summary = "configuration removed"
+        case .superceded:
+            message = "[VPN] Tunnel stopped because another VPN took over"
+            level = .warning
+            summary = "superseded by another VPN"
+        case .userLogout:
+            message = "[VPN] Tunnel stopped because the user logged out"
+            level = .warning
+            summary = "user logout"
+        case .userSwitch:
+            message = "[VPN] Tunnel stopped because the active user changed"
+            level = .warning
+            summary = "user switch"
+        case .connectionFailed:
+            message = "[VPN] Tunnel stopped because the VPN connection failed"
+            level = .warning
+            summary = "VPN connection failure"
+        case .sleep:
+            message = "[VPN] Tunnel stopped for device sleep"
+            level = .warning
+            summary = "device sleep"
+        case .appUpdate:
+            message = "[VPN] Tunnel stopped for app update"
+            level = .info
+            summary = nil
+        case .internalError:
+            message = "[VPN] Tunnel stopped because Network Extension hit an internal error"
+            level = .error
+            summary = "Network Extension internal error"
+        case .none:
+            message = "[VPN] Tunnel stopped"
+            level = .info
+            summary = nil
+        @unknown default:
+            message = "[VPN] Tunnel stopped for an unknown reason"
+            level = .warning
+            summary = "unknown tunnel stop"
+        }
+
+        switch level {
+        case .info:
+            logger.info(message)
+        case .warning:
+            logger.warning(message)
+        case .error:
+            logger.error(message)
+        }
+
+        if let summary {
+            lwipStack.noteRecentTunnelInterruption(summary: summary, level: level)
+        }
+    }
+
+    private static func makePathSnapshot(from path: Network.NWPath) -> PathSnapshot {
+        let interfaceTypes: [String] = [
+            (NWInterface.InterfaceType.wifi, "Wi-Fi"),
+            (.wiredEthernet, "Ethernet"),
+            (.cellular, "cellular"),
+            (.loopback, "loopback"),
+            (.other, "other")
+        ]
+        .compactMap { path.usesInterfaceType($0.0) ? $0.1 : nil }
+
+        let unsatisfiedReason: String?
+        if #available(iOS 14.2, tvOS 17.0, *) {
+            switch path.unsatisfiedReason {
+            case .notAvailable:
+                unsatisfiedReason = nil
+            case .cellularDenied:
+                unsatisfiedReason = "cellular denied"
+            case .wifiDenied:
+                unsatisfiedReason = "Wi-Fi denied"
+            case .localNetworkDenied:
+                unsatisfiedReason = "local network denied"
+            case .vpnInactive:
+                unsatisfiedReason = "required VPN inactive"
+            @unknown default:
+                unsatisfiedReason = "unspecified reason"
+            }
+        } else {
+            unsatisfiedReason = nil
+        }
+
+        return PathSnapshot(
+            status: path.status,
+            unsatisfiedReason: unsatisfiedReason,
+            interfaceSummary: interfaceTypes.isEmpty ? "no interface" : interfaceTypes.joined(separator: "+"),
+            supportsIPv4: path.supportsIPv4,
+            supportsIPv6: path.supportsIPv6,
+            isExpensive: path.isExpensive,
+            isConstrained: path.isConstrained
+        )
     }
 
     // MARK: - Encrypted DNS Hostname Resolution
@@ -245,7 +490,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         hints.ai_socktype = SOCK_STREAM
         var result: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(hostname, nil, &hints, &result) == 0, let res = result else {
-            logger.warning("[VPN] Failed to resolve encrypted DNS server: \(hostname, privacy: .public)")
+            logger.warning("[VPN] Failed to resolve encrypted DNS server: \(hostname)")
             return nil
         }
         defer { freeaddrinfo(res) }

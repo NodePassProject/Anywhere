@@ -25,6 +25,12 @@ struct AdvancedSettingsView: View {
                     EncryptedDNSSettingsView()
                 }
             }
+
+            Section("Diagnostics") {
+                NavigationLink("Logs") {
+                    LogListView()
+                }
+            }
         }
         .navigationTitle("Advanced Settings")
     }

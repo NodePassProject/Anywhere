@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "LWIP-UDP")
+private let logger = TunnelLogger(category: "LWIP-UDP")
 
 class LWIPUDPFlow {
     let flowKey: LWIPStack.UDPFlowKey
@@ -70,6 +69,45 @@ class LWIPUDPFlow {
         self.lwipQueue = lwipQueue
     }
 
+    private static func conciseErrorDescription(_ error: Error) -> String {
+        var message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        let redundantPrefixes = [
+            "Connection failed: ",
+            "Send failed: ",
+            "Receive failed: ",
+            "DNS resolution failed: "
+        ]
+
+        for prefix in redundantPrefixes where message.hasPrefix(prefix) {
+            message.removeFirst(prefix.count)
+            break
+        }
+
+        return message
+    }
+
+    private func logTransportFailure(_ operation: String, error: Error, defaultLevel: LWIPStack.LogLevel) {
+        let errorDescription = Self.conciseErrorDescription(error)
+
+        if let interruption = LWIPStack.shared?.recentTunnelInterruptionContext() {
+            if interruption.level == .info {
+                logger.debug("[UDP] \(operation) ended after \(interruption.summary): \(flowKey): \(errorDescription)")
+            } else {
+                logger.warning("[UDP] \(operation) interrupted after \(interruption.summary): \(flowKey) (\(errorDescription))")
+            }
+            return
+        }
+
+        switch defaultLevel {
+        case .info:
+            logger.info("[UDP] \(operation) failed: \(flowKey): \(errorDescription)")
+        case .warning:
+            logger.warning("[UDP] \(operation) failed: \(flowKey): \(errorDescription)")
+        case .error:
+            logger.error("[UDP] \(operation) failed: \(flowKey): \(errorDescription)")
+        }
+    }
+
     // MARK: - Data Handling (called on lwipQueue)
 
     func handleReceivedData(_ data: Data, payloadLength: Int) {
@@ -102,7 +140,7 @@ class LWIPUDPFlow {
         if let session = muxSession {
             session.send(data: payload) { [weak self] error in
                 if let error {
-                    logger.error("[UDP] Mux send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                 }
             }
             return
@@ -114,7 +152,7 @@ class LWIPUDPFlow {
                 // SS connection handles encryption; send raw payload
                 connection.send(data: payload) { [weak self] error in
                     if let error {
-                        logger.error("[UDP] SS send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                     }
                 }
             } else {
@@ -149,7 +187,7 @@ class LWIPUDPFlow {
 
         connection.sendRaw(data: framedPayload) { [weak self] error in
             if let error {
-                logger.error("[UDP] Proxy send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
             }
         }
     }
@@ -255,14 +293,14 @@ class LWIPUDPFlow {
                     for payload in buffered {
                         session.send(data: payload) { [weak self] error in
                             if let error {
-                                logger.error("[UDP] Mux initial send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                             }
                         }
                     }
 
                 case .failure(let error):
                     if case .dropped = error as? ProxyError {} else {
-                        logger.error("[UDP] Mux dispatch failed: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        self.logTransportFailure("Connect", error: error, defaultLevel: .error)
                     }
                     self.releaseProxy()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
@@ -294,7 +332,7 @@ class LWIPUDPFlow {
                             for payload in self.pendingData {
                                 proxyConnection.send(data: payload) { [weak self] error in
                                     if let error {
-                                        logger.error("[UDP] SS initial send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                        self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                                     }
                                 }
                             }
@@ -309,7 +347,7 @@ class LWIPUDPFlow {
                             }
                             proxyConnection.sendRaw(data: dataToSend) { [weak self] error in
                                 if let error {
-                                    logger.error("[UDP] Proxy initial send error for \(self?.flowKey.description ?? "?", privacy: .public): \(error.localizedDescription, privacy: .public)")
+                                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                                 }
                             }
                         }
@@ -322,7 +360,7 @@ class LWIPUDPFlow {
 
                 case .failure(let error):
                     if case .dropped = error as? ProxyError {} else {
-                        logger.error("[UDP] connect failed: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                        self.logTransportFailure("Connect", error: error, defaultLevel: .error)
                     }
                     self.releaseProxy()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
@@ -337,6 +375,7 @@ class LWIPUDPFlow {
         guard let method = configuration.ssMethod,
               let cipher = ShadowsocksCipher(method: method),
               let password = configuration.ssPassword else {
+            logger.error("[UDP] Invalid Shadowsocks config for \(flowKey)")
             proxyConnecting = false
             close()
             LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
@@ -346,6 +385,7 @@ class LWIPUDPFlow {
         let mode: ShadowsocksUDPRelay.Mode
         if cipher.isSS2022 {
             guard let psk = ShadowsocksKeyDerivation.decodePSK(password: password, keySize: cipher.keySize) else {
+                logger.error("[UDP] Invalid SS2022 key for \(flowKey)")
                 proxyConnecting = false
                 close()
                 LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
@@ -372,7 +412,7 @@ class LWIPUDPFlow {
                 guard !self.closed else { return }
 
                 if let error {
-                    logger.error("[UDP] SS UDP relay connect failed: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    self.logTransportFailure("Connect", error: error, defaultLevel: .error)
                     self.close()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                     return
@@ -407,7 +447,7 @@ class LWIPUDPFlow {
                 guard !self.closed else { return }
 
                 if let error {
-                    logger.error("[UDP] Direct connect failed: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    self.logTransportFailure("Connect", error: error, defaultLevel: .error)
                     self.close()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                     return
@@ -435,7 +475,7 @@ class LWIPUDPFlow {
         } errorHandler: { [weak self] error in
             guard let self else { return }
             if let error {
-                logger.warning("[UDP] Proxy recv error: \(self.flowKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                self.logTransportFailure("Recv", error: error, defaultLevel: .error)
             }
             self.lwipQueue.async {
                 self.close()
@@ -456,7 +496,7 @@ class LWIPUDPFlow {
                         guard let dstBase = dstPtr.baseAddress,
                               let srcBase = srcPtr.baseAddress,
                               let dataBase = dataPtr.baseAddress else {
-                            logger.error("[UDP] NULL base address in data pointers")
+                            logger.debug("[UDP] NULL base address in data pointers")
                             return
                         }
                         lwip_bridge_udp_sendto(

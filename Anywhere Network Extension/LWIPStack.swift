@@ -7,9 +7,8 @@
 
 import Foundation
 import NetworkExtension
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "LWIPStack")
+private let logger = TunnelLogger(category: "LWIPStack")
 
 // MARK: - LWIPStack
 
@@ -82,6 +81,88 @@ class LWIPStack {
     /// Small races are tolerable — these are only used for UI display.
     private(set) var totalBytesIn: Int64 = 0
     private(set) var totalBytesOut: Int64 = 0
+
+    // MARK: - Log Buffer
+    //
+    // Stores recent log messages for display in the main app's log viewer.
+    // Entries older than 2 minutes are pruned on each append or fetch.
+    // Thread-safe via NSLock — logs may be appended from NWConnection
+    // completion handlers (not on lwipQueue), while fetches come from IPC.
+
+    enum LogLevel: String {
+        case info
+        case warning
+        case error
+    }
+
+    struct LogEntry {
+        let timestamp: CFAbsoluteTime
+        let level: LogLevel
+        let message: String
+    }
+
+    struct RecentTunnelInterruption {
+        let timestamp: CFAbsoluteTime
+        let level: LogLevel
+        let summary: String
+    }
+
+    private let logLock = NSLock()
+    private var logEntries: [LogEntry] = []
+    private static let logRetentionInterval: CFAbsoluteTime = 120
+    private let recentTunnelInterruptionLock = NSLock()
+    private var recentTunnelInterruption: RecentTunnelInterruption?
+    private static let recentTunnelInterruptionWindow: CFAbsoluteTime = 8
+
+    /// Appends a log message to the buffer. Thread-safe.
+    func appendLog(_ message: String, level: LogLevel) {
+        let now = CFAbsoluteTimeGetCurrent()
+        logLock.lock()
+        logEntries.append(LogEntry(timestamp: now, level: level, message: message))
+        let cutoff = now - Self.logRetentionInterval
+        logEntries.removeAll { $0.timestamp < cutoff }
+        logLock.unlock()
+    }
+
+    /// Returns all log entries within the retention window as serializable dictionaries.
+    func fetchLogs() -> [[String: Any]] {
+        let now = CFAbsoluteTimeGetCurrent()
+        logLock.lock()
+        let cutoff = now - Self.logRetentionInterval
+        logEntries.removeAll { $0.timestamp < cutoff }
+        let result = logEntries.map { entry in
+            ["timestamp": entry.timestamp, "level": entry.level.rawValue, "message": entry.message] as [String: Any]
+        }
+        logLock.unlock()
+        return result
+    }
+
+    /// Records a recent tunnel-level interruption so connection errors that follow
+    /// can be reclassified as VPN/path interruptions instead of generic failures.
+    func noteRecentTunnelInterruption(summary: String, level: LogLevel) {
+        recentTunnelInterruptionLock.lock()
+        recentTunnelInterruption = RecentTunnelInterruption(
+            timestamp: CFAbsoluteTimeGetCurrent(),
+            level: level,
+            summary: summary
+        )
+        recentTunnelInterruptionLock.unlock()
+    }
+
+    /// Returns the most recent tunnel interruption if it is still fresh enough
+    /// to explain follow-up socket failures.
+    func recentTunnelInterruptionContext() -> RecentTunnelInterruption? {
+        let now = CFAbsoluteTimeGetCurrent()
+        recentTunnelInterruptionLock.lock()
+        defer { recentTunnelInterruptionLock.unlock() }
+
+        guard let recentTunnelInterruption else { return nil }
+        guard now - recentTunnelInterruption.timestamp <= Self.recentTunnelInterruptionWindow else {
+            self.recentTunnelInterruption = nil
+            return nil
+        }
+        return recentTunnelInterruption
+    }
 
     /// Mux manager for multiplexing UDP flows (created when Vision flow is active).
     var muxManager: MuxManager?
@@ -270,6 +351,9 @@ class LWIPStack {
             self.running = true
             self.totalBytesIn = 0
             self.totalBytesOut = 0
+            self.recentTunnelInterruptionLock.lock()
+            self.recentTunnelInterruption = nil
+            self.recentTunnelInterruptionLock.unlock()
 
             // Load GeoIP database once (reused across switchConfiguration)
             if self.geoIPDatabase == nil {
@@ -297,7 +381,7 @@ class LWIPStack {
             self.startTimeoutTimer()
             self.startUDPCleanupTimer()
             self.startReadingPackets()
-            logger.info("[LWIPStack] Started, mode=\(self.proxyMode.rawValue), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
+            logger.debug("[LWIPStack] Started, mode=\(self.proxyMode.rawValue), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
         }
 
         startObservingSettings()
@@ -310,6 +394,9 @@ class LWIPStack {
             self.running = false
             self.shutdownInternal()
             self.fakeIPPool.reset()
+            self.recentTunnelInterruptionLock.lock()
+            self.recentTunnelInterruption = nil
+            self.recentTunnelInterruptionLock.unlock()
         }
 
         self.packetFlow = nil
@@ -323,6 +410,8 @@ class LWIPStack {
     /// with the new configuration using the existing packet flow.
     func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
         lwipQueue.async { [self] in
+            logger.info("[VPN] Configuration switched; reconnecting active connections")
+            self.noteRecentTunnelInterruption(summary: "configuration switch", level: .info)
             self.restartStack(configuration: newConfiguration)
         }
     }
@@ -359,7 +448,7 @@ class LWIPStack {
         self.udpFlows.removeAll()
 
         lwip_bridge_shutdown()
-        logger.info("[LWIPStack] Shutdown complete, closed \(flowCount) UDP flows")
+        logger.debug("[LWIPStack] Shutdown complete, closed \(flowCount) UDP flows")
     }
 
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.
@@ -390,7 +479,7 @@ class LWIPStack {
         self.startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.info("[LWIPStack] Restarted, mode=\(self.proxyMode.rawValue), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
+        logger.debug("[LWIPStack] Restarted, mode=\(self.proxyMode.rawValue), mux=\(self.muxManager != nil), ipv6dns=\(self.ipv6DNSEnabled), encryptedDNS=\(self.encryptedDNSEnabled), bypass=\(self.bypassCountry != 0)")
     }
 
     // MARK: - Settings Observation
@@ -465,6 +554,17 @@ class LWIPStack {
 
             guard ipv6DNSEnabledChanged || bypassCountryChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || proxyModeChanged else { return }
 
+            var changedSettings: [String] = []
+            if ipv6DNSEnabledChanged { changedSettings.append("IPv6 DNS") }
+            if bypassCountryChanged { changedSettings.append("bypass country") }
+            if encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged {
+                changedSettings.append("encrypted DNS")
+            }
+            if proxyModeChanged { changedSettings.append("proxy mode") }
+            let changedSummary = changedSettings.joined(separator: ", ")
+            logger.info("[VPN] Settings changed (\(changedSummary)); reconnecting active connections")
+            self.noteRecentTunnelInterruption(summary: "settings change", level: .info)
+
             // IPv6 connections toggle affects tunnel network settings (IPv6 routes + DNS servers).
             // Encrypted DNS changes also affect tunnel settings (NEDNSOverHTTPSSettings / NEDNSOverTLSSettings).
             // Must re-apply via PacketTunnelProvider before restarting the stack.
@@ -485,6 +585,8 @@ class LWIPStack {
     private func handleRoutingChanged() {
         lwipQueue.async { [self] in
             guard self.running, let configuration = self.configuration else { return }
+            logger.info("[VPN] Routing changed; reconnecting active connections")
+            self.noteRecentTunnelInterruption(summary: "routing change", level: .info)
             self.restartStack(configuration: configuration)
         }
     }
@@ -517,7 +619,7 @@ class LWIPStack {
             guard let shared = LWIPStack.shared,
                   let pcb, let dstIP,
                   let defaultConfiguration = shared.configuration else {
-                logger.error("[LWIPStack] tcp_accept: guard failed")
+                logger.debug("[LWIPStack] tcp_accept: guard failed")
                 return nil
             }
 
@@ -536,14 +638,14 @@ class LWIPStack {
                         forceBypass = true
                     case .reject:
                         return nil
-                    case .proxy(let id):
+                    case .proxy(_):
                         if var configuration = shared.domainRouter.resolveConfiguration(action: action) {
                             if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
                                 configuration = configuration.withChain(chain)
                             }
                             connectionConfiguration = configuration
                         } else {
-                            logger.warning("[LWIPStack] TCP proxy config \(id) not found for IP \(dstIPString, privacy: .public)")
+                            logger.warning("[TCP] Routing config not found for \(dstIPString)")
                         }
                     }
                 }
@@ -570,7 +672,7 @@ class LWIPStack {
         // TCP recv: deliver data to the connection
         lwip_bridge_set_tcp_recv_fn { connection, data, len in
             guard let connection else {
-                logger.error("[LWIPStack] tcp_recv: connection is nil")
+                logger.debug("[LWIPStack] tcp_recv: connection is nil")
                 return
             }
             let tcpConnection = Unmanaged<LWIPTCPConnection>.fromOpaque(connection).takeUnretainedValue()
@@ -591,7 +693,7 @@ class LWIPStack {
         // TCP error: PCB is already freed by lwIP — release our reference
         lwip_bridge_set_tcp_err_fn { connection, err in
             guard let connection else {
-                logger.error("[LWIPStack] tcp_err: connection is nil, err=\(err)")
+                logger.debug("[LWIPStack] tcp_err: connection is nil, err=\(err)")
                 return
             }
             let tcpConnection = Unmanaged<LWIPTCPConnection>.fromOpaque(connection).takeRetainedValue()
@@ -649,14 +751,14 @@ class LWIPStack {
                             isIPv6: isIPv6 != 0,
                             udpPayloadLength: Int(len))
                         return
-                    case .proxy(let id):
+                    case .proxy(_):
                         if var configuration = shared.domainRouter.resolveConfiguration(action: action) {
                             if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
                                 configuration = configuration.withChain(chain)
                             }
                             flowConfiguration = configuration
                         } else {
-                            logger.warning("[LWIPStack] UDP proxy config \(id) not found for IP \(dstIPString, privacy: .public)")
+                            logger.warning("[UDP] Routing config not found for \(dstIPString)")
                         }
                     }
                 }
@@ -686,7 +788,7 @@ class LWIPStack {
             }
 
             guard shared.udpFlows.count < shared.maxUDPFlows else {
-                logger.error("[LWIPStack] UDP max flows reached (\(shared.maxUDPFlows)), dropping \(flowKey, privacy: .public)")
+                logger.warning("[UDP] Max flows reached, dropping \(flowKey)")
                 return
             }
 
@@ -740,10 +842,10 @@ class LWIPStack {
                 return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: true)
             case .reject:
                 return .drop
-            case .proxy(let id):
+            case .proxy(_):
                 let configuration = domainRouter.resolveConfiguration(action: action)
                 if configuration == nil {
-                    logger.warning("[FakeIP] \(proto, privacy: .public) proxy config \(id) not found for \(entry.domain, privacy: .public)")
+                    logger.warning("[\(proto)] Routing config not found for \(entry.domain)")
                 }
                 return .resolved(domain: entry.domain, configurationOverride: configuration, forceBypass: false)
             }

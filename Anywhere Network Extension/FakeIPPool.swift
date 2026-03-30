@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "FakeIPPool")
+private let logger = TunnelLogger(category: "FakeIPPool")
 
 class FakeIPPool {
 
@@ -213,7 +212,7 @@ class FakeIPPool {
         guard let tail = lruTail else {
             // Should never happen — pool is full so LRU list cannot be empty.
             // Fall back to offset 1 rather than crashing.
-            logger.error("[FakeIPPool] evictLRU called on empty list, falling back to offset 1")
+            logger.debug("[FakeIPPool] evictLRU called on empty list, falling back to offset 1")
             return 1
         }
         let offset = tail.offset
