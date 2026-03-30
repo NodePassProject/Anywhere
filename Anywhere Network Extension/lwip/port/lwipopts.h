@@ -69,6 +69,8 @@
 #define TCP_OVERSIZE                    TCP_MSS
 #define LWIP_TCP_TIMESTAMPS             0
 #define LWIP_TCP_SACK_OUT               1
+#define LWIP_TCP_CALC_INITIAL_CWND(mss) ((tcpwnd_size_t)(10U * (mss)))
+
 #define TCP_LISTEN_BACKLOG              0
 
 /* --- TCP window scaling (RFC 1323) --- */

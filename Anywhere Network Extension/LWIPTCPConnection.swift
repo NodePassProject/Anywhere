@@ -487,6 +487,12 @@ class LWIPTCPConnection {
     /// Manages the receive loop manually (instead of `startReceiving`) to
     /// support pause/resume for backpressure. Only issues a receive when
     /// not paused and the connection is active.
+    ///
+    /// The receive callback pre-issues the next receive **before** writing
+    /// data to lwIP, so the kernel/NWConnection can fill its buffer while
+    /// the current chunk is being processed.  This eliminates the pipeline
+    /// gap that previously existed between ``writeToLWIP`` finishing and
+    /// the next receive being posted.
     private func requestNextReceive() {
         guard !closed, !receivePaused else { return }
 
@@ -498,7 +504,7 @@ class LWIPTCPConnection {
                     guard !self.closed else { return }
 
                     if let error {
-                        self.logTransportFailure("Recv", error: error)
+                        self.logTransportFailure("Receive", error: error)
                         self.abort()
                         return
                     }
@@ -514,6 +520,9 @@ class LWIPTCPConnection {
                     }
 
                     self.activityTimer?.update()
+                    // Pipeline: issue next receive before processing so the
+                    // transport can fill its buffer concurrently.
+                    self.requestNextReceive()
                     self.writeToLWIP(data)
                 }
             }
@@ -529,7 +538,7 @@ class LWIPTCPConnection {
                 guard !self.closed else { return }
 
                 if let error {
-                    self.logTransportFailure("Recv", error: error)
+                    self.logTransportFailure("Receive", error: error)
                     self.abort()
                     return
                 }
@@ -545,6 +554,9 @@ class LWIPTCPConnection {
                 }
 
                 self.activityTimer?.update()
+                // Pipeline: issue next receive before processing so the
+                // transport can fill its buffer concurrently.
+                self.requestNextReceive()
                 self.writeToLWIP(data)
             }
         }
@@ -592,9 +604,11 @@ class LWIPTCPConnection {
             overflowBuffer.append(data)
             drainOverflowBuffer()
             guard !closed else { return }
-            if overflowBuffer.count < Self.maxOverflowBufferSize {
-                requestNextReceive()
-            } else {
+            // Pause further receives if overflow is too large.  The next
+            // receive was already pre-issued by the pipelined callback; when
+            // it fires and finds receivePaused == true it will still write to
+            // the overflow buffer, but won't issue yet another receive.
+            if overflowBuffer.count >= Self.maxOverflowBufferSize {
                 receivePaused = true
             }
             return
@@ -616,12 +630,17 @@ class LWIPTCPConnection {
         guard !closed else { return }
 
         lwip_bridge_tcp_output(pcb)
+        // Flush output packets to the TUN inline, eliminating the deferred-
+        // dispatch latency.  During TCP slow start, faster segment delivery
+        // means earlier ACKs from the local app and quicker cwnd growth.
+        LWIPStack.shared?.flushOutputInline()
 
         // Backpressure gate: if overflow has accumulated beyond the soft limit,
-        // pause receives so the remote side stops sending.
-        if overflowBuffer.count < Self.maxOverflowBufferSize {
-            requestNextReceive()
-        } else {
+        // pause receives so the remote side stops sending.  The pipelined
+        // receive loop pre-issues the next receive before calling writeToLWIP,
+        // so we only need to set the pause flag here; the already-outstanding
+        // receive's callback will respect it and stop issuing further receives.
+        if overflowBuffer.count >= Self.maxOverflowBufferSize {
             receivePaused = true
         }
     }
@@ -655,6 +674,7 @@ class LWIPTCPConnection {
                 overflowBuffer.removeSubrange(0..<offset)
             }
             lwip_bridge_tcp_output(pcb)
+            LWIPStack.shared?.flushOutputInline()
         } else if !overflowBuffer.isEmpty {
             // Nothing drained (ERR_MEM with empty send buffer) — no handleSent will
             // fire for this connection, so schedule a delayed retry.

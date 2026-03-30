@@ -85,7 +85,8 @@ class LWIPStack {
     // MARK: - Log Buffer
     //
     // Stores recent log messages for display in the main app's log viewer.
-    // Entries older than 2 minutes are pruned on each append or fetch.
+    // Entries older than 5 minutes or exceeding 50 items are pruned on
+    // each append or fetch.
     // Thread-safe via NSLock — logs may be appended from NWConnection
     // completion handlers (not on lwipQueue), while fetches come from IPC.
 
@@ -109,7 +110,8 @@ class LWIPStack {
 
     private let logLock = NSLock()
     private var logEntries: [LogEntry] = []
-    private static let logRetentionInterval: CFAbsoluteTime = 120
+    private static let logRetentionInterval: CFAbsoluteTime = 300
+    private static let logMaxEntries = 50
     private let recentTunnelInterruptionLock = NSLock()
     private var recentTunnelInterruption: RecentTunnelInterruption?
     private static let recentTunnelInterruptionWindow: CFAbsoluteTime = 8
@@ -119,8 +121,7 @@ class LWIPStack {
         let now = CFAbsoluteTimeGetCurrent()
         logLock.lock()
         logEntries.append(LogEntry(timestamp: now, level: level, message: message))
-        let cutoff = now - Self.logRetentionInterval
-        logEntries.removeAll { $0.timestamp < cutoff }
+        compactLogs(now: now)
         logLock.unlock()
     }
 
@@ -128,13 +129,22 @@ class LWIPStack {
     func fetchLogs() -> [[String: Any]] {
         let now = CFAbsoluteTimeGetCurrent()
         logLock.lock()
-        let cutoff = now - Self.logRetentionInterval
-        logEntries.removeAll { $0.timestamp < cutoff }
+        compactLogs(now: now)
         let result = logEntries.map { entry in
             ["timestamp": entry.timestamp, "level": entry.level.rawValue, "message": entry.message] as [String: Any]
         }
         logLock.unlock()
         return result
+    }
+
+    /// Removes entries older than the retention window, then trims the oldest
+    /// entries if the buffer still exceeds `logMaxEntries`. Caller must hold `logLock`.
+    private func compactLogs(now: CFAbsoluteTime) {
+        let cutoff = now - Self.logRetentionInterval
+        logEntries.removeAll { $0.timestamp < cutoff }
+        if logEntries.count > Self.logMaxEntries {
+            logEntries.removeFirst(logEntries.count - Self.logMaxEntries)
+        }
     }
 
     /// Records a recent tunnel-level interruption so connection errors that follow
@@ -1153,6 +1163,21 @@ class LWIPStack {
     }
 
     // MARK: - Output Batching
+
+    /// Flushes accumulated output packets to the TUN device immediately.
+    ///
+    /// Called inline from download write paths (``LWIPTCPConnection.writeToLWIP``
+    /// and ``drainOverflowBuffer``) to eliminate the extra dispatch-cycle latency
+    /// of the deferred ``lwipQueue.async`` flush.  The deferred path still serves
+    /// as the fallback for output generated during input batch processing
+    /// (``startReadingPackets`` → ``lwip_bridge_input`` loop), where batching
+    /// across many connections is desirable.
+    ///
+    /// Safe to call at any time on lwipQueue — ``flushOutputPackets`` is a no-op
+    /// when there are no accumulated packets or a write is already in flight.
+    func flushOutputInline() {
+        flushOutputPackets()
+    }
 
     /// Flushes accumulated output packets to the TUN device in a single writePackets call.
     /// Called via deferred lwipQueue.async after the current batch of lwip_bridge_input

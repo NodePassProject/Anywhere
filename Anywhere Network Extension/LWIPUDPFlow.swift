@@ -475,7 +475,7 @@ class LWIPUDPFlow {
         } errorHandler: { [weak self] error in
             guard let self else { return }
             if let error {
-                self.logTransportFailure("Recv", error: error, defaultLevel: .error)
+                self.logTransportFailure("Receive", error: error, defaultLevel: .error)
             }
             self.lwipQueue.async {
                 self.close()
