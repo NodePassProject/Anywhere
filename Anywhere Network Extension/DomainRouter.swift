@@ -26,8 +26,16 @@ class DomainRouter {
         static let none = DomainMatch(userAction: nil, isBypass: false)
     }
 
+    /// Result of a unified IP lookup covering both user rules and country bypass.
+    struct IPMatch {
+        var userAction: RouteAction?
+        var isBypass: Bool
+        static let none = IPMatch(userAction: nil, isBypass: false)
+    }
+
     // MARK: - Suffix Trie (reverse-label)
     //
+    // All domain filters are normalized to suffix rules.
     // Domains are split into labels and reversed: "www.google.com" → ["com","google","www"].
     // Walking the trie from root matches progressively more-specific suffixes.
     // Each node stores the deepest user action and/or a bypass flag at that suffix boundary.
@@ -40,29 +48,11 @@ class DomainRouter {
 
     private var trieRoot = TrieNode()
 
-    // Exact domain matches (O(1) hash lookup, checked before the trie)
-    private var exactDomains: [String: RouteAction] = [:]
-    private var bypassExactDomains: Set<String> = []
-
-    // MARK: - Aho-Corasick Keyword Matcher
-    //
-    // All keyword patterns (user + bypass) are compiled into a single automaton.
-    // Matching scans the domain string once, O(m), and reports any keyword hit.
-
-    private struct ACState {
-        var goto: [UInt8: Int] = [:]
-        var failure: Int = 0
-        var userAction: RouteAction?
-        var isBypass: Bool = false
-        var outputLink: Int = -1   // nearest match state reachable via failure chain
-    }
-
-    private var acStates: [ACState] = [ACState()]   // state 0 = root
-    private var acBuilt = false
-
     // Compiled IP CIDR rules (network & mask pre-computed at load time)
     private var ipv4CIDRRules: [(network: UInt32, mask: UInt32, action: RouteAction)] = []
     private var ipv6CIDRRules: [(network: [UInt8], prefixLen: Int, action: RouteAction)] = []
+    private var bypassIPv4CIDRRules: [(network: UInt32, mask: UInt32)] = []
+    private var bypassIPv6CIDRRules: [(network: [UInt8], prefixLen: Int)] = []
 
     // Proxy configurations for rule-assigned proxies
     private var configurationMap: [UUID: ProxyConfiguration] = [:]
@@ -77,14 +67,12 @@ class DomainRouter {
     func loadRoutingConfiguration() {
         // Clear all domain matching structures
         trieRoot = TrieNode()
-        exactDomains.removeAll()
-        bypassExactDomains.removeAll()
-        acStates = [ACState()]
-        acBuilt = false
         domainRuleCount = 0
 
         ipv4CIDRRules.removeAll()
         ipv6CIDRRules.removeAll()
+        bypassIPv4CIDRRules.removeAll()
+        bypassIPv6CIDRRules.removeAll()
         configurationMap.removeAll()
 
         guard let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.routingData),
@@ -126,44 +114,40 @@ class DomainRouter {
             }
 
             // Domain rules
-            if let domainRules = rule["domainRules"] as? [[String: String]] {
+            if let domainRules = rule["domainRules"] as? [[String: Any]] {
                 for dr in domainRules {
-                    guard let typeStr = dr["type"], let value = dr["value"] else { continue }
+                    guard let type = Self.parseRuleType(dr["type"]),
+                          let value = dr["value"] as? String else { continue }
                     let lowered = value.lowercased()
 
-                    switch typeStr {
-                    case "domain":
-                        exactDomains[lowered] = action
-                        domainRuleCount += 1
-                    case "domainSuffix":
+                    switch type {
+                    case .domainSuffix:
                         trieInsert(lowered, userAction: action)
                         domainRuleCount += 1
-                    case "domainKeyword":
-                        acAddPattern(lowered, userAction: action)
-                        domainRuleCount += 1
-                    default:
+                    case .ipCIDR, .ipCIDR6:
                         break
                     }
                 }
             }
 
             // IP CIDR rules
-            if let ipRules = rule["ipRules"] as? [[String: String]] {
+            if let ipRules = rule["ipRules"] as? [[String: Any]] {
                 for ir in ipRules {
-                    guard let typeStr = ir["type"], let value = ir["value"] else { continue }
+                    guard let type = Self.parseRuleType(ir["type"]),
+                          let value = ir["value"] as? String else { continue }
 
-                    switch typeStr {
-                    case "ipCIDR":
+                    switch type {
+                    case .ipCIDR:
                         if let parsed = Self.parseIPv4CIDR(value) {
                             ipv4CIDRRules.append((network: parsed.network, mask: parsed.mask, action: action))
                             ipRuleCount += 1
                         }
-                    case "ipCIDR6":
+                    case .ipCIDR6:
                         if let parsed = Self.parseIPv6CIDR(value) {
                             ipv6CIDRRules.append((network: parsed.network, prefixLen: parsed.prefixLen, action: action))
                             ipRuleCount += 1
                         }
-                    default:
+                    case .domainSuffix:
                         break
                     }
                 }
@@ -173,38 +157,39 @@ class DomainRouter {
         logger.debug("[DomainRouter] Loaded \(self.domainRuleCount) domain rules, \(ipRuleCount) IP rules, \(self.configurationMap.count) configurations")
     }
 
-    /// Reads bypass country domain rules from App Group UserDefaults and adds them
-    /// to the shared trie / Aho-Corasick structures. Builds the keyword automaton.
+    /// Reads bypass country rules from App Group UserDefaults and adds them
+    /// to the shared domain structures and IP rule tables.
     /// Must be called after ``loadRoutingConfiguration()``.
     func loadBypassCountryRules() {
-        var count = 0
+        var domainRuleCount = 0
+        var ipRuleCount = 0
 
         if let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.bypassCountryDomainRules),
-           let rules = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] {
+           let rules = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             for rule in rules {
-                guard let typeStr = rule["type"], let value = rule["value"] else { continue }
+                guard let type = Self.parseRuleType(rule["type"]),
+                      let value = rule["value"] as? String else { continue }
                 let lowered = value.lowercased()
-                switch typeStr {
-                case "domain":
-                    bypassExactDomains.insert(lowered)
-                    count += 1
-                case "domainSuffix":
+                switch type {
+                case .domainSuffix:
                     trieInsertBypass(lowered)
-                    count += 1
-                case "domainKeyword":
-                    acAddPattern(lowered, isBypass: true)
-                    count += 1
-                default:
-                    break
+                    domainRuleCount += 1
+                case .ipCIDR:
+                    if let parsed = Self.parseIPv4CIDR(value) {
+                        bypassIPv4CIDRRules.append((network: parsed.network, mask: parsed.mask))
+                        ipRuleCount += 1
+                    }
+                case .ipCIDR6:
+                    if let parsed = Self.parseIPv6CIDR(value) {
+                        bypassIPv6CIDRRules.append((network: parsed.network, prefixLen: parsed.prefixLen))
+                        ipRuleCount += 1
+                    }
                 }
             }
         }
 
-        // Build the Aho-Corasick automaton after all patterns (user + bypass) are inserted
-        acBuild()
-
-        if count > 0 {
-            logger.debug("[DomainRouter] Loaded \(count) bypass country domain rules")
+        if domainRuleCount > 0 || ipRuleCount > 0 {
+            logger.debug("[DomainRouter] Loaded \(domainRuleCount) bypass country domain rules, \(ipRuleCount) IP rules")
         }
     }
 
@@ -215,60 +200,52 @@ class DomainRouter {
         domainRuleCount > 0 || !ipv4CIDRRules.isEmpty || !ipv6CIDRRules.isEmpty
     }
 
-    /// Unified domain matching: checks exact → suffix trie → Aho-Corasick keywords.
-    /// User rules take absolute precedence over country bypass.
+    /// Unified domain matching via the suffix trie.
+    /// User suffix rules take absolute precedence over country bypass suffixes.
     func matchDomain(_ domain: String) -> DomainMatch {
         guard !domain.isEmpty else { return .none }
-
-        // 1. Exact match (O(1) hash lookup)
-        if let action = exactDomains[domain] {
-            return DomainMatch(userAction: action, isBypass: false)
-        }
-
-        // 2. Suffix match via reverse-label trie (O(k), k = label count ≈ 2-4)
         let suffix = trieLookup(domain)
-        if let action = suffix.userAction {
-            return DomainMatch(userAction: action, isBypass: false)
-        }
-
-        // 3. Keyword match via Aho-Corasick (O(m), m = domain length)
-        let keyword = acMatch(domain)
-        if let action = keyword.userAction {
-            return DomainMatch(userAction: action, isBypass: false)
-        }
-
-        // 4. No user rule matched — check bypass from all three sources
-        let isBypass = bypassExactDomains.contains(domain) || suffix.isBypass || keyword.isBypass
-        return DomainMatch(userAction: nil, isBypass: isBypass)
+        return DomainMatch(userAction: suffix.userAction, isBypass: suffix.userAction == nil && suffix.isBypass)
     }
 
-    /// Matches an IP address against IP CIDR rules. Returns nil if no rule matches.
-    func matchIP(_ ip: String) -> RouteAction? {
-        guard !ip.isEmpty else { return nil }
+    /// Matches an IP address against user and bypass CIDR rules.
+    /// User rules take absolute precedence over country bypass.
+    func matchIP(_ ip: String) -> IPMatch {
+        guard !ip.isEmpty else { return .none }
 
         if ip.contains(":") {
             // IPv6
             var addr = in6_addr()
-            guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
-            return withUnsafeBytes(of: &addr) { raw -> RouteAction? in
+            guard inet_pton(AF_INET6, ip, &addr) == 1 else { return .none }
+            return withUnsafeBytes(of: &addr) { raw -> IPMatch in
                 let bytes = raw.bindMemory(to: UInt8.self)
-                guard bytes.count == 16 else { return nil }
+                guard bytes.count == 16 else { return .none }
                 for rule in ipv6CIDRRules {
                     if Self.ipv6Matches(bytes: bytes, network: rule.network, prefixLen: rule.prefixLen) {
-                        return rule.action
+                        return IPMatch(userAction: rule.action, isBypass: false)
                     }
                 }
-                return nil
+                for rule in bypassIPv6CIDRRules {
+                    if Self.ipv6Matches(bytes: bytes, network: rule.network, prefixLen: rule.prefixLen) {
+                        return IPMatch(userAction: nil, isBypass: true)
+                    }
+                }
+                return .none
             }
         } else {
             // IPv4
-            guard let ip32 = Self.parseIPv4(ip) else { return nil }
+            guard let ip32 = Self.parseIPv4(ip) else { return .none }
             for rule in ipv4CIDRRules {
                 if (ip32 & rule.mask) == rule.network {
-                    return rule.action
+                    return IPMatch(userAction: rule.action, isBypass: false)
                 }
             }
-            return nil
+            for rule in bypassIPv4CIDRRules {
+                if (ip32 & rule.mask) == rule.network {
+                    return IPMatch(userAction: nil, isBypass: true)
+                }
+            }
+            return .none
         }
     }
 
@@ -334,112 +311,25 @@ class DomainRouter {
         return (deepestUserAction, foundBypass)
     }
 
-    // MARK: - Aho-Corasick (private)
-
-    /// Inserts a keyword pattern into the automaton (before ``acBuild()``).
-    /// Set `userAction` for user rules, `isBypass` for country bypass, or both.
-    private func acAddPattern(_ pattern: String, userAction: RouteAction? = nil, isBypass: Bool = false) {
-        var state = 0
-        for byte in pattern.utf8 {
-            if let next = acStates[state].goto[byte] {
-                state = next
-            } else {
-                let newState = acStates.count
-                acStates.append(ACState())
-                acStates[state].goto[byte] = newState
-                state = newState
-            }
-        }
-        if let action = userAction {
-            acStates[state].userAction = action
-        }
-        if isBypass {
-            acStates[state].isBypass = true
-        }
-    }
-
-    /// Computes failure links and output links (BFS). Must be called once after
-    /// all patterns have been inserted.
-    private func acBuild() {
-        guard acStates.count > 1 else {
-            acBuilt = true
-            return
-        }
-
-        var queue: [Int] = []
-
-        // Depth-1 states: failure → root
-        for (_, nextState) in acStates[0].goto {
-            acStates[nextState].failure = 0
-            acStates[nextState].outputLink = -1
-            queue.append(nextState)
-        }
-
-        var head = 0
-        while head < queue.count {
-            let current = queue[head]
-            head += 1
-
-            for (byte, nextState) in acStates[current].goto {
-                // Compute failure link for nextState
-                var f = acStates[current].failure
-                while f != 0 && acStates[f].goto[byte] == nil {
-                    f = acStates[f].failure
-                }
-                let failTarget = acStates[f].goto[byte] ?? 0
-                acStates[nextState].failure = (failTarget == nextState) ? 0 : failTarget
-
-                // Compute output link (nearest match state via failure chain)
-                let fs = acStates[nextState].failure
-                if acStates[fs].userAction != nil || acStates[fs].isBypass {
-                    acStates[nextState].outputLink = fs
-                } else {
-                    acStates[nextState].outputLink = acStates[fs].outputLink
-                }
-
-                queue.append(nextState)
-            }
-        }
-        acBuilt = true
-    }
-
-    /// Scans the domain through the automaton and returns the first user keyword
-    /// action found and whether any bypass keyword matched.
-    private func acMatch(_ domain: String) -> (userAction: RouteAction?, isBypass: Bool) {
-        guard acBuilt, acStates.count > 1 else { return (nil, false) }
-
-        var state = 0
-        var resultUserAction: RouteAction? = nil
-        var resultBypass = false
-
-        for byte in domain.utf8 {
-            // Follow failure links until we find a goto or reach root
-            while state != 0 && acStates[state].goto[byte] == nil {
-                state = acStates[state].failure
-            }
-            state = acStates[state].goto[byte] ?? 0
-
-            // Check this state and all output-linked states for matches
-            var check = state
-            while check > 0 {
-                if resultUserAction == nil, let action = acStates[check].userAction {
-                    resultUserAction = action
-                }
-                if !resultBypass && acStates[check].isBypass {
-                    resultBypass = true
-                }
-                if resultUserAction != nil && resultBypass { break }
-                check = acStates[check].outputLink
-                guard check > 0 else { break }
-            }
-
-            if resultUserAction != nil && resultBypass { break }
-        }
-
-        return (resultUserAction, resultBypass)
-    }
-
     // MARK: - CIDR Parsing
+
+    /// Accepts the new integer format and older string payloads during migration.
+    private static func parseRuleType(_ rawValue: Any?) -> DomainRuleType? {
+        if let rawValue = rawValue as? Int {
+            return DomainRuleType(rawValue: rawValue)
+        }
+        guard let legacy = rawValue as? String else { return nil }
+        switch legacy {
+        case "ipCIDR":
+            return .ipCIDR
+        case "ipCIDR6":
+            return .ipCIDR6
+        case "domain", "domainKeyword", "domainSuffix":
+            return .domainSuffix
+        default:
+            return nil
+        }
+    }
 
     /// Parses "A.B.C.D/prefix" into (network, mask) with host bits zeroed.
     private static func parseIPv4CIDR(_ cidr: String) -> (network: UInt32, mask: UInt32)? {

@@ -45,7 +45,7 @@ Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere t
 - **Manual editor** for full control over every parameter
 - **Latency testing** with color-coded indicators and batch "Test All"
 - **Domain routing rules** with exact, suffix, and keyword matching
-- **Country bypass** — GeoIP-based split routing (CN, RU, IR, TM, MM, BY, SA, AE, VN, CU)
+- **Country bypass** — GeoIP-based split routing (AE, BY, CN, CU, IR, RU, SA, TM, TR, VN)
 - **DNS over HTTPS** toggle
 - **IPv6** support
 - **Always On VPN**

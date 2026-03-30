@@ -19,17 +19,6 @@ struct OnboardingView: View {
     @State private var isGoingForward = true
     @State private var adBlockEnabled = false
 
-    private static let countryCodes: [String] = [
-        "AE", "BY", "CN", "CU", "IR", "MM", "RU", "SA", "TM", "VN"
-    ]
-
-    /// Maps language codes to the most likely bypass country.
-    private static let languageToCountry: [String: String] = [
-        "ar": "SA", "fa": "IR", "my": "MM", "ru": "RU",
-        "tk": "TM", "vi": "VN", "zh": "CN", "be": "BY",
-        "cu": "CU", "es": "CU",
-    ]
-
     var body: some View {
         VStack(spacing: 0) {
             VStack {
@@ -53,8 +42,7 @@ struct OnboardingView: View {
             .ignoresSafeArea()
         )
         .onAppear {
-            if let langCode = Locale.current.language.languageCode?.identifier,
-               let country = Self.languageToCountry[langCode] {
+            if let country = CountryBypassCatalog.shared.suggestedCountryCode() {
                 bypassCountryCode = country
             }
         }
@@ -139,7 +127,7 @@ struct OnboardingView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        ForEach(Self.countryCodes, id: \.self) { code in
+                        ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
                             Divider().opacity(0.3)
                             countryRow(code: code) {
                                 bypassCountryCode = code

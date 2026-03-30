@@ -104,19 +104,19 @@ class RuleSetStore: ObservableObject {
                 let domainRules = Self.loadRules(for: ruleSet.name)
                 guard !domainRules.isEmpty else { continue }
 
-                let domainRulesArray: [[String: String]] = domainRules.compactMap {
+                let domainRulesArray: [[String: Any]] = domainRules.compactMap {
                     switch $0.type {
-                    case .domain, .domainSuffix, .domainKeyword:
+                    case .domainSuffix:
                         return ["type": $0.type.rawValue, "value": $0.value]
                     case .ipCIDR, .ipCIDR6:
                         return nil
                     }
                 }
-                let ipRulesArray: [[String: String]] = domainRules.compactMap {
+                let ipRulesArray: [[String: Any]] = domainRules.compactMap {
                     switch $0.type {
                     case .ipCIDR, .ipCIDR6:
                         return ["type": $0.type.rawValue, "value": $0.value]
-                    case .domain, .domainSuffix, .domainKeyword:
+                    case .domainSuffix:
                         return nil
                     }
                 }
@@ -161,29 +161,30 @@ class RuleSetStore: ObservableObject {
 
     // MARK: - Bypass Country
 
-    /// Serializes the bypass country's domain rules to App Group UserDefaults
-    /// so the Network Extension can match domains for country-based bypass.
-    func syncBypassCountryRules() async {
-        let code = AWCore.userDefaults.string(forKey: "bypassCountryCode") ?? ""
-        if code.isEmpty {
-            AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
-            return
-        }
-        await Task.detached {
-            let rules = Self.loadRules(for: code)
-            let domainRulesArray: [[String: String]] = rules.compactMap {
-                switch $0.type {
-                case .domain, .domainSuffix, .domainKeyword:
-                    return ["type": $0.type.rawValue, "value": $0.value]
-                case .ipCIDR, .ipCIDR6:
-                    return nil
-                }
-            }
-            if domainRulesArray.isEmpty {
+    /// Serializes the bypass country's rules to App Group UserDefaults
+    /// so the Network Extension can match both domains and IPs for country-based bypass.
+    func syncBypassCountryRules(countryCode: String? = nil) async {
+        var effectiveCountryCode: String
+        if let countryCode {
+            effectiveCountryCode = countryCode
+        } else {
+            if let countryCode = AWCore.userDefaults.string(forKey: "bypassCountryCode") {
+                effectiveCountryCode = countryCode
+            } else {
                 AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
                 return
             }
-            if let data = try? JSONSerialization.data(withJSONObject: domainRulesArray) {
+        }
+        await Task.detached {
+            let rules = await CountryBypassCatalog.shared.rules(for: effectiveCountryCode)
+            let serializedRules: [[String: Any]] = rules.map {
+                ["type": $0.type.rawValue, "value": $0.value]
+            }
+            if serializedRules.isEmpty {
+                AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
+                return
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: serializedRules) {
                 AWCore.userDefaults.set(data, forKey: "bypassCountryDomainRules")
             }
         }.value
