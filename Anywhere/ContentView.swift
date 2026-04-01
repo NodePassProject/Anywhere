@@ -9,6 +9,11 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
+    @EnvironmentObject private var deepLinkManager: DeepLinkManager
+    @State private var selectedTab: AppTab = .home
+    @State private var showingDeepLinkAddSheet = false
+    @State private var showingManualAddSheet = false
+    @State private var pendingDeepLinkAction: DeepLinkAction?
 
     private var showOrphanedAlert: Binding<Bool> {
         Binding(
@@ -20,26 +25,26 @@ struct ContentView: View {
     var body: some View {
         Group {
             if #available(iOS 18.0, *) {
-                TabView {
-                    Tab("Home", systemImage: "house") {
+                TabView(selection: $selectedTab) {
+                    Tab("Home", systemImage: "house", value: .home) {
                         NavigationStack {
                             HomeView()
                         }
                     }
 
-                    Tab("Proxies", systemImage: "network") {
+                    Tab("Proxies", systemImage: "network", value: .proxies) {
                         NavigationStack {
                             ProxyListView()
                         }
                     }
 
-                    Tab("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill") {
+                    Tab("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill", value: .chains) {
                         NavigationStack {
                             ChainListView()
                         }
                     }
 
-                    Tab("Settings", systemImage: "gearshape") {
+                    Tab("Settings", systemImage: "gearshape", value: .settings) {
                         NavigationStack {
                             SettingsView()
                         }
@@ -47,27 +52,53 @@ struct ContentView: View {
                 }
                 .tabViewStyle(.sidebarAdaptable)
             } else {
-                TabView {
+                TabView(selection: $selectedTab) {
                     NavigationStack {
                         HomeView()
                     }
                     .tabItem { Label("Home", systemImage: "house") }
+                    .tag(AppTab.home)
 
                     NavigationStack {
                         ProxyListView()
                     }
                     .tabItem { Label("Proxies", systemImage: "network") }
+                    .tag(AppTab.proxies)
 
                     NavigationStack {
                         ChainListView()
                     }
                     .tabItem { Label("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill") }
+                    .tag(AppTab.chains)
 
                     NavigationStack {
                         SettingsView()
                     }
                     .tabItem { Label("Settings", systemImage: "gearshape") }
+                    .tag(AppTab.settings)
                 }
+            }
+        }
+        .onChange(of: deepLinkManager.pendingAction) { _, action in
+            if let action {
+                selectedTab = .proxies
+                pendingDeepLinkAction = action
+                deepLinkManager.pendingAction = nil
+                showingDeepLinkAddSheet = true
+            }
+        }
+        .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkAction = nil }) {
+            DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkAction: pendingDeepLinkAction) { configuration in
+                    viewModel.addConfiguration(configuration)
+                } onSubscriptionImport: { configurations, subscription in
+                    viewModel.addSubscription(configurations: configurations, subscription: subscription)
+                }
+            }
+        }
+        .sheet(isPresented: $showingManualAddSheet) {
+            ProxyEditorView { configuration in
+                viewModel.addConfiguration(configuration)
             }
         }
         .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
@@ -77,4 +108,8 @@ struct ContentView: View {
             Text("The proxy used by the following routing rules was deleted. They have been reset to Default: \(names)")
         }
     }
+}
+
+private enum AppTab: Hashable {
+    case home, proxies, chains, settings
 }

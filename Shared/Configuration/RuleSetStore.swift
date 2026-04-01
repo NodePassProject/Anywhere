@@ -29,9 +29,14 @@ class RuleSetStore: ObservableObject {
         ruleSets.filter { $0.name != "Direct" && $0.name != "ADBlock" }
     }
 
-    /// Bundled ruleset names (must match JSON filenames in Resources/).
-    private static let builtIn = ["Direct", "Telegram", "Netflix", "YouTube", "Disney+", "TikTok", "ChatGPT", "Claude", "Gemini", "ADBlock"]
     private static let assignmentsKey = "ruleSetAssignments"
+
+    /// Bundled ruleset names: Direct + supported services + ADBlock.
+    private static let builtIn: [String] = {
+        ["Direct"] + serviceCatalog.supportedServices + ["ADBlock"]
+    }()
+
+    private static let serviceCatalog = ServiceCatalog.load()
 
     private static let defaultAssignments: [String: String] = ["Direct": "DIRECT"]
 
@@ -47,6 +52,14 @@ class RuleSetStore: ObservableObject {
     func updateAssignment(_ ruleSet: RuleSet, configurationId: String?) {
         guard let index = ruleSets.firstIndex(where: { $0.id == ruleSet.id }) else { return }
         ruleSets[index].assignedConfigurationId = configurationId
+        saveAssignments()
+    }
+    
+    func resetAssignments() {
+        for routingRuleSet in routingRuleSets {
+            guard let index = ruleSets.firstIndex(where: { $0.id == routingRuleSet.id }) else { continue }
+            ruleSets[index].assignedConfigurationId = nil
+        }
         saveAssignments()
     }
 
@@ -70,8 +83,12 @@ class RuleSetStore: ObservableObject {
 
     // MARK: - Rules
 
-    /// Loads rules from the app bundle. Thread-safe – no instance state accessed.
+    /// Loads rules for a given rule set name. Thread-safe – no instance state accessed.
+    /// Direct and ADBlock are loaded from their own JSON files; all others come from the merged Service.json.
     nonisolated static func loadRules(for name: String) -> [DomainRule] {
+        if name != "Direct" && name != "ADBlock" {
+            return serviceCatalog.rules(for: name)
+        }
         guard let url = Bundle.main.url(forResource: name, withExtension: "json") else {
             logger.error("[RuleSetStore] Bundle resource '\(name, privacy: .public).json' not found")
             return []
