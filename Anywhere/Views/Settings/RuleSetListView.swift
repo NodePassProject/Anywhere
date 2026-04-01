@@ -61,6 +61,19 @@ struct RuleSetListView: View {
         }
         .listRowSpacing(8)
         .navigationTitle("Routing Rules")
+        .toolbar {
+            ToolbarItem {
+                Menu("More", systemImage: "ellipsis") {
+                    Button {
+                        RuleSetStore.shared.resetAssignments()
+                        routingRuleSets = RuleSetStore.shared.routingRuleSets
+                        Task { await viewModel.syncRoutingConfigurationToNE() }
+                    } label: {
+                        Label("Reset", systemImage: "arrow.clockwise")
+                    }
+                }
+            }
+        }
         .onAppear {
             routingRuleSets = RuleSetStore.shared.routingRuleSets
         }

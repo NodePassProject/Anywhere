@@ -40,6 +40,7 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
 struct AddProxyView: View {
     @Environment(\.dismiss) var dismiss
     @Binding var showingManualAddSheet: Bool
+    var deepLinkAction: DeepLinkAction?
     var onImport: ((ProxyConfiguration) -> Void)?
     var onSubscriptionImport: (([ProxyConfiguration], Subscription) -> Void)?
 
@@ -50,6 +51,23 @@ struct AddProxyView: View {
     @State private var isLoading = false
     @State private var showingLinkError = false
     @State private var linkErrorMessage = ""
+
+    init(showingManualAddSheet: Binding<Bool>, deepLinkAction: DeepLinkAction? = nil, onImport: ((ProxyConfiguration) -> Void)? = nil, onSubscriptionImport: (([ProxyConfiguration], Subscription) -> Void)? = nil) {
+        _showingManualAddSheet = showingManualAddSheet
+        self.deepLinkAction = deepLinkAction
+        self.onImport = onImport
+        self.onSubscriptionImport = onSubscriptionImport
+        switch deepLinkAction {
+        case .addProxyWithLink(let url):
+            _selectedMethod = State(initialValue: .link)
+            _linkURL = State(initialValue: url)
+        case .addProxyManual(let url):
+            _selectedMethod = State(initialValue: .link)
+            _linkURL = State(initialValue: url)
+        case nil:
+            break
+        }
+    }
 
     var body: some View {
         VStack(spacing: 20) {
