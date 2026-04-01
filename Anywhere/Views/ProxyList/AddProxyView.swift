@@ -66,44 +66,8 @@ struct AddProxyView: View {
                         .geometryGroup()
                 }
             }
-
-            if #available(iOS 26.0, *) {
-                Button {
-                    handleContinue()
-                } label: {
-                    if isLoading {
-                        ProgressView()
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                    } else {
-                        Text("Continue")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                    }
-                }
-                .disabled(isContinueDisabled)
-                .buttonStyle(.glassProminent)
-                .geometryGroup()
-            } else {
-                Button {
-                    handleContinue()
-                } label: {
-                    if isLoading {
-                        ProgressView()
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                    } else {
-                        Text("Continue")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                    }
-                }
-                .disabled(isContinueDisabled)
-                .buttonStyle(.borderedProminent)
-                .geometryGroup()
-            }
+            
+            continueButton
         }
         .padding(20)
         .frame(maxHeight: .infinity, alignment: .bottom)
@@ -217,6 +181,48 @@ struct AddProxyView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.top, 12)
+    }
+    
+    // MARK: - Continue Button
+    @ViewBuilder
+    private var continueButton: some View {
+        if #available(iOS 26.0, *) {
+            Button {
+                handleContinue()
+            } label: {
+                if isLoading {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                } else {
+                    Text("Continue")
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+            }
+            .disabled(isContinueDisabled)
+            .buttonStyle(.glassProminent)
+            .geometryGroup()
+        } else {
+            Button {
+                handleContinue()
+            } label: {
+                if isLoading {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                } else {
+                    Text("Continue")
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+            }
+            .disabled(isContinueDisabled)
+            .buttonStyle(.borderedProminent)
+            .geometryGroup()
+        }
     }
 
     // MARK: - Actions

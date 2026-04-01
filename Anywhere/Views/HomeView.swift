@@ -119,8 +119,12 @@ struct HomeView: View {
 
     private var powerButton: some View {
         Button {
-            withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                viewModel.toggleVPN()
+            if viewModel.hasConfigurations {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
+                    viewModel.toggleVPN()
+                }
+            } else {
+                showingAddSheet = true
             }
         } label: {
             ZStack {
@@ -168,7 +172,7 @@ struct HomeView: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isButtonDisabled)
+        .disabled(viewModel.isButtonDisabled && viewModel.hasConfigurations)
         .sensoryFeedback(.impact(weight: .medium), trigger: isConnected)
         .animation(.easeInOut(duration: 0.6), value: isConnected)
     }

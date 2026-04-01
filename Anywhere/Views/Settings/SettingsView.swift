@@ -63,7 +63,7 @@ struct SettingsView: View {
                     }, set: { newValue in
                         if newValue { proxyMode = .global } else { proxyMode = .rule }
                     })) {
-                        TextWithColorfulIcon(titleKey: "Global Mode", systemName: "arrow.trianglehead.merge", foregroundColor: .white, backgroundColor: .orange)
+                        TextWithColorfulIcon(titleKey: "Global Mode", systemName: "arrow.merge", foregroundColor: .white, backgroundColor: .orange)
                     }
                 }
                 if proxyMode != .global {

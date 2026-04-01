@@ -385,7 +385,7 @@ class TVHomeViewController: UIViewController {
     }
 
     private func updatePowerButton() {
-        let disabled = viewModel.isButtonDisabled
+        let disabled = viewModel.hasConfigurations && (!viewModel.isManagerReady || (viewModel.vpnStatus != .connected && viewModel.vpnStatus != .disconnected))
         powerButton.isEnabled = !disabled
         powerButton.alpha = disabled ? 0.5 : 1.0
 
@@ -438,6 +438,10 @@ class TVHomeViewController: UIViewController {
     // MARK: - Actions
 
     @objc private func powerButtonTapped() {
+        guard viewModel.hasConfigurations else {
+            addConfigTapped()
+            return
+        }
         viewModel.toggleVPN()
     }
 
