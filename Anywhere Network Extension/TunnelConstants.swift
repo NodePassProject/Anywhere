@@ -77,6 +77,13 @@ enum TunnelConstants {
     /// Time window (seconds) to attribute connection errors to a recent tunnel interruption.
     static let recentTunnelInterruptionWindow: CFAbsoluteTime = 8
 
+    // MARK: - Output Batching
+
+    /// Maximum packets per writePackets call. Caps each kernel write to avoid
+    /// overwhelming the utun buffer (ENOSPC). Remaining packets flush in the
+    /// next cycle. 512 packets × ~1400 bytes ≈ 700 KB per write.
+    static let outputBatchLimit = 512
+
     // MARK: - Timer Intervals
 
     /// lwIP periodic timeout interval (milliseconds).

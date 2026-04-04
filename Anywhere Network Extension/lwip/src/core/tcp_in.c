@@ -66,7 +66,10 @@
 #endif
 
 /** Initial CWND calculation as defined RFC 2581 */
+/* Anywhere patch: added #ifndef guard so lwipopts.h can override (e.g. IW10 per RFC 6928) */
+#ifndef LWIP_TCP_CALC_INITIAL_CWND
 #define LWIP_TCP_CALC_INITIAL_CWND(mss) ((tcpwnd_size_t)LWIP_MIN((4U * (mss)), LWIP_MAX((2U * (mss)), 4380U)))
+#endif
 
 /* These variables are global to all functions involved in the input
    processing of TCP segments. They are set by the tcp_input()
@@ -357,7 +360,7 @@ tcp_input(struct pbuf *p, struct netif *inp)
       prev = lpcb_prev;
     }
 #endif /* SO_REUSE */
-    /* tun2socks patch: fallback to wildcard listener with local_port == 0 */
+    /* Anywhere patch: fallback to wildcard listener with local_port == 0 */
     if (lpcb == NULL) {
       for (lpcb = tcp_listen_pcbs.listen_pcbs; lpcb != NULL; lpcb = lpcb->next) {
         if (lpcb->local_port == 0 &&
@@ -687,7 +690,7 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
     /* Set up the new PCB. */
     ip_addr_copy(npcb->local_ip, *ip_current_dest_addr());
     ip_addr_copy(npcb->remote_ip, *ip_current_src_addr());
-    /* tun2socks patch: use actual destination port from SYN when listener is wildcard (port 0) */
+    /* Anywhere patch: use actual destination port from SYN when listener is wildcard (port 0) */
     npcb->local_port = (pcb->local_port == 0) ? tcphdr->dest : pcb->local_port;
     npcb->remote_port = tcphdr->src;
     npcb->state = SYN_RCVD;
@@ -1577,7 +1580,7 @@ tcp_receive(struct tcp_pcb *pcb)
           recv_data = inseg.p;
           /* Since this pbuf now is the responsibility of the
              application, we delete our reference to it so that we won't
-             (mistakingly) deallocate it. */
+             (mistakenly) deallocate it. */
           inseg.p = NULL;
         }
         if (TCPH_FLAGS(inseg.tcphdr) & TCP_FIN) {
@@ -1700,10 +1703,20 @@ tcp_receive(struct tcp_pcb *pcb)
                  ->ooseq. We check the lengths to see which one to
                  discard. */
               if (inseg.len > next->len) {
+                struct tcp_seg* cseg;
+
+                /* If next segment is the last segment in ooseq
+                   and smaller than inseg, that means it has been
+                   trimmed before to fit our window, so we just
+                   break here. */
+                if (next->next == NULL) {
+                  break;
+                }
+
                 /* The incoming segment is larger than the old
                    segment. We replace some segments with the new
                    one. */
-                struct tcp_seg *cseg = tcp_seg_copy(&inseg);
+                cseg = tcp_seg_copy(&inseg);
                 if (cseg != NULL) {
                   if (prev != NULL) {
                     prev->next = cseg;
@@ -1996,17 +2009,17 @@ tcp_parseopt(struct tcp_pcb *pcb)
             return;
           }
           /* TCP timestamp option with valid length */
-          tsval = tcp_get_next_optbyte();
-          tsval |= (tcp_get_next_optbyte() << 8);
+          tsval = (tcp_get_next_optbyte() << 24);
           tsval |= (tcp_get_next_optbyte() << 16);
-          tsval |= (tcp_get_next_optbyte() << 24);
+          tsval |= (tcp_get_next_optbyte() << 8);
+          tsval |= tcp_get_next_optbyte();
           if (flags & TCP_SYN) {
-            pcb->ts_recent = lwip_ntohl(tsval);
+            pcb->ts_recent = tsval;
             /* Enable sending timestamps in every segment now that we know
                the remote host supports it. */
             tcp_set_flags(pcb, TF_TIMESTAMP);
           } else if (TCP_SEQ_BETWEEN(pcb->ts_lastacksent, seqno, seqno + tcplen)) {
-            pcb->ts_recent = lwip_ntohl(tsval);
+            pcb->ts_recent = tsval;
           }
           /* Advance to next option (6 bytes already read) */
           tcp_optidx += LWIP_TCP_OPT_LEN_TS - 6;

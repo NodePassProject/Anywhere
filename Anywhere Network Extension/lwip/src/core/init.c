@@ -58,8 +58,7 @@
 #include "lwip/mld6.h"
 #include "lwip/api.h"
 
-#include "netif/ppp/ppp_opts.h"
-#include "netif/ppp/ppp_impl.h"
+/* Anywhere patch: PPP headers removed — PPP_SUPPORT=0 and PPP_NUM_TIMEOUTS=0 defined in lwipopts.h */
 
 #ifndef LWIP_SKIP_PACKING_CHECK
 
@@ -196,8 +195,11 @@ PACK_STRUCT_END
 #if (LWIP_ALTCP && LWIP_EVENT_API)
 #error "The application layered tcp API does not work with LWIP_EVENT_API"
 #endif
-#if (MEM_LIBC_MALLOC && MEM_USE_POOLS)
-#error "MEM_LIBC_MALLOC and MEM_USE_POOLS may not both be simultaneously enabled in your lwipopts.h"
+#if (MEM_CUSTOM_ALLOCATOR && !(defined(MEM_CUSTOM_FREE) && defined(MEM_CUSTOM_MALLOC) && defined(MEM_CUSTOM_CALLOC)))
+#error "All of MEM_CUSTOM_FREE/MEM_CUSTOM_MALLOC/MEM_CUSTOM_CALLOC must be provided if MEM_CUSTOM_ALLOCATOR is enabled in your lwipopts.h"
+#endif
+#if (MEM_USE_POOLS && MEM_CUSTOM_ALLOCATOR)
+#error "MEM_USE_POOLS may not be used with a custom allocator (MEM_CUSTOM_ALLOCATOR or MEM_LIBC_MALLOC) enabled in your lwipopts.h"
 #endif
 #if (MEM_USE_POOLS && !MEMP_USE_CUSTOM_POOLS)
 #error "MEM_USE_POOLS requires custom pools (MEMP_USE_CUSTOM_POOLS) to be enabled in your lwipopts.h"

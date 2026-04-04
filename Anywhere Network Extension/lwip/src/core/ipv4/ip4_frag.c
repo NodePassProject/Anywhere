@@ -175,19 +175,21 @@ ip_reass_free_complete_datagram(struct ip_reassdata *ipr, struct ip_reassdata *p
 
   MIB2_STATS_INC(mib2.ipreasmfails);
 #if LWIP_ICMP
-  iprh = (struct ip_reass_helper *)ipr->p->payload;
-  if (iprh->start == 0) {
-    /* The first fragment was received, send ICMP time exceeded. */
-    /* First, de-queue the first pbuf from r->p. */
-    p = ipr->p;
-    ipr->p = iprh->next_pbuf;
-    /* Then, copy the original header into it. */
-    SMEMCPY(p->payload, &ipr->iphdr, IP_HLEN);
-    icmp_time_exceeded(p, ICMP_TE_FRAG);
-    clen = pbuf_clen(p);
-    LWIP_ASSERT("pbufs_freed + clen <= 0xffff", pbufs_freed + clen <= 0xffff);
-    pbufs_freed = (u16_t)(pbufs_freed + clen);
-    pbuf_free(p);
+  if (ipr->p != NULL) {
+    iprh = (struct ip_reass_helper *)ipr->p->payload;
+    if (iprh->start == 0) {
+      /* The first fragment was received, send ICMP time exceeded. */
+      /* First, de-queue the first pbuf from r->p. */
+      p = ipr->p;
+      ipr->p = iprh->next_pbuf;
+      /* Then, copy the original header into it. */
+      SMEMCPY(p->payload, &ipr->iphdr, IP_HLEN);
+      icmp_time_exceeded(p, ICMP_TE_FRAG);
+      clen = pbuf_clen(p);
+      LWIP_ASSERT("pbufs_freed + clen <= 0xffff", pbufs_freed + clen <= 0xffff);
+      pbufs_freed = (u16_t)(pbufs_freed + clen);
+      pbuf_free(p);
+    }
   }
 #endif /* LWIP_ICMP */
 

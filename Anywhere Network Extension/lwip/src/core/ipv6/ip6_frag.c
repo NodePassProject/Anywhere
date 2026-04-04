@@ -154,35 +154,37 @@ ip6_reass_free_complete_datagram(struct ip6_reassdata *ipr)
   struct ip6_reass_helper *iprh;
 
 #if LWIP_ICMP6
-  iprh = (struct ip6_reass_helper *)ipr->p->payload;
-  if (iprh->start == 0) {
-    /* The first fragment was received, send ICMP time exceeded. */
-    /* First, de-queue the first pbuf from r->p. */
-    p = ipr->p;
-    ipr->p = iprh->next_pbuf;
-    /* Restore the part that we've overwritten with our helper structure, or we
-     * might send garbage (and disclose a pointer) in the ICMPv6 reply. */
-    MEMCPY(p->payload, ipr->orig_hdr, sizeof(iprh));
-    /* Then, move back to the original ipv6 header (we are now pointing to Fragment header).
-       This cannot fail since we already checked when receiving this fragment. */
-    if (pbuf_header_force(p, (s16_t)((u8_t*)p->payload - (u8_t*)ipr->iphdr))) {
-      LWIP_ASSERT("ip6_reass_free: moving p->payload to ip6 header failed", 0);
+  if (ipr->p != NULL) {
+    iprh = (struct ip6_reass_helper *)ipr->p->payload;
+    if (iprh->start == 0) {
+      /* The first fragment was received, send ICMP time exceeded. */
+      /* First, de-queue the first pbuf from r->p. */
+      p = ipr->p;
+      ipr->p = iprh->next_pbuf;
+      /* Restore the part that we've overwritten with our helper structure, or we
+       * might send garbage (and disclose a pointer) in the ICMPv6 reply. */
+      MEMCPY(p->payload, ipr->orig_hdr, sizeof(*iprh));
+      /* Then, move back to the original ipv6 header (we are now pointing to Fragment header).
+         This cannot fail since we already checked when receiving this fragment. */
+      if (pbuf_header_force(p, (s16_t)((u8_t*)p->payload - (u8_t*)ipr->iphdr))) {
+        LWIP_ASSERT("ip6_reass_free: moving p->payload to ip6 header failed", 0);
+      }
+      else {
+        /* Reconstruct the zoned source and destination addresses, so that we do
+         * not end up sending the ICMP response over the wrong link. */
+        ip6_addr_t src_addr, dest_addr;
+        ip6_addr_copy_from_packed(src_addr, IPV6_FRAG_SRC(ipr));
+        ip6_addr_set_zone(&src_addr, ipr->src_zone);
+        ip6_addr_copy_from_packed(dest_addr, IPV6_FRAG_DEST(ipr));
+        ip6_addr_set_zone(&dest_addr, ipr->dest_zone);
+        /* Send the actual ICMP response. */
+        icmp6_time_exceeded_with_addrs(p, ICMP6_TE_FRAG, &src_addr, &dest_addr);
+      }
+      clen = pbuf_clen(p);
+      LWIP_ASSERT("pbufs_freed + clen <= 0xffff", pbufs_freed + clen <= 0xffff);
+      pbufs_freed = (u16_t)(pbufs_freed + clen);
+      pbuf_free(p);
     }
-    else {
-      /* Reconstruct the zoned source and destination addresses, so that we do
-       * not end up sending the ICMP response over the wrong link. */
-      ip6_addr_t src_addr, dest_addr;
-      ip6_addr_copy_from_packed(src_addr, IPV6_FRAG_SRC(ipr));
-      ip6_addr_set_zone(&src_addr, ipr->src_zone);
-      ip6_addr_copy_from_packed(dest_addr, IPV6_FRAG_DEST(ipr));
-      ip6_addr_set_zone(&dest_addr, ipr->dest_zone);
-      /* Send the actual ICMP response. */
-      icmp6_time_exceeded_with_addrs(p, ICMP6_TE_FRAG, &src_addr, &dest_addr);
-    }
-    clen = pbuf_clen(p);
-    LWIP_ASSERT("pbufs_freed + clen <= 0xffff", pbufs_freed + clen <= 0xffff);
-    pbufs_freed = (u16_t)(pbufs_freed + clen);
-    pbuf_free(p);
   }
 #endif /* LWIP_ICMP6 */
 
@@ -447,6 +449,19 @@ ip6_reass(struct pbuf *p)
         }
       }
 #endif /* IP_REASS_CHECK_OVERLAP */
+      /* Check if the fragments received so far have no gaps. */
+      if (iprh_prev != NULL) {
+        if (iprh_prev->end != start) {
+          /* There is a fragment missing between the current
+           * and the previous fragment */
+          valid = 0;
+        }
+      }
+      if (end != iprh_tmp->start) {
+        /* There is a fragment missing between the current
+         * and the following fragment */
+        valid = 0;
+      }
       /* the new pbuf should be inserted before this */
       next_pbuf = q;
       if (iprh_prev != NULL) {
@@ -658,6 +673,7 @@ ip6_reass(struct pbuf *p)
     }
 
     /* Return the pbuf chain */
+    MIB2_STATS_INC(mib2.ip6reasmoks);
     return p;
   }
   /* the datagram is not (yet?) reassembled completely */
