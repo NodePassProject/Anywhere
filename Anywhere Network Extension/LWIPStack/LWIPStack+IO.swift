@@ -37,20 +37,12 @@ extension LWIPStack {
     func flushOutputPackets() {
         outputFlushScheduled = false
         guard !outputPackets.isEmpty, !outputWriteInFlight else { return }
-        let limit = TunnelConstants.outputBatchLimit
         let packets: [Data]
         let protocols: [NSNumber]
-        if outputPackets.count <= limit {
-            packets = outputPackets
-            protocols = outputProtocols
-            outputPackets.removeAll(keepingCapacity: true)
-            outputProtocols.removeAll(keepingCapacity: true)
-        } else {
-            packets = Array(outputPackets.prefix(limit))
-            protocols = Array(outputProtocols.prefix(limit))
-            outputPackets.removeFirst(limit)
-            outputProtocols.removeFirst(limit)
-        }
+        packets = outputPackets
+        protocols = outputProtocols
+        outputPackets.removeAll(keepingCapacity: true)
+        outputProtocols.removeAll(keepingCapacity: true)
         outputWriteInFlight = true
         outputQueue.async { [weak self] in
             self?.packetFlow?.writePackets(packets, withProtocols: protocols)

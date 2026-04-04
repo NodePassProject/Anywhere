@@ -47,10 +47,10 @@ enum TunnelConstants {
 
     // MARK: - TCP Buffer Sizes
 
-    /// Soft cap for the TCP overflow buffer (512 KB). When exceeded, receiving pauses
+    /// Soft cap for the TCP overflow buffer (2MB). When exceeded, receiving pauses
     /// to apply backpressure. NOT a hard cap — do not abort when exceeded; the
     /// backpressure mechanism (`receivePaused` + `drainOverflowBuffer`) handles recovery.
-    static let tcpOverflowBufferSize = 512 * 1024
+    static let tcpOverflowBufferSize = 2 * 1024 * 1024
     /// Maximum bytes per tcp_write call (16 KB ≈ 12 TCP segments at TCP_MSS=1360).
     /// With MEMP_NUM_TCP_SEG=4096, this lets many connections make progress without
     /// exhausting the segment pool. Must stay in sync with lwipopts.h.
@@ -76,13 +76,6 @@ enum TunnelConstants {
     static let logMaxEntries = 50
     /// Time window (seconds) to attribute connection errors to a recent tunnel interruption.
     static let recentTunnelInterruptionWindow: CFAbsoluteTime = 8
-
-    // MARK: - Output Batching
-
-    /// Maximum packets per writePackets call. Caps each kernel write to avoid
-    /// overwhelming the utun buffer (ENOSPC). Remaining packets flush in the
-    /// next cycle. 512 packets × ~1400 bytes ≈ 700 KB per write.
-    static let outputBatchLimit = 512
 
     // MARK: - Timer Intervals
 
