@@ -471,11 +471,6 @@ ip6_input_accept(struct netif *netif)
   /* interface is up? */
   if (netif_is_up(netif)) {
     u8_t i;
-    /* tun2socks patch: accept all packets when first IPv6 address is :: (unspecified) */
-    if (ip6_addr_isvalid(netif_ip6_addr_state(netif, 0)) &&
-        ip6_addr_isany(netif_ip6_addr(netif, 0))) {
-      return 1;
-    }
     /* unicast to this interface address? address configured? */
     /* If custom scopes are used, the destination zone will be tested as
       * part of the local-address comparison, but we need to test the source
@@ -1016,9 +1011,10 @@ netif_found:
           goto ip6_input_cleanup;
         }
 
-        /* Returned p point to IPv6 header.
+        /* Returned p points to IPv6 header.
          * Update all our variables and pointers and continue. */
         ip6hdr = (struct ip6_hdr *)p->payload;
+        ip_data.current_ip6_header = ip6hdr;
         nexth = &IP6H_NEXTH(ip6hdr);
         hlen = hlen_tot = IP6_HLEN;
         pbuf_remove_header(p, IP6_HLEN);

@@ -67,8 +67,7 @@
 #include "lwip/etharp.h"
 #include "lwip/igmp.h"
 #include "lwip/timeouts.h"
-/* needed by default MEMP_NUM_SYS_TIMEOUT */
-#include "netif/ppp/ppp_opts.h"
+/* Anywhere patch: ppp_opts.h removed — PPP_NUM_TIMEOUTS=0 defined in lwipopts.h */
 #include "lwip/netdb.h"
 #include "lwip/dns.h"
 #include "lwip/priv/nd6_priv.h"

@@ -11,7 +11,7 @@
 #define LWIP_UDP                        1
 #define LWIP_IPV4                       1
 #define LWIP_IPV6                       1
-#define LWIP_ICMP                       0
+#define LWIP_ICMP                       1
 #define LWIP_ICMP6                      1
 #define LWIP_RAW                        0
 
@@ -35,19 +35,19 @@
 #define LWIP_STATS_DISPLAY              0
 
 /* --- Single network interface optimization --- */
-#define LWIP_SINGLE_NETIF              1
+#define LWIP_SINGLE_NETIF               1
 
 /* --- Raw API only (no sockets/netconn) --- */
 #define LWIP_CALLBACK_API               1
 
 /* --- Memory configuration --- */
-#define MEM_SIZE                        (8 * 1024 * 1024)
-#define MEM_ALIGNMENT                   4
+#define MEM_SIZE                        (16 * 1024 * 1024)
+#define MEM_ALIGNMENT                   8
 #define MEMP_OVERFLOW_CHECK             0
 #define MEMP_SANITY_CHECK               0
 
 /* --- Pool sizes --- */
-#define MEMP_NUM_TCP_PCB                128
+#define MEMP_NUM_TCP_PCB                256
 #define MEMP_NUM_TCP_PCB_LISTEN         2
 #define MEMP_NUM_UDP_PCB                8
 #define MEMP_NUM_TCP_SEG                16384
@@ -57,7 +57,7 @@
 
 /* --- Pbuf configuration --- */
 #define PBUF_POOL_SIZE                  256
-#define PBUF_POOL_BUFSIZE               1500
+#define PBUF_POOL_BUFSIZE               1400
 
 /* --- TCP configuration --- */
 #define TCP_MSS                         1360
@@ -88,7 +88,7 @@
 #define CHECKSUM_GEN_IP                 1
 #define CHECKSUM_GEN_TCP                1
 #define CHECKSUM_GEN_UDP                1
-#define CHECKSUM_GEN_ICMP               0
+#define CHECKSUM_GEN_ICMP               1
 #define CHECKSUM_GEN_ICMP6              1
 
 /* --- IPv6 --- */
@@ -105,6 +105,10 @@
 #define LWIP_HAVE_LOOPIF                0
 #define LWIP_NETIF_LOOPBACK             0
 #define LWIP_RANDOMIZE_INITIAL_LOCAL_PORTS 1
+
+/* --- PPP (disabled, provide default for opt.h) --- */
+#define PPP_SUPPORT                     0
+#define PPP_NUM_TIMEOUTS                0
 
 /* --- Debug (disable in release) --- */
 #define LWIP_DEBUG                      0

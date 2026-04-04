@@ -215,10 +215,10 @@ ip4_route(const ip4_addr_t *dest)
 
   if ((netif_default == NULL) || !netif_is_up(netif_default) || !netif_is_link_up(netif_default) ||
       ip4_addr_isloopback(dest)) {
+    /* Anywhere patch: removed ip4_addr_isany_val check - allow routing through
+       netif with 0.0.0.0 address (catch-all TUN interface) */
     /* No matching netif found and default netif is not usable.
        If this is not good enough for you, use LWIP_HOOK_IP4_ROUTE() */
-    /* tun2socks patch: removed ip4_addr_isany_val check - allow routing through
-       netif with 0.0.0.0 address (catch-all TUN interface) */
     LWIP_DEBUGF(IP_DEBUG | LWIP_DBG_LEVEL_SERIOUS, ("ip4_route: No route to %"U16_F".%"U16_F".%"U16_F".%"U16_F"\n",
                 ip4_addr1_16(dest), ip4_addr2_16(dest), ip4_addr3_16(dest), ip4_addr4_16(dest)));
     IP_STATS_INC(ip.rterr);
@@ -415,7 +415,7 @@ ip4_input_accept(struct netif *netif)
                          ip4_addr_get_u32(netif_ip4_addr(netif)) & ip4_addr_get_u32(netif_ip4_netmask(netif)),
                          ip4_addr_get_u32(ip4_current_dest_addr()) & ~ip4_addr_get_u32(netif_ip4_netmask(netif))));
 
-  /* tun2socks patch: accept all packets when netif IP is 0.0.0.0 (catch-all) */
+  /* Anywhere patch: accept all packets when netif IP is 0.0.0.0 (catch-all) */
   if ((netif_is_up(netif)) && ip4_addr_isany_val(*netif_ip4_addr(netif))) {
     return 1;
   }
