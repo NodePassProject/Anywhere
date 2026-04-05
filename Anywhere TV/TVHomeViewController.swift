@@ -153,6 +153,7 @@ class TVHomeViewController: UIViewController {
         let uploadArrow = UIImageView(image: UIImage(systemName: "arrow.up", withConfiguration: arrowConfig))
         uploadArrow.tintColor = UIColor.white.withAlphaComponent(0.7)
         uploadArrow.setContentHuggingPriority(.required, for: .horizontal)
+        uploadArrow.accessibilityLabel = "Upload"
 
         uploadLabel.font = .monospacedDigitSystemFont(ofSize: 34, weight: .regular)
         uploadLabel.textColor = .white
@@ -161,6 +162,7 @@ class TVHomeViewController: UIViewController {
         let downloadArrow = UIImageView(image: UIImage(systemName: "arrow.down", withConfiguration: arrowConfig))
         downloadArrow.tintColor = UIColor.white.withAlphaComponent(0.7)
         downloadArrow.setContentHuggingPriority(.required, for: .horizontal)
+        downloadArrow.accessibilityLabel = "Download"
 
         downloadLabel.font = .monospacedDigitSystemFont(ofSize: 34, weight: .regular)
         downloadLabel.textColor = .white

@@ -13,6 +13,7 @@ struct CustomRuleSetDetailView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
 
     @State private var showAddRuleSheet = false
+    @State private var showImportSheet = false
     @State private var showRenameAlert = false
     @State private var renameText = ""
 
@@ -65,6 +66,11 @@ struct CustomRuleSetDetailView: View {
                         Label("Add Rule", systemImage: "plus")
                     }
                     Button {
+                        showImportSheet = true
+                    } label: {
+                        Label("Import Rules", systemImage: "square.and.arrow.down")
+                    }
+                    Button {
                         renameText = customRuleSet?.name ?? ""
                         showRenameAlert = true
                     } label: {
@@ -75,6 +81,9 @@ struct CustomRuleSetDetailView: View {
         }
         .sheet(isPresented: $showAddRuleSheet) {
             AddRuleView(customRuleSetId: customRuleSetId)
+        }
+        .sheet(isPresented: $showImportSheet) {
+            ImportRulesView(customRuleSetId: customRuleSetId)
         }
         .alert("Rename Rule Set", isPresented: $showRenameAlert) {
             TextField("Name", text: $renameText)
@@ -130,9 +139,9 @@ struct CustomRuleSetDetailView: View {
 
     private func ruleTypeLabel(_ type: DomainRuleType) -> String {
         switch type {
-        case .domainSuffix: return "Domain Suffix"
-        case .ipCIDR: return "IPv4 CIDR"
-        case .ipCIDR6: return "IPv6 CIDR"
+        case .domainSuffix: return String(localized: "Domain Suffix")
+        case .ipCIDR: return String(localized: "IPv4 CIDR")
+        case .ipCIDR6: return String(localized: "IPv6 CIDR")
         }
     }
 }
@@ -189,6 +198,199 @@ private struct AddRuleView: View {
         case .domainSuffix: return "example.com"
         case .ipCIDR: return "10.0.0.0/8"
         case .ipCIDR6: return "2001:db8::/32"
+        }
+    }
+}
+
+// MARK: - Import Rules Sheet
+
+private struct ImportRulesView: View {
+    let customRuleSetId: UUID
+    @ObservedObject private var ruleSetStore = RuleSetStore.shared
+    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var text = ""
+    @State private var url = ""
+    @State private var isDownloading = false
+    @State private var downloadError: String?
+
+    private var parsedRules: [DomainRule] {
+        RuleParser.parse(text)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Rules") {
+                    TextEditor(text: $text)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .font(.system(size: 12).monospaced())
+                        .frame(minHeight: 200)
+                }
+                
+                Section {
+                    HStack {
+                        TextField("Anywhere Rule List URL", text: $url)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .keyboardType(.URL)
+                            .textFieldStyle(.plain)
+                        if #available(iOS 26.0, *) {
+                            Button {
+                                Task { await download() }
+                            } label: {
+                                VStack {
+                                    if isDownloading {
+                                        ProgressView()
+                                    } else {
+                                        Image(systemName: "checkmark")
+                                            .accessibilityLabel("Download")
+                                    }
+                                }
+                            }
+                            .buttonBorderShape(.circle)
+                            .buttonStyle(.glassProminent)
+                            .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isDownloading)
+                        } else {
+                            Button {
+                                Task { await download() }
+                            } label: {
+                                ZStack {
+                                    Text("Download")
+                                    if isDownloading {
+                                        ProgressView()
+                                    }
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isDownloading)
+                        }
+                    }
+                    
+                } header: {
+                    Text("Download From Internet")
+                } footer: {
+                    if let downloadError {
+                        Text(downloadError)
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                    }
+                }
+
+                let parsedRuleCount = parsedRules.count
+                if parsedRuleCount > 0 {
+                    Section {
+                        Text("\(parsedRules.count) rule(s)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("Import Rules")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    CancelButton("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    ConfirmButton("Import") {
+                        ruleSetStore.addRules(to: customRuleSetId, rules: parsedRules)
+                        Task { await viewModel.syncRoutingConfigurationToNE() }
+                        dismiss()
+                    }
+                    .disabled(parsedRules.isEmpty)
+                }
+            }
+        }
+    }
+
+    private func download() async {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let requestURL = URL(string: trimmed) else {
+            downloadError = "Invalid URL."
+            return
+        }
+        isDownloading = true
+        downloadError = nil
+        do {
+            let (data, response) = try await URLSession.shared.data(from: requestURL)
+            if let httpResponse = response as? HTTPURLResponse,
+               !(200...299).contains(httpResponse.statusCode) {
+                downloadError = "HTTP \(httpResponse.statusCode)"
+            } else if let body = String(data: data, encoding: .utf8) {
+                text = body
+            } else {
+                downloadError = "Unable to decode response as text."
+            }
+        } catch {
+            downloadError = error.localizedDescription
+        }
+        isDownloading = false
+    }
+}
+
+// MARK: - Rule Parser
+
+enum RuleParser {
+
+    static func parse(_ text: String) -> [DomainRule] {
+        text
+            .components(separatedBy: .newlines)
+            .compactMap { parseLine($0) }
+    }
+
+    private static func parseLine(_ line: String) -> DomainRule? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        // Skip comment lines
+        if trimmed.hasPrefix("#") || trimmed.hasPrefix("//") { return nil }
+
+        // Try comma-separated formats: "type, value"
+        if let commaIndex = trimmed.firstIndex(of: ",") {
+            let prefix = trimmed[trimmed.startIndex..<commaIndex].trimmingCharacters(in: .whitespaces)
+            let value = trimmed[trimmed.index(after: commaIndex)...].trimmingCharacters(in: .whitespaces)
+            guard !value.isEmpty else { return nil }
+
+            // Anywhere format: "0, ...", "1, ...", "2, ..."
+            if let typeInt = Int(prefix), let type = DomainRuleType(rawValue: typeInt) {
+                return DomainRule(type: type, value: normalizeValue(value, type: type))
+            }
+
+            // General format: "IP-CIDR, ...", "IP-CIDR6, ...", "DOMAIN-SUFFIX, ..."
+            let upper = prefix.uppercased()
+            switch upper {
+            case "IP-CIDR":
+                return DomainRule(type: .ipCIDR, value: normalizeValue(value, type: .ipCIDR))
+            case "IP-CIDR6":
+                return DomainRule(type: .ipCIDR6, value: normalizeValue(value, type: .ipCIDR6))
+            case "DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD":
+                return DomainRule(type: .domainSuffix, value: value)
+            default:
+                return nil
+            }
+        }
+
+        // No comma — unrecognized format
+        return nil
+    }
+
+    private static func normalizeValue(_ value: String, type: DomainRuleType) -> String {
+        switch type {
+        case .ipCIDR:
+            // Single IPv4 (no slash) → append /32
+            if !value.contains("/") {
+                return value + "/32"
+            }
+            return value
+        case .ipCIDR6:
+            // Single IPv6 (no slash) → append /128
+            if !value.contains("/") {
+                return value + "/128"
+            }
+            return value
+        case .domainSuffix:
+            return value
         }
     }
 }

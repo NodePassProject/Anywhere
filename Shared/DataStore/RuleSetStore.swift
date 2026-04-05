@@ -165,6 +165,13 @@ class RuleSetStore: ObservableObject {
         saveCustomRuleSets()
     }
 
+    func addRules(to customRuleSetId: UUID, rules: [DomainRule]) {
+        guard !rules.isEmpty,
+              let index = customRuleSets.firstIndex(where: { $0.id == customRuleSetId }) else { return }
+        customRuleSets[index].rules.append(contentsOf: rules)
+        saveCustomRuleSets()
+    }
+
     func removeRules(from customRuleSetId: UUID, at indices: [Int]) {
         guard let index = customRuleSets.firstIndex(where: { $0.id == customRuleSetId }) else { return }
         for i in indices.sorted().reversed() {
@@ -181,7 +188,7 @@ class RuleSetStore: ObservableObject {
 
     /// Loads rules for a given built-in rule set name. Thread-safe – no instance state accessed.
     /// All built-in rules are stored in the bundled Rules.db SQLite database.
-    nonisolated static func loadRules(for name: String) -> [DomainRule] {
+    static func loadRules(for name: String) -> [DomainRule] {
         if name != "Direct" && name != "ADBlock" {
             return serviceCatalog.rules(for: name)
         }
@@ -210,7 +217,7 @@ class RuleSetStore: ObservableObject {
                    let custom = customSnapshot.first(where: { $0.id == customId }) {
                     domainRules = custom.rules
                 } else {
-                    domainRules = Self.loadRules(for: ruleSet.name)
+                    domainRules = await Self.loadRules(for: ruleSet.name)
                 }
                 guard !domainRules.isEmpty else { continue }
 
@@ -258,7 +265,7 @@ class RuleSetStore: ObservableObject {
             let routing: [String: Any] = ["rules": routingRules, "configs": configurationsDict]
 
             if let data = try? JSONSerialization.data(withJSONObject: routing) {
-                AWCore.userDefaults.set(data, forKey: "routingData")
+                await AWCore.userDefaults.set(data, forKey: "routingData")
             }
 
             CFNotificationCenterPostNotification(
@@ -291,11 +298,11 @@ class RuleSetStore: ObservableObject {
                 ["type": $0.type.rawValue, "value": $0.value]
             }
             if serializedRules.isEmpty {
-                AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
+                await AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
                 return
             }
             if let data = try? JSONSerialization.data(withJSONObject: serializedRules) {
-                AWCore.userDefaults.set(data, forKey: "bypassCountryDomainRules")
+                await AWCore.userDefaults.set(data, forKey: "bypassCountryDomainRules")
             }
         }.value
     }
