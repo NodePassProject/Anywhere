@@ -9,7 +9,7 @@ import Foundation
 import Combine
 
 @MainActor
-class ConfigurationStore: ObservableObject, ConfigurationProviding {
+class ConfigurationStore: ObservableObject {
     static let shared = ConfigurationStore()
 
     @Published private(set) var configurations: [ProxyConfiguration] = []

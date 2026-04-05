@@ -40,7 +40,7 @@ enum DomainRuleType: Int, Codable {
     }
 }
 
-struct DomainRule: Codable {
+struct DomainRule: Codable, Equatable {
     let type: DomainRuleType
     let value: String   // domain suffix or CIDR notation
 }

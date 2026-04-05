@@ -154,7 +154,6 @@ struct ChainEditorView: View {
             .environment(\.editMode, .constant(.active))
             .sheet(isPresented: $showingProxyPicker) {
                 ProxyPickerView(
-                    configurations: viewModel.configurations,
                     excludedIds: Set(selectedProxyIds)
                 ) { selected in
                     selectedProxyIds.append(selected.id)
@@ -189,40 +188,46 @@ struct ChainEditorView: View {
 // MARK: - Proxy Picker
 
 private struct ProxyPickerView: View {
+    @ObservedObject private var viewModel = VPNViewModel.shared
     @Environment(\.dismiss) private var dismiss
-    let configurations: [ProxyConfiguration]
+    
     let excludedIds: Set<UUID>
     let onSelect: (ProxyConfiguration) -> Void
 
-    private var available: [ProxyConfiguration] {
-        configurations.filter { !excludedIds.contains($0.id) }
+    private var standaloneConfigurations: [ProxyConfiguration] {
+        viewModel.configurations.filter { $0.subscriptionId == nil && !excludedIds.contains($0.id) }
+    }
+    
+    private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
+        viewModel.subscriptions.compactMap { subscription in
+            let configurations = viewModel.configurations(for: subscription).filter { !excludedIds.contains($0.id) }
+            return configurations.isEmpty ? nil : (subscription, configurations)
+        }
     }
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach(available) { proxy in
-                    Button {
-                        onSelect(proxy)
-                        dismiss()
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(proxy.name)
-                                .font(.body)
-                                .foregroundStyle(.primary)
-                            Text("\(proxy.serverAddress):\(proxy.serverPort, format: .number.grouping(.never))")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                if !standaloneConfigurations.isEmpty {
+                    Section {
+                        ForEach(standaloneConfigurations) { configuration in
+                            configurationRow(configuration)
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                        .contentShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    .buttonStyle(.plain)
+                }
+                ForEach(subscribedGroups, id: \.0.id) { subscription, configurations in
+                    Section {
+                        ForEach(configurations) { configuration in
+                            configurationRow(configuration)
+                        }
+                    } header: {
+                        Text(subscription.name)
+                    }
                 }
             }
             .overlay {
-                if available.isEmpty {
-                    ContentUnavailableView("No Proxies", systemImage: "network.slash")
+                if viewModel.configurations.isEmpty {
+                    ContentUnavailableView("No Proxies", systemImage: "network")
                 }
             }
             .navigationTitle("Select Proxy")
@@ -241,5 +246,25 @@ private struct ProxyPickerView: View {
                 }
             }
         }
+    }
+    
+    @ViewBuilder
+    private func configurationRow(_ configuration: ProxyConfiguration) -> some View {
+        Button {
+            onSelect(configuration)
+            dismiss()
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(configuration.name)
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                Text("\(configuration.serverAddress):\(configuration.serverPort, format: .number.grouping(.never))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
     }
 }
