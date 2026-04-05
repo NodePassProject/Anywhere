@@ -15,7 +15,7 @@ extension LWIPStack {
     /// Flushes accumulated output packets to the TUN device immediately.
     ///
     /// Called inline from download write paths (``LWIPTCPConnection.writeToLWIP``
-    /// and ``drainOverflowBuffer``) to eliminate the extra dispatch-cycle latency
+    /// and ``drainPendingWrite``) to eliminate the extra dispatch-cycle latency
     /// of the deferred ``lwipQueue.async`` flush. The deferred path still serves
     /// as the fallback for output generated during input batch processing
     /// (``startReadingPackets`` → ``lwip_bridge_input`` loop), where batching

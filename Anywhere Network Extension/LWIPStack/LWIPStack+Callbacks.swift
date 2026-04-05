@@ -69,7 +69,7 @@ extension LWIPStack {
                             logger.warning("[TCP] Routing config not found for \(dstIPString)")
                         }
                     }
-                } else if shared.proxyMode != .global, shared.bypassCountry != 0, match.isBypass {
+                } else if shared.proxyMode != .global, !shared.bypassCountryCode.isEmpty, match.isBypass {
                     forceBypass = true
                 }
             case .resolved(let domain, let configurationOverride, let bypass):
@@ -196,7 +196,7 @@ extension LWIPStack {
                             logger.warning("[UDP] Routing config not found for \(dstIPString)")
                         }
                     }
-                } else if shared.proxyMode != .global, shared.bypassCountry != 0, match.isBypass {
+                } else if shared.proxyMode != .global, !shared.bypassCountryCode.isEmpty, match.isBypass {
                     forceBypass = true
                 }
             case .resolved(let domain, let configurationOverride, let bypass):
@@ -217,11 +217,6 @@ extension LWIPStack {
                     isIPv6: isIPv6 != 0,
                     udpPayloadLength: Int(len)
                 )
-                return
-            }
-
-            guard shared.udpFlows.count < TunnelConstants.maxUDPFlows else {
-                logger.warning("[UDP] Max flows reached, dropping \(flowKey)")
                 return
             }
 
@@ -288,7 +283,7 @@ extension LWIPStack {
         }
 
         // Country bypass: domain matched the bypass country's rule set.
-        if proxyMode != .global, bypassCountry != 0, match.isBypass {
+        if proxyMode != .global, !bypassCountryCode.isEmpty, match.isBypass {
             return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: true)
         }
 

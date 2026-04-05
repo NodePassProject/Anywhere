@@ -27,12 +27,10 @@ class LWIPTCPConnection {
 
     // MARK: Backpressure State
 
-    /// Data that couldn't fit in lwIP's TCP send buffer.
-    /// Acts as the equivalent of Xray-core's pipe buffer between reader and writer.
-    private var overflowBuffer = Data()
-
-    /// Whether the proxy receive loop is paused due to a full lwIP send buffer.
-    private var receivePaused = false
+    /// Remainder of the current receive that couldn't fit in lwIP's TCP send
+    /// buffer. Bounded to at most one receive chunk — no new receives are
+    /// issued until this is fully drained.
+    private var pendingWrite = Data()
 
     // MARK: Upload Coalescing
 
@@ -221,12 +219,11 @@ class LWIPTCPConnection {
 
     /// Called when the local app acknowledges receipt of data sent via lwIP.
     ///
-    /// Drains the overflow buffer into the now-available send buffer space,
-    /// and resumes the VLESS receive loop once overflow is fully drained.
-    /// This mirrors Xray-core's pipe read-signal mechanism.
+    /// Drains pending data into the now-available send buffer space,
+    /// and resumes the receive loop once fully drained.
     func handleSent(len: UInt16) {
         guard !closed else { return }
-        drainOverflowBuffer()
+        drainPendingWrite()
     }
 
     func handleRemoteClose() {
@@ -452,13 +449,14 @@ class LWIPTCPConnection {
     /// support pause/resume for backpressure. Only issues a receive when
     /// not paused and the connection is active.
     ///
-    /// The receive callback pre-issues the next receive **before** writing
-    /// data to lwIP, so the kernel/NWConnection can fill its buffer while
-    /// the current chunk is being processed.  This eliminates the pipeline
-    /// gap that previously existed between ``writeToLWIP`` finishing and
-    /// the next receive being posted.
+    /// Issues the next receive on the proxy transport.
+    ///
+    /// The next receive is only issued **after** ``writeToLWIP(_:)`` confirms
+    /// all data was consumed (pull model). If a remainder exists in
+    /// ``pendingWrite``, no receive is issued until ``handleSent(len:)``
+    /// drains it completely.
     private func requestNextReceive() {
-        guard !closed, !receivePaused else { return }
+        guard !closed else { return }
 
         if let relay = directRelay {
             relay.receive { [weak self] data, error in
@@ -484,9 +482,6 @@ class LWIPTCPConnection {
                     }
 
                     self.activityTimer?.update()
-                    // Pipeline: issue next receive before processing so the
-                    // transport can fill its buffer concurrently.
-                    self.requestNextReceive()
                     self.writeToLWIP(data)
                 }
             }
@@ -518,9 +513,6 @@ class LWIPTCPConnection {
                 }
 
                 self.activityTimer?.update()
-                // Pipeline: issue next receive before processing so the
-                // transport can fill its buffer concurrently.
-                self.requestNextReceive()
                 self.writeToLWIP(data)
             }
         }
@@ -557,68 +549,48 @@ class LWIPTCPConnection {
 
     /// Writes data from proxy to the lwIP TCP send buffer.
     ///
-    /// Writes as much data as the lwIP send buffer can accept. Any remainder
-    /// is stored in ``overflowBuffer`` and the receive loop pauses until
-    /// ``handleSent(len:)`` drains the overflow and resumes receiving.
+    /// Feeds as much as possible to lwIP. Any remainder is saved in
+    /// ``pendingWrite`` and no further receives are issued until
+    /// ``handleSent(len:)`` drains it completely.
     private func writeToLWIP(_ data: Data) {
         guard !closed else { return }
 
-        // If overflow already queued, append to preserve ordering.
-        if !overflowBuffer.isEmpty {
-            overflowBuffer.append(data)
-            drainOverflowBuffer()
-            guard !closed else { return }
-            // Pause further receives if overflow is too large.  The next
-            // receive was already pre-issued by the pipelined callback; when
-            // it fires and finds receivePaused == true it will still write to
-            // the overflow buffer, but won't issue yet another receive.
-            if overflowBuffer.count >= TunnelConstants.tcpOverflowBufferSize {
-                receivePaused = true
-            }
-            return
-        }
-
+        var written = 0
         data.withUnsafeBytes { buffer in
             guard let base = buffer.baseAddress else { return }
-            let written = feedLWIP(base, count: data.count, retryOnEmpty: true)
-            if written == -1 {
+            let fed = feedLWIP(base, count: data.count, retryOnEmpty: true)
+            if fed == -1 {
                 logger.error("[TCP] Write failed: \(self.dstHost):\(self.dstPort)")
                 self.abort()
                 return
             }
-            if written < data.count {
-                overflowBuffer.append(Data(bytes: base + written, count: data.count - written))
-            }
+            written = fed
         }
 
         guard !closed else { return }
 
         lwip_bridge_tcp_output(pcb)
-        // Flush output packets to the TUN inline, eliminating the deferred-
-        // dispatch latency.  During TCP slow start, faster segment delivery
-        // means earlier ACKs from the local app and quicker cwnd growth.
         LWIPStack.shared?.flushOutputInline()
 
-        // Backpressure gate: if overflow has accumulated beyond the soft limit,
-        // pause receives so the remote side stops sending.  The pipelined
-        // receive loop pre-issues the next receive before calling writeToLWIP,
-        // so we only need to set the pause flag here; the already-outstanding
-        // receive's callback will respect it and stop issuing further receives.
-        if overflowBuffer.count >= TunnelConstants.tcpOverflowBufferSize {
-            receivePaused = true
+        if written < data.count {
+            // Save remainder — no more receives until this is drained.
+            pendingWrite.append(data[written...])
+        } else {
+            // All consumed — pull the next chunk.
+            requestNextReceive()
         }
     }
 
-    /// Drains the overflow buffer into lwIP's TCP send buffer.
+    /// Drains ``pendingWrite`` into lwIP's TCP send buffer.
     ///
     /// Called from ``handleSent(len:)`` when the local app acknowledges data,
-    /// freeing space in the lwIP send buffer. Resumes the proxy receive loop
-    /// as soon as any data is drained (mirroring Xray-core's instant-resume).
-    private func drainOverflowBuffer() {
-        guard !closed, !overflowBuffer.isEmpty else { return }
+    /// freeing space in the send buffer. Once fully drained, resumes the
+    /// receive loop.
+    private func drainPendingWrite() {
+        guard !closed, !pendingWrite.isEmpty else { return }
 
-        let count = overflowBuffer.count
-        let offset = overflowBuffer.withUnsafeBytes { buffer -> Int in
+        let count = pendingWrite.count
+        let offset = pendingWrite.withUnsafeBytes { buffer -> Int in
             guard let base = buffer.baseAddress else { return 0 }
             let written = feedLWIP(base, count: count)
             if written == -1 {
@@ -633,36 +605,37 @@ class LWIPTCPConnection {
 
         if offset > 0 {
             if offset >= count {
-                overflowBuffer.removeAll(keepingCapacity: true)
+                pendingWrite.removeAll(keepingCapacity: true)
             } else {
-                overflowBuffer.removeSubrange(0..<offset)
+                pendingWrite.removeSubrange(0..<offset)
             }
             lwip_bridge_tcp_output(pcb)
             LWIPStack.shared?.flushOutputInline()
-        } else if !overflowBuffer.isEmpty {
-            // Nothing drained (ERR_MEM with empty send buffer) — no handleSent will
-            // fire for this connection, so schedule a delayed retry.
+        } else if !pendingWrite.isEmpty {
+            // Nothing drained (ERR_MEM) — schedule a delayed retry.
+            logger.warning("[TCP] Drain stalled (\(self.pendingWrite.count) bytes pending), retrying in \(TunnelConstants.drainRetryDelayMs)ms: \(self.dstHost):\(self.dstPort)")
             lwipQueue.asyncAfter(deadline: .now() + .milliseconds(TunnelConstants.drainRetryDelayMs)) { [weak self] in
                 guard let self, !self.closed else { return }
-                self.drainOverflowBuffer()
+                self.drainPendingWrite()
             }
+            return
         }
 
-        if receivePaused && overflowBuffer.count < TunnelConstants.tcpOverflowBufferSize {
-            receivePaused = false
+        // Fully drained — resume receiving.
+        if pendingWrite.isEmpty {
             requestNextReceive()
         }
     }
 
     // MARK: - Close / Abort
 
-    /// Best-effort flush of overflow data into lwIP send buffer before close.
+    /// Best-effort flush of pending data into lwIP send buffer before close.
     /// Data written here will be delivered before the FIN segment.
-    private func flushOverflowToLWIP() {
-        guard !overflowBuffer.isEmpty else { return }
+    private func flushPendingToLWIP() {
+        guard !pendingWrite.isEmpty else { return }
 
-        let count = overflowBuffer.count
-        let offset = overflowBuffer.withUnsafeBytes { buffer -> Int in
+        let count = pendingWrite.count
+        let offset = pendingWrite.withUnsafeBytes { buffer -> Int in
             guard let base = buffer.baseAddress else { return 0 }
             let written = feedLWIP(base, count: count)
             return max(written, 0)  // treat fatal as 0 (best-effort)
@@ -676,7 +649,7 @@ class LWIPTCPConnection {
     func close() {
         guard !closed else { return }
         closed = true
-        flushOverflowToLWIP()
+        flushPendingToLWIP()
         lwip_bridge_tcp_close(pcb)
         releaseProxy()
         Unmanaged.passUnretained(self).release()
@@ -704,11 +677,10 @@ class LWIPTCPConnection {
         proxyClient = nil
         proxyConnecting = false
         pendingData = Data()
-        overflowBuffer = Data()
+        pendingWrite = Data()
         uploadCoalesceBuffer = Data()
         uploadCoalesceRecvLen = 0
         uploadFlushInFlight = false
-        receivePaused = false
         relay?.cancel()
         connection?.cancel()
         client?.cancel()

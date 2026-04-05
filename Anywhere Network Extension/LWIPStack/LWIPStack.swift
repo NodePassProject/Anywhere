@@ -50,7 +50,7 @@ class LWIPStack {
     // ipv6DNSEnabled          │ lwIP DNS interception (AAAA fake IP)│ Stack restart
     // encryptedDNSEnabled     │ lwIP DNS interception (DDR block),  │ Reapply tunnel settings +
     //                         │ tunnel DNS settings (DoH/DoT)       │ stack restart
-    // bypassCountry           │ lwIP per-connection bypass check    │ Stack restart
+    // bypassCountryEnabled     │ DomainRouter bypass rules gate      │ Stack restart
     // routingRules            │ DomainRouter (connection-time)      │ Stack restart (closes connections
     //                         │                                     │ using outdated proxy configurations;
     //                         │                                     │ FakeIPPool preserved)
@@ -65,11 +65,9 @@ class LWIPStack {
     // lwIP periodic timeout timer
     var timeoutTimer: DispatchSourceTimer?
 
-    /// GeoIP database for country-based bypass (loaded once, reused across configuration switches).
-    private var geoIPDatabase: GeoIPDatabase?
-
-    /// Packed UInt16 country code to bypass (0 = disabled).
-    var bypassCountry: UInt16 = 0
+    /// Active bypass country code (empty = disabled).
+    /// Used to gate DomainRouter bypass flags and detect settings changes.
+    var bypassCountryCode: String = ""
 
     /// All proxy server addresses (domains and resolved IPs) from all configurations.
     /// Updated via IPC from the app when configurations change. The extension also
@@ -204,16 +202,13 @@ class LWIPStack {
     /// Singleton for C callback access (one NE process = one stack).
     static var shared: LWIPStack?
 
-    // MARK: - GeoIP Bypass
+    // MARK: - Proxy Server Address Bypass
 
     /// Returns true if traffic to the given host should bypass the tunnel.
-    /// Checks proxy server addresses first (prevents routing loops after config switch),
-    /// then falls back to GeoIP country-based bypass.
+    /// Checks proxy server addresses (prevents routing loops after config switch).
+    /// Country-based bypass is handled entirely by DomainRouter rules.
     func shouldBypass(host: String) -> Bool {
-        if isProxyServerAddress(host) { return true }
-        if proxyMode == .global { return false }
-        guard bypassCountry != 0 else { return false }
-        return geoIPDatabase?.lookup(host) == bypassCountry
+        isProxyServerAddress(host)
     }
 
     /// Returns true if the given host matches any proxy server address across all
@@ -244,7 +239,6 @@ class LWIPStack {
     // MARK: - Runtime Configuration
 
     func configureRuntime(for configuration: ProxyConfiguration, shouldLoadProxyServerAddresses: Bool) {
-        ensureGeoIPDatabaseLoaded()
         loadIPv6Settings()
         loadBypassCountry()
         loadEncryptedDNSSetting()
@@ -265,12 +259,6 @@ class LWIPStack {
         }
     }
 
-    private func ensureGeoIPDatabaseLoaded() {
-        if geoIPDatabase == nil {
-            geoIPDatabase = GeoIPDatabase()
-        }
-    }
-
     private static func shouldUseVisionMux(_ configuration: ProxyConfiguration) -> Bool {
         configuration.outboundProtocol == .vless &&
         configuration.muxEnabled &&
@@ -282,10 +270,9 @@ class LWIPStack {
         ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.ipv6DNSEnabled)
     }
 
-    /// Reads the bypass country code from app group UserDefaults and converts to UInt16.
+    /// Reads the bypass country code from app group UserDefaults.
     private func loadBypassCountry() {
-        let code = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.bypassCountryCode) ?? ""
-        bypassCountry = code.isEmpty ? 0 : GeoIPDatabase.packCountryCode(code)
+        bypassCountryCode = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.bypassCountryCode) ?? ""
     }
 
     // MARK: - Proxy Server Address Bypass

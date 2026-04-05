@@ -36,7 +36,7 @@ extension LWIPStack {
             startTimeoutTimer()
             startUDPCleanupTimer()
             startReadingPackets()
-            logger.debug("[LWIPStack] Started, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), ipv6dns=\(ipv6DNSEnabled), encryptedDNS=\(encryptedDNSEnabled), bypass=\(bypassCountry != 0)")
+            logger.debug("[LWIPStack] Started, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), ipv6dns=\(ipv6DNSEnabled), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
         }
 
         startObservingSettings()
@@ -120,7 +120,7 @@ extension LWIPStack {
         startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.debug("[LWIPStack] Restarted, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), ipv6dns=\(ipv6DNSEnabled), encryptedDNS=\(encryptedDNSEnabled), bypass=\(bypassCountry != 0)")
+        logger.debug("[LWIPStack] Restarted, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), ipv6dns=\(ipv6DNSEnabled), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
     }
 
     // MARK: - Settings Observation
@@ -180,14 +180,13 @@ extension LWIPStack {
 
             let ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.ipv6DNSEnabled)
             let bypassCountryCode = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.bypassCountryCode) ?? ""
-            let bypassCountry = bypassCountryCode.isEmpty ? 0 : GeoIPDatabase.packCountryCode(bypassCountryCode)
             let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSEnabled)
             let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSProtocol) ?? TunnelConstants.defaultEncryptedDNSProtocol
             let encryptedDNSServer = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSServer) ?? ""
             let proxyMode = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.proxyMode).flatMap(ProxyMode.init) ?? .rule
 
             let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
-            let bypassCountryChanged = bypassCountry != self.bypassCountry
+            let bypassCountryChanged = bypassCountryCode != self.bypassCountryCode
             let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
             let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
             let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer

@@ -47,10 +47,6 @@ enum TunnelConstants {
 
     // MARK: - TCP Buffer Sizes
 
-    /// Soft cap for the TCP overflow buffer (2MB). When exceeded, receiving pauses
-    /// to apply backpressure. NOT a hard cap — do not abort when exceeded; the
-    /// backpressure mechanism (`receivePaused` + `drainOverflowBuffer`) handles recovery.
-    static let tcpOverflowBufferSize = 2 * 1024 * 1024
     /// Maximum bytes per tcp_write call (16 KB ≈ 12 TCP segments at TCP_MSS=1360).
     /// With MEMP_NUM_TCP_SEG=4096, this lets many connections make progress without
     /// exhausting the segment pool. Must stay in sync with lwipopts.h.
@@ -61,10 +57,8 @@ enum TunnelConstants {
 
     // MARK: - UDP Settings
 
-    /// Maximum buffer size for queued UDP datagrams (Xray-core DiscardOverflow, 16 KB).
+    /// Maximum buffer size for queued UDP datagrams.
     static let udpMaxBufferSize = 16 * 1024
-    /// Maximum concurrent UDP flows.
-    static let maxUDPFlows = 200
     /// Idle timeout for UDP flows (seconds).
     static let udpIdleTimeout: CFAbsoluteTime = 60
 
@@ -84,7 +78,7 @@ enum TunnelConstants {
     /// UDP flow cleanup timer interval (seconds).
     static let udpCleanupIntervalSec = 1
     /// Retry delay when TCP overflow drain makes no progress (milliseconds).
-    static let drainRetryDelayMs = 100
+    static let drainRetryDelayMs = 250
 
     // MARK: - UserDefaults Keys
 
