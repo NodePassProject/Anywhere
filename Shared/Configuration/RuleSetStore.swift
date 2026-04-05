@@ -84,24 +84,12 @@ class RuleSetStore: ObservableObject {
     // MARK: - Rules
 
     /// Loads rules for a given rule set name. Thread-safe – no instance state accessed.
-    /// Direct and ADBlock are loaded from their own JSON files; all others come from the merged Service.json.
+    /// All rules are stored in the bundled Rules.db SQLite database.
     nonisolated static func loadRules(for name: String) -> [DomainRule] {
         if name != "Direct" && name != "ADBlock" {
             return serviceCatalog.rules(for: name)
         }
-        guard let url = Bundle.main.url(forResource: name, withExtension: "json") else {
-            logger.error("[RuleSetStore] Bundle resource '\(name, privacy: .public).json' not found")
-            return []
-        }
-        guard let data = try? Data(contentsOf: url) else {
-            logger.error("[RuleSetStore] Failed to read '\(name, privacy: .public).json'")
-            return []
-        }
-        guard let rules = try? JSONDecoder().decode([DomainRule].self, from: data) else {
-            logger.error("[RuleSetStore] Failed to decode '\(name, privacy: .public).json'")
-            return []
-        }
-        return rules
+        return RulesDatabase.shared.loadRules(for: name)
     }
 
     // MARK: - App Group Sync

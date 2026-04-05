@@ -6,14 +6,10 @@
 //
 
 import Foundation
-import os.log
 
-private let countryBypassLogger = Logger(subsystem: "com.argsment.Anywhere", category: "CountryBypassCatalog")
-
-struct CountryBypassCatalog: Decodable {
+struct CountryBypassCatalog {
     let supportedCountryCodes: [String]
-    let languageToCountry: [String: String]
-    let rulesByCountryCode: [String: [DomainRule]]
+    private let languageToCountry: [String: String]
 
     static let shared = load()
 
@@ -25,31 +21,13 @@ struct CountryBypassCatalog: Decodable {
     }
 
     func rules(for countryCode: String) -> [DomainRule] {
-        rulesByCountryCode[countryCode] ?? []
+        RulesDatabase.shared.loadRules(for: countryCode)
     }
 
-    private static func load(bundle: Bundle = .main) -> CountryBypassCatalog {
-        let resourceName = "Country"
-        let resourceDescription = "\(resourceName).json"
-
-        guard let url = bundle.url(forResource: resourceName, withExtension: "json") else {
-            countryBypassLogger.error("[CountryBypassCatalog] Bundle resource '\(resourceDescription, privacy: .public)' not found")
-            return .empty
-        }
-        guard let data = try? Data(contentsOf: url) else {
-            countryBypassLogger.error("[CountryBypassCatalog] Failed to read '\(resourceDescription, privacy: .public)'")
-            return .empty
-        }
-        guard let catalog = try? JSONDecoder().decode(Self.self, from: data) else {
-            countryBypassLogger.error("[CountryBypassCatalog] Failed to decode '\(resourceDescription, privacy: .public)'")
-            return .empty
-        }
-        return catalog
+    private static func load() -> CountryBypassCatalog {
+        CountryBypassCatalog(
+            supportedCountryCodes: RulesDatabase.shared.loadStringArray("supportedCountryCodes"),
+            languageToCountry: RulesDatabase.shared.loadStringDictionary("languageToCountry")
+        )
     }
-
-    private static let empty = CountryBypassCatalog(
-        supportedCountryCodes: [],
-        languageToCountry: [:],
-        rulesByCountryCode: [:]
-    )
 }
