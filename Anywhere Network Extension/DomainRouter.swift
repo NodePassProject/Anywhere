@@ -48,31 +48,36 @@ class DomainRouter {
 
     private var trieRoot = TrieNode()
 
-    // Compiled IP CIDR rules (network & mask pre-computed at load time)
-    private var ipv4CIDRRules: [(network: UInt32, mask: UInt32, action: RouteAction)] = []
-    private var ipv6CIDRRules: [(network: [UInt8], prefixLen: Int, action: RouteAction)] = []
-    private var bypassIPv4CIDRRules: [(network: UInt32, mask: UInt32)] = []
-    private var bypassIPv6CIDRRules: [(network: [UInt8], prefixLen: Int)] = []
+    // MARK: - IP CIDR Binary Tries
+    //
+    // Binary tries for longest-prefix-match on IP addresses.
+    // Both user actions and bypass flags are stored in a single trie per protocol,
+    // mirroring the domain suffix trie design. User actions at the most-specific
+    // (deepest) matching prefix take precedence over bypass flags.
+    // Lookup is O(32) for IPv4, O(128) for IPv6 — constant regardless of rule count.
+
+    private var ipv4Trie = CIDRTrie()
+    private var ipv6Trie = CIDRTrie()
 
     // Proxy configurations for rule-assigned proxies
     private var configurationMap: [UUID: ProxyConfiguration] = [:]
 
-    // Count for hasRules (user domain rules only)
+    // Counts for hasRules (user rules only)
     private var domainRuleCount = 0
+    private var ipRuleCount = 0
 
     // MARK: - Loading
 
     /// Reads routing configuration from App Group UserDefaults and compiles rules.
     /// Clears all structures — must be called before ``loadBypassCountryRules()``.
     func loadRoutingConfiguration() {
-        // Clear all domain matching structures
+        // Clear all matching structures
         trieRoot = TrieNode()
         domainRuleCount = 0
+        ipRuleCount = 0
 
-        ipv4CIDRRules.removeAll()
-        ipv6CIDRRules.removeAll()
-        bypassIPv4CIDRRules.removeAll()
-        bypassIPv6CIDRRules.removeAll()
+        ipv4Trie = CIDRTrie()
+        ipv6Trie = CIDRTrie()
         configurationMap.removeAll()
 
         guard let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.routingData),
@@ -97,8 +102,6 @@ class DomainRouter {
             logger.warning("[VPN] Routing data malformed: missing rules")
             return
         }
-        var ipRuleCount = 0
-
         for rule in rules {
             guard let actionStr = rule["action"] as? String else { continue }
 
@@ -139,12 +142,12 @@ class DomainRouter {
                     switch type {
                     case .ipCIDR:
                         if let parsed = Self.parseIPv4CIDR(value) {
-                            ipv4CIDRRules.append((network: parsed.network, mask: parsed.mask, action: action))
+                            ipv4Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, userAction: action)
                             ipRuleCount += 1
                         }
                     case .ipCIDR6:
                         if let parsed = Self.parseIPv6CIDR(value) {
-                            ipv6CIDRRules.append((network: parsed.network, prefixLen: parsed.prefixLen, action: action))
+                            ipv6Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, userAction: action)
                             ipRuleCount += 1
                         }
                     case .domainSuffix:
@@ -154,7 +157,7 @@ class DomainRouter {
             }
         }
 
-        logger.debug("[DomainRouter] Loaded \(self.domainRuleCount) domain rules, \(ipRuleCount) IP rules, \(self.configurationMap.count) configurations")
+        logger.debug("[DomainRouter] Loaded \(self.domainRuleCount) domain rules, \(self.ipRuleCount) IP rules, \(self.configurationMap.count) configurations")
     }
 
     /// Reads bypass country rules from App Group UserDefaults and adds them
@@ -162,7 +165,7 @@ class DomainRouter {
     /// Must be called after ``loadRoutingConfiguration()``.
     func loadBypassCountryRules() {
         var domainRuleCount = 0
-        var ipRuleCount = 0
+        var bypassIPRuleCount = 0
 
         if let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.bypassCountryDomainRules),
            let rules = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
@@ -176,20 +179,20 @@ class DomainRouter {
                     domainRuleCount += 1
                 case .ipCIDR:
                     if let parsed = Self.parseIPv4CIDR(value) {
-                        bypassIPv4CIDRRules.append((network: parsed.network, mask: parsed.mask))
-                        ipRuleCount += 1
+                        ipv4Trie.insertBypass(network: parsed.network, prefixLen: parsed.prefixLen)
+                        bypassIPRuleCount += 1
                     }
                 case .ipCIDR6:
                     if let parsed = Self.parseIPv6CIDR(value) {
-                        bypassIPv6CIDRRules.append((network: parsed.network, prefixLen: parsed.prefixLen))
-                        ipRuleCount += 1
+                        ipv6Trie.insertBypass(network: parsed.network, prefixLen: parsed.prefixLen)
+                        bypassIPRuleCount += 1
                     }
                 }
             }
         }
 
-        if domainRuleCount > 0 || ipRuleCount > 0 {
-            logger.debug("[DomainRouter] Loaded \(domainRuleCount) bypass country domain rules, \(ipRuleCount) IP rules")
+        if domainRuleCount > 0 || bypassIPRuleCount > 0 {
+            logger.debug("[DomainRouter] Loaded \(domainRuleCount) bypass country domain rules, \(bypassIPRuleCount) IP rules")
         }
     }
 
@@ -197,7 +200,7 @@ class DomainRouter {
 
     /// Whether any user routing rules have been loaded.
     var hasRules: Bool {
-        domainRuleCount > 0 || !ipv4CIDRRules.isEmpty || !ipv6CIDRRules.isEmpty
+        domainRuleCount > 0 || ipRuleCount > 0
     }
 
     /// Unified domain matching via the suffix trie.
@@ -208,44 +211,25 @@ class DomainRouter {
         return DomainMatch(userAction: suffix.userAction, isBypass: suffix.userAction == nil && suffix.isBypass)
     }
 
-    /// Matches an IP address against user and bypass CIDR rules.
-    /// User rules take absolute precedence over country bypass.
+    /// Matches an IP address against user and bypass CIDR rules via binary trie.
+    /// Longest-prefix user action takes precedence; bypass is a fallback.
+    /// O(32) for IPv4, O(128) for IPv6 — constant regardless of rule count.
     func matchIP(_ ip: String) -> IPMatch {
         guard !ip.isEmpty else { return .none }
 
         if ip.contains(":") {
-            // IPv6
             var addr = in6_addr()
             guard inet_pton(AF_INET6, ip, &addr) == 1 else { return .none }
-            return withUnsafeBytes(of: &addr) { raw -> IPMatch in
-                let bytes = raw.bindMemory(to: UInt8.self)
-                guard bytes.count == 16 else { return .none }
-                for rule in ipv6CIDRRules {
-                    if Self.ipv6Matches(bytes: bytes, network: rule.network, prefixLen: rule.prefixLen) {
-                        return IPMatch(userAction: rule.action, isBypass: false)
-                    }
-                }
-                for rule in bypassIPv6CIDRRules {
-                    if Self.ipv6Matches(bytes: bytes, network: rule.network, prefixLen: rule.prefixLen) {
-                        return IPMatch(userAction: nil, isBypass: true)
-                    }
-                }
-                return .none
+            let result = withUnsafeBytes(of: &addr) { raw in
+                ipv6Trie.lookup(raw.bindMemory(to: UInt8.self))
             }
+            return IPMatch(userAction: result.userAction,
+                           isBypass: result.userAction == nil && result.isBypass)
         } else {
-            // IPv4
             guard let ip32 = Self.parseIPv4(ip) else { return .none }
-            for rule in ipv4CIDRRules {
-                if (ip32 & rule.mask) == rule.network {
-                    return IPMatch(userAction: rule.action, isBypass: false)
-                }
-            }
-            for rule in bypassIPv4CIDRRules {
-                if (ip32 & rule.mask) == rule.network {
-                    return IPMatch(userAction: nil, isBypass: true)
-                }
-            }
-            return .none
+            let result = ipv4Trie.lookup(ip32)
+            return IPMatch(userAction: result.userAction,
+                           isBypass: result.userAction == nil && result.isBypass)
         }
     }
 
@@ -331,15 +315,15 @@ class DomainRouter {
         }
     }
 
-    /// Parses "A.B.C.D/prefix" into (network, mask) with host bits zeroed.
-    private static func parseIPv4CIDR(_ cidr: String) -> (network: UInt32, mask: UInt32)? {
+    /// Parses "A.B.C.D/prefix" into (network, prefixLen) with host bits zeroed.
+    private static func parseIPv4CIDR(_ cidr: String) -> (network: UInt32, prefixLen: Int)? {
         let parts = cidr.split(separator: "/", maxSplits: 1)
         guard parts.count == 2,
-              let prefix = Int(parts[1]),
-              prefix >= 0, prefix <= 32,
+              let prefixLen = Int(parts[1]),
+              prefixLen >= 0, prefixLen <= 32,
               let ip = parseIPv4(String(parts[0])) else { return nil }
-        let mask: UInt32 = prefix == 0 ? 0 : ~UInt32(0) << (32 - prefix)
-        return (network: ip & mask, mask: mask)
+        let mask: UInt32 = prefixLen == 0 ? 0 : ~UInt32(0) << (32 - prefixLen)
+        return (network: ip & mask, prefixLen: prefixLen)
     }
 
     /// Parses a dotted-quad IPv4 string to host-order UInt32.
@@ -377,20 +361,114 @@ class DomainRouter {
         }
         return (network: network, prefixLen: prefixLen)
     }
+}
 
-    /// Checks if IPv6 address bytes match a CIDR rule.
-    private static func ipv6Matches(bytes: UnsafeBufferPointer<UInt8>, network: [UInt8], prefixLen: Int) -> Bool {
-        var remaining = prefixLen
-        for i in 0..<16 {
-            if remaining <= 0 { return true }
-            if remaining >= 8 {
-                if bytes[i] != network[i] { return false }
-                remaining -= 8
+// MARK: - CIDR Binary Trie
+//
+// Binary trie for longest-prefix-match on IP addresses.
+// Each bit of the address selects a child (0 = left, 1 = right).
+// Nodes along the path may carry a user action and/or bypass flag.
+// Lookup walks all address bits, tracking the deepest match — O(W) where
+// W = address width (32 for IPv4, 128 for IPv6), independent of rule count.
+
+struct CIDRTrie {
+    private final class Node {
+        var left: Node?       // bit 0
+        var right: Node?      // bit 1
+        var userAction: RouteAction?
+        var isBypass: Bool = false
+    }
+
+    private var root = Node()
+
+    /// Inserts a user CIDR rule. More-specific prefixes override less-specific ones.
+    mutating func insert(network: UInt32, prefixLen: Int, userAction: RouteAction) {
+        let node = walkOrCreate(network, depth: prefixLen)
+        node.userAction = userAction
+    }
+
+    /// Inserts a user CIDR rule from IPv6 network bytes.
+    mutating func insert(network: [UInt8], prefixLen: Int, userAction: RouteAction) {
+        let node = walkOrCreateIPv6(network, depth: prefixLen)
+        node.userAction = userAction
+    }
+
+    /// Inserts a bypass CIDR rule for IPv4.
+    mutating func insertBypass(network: UInt32, prefixLen: Int) {
+        let node = walkOrCreate(network, depth: prefixLen)
+        node.isBypass = true
+    }
+
+    /// Inserts a bypass CIDR rule from IPv6 network bytes.
+    mutating func insertBypass(network: [UInt8], prefixLen: Int) {
+        let node = walkOrCreateIPv6(network, depth: prefixLen)
+        node.isBypass = true
+    }
+
+    /// Looks up an IPv4 address. Returns the deepest user action and whether
+    /// any bypass node was found along the path. O(32).
+    func lookup(_ ip: UInt32) -> (userAction: RouteAction?, isBypass: Bool) {
+        var node = root
+        var deepestUserAction: RouteAction? = node.userAction
+        var foundBypass = node.isBypass
+
+        for i in 0..<32 {
+            let bit = (ip >> (31 - i)) & 1
+            guard let next = bit == 0 ? node.left : node.right else { break }
+            node = next
+            if let action = node.userAction { deepestUserAction = action }
+            if node.isBypass { foundBypass = true }
+        }
+
+        return (deepestUserAction, foundBypass)
+    }
+
+    /// Looks up an IPv6 address from a byte buffer. O(128).
+    func lookup(_ bytes: UnsafeBufferPointer<UInt8>) -> (userAction: RouteAction?, isBypass: Bool) {
+        var node = root
+        var deepestUserAction: RouteAction? = node.userAction
+        var foundBypass = node.isBypass
+
+        for i in 0..<128 {
+            let bit = (bytes[i >> 3] >> (7 - (i & 7))) & 1
+            guard let next = bit == 0 ? node.left : node.right else { break }
+            node = next
+            if let action = node.userAction { deepestUserAction = action }
+            if node.isBypass { foundBypass = true }
+        }
+
+        return (deepestUserAction, foundBypass)
+    }
+
+    // MARK: - Private
+
+    private func walkOrCreate(_ network: UInt32, depth: Int) -> Node {
+        var node = root
+        for i in 0..<depth {
+            let bit = (network >> (31 - i)) & 1
+            if bit == 0 {
+                if node.left == nil { node.left = Node() }
+                node = node.left!
             } else {
-                let mask = ~UInt8(0) << (8 - remaining)
-                return (bytes[i] & mask) == network[i]
+                if node.right == nil { node.right = Node() }
+                node = node.right!
             }
         }
-        return true
+        return node
+    }
+
+    private func walkOrCreateIPv6(_ network: [UInt8], depth: Int) -> Node {
+        var node = root
+        for i in 0..<depth {
+            let bit = (network[i >> 3] >> (7 - (i & 7))) & 1
+            if bit == 0 {
+                if node.left == nil { node.left = Node() }
+                node = node.left!
+            } else {
+                if node.right == nil { node.right = Node() }
+                node = node.right!
+            }
+        }
+        return node
     }
 }
