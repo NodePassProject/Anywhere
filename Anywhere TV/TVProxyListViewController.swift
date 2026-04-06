@@ -44,9 +44,15 @@ class TVProxyListViewController: UITableViewController {
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
 
+        let addButton = UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addTapped))
+        addButton.tintColor = .label
+        
+        let testAllButton = UIBarButtonItem(title: String(localized: "Test All"), style: .plain, target: self, action: #selector(testAllTapped))
+        testAllButton.tintColor = .label
+        
         navigationItem.rightBarButtonItems = [
-            UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addTapped)),
-            UIBarButtonItem(title: String(localized: "Test All"), style: .plain, target: self, action: #selector(testAllTapped)),
+            addButton,
+            testAllButton,
         ]
 
         collapsedSubscriptions = Set(viewModel.subscriptions.filter(\.collapsed).map(\.id))

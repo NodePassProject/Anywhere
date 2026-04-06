@@ -35,6 +35,9 @@ class TVDemoHomeViewController: UIViewController {
         super.viewDidLoad()
         setupGradient()
         setupLayout()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in
+            self.updateGradientColors()
+        }
     }
 
     override func viewDidLayoutSubviews() {
@@ -45,6 +48,13 @@ class TVDemoHomeViewController: UIViewController {
     // MARK: - Gradient
 
     private func setupGradient() {
+        gradientLayer.startPoint = CGPoint(x: 0, y: 0)
+        gradientLayer.endPoint = CGPoint(x: 1, y: 1)
+        view.layer.insertSublayer(gradientLayer, at: 0)
+        updateGradientColors()
+    }
+
+    private func updateGradientColors() {
         let start: UIColor
         let end: UIColor
         if isConnected {
@@ -55,9 +65,6 @@ class TVDemoHomeViewController: UIViewController {
             end = UIColor(named: "GradientDisconnectedEnd") ?? .black
         }
         gradientLayer.colors = [start.cgColor, end.cgColor]
-        gradientLayer.startPoint = CGPoint(x: 0, y: 0)
-        gradientLayer.endPoint = CGPoint(x: 1, y: 1)
-        view.layer.insertSublayer(gradientLayer, at: 0)
     }
 
     // MARK: - Layout
@@ -265,9 +272,15 @@ class TVDemoProxyListViewController: UITableViewController {
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
 
+        let addButton = UIBarButtonItem(barButtonSystemItem: .add, target: nil, action: nil)
+        addButton.tintColor = .label
+        
+        let testAllButton = UIBarButtonItem(title: String(localized: "Test All"), style: .plain, target: nil, action: nil)
+        testAllButton.tintColor = .label
+        
         navigationItem.rightBarButtonItems = [
-            UIBarButtonItem(barButtonSystemItem: .add, target: nil, action: nil),
-            UIBarButtonItem(title: String(localized: "Test All"), style: .plain, target: nil, action: nil),
+            addButton,
+            testAllButton,
         ]
     }
 
@@ -418,9 +431,15 @@ class TVDemoChainListViewController: UITableViewController {
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
 
+        let addButton = UIBarButtonItem(barButtonSystemItem: .add, target: nil, action: nil)
+        addButton.tintColor = .label
+        
+        let testAllButton = UIBarButtonItem(title: String(localized: "Test All"), style: .plain, target: nil, action: nil)
+        testAllButton.tintColor = .label
+        
         navigationItem.rightBarButtonItems = [
-            UIBarButtonItem(barButtonSystemItem: .add, target: nil, action: nil),
-            UIBarButtonItem(title: String(localized: "Test All"), style: .plain, target: nil, action: nil),
+            addButton,
+            testAllButton,
         ]
     }
 

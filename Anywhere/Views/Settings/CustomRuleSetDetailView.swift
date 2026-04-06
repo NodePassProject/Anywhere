@@ -104,6 +104,8 @@ struct CustomRuleSetDetailView: View {
             VStack(alignment: .leading) {
                 Text(rule.value)
                     .font(.body.monospaced())
+                    .minimumScaleFactor(0.1)
+                    .lineLimit(1)
                 Text(ruleTypeLabel(rule.type))
                     .font(.caption)
                     .foregroundStyle(.secondary)
