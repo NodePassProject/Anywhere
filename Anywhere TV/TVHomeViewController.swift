@@ -64,6 +64,9 @@ class TVHomeViewController: UIViewController {
         setupLayout()
         bindViewModel()
         updateUI()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in
+            self.updateGradientColors(animated: false)
+        }
     }
 
     override func viewDidLayoutSubviews() {
@@ -352,6 +355,11 @@ class TVHomeViewController: UIViewController {
             .combineLatest(ConnectionStatsModel.shared.$bytesOut)
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateTrafficStats() }
+            .store(in: &cancellables)
+
+        viewModel.$isManagerReady
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updatePowerButton() }
             .store(in: &cancellables)
 
         viewModel.$configurations

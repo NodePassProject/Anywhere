@@ -49,7 +49,6 @@ class TVSettingsViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         title = String(localized: "Settings")
-        view.backgroundColor = .black
         setupLeftSide()
         setupRightSide()
         setupLayout()
