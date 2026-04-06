@@ -204,8 +204,8 @@ struct HomeView: View {
             cardContent {
                 VStack(spacing: 12) {
                     HStack {
-                        Image(systemName: "antenna.radiowaves.left.and.right")
-                            .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
+                        Image("anywhere")
+                            .foregroundStyle(isConnected ? .white : .secondary)
                             .frame(width: 24)
                         Text(configuration.name)
                             .font(.body.weight(.medium))

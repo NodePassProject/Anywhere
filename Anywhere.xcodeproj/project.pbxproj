@@ -15,6 +15,9 @@
 		CB2B9C962F77725900F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C952F77725900F24AC2 /* BLAKE3 */; };
 		CB2BA8542F7821F400F24AC2 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = CB2BA8532F7821F400F24AC2 /* YAML */; };
 		CB2BA8562F78220C00F24AC2 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = CB2BA8552F78220C00F24AC2 /* YAML */; };
+		CB71CDC52F837D11002B9E1D /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB71CDC42F837D11002B9E1D /* WidgetKit.framework */; };
+		CB71CDC72F837D11002B9E1D /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB71CDC62F837D11002B9E1D /* SwiftUI.framework */; };
+		CB71CDD42F837D11002B9E1D /* Anywhere Widget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB71CDC32F837D11002B9E1D /* Anywhere Widget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -32,6 +35,13 @@
 			remoteGlobalIDString = CB1C10762F23B82F00B74CD8;
 			remoteInfo = "Network Extension";
 		};
+		CB71CDD22F837D11002B9E1D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CB1C105D2F23B81500B74CD8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CB71CDC22F837D11002B9E1D;
+			remoteInfo = WidgetExtension;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -41,6 +51,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
+				CB71CDD42F837D11002B9E1D /* Anywhere Widget.appex in Embed Foundation Extensions */,
 				CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
@@ -64,6 +75,9 @@
 		CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Anywhere Network Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = NetworkExtension.framework; path = System/Library/Frameworks/NetworkExtension.framework; sourceTree = SDKROOT; };
 		CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Anywhere TV.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CB71CDC32F837D11002B9E1D /* Anywhere Widget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Anywhere Widget.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+		CB71CDC42F837D11002B9E1D /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
+		CB71CDC62F837D11002B9E1D /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -150,6 +164,20 @@
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 		};
+		CB71CDD82F837D11002B9E1D /* Exceptions for "Anywhere Widget" folder in "Anywhere Widget" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
+		};
+		CB71D2EE2F838FF3002B9E1D /* Exceptions for "Shared" folder in "Anywhere Widget" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Localizable.xcstrings,
+			);
+			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
+		};
 		CBE5B8662F62E736003CECEF /* Exceptions for "Anywhere" folder in "Anywhere" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -199,10 +227,19 @@
 			path = Protocols;
 			sourceTree = "<group>";
 		};
+		CB71CDC82F837D11002B9E1D /* Anywhere Widget */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				CB71CDD82F837D11002B9E1D /* Exceptions for "Anywhere Widget" folder in "Anywhere Widget" target */,
+			);
+			path = "Anywhere Widget";
+			sourceTree = "<group>";
+		};
 		CB7A00022F65700100C85E4A /* Shared */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				CB65476A2F65715600C85E4A /* Exceptions for "Shared" folder in "Anywhere Network Extension" target */,
+				CB71D2EE2F838FF3002B9E1D /* Exceptions for "Shared" folder in "Anywhere Widget" target */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -242,6 +279,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CB71CDC02F837D11002B9E1D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CB71CDC72F837D11002B9E1D /* SwiftUI.framework in Frameworks */,
+				CB71CDC52F837D11002B9E1D /* WidgetKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -252,8 +298,9 @@
 				CBDC12652F271BD50021FDA0 /* General */,
 				CB650DD92F6307AF00C85E4A /* Protocols */,
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
-				CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */,
 				CB2B549D2F6C3E2700F24AC2 /* Anywhere TV */,
+				CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */,
+				CB71CDC82F837D11002B9E1D /* Anywhere Widget */,
 				CB1C10782F23B82F00B74CD8 /* Frameworks */,
 				CB1C10662F23B81500B74CD8 /* Products */,
 			);
@@ -265,6 +312,7 @@
 				CB1C10652F23B81500B74CD8 /* Anywhere.app */,
 				CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */,
 				CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */,
+				CB71CDC32F837D11002B9E1D /* Anywhere Widget.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -273,6 +321,8 @@
 			isa = PBXGroup;
 			children = (
 				CB1C10792F23B82F00B74CD8 /* NetworkExtension.framework */,
+				CB71CDC42F837D11002B9E1D /* WidgetKit.framework */,
+				CB71CDC62F837D11002B9E1D /* SwiftUI.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -293,6 +343,7 @@
 			);
 			dependencies = (
 				CB1C10812F23B82F00B74CD8 /* PBXTargetDependency */,
+				CB71CDD32F837D11002B9E1D /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
@@ -362,6 +413,28 @@
 			productReference = CB2B549C2F6C3E2700F24AC2 /* Anywhere TV.app */;
 			productType = "com.apple.product-type.application";
 		};
+		CB71CDC22F837D11002B9E1D /* Anywhere Widget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CB71CDD72F837D11002B9E1D /* Build configuration list for PBXNativeTarget "Anywhere Widget" */;
+			buildPhases = (
+				CB71CDBF2F837D11002B9E1D /* Sources */,
+				CB71CDC02F837D11002B9E1D /* Frameworks */,
+				CB71CDC12F837D11002B9E1D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				CB71CDC82F837D11002B9E1D /* Anywhere Widget */,
+			);
+			name = "Anywhere Widget";
+			packageProductDependencies = (
+			);
+			productName = WidgetExtension;
+			productReference = CB71CDC32F837D11002B9E1D /* Anywhere Widget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -379,6 +452,9 @@
 						CreatedOnToolsVersion = 26.0.1;
 					};
 					CB2B549B2F6C3E2700F24AC2 = {
+						CreatedOnToolsVersion = 26.0.1;
+					};
+					CB71CDC22F837D11002B9E1D = {
 						CreatedOnToolsVersion = 26.0.1;
 					};
 				};
@@ -412,6 +488,7 @@
 				CB1C10642F23B81500B74CD8 /* Anywhere */,
 				CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */,
 				CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */,
+				CB71CDC22F837D11002B9E1D /* Anywhere Widget */,
 			);
 		};
 /* End PBXProject section */
@@ -432,6 +509,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		CB2B549A2F6C3E2700F24AC2 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CB71CDC12F837D11002B9E1D /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -462,6 +546,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		CB71CDBF2F837D11002B9E1D /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -474,6 +565,11 @@
 			isa = PBXTargetDependency;
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 			targetProxy = CB2B54B02F6C3E2800F24AC2 /* PBXContainerItemProxy */;
+		};
+		CB71CDD32F837D11002B9E1D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
+			targetProxy = CB71CDD22F837D11002B9E1D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -608,7 +704,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 164;
+				CURRENT_PROJECT_VERSION = 165;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -647,7 +743,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 164;
+				CURRENT_PROJECT_VERSION = 165;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -685,7 +781,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 164;
+				CURRENT_PROJECT_VERSION = 165;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -725,7 +821,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 164;
+				CURRENT_PROJECT_VERSION = 165;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
@@ -766,7 +862,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 164;
+				CURRENT_PROJECT_VERSION = 165;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
@@ -802,7 +898,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 164;
+				CURRENT_PROJECT_VERSION = 165;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
@@ -828,6 +924,70 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
 				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Release;
+		};
+		CB71CDD52F837D11002B9E1D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 165;
+				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Widget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.7;
+				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.Widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CB71CDD62F837D11002B9E1D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 165;
+				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Widget;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.7;
+				PRODUCT_BUNDLE_IDENTIFIER = com.argsment.Anywhere.Widget;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -866,6 +1026,15 @@
 			buildConfigurations = (
 				CB2B54AB2F6C3E2800F24AC2 /* Debug */,
 				CB2B54AC2F6C3E2800F24AC2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CB71CDD72F837D11002B9E1D /* Build configuration list for PBXNativeTarget "Anywhere Widget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CB71CDD52F837D11002B9E1D /* Debug */,
+				CB71CDD62F837D11002B9E1D /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
