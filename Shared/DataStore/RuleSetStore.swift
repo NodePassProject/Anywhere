@@ -80,14 +80,18 @@ class RuleSetStore: ObservableObject {
             RuleSet(id: name, name: name, assignedConfigurationId: assignmentsDict[name] ?? Self.defaultAssignments[name])
         }
 
-        for custom in customRuleSets {
+        // Insert custom rule sets before ADBlock so that ADBlock retains
+        // highest priority.  Desired trie-overwrite order (lowest → highest):
+        // Country Bypass → Direct → Services → User/Custom → ADBlock
+        let insertionIndex = sets.firstIndex(where: { $0.id == "ADBlock" }) ?? sets.endIndex
+        for (offset, custom) in customRuleSets.enumerated() {
             let id = custom.id.uuidString
-            sets.append(RuleSet(
+            sets.insert(RuleSet(
                 id: id,
                 name: custom.name,
                 assignedConfigurationId: assignmentsDict[id],
                 isCustom: true
-            ))
+            ), at: insertionIndex + offset)
         }
 
         ruleSets = sets
@@ -104,6 +108,10 @@ class RuleSetStore: ObservableObject {
     func resetAssignments() {
         for builtInServiceRuleSet in builtInServiceRuleSets {
             guard let index = ruleSets.firstIndex(where: { $0.id == builtInServiceRuleSet.id }) else { continue }
+            ruleSets[index].assignedConfigurationId = nil
+        }
+        for customRuleSet in customRuleSets {
+            guard let index = ruleSets.firstIndex(where: { $0.id == customRuleSet.id.uuidString }) else { continue }
             ruleSets[index].assignedConfigurationId = nil
         }
         saveAssignments()

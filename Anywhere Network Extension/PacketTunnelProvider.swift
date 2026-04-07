@@ -7,7 +7,9 @@
 
 import NetworkExtension
 import Network
+#if os(iOS)
 import WidgetKit
+#endif
 
 private let logger = TunnelLogger(category: "PacketTunnel")
 
@@ -105,10 +107,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             
+#if os(iOS)
             if #available(iOS 18.0, *) {
                 ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
             }
-
+#endif
+            
             self.lwipStack.start(packetFlow: self.packetFlow,
                                  configuration: configuration)
             self.startMonitoringPath()
@@ -219,16 +223,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+    override func stopTunnel(with reason: NEProviderStopReason) async {
+#if os(iOS)
         if #available(iOS 18.0, *) {
             ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
         }
+#endif
         
         stopMonitoringPath()
         logTunnelStop(reason: reason)
         lwipStack.stop()
-        
-        completionHandler()
     }
 
     // MARK: - App Messages
@@ -277,10 +281,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler?(nil)
     }
 
-    override func sleep(completionHandler: @escaping () -> Void) {
+    override func sleep() async {
         logger.warning("[VPN] Device going to sleep; active connections may pause")
         lwipStack.noteRecentTunnelInterruption(summary: "device sleep", level: .warning)
-        completionHandler()
     }
 
     override func wake() {

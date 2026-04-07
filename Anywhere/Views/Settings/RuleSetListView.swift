@@ -66,7 +66,7 @@ struct RuleSetListView: View {
                         for offset in offsets {
                             RuleSetStore.shared.removeCustomRuleSet(customs[offset].id)
                         }
-                        builtInServiceRuleSets = RuleSetStore.shared.builtInServiceRuleSets
+                        customRuleSets = RuleSetStore.shared.customRuleSets
                         Task { await viewModel.syncRoutingConfigurationToNE() }
                     }
                 } header: {
@@ -115,7 +115,7 @@ struct RuleSetListView: View {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
                 _ = RuleSetStore.shared.addCustomRuleSet(name: name)
-                builtInServiceRuleSets = RuleSetStore.shared.builtInServiceRuleSets
+                customRuleSets = RuleSetStore.shared.customRuleSets
                 newRuleSetName = ""
             }
             Button("Cancel", role: .cancel) {

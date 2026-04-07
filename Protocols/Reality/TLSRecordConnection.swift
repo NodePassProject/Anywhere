@@ -449,7 +449,7 @@ class TLSRecordConnection {
                     }
                 } catch {
                     // Reconstruct full record + any trailing data for fallback (rare path)
-                    var failed = Data(receiveBuffer[(base + consumed)...])
+                    let failed = Data(receiveBuffer[(base + consumed)...])
                     receiveBuffer.removeAll()
                     consumed = 0
                     failedRecordData = failed

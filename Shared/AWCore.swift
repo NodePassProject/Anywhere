@@ -17,14 +17,15 @@ final class AWCore {
     static let userDefaults = UserDefaults(suiteName: suiteName)!
 
     /// Moves a JSON file from the old documents directory to the App Group container if needed.
+    /// Delete in the future
     static func migrateToAppGroup(fileName: String) {
-        let fm = FileManager.default
-        let oldURL = fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(fileName)
-        guard let container = fm.containerURL(forSecurityApplicationGroupIdentifier: suiteName) else { return }
+        let fileManager = FileManager.default
+        let oldURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(fileName)
+        guard let container = fileManager.containerURL(forSecurityApplicationGroupIdentifier: suiteName) else { return }
         let newURL = container.appendingPathComponent(fileName)
-        guard fm.fileExists(atPath: oldURL.path), !fm.fileExists(atPath: newURL.path) else { return }
+        guard fileManager.fileExists(atPath: oldURL.path), !fileManager.fileExists(atPath: newURL.path) else { return }
         do {
-            try fm.moveItem(at: oldURL, to: newURL)
+            try fileManager.moveItem(at: oldURL, to: newURL)
         } catch {
             print("Failed to migrate \(fileName): \(error)")
         }
