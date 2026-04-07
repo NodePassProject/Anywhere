@@ -31,6 +31,7 @@ class RealityClient {
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var authKey: Data?
     private var storedClientHello: Data?
+    private var mlkemPrivateKeyStorage: Any? // MLKEM768.PrivateKey on iOS 26+
 
     // TLS 1.3 session state (cleared after handshake)
     private var keyDerivation: TLS13KeyDerivation?
@@ -211,6 +212,15 @@ class RealityClient {
             throw RealityError.handshakeFailed("Failed to derive auth key")
         }
 
+        // Generate ML-KEM-768 key pair for PQ hybrid key share (iOS 26+)
+        var mlkemEncapsulationKey: Data?
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
+            if let mlkemPK = try? CryptoKit.MLKEM768.PrivateKey() {
+                mlkemPrivateKeyStorage = mlkemPK
+                mlkemEncapsulationKey = Data(mlkemPK.publicKey.rawRepresentation)
+            }
+        }
+
         // Build ClientHello with zero SessionId for AAD (matching Xray-core)
         let zeroSessionId = Data(count: 32)
         let rawClientHelloForAAD = TLSClientHelloBuilder.buildRawClientHello(
@@ -218,7 +228,8 @@ class RealityClient {
             random: random,
             sessionId: zeroSessionId,
             serverName: configuration.serverName,
-            publicKey: privateKey.publicKey.rawRepresentation
+            publicKey: privateKey.publicKey.rawRepresentation,
+            mlkemEncapsulationKey: mlkemEncapsulationKey
         )
 
         // Encrypt first 16 bytes of SessionId using AES-GCM
@@ -238,7 +249,8 @@ class RealityClient {
             random: random,
             sessionId: encryptedSessionId,
             serverName: configuration.serverName,
-            publicKey: privateKey.publicKey.rawRepresentation
+            publicKey: privateKey.publicKey.rawRepresentation,
+            mlkemEncapsulationKey: mlkemEncapsulationKey
         )
 
         return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: finalClientHello)
@@ -326,7 +338,7 @@ class RealityClient {
             return
         }
 
-        guard let (serverKeyShare, cipherSuite) = parseServerHello(data: buffer),
+        guard let (serverKeyShare, keyShareGroup, cipherSuite) = parseServerHello(data: buffer),
               let privateKey = ephemeralPrivateKey,
               let clientHello = storedClientHello else {
             logger.error("[Reality] Failed to parse ServerHello or missing keys")
@@ -335,9 +347,22 @@ class RealityClient {
         }
 
         do {
-            let serverPubKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverKeyShare)
-            let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: serverPubKey)
-            let sharedSecretData = sharedSecret.withUnsafeBytes { Data($0) }
+            let sharedSecretData: Data
+            if keyShareGroup == 0x11EC && serverKeyShare.count == 1120 {
+                // X25519MLKEM768 hybrid: shared_secret = mlkem_ss || x25519_ss
+                let mlkemCiphertext = serverKeyShare.prefix(1088)
+                let x25519Key = serverKeyShare.suffix(32)
+                let x25519PubKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: x25519Key)
+                let x25519SS = try privateKey.sharedSecretFromKeyAgreement(with: x25519PubKey)
+                let x25519Data = x25519SS.withUnsafeBytes { Data($0) }
+                let mlkemData = try decapsulateMLKEM(ciphertext: Data(mlkemCiphertext))
+                sharedSecretData = mlkemData + x25519Data
+            } else {
+                // Pure X25519
+                let serverPubKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverKeyShare)
+                let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: serverPubKey)
+                sharedSecretData = sharedSecret.withUnsafeBytes { Data($0) }
+            }
 
             let serverHello = extractServerHelloMessage(from: buffer)
 
@@ -405,11 +430,11 @@ class RealityClient {
         return Data()
     }
 
-    /// Parses the ServerHello to extract the server's X25519 key share and cipher suite.
+    /// Parses the ServerHello to extract the server's key share, group, and cipher suite.
     ///
     /// - Parameter data: The raw TLS data containing the ServerHello record.
-    /// - Returns: A tuple of (keyShare, cipherSuite) or `nil` if parsing fails.
-    private func parseServerHello(data: Data) -> (keyShare: Data, cipherSuite: UInt16)? {
+    /// - Returns: A tuple of (keyShareData, group, cipherSuite) or `nil` if parsing fails.
+    private func parseServerHello(data: Data) -> (keyShare: Data, group: UInt16, cipherSuite: UInt16)? {
         var offset = 0
 
         while offset + 5 < data.count {
@@ -454,9 +479,14 @@ class RealityClient {
                     let keyLen = Int(data[shOffset + 2]) << 8 | Int(data[shOffset + 3])
                     shOffset += 4
 
-                    if group == 0x001d && keyLen == 32 {
+                    if group == 0x001D && keyLen == 32 {
+                        // Pure X25519
                         guard shOffset + 32 <= data.count else { return nil }
-                        return (data.subdata(in: shOffset..<(shOffset + 32)), cipherSuite)
+                        return (data.subdata(in: shOffset..<(shOffset + 32)), 0x001D, cipherSuite)
+                    } else if group == 0x11EC && keyLen == 1120 {
+                        // X25519MLKEM768 hybrid: 1088 bytes ML-KEM ciphertext + 32 bytes X25519
+                        guard shOffset + 1120 <= data.count else { return nil }
+                        return (data.subdata(in: shOffset..<(shOffset + 1120)), 0x11EC, cipherSuite)
                     }
                 }
 
@@ -818,11 +848,24 @@ class RealityClient {
         ephemeralPrivateKey = nil
         authKey = nil
         storedClientHello = nil
+        mlkemPrivateKeyStorage = nil
         keyDerivation = nil
         handshakeSecret = nil
         handshakeKeys = nil
         handshakeTranscript = nil
         serverCertVerified = false
+    }
+
+    /// Decapsulates an ML-KEM-768 ciphertext using the stored private key.
+    private func decapsulateMLKEM(ciphertext: Data) throws -> Data {
+        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
+            guard let pk = mlkemPrivateKeyStorage as? CryptoKit.MLKEM768.PrivateKey else {
+                throw RealityError.handshakeFailed("ML-KEM private key not available")
+            }
+            let sharedSecret = try pk.decapsulate(ciphertext)
+            return sharedSecret.withUnsafeBytes { Data($0) }
+        }
+        throw RealityError.handshakeFailed("ML-KEM not supported on this platform")
     }
 
     /// Derives a symmetric key from a shared secret using HKDF.
@@ -842,4 +885,5 @@ class RealityClient {
         )
         return derivedKey.withUnsafeBytes { Data($0) }
     }
+
 }

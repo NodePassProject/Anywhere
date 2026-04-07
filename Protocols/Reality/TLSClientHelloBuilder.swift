@@ -308,17 +308,19 @@ struct TLSClientHelloBuilder {
 
     // MARK: - X25519MLKEM768 Key Share Generation
 
-    /// Generates a fake X25519MLKEM768 hybrid key share for fingerprinting.
+    /// Generates an X25519MLKEM768 hybrid key share for fingerprinting.
     ///
-    /// The key share data is 1216 bytes: 1184 bytes of random data (ML-KEM-768
-    /// encapsulation key placeholder) + 32 bytes of the real X25519 public key.
-    /// Servers that don't support ML-KEM will negotiate using the separate X25519
-    /// key share entry, so the ML-KEM portion is never actually used.
-    private static func mlkem768HybridKeyShare(random: Data, publicKey: Data) -> Data {
-        let mlkemPart = derivePRBytes(from: random, label: "mlkem768", length: 1184)
-        var hybrid = mlkemPart
-        hybrid.append(publicKey)
-        return hybrid // 1216 bytes total
+    /// The key share data is 1216 bytes: 1184 bytes (ML-KEM-768 encapsulation
+    /// key) + 32 bytes of the real X25519 public key. Servers that don't support
+    /// ML-KEM will negotiate using the separate X25519 key share entry, so the
+    /// ML-KEM portion is never actually used for key exchange.
+    ///
+    /// Concatenates ML-KEM-768 encapsulation key + X25519 public key into
+    /// a hybrid key share (1216 bytes total).
+    private static func mlkem768HybridKeyShare(mlkemEncapsulationKey: Data, publicKey: Data) -> Data {
+        var hybrid = mlkemEncapsulationKey  // 1184 bytes
+        hybrid.append(publicKey)             // 32 bytes
+        return hybrid                        // 1216 bytes total
     }
 
     // MARK: - BoringGREASEECH (Chrome style)
@@ -354,7 +356,8 @@ struct TLSClientHelloBuilder {
         serverName: String,
         publicKey: Data,
         alpn: [String]? = nil,
-        omitPQKeyShares: Bool = false
+        omitPQKeyShares: Bool = false,
+        mlkemEncapsulationKey: Data? = nil
     ) -> Data {
         let resolved: TLSFingerprint
         if fingerprint == .random {
@@ -370,7 +373,8 @@ struct TLSClientHelloBuilder {
             serverName: serverName,
             publicKey: publicKey,
             alpn: alpn,
-            omitPQKeyShares: omitPQKeyShares
+            omitPQKeyShares: omitPQKeyShares,
+            mlkemEncapsulationKey: mlkemEncapsulationKey
         )
 
         return assembleClientHello(
@@ -432,14 +436,15 @@ struct TLSClientHelloBuilder {
         serverName: String,
         publicKey: Data,
         alpn: [String]?,
-        omitPQKeyShares: Bool = false
+        omitPQKeyShares: Bool = false,
+        mlkemEncapsulationKey: Data? = nil
     ) -> (cipherSuites: Data, extensions: Data, needsPadding: Bool) {
         switch fingerprint {
-        case .chrome133:  return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)
+        case .chrome133:  return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
         case .chrome120:  return buildChrome120(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
-        case .firefox148: return buildFirefox148(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)
+        case .firefox148: return buildFirefox148(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
         case .firefox120: return buildFirefox120(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
-        case .safari26:   return buildSafari26(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)
+        case .safari26:   return buildSafari26(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
         case .safari16:   return buildSafari16(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .ios14:      return buildIOS14(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .edge85:     return buildEdge85(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
@@ -456,7 +461,7 @@ struct TLSClientHelloBuilder {
     // MARK: - Chrome 133 (HelloChrome_Auto)
 
     private static func buildChrome133(
-        random: Data, serverName: String, publicKey: Data, alpn: [String]?, omitPQKeyShares: Bool = false
+        random: Data, serverName: String, publicKey: Data, alpn: [String]?, omitPQKeyShares: Bool = false, mlkemEncapsulationKey: Data? = nil
     ) -> (Data, Data, Bool) {
         let gCipher  = grease(random[24])
         let gExt1    = grease(random[25])
@@ -482,12 +487,12 @@ struct TLSClientHelloBuilder {
             (group: gGroup, keyData: Data([0x00])),           // GREASE key share
         ]
 
-        if omitPQKeyShares {
-            supportedGroups = [gGroup, 0x001D, 0x0017, 0x0018]
-        } else {
-            let mlkemKey = mlkem768HybridKeyShare(random: random, publicKey: publicKey)
+        if !omitPQKeyShares, let ekKey = mlkemEncapsulationKey {
+            let hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey: ekKey, publicKey: publicKey)
             supportedGroups = [gGroup, 0x11EC, 0x001D, 0x0017, 0x0018]
-            keyShares.append((group: 0x11EC, keyData: mlkemKey))
+            keyShares.append((group: 0x11EC, keyData: hybrid))
+        } else {
+            supportedGroups = [gGroup, 0x001D, 0x0017, 0x0018]
         }
         keyShares.append((group: 0x001D, keyData: publicKey))
 
@@ -591,7 +596,7 @@ struct TLSClientHelloBuilder {
     // MARK: - Firefox 148 (HelloFirefox_Auto)
 
     private static func buildFirefox148(
-        random: Data, serverName: String, publicKey: Data, alpn: [String]?, omitPQKeyShares: Bool = false
+        random: Data, serverName: String, publicKey: Data, alpn: [String]?, omitPQKeyShares: Bool = false, mlkemEncapsulationKey: Data? = nil
     ) -> (Data, Data, Bool) {
         let suites = cipherSuitesData([
             0x1301, 0x1303, 0x1302,                           // TLS 1.3 (ChaCha20 before AES-256)
@@ -610,12 +615,12 @@ struct TLSClientHelloBuilder {
         let supportedGroups: [UInt16]
         var keyShares: [(group: UInt16, keyData: Data)] = []
 
-        if omitPQKeyShares {
-            supportedGroups = [0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101]
-        } else {
-            let mlkemKey = mlkem768HybridKeyShare(random: random, publicKey: publicKey)
+        if !omitPQKeyShares, let ekKey = mlkemEncapsulationKey {
+            let hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey: ekKey, publicKey: publicKey)
             supportedGroups = [0x11EC, 0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101]
-            keyShares.append((group: 0x11EC, keyData: mlkemKey))
+            keyShares.append((group: 0x11EC, keyData: hybrid))
+        } else {
+            supportedGroups = [0x001D, 0x0017, 0x0018, 0x0019, 0x0100, 0x0101]
         }
         keyShares.append((group: 0x001D, keyData: publicKey))
         keyShares.append((group: 0x0017, keyData: p256PublicKey))
@@ -708,7 +713,7 @@ struct TLSClientHelloBuilder {
     // MARK: - Safari 26.3 (HelloSafari_Auto)
 
     private static func buildSafari26(
-        random: Data, serverName: String, publicKey: Data, alpn: [String]?, omitPQKeyShares: Bool = false
+        random: Data, serverName: String, publicKey: Data, alpn: [String]?, omitPQKeyShares: Bool = false, mlkemEncapsulationKey: Data? = nil
     ) -> (Data, Data, Bool) {
         let gCipher  = grease(random[24])
         let gExt1    = grease(random[25])
@@ -736,12 +741,12 @@ struct TLSClientHelloBuilder {
             (group: gGroup, keyData: Data([0x00])),           // GREASE key share
         ]
 
-        if omitPQKeyShares {
-            supportedGroups = [gGroup, 0x001D, 0x0017, 0x0018, 0x0019]
-        } else {
-            let mlkemKey = mlkem768HybridKeyShare(random: random, publicKey: publicKey)
+        if !omitPQKeyShares, let ekKey = mlkemEncapsulationKey {
+            let hybrid = mlkem768HybridKeyShare(mlkemEncapsulationKey: ekKey, publicKey: publicKey)
             supportedGroups = [gGroup, 0x11EC, 0x001D, 0x0017, 0x0018, 0x0019]
-            keyShares.append((group: 0x11EC, keyData: mlkemKey))
+            keyShares.append((group: 0x11EC, keyData: hybrid))
+        } else {
+            supportedGroups = [gGroup, 0x001D, 0x0017, 0x0018, 0x0019]
         }
         keyShares.append((group: 0x001D, keyData: publicKey))
 

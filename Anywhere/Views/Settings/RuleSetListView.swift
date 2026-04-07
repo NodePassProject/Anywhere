@@ -10,6 +10,9 @@ import SwiftUI
 struct RuleSetListView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
     
+    @AppStorage("experimentalEnabled", store: AWCore.userDefaults)
+    private var experimentalEnabled = false
+    
     private var standaloneConfigurations: [ProxyConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }
     }
@@ -76,10 +79,12 @@ struct RuleSetListView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu("More", systemImage: "ellipsis") {
-                    Button {
-                        showAddSheet = true
-                    } label: {
-                        Label("New Rule Set", systemImage: "plus")
+                    if experimentalEnabled {
+                        Button {
+                            showAddSheet = true
+                        } label: {
+                            Label("New Rule Set", systemImage: "plus")
+                        }
                     }
                     Button {
                         RuleSetStore.shared.resetAssignments()
