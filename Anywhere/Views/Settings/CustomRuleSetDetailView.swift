@@ -17,7 +17,7 @@ struct CustomRuleSetDetailView: View {
     @State private var showRenameAlert = false
     @State private var renameText = ""
 
-    private var customRuleSet: CustomRuleSet? {
+    private var customRuleSet: RuleSetStore.CustomRuleSet? {
         ruleSetStore.customRuleSet(for: customRuleSetId)
     }
 
@@ -103,7 +103,7 @@ struct CustomRuleSetDetailView: View {
                 .frame(width: 24)
             VStack(alignment: .leading) {
                 Text(rule.value)
-                    .font(.body.monospaced())
+                    .font(.system(size: 14).monospaced())
                     .minimumScaleFactor(0.1)
                     .lineLimit(1)
                 Text(ruleTypeLabel(rule.type))
@@ -310,7 +310,7 @@ private struct ImportRulesView: View {
     private func download() async {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let requestURL = URL(string: trimmed) else {
-            downloadError = "Invalid URL."
+            downloadError = String(localized: "Invalid URL.")
             return
         }
         isDownloading = true
@@ -323,7 +323,7 @@ private struct ImportRulesView: View {
             } else if let body = String(data: data, encoding: .utf8) {
                 text = body
             } else {
-                downloadError = "Unable to decode response as text."
+                downloadError = String(localized: "Unknown content.")
             }
         } catch {
             downloadError = error.localizedDescription
@@ -354,22 +354,12 @@ enum RuleParser {
             let value = trimmed[trimmed.index(after: commaIndex)...].trimmingCharacters(in: .whitespaces)
             guard !value.isEmpty else { return nil }
 
-            // Anywhere format: "0, ...", "1, ...", "2, ..."
+            // Anywhere format:
+            // "0, ..."(IPv4 CIDR)
+            // "1, ..."(IPv6 CIDR)
+            // "2, ..."(Domain Suffix)
             if let typeInt = Int(prefix), let type = DomainRuleType(rawValue: typeInt) {
                 return DomainRule(type: type, value: normalizeValue(value, type: type))
-            }
-
-            // General format: "IP-CIDR, ...", "IP-CIDR6, ...", "DOMAIN-SUFFIX, ..."
-            let upper = prefix.uppercased()
-            switch upper {
-            case "IP-CIDR":
-                return DomainRule(type: .ipCIDR, value: normalizeValue(value, type: .ipCIDR))
-            case "IP-CIDR6":
-                return DomainRule(type: .ipCIDR6, value: normalizeValue(value, type: .ipCIDR6))
-            case "DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD":
-                return DomainRule(type: .domainSuffix, value: value)
-            default:
-                return nil
             }
         }
 

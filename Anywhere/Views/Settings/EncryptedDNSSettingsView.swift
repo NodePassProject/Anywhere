@@ -30,7 +30,7 @@ struct EncryptedDNSSettingsView: View {
                             showEnableAlert = true
                         } else {
                             enabled = false
-                            notifySettingsChanged()
+                            AWCore.notifySettingsChanged()
                         }
                     }
                 ))
@@ -62,12 +62,12 @@ struct EncryptedDNSSettingsView: View {
         .onDisappear { commitServer() }
         .onChange(of: dnsProtocol) {
             commitServer()
-            notifySettingsChanged()
+            AWCore.notifySettingsChanged()
         }
         .alert("Encrypted DNS", isPresented: $showEnableAlert) {
             Button("Enable Anyway", role: .destructive) {
                 enabled = true
-                notifySettingsChanged()
+                AWCore.notifySettingsChanged()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -79,14 +79,6 @@ struct EncryptedDNSSettingsView: View {
         let trimmed = editingServer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed != storedServer else { return }
         storedServer = trimmed
-        notifySettingsChanged()
-    }
-
-    private func notifySettingsChanged() {
-        CFNotificationCenterPostNotification(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            CFNotificationName("com.argsment.Anywhere.settingsChanged" as CFString),
-            nil, nil, true
-        )
+        AWCore.notifySettingsChanged()
     }
 }

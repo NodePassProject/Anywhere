@@ -230,7 +230,7 @@ struct OnboardingView: View {
 
         // Notify settings changed for country bypass
         if !bypassCountryCode.isEmpty {
-            notifySettingsChanged()
+            AWCore.notifySettingsChanged()
         }
         
         AWCore.userDefaults.set(true, forKey: "onboardingCompleted")
@@ -253,13 +253,5 @@ struct OnboardingView: View {
     private func triggerNetworkPermission() {
         guard let url = URL(string: "http://1.1.1.1") else { return }
         URLSession.shared.dataTask(with: url) { _, _, _ in }.resume()
-    }
-
-    private func notifySettingsChanged() {
-        CFNotificationCenterPostNotification(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            CFNotificationName("com.argsment.Anywhere.settingsChanged" as CFString),
-            nil, nil, true
-        )
     }
 }

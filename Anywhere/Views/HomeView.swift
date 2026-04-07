@@ -10,6 +10,9 @@ import NetworkExtension
 
 struct HomeView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
+    
+    @AppStorage("proxyMode", store: AWCore.userDefaults)
+    private var proxyMode = ProxyMode.rule
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
@@ -31,36 +34,51 @@ struct HomeView: View {
             GeometryReader { geometry in
                 ScrollView {
                     VStack(spacing: 0) {
+                        Picker("Proxy Mode", selection: $proxyMode) {
+                            Text("Rule").tag(ProxyMode.rule)
+                            Text("Global").tag(ProxyMode.global)
+                        }
+                        .pickerStyle(.segmented)
+                        .fixedSize()
+                        .padding(.top, 10)
+                        
                         Spacer()
                         
-                        powerButton
-                            .padding(.bottom, 16)
-                        
-                        Text(viewModel.statusText)
-                            .font(.system(size: 20, weight: .medium))
-                            .foregroundStyle(isConnected ? .white : .secondary)
-                            .contentTransition(.interpolate)
-                            .animation(.easeInOut, value: viewModel.vpnStatus)
-                            .padding(.bottom, isConnected ? 20 : 40)
+                        VStack(spacing: 10) {
+                            powerButton
+                            
+                            Text(viewModel.statusText)
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(isConnected ? .white : .secondary)
+                                .contentTransition(.interpolate)
+                                .animation(.easeInOut, value: viewModel.vpnStatus)
+                        }
+                        .padding(.bottom, 50)
                         
                         if isConnected {
                             trafficStats
-                                .padding(.horizontal, 24)
                                 .padding(.bottom, 20)
                                 .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                         
                         configurationCard
-                            .padding(.horizontal, 24)
                         
                         Spacer()
+                        
+                        Rectangle()
+                            .fill(.clear)
+                            .frame(height: 30)
                     }
+                    .padding(.horizontal, 24)
                     .frame(minHeight: geometry.size.height)
                     .animation(.easeInOut(duration: 0.4), value: isConnected)
                 }
             }
         }
         .picker3D($pickerConfig, items: viewModel.allPickerItems)
+        .onChange(of: proxyMode) {
+            AWCore.notifySettingsChanged()
+        }
         .onChange(of: pickerConfig.show) {
             if !pickerConfig.show, let id = pickerConfig.selectedId {
                 if let configuration = viewModel.configurations.first(where: { $0.id == id }) {
@@ -205,7 +223,7 @@ struct HomeView: View {
                 VStack(spacing: 12) {
                     HStack {
                         Image("anywhere")
-                            .foregroundStyle(isConnected ? .white : .secondary)
+                            .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
                             .frame(width: 24)
                         Text(configuration.name)
                             .font(.body.weight(.medium))
@@ -219,7 +237,7 @@ struct HomeView: View {
                         Spacer()
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(isConnected ? Color.white.opacity(0.4) : Color.secondary.opacity(0.4))
+                            .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
                     }
                 }
             }

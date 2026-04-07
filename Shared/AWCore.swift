@@ -29,4 +29,12 @@ final class AWCore {
             print("Failed to migrate \(fileName): \(error)")
         }
     }
+    
+    static func notifySettingsChanged() {
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName("com.argsment.Anywhere.settingsChanged" as CFString),
+            nil, nil, true
+        )
+    }
 }

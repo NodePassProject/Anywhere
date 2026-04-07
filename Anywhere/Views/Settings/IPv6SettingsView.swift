@@ -20,14 +20,6 @@ struct IPv6SettingsView: View {
             }
         }
         .navigationTitle("IPv6")
-        .onChange(of: ipv6DNSEnabled) { notifySettingsChanged() }
-    }
-
-    private func notifySettingsChanged() {
-        CFNotificationCenterPostNotification(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            CFNotificationName("com.argsment.Anywhere.settingsChanged" as CFString),
-            nil, nil, true
-        )
+        .onChange(of: ipv6DNSEnabled) { AWCore.notifySettingsChanged() }
     }
 }

@@ -43,12 +43,6 @@ class VPNViewModel: ObservableObject {
     @Published var chainLatencyResults: [UUID: LatencyResult] = [:]
     @Published var startError: String?
     @Published var orphanedRuleSetNames: [String] = []
-    @Published var proxyMode: String = AWCore.userDefaults.string(forKey: "proxyMode") ?? "rule" {
-        didSet {
-            AWCore.userDefaults.set(proxyMode, forKey: "proxyMode")
-            notifySettingsChanged()
-        }
-    }
 
     private let store = ConfigurationStore.shared
     private let subscriptionStore = SubscriptionStore.shared
@@ -533,10 +527,14 @@ class VPNViewModel: ObservableObject {
             }
     }
 
+    private static let providerBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
+
     private func setupVPNManager() {
         Task {
             let managers = try? await NETunnelProviderManager.loadAllFromPreferences()
-            if let manager = managers?.first {
+            if let manager = managers?.first(where: {
+                ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == Self.providerBundleIdentifier
+            }) ?? managers?.first {
                 self.vpnManager = manager
                 self.vpnStatus = manager.connection.status
                 if manager.connection.status == .connected,
@@ -756,8 +754,8 @@ class VPNViewModel: ObservableObject {
 
     /// Builds routing configuration from rulesets and writes to App Group for the NE.
     func syncRoutingConfigurationToNE() async {
-        await ruleSetStore.syncToAppGroup(configurations: configurations, serializeConfiguration: VPNViewModel.serializeConfiguration)
         await ruleSetStore.syncBypassCountryRules()
+        await ruleSetStore.syncToAppGroup(configurations: configurations, serializeConfiguration: VPNViewModel.serializeConfiguration)
     }
 
     // MARK: - Proxy Server Address Sync
@@ -901,15 +899,5 @@ class VPNViewModel: ObservableObject {
         }
 
         return configurationDict
-    }
-
-    // MARK: - Notifications
-
-    private func notifySettingsChanged() {
-        CFNotificationCenterPostNotification(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            CFNotificationName("com.argsment.Anywhere.settingsChanged" as CFString),
-            nil, nil, true
-        )
     }
 }

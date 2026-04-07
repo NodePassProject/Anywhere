@@ -33,12 +33,21 @@ struct VPNToggleControl: ControlWidget {
     }
 }
 
+private let anywhereNEBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
+
+/// Returns the NETunnelProviderManager owned by Anywhere, if any.
+private func loadManager() async throws -> NETunnelProviderManager? {
+    let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+    return managers.first {
+        ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier == anywhereNEBundleIdentifier
+    }
+}
+
 struct VPNStatusProvider: ControlValueProvider {
     var previewValue: Bool { false }
 
     func currentValue() async throws -> Bool {
-        let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-        guard let manager = managers.first else { return false }
+        guard let manager = try await loadManager() else { return false }
         let status = manager.connection.status
         return status == .connected || status == .connecting
     }
@@ -51,11 +60,15 @@ struct ToggleVPNIntent: SetValueIntent {
     var value: Bool
 
     func perform() async throws -> some IntentResult {
-        let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-        guard let manager = managers.first else { return .result() }
+        guard let manager = try await loadManager() else { return .result() }
 
         if value {
-            // Use the existing configuration saved by the main app.
+            // Re-enable the manager in case another VPN app disabled it.
+            if !manager.isEnabled {
+                manager.isEnabled = true
+                try await manager.saveToPreferences()
+                try await manager.loadFromPreferences()
+            }
             // The extension reads lastConfigurationData from the App Group.
             try manager.connection.startVPNTunnel()
         } else {

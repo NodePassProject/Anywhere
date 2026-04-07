@@ -11,20 +11,6 @@ import os.log
 
 private let logger = Logger(subsystem: "com.argsment.Anywhere", category: "RuleSetStore")
 
-// MARK: - Custom Rule Set
-
-struct CustomRuleSet: Codable, Identifiable, Equatable {
-    let id: UUID
-    var name: String
-    var rules: [DomainRule]
-
-    init(name: String, rules: [DomainRule] = []) {
-        self.id = UUID()
-        self.name = name
-        self.rules = rules
-    }
-}
-
 @MainActor
 class RuleSetStore: ObservableObject {
     static let shared = RuleSetStore()
@@ -35,6 +21,18 @@ class RuleSetStore: ObservableObject {
         var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
         var isCustom: Bool = false
     }
+    
+    struct CustomRuleSet: Codable, Identifiable, Equatable {
+        let id: UUID
+        var name: String
+        var rules: [DomainRule]
+
+        init(name: String, rules: [DomainRule] = []) {
+            self.id = UUID()
+            self.name = name
+            self.rules = rules
+        }
+    }
 
     @Published private(set) var ruleSets: [RuleSet] = []
     @Published private(set) var customRuleSets: [CustomRuleSet] = []
@@ -42,7 +40,7 @@ class RuleSetStore: ObservableObject {
     var adBlockRuleSet: RuleSet? {
         ruleSets.first(where: { $0.name == "ADBlock" })
     }
-    var routingRuleSets: [RuleSetStore.RuleSet] {
+    var builtInServiceRuleSets: [RuleSetStore.RuleSet] {
         ruleSets.filter { $0.name != "Direct" && $0.name != "ADBlock" }
     }
 
@@ -104,8 +102,8 @@ class RuleSetStore: ObservableObject {
     }
 
     func resetAssignments() {
-        for routingRuleSet in routingRuleSets {
-            guard let index = ruleSets.firstIndex(where: { $0.id == routingRuleSet.id }) else { continue }
+        for builtInServiceRuleSet in builtInServiceRuleSets {
+            guard let index = ruleSets.firstIndex(where: { $0.id == builtInServiceRuleSet.id }) else { continue }
             ruleSets[index].assignedConfigurationId = nil
         }
         saveAssignments()

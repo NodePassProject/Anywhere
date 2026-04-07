@@ -49,22 +49,12 @@ struct SettingsView: View {
             }
 
             Section("Routing") {
-                if experimentalEnabled {
-                    Toggle(isOn: Binding(get: {
-                        proxyMode == .rule
-                    }, set: { newValue in
-                        if newValue { proxyMode = .rule } else { proxyMode = .global }
-                    })) {
-                        TextWithColorfulIconAndCustomImage(titleKey: "ASR™ Smart Routing", imageName: "ASR", foregroundColor: .white, backgroundColor: .orange)
-                    }
-                } else {
-                    Toggle(isOn: Binding(get: {
-                        proxyMode == .global
-                    }, set: { newValue in
-                        if newValue { proxyMode = .global } else { proxyMode = .rule }
-                    })) {
-                        TextWithColorfulIcon(titleKey: "Global Mode", systemName: "arrow.merge", foregroundColor: .white, backgroundColor: .orange)
-                    }
+                Toggle(isOn: Binding(get: {
+                    proxyMode == .global
+                }, set: { newValue in
+                    if newValue { proxyMode = .global } else { proxyMode = .rule }
+                })) {
+                    TextWithColorfulIcon(titleKey: "Global Mode", systemName: "arrow.merge", foregroundColor: .white, backgroundColor: .orange)
                 }
                 if proxyMode != .global {
                     Toggle(isOn: $adBlockEnabled) {
@@ -94,7 +84,7 @@ struct SettingsView: View {
                             showInsecureAlert = true
                         } else {
                             allowInsecure = false
-                            notifySettingsChanged()
+                            AWCore.notifySettingsChanged()
                         }
                     }
                 )) {
@@ -147,7 +137,7 @@ struct SettingsView: View {
             viewModel.reconnectVPN()
         }
         .onChange(of: proxyMode) {
-            notifySettingsChanged()
+            AWCore.notifySettingsChanged()
         }
         .onChange(of: adBlockEnabled) { _, newValue in
             if let adBlockRuleSet = RuleSetStore.shared.adBlockRuleSet {
@@ -162,13 +152,13 @@ struct SettingsView: View {
         .onChange(of: bypassCountryCode) { _, newValue in
             Task {
                 await RuleSetStore.shared.syncBypassCountryRules(countryCode: newValue)
-                notifySettingsChanged()
+                AWCore.notifySettingsChanged()
             }
         }
         .alert("Allow Insecure", isPresented: $showInsecureAlert) {
             Button("Allow Anyway", role: .destructive) {
                 allowInsecure = true
-                notifySettingsChanged()
+                AWCore.notifySettingsChanged()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -183,13 +173,5 @@ struct SettingsView: View {
         String(countryCode.unicodeScalars.compactMap {
             UnicodeScalar(127397 + $0.value)
         }.map(Character.init))
-    }
-    
-    private func notifySettingsChanged() {
-        CFNotificationCenterPostNotification(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            CFNotificationName("com.argsment.Anywhere.settingsChanged" as CFString),
-            nil, nil, true
-        )
     }
 }

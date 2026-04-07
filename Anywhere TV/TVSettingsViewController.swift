@@ -39,7 +39,7 @@ class TVSettingsViewController: UIViewController {
         get { AWCore.userDefaults.bool(forKey: "allowInsecure") }
         set {
             AWCore.userDefaults.set(newValue, forKey: "allowInsecure")
-            notifySettingsChanged()
+            AWCore.notifySettingsChanged()
             updateAppearance()
         }
     }
@@ -252,15 +252,5 @@ class TVSettingsViewController: UIViewController {
                 self.descriptionLabel.alpha = 0
             }
         }
-    }
-
-    // MARK: - Helpers
-
-    private func notifySettingsChanged() {
-        CFNotificationCenterPostNotification(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            CFNotificationName("com.argsment.Anywhere.settingsChanged" as CFString),
-            nil, nil, true
-        )
     }
 }

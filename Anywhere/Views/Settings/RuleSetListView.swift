@@ -21,21 +21,20 @@ struct RuleSetListView: View {
         }
     }
     
-    @State var routingRuleSets: [RuleSetStore.RuleSet] = RuleSetStore.shared.routingRuleSets
+    @State var builtInServiceRuleSets: [RuleSetStore.RuleSet] = RuleSetStore.shared.builtInServiceRuleSets
+    @State var customRuleSets: [RuleSetStore.CustomRuleSet] = RuleSetStore.shared.customRuleSets
     @State private var showAddSheet = false
     @State private var newRuleSetName = ""
     
     var body: some View {
         List {
             Section {
-                ForEach($routingRuleSets) { $ruleSet in
+                ForEach($builtInServiceRuleSets) { $ruleSet in
                     if !ruleSet.isCustom {
                         assignmentPicker(for: $ruleSet)
                     }
                 }
             }
-            
-            let customRuleSets = RuleSetStore.shared.customRuleSets
             if !customRuleSets.isEmpty {
                 Section {
                     ForEach(customRuleSets) { custom in
@@ -53,7 +52,7 @@ struct RuleSetListView: View {
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                if let ruleSet = routingRuleSets.first(where: { $0.id == custom.id.uuidString }) {
+                                if let ruleSet = builtInServiceRuleSets.first(where: { $0.id == custom.id.uuidString }) {
                                     assignmentLabel(for: ruleSet)
                                 }
                             }
@@ -64,7 +63,7 @@ struct RuleSetListView: View {
                         for offset in offsets {
                             RuleSetStore.shared.removeCustomRuleSet(customs[offset].id)
                         }
-                        routingRuleSets = RuleSetStore.shared.routingRuleSets
+                        builtInServiceRuleSets = RuleSetStore.shared.builtInServiceRuleSets
                         Task { await viewModel.syncRoutingConfigurationToNE() }
                     }
                 } header: {
@@ -84,7 +83,7 @@ struct RuleSetListView: View {
                     }
                     Button {
                         RuleSetStore.shared.resetAssignments()
-                        routingRuleSets = RuleSetStore.shared.routingRuleSets
+                        builtInServiceRuleSets = RuleSetStore.shared.builtInServiceRuleSets
                         Task { await viewModel.syncRoutingConfigurationToNE() }
                     } label: {
                         Label("Reset", systemImage: "arrow.clockwise")
@@ -92,17 +91,18 @@ struct RuleSetListView: View {
                 }
             }
         }
-        .onChange(of: routingRuleSets) { oldValue, newValue in
-            for currentRoutingRuleSet in newValue {
-                let previousRoutingRuleSet = oldValue.first(where: { $0.id == currentRoutingRuleSet.id })
-                if currentRoutingRuleSet.assignedConfigurationId != previousRoutingRuleSet?.assignedConfigurationId {
-                    RuleSetStore.shared.updateAssignment(currentRoutingRuleSet, configurationId: currentRoutingRuleSet.assignedConfigurationId)
+        .onChange(of: builtInServiceRuleSets) { oldValue, newValue in
+            for currentRuleSet in newValue {
+                let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
+                if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
+                    RuleSetStore.shared.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
                 }
             }
             Task { await viewModel.syncRoutingConfigurationToNE() }
         }
         .onAppear {
-            routingRuleSets = RuleSetStore.shared.routingRuleSets
+            builtInServiceRuleSets = RuleSetStore.shared.builtInServiceRuleSets
+            customRuleSets = RuleSetStore.shared.customRuleSets
         }
         .alert("New Rule Set", isPresented: $showAddSheet) {
             TextField("Name", text: $newRuleSetName)
@@ -110,7 +110,7 @@ struct RuleSetListView: View {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
                 _ = RuleSetStore.shared.addCustomRuleSet(name: name)
-                routingRuleSets = RuleSetStore.shared.routingRuleSets
+                builtInServiceRuleSets = RuleSetStore.shared.builtInServiceRuleSets
                 newRuleSetName = ""
             }
             Button("Cancel", role: .cancel) {
