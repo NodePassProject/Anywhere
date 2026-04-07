@@ -27,8 +27,7 @@ struct SettingsView: View {
     @AppStorage("alwaysOnEnabled", store: AWCore.userDefaults)
     private var alwaysOnEnabled = false
 
-    @AppStorage("proxyMode", store: AWCore.userDefaults)
-    private var proxyMode = ProxyMode.rule
+    @State private var proxyMode = AWCore.getProxyMode()
     
     @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
     private var bypassCountryCode = ""
@@ -133,10 +132,14 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .onAppear {
+            proxyMode = AWCore.getProxyMode()
+        }
         .onChange(of: alwaysOnEnabled) {
             viewModel.reconnectVPN()
         }
         .onChange(of: proxyMode) {
+            AWCore.setProxyMode(proxyMode)
             AWCore.notifySettingsChanged()
         }
         .onChange(of: adBlockEnabled) { _, newValue in
@@ -149,9 +152,9 @@ struct SettingsView: View {
             }
             Task { await viewModel.syncRoutingConfigurationToNE() }
         }
-        .onChange(of: bypassCountryCode) { _, newValue in
+        .onChange(of: bypassCountryCode) { _, _ in
             Task {
-                await RuleSetStore.shared.syncBypassCountryRules(countryCode: newValue)
+                await viewModel.syncRoutingConfigurationToNE()
                 AWCore.notifySettingsChanged()
             }
         }

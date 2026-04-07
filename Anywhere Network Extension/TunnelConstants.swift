@@ -92,13 +92,12 @@ enum TunnelConstants {
         static let proxyMode = "proxyMode"
         static let proxyServerAddresses = "proxyServerAddresses"
         static let routingData = "routingData"
-        static let bypassCountryDomainRules = "bypassCountryDomainRules"
     }
 
     // MARK: - Darwin Notification Names
 
     enum Notification {
-        static let settingsChanged = "com.argsment.Anywhere.settingsChanged" as CFString
-        static let routingChanged = "com.argsment.Anywhere.routingChanged" as CFString
+        static let settingsChanged = AWCore.Notification.settingsChanged
+        static let routingChanged = AWCore.Notification.routingChanged
     }
 }

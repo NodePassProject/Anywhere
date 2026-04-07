@@ -754,7 +754,6 @@ class VPNViewModel: ObservableObject {
 
     /// Builds routing configuration from rulesets and writes to App Group for the NE.
     func syncRoutingConfigurationToNE() async {
-        await ruleSetStore.syncBypassCountryRules()
         await ruleSetStore.syncToAppGroup(configurations: configurations, serializeConfiguration: VPNViewModel.serializeConfiguration)
     }
 
