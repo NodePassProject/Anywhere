@@ -11,8 +11,7 @@ import NetworkExtension
 struct HomeView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
     
-    @AppStorage("proxyMode", store: AWCore.userDefaults)
-    private var proxyMode = ProxyMode.rule
+    @State private var proxyMode = AWCore.getProxyMode()
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
@@ -41,6 +40,9 @@ struct HomeView: View {
                         .pickerStyle(.segmented)
                         .fixedSize()
                         .padding(.top, 10)
+                        .onAppear {
+                            proxyMode = AWCore.getProxyMode()
+                        }
                         
                         Spacer()
                         
@@ -77,6 +79,7 @@ struct HomeView: View {
         }
         .picker3D($pickerConfig, items: viewModel.allPickerItems)
         .onChange(of: proxyMode) {
+            AWCore.setProxyMode(proxyMode)
             AWCore.notifySettingsChanged()
         }
         .onChange(of: pickerConfig.show) {

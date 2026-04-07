@@ -17,33 +17,16 @@ enum RouteAction {
 
 class DomainRouter {
 
-    // MARK: - Domain Match Result
-
-    /// Result of a unified domain lookup covering both user rules and country bypass.
-    struct DomainMatch {
-        var userAction: RouteAction?
-        var isBypass: Bool
-        static let none = DomainMatch(userAction: nil, isBypass: false)
-    }
-
-    /// Result of a unified IP lookup covering both user rules and country bypass.
-    struct IPMatch {
-        var userAction: RouteAction?
-        var isBypass: Bool
-        static let none = IPMatch(userAction: nil, isBypass: false)
-    }
-
     // MARK: - Suffix Trie (reverse-label)
     //
     // All domain filters are normalized to suffix rules.
     // Domains are split into labels and reversed: "www.google.com" → ["com","google","www"].
     // Walking the trie from root matches progressively more-specific suffixes.
-    // Each node stores the deepest user action and/or a bypass flag at that suffix boundary.
+    // Bypass country rules are loaded first as .direct, then user rules overwrite.
 
     private final class TrieNode {
         var children: [String: TrieNode] = [:]
         var userAction: RouteAction?
-        var isBypass: Bool = false
     }
 
     private var trieRoot = TrieNode()
@@ -51,9 +34,7 @@ class DomainRouter {
     // MARK: - IP CIDR Binary Tries
     //
     // Binary tries for longest-prefix-match on IP addresses.
-    // Both user actions and bypass flags are stored in a single trie per protocol,
-    // mirroring the domain suffix trie design. User actions at the most-specific
-    // (deepest) matching prefix take precedence over bypass flags.
+    // Bypass country rules are inserted first as .direct, then user rules overwrite.
     // Lookup is O(32) for IPv4, O(128) for IPv6 — constant regardless of rule count.
 
     private var ipv4Trie = CIDRTrie()
@@ -69,7 +50,7 @@ class DomainRouter {
     // MARK: - Loading
 
     /// Reads routing configuration from App Group UserDefaults and compiles rules.
-    /// Clears all structures — must be called before ``loadBypassCountryRules()``.
+    /// Bypass country rules are loaded first as `.direct`, then user rules overwrite.
     func loadRoutingConfiguration() {
         // Clear all matching structures
         trieRoot = TrieNode()
@@ -86,6 +67,34 @@ class DomainRouter {
             return
         }
 
+        // Load bypass country rules first — user rules will overwrite on conflict
+        var bypassDomainRuleCount = 0
+        var bypassIPRuleCount = 0
+        if let bypassRules = json["bypassRules"] as? [[String: Any]] {
+            for rule in bypassRules {
+                guard let type = Self.parseRuleType(rule["type"]),
+                      let value = rule["value"] as? String else { continue }
+                switch type {
+                case .domainSuffix:
+                    trieInsert(value.lowercased(), action: .direct)
+                    bypassDomainRuleCount += 1
+                case .ipCIDR:
+                    if let parsed = Self.parseIPv4CIDR(value) {
+                        ipv4Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: .direct)
+                        bypassIPRuleCount += 1
+                    }
+                case .ipCIDR6:
+                    if let parsed = Self.parseIPv6CIDR(value) {
+                        ipv6Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: .direct)
+                        bypassIPRuleCount += 1
+                    }
+                }
+            }
+        }
+        if bypassDomainRuleCount > 0 || bypassIPRuleCount > 0 {
+            logger.debug("[DomainRouter] Loaded \(bypassDomainRuleCount) bypass country domain rules, \(bypassIPRuleCount) IP rules")
+        }
+
         // Parse configurations
         if let configurations = json["configs"] as? [String: Any] {
             for (key, value) in configurations {
@@ -97,7 +106,7 @@ class DomainRouter {
             }
         }
 
-        // Parse rules
+        // Parse user rules — these overwrite bypass rules on the same node
         guard let rules = json["rules"] as? [[String: Any]] else {
             logger.warning("[VPN] Routing data malformed: missing rules")
             return
@@ -125,7 +134,7 @@ class DomainRouter {
 
                     switch type {
                     case .domainSuffix:
-                        trieInsert(lowered, userAction: action)
+                        trieInsert(lowered, action: action)
                         domainRuleCount += 1
                     case .ipCIDR, .ipCIDR6:
                         break
@@ -142,12 +151,12 @@ class DomainRouter {
                     switch type {
                     case .ipCIDR:
                         if let parsed = Self.parseIPv4CIDR(value) {
-                            ipv4Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, userAction: action)
+                            ipv4Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
                             ipRuleCount += 1
                         }
                     case .ipCIDR6:
                         if let parsed = Self.parseIPv6CIDR(value) {
-                            ipv6Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, userAction: action)
+                            ipv6Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
                             ipRuleCount += 1
                         }
                     case .domainSuffix:
@@ -160,42 +169,6 @@ class DomainRouter {
         logger.debug("[DomainRouter] Loaded \(self.domainRuleCount) domain rules, \(self.ipRuleCount) IP rules, \(self.configurationMap.count) configurations")
     }
 
-    /// Reads bypass country rules from App Group UserDefaults and adds them
-    /// to the shared domain structures and IP rule tables.
-    /// Must be called after ``loadRoutingConfiguration()``.
-    func loadBypassCountryRules() {
-        var domainRuleCount = 0
-        var bypassIPRuleCount = 0
-
-        if let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.bypassCountryDomainRules),
-           let rules = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            for rule in rules {
-                guard let type = Self.parseRuleType(rule["type"]),
-                      let value = rule["value"] as? String else { continue }
-                let lowered = value.lowercased()
-                switch type {
-                case .domainSuffix:
-                    trieInsertBypass(lowered)
-                    domainRuleCount += 1
-                case .ipCIDR:
-                    if let parsed = Self.parseIPv4CIDR(value) {
-                        ipv4Trie.insertBypass(network: parsed.network, prefixLen: parsed.prefixLen)
-                        bypassIPRuleCount += 1
-                    }
-                case .ipCIDR6:
-                    if let parsed = Self.parseIPv6CIDR(value) {
-                        ipv6Trie.insertBypass(network: parsed.network, prefixLen: parsed.prefixLen)
-                        bypassIPRuleCount += 1
-                    }
-                }
-            }
-        }
-
-        if domainRuleCount > 0 || bypassIPRuleCount > 0 {
-            logger.debug("[DomainRouter] Loaded \(domainRuleCount) bypass country domain rules, \(bypassIPRuleCount) IP rules")
-        }
-    }
-
     // MARK: - Domain Matching (public API)
 
     /// Whether any user routing rules have been loaded.
@@ -203,33 +176,26 @@ class DomainRouter {
         domainRuleCount > 0 || ipRuleCount > 0
     }
 
-    /// Unified domain matching via the suffix trie.
-    /// User suffix rules take absolute precedence over country bypass suffixes.
-    func matchDomain(_ domain: String) -> DomainMatch {
-        guard !domain.isEmpty else { return .none }
-        let suffix = trieLookup(domain)
-        return DomainMatch(userAction: suffix.userAction, isBypass: suffix.userAction == nil && suffix.isBypass)
+    /// Matches a domain against the suffix trie.
+    func matchDomain(_ domain: String) -> RouteAction? {
+        guard !domain.isEmpty else { return nil }
+        return trieLookup(domain)
     }
 
-    /// Matches an IP address against user and bypass CIDR rules via binary trie.
-    /// Longest-prefix user action takes precedence; bypass is a fallback.
+    /// Matches an IP address against CIDR rules via binary trie.
     /// O(32) for IPv4, O(128) for IPv6 — constant regardless of rule count.
-    func matchIP(_ ip: String) -> IPMatch {
-        guard !ip.isEmpty else { return .none }
+    func matchIP(_ ip: String) -> RouteAction? {
+        guard !ip.isEmpty else { return nil }
 
         if ip.contains(":") {
             var addr = in6_addr()
-            guard inet_pton(AF_INET6, ip, &addr) == 1 else { return .none }
-            let result = withUnsafeBytes(of: &addr) { raw in
+            guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
+            return withUnsafeBytes(of: &addr) { raw in
                 ipv6Trie.lookup(raw.bindMemory(to: UInt8.self))
             }
-            return IPMatch(userAction: result.userAction,
-                           isBypass: result.userAction == nil && result.isBypass)
         } else {
-            guard let ip32 = Self.parseIPv4(ip) else { return .none }
-            let result = ipv4Trie.lookup(ip32)
-            return IPMatch(userAction: result.userAction,
-                           isBypass: result.userAction == nil && result.isBypass)
+            guard let ip32 = Self.parseIPv4(ip) else { return nil }
+            return ipv4Trie.lookup(ip32)
         }
     }
 
@@ -246,16 +212,10 @@ class DomainRouter {
 
     // MARK: - Suffix Trie (private)
 
-    /// Inserts a user suffix rule into the trie.
-    private func trieInsert(_ suffix: String, userAction: RouteAction) {
+    /// Inserts a suffix rule into the trie, overwriting any existing action.
+    private func trieInsert(_ suffix: String, action: RouteAction) {
         let node = trieWalkOrCreate(suffix)
-        node.userAction = userAction
-    }
-
-    /// Inserts a bypass suffix rule into the trie.
-    private func trieInsertBypass(_ suffix: String) {
-        let node = trieWalkOrCreate(suffix)
-        node.isBypass = true
+        node.userAction = action
     }
 
     /// Walks (or creates) the trie path for a domain suffix, returning the leaf node.
@@ -274,25 +234,20 @@ class DomainRouter {
         return node
     }
 
-    /// Looks up a domain in the suffix trie. Returns the deepest user action and
-    /// whether any bypass node was encountered along the path.
-    private func trieLookup(_ domain: String) -> (userAction: RouteAction?, isBypass: Bool) {
+    /// Looks up a domain in the suffix trie. Returns the deepest action along the path.
+    private func trieLookup(_ domain: String) -> RouteAction? {
         var node = trieRoot
-        var deepestUserAction: RouteAction? = nil
-        var foundBypass = false
+        var deepestAction: RouteAction? = nil
 
         for label in domain.split(separator: ".").reversed() {
             guard let child = node.children[String(label)] else { break }
             node = child
             if let action = node.userAction {
-                deepestUserAction = action
-            }
-            if node.isBypass {
-                foundBypass = true
+                deepestAction = action
             }
         }
 
-        return (deepestUserAction, foundBypass)
+        return deepestAction
     }
 
     // MARK: - CIDR Parsing
@@ -367,7 +322,7 @@ class DomainRouter {
 //
 // Binary trie for longest-prefix-match on IP addresses.
 // Each bit of the address selects a child (0 = left, 1 = right).
-// Nodes along the path may carry a user action and/or bypass flag.
+// Bypass country rules are inserted first as .direct, then user rules overwrite.
 // Lookup walks all address bits, tracking the deepest match — O(W) where
 // W = address width (32 for IPv4, 128 for IPv6), independent of rule count.
 
@@ -375,69 +330,51 @@ struct CIDRTrie {
     private final class Node {
         var left: Node?       // bit 0
         var right: Node?      // bit 1
-        var userAction: RouteAction?
-        var isBypass: Bool = false
+        var action: RouteAction?
     }
 
     private var root = Node()
 
-    /// Inserts a user CIDR rule. More-specific prefixes override less-specific ones.
-    mutating func insert(network: UInt32, prefixLen: Int, userAction: RouteAction) {
+    /// Inserts a CIDR rule. More-specific prefixes override less-specific ones.
+    mutating func insert(network: UInt32, prefixLen: Int, action: RouteAction) {
         let node = walkOrCreate(network, depth: prefixLen)
-        node.userAction = userAction
+        node.action = action
     }
 
-    /// Inserts a user CIDR rule from IPv6 network bytes.
-    mutating func insert(network: [UInt8], prefixLen: Int, userAction: RouteAction) {
+    /// Inserts a CIDR rule from IPv6 network bytes.
+    mutating func insert(network: [UInt8], prefixLen: Int, action: RouteAction) {
         let node = walkOrCreateIPv6(network, depth: prefixLen)
-        node.userAction = userAction
+        node.action = action
     }
 
-    /// Inserts a bypass CIDR rule for IPv4.
-    mutating func insertBypass(network: UInt32, prefixLen: Int) {
-        let node = walkOrCreate(network, depth: prefixLen)
-        node.isBypass = true
-    }
-
-    /// Inserts a bypass CIDR rule from IPv6 network bytes.
-    mutating func insertBypass(network: [UInt8], prefixLen: Int) {
-        let node = walkOrCreateIPv6(network, depth: prefixLen)
-        node.isBypass = true
-    }
-
-    /// Looks up an IPv4 address. Returns the deepest user action and whether
-    /// any bypass node was found along the path. O(32).
-    func lookup(_ ip: UInt32) -> (userAction: RouteAction?, isBypass: Bool) {
+    /// Looks up an IPv4 address. Returns the deepest action along the path. O(32).
+    func lookup(_ ip: UInt32) -> RouteAction? {
         var node = root
-        var deepestUserAction: RouteAction? = node.userAction
-        var foundBypass = node.isBypass
+        var deepestAction: RouteAction? = node.action
 
         for i in 0..<32 {
             let bit = (ip >> (31 - i)) & 1
             guard let next = bit == 0 ? node.left : node.right else { break }
             node = next
-            if let action = node.userAction { deepestUserAction = action }
-            if node.isBypass { foundBypass = true }
+            if let action = node.action { deepestAction = action }
         }
 
-        return (deepestUserAction, foundBypass)
+        return deepestAction
     }
 
     /// Looks up an IPv6 address from a byte buffer. O(128).
-    func lookup(_ bytes: UnsafeBufferPointer<UInt8>) -> (userAction: RouteAction?, isBypass: Bool) {
+    func lookup(_ bytes: UnsafeBufferPointer<UInt8>) -> RouteAction? {
         var node = root
-        var deepestUserAction: RouteAction? = node.userAction
-        var foundBypass = node.isBypass
+        var deepestAction: RouteAction? = node.action
 
         for i in 0..<128 {
             let bit = (bytes[i >> 3] >> (7 - (i & 7))) & 1
             guard let next = bit == 0 ? node.left : node.right else { break }
             node = next
-            if let action = node.userAction { deepestUserAction = action }
-            if node.isBypass { foundBypass = true }
+            if let action = node.action { deepestAction = action }
         }
 
-        return (deepestUserAction, foundBypass)
+        return deepestAction
     }
 
     // MARK: - Private

@@ -7,6 +7,7 @@
 
 import NetworkExtension
 import Network
+import WidgetKit
 
 private let logger = TunnelLogger(category: "PacketTunnel")
 
@@ -103,10 +104,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 completionHandler(error)
                 return
             }
+            
+            if #available(iOS 18.0, *) {
+                ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+            }
 
             self.lwipStack.start(packetFlow: self.packetFlow,
                                  configuration: configuration)
             self.startMonitoringPath()
+            
             completionHandler(nil)
         }
     }
@@ -214,9 +220,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        if #available(iOS 18.0, *) {
+            ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+        }
+        
         stopMonitoringPath()
         logTunnelStop(reason: reason)
         lwipStack.stop()
+        
         completionHandler()
     }
 

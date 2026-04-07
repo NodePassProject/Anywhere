@@ -51,9 +51,8 @@ extension LWIPStack {
 
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
             case .passthrough:
-                // Real IP — check IP CIDR rules, then GeoIP bypass
-                let match = shared.domainRouter.matchIP(dstIPString)
-                if let action = match.userAction {
+                // Real IP — check IP CIDR rules
+                if let action = shared.domainRouter.matchIP(dstIPString) {
                     switch action {
                     case .direct:
                         forceBypass = true
@@ -69,8 +68,6 @@ extension LWIPStack {
                             logger.warning("[TCP] Routing config not found for \(dstIPString)")
                         }
                     }
-                } else if shared.proxyMode != .global, !shared.bypassCountryCode.isEmpty, match.isBypass {
-                    forceBypass = true
                 }
             case .resolved(let domain, let configurationOverride, let bypass):
                 dstHost = domain
@@ -170,9 +167,8 @@ extension LWIPStack {
 
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "UDP") {
             case .passthrough:
-                // Real IP — check IP CIDR rules, then GeoIP bypass
-                let match = shared.domainRouter.matchIP(dstIPString)
-                if let action = match.userAction {
+                // Real IP — check IP CIDR rules
+                if let action = shared.domainRouter.matchIP(dstIPString) {
                     switch action {
                     case .direct:
                         forceBypass = true
@@ -196,8 +192,6 @@ extension LWIPStack {
                             logger.warning("[UDP] Routing config not found for \(dstIPString)")
                         }
                     }
-                } else if shared.proxyMode != .global, !shared.bypassCountryCode.isEmpty, match.isBypass {
-                    forceBypass = true
                 }
             case .resolved(let domain, let configurationOverride, let bypass):
                 dstHost = domain
@@ -265,9 +259,7 @@ extension LWIPStack {
             return .unreachable
         }
 
-        let match = domainRouter.matchDomain(entry.domain)
-
-        if let action = match.userAction {
+        if let action = domainRouter.matchDomain(entry.domain) {
             switch action {
             case .direct:
                 return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: true)
@@ -280,11 +272,6 @@ extension LWIPStack {
                 }
                 return .resolved(domain: entry.domain, configurationOverride: configuration, forceBypass: false)
             }
-        }
-
-        // Country bypass: domain matched the bypass country's rule set.
-        if proxyMode != .global, !bypassCountryCode.isEmpty, match.isBypass {
-            return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: true)
         }
 
         return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: false)

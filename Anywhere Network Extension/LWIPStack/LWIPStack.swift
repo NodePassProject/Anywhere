@@ -255,7 +255,6 @@ class LWIPStack {
 
         if proxyMode != .global {
             domainRouter.loadRoutingConfiguration()
-            domainRouter.loadBypassCountryRules()
         }
     }
 

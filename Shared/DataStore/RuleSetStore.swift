@@ -260,48 +260,25 @@ class RuleSetStore: ObservableObject {
                 routingRules.append(ruleEntry)
             }
 
-            let routing: [String: Any] = ["rules": routingRules, "configs": configurationsDict]
+            // Fetch bypass country rules
+            var bypassRules: [[String: Any]] = []
+            if let countryCode = await AWCore.userDefaults.string(forKey: "bypassCountryCode"), !countryCode.isEmpty {
+                let rules = await CountryBypassCatalog.shared.rules(for: countryCode)
+                bypassRules = rules.map {
+                    ["type": $0.type.rawValue, "value": $0.value]
+                }
+            }
+
+            var routing: [String: Any] = ["rules": routingRules, "configs": configurationsDict]
+            if !bypassRules.isEmpty {
+                routing["bypassRules"] = bypassRules
+            }
 
             if let data = try? JSONSerialization.data(withJSONObject: routing) {
                 await AWCore.userDefaults.set(data, forKey: "routingData")
             }
 
-            CFNotificationCenterPostNotification(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                CFNotificationName("com.argsment.Anywhere.routingChanged" as CFString),
-                nil, nil, true
-            )
-        }.value
-    }
-
-    // MARK: - Bypass Country
-
-    /// Serializes the bypass country's rules to App Group UserDefaults
-    /// so the Network Extension can match both domains and IPs for country-based bypass.
-    func syncBypassCountryRules(countryCode: String? = nil) async {
-        var effectiveCountryCode: String
-        if let countryCode {
-            effectiveCountryCode = countryCode
-        } else {
-            if let countryCode = AWCore.userDefaults.string(forKey: "bypassCountryCode") {
-                effectiveCountryCode = countryCode
-            } else {
-                AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
-                return
-            }
-        }
-        await Task.detached {
-            let rules = await CountryBypassCatalog.shared.rules(for: effectiveCountryCode)
-            let serializedRules: [[String: Any]] = rules.map {
-                ["type": $0.type.rawValue, "value": $0.value]
-            }
-            if serializedRules.isEmpty {
-                await AWCore.userDefaults.removeObject(forKey: "bypassCountryDomainRules")
-                return
-            }
-            if let data = try? JSONSerialization.data(withJSONObject: serializedRules) {
-                await AWCore.userDefaults.set(data, forKey: "bypassCountryDomainRules")
-            }
+            AWCore.notifyRoutingChanged()
         }.value
     }
 
