@@ -62,6 +62,12 @@ class LWIPStack {
     var proxyMode: ProxyMode = .rule
     var running = false
 
+    /// Timestamp of the last completed stack restart (used for throttling).
+    var lastRestartTime: CFAbsoluteTime = 0
+
+    /// Pending deferred restart when throttled. Cancelled and replaced on each new request.
+    var deferredRestart: DispatchWorkItem?
+
     // lwIP periodic timeout timer
     var timeoutTimer: DispatchSourceTimer?
 

@@ -56,6 +56,8 @@ extension LWIPStack {
         stopObservingSettings()
         lwipQueue.sync { [self] in
             running = false
+            deferredRestart?.cancel()
+            deferredRestart = nil
             shutdownInternal()
             fakeIPPool.reset()
             clearRecentTunnelInterruption()
@@ -127,12 +129,45 @@ extension LWIPStack {
         logger.debug("[LWIPStack] Shutdown complete, closed \(flowCount) UDP flows")
     }
 
+    /// Minimum interval between stack restarts (seconds).
+    private static let restartThrottleInterval: CFAbsoluteTime = 1.0
+
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.
+    ///
+    /// Throttled to at most once per ``restartThrottleInterval``. When a restart is
+    /// requested within the cooldown window the request is deferred; only the last
+    /// deferred request executes (earlier ones are cancelled and replaced).
+    private func restartStack(configuration: ProxyConfiguration) {
+        let now = CFAbsoluteTimeGetCurrent()
+        let elapsed = now - lastRestartTime
+
+        if elapsed < Self.restartThrottleInterval {
+            deferredRestart?.cancel()
+            let delay = Self.restartThrottleInterval - elapsed
+            let work = DispatchWorkItem { [self] in
+                deferredRestart = nil
+                guard running else { return }
+                restartStackNow(configuration: configuration)
+            }
+            deferredRestart = work
+            lwipQueue.asyncAfter(deadline: .now() + delay, execute: work)
+            logger.debug("[LWIPStack] Restart throttled, deferred by \(String(format: "%.0f", delay * 1000))ms")
+            return
+        }
+
+        restartStackNow(configuration: configuration)
+    }
+
+    /// Performs the actual stack restart. Must be called on `lwipQueue`.
     /// `running` stays `true` so the existing `readPackets` loop continues uninterrupted —
     /// packets queued on lwipQueue during reinit are processed after `lwip_bridge_init()`.
     /// FakeIPPool is preserved across restarts — since all DNS queries get fake IPs and
     /// routing decisions are made at connection time, cached fake IPs remain valid.
-    private func restartStack(configuration: ProxyConfiguration) {
+    private func restartStackNow(configuration: ProxyConfiguration) {
+        deferredRestart?.cancel()
+        deferredRestart = nil
+        lastRestartTime = CFAbsoluteTimeGetCurrent()
+
         shutdownInternal()
 
         self.configuration = configuration

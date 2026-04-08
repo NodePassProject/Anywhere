@@ -174,7 +174,7 @@ class NWTransport: RawTransport {
                 self.state = .ready
                 connection.betterPathUpdateHandler = { [weak self] isBetter in
                     if isBetter {
-                        logger.info("[TCP] Better network path available for connection")
+                        logger.debug("[TCP] Better network path available for connection")
                         self?.betterPathAvailableHandler?()
                     }
                 }

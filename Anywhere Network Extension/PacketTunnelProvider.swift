@@ -19,6 +19,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let pathMonitorQueue = DispatchQueue(label: "com.argsment.Anywhere.path-monitor")
     private var pathMonitor: NWPathMonitor?
     private var lastPathSnapshot: PathSnapshot?
+    private var sleepTimestamp: CFAbsoluteTime = 0
+
+    /// Minimum sleep duration (seconds) before proactively restarting the stack on wake.
+    /// Short sleeps leave TCP connections intact — they likely survive.
+    /// Long sleeps almost certainly leave dead proxy connections behind,
+    /// so we restart immediately instead of waiting for keepalive timeouts.
+    private static let wakeRestartThreshold: CFAbsoluteTime = 60
 
     private struct PathSnapshot: Equatable {
         let status: Network.NWPath.Status
@@ -283,11 +290,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func sleep() async {
         logger.warning("[VPN] Device going to sleep; active connections may pause")
+        sleepTimestamp = CFAbsoluteTimeGetCurrent()
         lwipStack.noteRecentTunnelInterruption(summary: "device sleep", level: .warning)
     }
 
     override func wake() {
-        logger.info("[VPN] Device woke up")
+        let sleepDuration = CFAbsoluteTimeGetCurrent() - sleepTimestamp
+        logger.info("[VPN] Device woke up after \(Int(sleepDuration))s")
+
+        if sleepTimestamp > 0 && sleepDuration >= Self.wakeRestartThreshold {
+            logger.warning("[VPN] Long sleep detected (\(Int(sleepDuration))s); restarting connections")
+            lwipStack.handleNetworkPathChange(summary: "device wake after \(Int(sleepDuration))s sleep")
+        }
     }
 
     // MARK: - Path Monitoring
