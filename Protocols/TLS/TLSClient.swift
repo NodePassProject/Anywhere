@@ -10,9 +10,8 @@ import CryptoKit
 import CommonCrypto
 import Security
 import Compression
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "TLS")
+private let logger = AnywhereLogger(category: "TLS")
 
 // MARK: - ServerHello Result
 
@@ -117,7 +116,7 @@ class TLSClient {
         do {
             clientHello = try buildTLSClientHello(privateKey: privateKey)
         } catch {
-            logger.error("[TLS] Failed to build ClientHello: \(error.localizedDescription, privacy: .public)")
+            logger.error("[TLS] Failed to build ClientHello: \(error.localizedDescription)")
             completion(.failure(error))
             return
         }
@@ -128,7 +127,7 @@ class TLSClient {
 
         transport.connect(host: host, port: port, queue: .global(), initialData: clientHello) { [weak self] error in
             if let error {
-                logger.error("[TLS] TCP connection failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("[TLS] TCP connection failed: \(error.localizedDescription)")
                 completion(.failure(TLSError.connectionFailed(error.localizedDescription)))
                 return
             }
@@ -193,7 +192,7 @@ class TLSClient {
                 guard let self else { return }
 
                 if let error {
-                    logger.error("[TLS] Failed to send ClientHello: \(error.localizedDescription, privacy: .public)")
+                    logger.error("[TLS] Failed to send ClientHello: \(error.localizedDescription)")
                     completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                     return
                 }
@@ -201,7 +200,7 @@ class TLSClient {
                 self.receiveServerResponse(completion: completion)
             }
         } catch {
-            logger.error("[TLS] Failed to build ClientHello: \(error.localizedDescription, privacy: .public)")
+            logger.error("[TLS] Failed to build ClientHello: \(error.localizedDescription)")
             completion(.failure(error))
         }
     }
@@ -258,10 +257,10 @@ class TLSClient {
             } else if contentType == 0x15 { // Alert
                 let alertLevel = buffer.count > 5 ? buffer[5] : 0
                 let alertDesc = buffer.count > 6 ? buffer[6] : 0
-                logger.error("[TLS] TLS Alert: level=\(alertLevel, privacy: .public), desc=\(alertDesc, privacy: .public)")
+                logger.error("[TLS] TLS Alert: level=\(alertLevel), desc=\(alertDesc)")
                 completion(.failure(TLSError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")))
             } else {
-                logger.error("[TLS] Unexpected content type: 0x\(String(format: "%02x", contentType), privacy: .public)")
+                logger.error("[TLS] Unexpected content type: 0x\(String(format: "%02x", contentType))")
                 completion(.failure(TLSError.handshakeFailed("Unexpected content type: \(contentType)")))
             }
             return
@@ -276,7 +275,7 @@ class TLSClient {
             guard let self else { return }
 
             if let error {
-                logger.error("[TLS] Error receiving server response: \(error.localizedDescription, privacy: .public)")
+                logger.error("[TLS] Error receiving server response: \(error.localizedDescription)")
                 completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                 return
             }
@@ -307,7 +306,7 @@ class TLSClient {
                 guard let self else { return }
 
                 if let error {
-                    logger.error("[TLS] Error receiving more data: \(error.localizedDescription, privacy: .public)")
+                    logger.error("[TLS] Error receiving more data: \(error.localizedDescription)")
                     completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                     return
                 }
@@ -560,7 +559,7 @@ class TLSClient {
 
             consumeRemainingTLS13Handshake(buffer: buffer, completion: completion)
         } catch {
-            logger.error("[TLS] Failed to derive TLS 1.3 keys: \(error.localizedDescription, privacy: .public)")
+            logger.error("[TLS] Failed to derive TLS 1.3 keys: \(error.localizedDescription)")
             completion(.failure(TLSError.handshakeFailed("Key derivation failed")))
         }
     }
@@ -672,7 +671,7 @@ class TLSClient {
                         hsOffset += 4 + hsLen
                     }
                 } catch {
-                    logger.error("[TLS] Failed to decrypt handshake record: \(error.localizedDescription, privacy: .public)")
+                    logger.error("[TLS] Failed to decrypt handshake record: \(error.localizedDescription)")
                 }
             }
 
@@ -725,7 +724,7 @@ class TLSClient {
                 guard let self else { return }
 
                 if let error {
-                    logger.warning("[TLS] Error receiving more handshake data: \(error.localizedDescription, privacy: .public)")
+                    logger.warning("[TLS] Error receiving more handshake data: \(error.localizedDescription)")
                     completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                     return
                 }
@@ -801,7 +800,7 @@ class TLSClient {
             guard let self else { return }
 
             if let error {
-                logger.error("[TLS] Failed to send Client Finished: \(error.localizedDescription, privacy: .public)")
+                logger.error("[TLS] Failed to send Client Finished: \(error.localizedDescription)")
                 completion(.failure(TLSError.handshakeFailed("Failed to send Client Finished")))
                 return
             }
@@ -914,7 +913,7 @@ class TLSClient {
             guard let self else { return }
 
             if let error {
-                logger.error("[TLS] Error receiving TLS 1.2 handshake: \(error.localizedDescription, privacy: .public)")
+                logger.error("[TLS] Error receiving TLS 1.2 handshake: \(error.localizedDescription)")
                 completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                 return
             }
@@ -1390,7 +1389,7 @@ class TLSClient {
             guard let self else { return }
 
             if let error {
-                logger.error("[TLS] Failed to send TLS 1.2 handshake: \(error.localizedDescription, privacy: .public)")
+                logger.error("[TLS] Failed to send TLS 1.2 handshake: \(error.localizedDescription)")
                 completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                 return
             }
@@ -1892,7 +1891,7 @@ class TLSClient {
                 return
             }
             let message = (cfError as Error?)?.localizedDescription ?? "Certificate evaluation failed"
-            logger.error("[TLS] Certificate validation failed: \(message, privacy: .public)")
+            logger.error("[TLS] Certificate validation failed: \(message)")
             completion(.failure(TLSError.certificateValidationFailed(message)))
         }
     }

@@ -11,7 +11,7 @@ import Network
 import WidgetKit
 #endif
 
-private let logger = TunnelLogger(category: "PacketTunnel")
+private let logger = AnywhereLogger(category: "PacketTunnel")
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     private let lwipStack = LWIPStack()
@@ -324,21 +324,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         switch snapshot.status {
         case .satisfied:
             if previous?.status == .satisfied {
-                logger.warning("[VPN] Network path changed to \(snapshot.summary); active connections may reconnect")
-                lwipStack.noteRecentTunnelInterruption(summary: "network path change", level: .warning)
+                logger.warning("[VPN] Network path changed to \(snapshot.summary); restarting connections on new interface")
+                lwipStack.handleNetworkPathChange(summary: "network interface change")
             } else {
-                logger.info("[VPN] Network path restored: \(snapshot.summary)")
+                logger.info("[VPN] Network path restored: \(snapshot.summary); restarting connections")
+                lwipStack.handleNetworkPathChange(summary: "network path restored")
+            }
+            // Signal the system that the tunnel has recovered from any prior interruption
+            if reasserting {
+                reasserting = false
             }
 
         case .requiresConnection:
             let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
             logger.warning("[VPN] Network path waiting for attachment\(reasonSuffix); active connections may pause")
             lwipStack.noteRecentTunnelInterruption(summary: "network path waiting for attachment", level: .warning)
+            reasserting = true
 
         case .unsatisfied:
             let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
             logger.warning("[VPN] Network path unavailable\(reasonSuffix); active connections interrupted")
             lwipStack.noteRecentTunnelInterruption(summary: "network path unavailable", level: .warning)
+            reasserting = true
 
         @unknown default:
             logger.warning("[VPN] Network path changed unexpectedly; active connections may reconnect")

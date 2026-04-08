@@ -7,9 +7,8 @@
 
 import Foundation
 import Network
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "NWTransport")
+private let logger = AnywhereLogger(category: "NWTransport")
 
 // MARK: - RawTransport
 
@@ -174,7 +173,10 @@ class NWTransport: RawTransport {
                 self.nwConnection = connection
                 self.state = .ready
                 connection.betterPathUpdateHandler = { [weak self] isBetter in
-                    if isBetter { self?.betterPathAvailableHandler?() }
+                    if isBetter {
+                        logger.info("[TCP] Better network path available for connection")
+                        self?.betterPathAvailableHandler?()
+                    }
                 }
                 completion(nil)
 

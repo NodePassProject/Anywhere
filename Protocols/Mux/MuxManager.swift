@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import os.log
 
 class MuxManager {
     let configuration: ProxyConfiguration

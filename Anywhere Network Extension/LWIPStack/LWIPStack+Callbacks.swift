@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = TunnelLogger(category: "LWIPStack")
+private let logger = AnywhereLogger(category: "LWIPStack")
 
 extension LWIPStack {
 

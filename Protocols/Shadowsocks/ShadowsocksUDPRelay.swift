@@ -9,10 +9,9 @@ import Foundation
 import CryptoKit
 import CommonCrypto
 import Network
-import os.log
 import Security
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "SS-UDP-Relay")
+private let logger = AnywhereLogger(category: "SS-UDP-Relay")
 
 // MARK: - ShadowsocksUDPRelay
 
@@ -121,7 +120,7 @@ class ShadowsocksUDPRelay {
             let encrypted = try encryptPacket(payload: data)
             connection.send(content: encrypted, completion: .contentProcessed({ _ in }))
         } catch {
-            logger.error("[SS-UDP] Encrypt error: \(error.localizedDescription, privacy: .public)")
+            logger.error("[SS-UDP] Encrypt error: \(error.localizedDescription)")
         }
     }
 
@@ -139,7 +138,7 @@ class ShadowsocksUDPRelay {
                     let payload = try self.decryptPacket(data)
                     handler(payload)
                 } catch {
-                    logger.error("[SS-UDP] Decrypt error: \(error.localizedDescription, privacy: .public)")
+                    logger.error("[SS-UDP] Decrypt error: \(error.localizedDescription)")
                 }
             }
             // UDP doesn't have EOF, continue receiving

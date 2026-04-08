@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "Proxy")
+private let logger = AnywhereLogger(category: "Proxy")
 
 // MARK: - ProxyConnectionProtocol
 

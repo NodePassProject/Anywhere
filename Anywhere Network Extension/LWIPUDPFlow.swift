@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = TunnelLogger(category: "LWIP-UDP")
+private let logger = AnywhereLogger(category: "LWIP-UDP")
 
 class LWIPUDPFlow {
     let flowKey: LWIPStack.UDPFlowKey
@@ -259,19 +259,9 @@ class LWIPUDPFlow {
 
                 switch result {
                 case .success(let session):
-                    // Guard against race: closeAll() may have already closed the
-                    // session (via receive-loop error) before this handler ran.
-                    // closeHandler was never set, so the flow won't be cleaned up
-                    // unless we handle it here.
-                    guard !session.closed else {
-                        self.releaseProxy()
-                        LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
-                        return
-                    }
-
-                    self.muxSession = session
-
-                    // Set up receive handler
+                    // Set up handlers BEFORE checking closed state to prevent
+                    // a race where close fires between the check and handler
+                    // registration, which would leak the flow.
                     session.dataHandler = { [weak self] data in
                         self?.handleProxyData(data)
                     }
@@ -282,6 +272,16 @@ class LWIPUDPFlow {
                             LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                         }
                     }
+
+                    // Guard against race: closeAll() may have already closed the
+                    // session (via receive-loop error) before this handler ran.
+                    guard !session.closed else {
+                        self.releaseProxy()
+                        LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                        return
+                    }
+
+                    self.muxSession = session
 
                     // Send buffered raw payloads
                     let buffered = self.pendingData

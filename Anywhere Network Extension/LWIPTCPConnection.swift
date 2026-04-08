@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = TunnelLogger(category: "LWIP-TCP")
+private let logger = AnywhereLogger(category: "LWIP-TCP")
 
 class LWIPTCPConnection {
     let pcb: UnsafeMutableRawPointer

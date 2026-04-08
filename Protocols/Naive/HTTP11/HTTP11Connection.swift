@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "HTTP11")
+private let logger = AnywhereLogger(category: "HTTP11")
 
 // MARK: - HTTP11Connection
 
@@ -189,7 +188,7 @@ class HTTP11Connection: NaiveTunnel {
 
             let statusCode = String(parts[1])
             guard statusCode == "200" else {
-                logger.error("[HTTP11] CONNECT rejected: \(String(statusLine), privacy: .public)")
+                logger.error("[HTTP11] CONNECT rejected: \(String(statusLine))")
                 if statusCode == "407" {
                     completion(NaiveTLSError.connectionFailed("Proxy authentication required (407)"))
                 } else {

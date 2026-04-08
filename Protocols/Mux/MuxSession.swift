@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "MuxSession")
+private let logger = AnywhereLogger(category: "MuxSession")
 
 class MuxSession {
     let sessionID: UInt16

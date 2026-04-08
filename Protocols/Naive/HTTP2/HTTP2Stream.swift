@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "HTTP2Stream")
+private let logger = AnywhereLogger(category: "HTTP2Stream")
 
 /// A single CONNECT tunnel multiplexed on an ``HTTP2Session``.
 ///
@@ -211,7 +210,7 @@ class HTTP2Stream: NaiveTunnel {
                 logger.error("[HTTP2Stream] Proxy authentication required (407) on stream \(self.streamID)")
                 handleStreamError(HTTP2Error.authenticationRequired)
             } else {
-                logger.error("[HTTP2Stream] CONNECT failed with status \(status, privacy: .public) on stream \(self.streamID)")
+                logger.error("[HTTP2Stream] CONNECT failed with status \(status) on stream \(self.streamID)")
                 handleStreamError(HTTP2Error.tunnelFailed(statusCode: status))
             }
         }

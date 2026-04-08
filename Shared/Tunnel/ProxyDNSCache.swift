@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "ProxyDNSCache")
+private let logger = AnywhereLogger(category: "ProxyDNSCache")
 
 // MARK: - ProxyDNSCache
 
@@ -101,7 +100,7 @@ final class ProxyDNSCache {
         guard !ips.isEmpty else {
             // If we have stale IPs, return them as fallback
             if let cached { return cached }
-            logger.warning("[DNS] Resolution failed for \(bare, privacy: .public)")
+            logger.warning("[DNS] Resolution failed for \(bare)")
             return []
         }
 

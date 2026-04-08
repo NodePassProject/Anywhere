@@ -8,7 +8,7 @@
 import Foundation
 import NetworkExtension
 
-private let logger = TunnelLogger(category: "LWIPStack")
+private let logger = AnywhereLogger(category: "LWIPStack")
 
 extension LWIPStack {
 
@@ -21,6 +21,15 @@ extension LWIPStack {
     ///   - configuration: The proxy configuration.
     func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) {
         LWIPStack.shared = self
+        AnywhereLogger.logSink = { [weak self] message, level in
+            let logLevel: LWIPStack.LogLevel
+            switch level {
+            case .info: logLevel = .info
+            case .warning: logLevel = .warning
+            case .error: logLevel = .error
+            }
+            self?.appendLog(message, level: logLevel)
+        }
         self.packetFlow = packetFlow
         self.configuration = configuration
 
@@ -52,6 +61,7 @@ extension LWIPStack {
             clearRecentTunnelInterruption()
         }
 
+        AnywhereLogger.logSink = nil
         packetFlow = nil
         configuration = nil
         LWIPStack.shared = nil
@@ -66,6 +76,19 @@ extension LWIPStack {
             logger.info("[VPN] Configuration switched; reconnecting active connections")
             noteRecentTunnelInterruption(summary: "configuration switch", level: .info)
             restartStack(configuration: newConfiguration)
+        }
+    }
+
+    /// Tears down all active connections and restarts the stack on the current
+    /// configuration. Called when the network path changes significantly
+    /// (interface switch or restored from unavailable) so that stale
+    /// connections bound to the old interface are replaced immediately.
+    func handleNetworkPathChange(summary: String) {
+        lwipQueue.async { [self] in
+            guard running, let configuration else { return }
+            logger.warning("[VPN] Restarting stack after \(summary)")
+            noteRecentTunnelInterruption(summary: summary, level: .warning)
+            restartStack(configuration: configuration)
         }
     }
 

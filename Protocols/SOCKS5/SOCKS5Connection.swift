@@ -7,9 +7,8 @@
 
 import Foundation
 import Network
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "SOCKS5")
+private let logger = AnywhereLogger(category: "SOCKS5")
 
 // MARK: - SOCKS5 Protocol Constants
 
@@ -150,7 +149,7 @@ enum SOCKS5Handshake {
     ) {
         performAuth(buffer: buffer, transport: transport, username: username, password: password) { error in
             if let error {
-                logger.error("[SOCKS5] auth failed for \(destinationHost, privacy: .public):\(destinationPort): \(error.localizedDescription, privacy: .public)")
+                logger.error("[SOCKS5] auth failed for \(destinationHost):\(destinationPort): \(error.localizedDescription)")
                 completion(error)
                 return
             }
@@ -165,7 +164,7 @@ enum SOCKS5Handshake {
                 case .success:
                     completion(nil)
                 case .failure(let error):
-                    logger.error("[SOCKS5] CONNECT failed for \(destinationHost, privacy: .public):\(destinationPort): \(error.localizedDescription, privacy: .public)")
+                    logger.error("[SOCKS5] CONNECT failed for \(destinationHost):\(destinationPort): \(error.localizedDescription)")
                     completion(error)
                 }
             }

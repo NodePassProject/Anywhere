@@ -10,6 +10,8 @@ import NetworkExtension
 import Combine
 import SwiftUI
 
+private let logger = AnywhereLogger(category: "VPNViewModel")
+
 /// ViewModel managing VPN connection state and operations
 @MainActor
 class VPNViewModel: ObservableObject {
@@ -637,6 +639,8 @@ class VPNViewModel: ObservableObject {
 
     func disconnectVPN() {
         guard let manager = vpnManager else { return }
+        // Clear any pending reconnect — an explicit disconnect should not auto-reconnect
+        pendingReconnect = false
         if manager.isOnDemandEnabled {
             manager.isOnDemandEnabled = false
             manager.saveToPreferences { _ in
@@ -683,7 +687,11 @@ class VPNViewModel: ObservableObject {
             }
 
             guard let data = try? JSONSerialization.data(withJSONObject: configurationDict) else { return }
-            try? session.sendProviderMessage(data) { _ in }
+            do {
+                try session.sendProviderMessage(data) { _ in }
+            } catch {
+                logger.warning("Failed to send configuration to tunnel: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -804,7 +812,11 @@ class VPNViewModel: ObservableObject {
               let session = vpnManager?.connection as? NETunnelProviderSession else { return }
         let message: [String: Any] = ["type": "proxyAddresses", "addresses": addressArray]
         guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
-        try? session.sendProviderMessage(data) { _ in }
+        do {
+            try session.sendProviderMessage(data) { _ in }
+        } catch {
+            logger.warning("Failed to send proxy addresses to tunnel: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Configuration Serialization

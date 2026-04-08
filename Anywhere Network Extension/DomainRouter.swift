@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = TunnelLogger(category: "DomainRouter")
+private let logger = AnywhereLogger(category: "DomainRouter")
 
 enum RouteAction {
     case direct
@@ -49,17 +49,22 @@ class DomainRouter {
 
     // MARK: - Loading
 
+    /// Clears all routing rules and configurations.
+    /// Used when switching to global mode to ensure no stale rules affect routing.
+    func reset() {
+        trieRoot = TrieNode()
+        domainRuleCount = 0
+        ipRuleCount = 0
+        ipv4Trie = CIDRTrie()
+        ipv6Trie = CIDRTrie()
+        configurationMap.removeAll()
+    }
+
     /// Reads routing configuration from App Group UserDefaults and compiles rules.
     /// Bypass country rules are loaded first as `.direct`, then user rules overwrite.
     func loadRoutingConfiguration() {
         // Clear all matching structures
-        trieRoot = TrieNode()
-        domainRuleCount = 0
-        ipRuleCount = 0
-
-        ipv4Trie = CIDRTrie()
-        ipv6Trie = CIDRTrie()
-        configurationMap.removeAll()
+        reset()
 
         guard let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.routingData),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

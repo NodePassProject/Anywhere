@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "HTTP2Session")
+private let logger = AnywhereLogger(category: "HTTP2Session")
 
 /// Multiplexed HTTP/2 session that hosts multiple concurrent CONNECT tunnels.
 ///
@@ -477,7 +476,7 @@ class HTTP2Session {
     func sendControlFrame(_ frame: HTTP2Frame) {
         transport.send(data: HTTP2Framer.serialize(frame)) { error in
             if let error {
-                logger.warning("[HTTP2Session] Failed to send control frame: \(error.localizedDescription, privacy: .public)")
+                logger.warning("[HTTP2Session] Failed to send control frame: \(error.localizedDescription)")
             }
         }
     }

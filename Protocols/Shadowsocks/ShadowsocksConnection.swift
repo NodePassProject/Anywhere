@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "Shadowsocks")
+private let logger = AnywhereLogger(category: "Shadowsocks")
 
 // MARK: - ShadowsocksConnection
 
@@ -56,7 +55,7 @@ class ShadowsocksConnection: ProxyConnection {
     override func sendRaw(data: Data) {
         sendRaw(data: data) { error in
             if let error {
-                logger.error("[SS] Send error: \(error.localizedDescription, privacy: .public)")
+                logger.error("[SS] Send error: \(error.localizedDescription)")
             }
         }
     }
@@ -131,7 +130,7 @@ class ShadowsocksUDPConnection: ProxyConnection {
     override func sendRaw(data: Data) {
         sendRaw(data: data) { error in
             if let error {
-                logger.error("[SS-UDP] Send error: \(error.localizedDescription, privacy: .public)")
+                logger.error("[SS-UDP] Send error: \(error.localizedDescription)")
             }
         }
     }

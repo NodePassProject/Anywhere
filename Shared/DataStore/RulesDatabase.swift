@@ -7,9 +7,8 @@
 
 import Foundation
 import SQLite3
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere", category: "RulesDatabase")
+private let logger = AnywhereLogger(category: "RulesDatabase")
 
 /// Read-only SQLite database for bundled routing rules (replaces JSON resource files).
 ///

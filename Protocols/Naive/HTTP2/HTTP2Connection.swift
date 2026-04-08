@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "HTTP2")
+private let logger = AnywhereLogger(category: "HTTP2")
 
 // MARK: - Error
 
@@ -376,7 +375,7 @@ class HTTP2Connection: NaiveTunnel {
             completion(HTTP2Error.authenticationRequired)
         } else {
             state = .closed
-            logger.error("[HTTP2] CONNECT failed with status \(status, privacy: .public)")
+            logger.error("[HTTP2] CONNECT failed with status \(status)")
             completion(HTTP2Error.tunnelFailed(statusCode: status))
         }
     }
@@ -581,7 +580,7 @@ class HTTP2Connection: NaiveTunnel {
     private func sendFrame(_ frame: HTTP2Frame) {
         transport.send(data: HTTP2Framer.serialize(frame)) { error in
             if let error {
-                logger.warning("[HTTP2] Failed to send frame: \(error.localizedDescription, privacy: .public)")
+                logger.warning("[HTTP2] Failed to send frame: \(error.localizedDescription)")
             }
         }
     }

@@ -8,9 +8,8 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "Reality")
+private let logger = AnywhereLogger(category: "Reality")
 
 // MARK: - TLSRecordConnection
 
@@ -168,7 +167,7 @@ class TLSRecordConnection {
             sendLock.unlock()
         } catch {
             sendLock.unlock()
-            logger.error("[Reality] Encryption error: \(error.localizedDescription, privacy: .public)")
+            logger.error("[Reality] Encryption error: \(error.localizedDescription)")
             completion(error)
         }
     }
@@ -188,7 +187,7 @@ class TLSRecordConnection {
             sendLock.unlock()
         } catch {
             sendLock.unlock()
-            logger.error("[Reality] Encryption error: \(error.localizedDescription, privacy: .public)")
+            logger.error("[Reality] Encryption error: \(error.localizedDescription)")
         }
     }
 

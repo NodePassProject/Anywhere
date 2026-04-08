@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "MuxClient")
+private let logger = AnywhereLogger(category: "MuxClient")
 
 class MuxClient {
     let configuration: ProxyConfiguration
@@ -231,7 +230,6 @@ class MuxClient {
                     for cb in completions { cb(nil) }
 
                 case .failure(let error):
-                    logger.error("[Mux] Connection failed: \(error.localizedDescription, privacy: .public)")
                     self.closeAll()
                     for cb in completions { cb(error) }
                 }
@@ -266,8 +264,7 @@ class MuxClient {
                 self.isWriting = false
                 completion(error)
 
-                if let error {
-                    logger.error("[Mux] Write error: \(error.localizedDescription, privacy: .public)")
+                if error != nil {
                     self.closeAll()
                 } else {
                     self.drainWriteQueue()
@@ -285,9 +282,9 @@ class MuxClient {
                 self?.handleReceivedData(data)
             }
         }, errorHandler: { [weak self] (error: Error?) in
-            guard let self else { return }
+            guard let self, !self.closed else { return }
             if let error {
-                logger.error("[Mux] Receive error: \(error.localizedDescription, privacy: .public)")
+                logger.error("[Mux] Receive error: \(error.localizedDescription)")
             }
             self.lwipQueue.async { [weak self] in
                 self?.closeAll()

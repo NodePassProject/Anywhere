@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "XHTTP")
+private let logger = AnywhereLogger(category: "XHTTP")
 
 let defaultUserAgent = ProxyUserAgent.chrome
 

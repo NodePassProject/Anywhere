@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "NaiveProxy")
+private let logger = AnywhereLogger(category: "NaiveProxy")
 
 // MARK: - NaiveTunnel Protocol
 
@@ -72,7 +71,7 @@ class NaiveProxyConnection: ProxyConnection {
     override func sendRaw(data: Data) {
         sendRaw(data: data) { error in
             if let error {
-                logger.error("[Naive] Send error: \(error.localizedDescription, privacy: .public)")
+                logger.error("[Naive] Send error: \(error.localizedDescription)")
             }
         }
     }

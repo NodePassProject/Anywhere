@@ -8,10 +8,9 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
-import os.log
 import Security
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "SS2022")
+private let logger = AnywhereLogger(category: "SS2022")
 
 // MARK: - Constants
 
@@ -99,7 +98,7 @@ class Shadowsocks2022Connection: ProxyConnection {
     override func sendRaw(data: Data) {
         sendRaw(data: data) { error in
             if let error {
-                logger.error("[SS2022] Send error: \(error.localizedDescription, privacy: .public)")
+                logger.error("[SS2022] Send error: \(error.localizedDescription)")
             }
         }
     }
@@ -505,7 +504,7 @@ class Shadowsocks2022AESUDPConnection: ProxyConnection {
     override func sendRaw(data: Data) {
         sendRaw(data: data) { error in
             if let error {
-                logger.error("[SS2022-UDP] Send error: \(error.localizedDescription, privacy: .public)")
+                logger.error("[SS2022-UDP] Send error: \(error.localizedDescription)")
             }
         }
     }
@@ -724,7 +723,7 @@ class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
     override func sendRaw(data: Data) {
         sendRaw(data: data) { error in
             if let error {
-                logger.error("[SS2022-ChaCha-UDP] Send error: \(error.localizedDescription, privacy: .public)")
+                logger.error("[SS2022-ChaCha-UDP] Send error: \(error.localizedDescription)")
             }
         }
     }

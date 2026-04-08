@@ -8,7 +8,7 @@
 import Foundation
 import NetworkExtension
 
-private let logger = TunnelLogger(category: "LWIPStack")
+private let logger = AnywhereLogger(category: "LWIPStack")
 
 // MARK: - LWIPStack
 
@@ -255,6 +255,8 @@ class LWIPStack {
 
         if proxyMode != .global {
             domainRouter.loadRoutingConfiguration()
+        } else {
+            domainRouter.reset()
         }
     }
 

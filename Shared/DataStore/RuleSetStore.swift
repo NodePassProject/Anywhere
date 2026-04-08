@@ -7,9 +7,8 @@
 
 import Foundation
 import Combine
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere", category: "RuleSetStore")
+private let logger = AnywhereLogger(category: "RuleSetStore")
 
 @MainActor
 class RuleSetStore: ObservableObject {

@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "NaiveTLS")
+private let logger = AnywhereLogger(category: "NaiveTLS")
 
 // MARK: - Error
 
@@ -93,7 +92,7 @@ class NaiveTLSTransport {
                 completion(nil)
             case .failure(let error):
                 self.tlsClient = nil
-                logger.error("[NaiveTLS] Connection failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("[NaiveTLS] Connection failed: \(error.localizedDescription)")
                 completion(error)
             }
         }

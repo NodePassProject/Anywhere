@@ -6,9 +6,8 @@
 //
 
 import Foundation
-import os.log
 
-private let logger = Logger(subsystem: "com.argsment.Anywhere.Network-Extension", category: "HTTP2Pool")
+private let logger = AnywhereLogger(category: "HTTP2Pool")
 
 /// Pools ``HTTP2Session`` instances for reuse across CONNECT tunnels.
 ///
@@ -132,7 +131,7 @@ class HTTP2SessionPool {
         // Also clean up if the session was draining after GOAWAY
         dedicatedSessions.removeValue(forKey: ObjectIdentifier(session))
         lock.unlock()
-        logger.info("[HTTP2Pool] Evicted session for \(key, privacy: .public)")
+        logger.info("[HTTP2Pool] Evicted session for \(key)")
     }
 
     /// Closes all pooled sessions (e.g. on VPN tunnel teardown).
