@@ -51,10 +51,14 @@ class XHTTPConnection {
     var _isConnected = false
     let lock = UnfairLock()
 
-    // Packet-up batching: delay completion to match Xray-core's scMinPostsIntervalMs.
-    // This keeps uploadFlushInFlight=true longer, causing LWIPTCPConnection to
-    // accumulate data in its coalesce buffer, resulting in fewer, larger POSTs.
-    var lastPacketUpSendTime: UInt64 = 0
+    // Packet-up batching state (mirrors Xray-core's pipe.New buffered upload pipe in
+    // splithttp/dialer.go). Each `send()` in packet-up mode appends to the queue and
+    // returns once the batched POST has been written; a single in-flight flush drains
+    // the queue into one POST per `scMinPostsIntervalMs`. This is essential for UDP,
+    // where each datagram would otherwise become its own HTTP POST request.
+    var packetUpQueue: [(Data, (Error?) -> Void)] = []
+    var packetUpFlushPending = false
+    var packetUpLastFlushTime: UInt64 = 0
 
     /// Leftover data after HTTP response headers.
     var headerBuffer = Data()
@@ -326,10 +330,14 @@ class XHTTPConnection {
 
     /// Sends data through the XHTTP connection.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
+        if mode == .packetUp {
+            // Packet-up batches writes through an internal queue (see
+            // enqueuePacketUpSend). All other modes go directly to the wire.
+            enqueuePacketUpSend(data: data, completion: completion)
+            return
+        }
         if useHTTP2 {
-            if mode == .packetUp {
-                sendH2PacketUp(data: data, completion: completion)
-            } else if mode == .streamUp {
+            if mode == .streamUp {
                 sendH2Data(data: data, streamId: h2UploadStreamId, completion: completion)
             } else {
                 // stream-one: upload and download share stream 1
@@ -339,8 +347,6 @@ class XHTTPConnection {
             sendStreamOne(data: data, completion: completion)
         } else if mode == .streamUp {
             sendStreamUp(data: data, completion: completion)
-        } else {
-            sendPacketUp(data: data, completion: completion)
         }
     }
 
@@ -422,39 +428,136 @@ class XHTTPConnection {
         uploadSend = nil
         uploadReceive = nil
         uploadCancel = nil
+        let pendingPackets = packetUpQueue
+        packetUpQueue.removeAll()
+        packetUpFlushPending = false
         lock.unlock()
+
+        for (_, completion) in pendingPackets {
+            completion(XHTTPError.connectionClosed)
+        }
 
         downloadCancel()
         uploadCancelFn?()
     }
 
-    // MARK: - Packet-Up Delay
+    // MARK: - Packet-Up Batching
 
-    /// Delays the packet-up send completion to enforce `scMinPostsIntervalMs` spacing
-    /// between POSTs, matching Xray-core's behavior. This keeps the caller's send-in-flight
-    /// flag set, causing data to accumulate and batch into larger POSTs.
-    func completePacketUpWithDelay(completion: @escaping (Error?) -> Void) {
-        let delayMs = configuration.scMinPostsIntervalMs
-        guard delayMs > 0 else {
-            completion(nil)
+    /// Queues a write for the next batched POST in packet-up mode.
+    ///
+    /// Mirrors Xray-core's buffered upload pipe in `splithttp/dialer.go`: writes append
+    /// to an in-memory queue and a single in-flight flush coalesces them into one POST
+    /// per `scMinPostsIntervalMs`. Without this, every individual `send()` (in particular
+    /// every UDP datagram delivered via `LWIPUDPFlow.sendUDPThroughProxy`) would become
+    /// its own HTTP POST request, causing huge per-packet overhead and, on HTTP/2,
+    /// rapid stream-ID exhaustion.
+    func enqueuePacketUpSend(data: Data, completion: @escaping (Error?) -> Void) {
+        lock.lock()
+        if !_isConnected || (useHTTP2 && h2StreamClosed) {
+            lock.unlock()
+            completion(XHTTPError.connectionClosed)
             return
         }
+        packetUpQueue.append((data, completion))
+        let shouldSchedule = !packetUpFlushPending
+        if shouldSchedule {
+            packetUpFlushPending = true
+        }
+        lock.unlock()
+        if shouldSchedule {
+            schedulePacketUpFlush()
+        }
+    }
+
+    /// Schedules a packet-up flush, respecting the `scMinPostsIntervalMs` interval
+    /// since the last flush start (matches Xray-core's `time.Sleep(... - elapsed)`).
+    private func schedulePacketUpFlush() {
         lock.lock()
-        let now = DispatchTime.now().uptimeNanoseconds
-        let elapsed = lastPacketUpSendTime == 0 ? UInt64(delayMs) * 1_000_000 : now - lastPacketUpSendTime
-        lastPacketUpSendTime = now
+        let delayMs = configuration.scMinPostsIntervalMs
+        let elapsedMs: Int
+        if packetUpLastFlushTime == 0 {
+            elapsedMs = .max
+        } else {
+            let now = DispatchTime.now().uptimeNanoseconds
+            let elapsedNs = now &- packetUpLastFlushTime
+            elapsedMs = Int(min(elapsedNs / 1_000_000, UInt64(Int.max)))
+        }
         lock.unlock()
 
-        let delayNs = UInt64(delayMs) * 1_000_000
-        if elapsed >= delayNs {
-            // Enough time has passed since last POST — complete immediately
-            completion(nil)
+        let runFlush: () -> Void = { [weak self] in
+            self?.flushPacketUpBatch()
+        }
+        if delayMs <= 0 || elapsedMs >= delayMs {
+            DispatchQueue.global().async(execute: runFlush)
         } else {
-            // Defer completion for the remaining interval
-            let remaining = delayNs - elapsed
-            DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(remaining))) {
-                completion(nil)
+            let remaining = delayMs - elapsedMs
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(remaining), execute: runFlush)
+        }
+    }
+
+    /// Drains the packet-up queue (up to `scMaxEachPostBytes`) into a single batched
+    /// POST. On completion, fires every queued completion and chains into the next
+    /// flush if more data has been enqueued in the meantime.
+    private func flushPacketUpBatch() {
+        lock.lock()
+
+        if !_isConnected || (useHTTP2 && h2StreamClosed) {
+            let pending = packetUpQueue
+            packetUpQueue.removeAll()
+            packetUpFlushPending = false
+            lock.unlock()
+            for (_, completion) in pending {
+                completion(XHTTPError.connectionClosed)
             }
+            return
+        }
+
+        guard !packetUpQueue.isEmpty else {
+            packetUpFlushPending = false
+            lock.unlock()
+            return
+        }
+
+        let maxSize = max(1, configuration.scMaxEachPostBytes)
+        var batchedData = Data()
+        var batchedCompletions: [(Error?) -> Void] = []
+        while !packetUpQueue.isEmpty {
+            let (chunk, completion) = packetUpQueue[0]
+            // Allow the first chunk to exceed maxSize on its own (sendPacketUp will
+            // re-split it); otherwise stop before the limit so the next flush picks
+            // up where this one left off.
+            if !batchedData.isEmpty && batchedData.count + chunk.count > maxSize {
+                break
+            }
+            batchedData.append(chunk)
+            batchedCompletions.append(completion)
+            packetUpQueue.removeFirst()
+        }
+
+        packetUpLastFlushTime = DispatchTime.now().uptimeNanoseconds
+        let isH2 = useHTTP2
+        lock.unlock()
+
+        let onComplete: (Error?) -> Void = { [weak self] error in
+            for completion in batchedCompletions {
+                completion(error)
+            }
+            guard let self else { return }
+            self.lock.lock()
+            if error != nil || self.packetUpQueue.isEmpty {
+                self.packetUpFlushPending = false
+                self.lock.unlock()
+                return
+            }
+            // packetUpFlushPending stays true; chain into the next flush.
+            self.lock.unlock()
+            self.schedulePacketUpFlush()
+        }
+
+        if isH2 {
+            sendH2PacketUp(data: batchedData, completion: onComplete)
+        } else {
+            sendPacketUp(data: batchedData, completion: onComplete)
         }
     }
 }

@@ -260,13 +260,13 @@ extension XHTTPConnection {
 
         guard !data.isEmpty else {
             lock.unlock()
+            // Rate limiting between POSTs is handled one layer up by
+            // flushPacketUpBatch; complete as soon as the HEADERS frame is on the wire.
             downloadSend(outbound) { [weak self] error in
                 if let error {
                     self?.markH2Closed()
-                    completion(error)
-                } else {
-                    self?.completePacketUpWithDelay(completion: completion)
                 }
+                completion(error)
             }
             return
         }
@@ -307,13 +307,11 @@ extension XHTTPConnection {
                 self?.sendH2PacketUpData(data: data, streamId: streamId, offset: nextOffset, maxSize: maxSize, streamWindow: perStreamRemaining) { [weak self] error in
                     if let error {
                         self?.markH2Closed()
-                        completion(error)
-                    } else {
-                        self?.completePacketUpWithDelay(completion: completion)
                     }
+                    completion(error)
                 }
             } else {
-                self?.completePacketUpWithDelay(completion: completion)
+                completion(nil)
             }
         }
     }

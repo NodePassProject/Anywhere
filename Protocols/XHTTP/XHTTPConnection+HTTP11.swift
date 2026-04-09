@@ -418,12 +418,8 @@ extension XHTTPConnection {
         }
         requestData.append(bodyData)
 
-        uploadSend(requestData) { [weak self] error in
-            if let error {
-                completion(error)
-            } else {
-                self?.completePacketUpWithDelay(completion: completion)
-            }
-        }
+        // Completion fires as soon as bytes are accepted by the upload transport;
+        // rate limiting between POSTs is enforced one layer up by flushPacketUpBatch.
+        uploadSend(requestData, completion)
     }
 }
