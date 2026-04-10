@@ -1273,7 +1273,9 @@ class ProxyClient {
             scheme: scheme
         )
 
-        let destination = "\(destinationHost):\(destinationPort)"
+        // RFC 3986 §3.2.2: IPv6 literals must be bracketed in authority strings.
+        let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
+        let destination = "\(bracketedHost):\(destinationPort)"
 
         switch scheme {
         case .http11:

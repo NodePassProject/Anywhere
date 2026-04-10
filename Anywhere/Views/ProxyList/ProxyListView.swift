@@ -314,7 +314,6 @@ struct ProxyListView: View {
                             Image("anywhere")
                             Text(configuration.name)
                         }
-                        .foregroundStyle(Color.anywhere.gradient)
                         if viewModel.selectedConfiguration?.id == configuration.id {
                             Image(systemName: "checkmark")
                                 .font(.caption.bold())

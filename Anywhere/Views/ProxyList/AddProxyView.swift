@@ -178,37 +178,24 @@ struct AddProxyView: View {
             HStack(spacing: 10) {
                 let image = method.image
                 if method.useCustomSymbol {
-                    if method == .anywherePremiumProxy {
-                        Image(image)
-                            .foregroundStyle(Color.anywhere.gradient)
-                            .font(.title)
-                            .frame(width: 40)
-                    } else {
-                        Image(image)
-                            .font(.title)
-                            .frame(width: 40)
-                    }
+                    Image(image)
+                        .font(.title)
+                        .frame(width: 40)
                 } else {
                     Image(systemName: image)
                         .font(.title)
                         .frame(width: 40)
                 }
                 
-                if method == .anywherePremiumProxy {
-                    Text(method.title)
-                        .foregroundStyle(Color.anywhere.gradient)
-                        .fontWeight(.semibold)
-                } else {
-                    Text(method.title)
-                        .fontWeight(.semibold)
-                }
+                Text(method.title)
+                    .fontWeight(.semibold)
                 
                 Spacer(minLength: 0)
                 
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle.fill")
                     .font(.title)
                     .contentTransition(.symbolEffect)
-                    .foregroundStyle(isSelected ? (method == .anywherePremiumProxy ? Color.anywhere : Color.blue) : Color.gray.opacity(0.2))
+                    .foregroundStyle(isSelected ? Color.blue : Color.gray.opacity(0.2))
             }
             .padding(.vertical, 6)
             .contentShape(.rect)

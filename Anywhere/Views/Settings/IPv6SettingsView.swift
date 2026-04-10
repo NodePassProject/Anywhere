@@ -15,8 +15,6 @@ struct IPv6SettingsView: View {
         Form {
             Section {
                 Toggle("IPv6 DNS Lookup", isOn: $ipv6DNSEnabled)
-            } footer: {
-                Text("Send and respond to AAAA DNS queries.")
             }
         }
         .navigationTitle("IPv6")
