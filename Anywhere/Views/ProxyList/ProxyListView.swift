@@ -20,9 +20,13 @@ struct ProxyListView: View {
     @State private var collapsedSubscriptions: Set<UUID> = []
     @State private var renamingSubscription: Subscription?
     @State private var renameText = ""
+    
+    private var anywherePremiumProxyConfigurations: [ProxyConfiguration] {
+        viewModel.configurations.filter { $0.id == $0.uuid }
+    }
 
     private var standaloneConfigurations: [ProxyConfiguration] {
-        viewModel.configurations.filter { $0.subscriptionId == nil }
+        viewModel.configurations.filter { $0.subscriptionId == nil && $0.id != $0.uuid }
     }
 
     private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
@@ -34,6 +38,13 @@ struct ProxyListView: View {
 
     var body: some View {
         List {
+            if !anywherePremiumProxyConfigurations.isEmpty {
+                Section {
+                    ForEach(anywherePremiumProxyConfigurations) { configuration in
+                        configurationRow(configuration, isAnywherePremiumProxy: true)
+                    }
+                }
+            }
             if !standaloneConfigurations.isEmpty {
                 Section {
                     ForEach(standaloneConfigurations) { configuration in
@@ -201,7 +212,7 @@ struct ProxyListView: View {
     // MARK: - Config Row
 
     @ViewBuilder
-    private func configurationRow(_ configuration: ProxyConfiguration) -> some View {
+    private func configurationRow(_ configuration: ProxyConfiguration, isAnywherePremiumProxy: Bool = false) -> some View {
         let latency = viewModel.latencyResults[configuration.id]
 
         Button {
@@ -210,8 +221,15 @@ struct ProxyListView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        Text(configuration.name)
-                            .font(.body)
+                        if isAnywherePremiumProxy {
+                            HStack {
+                                Image("anywhere")
+                                Text(configuration.name)
+                            }
+                            .foregroundStyle(Color.anywhere.gradient)
+                        } else {
+                            Text(configuration.name)
+                        }
                         if viewModel.selectedConfiguration?.id == configuration.id {
                             Image(systemName: "checkmark")
                                 .font(.caption.bold())

@@ -19,12 +19,21 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
     case qrCode = "qrCode"
     case link = "link"
     case manual = "manual"
+    case anywherePremiumProxy = "anywherePremiumProxy"
+    
+    var useCustomSymbol: Bool {
+        switch self {
+        case .qrCode, .link, .manual: false
+        case .anywherePremiumProxy: true
+        }
+    }
 
-    var systemImage: String {
+    var image: String {
         switch self {
         case .qrCode: "qrcode.viewfinder"
         case .link: "link"
         case .manual: "hand.point.up.left"
+        case .anywherePremiumProxy: "anywhere"
         }
     }
 
@@ -33,6 +42,7 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
         case .qrCode: String(localized: "QR Code")
         case .link: String(localized: "Link")
         case .manual: String(localized: "Manual")
+        case .anywherePremiumProxy: "Anywhere Premium Proxy"
         }
     }
 }
@@ -49,8 +59,8 @@ struct AddProxyView: View {
     @State private var linkURL = ""
     @State private var linkType: LinkType = .subscription
     @State private var isLoading = false
-    @State private var showingLinkError = false
-    @State private var linkErrorMessage = ""
+    @State private var showingError = false
+    @State private var errorMessage = ""
 
     init(showingManualAddSheet: Binding<Bool>, deepLinkAction: DeepLinkAction? = nil, onImport: ((ProxyConfiguration) -> Void)? = nil, onSubscriptionImport: (([ProxyConfiguration], Subscription) -> Void)? = nil) {
         _showingManualAddSheet = showingManualAddSheet
@@ -97,10 +107,10 @@ struct AddProxyView: View {
         .qrScanner(isScanning: $showingQRScanner) { code in
             importFromString(code)
         }
-        .alert("Import Failed", isPresented: $showingLinkError) {
+        .alert("Import Failed", isPresented: $showingError) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text(linkErrorMessage)
+            Text(errorMessage)
         }
     }
 
@@ -153,19 +163,39 @@ struct AddProxyView: View {
             let isSelected: Bool = selectedMethod == method
             
             HStack(spacing: 10) {
-                Image(systemName: method.systemImage)
-                    .font(.title)
-                    .frame(width: 40)
+                let image = method.image
+                if method.useCustomSymbol {
+                    if method == .anywherePremiumProxy {
+                        Image(image)
+                            .foregroundStyle(Color.anywhere.gradient)
+                            .font(.title)
+                            .frame(width: 40)
+                    } else {
+                        Image(image)
+                            .font(.title)
+                            .frame(width: 40)
+                    }
+                } else {
+                    Image(systemName: image)
+                        .font(.title)
+                        .frame(width: 40)
+                }
                 
-                Text(method.title)
-                    .fontWeight(.semibold)
+                if method == .anywherePremiumProxy {
+                    Text(method.title)
+                        .foregroundStyle(Color.anywhere.gradient)
+                        .fontWeight(.semibold)
+                } else {
+                    Text(method.title)
+                        .fontWeight(.semibold)
+                }
                 
                 Spacer(minLength: 0)
                 
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle.fill")
                     .font(.title)
                     .contentTransition(.symbolEffect)
-                    .foregroundStyle(isSelected ? Color.blue : Color.gray.opacity(0.2))
+                    .foregroundStyle(isSelected ? (method == .anywherePremiumProxy ? Color.anywhere : Color.blue) : Color.gray.opacity(0.2))
             }
             .padding(.vertical, 6)
             .contentShape(.rect)
@@ -261,8 +291,53 @@ struct AddProxyView: View {
         case .manual:
             showingManualAddSheet = true
             dismiss()
+        case .anywherePremiumProxy:
+            importAnywherePremiumProxy()
         case .none:
             break
+        }
+    }
+
+    private func importAnywherePremiumProxy() {
+        isLoading = true
+        Task {
+            do {
+                struct CreateUserResponse: Decodable { let uuid: UUID }
+                var request = URLRequest(url: URL(string: "https://anywhere-premium-proxy.argsment.com/users")!)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                let (data, response) = try await URLSession.shared.data(for: request)
+                if let httpResponse = response as? HTTPURLResponse,
+                   !(200...299).contains(httpResponse.statusCode) {
+                    throw NSError(
+                        domain: "AnywherePremiumProxy",
+                        code: httpResponse.statusCode,
+                        userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"]
+                    )
+                }
+                let uuid = try JSONDecoder().decode(CreateUserResponse.self, from: data).uuid
+                let configuration = ProxyConfiguration(
+                    id: uuid,
+                    name: "Anywhere Premium Proxy",
+                    serverAddress: "anywhere.stdco.de",
+                    serverPort: 443,
+                    outbound: .vless(uuid: uuid, encryption: "none", flow: nil),
+                    transportLayer: .xhttp(
+                        XHTTPConfiguration(host: "anywhere.stdco.de", path: "/app")
+                    ),
+                    securityLayer: .tls(
+                        TLSConfiguration(serverName: "anywhere.stdco.de", fingerprint: .chrome120)
+                    ),
+                    muxEnabled: true,
+                    xudpEnabled: true
+                )
+                onImport?(configuration)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+                showingError = true
+            }
+            isLoading = false
         }
     }
 
@@ -284,8 +359,8 @@ struct AddProxyView: View {
                 onImport?(configuration)
                 dismiss()
             } catch {
-                linkErrorMessage = error.localizedDescription
-                showingLinkError = true
+                errorMessage = error.localizedDescription
+                showingError = true
             }
         } else {
             // Treat as subscription URL
@@ -305,8 +380,8 @@ struct AddProxyView: View {
                     onSubscriptionImport?(result.configurations, subscription)
                     dismiss()
                 } catch {
-                    linkErrorMessage = error.localizedDescription
-                    showingLinkError = true
+                    errorMessage = error.localizedDescription
+                    showingError = true
                 }
                 isLoading = false
             }
