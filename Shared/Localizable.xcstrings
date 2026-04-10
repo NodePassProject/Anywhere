@@ -8655,64 +8655,6 @@
         }
       }
     },
-    "Send and respond to AAAA DNS queries." : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "إرسال والاستجابة لاستعلامات DNS من نوع AAAA."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Send and respond to AAAA DNS queries."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Enviar y responder a consultas DNS AAAA."
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ارسال و پاسخ به درخواست‌های DNS از نوع AAAA."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Отправлять и отвечать на DNS-запросы AAAA."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "AAAA DNS soraglaryny ibermek we jogap bermek."
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "AAAA DNS sorgularını gönderin ve yanıtlayın."
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Gửi và phản hồi truy vấn DNS AAAA."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "发送并响应 AAAA DNS 请求。"
-          }
-        }
-      }
-    },
     "Server" : {
       "localizations" : {
         "ar" : {

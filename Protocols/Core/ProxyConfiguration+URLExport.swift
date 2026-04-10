@@ -11,6 +11,11 @@ import Foundation
 
 extension ProxyConfiguration {
 
+    /// RFC 3986 §3.2.2: IPv6 literals must be bracketed in URL authority components.
+    private var bracketedServerAddress: String {
+        serverAddress.contains(":") ? "[\(serverAddress)]" : serverAddress
+    }
+
     /// Export configuration as a shareable URL string.
     /// Produces `vless://...` for VLESS or `ss://...` for Shadowsocks.
     func toURL() -> String {
@@ -83,7 +88,7 @@ extension ProxyConfiguration {
 
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        return "vless://\(uuid.uuidString.lowercased())@\(serverAddress):\(serverPort)/\(query)#\(fragment)"
+        return "vless://\(uuid.uuidString.lowercased())@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
     }
 
     private func toShadowsocksURL() -> String {
@@ -120,7 +125,7 @@ extension ProxyConfiguration {
 
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        return "ss://\(encoded)@\(serverAddress):\(serverPort)/\(query)#\(fragment)"
+        return "ss://\(encoded)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
     }
 
     private func toSOCKS5URL() -> String {
@@ -128,9 +133,9 @@ extension ProxyConfiguration {
         if let user = socks5Username, !user.isEmpty {
             let encodedUser = user.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? user
             let encodedPass = (socks5Password ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
-            return "socks5://\(encodedUser):\(encodedPass)@\(serverAddress):\(serverPort)#\(fragment)"
+            return "socks5://\(encodedUser):\(encodedPass)@\(bracketedServerAddress):\(serverPort)#\(fragment)"
         }
-        return "socks5://\(serverAddress):\(serverPort)#\(fragment)"
+        return "socks5://\(bracketedServerAddress):\(serverPort)#\(fragment)"
     }
 
     private func toNaiveURL() -> String {
@@ -138,7 +143,7 @@ extension ProxyConfiguration {
         let user = (activeUsername ?? "").addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? ""
         let pass = (activePassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        return "\(scheme)://\(user):\(pass)@\(serverAddress):\(serverPort)#\(fragment)"
+        return "\(scheme)://\(user):\(pass)@\(bracketedServerAddress):\(serverPort)#\(fragment)"
     }
 
     private func appendTransportParams(to params: inout [String]) {
