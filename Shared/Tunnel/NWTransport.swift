@@ -140,6 +140,12 @@ class NWTransport: RawTransport {
             return
         }
 
+        // If forceCancel() was called before this attempt, stop immediately.
+        if case .cancelled = state {
+            completion(SocketError.connectionFailed("Cancelled"))
+            return
+        }
+
         let ip = ips[index]
 
         // TCP options (reference: Xray-core sockopt_darwin.go)
@@ -189,7 +195,15 @@ class NWTransport: RawTransport {
             case .cancelled:
                 guard !completed else { return }
                 completed = true
-                self.tryConnect(ips: ips, port: port, index: index + 1, initialData: initialData, completion: completion)
+                // If the transport itself was force-cancelled, propagate the
+                // cancellation immediately instead of retrying the next address.
+                // Without this check, forceCancel() would leave the completion
+                // handler suspended until all IPs exhausted (up to 16s each).
+                if case .cancelled = self.state {
+                    completion(SocketError.connectionFailed("Cancelled"))
+                } else {
+                    self.tryConnect(ips: ips, port: port, index: index + 1, initialData: initialData, completion: completion)
+                }
 
             default:
                 break

@@ -213,7 +213,7 @@ struct DemoProxyListView: View {
             }
             .sheet(isPresented: $showingAddSheet) {
                 DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                    AddProxyView(showingManualAddSheet: $showingManualAddSheet) { _ in } onSubscriptionImport: { _, _ in }
+                    AddProxyView(showingManualAddSheet: $showingManualAddSheet)
                 }
             }
             .sheet(isPresented: $showingManualAddSheet) {

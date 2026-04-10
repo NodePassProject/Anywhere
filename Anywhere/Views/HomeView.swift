@@ -93,11 +93,7 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet) { configuration in
-                    viewModel.addConfiguration(configuration)
-                } onSubscriptionImport: { configurations, subscription in
-                    viewModel.addSubscription(configurations: configurations, subscription: subscription)
-                }
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {

@@ -21,8 +21,13 @@ struct ProxyListView: View {
     @State private var renamingSubscription: Subscription?
     @State private var renameText = ""
     
-    private var anywherePremiumProxyConfigurations: [ProxyConfiguration] {
-        viewModel.configurations.filter { $0.id == $0.uuid }
+    private var anywherePremiumProxyConfiguration: ProxyConfiguration? {
+        viewModel.configurations.first {
+            if case .vless(let id, _, _) = $0.outbound {
+                if id == $0.id { return true }
+            }
+            return false
+        }
     }
 
     private var standaloneConfigurations: [ProxyConfiguration] {
@@ -38,11 +43,9 @@ struct ProxyListView: View {
 
     var body: some View {
         List {
-            if !anywherePremiumProxyConfigurations.isEmpty {
+            if let anywherePremiumProxyConfiguration {
                 Section {
-                    ForEach(anywherePremiumProxyConfigurations) { configuration in
-                        configurationRow(configuration, isAnywherePremiumProxy: true)
-                    }
+                    anywherePremiumProxyConfigurationRow(anywherePremiumProxyConfiguration)
                 }
             }
             if !standaloneConfigurations.isEmpty {
@@ -73,9 +76,10 @@ struct ProxyListView: View {
         .toolbar {
             ToolbarItem {
                 Button {
-                    let visibleConfigurations = standaloneConfigurations + subscribedGroups
+                    var visibleConfigurations = standaloneConfigurations + subscribedGroups
                         .filter { !collapsedSubscriptions.contains($0.0.id) }
                         .flatMap(\.1)
+                    if let anywherePremiumProxyConfiguration { visibleConfigurations.append(anywherePremiumProxyConfiguration) }
                     viewModel.testLatencies(for: visibleConfigurations)
                 } label: {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
@@ -91,11 +95,7 @@ struct ProxyListView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet) { configuration in
-                    viewModel.addConfiguration(configuration)
-                } onSubscriptionImport: { configurations, subscription in
-                    viewModel.addSubscription(configurations: configurations, subscription: subscription)
-                }
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {
@@ -210,9 +210,9 @@ struct ProxyListView: View {
     }
 
     // MARK: - Config Row
-
+    
     @ViewBuilder
-    private func configurationRow(_ configuration: ProxyConfiguration, isAnywherePremiumProxy: Bool = false) -> some View {
+    private func configurationRow(_ configuration: ProxyConfiguration) -> some View {
         let latency = viewModel.latencyResults[configuration.id]
 
         Button {
@@ -221,15 +221,7 @@ struct ProxyListView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        if isAnywherePremiumProxy {
-                            HStack {
-                                Image("anywhere")
-                                Text(configuration.name)
-                            }
-                            .foregroundStyle(Color.anywhere.gradient)
-                        } else {
-                            Text(configuration.name)
-                        }
+                        Text(configuration.name)
                         if viewModel.selectedConfiguration?.id == configuration.id {
                             Image(systemName: "checkmark")
                                 .font(.caption.bold())
@@ -262,9 +254,7 @@ struct ProxyListView: View {
                 
                 latencyView(latency)
                     .onTapGesture {
-                        if viewModel.vpnStatus != .connected {
-                            viewModel.testLatency(for: configuration)
-                        }
+                        viewModel.testLatency(for: configuration)
                     }
             }
             .contentShape(Rectangle())
@@ -307,6 +297,67 @@ struct ProxyListView: View {
                 Label("Edit", systemImage: "pencil")
             }
             .tint(.orange)
+        }
+    }
+    
+    @ViewBuilder
+    private func anywherePremiumProxyConfigurationRow(_ configuration: ProxyConfiguration) -> some View {
+        let latency = viewModel.latencyResults[configuration.id]
+
+        Button {
+            viewModel.selectedConfiguration = configuration
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        HStack {
+                            Image("anywhere")
+                            Text(configuration.name)
+                        }
+                        .foregroundStyle(Color.anywhere.gradient)
+                        if viewModel.selectedConfiguration?.id == configuration.id {
+                            Image(systemName: "checkmark")
+                                .font(.caption.bold())
+                                .foregroundStyle(Color.anywhere.gradient)
+                        }
+                    }
+                    HStack(spacing: 4) {
+                        Text("Powered by Centent Delivery Network")
+                            .foregroundStyle(.cloudflare)
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                }
+                
+                Spacer()
+                
+                latencyView(latency)
+                    .onTapGesture {
+                        viewModel.testLatency(for: configuration)
+                    }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                viewModel.testLatency(for: configuration)
+            } label: {
+                Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
+            }
+
+            Button(role: .destructive) {
+                viewModel.deleteConfiguration(configuration)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                viewModel.deleteConfiguration(configuration)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
         }
     }
 

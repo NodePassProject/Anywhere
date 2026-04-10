@@ -42,17 +42,16 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
         case .qrCode: String(localized: "QR Code")
         case .link: String(localized: "Link")
         case .manual: String(localized: "Manual")
-        case .anywherePremiumProxy: "Anywhere Premium Proxy"
+        case .anywherePremiumProxy: String(localized: "Anywhere Premium Proxy")
         }
     }
 }
 
 struct AddProxyView: View {
+    @ObservedObject private var viewModel = VPNViewModel.shared
     @Environment(\.dismiss) var dismiss
     @Binding var showingManualAddSheet: Bool
     var deepLinkAction: DeepLinkAction?
-    var onImport: ((ProxyConfiguration) -> Void)?
-    var onSubscriptionImport: (([ProxyConfiguration], Subscription) -> Void)?
 
     @State private var selectedMethod: Method?
     @State private var showingQRScanner = false
@@ -61,12 +60,23 @@ struct AddProxyView: View {
     @State private var isLoading = false
     @State private var showingError = false
     @State private var errorMessage = ""
+    
+    private var anywherePremiumProxyConfiguration: ProxyConfiguration? {
+        viewModel.configurations.first {
+            if case .vless(let id, _, _) = $0.outbound {
+                if id == $0.id { return true }
+            }
+            return false
+        }
+    }
+    private var availableMethods: [Method] {
+        if anywherePremiumProxyConfiguration == nil { return Method.allCases }
+        return Method.allCases.filter { $0 != .anywherePremiumProxy }
+    }
 
-    init(showingManualAddSheet: Binding<Bool>, deepLinkAction: DeepLinkAction? = nil, onImport: ((ProxyConfiguration) -> Void)? = nil, onSubscriptionImport: (([ProxyConfiguration], Subscription) -> Void)? = nil) {
+    init(showingManualAddSheet: Binding<Bool>, deepLinkAction: DeepLinkAction? = nil) {
         _showingManualAddSheet = showingManualAddSheet
         self.deepLinkAction = deepLinkAction
-        self.onImport = onImport
-        self.onSubscriptionImport = onSubscriptionImport
         switch deepLinkAction {
         case .addProxyWithLink(let url):
             _selectedMethod = State(initialValue: .link)
@@ -99,6 +109,9 @@ struct AddProxyView: View {
         }
         .padding(20)
         .frame(maxHeight: .infinity, alignment: .bottom)
+        .onAppear {
+            
+        }
         .onChange(of: selectedMethod) {
             if selectedMethod == .link && linkURL.isEmpty {
                 checkClipboard()
@@ -156,10 +169,10 @@ struct AddProxyView: View {
     }
 
     // MARK: - Method Picker
-
+    
     @ViewBuilder
     var methodPicker: some View {
-        ForEach(Method.allCases) { method in
+        ForEach(availableMethods) { method in
             let isSelected: Bool = selectedMethod == method
             
             HStack(spacing: 10) {
@@ -318,7 +331,7 @@ struct AddProxyView: View {
                 let uuid = try JSONDecoder().decode(CreateUserResponse.self, from: data).uuid
                 let configuration = ProxyConfiguration(
                     id: uuid,
-                    name: "Anywhere Premium Proxy",
+                    name: String(localized: "Anywhere Premium Proxy"),
                     serverAddress: "anywhere.stdco.de",
                     serverPort: 443,
                     outbound: .vless(uuid: uuid, encryption: "none", flow: nil),
@@ -331,7 +344,7 @@ struct AddProxyView: View {
                     muxEnabled: true,
                     xudpEnabled: true
                 )
-                onImport?(configuration)
+                viewModel.addConfiguration(configuration)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
@@ -356,7 +369,7 @@ struct AddProxyView: View {
             }
             do {
                 let configuration = try ProxyConfiguration.parse(url: trimmed, naiveProtocol: naiveProtocol)
-                onImport?(configuration)
+                viewModel.addConfiguration(configuration)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
@@ -377,7 +390,7 @@ struct AddProxyView: View {
                         total: result.total,
                         expire: result.expire
                     )
-                    onSubscriptionImport?(result.configurations, subscription)
+                    viewModel.addSubscription(configurations: result.configurations, subscription: subscription)
                     dismiss()
                 } catch {
                     errorMessage = error.localizedDescription

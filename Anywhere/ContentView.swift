@@ -89,11 +89,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkAction = nil }) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkAction: pendingDeepLinkAction) { configuration in
-                    viewModel.addConfiguration(configuration)
-                } onSubscriptionImport: { configurations, subscription in
-                    viewModel.addSubscription(configurations: configurations, subscription: subscription)
-                }
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkAction: pendingDeepLinkAction)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {
