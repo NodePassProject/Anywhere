@@ -143,6 +143,43 @@ enum QPACKEncoder {
         return headers
     }
 
+    /// Encodes HTTP/3 POST request headers into a QPACK header block.
+    ///
+    /// For a regular (non-CONNECT) request:
+    /// - `:method`    = POST   (static table index 20)
+    /// - `:scheme`    = https  (static table index 23)
+    /// - `:authority`          (literal with name ref, static index 0)
+    /// - `:path`               (literal with name ref, static index 1)
+    ///
+    /// - Parameters:
+    ///   - authority: The target host (e.g. "hysteria").
+    ///   - path: The request path (e.g. "/auth").
+    ///   - extraHeaders: Additional headers.
+    /// - Returns: QPACK-encoded header block.
+    static func encodePostHeaders(
+        authority: String,
+        path: String,
+        extraHeaders: [(name: String, value: String)]
+    ) -> Data {
+        var block = Data()
+        block.append(0x00) // Required Insert Count = 0
+        block.append(0x00) // S=0, Delta Base = 0
+
+        // :method = POST (static table index 20)
+        block.append(contentsOf: encodeIndexedFieldLine(20))
+        // :scheme = https (static table index 23)
+        block.append(contentsOf: encodeIndexedFieldLine(23))
+        // :authority = <authority> (static index 0)
+        block.append(contentsOf: encodeLiteralWithNameRef(staticIndex: 0, value: authority))
+        // :path = <path> (static index 1)
+        block.append(contentsOf: encodeLiteralWithNameRef(staticIndex: 1, value: path))
+
+        for header in extraHeaders {
+            block.append(contentsOf: encodeLiteralFieldLine(name: header.name, value: header.value))
+        }
+        return block
+    }
+
     // MARK: - Encoding Helpers
 
     /// Indexed field line: 1 T(1) Index(6+)
@@ -268,6 +305,15 @@ enum QPACKEncoder {
         case 0: return (":authority", "")
         case 1: return (":path", "/")
         case 15: return (":method", "CONNECT")
+        case 16: return (":method", "DELETE")
+        case 17: return (":method", "GET")
+        case 18: return (":method", "HEAD")
+        case 19: return (":method", "OPTIONS")
+        case 20: return (":method", "POST")
+        case 21: return (":method", "PUT")
+        case 22: return (":scheme", "http")
+        case 23: return (":scheme", "https")
+        case 24: return (":status", "103")
         case 25: return (":status", "200")
         case 26: return (":status", "204")
         case 27: return (":status", "206")

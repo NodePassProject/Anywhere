@@ -42,7 +42,7 @@ class QUICConnection {
 
     private let host: String
     private let port: UInt16
-    private let sni: String
+    private let serverName: String
     private let alpn: [String]
 
     fileprivate var state: State = .idle
@@ -67,9 +67,16 @@ class QUICConnection {
 
     fileprivate var connectCompletion: ((Error?) -> Void)?
     var streamDataHandler: ((Int64, Data, Bool) -> Void)?
+    /// Called when a QUIC DATAGRAM frame is received.
+    var datagramHandler: ((Data) -> Void)?
     /// Called when the QUIC connection is closed (draining, error, etc.).
     /// Allows the session to react immediately rather than discovering it on the next operation.
     var connectionClosedHandler: ((Error) -> Void)?
+
+    /// When true, advertises DATAGRAM frame support in transport params.
+    private let datagramsEnabled: Bool
+    /// Maximum DATAGRAM frame size advertised to the peer (what we can receive).
+    static let maxDatagramFrameSize: UInt64 = 65535
 
     /// Pending writes that were blocked by stream flow control.
     /// Flushed when incoming packets extend the window (MAX_STREAM_DATA).
@@ -82,6 +89,10 @@ class QUICConnection {
         let completion: (Error?) -> Void
     }
 
+    /// Pending datagrams waiting to be sent. Drained in `writeToUDP()` where
+    /// they get first priority for congestion window space.
+    private var pendingDatagrams: [Data] = []
+
     static let maxUDPPayload = 1452
 
     // MARK: Init
@@ -89,11 +100,13 @@ class QUICConnection {
     /// Returns true if the caller is already executing on this connection's queue.
     var isOnQueue: Bool { DispatchQueue.getSpecific(key: Self.queueKey) == true }
 
-    init(host: String, port: UInt16, sni: String? = nil, alpn: [String] = ["h3"]) {
+    init(host: String, port: UInt16, serverName: String? = nil, alpn: [String] = ["h3"],
+         datagramsEnabled: Bool = false) {
         self.host = host
         self.port = port
-        self.sni = sni ?? host
+        self.serverName = serverName ?? host
         self.alpn = alpn
+        self.datagramsEnabled = datagramsEnabled
         self.queue = DispatchQueue(label: "com.argsment.Anywhere.quic")
         queue.setSpecific(key: Self.queueKey, value: true)
     }
@@ -170,6 +183,42 @@ class QUICConnection {
             self.writeStreamImpl(conn: conn, streamId: streamId,
                                  data: data, fin: fin, completion: completion)
         }
+    }
+
+    // MARK: Datagrams
+
+    /// Queues a QUIC DATAGRAM frame for sending.
+    ///
+    /// The datagram is sent on the next `writeToUDP()` cycle, where it gets
+    /// first priority for congestion window space (coalesced with ACKs and
+    /// control frames).  QUIC datagrams are unreliable — if the congestion
+    /// window is still exhausted after retries, the datagram is silently
+    /// dropped (same as UDP packet loss).
+    ///
+    /// Only returns an error for fatal issues (connection closed, payload
+    /// exceeds the remote's max_datagram_frame_size).
+    func writeDatagram(_ data: Data, completion: @escaping (Error?) -> Void) {
+        queue.async { [weak self] in
+            guard let self, self.conn != nil, self.state == .connected else {
+                completion(QUICError.closed)
+                return
+            }
+            self.pendingDatagrams.append(data)
+            self.writeToUDP()
+            completion(nil)
+        }
+    }
+
+    /// Maximum datagram payload size the remote endpoint can receive.
+    /// Returns 0 if datagrams are not supported or the connection isn't ready.
+    /// This accounts for the DATAGRAM frame overhead (up to 9 bytes).
+    var maxDatagramPayloadSize: Int {
+        guard let conn else { return 0 }
+        guard let params = ngtcp2_swift_conn_get_remote_transport_params(conn) else { return 0 }
+        let maxFrame = Int(params.pointee.max_datagram_frame_size)
+        guard maxFrame > 0 else { return 0 }
+        // NGTCP2_DATAGRAM_OVERHEAD = 1 (type) + 8 (length varint max) = 9
+        return max(0, maxFrame - 9)
     }
 
     /// Writes stream data, queuing any remainder that can't be sent due to
@@ -297,9 +346,10 @@ class QUICConnection {
             self.udpConnection?.forceCancel()
             self.udpConnection = nil
             self.state = .closed
-            // Fail any pending writes
+            // Fail any pending writes; drop pending datagrams
             let writes = self.pendingWrites
             self.pendingWrites.removeAll()
+            self.pendingDatagrams.removeAll()
             let closeError = error ?? QUICError.closed
             for pw in writes { pw.completion(closeError) }
             self.connectionClosedHandler?(closeError)
@@ -461,7 +511,7 @@ class QUICConnection {
         generateConnectionID(&dcid, length: 16)
         generateConnectionID(&scid, length: 16)
 
-        tlsHandshaker = QUICTLSHandler(sni: sni, alpn: alpn)
+        tlsHandshaker = QUICTLSHandler(serverName: serverName, alpn: alpn)
 
         var callbacks = ngtcp2_callbacks()
         callbacks.client_initial = quicClientInitialCB
@@ -481,6 +531,9 @@ class QUICConnection {
         callbacks.get_path_challenge_data2 = ngtcp2_crypto_get_path_challenge_data2_cb
         callbacks.version_negotiation = ngtcp2_crypto_version_negotiation_cb
         callbacks.handshake_completed = quicHandshakeCompletedCB
+        if datagramsEnabled {
+            callbacks.recv_datagram = quicRecvDatagramCB
+        }
 
         var settings = ngtcp2_settings()
         ngtcp2_swift_settings_default(&settings)
@@ -495,6 +548,9 @@ class QUICConnection {
         params.initial_max_stream_data_bidi_local = 64 * 1024 * 1024
         params.initial_max_stream_data_bidi_remote = 64 * 1024 * 1024
         params.initial_max_stream_data_uni = 64 * 1024 * 1024
+        if datagramsEnabled {
+            params.max_datagram_frame_size = Self.maxDatagramFrameSize
+        }
 
         var path = ngtcp2_path()
         withUnsafeMutablePointer(to: &localAddr) { local in
@@ -585,6 +641,43 @@ class QUICConnection {
         var buf = [UInt8](repeating: 0, count: Self.maxUDPPayload)
         var pi = ngtcp2_pkt_info()
 
+        // Drain pending datagrams first. `write_datagram` also flushes ACKs,
+        // retransmissions and control frames — so the datagram is coalesced
+        // into the same packet, giving it fair access to the congestion window
+        // instead of being starved by `write_pkt`.
+        while !pendingDatagrams.isEmpty {
+            var accepted: Int32 = 0
+            let dgram = pendingDatagrams[0]
+
+            let nwrite: ngtcp2_ssize = dgram.withUnsafeBytes { rawBuf in
+                guard let ptr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                    return 0
+                }
+                return ngtcp2_swift_conn_write_datagram(
+                    conn, nil, &pi, &buf, buf.count,
+                    &accepted, 0, 0, ptr, dgram.count, ts
+                )
+            }
+
+            if nwrite < 0 {
+                // Fatal error (too large, unsupported) — drop this datagram
+                pendingDatagrams.removeFirst()
+                continue
+            }
+            if nwrite > 0 {
+                sendUDPPacket(Data(buf.prefix(Int(nwrite))))
+            }
+            if accepted != 0 {
+                pendingDatagrams.removeFirst()
+            } else {
+                // Congestion window full — stop trying, remaining datagrams
+                // will be attempted on the next writeToUDP() cycle.
+                break
+            }
+        }
+
+        // Flush any remaining control/stream packets that write_datagram
+        // didn't cover (e.g. when no datagrams were pending).
         while true {
             let nwrite = ngtcp2_swift_conn_write_pkt(conn, nil, &pi, &buf, buf.count, ts)
             if nwrite <= 0 { break }
@@ -784,5 +877,14 @@ private let quicHandshakeCompletedCB: @convention(c) (
         qc.connectCompletion?(nil)
         qc.connectCompletion = nil
     }
+    return 0
+}
+
+private let quicRecvDatagramCB: @convention(c) (
+    OpaquePointer?, UInt32, UnsafePointer<UInt8>?, Int, UnsafeMutableRawPointer?
+) -> Int32 = { _, _, data, datalen, ud in
+    guard let data, datalen > 0, let qc = qcFromUserData(ud) else { return 0 }
+    let d = Data(bytes: data, count: datalen)
+    qc.datagramHandler?(d)
     return 0
 }

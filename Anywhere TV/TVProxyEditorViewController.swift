@@ -420,6 +420,10 @@ class TVProxyEditorViewController: UITableViewController {
         }
 
         switch configuration.outbound {
+        case .vless:
+            break
+        case .hysteria2:
+            break
         case .shadowsocks(let password, let method):
             ssPassword = password
             ssMethod = method
@@ -429,8 +433,6 @@ class TVProxyEditorViewController: UITableViewController {
         case .http11(let user, let pass), .http2(let user, let pass), .http3(let user, let pass):
             naiveUsername = user
             naivePassword = pass
-        case .vless:
-            break
         }
     }
 
@@ -539,6 +541,8 @@ class TVProxyEditorViewController: UITableViewController {
         switch selectedProtocol {
         case .vless:
             outbound = .vless(uuid: parsedUUID, encryption: encryption, flow: flow.isEmpty ? nil : flow)
+        case .hysteria2:
+            outbound = .hysteria2(auth: "")
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)
         case .socks5:

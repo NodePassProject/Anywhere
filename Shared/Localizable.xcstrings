@@ -1755,6 +1755,9 @@
         }
       }
     },
+    "Auth" : {
+
+    },
     "Auto" : {
       "localizations" : {
         "ar" : {
@@ -4462,6 +4465,9 @@
     },
     "HTTPUpgrade" : {
       "shouldTranslate" : false
+    },
+    "Hysteria 2" : {
+
     },
     "Import" : {
       "localizations" : {

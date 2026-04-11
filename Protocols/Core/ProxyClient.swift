@@ -326,8 +326,16 @@ class ProxyClient {
             completion(.failure(ProxyError.dropped))
             return
         }
-
-        // SS restrictions: no Mux, no Reality
+        
+        if configuration.outboundProtocol == .hysteria2 {
+            if command == .mux {
+                completion(.failure(ProxyError.protocolError("Mux is not supported with Hysteria2")))
+                return
+            }
+            connectWithHysteria(command: command, destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
+            return
+        }
+        
         if isShadowsocks {
             if command == .mux {
                 completion(.failure(ProxyError.protocolError("Mux is not supported with Shadowsocks")))
@@ -338,6 +346,15 @@ class ProxyClient {
                 return
             }
         }
+        
+        if configuration.outboundProtocol == .socks5 {
+            if command == .mux {
+                completion(.failure(ProxyError.protocolError("Mux is not supported with SOCKS5")))
+                return
+            }
+            connectWithSOCKS5(command: command, destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
+            return
+        }
 
         if configuration.outboundProtocol.isNaive {
             if command != .tcp {
@@ -345,15 +362,6 @@ class ProxyClient {
                 return
             }
             connectWithNaive(destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
-            return
-        }
-
-        if configuration.outboundProtocol == .socks5 {
-            if command == .mux {
-                completion(.failure(ProxyError.protocolError("Mux is not supported with SOCKS5")))
-                return
-            }
-            connectWithSOCKS5(command: command, destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
             return
         }
 
@@ -1175,6 +1183,84 @@ class ProxyClient {
         ])
         return VLESSVisionConnection(connection: connection, userUUID: uuidData, testseed: configuration.testseed)
     }
+    
+    // MARK: - Hysteria
+
+    /// Connects through a Hysteria2 proxy using QUIC.
+    ///
+    /// For TCP, opens a new QUIC stream with Hysteria TCPRequest framing.
+    /// For UDP, creates a QUIC datagram session with UDPMessage framing.
+    /// The underlying QUIC connection is pooled per server address.
+    private func connectWithHysteria(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        guard let auth = configuration.hysteriaAuth else {
+            completion(.failure(ProxyError.protocolError("Hysteria2 auth not configured")))
+            return
+        }
+
+        let serverName = configuration.tls?.serverName ?? configuration.serverAddress
+
+        HysteriaClientPool.client(
+            host: configuration.connectAddress,
+            port: configuration.serverPort,
+            serverName: serverName,
+            auth: auth
+        ) { [weak self] result in
+            guard let self else {
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                return
+            }
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let client):
+                let address = "\(destinationHost):\(destinationPort)"
+                if command == .udp {
+                    self.connectHysteriaUDP(client: client, address: address, completion: completion)
+                } else {
+                    self.connectHysteriaTCP(client: client, address: address, completion: completion)
+                }
+            }
+        }
+    }
+
+    private func connectHysteriaTCP(
+        client: HysteriaClient,
+        address: String,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        client.openTCPStream(address: address) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let conn):
+                completion(.success(conn))
+            }
+        }
+    }
+
+    private func connectHysteriaUDP(
+        client: HysteriaClient,
+        address: String,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        client.openUDPSession { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let session):
+                let conn = HysteriaUDPConnection(
+                    session: session, address: address,
+                    queue: DispatchQueue(label: "com.argsment.Anywhere.hysteria.udp")
+                )
+                completion(.success(conn))
+            }
+        }
+    }
 
     // MARK: - Shadowsocks
 
@@ -1241,108 +1327,6 @@ class ProxyClient {
         }
     }
     
-    // MARK: - Naive (HTTPS/HTTP2/HTTP3 CONNECT)
-
-    /// Connects through a CONNECT tunnel using HTTP/1.1, HTTP/2, or HTTP/3.
-    ///
-    /// The scheme is determined by ``OutboundProtocol``:
-    /// - `.http11` → HTTP/1.1 CONNECT over TLS
-    /// - `.http2` → HTTP/2 CONNECT over TLS (NaiveProxy)
-    /// - `.quic`  → HTTP/3 CONNECT over QUIC (NaiveProxy)
-    ///
-    /// All schemes produce a ``NaiveProxyConnection`` wrapping the appropriate ``NaiveTunnel``.
-    private func connectWithNaive(
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let scheme: NaiveConfiguration.NaiveScheme
-        switch configuration.outboundProtocol {
-        case .http11: scheme = .http11
-        case .http2:  scheme = .http2
-        case .http3:  scheme = .http3
-        default:      scheme = .http2
-        }
-
-        let naiveConfig = NaiveConfiguration(
-            proxyHost: configuration.serverAddress,
-            proxyPort: configuration.serverPort,
-            username: configuration.activeUsername,
-            password: configuration.activePassword,
-            sni: nil,
-            scheme: scheme
-        )
-
-        // RFC 3986 §3.2.2: IPv6 literals must be bracketed in authority strings.
-        let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
-        let destination = "\(bracketedHost):\(destinationPort)"
-
-        // Use serverAddress (hostname) instead of connectAddress (which may
-        // contain a fake IP from FakeIPPool when switching proxies while the
-        // VPN is active).  The Network Extension resolves hostnames via the
-        // real network interface, bypassing the tunnel.
-        let proxyHost = configuration.serverAddress
-
-        switch scheme {
-        case .http11:
-            let transport = NaiveTLSTransport(
-                host: proxyHost,
-                port: configuration.serverPort,
-                sni: naiveConfig.effectiveSNI,
-                alpn: ["http/1.1"],
-                tunnel: self.tunnel
-            )
-            let tunnel = HTTP11Connection(
-                transport: transport,
-                configuration: naiveConfig,
-                destination: destination
-            )
-            openTunnelAndWrap(tunnel, completion: completion)
-
-        case .http2:
-            HTTP2SessionPool.shared.acquireStream(
-                host: proxyHost,
-                port: configuration.serverPort,
-                sni: naiveConfig.effectiveSNI,
-                tunnel: self.tunnel,
-                configuration: naiveConfig,
-                destination: destination
-            ) { [self] stream in
-                openTunnelAndWrap(stream, completion: completion)
-            }
-
-        case .http3:
-            HTTP3SessionPool.shared.acquireStream(
-                host: proxyHost,
-                port: configuration.serverPort,
-                sni: naiveConfig.effectiveSNI,
-                configuration: naiveConfig,
-                destination: destination
-            ) { [self] stream in
-                openTunnelAndWrap(stream, completion: completion)
-            }
-        }
-    }
-
-    /// Opens a ``NaiveTunnel`` and wraps it in a ``NaiveProxyConnection``.
-    private func openTunnelAndWrap(
-        _ tunnel: NaiveTunnel,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        tunnel.openTunnel { error in
-            if let error {
-                tunnel.close()
-                completion(.failure(error))
-                return
-            }
-            let connection = NaiveProxyConnection(
-                tunnel: tunnel,
-                paddingType: tunnel.negotiatedPaddingType
-            )
-            completion(.success(connection))
-        }
-    }
-
     // MARK: - SOCKS5
 
     /// Connects through a SOCKS5 proxy server.
@@ -1502,6 +1486,108 @@ class ProxyClient {
                 proxyConnection.responseHeaderReceived = true
                 completion(.success(proxyConnection))
             }
+        }
+    }
+    
+    // MARK: - Naive (HTTPS/HTTP2/HTTP3 CONNECT)
+
+    /// Connects through a CONNECT tunnel using HTTP/1.1, HTTP/2, or HTTP/3.
+    ///
+    /// The scheme is determined by ``OutboundProtocol``:
+    /// - `.http11` → HTTP/1.1 CONNECT over TLS
+    /// - `.http2` → HTTP/2 CONNECT over TLS (NaiveProxy)
+    /// - `.quic`  → HTTP/3 CONNECT over QUIC (NaiveProxy)
+    ///
+    /// All schemes produce a ``NaiveProxyConnection`` wrapping the appropriate ``NaiveTunnel``.
+    private func connectWithNaive(
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        let scheme: NaiveConfiguration.NaiveScheme
+        switch configuration.outboundProtocol {
+        case .http11: scheme = .http11
+        case .http2:  scheme = .http2
+        case .http3:  scheme = .http3
+        default:      scheme = .http2
+        }
+
+        let naiveConfig = NaiveConfiguration(
+            proxyHost: configuration.serverAddress,
+            proxyPort: configuration.serverPort,
+            username: configuration.activeUsername,
+            password: configuration.activePassword,
+            sni: nil,
+            scheme: scheme
+        )
+
+        // RFC 3986 §3.2.2: IPv6 literals must be bracketed in authority strings.
+        let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
+        let destination = "\(bracketedHost):\(destinationPort)"
+
+        // Use serverAddress (hostname) instead of connectAddress (which may
+        // contain a fake IP from FakeIPPool when switching proxies while the
+        // VPN is active).  The Network Extension resolves hostnames via the
+        // real network interface, bypassing the tunnel.
+        let proxyHost = configuration.serverAddress
+
+        switch scheme {
+        case .http11:
+            let transport = NaiveTLSTransport(
+                host: proxyHost,
+                port: configuration.serverPort,
+                sni: naiveConfig.effectiveSNI,
+                alpn: ["http/1.1"],
+                tunnel: self.tunnel
+            )
+            let tunnel = HTTP11Connection(
+                transport: transport,
+                configuration: naiveConfig,
+                destination: destination
+            )
+            openTunnelAndWrap(tunnel, completion: completion)
+
+        case .http2:
+            HTTP2SessionPool.shared.acquireStream(
+                host: proxyHost,
+                port: configuration.serverPort,
+                sni: naiveConfig.effectiveSNI,
+                tunnel: self.tunnel,
+                configuration: naiveConfig,
+                destination: destination
+            ) { [self] stream in
+                openTunnelAndWrap(stream, completion: completion)
+            }
+
+        case .http3:
+            HTTP3SessionPool.shared.acquireStream(
+                host: proxyHost,
+                port: configuration.serverPort,
+                sni: naiveConfig.effectiveSNI,
+                configuration: naiveConfig,
+                destination: destination
+            ) { [self] stream in
+                openTunnelAndWrap(stream, completion: completion)
+            }
+        }
+    }
+
+    /// Opens a ``NaiveTunnel`` and wraps it in a ``NaiveProxyConnection``.
+    private func openTunnelAndWrap(
+        _ tunnel: NaiveTunnel,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        tunnel.openTunnel { error in
+            if let error {
+                tunnel.close()
+                completion(.failure(error))
+                return
+            }
+            let connection = NaiveProxyConnection(
+                tunnel: tunnel,
+                paddingType: tunnel.negotiatedPaddingType
+            )
+            completion(.success(connection))
         }
     }
 }

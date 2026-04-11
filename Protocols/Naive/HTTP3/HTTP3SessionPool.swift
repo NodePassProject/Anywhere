@@ -71,7 +71,7 @@ class HTTP3SessionPool {
             }
 
             let new = HTTP3Session(
-                host: host, port: port, sni: sni, configuration: configuration
+                host: host, port: port, serverName: sni, configuration: configuration
             )
             let capturedKey = key
             new.onClose = { [weak self, weak new] in
