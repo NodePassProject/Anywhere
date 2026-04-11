@@ -1,6 +1,6 @@
 //
 //  FakeIPPool.swift
-//  Network Extension
+//  Anywhere
 //
 //  Created by Argsment Limited on 3/1/26.
 //

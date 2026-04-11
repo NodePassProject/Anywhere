@@ -361,7 +361,7 @@ enum HPACKEncoder {
 // MARK: - HPACK Huffman Decoder
 
 /// Huffman decoder for HPACK string literals (RFC 7541 Appendix B).
-private enum HPACKHuffman {
+enum HPACKHuffman {
 
     /// Trie node for Huffman decoding. Children are array indices; -1 = no child.
     private struct Node {

@@ -7,7 +7,7 @@
 
 import SwiftUI
 
-fileprivate enum LinkType:  CaseIterable {
+fileprivate enum HTTPSLinkType: CaseIterable {
     case subscription
     case http11Proxy
     case http2Proxy
@@ -56,7 +56,7 @@ struct AddProxyView: View {
     @State private var selectedMethod: Method?
     @State private var showingQRScanner = false
     @State private var linkURL = ""
-    @State private var linkType: LinkType = .subscription
+    @State private var httpsLinkType: HTTPSLinkType = .subscription
     @State private var isLoading = false
     @State private var showingError = false
     @State private var errorMessage = ""
@@ -212,10 +212,10 @@ struct AddProxyView: View {
     private var linkInputField: some View {
         VStack {
             if linkURL.hasPrefix("http://") || linkURL.hasPrefix("https://") {
-                Picker("Link Type", selection: $linkType) {
-                    Text("Subscription").tag(LinkType.subscription)
-                    Text("HTTPS Proxy").tag(LinkType.http11Proxy)
-                    Text("HTTP/2 Proxy").tag(LinkType.http2Proxy)
+                Picker("Link Type", selection: $httpsLinkType) {
+                    Text("Subscription").tag(HTTPSLinkType.subscription)
+                    Text("HTTPS Proxy").tag(HTTPSLinkType.http11Proxy)
+                    Text("HTTP/2 Proxy").tag(HTTPSLinkType.http2Proxy)
                 }
                 .pickerStyle(.segmented)
             }
@@ -347,9 +347,10 @@ struct AddProxyView: View {
 
         if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") ||
             trimmed.hasPrefix("socks5://") || trimmed.hasPrefix("socks://") ||
-            (isHTTP && linkType != .subscription) {
+            trimmed.hasPrefix("quic://") ||
+            (isHTTP && httpsLinkType != .subscription) {
             // Single proxy link (VLESS, Shadowsocks, SOCKS5, or NaiveProxy)
-            let naiveProtocol: OutboundProtocol? = switch linkType {
+            let naiveProtocol: OutboundProtocol? = switch httpsLinkType {
             case .http11Proxy: .http11
             case .http2Proxy: .http2
             case .subscription: nil

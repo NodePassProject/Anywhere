@@ -1,6 +1,6 @@
 //
 //  TVDemoViews.swift
-//  Anywhere TV
+//  Anywhere
 //
 //  Demo view controllers for Xcode Previews. Self-contained with mock data,
 //  no dependency on VPNViewModel or persistent stores.

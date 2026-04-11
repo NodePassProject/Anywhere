@@ -1,6 +1,6 @@
 //
 //  TunnelConstants.swift
-//  Anywhere Network Extension
+//  Anywhere
 //
 //  Created by Argsment Limited on 3/30/26.
 //

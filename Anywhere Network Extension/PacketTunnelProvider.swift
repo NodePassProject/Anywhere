@@ -1,6 +1,6 @@
 //
 //  PacketTunnelProvider.swift
-//  Network Extension
+//  Anywhere
 //
 //  Created by Argsment Limited on 1/23/26.
 //

@@ -118,6 +118,12 @@
 				Naive/HTTP2/HTTP2Session.swift,
 				Naive/HTTP2/HTTP2SessionPool.swift,
 				Naive/HTTP2/HTTP2Stream.swift,
+				Naive/HTTP3/HTTP3Connection.swift,
+				Naive/HTTP3/HTTP3Framer.swift,
+				Naive/HTTP3/QPACKEncoder.swift,
+				Naive/HTTP3/QUICConnection.swift,
+				Naive/HTTP3/QUICCrypto.swift,
+				Naive/HTTP3/QUICTLSHandler.swift,
 				Naive/HTTP11/HTTP11Connection.swift,
 				Naive/NaiveConfiguration.swift,
 				Naive/NaivePaddingFramer.swift,
@@ -162,6 +168,54 @@
 				AWCore.swift,
 				Blake3/Blake3Hasher.swift,
 				Models/DomainRule.swift,
+				ngtcp2/ngtcp2_acktr.c,
+				ngtcp2/ngtcp2_addr.c,
+				ngtcp2/ngtcp2_balloc.c,
+				ngtcp2/ngtcp2_bbr.c,
+				ngtcp2/ngtcp2_buf.c,
+				ngtcp2/ngtcp2_callbacks.c,
+				ngtcp2/ngtcp2_cc.c,
+				ngtcp2/ngtcp2_cid.c,
+				ngtcp2/ngtcp2_conn_info.c,
+				ngtcp2/ngtcp2_conn.c,
+				ngtcp2/ngtcp2_conv.c,
+				ngtcp2/ngtcp2_crypto_apple.c,
+				ngtcp2/ngtcp2_crypto.c,
+				ngtcp2/ngtcp2_dcidtr.c,
+				ngtcp2/ngtcp2_err.c,
+				ngtcp2/ngtcp2_fmt.c,
+				ngtcp2/ngtcp2_frame_chain.c,
+				ngtcp2/ngtcp2_gaptr.c,
+				ngtcp2/ngtcp2_idtr.c,
+				ngtcp2/ngtcp2_ksl.c,
+				ngtcp2/ngtcp2_log.c,
+				ngtcp2/ngtcp2_map.c,
+				ngtcp2/ngtcp2_mem.c,
+				ngtcp2/ngtcp2_objalloc.c,
+				ngtcp2/ngtcp2_opl.c,
+				ngtcp2/ngtcp2_path.c,
+				ngtcp2/ngtcp2_pcg.c,
+				ngtcp2/ngtcp2_pkt.c,
+				ngtcp2/ngtcp2_pmtud.c,
+				ngtcp2/ngtcp2_ppe.c,
+				ngtcp2/ngtcp2_pq.c,
+				ngtcp2/ngtcp2_pv.c,
+				ngtcp2/ngtcp2_qlog.c,
+				ngtcp2/ngtcp2_range.c,
+				ngtcp2/ngtcp2_ratelim.c,
+				ngtcp2/ngtcp2_ringbuf.c,
+				ngtcp2/ngtcp2_rob.c,
+				ngtcp2/ngtcp2_rst.c,
+				ngtcp2/ngtcp2_rtb.c,
+				ngtcp2/ngtcp2_settings.c,
+				ngtcp2/ngtcp2_str.c,
+				ngtcp2/ngtcp2_strm.c,
+				ngtcp2/ngtcp2_transport_params.c,
+				ngtcp2/ngtcp2_unreachable.c,
+				ngtcp2/ngtcp2_vec.c,
+				ngtcp2/ngtcp2_version.c,
+				ngtcp2/ngtcp2_window_filter.c,
+				ngtcp2/shared.c,
 				Tunnel/NWTransport.swift,
 				Tunnel/ProxyDNSCache.swift,
 				Utilities/ActivityTimer.swift,
@@ -703,10 +757,15 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 175;
+				CURRENT_PROJECT_VERSION = 176;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"HAVE_CONFIG_H=1",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -729,6 +788,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -742,10 +802,15 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 175;
+				CURRENT_PROJECT_VERSION = 176;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"HAVE_CONFIG_H=1",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -768,6 +833,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = Anywhere/BridgingHeader.h;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -780,12 +846,17 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 175;
+				CURRENT_PROJECT_VERSION = 176;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"HAVE_CONFIG_H=1",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
+					"\"$(SRCROOT)/Shared/ngtcp2\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
@@ -820,12 +891,17 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 175;
+				CURRENT_PROJECT_VERSION = 176;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"HAVE_CONFIG_H=1",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
+					"\"$(SRCROOT)/Shared/ngtcp2\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
@@ -861,9 +937,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 175;
+				CURRENT_PROJECT_VERSION = 176;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"HAVE_CONFIG_H=1",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -883,6 +964,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere TV/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -897,9 +979,14 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 175;
+				CURRENT_PROJECT_VERSION = 176;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"HAVE_CONFIG_H=1",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -919,6 +1006,7 @@
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Anywhere TV/BridgingHeader.h";
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -933,7 +1021,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 175;
+				CURRENT_PROJECT_VERSION = 176;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
@@ -965,7 +1053,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 175;
+				CURRENT_PROJECT_VERSION = 176;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";

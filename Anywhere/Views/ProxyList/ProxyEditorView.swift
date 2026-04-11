@@ -109,6 +109,7 @@ struct ProxyEditorView: View {
                         Text("SOCKS5").tag(OutboundProtocol.socks5)
                         Text("HTTPS").tag(OutboundProtocol.http11)
                         Text("HTTP2").tag(OutboundProtocol.http2)
+                        Text("QUIC").tag(OutboundProtocol.http3)
                     } label: {
                         TextWithColorfulIcon(titleKey: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }

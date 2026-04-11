@@ -1,6 +1,6 @@
 //
 //  TVProxyCell.swift
-//  Anywhere TV
+//  Anywhere
 //
 //  Created by Argsment Limited on 3/29/26.
 //
