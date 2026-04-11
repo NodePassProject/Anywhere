@@ -1176,7 +1176,7 @@ struct TLSClientHelloBuilder {
     /// Returns a raw TLS Handshake message (type + 3-byte length + body).
     static func buildQUICClientHello(
         random: Data,
-        sni: String,
+        serverName: String,
         alpn: [String],
         publicKey: Data,
         quicTransportParams: Data,
@@ -1191,7 +1191,7 @@ struct TLSClientHelloBuilder {
 
         // Extensions
         var extsData = Data()
-        extsData.append(buildSNIExtension(serverName: sni))
+        extsData.append(buildSNIExtension(serverName: serverName))
         extsData.append(supportedGroupsExt([0x0017])) // secp256r1
         extsData.append(signatureAlgorithmsExt([
             0x0403, 0x0804, 0x0401, // ECDSA

@@ -54,4 +54,19 @@ static inline ngtcp2_ssize ngtcp2_swift_conn_writev_stream(
                                     datav, datavcnt, ts);
 }
 
+static inline const ngtcp2_transport_params *ngtcp2_swift_conn_get_remote_transport_params(
+    ngtcp2_conn *conn) {
+  return ngtcp2_conn_get_remote_transport_params(conn);
+}
+
+static inline ngtcp2_ssize ngtcp2_swift_conn_write_datagram(
+    ngtcp2_conn *conn, ngtcp2_path *path, ngtcp2_pkt_info *pi,
+    uint8_t *dest, size_t destlen, int *paccepted,
+    uint32_t flags, uint64_t dgram_id,
+    const uint8_t *data, size_t datalen, ngtcp2_tstamp ts) {
+  return ngtcp2_conn_write_datagram(conn, path, pi, dest, destlen,
+                                     paccepted, flags, dgram_id,
+                                     data, datalen, ts);
+}
+
 #endif /* NGTCP2_SWIFT_BRIDGE_H */
