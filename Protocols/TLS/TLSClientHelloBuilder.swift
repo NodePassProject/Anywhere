@@ -1162,6 +1162,62 @@ struct TLSClientHelloBuilder {
         return (suites, extensionsData, false) // No padding
     }
 
+    // MARK: - QUIC ClientHello
+
+    /// Builds a TLS 1.3 ClientHello for QUIC transport (no TLS record wrapping).
+    ///
+    /// The ClientHello includes:
+    /// - SNI extension for the server name
+    /// - ALPN extension (typically "h3")
+    /// - Supported versions (TLS 1.3 only)
+    /// - Key share (P-256)
+    /// - QUIC transport parameters extension (0x39)
+    ///
+    /// Returns a raw TLS Handshake message (type + 3-byte length + body).
+    static func buildQUICClientHello(
+        random: Data,
+        sni: String,
+        alpn: [String],
+        publicKey: Data,
+        quicTransportParams: Data
+    ) -> Data {
+        // TLS 1.3 cipher suites
+        let suites = cipherSuitesData([
+            0x1301, // TLS_AES_128_GCM_SHA256
+            0x1302, // TLS_AES_256_GCM_SHA384
+            0x1303, // TLS_CHACHA20_POLY1305_SHA256
+        ])
+
+        // Extensions
+        var extsData = Data()
+        extsData.append(buildSNIExtension(serverName: sni))
+        extsData.append(supportedGroupsExt([0x0017])) // secp256r1
+        extsData.append(signatureAlgorithmsExt([
+            0x0403, 0x0804, 0x0401, // ECDSA
+            0x0503, 0x0805, 0x0501, // ECDSA (larger)
+            0x0806, 0x0601,         // RSA-PSS
+            0x0203, 0x0201,         // RSA
+        ]))
+        extsData.append(alpnExt(alpn))
+        extsData.append(supportedVersionsExt([0x0304])) // TLS 1.3 only
+        extsData.append(pskKeyExchangeModesExt())
+        extsData.append(keyShareExt([(group: 0x0017, keyData: publicKey)]))
+
+        // QUIC transport parameters extension (type 0x0039)
+        extsData.append(ext(0x0039, quicTransportParams))
+
+        // Empty session ID for QUIC (RFC 9001 §8.4)
+        let sessionId = Data()
+
+        return assembleClientHello(
+            random: random,
+            sessionId: sessionId,
+            cipherSuites: suites,
+            extensions: extsData,
+            applyBoringPadding: false
+        )
+    }
+
     /// Wrap a ClientHello message in a TLS record.
     static func wrapInTLSRecord(clientHello: Data) -> Data {
         var record = Data()

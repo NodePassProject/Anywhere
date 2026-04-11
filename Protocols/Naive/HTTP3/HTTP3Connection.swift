@@ -1,0 +1,295 @@
+//
+//  HTTP3Connection.swift
+//  Anywhere
+//
+//  HTTP/3 CONNECT tunnel for NaiveProxy, conforming to NaiveTunnel.
+//
+
+import Foundation
+
+private let logger = AnywhereLogger(category: "HTTP3")
+
+// MARK: - Error
+
+enum HTTP3Error: Error, LocalizedError {
+    case notReady
+    case connectionFailed(String)
+    case tunnelFailed(statusCode: String)
+    case authenticationRequired
+    case streamClosed
+
+    var errorDescription: String? {
+        switch self {
+        case .notReady: return "HTTP/3 connection not ready"
+        case .connectionFailed(let msg): return "HTTP/3 connection failed: \(msg)"
+        case .tunnelFailed(let code): return "HTTP/3 CONNECT tunnel failed with status \(code)"
+        case .authenticationRequired: return "HTTP/3 proxy authentication required (407)"
+        case .streamClosed: return "HTTP/3 stream closed"
+        }
+    }
+}
+
+// MARK: - HTTP3Connection
+
+class HTTP3Connection: NaiveTunnel {
+
+    enum State {
+        case idle, quicConnecting, settingsSent, connectSent, tunnelOpen, closed
+    }
+
+    private let quic: QUICConnection
+    private let configuration: NaiveConfiguration
+    private let destination: String
+
+    private var state: State = .idle
+    private let queue = DispatchQueue(label: "com.argsment.Anywhere.http3")
+
+    private var controlStreamId: Int64 = -1
+    private var requestStreamId: Int64 = -1
+
+    private var receiveBuffer = Data()
+    private var pendingReceiveCompletion: ((Data?, Error?) -> Void)?
+    private var headersReceived = false
+
+    private(set) var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType = .none
+
+    var isConnected: Bool { state == .tunnelOpen }
+
+    private var tunnelCompletion: ((Error?) -> Void)?
+
+    init(configuration: NaiveConfiguration, destination: String) {
+        self.configuration = configuration
+        self.destination = destination
+        self.quic = QUICConnection(
+            host: configuration.proxyHost,
+            port: configuration.proxyPort,
+            sni: configuration.effectiveSNI,
+            alpn: ["h3"]
+        )
+    }
+
+    // MARK: - NaiveTunnel
+
+    func openTunnel(completion: @escaping (Error?) -> Void) {
+        queue.async { [weak self] in
+            guard let self, self.state == .idle else {
+                completion(HTTP3Error.notReady)
+                return
+            }
+
+            self.state = .quicConnecting
+            self.tunnelCompletion = completion
+
+            self.quic.connect { [weak self] error in
+                guard let self else { return }
+
+                if let error {
+                    self.queue.async {
+                        self.state = .closed
+                        completion(error)
+                    }
+                    return
+                }
+
+                self.queue.async {
+                    self.openControlStream()
+
+                    self.quic.streamDataHandler = { [weak self] streamId, data, fin in
+                        self?.queue.async {
+                            self?.handleStreamData(streamId: streamId, data: data, fin: fin)
+                        }
+                    }
+
+                    self.sendConnect()
+                }
+            }
+        }
+    }
+
+    func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
+        queue.async { [weak self] in
+            guard let self, self.state == .tunnelOpen else {
+                completion(HTTP3Error.notReady)
+                return
+            }
+            let frame = HTTP3Framer.dataFrame(payload: data)
+            self.quic.writeStream(self.requestStreamId, data: frame, completion: completion)
+        }
+    }
+
+    func receiveData(completion: @escaping (Data?, Error?) -> Void) {
+        queue.async { [weak self] in
+            guard let self else {
+                completion(nil, HTTP3Error.streamClosed)
+                return
+            }
+
+            if !self.receiveBuffer.isEmpty {
+                let data = self.receiveBuffer
+                self.receiveBuffer.removeAll()
+                completion(data, nil)
+                return
+            }
+
+            self.pendingReceiveCompletion = completion
+        }
+    }
+
+    func close() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.state = .closed
+            self.quic.close()
+            self.pendingReceiveCompletion?(nil, HTTP3Error.streamClosed)
+            self.pendingReceiveCompletion = nil
+        }
+    }
+
+    // MARK: - Control Stream
+
+    private func openControlStream() {
+        guard let streamId = quic.openUniStream() else {
+            tunnelCompletion?(HTTP3Error.connectionFailed("Failed to open control stream"))
+            tunnelCompletion = nil
+            return
+        }
+        controlStreamId = streamId
+
+        var payload = Data()
+        payload.append(0x00)
+        payload.append(HTTP3Framer.clientSettingsFrame())
+        quic.writeStream(streamId, data: payload) { _ in }
+
+        if let enc = quic.openUniStream() {
+            quic.writeStream(enc, data: Data([0x02])) { _ in }
+        }
+        if let dec = quic.openUniStream() {
+            quic.writeStream(dec, data: Data([0x03])) { _ in }
+        }
+
+        state = .settingsSent
+    }
+
+    // MARK: - CONNECT Request
+
+    private func sendConnect() {
+        guard let streamId = quic.openBidiStream() else {
+            tunnelCompletion?(HTTP3Error.connectionFailed("Failed to open QUIC stream"))
+            tunnelCompletion = nil
+            return
+        }
+        requestStreamId = streamId
+
+        var extraHeaders: [(name: String, value: String)] = []
+        extraHeaders.append((name: "user-agent", value: "Chrome/128.0.0.0"))
+        if let auth = configuration.basicAuth {
+            extraHeaders.append((name: "proxy-authorization", value: "Basic \(auth)"))
+        }
+        extraHeaders.append(contentsOf: NaivePaddingNegotiator.requestHeaders())
+
+        let headerBlock = QPACKEncoder.encodeConnectHeaders(
+            authority: destination, extraHeaders: extraHeaders
+        )
+        let headersFrame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
+
+        state = .connectSent
+        quic.writeStream(streamId, data: headersFrame) { [weak self] error in
+            if let error {
+                self?.queue.async {
+                    self?.tunnelCompletion?(error)
+                    self?.tunnelCompletion = nil
+                }
+            }
+        }
+    }
+
+    // MARK: - Stream Data Handling
+
+    private func handleStreamData(streamId: Int64, data: Data, fin: Bool) {
+        if streamId == requestStreamId {
+            handleRequestStreamData(data, fin: fin)
+        }
+    }
+
+    private func handleRequestStreamData(_ data: Data, fin: Bool) {
+        if fin && data.isEmpty {
+            state = .closed
+            pendingReceiveCompletion?(nil, HTTP3Error.streamClosed)
+            pendingReceiveCompletion = nil
+            return
+        }
+
+        if !headersReceived {
+            processResponseHeaders(data)
+        } else {
+            processDataFrames(data)
+        }
+    }
+
+    private func processResponseHeaders(_ data: Data) {
+        guard let (frame, consumed) = HTTP3Framer.parseFrame(from: data) else {
+            tunnelCompletion?(HTTP3Error.connectionFailed("Invalid response frame"))
+            tunnelCompletion = nil
+            return
+        }
+
+        guard frame.type == HTTP3FrameType.headers.rawValue else {
+            tunnelCompletion?(HTTP3Error.connectionFailed("Unexpected frame type"))
+            tunnelCompletion = nil
+            return
+        }
+
+        let headers = QPACKEncoder.decodeHeaders(from: frame.payload)
+
+        let statusHeader = headers.first(where: { $0.name == ":status" })
+        guard let status = statusHeader?.value, status == "200" else {
+            let code = statusHeader?.value ?? "unknown"
+            if code == "407" {
+                tunnelCompletion?(HTTP3Error.authenticationRequired)
+            } else {
+                tunnelCompletion?(HTTP3Error.tunnelFailed(statusCode: code))
+            }
+            tunnelCompletion = nil
+            return
+        }
+
+        let paddingTuples = headers.map { (name: $0.name, value: $0.value) }
+        negotiatedPaddingType = NaivePaddingNegotiator.parseResponse(headers: paddingTuples)
+
+        headersReceived = true
+        state = .tunnelOpen
+
+        tunnelCompletion?(nil)
+        tunnelCompletion = nil
+
+        if consumed < data.count {
+            processDataFrames(Data(data[consumed...]))
+        }
+    }
+
+    private func processDataFrames(_ data: Data) {
+        var offset = 0
+
+        while offset < data.count {
+            guard let (frame, consumed) = HTTP3Framer.parseFrame(from: data, offset: offset) else {
+                receiveBuffer.append(Data(data[offset...]))
+                break
+            }
+
+            offset += consumed
+
+            if frame.type == HTTP3FrameType.data.rawValue {
+                deliverData(frame.payload)
+            }
+        }
+    }
+
+    private func deliverData(_ data: Data) {
+        if let completion = pendingReceiveCompletion {
+            pendingReceiveCompletion = nil
+            completion(data, nil)
+        } else {
+            receiveBuffer.append(data)
+        }
+    }
+}

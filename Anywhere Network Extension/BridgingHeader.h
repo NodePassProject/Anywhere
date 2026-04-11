@@ -1,6 +1,6 @@
 //
 //  BridgingHeader.h
-//  Network Extension
+//  Anywhere
 //
 //  Created by Argsment Limited on 1/23/26.
 //
@@ -9,5 +9,6 @@
 #define BridgingHeader_h
 
 #include "./lwip/lwip_bridge.h"
+#include "../Shared/ngtcp2/ngtcp2_bridge.h"
 
 #endif /* BridgingHeader_h */

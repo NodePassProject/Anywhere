@@ -1,6 +1,6 @@
 //
 //  TVProxyEditorViewController.swift
-//  Anywhere TV
+//  Anywhere
 //
 //  Created by Argsment Limited on 3/19/26.
 //
@@ -83,7 +83,7 @@ class TVProxyEditorViewController: UITableViewController {
 
         // Protocol
         let protocolOptions: [(String, String)] = [
-            ("VLESS", "vless"), ("Shadowsocks", "shadowsocks"), ("SOCKS5", "socks5"), ("HTTPS", "http11"), ("HTTP2", "http2"),
+            ("VLESS", "vless"), ("Shadowsocks", "shadowsocks"), ("SOCKS5", "socks5"), ("HTTPS", "http11"), ("HTTP2", "http2"), ("QUIC", "http3"),
         ]
         sections.append((String(localized: "Protocol"), [
             .selection(label: String(localized: "Protocol"), value: selectedProtocol.name, options: protocolOptions, key: .outboundProtocol),

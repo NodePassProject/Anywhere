@@ -1306,7 +1306,11 @@ class ProxyClient {
             }
 
         case .http3:
-            completion(.failure(ProxyError.protocolError("HTTP/3 (QUIC) is not implemented")))
+            let http3 = HTTP3Connection(
+                configuration: naiveConfig,
+                destination: destination
+            )
+            openTunnelAndWrap(http3, completion: completion)
         }
     }
 

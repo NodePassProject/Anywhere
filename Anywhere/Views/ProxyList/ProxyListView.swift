@@ -31,7 +31,7 @@ struct ProxyListView: View {
     }
 
     private var standaloneConfigurations: [ProxyConfiguration] {
-        viewModel.configurations.filter { $0.subscriptionId == nil && $0.id != $0.uuid }
+        viewModel.configurations.filter { $0.subscriptionId == nil && $0.id != anywherePremiumProxyConfiguration?.id }
     }
 
     private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {

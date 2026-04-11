@@ -1,6 +1,6 @@
 //
 //  TVAddProxyViewController.swift
-//  Anywhere TV
+//  Anywhere
 //
 //  Created by Argsment Limited on 3/19/26.
 //
@@ -263,6 +263,7 @@ class TVAddProxyViewController: UITableViewController {
 
         if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") ||
             trimmed.hasPrefix("socks5://") || trimmed.hasPrefix("socks://") ||
+            trimmed.hasPrefix("quic://") ||
             (isHTTP && linkType != .subscription) {
             let naiveProtocol: OutboundProtocol? = switch linkType {
             case .http11: .http11

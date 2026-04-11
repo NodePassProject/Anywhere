@@ -1,6 +1,6 @@
 //
 //  VPNToggleControl.swift
-//  Anywhere Widget
+//  Anywhere
 //
 //  Created by Argsment Limited on 4/6/26.
 //
