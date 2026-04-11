@@ -15,7 +15,6 @@ private let logger = AnywhereLogger(category: "PacketTunnel")
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     private let lwipStack = LWIPStack()
-    private var remoteAddress: String = ""
     private let pathMonitorQueue = DispatchQueue(label: "com.argsment.Anywhere.path-monitor")
     private var pathMonitor: NWPathMonitor?
     private var lastPathSnapshot: PathSnapshot?
@@ -97,9 +96,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             completionHandler(NSError(domain: "com.argsment.Anywhere", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"]))
             return
         }
-
-        remoteAddress = configuration.connectAddress
-        logger.info("[VPN] Tunnel starting: \(configuration.serverAddress):\(configuration.serverPort)")
 
         lwipStack.onTunnelSettingsNeedReapply = { [weak self] in
             self?.reapplyTunnelSettings()
