@@ -382,6 +382,9 @@ class HysteriaUDPSession {
     }
 
     /// Sends a UDP message via QUIC datagram, fragmenting if necessary.
+    ///
+    /// When fragmentation is needed, all fragments are queued atomically
+    /// to prevent interleaving with fragments from other messages.
     func send(address: String, data: Data, completion: @escaping (Error?) -> Void) {
         let msg = HysteriaUDPMessage(
             sessionID: sessionID, packetID: 0,
@@ -400,45 +403,34 @@ class HysteriaUDPSession {
             let serialized = msg.serialize()
             quic.writeDatagram(serialized, completion: completion)
         } else {
-            // Fragment
+            // Fragment and send all fragments atomically so they aren't
+            // interleaved with fragments from other concurrent sends.
             var fragMsg = msg
             fragMsg.packetID = UInt16.random(in: 1...UInt16.max)
             let fragments = HysteriaUDPFragmentation.fragment(fragMsg, maxSize: maxSize)
-            sendFragments(fragments, index: 0, completion: completion)
-        }
-    }
-
-    private func sendFragments(
-        _ fragments: [HysteriaUDPMessage], index: Int,
-        completion: @escaping (Error?) -> Void
-    ) {
-        guard index < fragments.count else {
-            completion(nil)
-            return
-        }
-        let serialized = fragments[index].serialize()
-        quic.writeDatagram(serialized) { [weak self] error in
-            if let error {
-                completion(error)
-            } else {
-                self?.sendFragments(fragments, index: index + 1, completion: completion)
-            }
+            let datagrams = fragments.map { $0.serialize() }
+            quic.writeDatagrams(datagrams, completion: completion)
         }
     }
 
     /// Receives the next reassembled UDP message.
     func receive(completion: @escaping (HysteriaUDPMessage?, Error?) -> Void) {
-        // This is called from the hysteria queue
-        if !receivedMessages.isEmpty {
-            let msg = receivedMessages.removeFirst()
-            completion(msg, nil)
-            return
+        queue.async { [weak self] in
+            guard let self else {
+                completion(nil, HysteriaClient.HysteriaError.closed)
+                return
+            }
+            if !self.receivedMessages.isEmpty {
+                let msg = self.receivedMessages.removeFirst()
+                completion(msg, nil)
+                return
+            }
+            if self.isClosed {
+                completion(nil, self.closeError)
+                return
+            }
+            self.pendingReceive = completion
         }
-        if isClosed {
-            completion(nil, closeError)
-            return
-        }
-        pendingReceive = completion
     }
 
     /// Called by HysteriaClient when a datagram arrives for this session.
