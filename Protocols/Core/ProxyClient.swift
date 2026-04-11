@@ -1277,10 +1277,16 @@ class ProxyClient {
         let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
         let destination = "\(bracketedHost):\(destinationPort)"
 
+        // Use serverAddress (hostname) instead of connectAddress (which may
+        // contain a fake IP from FakeIPPool when switching proxies while the
+        // VPN is active).  The Network Extension resolves hostnames via the
+        // real network interface, bypassing the tunnel.
+        let proxyHost = configuration.serverAddress
+
         switch scheme {
         case .http11:
             let transport = NaiveTLSTransport(
-                host: configuration.connectAddress,
+                host: proxyHost,
                 port: configuration.serverPort,
                 sni: naiveConfig.effectiveSNI,
                 alpn: ["http/1.1"],
@@ -1295,7 +1301,7 @@ class ProxyClient {
 
         case .http2:
             HTTP2SessionPool.shared.acquireStream(
-                host: configuration.connectAddress,
+                host: proxyHost,
                 port: configuration.serverPort,
                 sni: naiveConfig.effectiveSNI,
                 tunnel: self.tunnel,
@@ -1307,7 +1313,7 @@ class ProxyClient {
 
         case .http3:
             HTTP3SessionPool.shared.acquireStream(
-                host: configuration.connectAddress,
+                host: proxyHost,
                 port: configuration.serverPort,
                 sni: naiveConfig.effectiveSNI,
                 configuration: naiveConfig,
@@ -1451,7 +1457,7 @@ class ProxyClient {
                 transport: transport,
                 username: configuration.socks5Username,
                 password: configuration.socks5Password,
-                serverAddress: configuration.connectAddress
+                serverAddress: configuration.serverAddress
             ) { result in
                 switch result {
                 case .success(let relay):
