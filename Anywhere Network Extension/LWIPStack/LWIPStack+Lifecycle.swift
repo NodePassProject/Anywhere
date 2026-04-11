@@ -49,6 +49,7 @@ extension LWIPStack {
         }
 
         startObservingSettings()
+        CertificatePolicy.startObserving()
     }
 
     /// Stops the lwIP stack and closes all active flows.
@@ -188,7 +189,7 @@ extension LWIPStack {
     // and re-reads settings. FakeIPPool is preserved — routing decisions are
     // made at connection time, so rule changes take effect immediately.
     //
-    // 1. "settingsChanged" — posted by SettingsView when IPv6/Encrypted DNS/Country Bypass toggles change.
+    // 1. "tunnelSettingsChanged" — posted by SettingsView when IPv6/Encrypted DNS/Country Bypass toggles change.
     //    IPv6 additionally re-applies tunnel network settings (routes + DNS servers).
     //
     // 2. "routingChanged" — posted by RuleSetListView when routing rule assignments change.
@@ -203,7 +204,7 @@ extension LWIPStack {
                 let stack = Unmanaged<LWIPStack>.fromOpaque(observer).takeUnretainedValue()
                 stack.handleSettingsChanged()
             },
-            TunnelConstants.Notification.settingsChanged,
+            TunnelConstants.Notification.tunnelSettingsChanged,
             nil,
             .deliverImmediately
         )
@@ -229,7 +230,7 @@ extension LWIPStack {
         )
     }
 
-    /// Handles the "settingsChanged" notification (ipv6/bypass/encrypted DNS toggles).
+    /// Handles the "tunnelSettingsChanged" notification (ipv6/bypass/encrypted DNS toggles).
     /// Compares current values against UserDefaults and restarts the stack if changed.
     /// Stack restart closes all connections, clears FakeIPPool, and re-reads all settings.
     private func handleSettingsChanged() {

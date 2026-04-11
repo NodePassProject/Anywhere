@@ -53,6 +53,9 @@ class NaiveProxyConnection: ProxyConnection {
 
     // MARK: - Send
 
+    /// Maximum payload that fits in one padding frame (2-byte length field).
+    private static let maxPaddingPayload = 65535
+
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         if paddingFramer.isWritePaddingActive && paddingType == .variant1 {
             // Fragment medium payloads (400–1024 bytes) into 200–300 byte chunks
@@ -60,9 +63,24 @@ class NaiveProxyConnection: ProxyConnection {
                 sendFragmented(data: data, offset: 0, completion: completion)
                 return
             }
-            let paddingSize = Self.generateSendPaddingSize(payloadSize: data.count)
-            let framed = paddingFramer.write(payload: data, paddingSize: paddingSize)
-            tunnel.sendData(framed, completion: completion)
+            // Padding frame has 2-byte payload length (max 65535).
+            // Truncate to fit, matching the reference NaivePaddingFramer::Write()
+            // which caps payload_consumed_len to the output buffer capacity.
+            let payload = data.count > Self.maxPaddingPayload
+                ? Data(data.prefix(Self.maxPaddingPayload)) : data
+            let paddingSize = Self.generateSendPaddingSize(payloadSize: payload.count)
+            let framed = paddingFramer.write(payload: payload, paddingSize: paddingSize)
+            if payload.count < data.count {
+                // Send framed portion, then remainder unframed (padding frames exhausted
+                // after this since we're already near/at frame 8).
+                tunnel.sendData(framed) { [weak self] error in
+                    if let error { completion(error); return }
+                    let rest = Data(data[payload.count...])
+                    self?.sendRaw(data: rest, completion: completion)
+                }
+            } else {
+                tunnel.sendData(framed, completion: completion)
+            }
         } else {
             tunnel.sendData(data, completion: completion)
         }

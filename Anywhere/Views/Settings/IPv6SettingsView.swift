@@ -18,6 +18,6 @@ struct IPv6SettingsView: View {
             }
         }
         .navigationTitle("IPv6")
-        .onChange(of: ipv6DNSEnabled) { AWCore.notifySettingsChanged() }
+        .onChange(of: ipv6DNSEnabled) { AWCore.notifyTunnelSettingsChanged() }
     }
 }

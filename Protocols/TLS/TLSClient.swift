@@ -1206,8 +1206,7 @@ class TLSClient {
 
         if !isValid {
             // Allow if allowInsecure is set
-            if let defaults = UserDefaults(suiteName: "group.com.argsment.Anywhere"),
-               defaults.bool(forKey: "allowInsecure") {
+            if CertificatePolicy.allowInsecure {
                 return
             }
             let message = error?.takeRetainedValue().localizedDescription ?? "Signature verification failed"
@@ -1855,8 +1854,7 @@ class TLSClient {
 
     /// Validates the server certificate chain using Apple's Security framework.
     private func validateCertificate(completion: @escaping (Result<Void, Error>) -> Void) {
-        if let defaults = UserDefaults(suiteName: "group.com.argsment.Anywhere"),
-           defaults.bool(forKey: "allowInsecure") {
+        if CertificatePolicy.allowInsecure {
             completion(.success(()))
             return
         }
@@ -2021,11 +2019,8 @@ class TLSClient {
 
     /// Checks whether the certificate's SHA-256 fingerprint is in the user's trusted list.
     private static func isUserTrusted(certificate: SecCertificate) -> Bool {
-        guard let defaults = UserDefaults(suiteName: "group.com.argsment.Anywhere"),
-              let trusted = defaults.stringArray(forKey: "trustedCertificateSHA256s"),
-              !trusted.isEmpty else {
-            return false
-        }
+        let trusted = CertificatePolicy.trustedFingerprints
+        guard !trusted.isEmpty else { return false }
         let certData = SecCertificateCopyData(certificate) as Data
         let sha256 = SHA256.hash(data: certData).map { String(format: "%02x", $0) }.joined()
         return trusted.contains(sha256)

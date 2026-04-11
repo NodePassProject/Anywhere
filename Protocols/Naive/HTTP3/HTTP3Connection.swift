@@ -2,12 +2,10 @@
 //  HTTP3Connection.swift
 //  Anywhere
 //
-//  HTTP/3 CONNECT tunnel for NaiveProxy, conforming to NaiveTunnel.
+//  Created by Argsment Limited on 4/11/26.
 //
 
 import Foundation
-
-private let logger = AnywhereLogger(category: "HTTP3")
 
 // MARK: - Error
 
@@ -50,6 +48,7 @@ class HTTP3Connection: NaiveTunnel {
     private var receiveBuffer = Data()
     private var pendingReceiveCompletion: ((Data?, Error?) -> Void)?
     private var headersReceived = false
+    private var pendingQuicBytes = 0
 
     private(set) var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType = .none
 
@@ -80,26 +79,35 @@ class HTTP3Connection: NaiveTunnel {
             self.state = .quicConnecting
             self.tunnelCompletion = completion
 
+            // React immediately when the QUIC connection closes
+            self.quic.connectionClosedHandler = { [weak self] error in
+                guard let self else { return }
+                self.queue.async {
+                    guard self.state != .closed else { return }
+                    self.state = .closed
+                    self.pendingReceiveCompletion?(nil, error)
+                    self.pendingReceiveCompletion = nil
+                    if let cb = self.tunnelCompletion {
+                        self.tunnelCompletion = nil
+                        cb(error)
+                    }
+                }
+            }
+
             self.quic.connect { [weak self] error in
                 guard let self else { return }
-
                 if let error {
-                    self.queue.async {
-                        self.state = .closed
-                        completion(error)
-                    }
+                    self.queue.async { self.state = .closed; completion(error) }
                     return
                 }
 
                 self.queue.async {
                     self.openControlStream()
-
                     self.quic.streamDataHandler = { [weak self] streamId, data, fin in
                         self?.queue.async {
                             self?.handleStreamData(streamId: streamId, data: data, fin: fin)
                         }
                     }
-
                     self.sendConnect()
                 }
             }
@@ -108,12 +116,23 @@ class HTTP3Connection: NaiveTunnel {
 
     func sendData(_ data: Data, completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
-            guard let self, self.state == .tunnelOpen else {
-                completion(HTTP3Error.notReady)
+            guard let self else {
+                completion(HTTP3Error.streamClosed)
+                return
+            }
+            guard self.state == .tunnelOpen else {
+                completion(self.state == .closed ? HTTP3Error.streamClosed : HTTP3Error.notReady)
                 return
             }
             let frame = HTTP3Framer.dataFrame(payload: data)
-            self.quic.writeStream(self.requestStreamId, data: frame, completion: completion)
+            self.quic.writeStream(self.requestStreamId, data: frame) { [weak self] error in
+                if let error {
+                    self?.queue.async { self?.state = .closed }
+                    completion(error)
+                } else {
+                    completion(nil)
+                }
+            }
         }
     }
 
@@ -123,14 +142,17 @@ class HTTP3Connection: NaiveTunnel {
                 completion(nil, HTTP3Error.streamClosed)
                 return
             }
-
             if !self.receiveBuffer.isEmpty {
+                self.ackConsumedBytes()
                 let data = self.receiveBuffer
                 self.receiveBuffer.removeAll()
                 completion(data, nil)
                 return
             }
-
+            if self.state == .closed {
+                completion(nil, nil)
+                return
+            }
             self.pendingReceiveCompletion = completion
         }
     }
@@ -185,7 +207,14 @@ class HTTP3Connection: NaiveTunnel {
         if let auth = configuration.basicAuth {
             extraHeaders.append((name: "proxy-authorization", value: "Basic \(auth)"))
         }
-        extraHeaders.append(contentsOf: NaivePaddingNegotiator.requestHeaders())
+        let cachedType = NaivePaddingNegotiator.cachedPaddingType(
+            host: configuration.proxyHost,
+            port: configuration.proxyPort,
+            sni: configuration.effectiveSNI
+        )
+        extraHeaders.append(contentsOf: NaivePaddingNegotiator.requestHeaders(
+            fastOpen: cachedType != nil
+        ))
 
         let headerBlock = QPACKEncoder.encodeConnectHeaders(
             authority: destination, extraHeaders: extraHeaders
@@ -212,17 +241,21 @@ class HTTP3Connection: NaiveTunnel {
     }
 
     private func handleRequestStreamData(_ data: Data, fin: Bool) {
-        if fin && data.isEmpty {
-            state = .closed
-            pendingReceiveCompletion?(nil, HTTP3Error.streamClosed)
-            pendingReceiveCompletion = nil
-            return
+        if !data.isEmpty {
+            pendingQuicBytes += data.count
+            if !headersReceived {
+                processResponseHeaders(data)
+            } else {
+                processDataFrames(data)
+            }
         }
 
-        if !headersReceived {
-            processResponseHeaders(data)
-        } else {
-            processDataFrames(data)
+        if fin {
+            state = .closed
+            if let completion = pendingReceiveCompletion {
+                pendingReceiveCompletion = nil
+                completion(nil, nil)
+            }
         }
     }
 
@@ -256,6 +289,13 @@ class HTTP3Connection: NaiveTunnel {
         let paddingTuples = headers.map { (name: $0.name, value: $0.value) }
         negotiatedPaddingType = NaivePaddingNegotiator.parseResponse(headers: paddingTuples)
 
+        NaivePaddingNegotiator.cachePaddingType(
+            negotiatedPaddingType,
+            host: configuration.proxyHost,
+            port: configuration.proxyPort,
+            sni: configuration.effectiveSNI
+        )
+
         headersReceived = true
         state = .tunnelOpen
 
@@ -287,9 +327,17 @@ class HTTP3Connection: NaiveTunnel {
     private func deliverData(_ data: Data) {
         if let completion = pendingReceiveCompletion {
             pendingReceiveCompletion = nil
+            ackConsumedBytes()
             completion(data, nil)
         } else {
             receiveBuffer.append(data)
         }
+    }
+
+    private func ackConsumedBytes() {
+        let count = pendingQuicBytes
+        guard count > 0 else { return }
+        pendingQuicBytes = 0
+        quic.extendStreamOffset(requestStreamId, count: count)
     }
 }

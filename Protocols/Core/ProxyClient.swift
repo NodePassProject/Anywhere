@@ -1306,11 +1306,15 @@ class ProxyClient {
             }
 
         case .http3:
-            let http3 = HTTP3Connection(
+            HTTP3SessionPool.shared.acquireStream(
+                host: configuration.connectAddress,
+                port: configuration.serverPort,
+                sni: naiveConfig.effectiveSNI,
                 configuration: naiveConfig,
                 destination: destination
-            )
-            openTunnelAndWrap(http3, completion: completion)
+            ) { [self] stream in
+                openTunnelAndWrap(stream, completion: completion)
+            }
         }
     }
 

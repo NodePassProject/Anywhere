@@ -2,11 +2,7 @@
 //  QPACKEncoder.swift
 //  Anywhere
 //
-//  Minimal QPACK encoder/decoder for HTTP/3 CONNECT requests.
-//  Uses only static table entries and literal representations
-//  (no dynamic table, no Huffman encoding) for simplicity.
-//
-//  Reference: RFC 9204 (QPACK)
+//  Created by Argsment Limited on 4/11/26.
 //
 
 import Foundation

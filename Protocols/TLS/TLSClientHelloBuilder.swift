@@ -1179,7 +1179,8 @@ struct TLSClientHelloBuilder {
         sni: String,
         alpn: [String],
         publicKey: Data,
-        quicTransportParams: Data
+        quicTransportParams: Data,
+        pskExtension: Data? = nil
     ) -> Data {
         // TLS 1.3 cipher suites
         let suites = cipherSuitesData([
@@ -1205,6 +1206,11 @@ struct TLSClientHelloBuilder {
 
         // QUIC transport parameters extension (type 0x0039)
         extsData.append(ext(0x0039, quicTransportParams))
+
+        // pre_shared_key must be the last extension (RFC 8446 §4.2.11)
+        if let pskExtension {
+            extsData.append(pskExtension)
+        }
 
         // Empty session ID for QUIC (RFC 9001 §8.4)
         let sessionId = Data()

@@ -230,7 +230,7 @@ struct OnboardingView: View {
 
         // Notify settings changed for country bypass
         if !bypassCountryCode.isEmpty {
-            AWCore.notifySettingsChanged()
+            AWCore.notifyTunnelSettingsChanged()
         }
         
         AWCore.userDefaults.set(true, forKey: "onboardingCompleted")

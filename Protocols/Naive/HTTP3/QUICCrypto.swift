@@ -2,9 +2,7 @@
 //  QUICCrypto.swift
 //  Anywhere
 //
-//  Provides CryptoKit-based AEAD encryption/decryption for ngtcp2's crypto backend.
-//  The C layer (ngtcp2_crypto_apple.c) calls back into these Swift functions for
-//  AES-GCM and ChaCha20-Poly1305 operations.
+//  Created by Argsment Limited on 4/11/26.
 //
 
 import Foundation

@@ -82,6 +82,29 @@ enum NaivePaddingNegotiator {
         return headers
     }
 
+    // MARK: - Padding Type Cache
+
+    /// Caches negotiated padding types per server so subsequent connections
+    /// can send the `fastopen: 1` header and skip the negotiation round-trip.
+    private static let cacheLock = UnfairLock()
+    private static var paddingTypeCache: [String: PaddingType] = [:]
+
+    /// Returns the cached padding type for the given server, or `nil` if unknown.
+    static func cachedPaddingType(host: String, port: UInt16, sni: String) -> PaddingType? {
+        let key = "\(host):\(port):\(sni)"
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return paddingTypeCache[key]
+    }
+
+    /// Caches a successfully negotiated padding type for future connections.
+    static func cachePaddingType(_ type: PaddingType, host: String, port: UInt16, sni: String) {
+        let key = "\(host):\(port):\(sni)"
+        cacheLock.lock()
+        paddingTypeCache[key] = type
+        cacheLock.unlock()
+    }
+
     // MARK: - Response Parsing
 
     /// Parses the server's response headers to determine the negotiated padding type.

@@ -97,7 +97,7 @@ enum TunnelConstants {
     // MARK: - Darwin Notification Names
 
     enum Notification {
-        static let settingsChanged = AWCore.Notification.settingsChanged
+        static let tunnelSettingsChanged = AWCore.Notification.tunnelSettingsChanged
         static let routingChanged = AWCore.Notification.routingChanged
     }
 }

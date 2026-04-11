@@ -2,15 +2,31 @@
 //  QUICTLSHandler.swift
 //  Anywhere
 //
-//  Handles TLS 1.3 handshake over QUIC CRYPTO frames.
-//  Uses the existing TLSClientHelloBuilder for ClientHello construction
-//  and TLS13KeyDerivation for key material derivation.
+//  Created by Argsment Limited on 4/11/26.
 //
 
 import Foundation
 import CryptoKit
+import Security
 
 private let logger = AnywhereLogger(category: "QUIC-TLS")
+
+// MARK: - Session Ticket Cache
+
+/// Cached session ticket for TLS resumption.
+struct QUICSessionTicket {
+    let ticket: Data
+    let nonce: Data
+    let psk: Data           // Pre-shared key derived from resumption master secret
+    let cipherSuite: UInt16
+    let createdAt: Date
+    let lifetime: UInt32    // seconds
+    let ageAdd: UInt32      // obfuscation factor for ticket age
+}
+
+/// Global session ticket cache, keyed by SNI.
+private let ticketCacheLock = UnfairLock()
+private var sessionTicketCache: [String: QUICSessionTicket] = [:]
 
 /// Result of processing a TLS crypto data message.
 enum QUICTLSResult {
@@ -64,6 +80,17 @@ class QUICTLSHandler {
     // Accumulator for partial TLS messages
     private var cryptoBuffer = Data()
 
+    // Certificate validation state
+    private var serverCertificates: [SecCertificate] = []
+    private var transcriptBeforeCertVerify: Data?
+    private var certificateVerifyAlgorithm: UInt16 = 0
+    private var certificateVerifySignature: Data?
+
+    // Session resumption
+    private var resumptionMasterSecret: Data?
+    private var activePSK: Data?           // PSK used in this handshake (when server accepts)
+    private var pskBinderLength: Int = 0   // Binder length used in ClientHello
+
     // Server's transport parameters (extracted from EncryptedExtensions)
     private(set) var serverTransportParams: Data?
 
@@ -93,14 +120,37 @@ class QUICTLSHandler {
 
         let publicKeyData = privateKey.publicKey.x963Representation
 
-        // Build ClientHello using the existing builder
-        let clientHello = TLSClientHelloBuilder.buildQUICClientHello(
+        // Check for a cached session ticket for resumption
+        var pskExtData: Data?
+        var candidatePSK: Data?
+
+        ticketCacheLock.lock()
+        let cachedTicket = sessionTicketCache[sni]
+        ticketCacheLock.unlock()
+
+        if let ticket = cachedTicket,
+           Date().timeIntervalSince(ticket.createdAt) < Double(ticket.lifetime) {
+            let (extData, binderLen) = buildPSKExtension(ticket: ticket)
+            pskExtData = extData
+            pskBinderLength = binderLen
+            candidatePSK = ticket.psk
+        }
+
+        // Build ClientHello (PSK extension appended last if present)
+        var clientHello = TLSClientHelloBuilder.buildQUICClientHello(
             random: clientRandom,
             sni: sni,
             alpn: alpn,
             publicKey: publicKeyData,
-            quicTransportParams: transportParams
+            quicTransportParams: transportParams,
+            pskExtension: pskExtData
         )
+
+        // Compute and patch PSK binder if we included a PSK extension
+        if let psk = candidatePSK, pskBinderLength > 0 {
+            patchPSKBinder(clientHello: &clientHello, binderLen: pskBinderLength, psk: psk)
+            activePSK = psk
+        }
 
         // Add to transcript
         transcript.append(clientHello)
@@ -134,6 +184,11 @@ class QUICTLSHandler {
             let message = Data(cryptoBuffer[si..<(si + totalLen)])
             cryptoBuffer = Data(cryptoBuffer.dropFirst(totalLen))
 
+            // Save transcript state before CertificateVerify for signature verification
+            if msgType == 15 { // CertificateVerify
+                transcriptBeforeCertVerify = transcript
+            }
+
             // Add to transcript
             transcript.append(message)
 
@@ -157,10 +212,10 @@ class QUICTLSHandler {
         switch msgType {
         case 2:  return processServerHello(body, conn: conn)
         case 8:  return processEncryptedExtensions(body, conn: conn)
-        case 11: return .success // Certificate
-        case 15: return .success // CertificateVerify
+        case 11: return processCertificate(body)
+        case 15: return processCertificateVerify(body)
         case 20: return processServerFinished(body, conn: conn)
-        case 4:  return .success // NewSessionTicket
+        case 4:  return processNewSessionTicket(body)
         default:
             logger.warning("[QUIC-TLS] Unknown message type: \(msgType)")
             return .success
@@ -197,6 +252,7 @@ class QUICTLSHandler {
         offset += 2
 
         var serverPublicKey: Data?
+        var pskAccepted = false
         let extEnd = offset + extLen
         while offset + 4 <= extEnd && offset + 4 <= body.count {
             let extType = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
@@ -210,6 +266,12 @@ class QUICTLSHandler {
                     if offset + 4 + keyExchangeLen <= body.count {
                         serverPublicKey = Data(body[(offset + 4)..<(offset + 4 + keyExchangeLen)])
                     }
+                }
+            } else if extType == 0x0029 { // pre_shared_key
+                // Server accepted PSK: selected_identity (UInt16), must be 0
+                if extDataLen >= 2 {
+                    let selectedIdentity = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
+                    pskAccepted = (selectedIdentity == 0 && activePSK != nil)
                 }
             }
             offset += extDataLen
@@ -232,10 +294,13 @@ class QUICTLSHandler {
             ngtcp2_conn_set_tls_native_handle(conn,
                 UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
 
-            // Derive handshake keys
-            let transcriptForHS = keyDerivation!.transcriptHash(transcript)
+            // Clear PSK if server didn't accept it
+            if !pskAccepted { activePSK = nil }
+
+            // Derive handshake keys (with PSK for resumption, or nil for full handshake)
             let (hsSecret, hsKeys) = keyDerivation!.deriveHandshakeKeys(
-                sharedSecret: sharedSecretData, transcript: transcript
+                sharedSecret: sharedSecretData, transcript: transcript,
+                psk: activePSK
             )
             handshakeSecret = hsSecret
             clientHandshakeTrafficSecret = hsKeys.clientTrafficSecret
@@ -300,6 +365,26 @@ class QUICTLSHandler {
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
+        // Validate server certificate chain (respects allowInsecure setting)
+        if let error = validateCertificate() {
+            logger.error("[QUIC-TLS] \(error.localizedDescription)")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        // Verify CertificateVerify signature against transcript
+        if !serverCertificates.isEmpty,
+           let cvTranscript = transcriptBeforeCertVerify,
+           let signature = certificateVerifySignature {
+            if let error = verifyCertificateVerify(
+                transcript: cvTranscript,
+                algorithm: certificateVerifyAlgorithm,
+                signature: signature
+            ) {
+                logger.error("[QUIC-TLS] \(error.localizedDescription)")
+                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            }
+        }
+
         let appKeys = keyDerivation.deriveApplicationKeys(
             handshakeSecret: handshakeSecret, fullTranscript: transcript
         )
@@ -327,6 +412,18 @@ class QUICTLSHandler {
 
         ngtcp2_conn_tls_handshake_completed(conn)
         state = .completed
+
+        // Compute resumption master secret for session ticket processing.
+        // Transcript must include client Finished for this derivation.
+        transcript.append(finishedMessage)
+        let hsKey = SymmetricKey(data: handshakeSecret)
+        let derivedHS = keyDerivation.deriveSecret(key: hsKey, label: "derived", messages: Data())
+        let (_, masterKey) = keyDerivation.hkdfExtract(
+            salt: derivedHS, ikm: Data(repeating: 0, count: keyDerivation.hashLength)
+        )
+        resumptionMasterSecret = keyDerivation.deriveSecret(
+            key: masterKey, label: "res master", messages: transcript
+        )
 
         return .success
     }
@@ -473,6 +570,304 @@ class QUICTLSHandler {
             }
         }
 
+    }
+
+    // MARK: - Session Tickets
+
+    /// Parses a NewSessionTicket message and caches it for future resumption.
+    private func processNewSessionTicket(_ body: Data) -> QUICTLSResult {
+        guard body.count >= 11 else { return .success }
+
+        var offset = 0
+        let lifetime = UInt32(body[0]) << 24 | UInt32(body[1]) << 16
+                     | UInt32(body[2]) << 8  | UInt32(body[3])
+        offset += 4
+
+        let ageAdd = UInt32(body[offset]) << 24 | UInt32(body[offset + 1]) << 16
+                   | UInt32(body[offset + 2]) << 8  | UInt32(body[offset + 3])
+        offset += 4
+
+        let nonceLen = Int(body[offset])
+        offset += 1
+        guard offset + nonceLen <= body.count else { return .success }
+        let nonce = Data(body[offset..<(offset + nonceLen)])
+        offset += nonceLen
+
+        guard offset + 2 <= body.count else { return .success }
+        let ticketLen = Int(body[offset]) << 8 | Int(body[offset + 1])
+        offset += 2
+        guard offset + ticketLen <= body.count else { return .success }
+        let ticket = Data(body[offset..<(offset + ticketLen)])
+
+        // Derive PSK from resumption master secret (RFC 8446 §4.6.1)
+        guard let kd = keyDerivation, let rms = resumptionMasterSecret else { return .success }
+        let psk = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: rms),
+            label: "resumption",
+            context: nonce,
+            length: kd.hashLength
+        )
+
+        let cached = QUICSessionTicket(
+            ticket: ticket, nonce: nonce, psk: psk,
+            cipherSuite: cipherSuite, createdAt: Date(),
+            lifetime: lifetime, ageAdd: ageAdd
+        )
+        ticketCacheLock.lock()
+        sessionTicketCache[sni] = cached
+        ticketCacheLock.unlock()
+        
+        return .success
+    }
+
+    // MARK: - PSK Extension Building
+
+    /// Builds a pre_shared_key extension (type 0x0029) with a zero-filled binder placeholder.
+    private func buildPSKExtension(ticket: QUICSessionTicket) -> (extensionData: Data, binderLen: Int) {
+        let ticketAgeMs = UInt32(Date().timeIntervalSince(ticket.createdAt) * 1000)
+        let obfuscatedAge = ticketAgeMs &+ ticket.ageAdd
+
+        // PskIdentity: identity_len(2) + identity + obfuscated_ticket_age(4)
+        var identities = Data()
+        identities.append(UInt8(ticket.ticket.count >> 8))
+        identities.append(UInt8(ticket.ticket.count & 0xFF))
+        identities.append(ticket.ticket)
+        identities.append(UInt8((obfuscatedAge >> 24) & 0xFF))
+        identities.append(UInt8((obfuscatedAge >> 16) & 0xFF))
+        identities.append(UInt8((obfuscatedAge >> 8) & 0xFF))
+        identities.append(UInt8(obfuscatedAge & 0xFF))
+
+        let kd = TLS13KeyDerivation(cipherSuite: ticket.cipherSuite)
+        let binderLen = kd.hashLength
+
+        // PskBinderEntry: binder_len(1) + binder (zero placeholder)
+        var binders = Data()
+        binders.append(UInt8(binderLen))
+        binders.append(Data(repeating: 0, count: binderLen))
+
+        // OfferedPsks: identities_len(2) + identities + binders_len(2) + binders
+        var payload = Data()
+        payload.append(UInt8(identities.count >> 8))
+        payload.append(UInt8(identities.count & 0xFF))
+        payload.append(identities)
+        payload.append(UInt8(binders.count >> 8))
+        payload.append(UInt8(binders.count & 0xFF))
+        payload.append(binders)
+
+        // Extension header: type(2) + length(2) + payload
+        var ext = Data()
+        ext.append(0x00); ext.append(0x29) // pre_shared_key
+        ext.append(UInt8(payload.count >> 8))
+        ext.append(UInt8(payload.count & 0xFF))
+        ext.append(payload)
+
+        return (ext, binderLen)
+    }
+
+    /// Computes and patches the PSK binder into a ClientHello that has a zero-filled placeholder.
+    private func patchPSKBinder(clientHello: inout Data, binderLen: Int, psk: Data) {
+        let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
+
+        // Derive binder key: early_secret → "res binder" → finished_key
+        let (_, earlyKey) = kd.hkdfExtract(salt: Data(), ikm: psk)
+        let binderKeySecret = kd.deriveSecret(key: earlyKey, label: "res binder", messages: Data())
+        let finishedKey = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: binderKeySecret),
+            label: "finished",
+            context: Data(),
+            length: kd.hashLength
+        )
+
+        // Binder = HMAC(finished_key, Hash(partial_ClientHello))
+        // partial_ClientHello = everything except the binder value bytes at the end
+        let partialLen = clientHello.count - binderLen
+        let partial = Data(clientHello[0..<partialLen])
+        let transcriptHash = kd.transcriptHash(partial)
+
+        let symKey = SymmetricKey(data: finishedKey)
+        let binder: Data
+        if cipherSuite == TLSCipherSuite.TLS_AES_256_GCM_SHA384 {
+            binder = Data(HMAC<SHA384>.authenticationCode(for: transcriptHash, using: symKey))
+        } else {
+            binder = Data(HMAC<SHA256>.authenticationCode(for: transcriptHash, using: symKey))
+        }
+
+        // Patch binder into ClientHello
+        clientHello.replaceSubrange(partialLen..<clientHello.count, with: binder)
+    }
+
+    // MARK: - Certificate
+
+    private func processCertificate(_ body: Data) -> QUICTLSResult {
+        parseTLS13CertificateMessage(body)
+        return .success
+    }
+
+    /// Parses a TLS 1.3 Certificate message to extract X.509 certificates.
+    private func parseTLS13CertificateMessage(_ body: Data) {
+        serverCertificates.removeAll()
+        guard body.count >= 4 else { return }
+
+        var offset = 0
+        let contextLen = Int(body[offset])
+        offset += 1 + contextLen
+
+        guard offset + 3 <= body.count else { return }
+        let listLen = Int(body[offset]) << 16 | Int(body[offset + 1]) << 8 | Int(body[offset + 2])
+        offset += 3
+
+        let listEnd = offset + listLen
+        guard listEnd <= body.count else { return }
+
+        while offset + 3 <= listEnd {
+            let certLen = Int(body[offset]) << 16 | Int(body[offset + 1]) << 8 | Int(body[offset + 2])
+            offset += 3
+            guard offset + certLen <= listEnd else { break }
+
+            let certData = Data(body[offset..<(offset + certLen)])
+            offset += certLen
+
+            if let cert = SecCertificateCreateWithData(nil, certData as CFData) {
+                serverCertificates.append(cert)
+            }
+
+            // Skip per-certificate extensions
+            guard offset + 2 <= listEnd else { break }
+            let extLen = Int(body[offset]) << 8 | Int(body[offset + 1])
+            offset += 2 + extLen
+        }
+    }
+
+    // MARK: - CertificateVerify
+
+    private func processCertificateVerify(_ body: Data) -> QUICTLSResult {
+        guard body.count >= 4 else {
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+        certificateVerifyAlgorithm = UInt16(body[0]) << 8 | UInt16(body[1])
+        let sigLen = Int(body[2]) << 8 | Int(body[3])
+        guard body.count >= 4 + sigLen else {
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+        certificateVerifySignature = Data(body[4..<(4 + sigLen)])
+        return .success
+    }
+
+    // MARK: - Certificate Validation
+
+    /// Validates the server certificate chain using SecTrust.
+    /// Respects `allowInsecure` and user-trusted certificate SHA-256 fingerprints,
+    /// matching the behavior of TLSClient for HTTP/2.
+    private func validateCertificate() -> Error? {
+        if CertificatePolicy.allowInsecure {
+            return nil
+        }
+
+        guard !serverCertificates.isEmpty else {
+            return TLSError.certificateValidationFailed("No server certificates received")
+        }
+
+        var trust: SecTrust?
+        let policy = SecPolicyCreateSSL(true, sni as CFString)
+
+        let status = SecTrustCreateWithCertificates(
+            serverCertificates as CFArray,
+            policy,
+            &trust
+        )
+
+        guard status == errSecSuccess, let trust else {
+            return TLSError.certificateValidationFailed("Failed to create trust object")
+        }
+
+        var cfError: CFError?
+        let isValid = SecTrustEvaluateWithError(trust, &cfError)
+        if isValid {
+            return nil
+        }
+
+        if let leafCert = serverCertificates.first,
+           Self.isUserTrusted(certificate: leafCert) {
+            return nil
+        }
+
+        let message = (cfError as Error?)?.localizedDescription ?? "Certificate evaluation failed"
+        return TLSError.certificateValidationFailed(message)
+    }
+
+    /// Verifies the CertificateVerify signature against the handshake transcript.
+    private func verifyCertificateVerify(
+        transcript: Data,
+        algorithm: UInt16,
+        signature: Data
+    ) -> Error? {
+        guard let kd = keyDerivation else {
+            return TLSError.handshakeFailed("Missing key derivation")
+        }
+
+        guard let serverCert = serverCertificates.first else {
+            return TLSError.certificateValidationFailed("No server certificate for CertificateVerify")
+        }
+
+        guard let serverPublicKey = SecCertificateCopyKey(serverCert) else {
+            return TLSError.certificateValidationFailed("Failed to extract public key")
+        }
+
+        let transcriptHash = kd.transcriptHash(transcript)
+
+        // RFC 8446 §4.4.3: content = 64×0x20 + context_string + 0x00 + Hash(transcript)
+        var content = Data(repeating: 0x20, count: 64)
+        content.append("TLS 1.3, server CertificateVerify".data(using: .ascii)!)
+        content.append(0x00)
+        content.append(transcriptHash)
+
+        let secAlgorithm = Self.secKeyAlgorithm(for: algorithm)
+
+        var error: Unmanaged<CFError>?
+        let isValid = SecKeyVerifySignature(
+            serverPublicKey,
+            secAlgorithm,
+            content as CFData,
+            signature as CFData,
+            &error
+        )
+
+        if !isValid {
+            // Respect allowInsecure for signature verification too
+            if CertificatePolicy.allowInsecure {
+                return nil
+            }
+            let message = error?.takeRetainedValue().localizedDescription ?? "Signature verification failed"
+            return TLSError.certificateValidationFailed("CertificateVerify failed: \(message)")
+        }
+
+        return nil
+    }
+
+    /// Maps TLS signature algorithm identifier to Security.framework algorithm.
+    private static func secKeyAlgorithm(for tlsAlgorithm: UInt16) -> SecKeyAlgorithm {
+        switch tlsAlgorithm {
+        case 0x0403: return .ecdsaSignatureMessageX962SHA256
+        case 0x0503: return .ecdsaSignatureMessageX962SHA384
+        case 0x0603: return .ecdsaSignatureMessageX962SHA512
+        case 0x0804: return .rsaSignatureMessagePSSSHA256
+        case 0x0805: return .rsaSignatureMessagePSSSHA384
+        case 0x0806: return .rsaSignatureMessagePSSSHA512
+        case 0x0401: return .rsaSignatureMessagePKCS1v15SHA256
+        case 0x0501: return .rsaSignatureMessagePKCS1v15SHA384
+        case 0x0601: return .rsaSignatureMessagePKCS1v15SHA512
+        case 0x0201: return .rsaSignatureMessagePKCS1v15SHA1
+        default:     return .rsaSignatureMessagePSSSHA256
+        }
+    }
+
+    /// Checks whether the certificate's SHA-256 fingerprint is in the user's trusted list.
+    private static func isUserTrusted(certificate: SecCertificate) -> Bool {
+        let trusted = CertificatePolicy.trustedFingerprints
+        guard !trusted.isEmpty else { return false }
+        let certData = SecCertificateCopyData(certificate) as Data
+        let sha256 = SHA256.hash(data: certData).map { String(format: "%02x", $0) }.joined()
+        return trusted.contains(sha256)
     }
 
     // MARK: - Helpers

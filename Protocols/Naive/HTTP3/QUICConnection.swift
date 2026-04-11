@@ -2,7 +2,7 @@
 //  QUICConnection.swift
 //  Anywhere
 //
-//  Swift wrapper around ngtcp2 for QUIC client connections.
+//  Created by Argsment Limited on 4/11/26.
 //
 
 import Foundation
@@ -46,25 +46,17 @@ class QUICConnection {
     private let alpn: [String]
 
     fileprivate var state: State = .idle
-    fileprivate let queue = DispatchQueue(label: "com.argsment.Anywhere.quic")
+    let queue: DispatchQueue
+    private static let queueKey = DispatchSpecificKey<Bool>()
 
     fileprivate var conn: OpaquePointer?
     private var connRefStorage = ngtcp2_crypto_conn_ref()
 
     private var udpConnection: NWConnection?
-    private var localAddr: sockaddr_in = {
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_addr.s_addr = INADDR_ANY
-        return addr
-    }()
-    private var remoteAddr: sockaddr_in = {
-        var addr = sockaddr_in()
-        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        addr.sin_family = sa_family_t(AF_INET)
-        return addr
-    }()
+    private var localAddr = sockaddr_storage()
+    private var remoteAddr = sockaddr_storage()
+    /// Actual sockaddr size (either `sockaddr_in` or `sockaddr_in6`).
+    private var addrLen: Int = MemoryLayout<sockaddr_in>.size
 
     fileprivate var tlsHandshaker: QUICTLSHandler?
 
@@ -75,16 +67,35 @@ class QUICConnection {
 
     fileprivate var connectCompletion: ((Error?) -> Void)?
     var streamDataHandler: ((Int64, Data, Bool) -> Void)?
+    /// Called when the QUIC connection is closed (draining, error, etc.).
+    /// Allows the session to react immediately rather than discovering it on the next operation.
+    var connectionClosedHandler: ((Error) -> Void)?
+
+    /// Pending writes that were blocked by stream flow control.
+    /// Flushed when incoming packets extend the window (MAX_STREAM_DATA).
+    private var pendingWrites: [PendingWrite] = []
+
+    private struct PendingWrite {
+        let streamId: Int64
+        var data: Data
+        let fin: Bool
+        let completion: (Error?) -> Void
+    }
 
     static let maxUDPPayload = 1452
 
     // MARK: Init
+
+    /// Returns true if the caller is already executing on this connection's queue.
+    var isOnQueue: Bool { DispatchQueue.getSpecific(key: Self.queueKey) == true }
 
     init(host: String, port: UInt16, sni: String? = nil, alpn: [String] = ["h3"]) {
         self.host = host
         self.port = port
         self.sni = sni ?? host
         self.alpn = alpn
+        self.queue = DispatchQueue(label: "com.argsment.Anywhere.quic")
+        queue.setSpecific(key: Self.queueKey, value: true)
     }
 
     deinit { close() }
@@ -130,6 +141,25 @@ class QUICConnection {
         return streamId
     }
 
+    /// Extends both the stream-level and connection-level flow control windows.
+    /// Called when the application has consumed `count` bytes from a stream,
+    /// allowing the server to send more data.
+    func extendStreamOffset(_ streamId: Int64, count: Int) {
+        guard let conn, count > 0 else { return }
+        ngtcp2_conn_extend_max_stream_offset(conn, streamId, UInt64(count))
+        ngtcp2_conn_extend_max_offset(conn, UInt64(count))
+    }
+
+    /// Shuts down a stream (sends RESET_STREAM + STOP_SENDING).
+    /// This frees the stream ID slot so the server grants new ones via MAX_STREAMS.
+    func shutdownStream(_ streamId: Int64) {
+        queue.async { [weak self] in
+            guard let self, let conn = self.conn else { return }
+            ngtcp2_conn_shutdown_stream(conn, 0, streamId, 0)
+            self.writeToUDP()
+        }
+    }
+
     func writeStream(_ streamId: Int64, data: Data, fin: Bool = false,
                      completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
@@ -137,60 +167,127 @@ class QUICConnection {
                 completion(QUICError.closed)
                 return
             }
+            self.writeStreamImpl(conn: conn, streamId: streamId,
+                                 data: data, fin: fin, completion: completion)
+        }
+    }
 
-            let ts = self.currentTimestamp()
-            var offset = 0
+    /// Writes stream data, queuing any remainder that can't be sent due to
+    /// flow control. Queued data is flushed when incoming packets extend the
+    /// window (MAX_STREAM_DATA).
+    private func writeStreamImpl(conn: OpaquePointer, streamId: Int64,
+                                  data: Data, fin: Bool,
+                                  completion: @escaping (Error?) -> Void) {
+        let sent = writeStreamSync(conn: conn, streamId: streamId,
+                                    data: data, fin: fin)
 
-            while offset < data.count {
-                var packetBuf = [UInt8](repeating: 0, count: Self.maxUDPPayload)
-                var pi = ngtcp2_pkt_info()
-                var pdatalen: ngtcp2_ssize = 0
+        if sent >= data.count {
+            completion(nil)
+        } else {
+            // Stream flow control blocked — queue remainder for later
+            let remaining = Data(data[sent...])
+            pendingWrites.append(PendingWrite(
+                streamId: streamId, data: remaining,
+                fin: fin, completion: completion
+            ))
+        }
+    }
 
-                let remaining = data.count - offset
-                let chunk = data[offset..<data.count]
+    /// Writes as much stream data as possible synchronously.
+    /// Returns the number of bytes accepted by ngtcp2.
+    private func writeStreamSync(conn: OpaquePointer, streamId: Int64,
+                                  data: Data, fin: Bool) -> Int {
+        let ts = currentTimestamp()
+        var offset = 0
 
-                let nwrite: ngtcp2_ssize = chunk.withUnsafeBytes { rawBuf in
-                    let ptr = rawBuf.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                    var vec = ngtcp2_vec(base: UnsafeMutablePointer(mutating: ptr),
-                                        len: remaining)
-                    let isFin = fin && (offset + remaining >= data.count)
-                    let flags: UInt32 = isFin ? UInt32(NGTCP2_WRITE_STREAM_FLAG_FIN) : 0
-                    return ngtcp2_swift_conn_writev_stream(
-                        conn, nil, &pi, &packetBuf, packetBuf.count,
-                        &pdatalen, flags,
-                        streamId, &vec, 1, ts
-                    )
-                }
+        while offset < data.count {
+            var packetBuf = [UInt8](repeating: 0, count: Self.maxUDPPayload)
+            var pi = ngtcp2_pkt_info()
+            var pdatalen: ngtcp2_ssize = 0
 
-                if nwrite == 0 { break }
+            let remaining = data.count - offset
+            let chunk = data[offset..<data.count]
+            let isLast = (offset + remaining >= data.count)
+            let flags: UInt32 = {
+                var f: UInt32 = 0
+                if fin && isLast { f |= UInt32(NGTCP2_WRITE_STREAM_FLAG_FIN) }
+                if !isLast { f |= UInt32(NGTCP2_WRITE_STREAM_FLAG_MORE) }
+                return f
+            }()
 
-                if nwrite < 0 {
-                    let code = Int32(nwrite)
-                    if code == NGTCP2_ERR_WRITE_MORE {
-                        if pdatalen > 0 { offset += Int(pdatalen) }
-                        continue
-                    }
-                    if code == NGTCP2_ERR_STREAM_DATA_BLOCKED { break }
-                    logger.error("[QUIC] writev_stream failed: \(nwrite)")
-                    completion(QUICError.streamError("Write failed: \(nwrite)"))
-                    return
-                }
-
-                self.sendUDPPacket(Data(packetBuf.prefix(Int(nwrite))))
-                if pdatalen > 0 { offset += Int(pdatalen) }
-                if pdatalen == 0 { break }
+            let nwrite: ngtcp2_ssize = chunk.withUnsafeBytes { rawBuf in
+                let ptr = rawBuf.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                var vec = ngtcp2_vec(base: UnsafeMutablePointer(mutating: ptr),
+                                    len: remaining)
+                return ngtcp2_swift_conn_writev_stream(
+                    conn, nil, &pi, &packetBuf, packetBuf.count,
+                    &pdatalen, flags,
+                    streamId, &vec, 1, ts
+                )
             }
 
-            self.writeToUDP()
-            completion(nil)
+            if nwrite == 0 { break }
+
+            if nwrite < 0 {
+                let code = Int32(nwrite)
+                if code == NGTCP2_ERR_WRITE_MORE {
+                    if pdatalen > 0 { offset += Int(pdatalen) }
+                    continue
+                }
+                if code == NGTCP2_ERR_STREAM_DATA_BLOCKED {
+                    if pdatalen > 0 { offset += Int(pdatalen) }
+                    break
+                }
+                if code == NGTCP2_ERR_STREAM_NOT_FOUND || code == NGTCP2_ERR_STREAM_SHUT_WR {
+                    break
+                }
+                break
+            }
+
+            sendUDPPacket(Data(packetBuf.prefix(Int(nwrite))))
+            if pdatalen > 0 { offset += Int(pdatalen) }
+            if pdatalen == 0 { break }
         }
+
+        writeToUDP()
+        return offset
+    }
+
+    /// Retries pending writes that were blocked by stream flow control.
+    /// Called after processing incoming packets which may contain MAX_STREAM_DATA.
+    private func flushPendingWrites() {
+        guard !pendingWrites.isEmpty, let conn else { return }
+        guard state == .connected else {
+            let writes = pendingWrites
+            pendingWrites.removeAll()
+            for pw in writes { pw.completion(QUICError.closed) }
+            return
+        }
+
+        var remaining: [PendingWrite] = []
+        for pw in pendingWrites {
+            let sent = writeStreamSync(conn: conn, streamId: pw.streamId,
+                                        data: pw.data, fin: pw.fin)
+            if sent >= pw.data.count {
+                pw.completion(nil)
+            } else {
+                remaining.append(PendingWrite(
+                    streamId: pw.streamId,
+                    data: Data(pw.data[sent...]),
+                    fin: pw.fin,
+                    completion: pw.completion
+                ))
+            }
+        }
+        pendingWrites = remaining
     }
 
     // MARK: Close
 
-    func close() {
-        queue.async { [weak self] in
+    func close(error: Error? = nil) {
+        let work = { [weak self] in
             guard let self else { return }
+            guard self.state != .closed else { return }
             self.retransmitTimer?.cancel()
             self.retransmitTimer = nil
             if let conn = self.conn {
@@ -200,6 +297,21 @@ class QUICConnection {
             self.udpConnection?.forceCancel()
             self.udpConnection = nil
             self.state = .closed
+            // Fail any pending writes
+            let writes = self.pendingWrites
+            self.pendingWrites.removeAll()
+            let closeError = error ?? QUICError.closed
+            for pw in writes { pw.completion(closeError) }
+            self.connectionClosedHandler?(closeError)
+            self.connectionClosedHandler = nil
+        }
+        // When called from the QUIC queue (e.g. handleReceivedPacket detecting
+        // DRAINING), execute synchronously so the session's pool-visible state
+        // is updated before the pool can hand out new streams.
+        if isOnQueue {
+            work()
+        } else {
+            queue.async(execute: work)
         }
     }
 
@@ -222,7 +334,7 @@ class QUICConnection {
                         self.state = .handshaking
                         self.writeToUDP()
                         self.readFromUDP()
-                        self.startRetransmitTimer()
+                        self.rescheduleTimer()
                     } catch {
                         self.state = .closed
                         completion(error)
@@ -240,21 +352,85 @@ class QUICConnection {
     }
 
     private func populateRemoteAddr() {
-        remoteAddr.sin_port = port.bigEndian
-        var addr = in_addr()
-        if inet_pton(AF_INET, host, &addr) == 1 {
-            remoteAddr.sin_addr = addr
-        } else {
-            var hints = addrinfo()
-            hints.ai_family = AF_INET
-            hints.ai_socktype = SOCK_DGRAM
-            var result: UnsafeMutablePointer<addrinfo>?
-            if getaddrinfo(host, nil, &hints, &result) == 0, let res = result {
-                if let sa = res.pointee.ai_addr, res.pointee.ai_family == AF_INET {
-                    let sin = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
-                    remoteAddr.sin_addr = sin.sin_addr
-                }
-                freeaddrinfo(result)
+        // Try IPv4 first
+        var addr4 = in_addr()
+        if inet_pton(AF_INET, host, &addr4) == 1 {
+            configureIPv4(addr4)
+            return
+        }
+
+        // Try IPv6
+        var addr6 = in6_addr()
+        if inet_pton(AF_INET6, host, &addr6) == 1 {
+            configureIPv6(addr6)
+            return
+        }
+
+        // DNS resolution — prefer IPv6 if available, fall back to IPv4
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_DGRAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, nil, &hints, &result) == 0, let res = result else { return }
+        defer { freeaddrinfo(result) }
+
+        // Walk the result list: prefer IPv4 for now, but accept IPv6
+        var found4: UnsafeMutablePointer<addrinfo>?
+        var found6: UnsafeMutablePointer<addrinfo>?
+        var cur: UnsafeMutablePointer<addrinfo>? = res
+        while let r = cur {
+            if r.pointee.ai_family == AF_INET && found4 == nil { found4 = r }
+            if r.pointee.ai_family == AF_INET6 && found6 == nil { found6 = r }
+            cur = r.pointee.ai_next
+        }
+
+        if let r = found4, let sa = r.pointee.ai_addr {
+            let sin = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+            configureIPv4(sin.sin_addr)
+        } else if let r = found6, let sa = r.pointee.ai_addr {
+            let sin6 = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+            configureIPv6(sin6.sin6_addr)
+        }
+    }
+
+    private func configureIPv4(_ addr: in_addr) {
+        addrLen = MemoryLayout<sockaddr_in>.size
+        withUnsafeMutablePointer(to: &remoteAddr) { storage in
+            storage.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
+                sin.pointee = sockaddr_in()
+                sin.pointee.sin_len = UInt8(addrLen)
+                sin.pointee.sin_family = sa_family_t(AF_INET)
+                sin.pointee.sin_port = port.bigEndian
+                sin.pointee.sin_addr = addr
+            }
+        }
+        withUnsafeMutablePointer(to: &localAddr) { storage in
+            storage.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
+                sin.pointee = sockaddr_in()
+                sin.pointee.sin_len = UInt8(addrLen)
+                sin.pointee.sin_family = sa_family_t(AF_INET)
+                sin.pointee.sin_addr.s_addr = INADDR_ANY
+            }
+        }
+    }
+
+    private func configureIPv6(_ addr: in6_addr) {
+        addrLen = MemoryLayout<sockaddr_in6>.size
+        withUnsafeMutablePointer(to: &remoteAddr) { storage in
+            storage.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
+                sin6.pointee = sockaddr_in6()
+                sin6.pointee.sin6_len = UInt8(addrLen)
+                sin6.pointee.sin6_family = sa_family_t(AF_INET6)
+                sin6.pointee.sin6_port = port.bigEndian
+                sin6.pointee.sin6_addr = addr
+            }
+        }
+        withUnsafeMutablePointer(to: &localAddr) { storage in
+            storage.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
+                sin6.pointee = sockaddr_in6()
+                sin6.pointee.sin6_len = UInt8(addrLen)
+                sin6.pointee.sin6_family = sa_family_t(AF_INET6)
+                sin6.pointee.sin6_addr = in6addr_any
             }
         }
     }
@@ -270,8 +446,10 @@ class QUICConnection {
     private func readFromUDP() {
         udpConnection?.receiveMessage { [weak self] data, _, _, error in
             guard let self else { return }
+            // NWConnection dispatches on our queue (started with queue:),
+            // so no need for queue.async — process immediately.
             if let data, !data.isEmpty {
-                self.queue.async { self.handleReceivedPacket(data) }
+                self.handleReceivedPacket(data)
             }
             if error == nil { self.readFromUDP() }
         }
@@ -308,11 +486,11 @@ class QUICConnection {
         ngtcp2_swift_settings_default(&settings)
         settings.initial_ts = currentTimestamp()
         settings.max_tx_udp_payload_size = Self.maxUDPPayload
-
+        settings.ack_thresh = 1
         var params = ngtcp2_transport_params()
         ngtcp2_swift_transport_params_default(&params)
         params.initial_max_streams_bidi = 100
-        params.initial_max_streams_uni = 3
+        params.initial_max_streams_uni = 100
         params.initial_max_data = 64 * 1024 * 1024
         params.initial_max_stream_data_bidi_local = 64 * 1024 * 1024
         params.initial_max_stream_data_bidi_remote = 64 * 1024 * 1024
@@ -323,10 +501,10 @@ class QUICConnection {
             withUnsafeMutablePointer(to: &remoteAddr) { remote in
                 path.local = ngtcp2_addr(
                     addr: UnsafeMutableRawPointer(local).assumingMemoryBound(to: sockaddr.self),
-                    addrlen: ngtcp2_socklen(MemoryLayout<sockaddr_in>.size))
+                    addrlen: ngtcp2_socklen(addrLen))
                 path.remote = ngtcp2_addr(
                     addr: UnsafeMutableRawPointer(remote).assumingMemoryBound(to: sockaddr.self),
-                    addrlen: ngtcp2_socklen(MemoryLayout<sockaddr_in>.size))
+                    addrlen: ngtcp2_socklen(addrLen))
             }
         }
 
@@ -364,10 +542,10 @@ class QUICConnection {
                 withUnsafeMutablePointer(to: &remoteAddr) { remote in
                     path.local = ngtcp2_addr(
                         addr: UnsafeMutableRawPointer(local).assumingMemoryBound(to: sockaddr.self),
-                        addrlen: ngtcp2_socklen(MemoryLayout<sockaddr_in>.size))
+                        addrlen: ngtcp2_socklen(addrLen))
                     path.remote = ngtcp2_addr(
                         addr: UnsafeMutableRawPointer(remote).assumingMemoryBound(to: sockaddr.self),
-                        addrlen: ngtcp2_socklen(MemoryLayout<sockaddr_in>.size))
+                        addrlen: ngtcp2_socklen(addrLen))
                 }
             }
             return ngtcp2_swift_conn_read_pkt(conn, &path, &pi, ptr, data.count, ts)
@@ -376,11 +554,29 @@ class QUICConnection {
         if rv != 0 {
             logger.error("[QUIC] read_pkt error: \(rv)")
             if rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING {
-                close()
+                let error = QUICError.closed
+                if let cb = connectCompletion {
+                    connectCompletion = nil
+                    cb(error)
+                }
+                close(error: error)
+                return
+            }
+            // Fatal errors (e.g. TLS callback failure) — close and notify
+            if rv == NGTCP2_ERR_CALLBACK_FAILURE || rv == NGTCP2_ERR_CRYPTO {
+                let error = QUICError.handshakeFailed("ngtcp2 error: \(rv)")
+                if let cb = connectCompletion {
+                    connectCompletion = nil
+                    cb(error)
+                }
+                close(error: error)
                 return
             }
         }
         writeToUDP()
+        // Incoming packets may contain MAX_STREAM_DATA, extending the send
+        // window.  Retry any writes that were blocked by flow control.
+        flushPendingWrites()
     }
 
     fileprivate func writeToUDP() {
@@ -394,25 +590,57 @@ class QUICConnection {
             if nwrite <= 0 { break }
             sendUDPPacket(Data(buf.prefix(Int(nwrite))))
         }
+        // Any ngtcp2 operation may change the next deadline (retransmission,
+        // ACK, PING, etc.).  Keep the timer aligned with ngtcp2's state.
+        rescheduleTimer()
     }
 
     // MARK: Timer
 
-    private func startRetransmitTimer() {
+    /// Schedules a one-shot timer at the exact deadline ngtcp2 needs
+    /// (retransmission, loss detection, etc.).  Replaces the old 50ms
+    /// polling timer with a precise, event-driven alarm — matching
+    /// Chromium/QUICHE's QuicAlarm approach.
+    private var lastScheduledExpiry: UInt64 = 0
+
+    private func rescheduleTimer() {
+        guard let conn else { return }
+        let expiry = ngtcp2_conn_get_expiry(conn)
+        guard expiry != UInt64.max else {
+            retransmitTimer?.cancel()
+            retransmitTimer = nil
+            lastScheduledExpiry = 0
+            return
+        }
+
+        // Avoid creating a new timer if the deadline hasn't changed
+        if expiry == lastScheduledExpiry && retransmitTimer != nil { return }
+        lastScheduledExpiry = expiry
+
+        let now = currentTimestamp()
+        let delay: UInt64 = expiry > now ? expiry - now : 0
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + .milliseconds(50),
-                      repeating: .milliseconds(50), leeway: .milliseconds(10))
+        timer.schedule(deadline: .now() + .nanoseconds(Int(delay)),
+                      leeway: .microseconds(500))
         timer.setEventHandler { [weak self] in
             guard let self, let conn = self.conn else { return }
+            self.lastScheduledExpiry = 0  // allow reschedule after handling
             let ts = self.currentTimestamp()
-            let expiry = ngtcp2_conn_get_expiry(conn)
-            if expiry <= ts {
-                let rv = ngtcp2_conn_handle_expiry(conn, ts)
-                if rv != 0 { return }
-                self.writeToUDP()
+            let rv = ngtcp2_conn_handle_expiry(conn, ts)
+            if rv != 0 {
+                let error = QUICError.connectionFailed("expiry error: \(rv)")
+                if let cb = self.connectCompletion {
+                    self.connectCompletion = nil
+                    cb(error)
+                }
+                self.close(error: error)
+                return
             }
+            self.writeToUDP()
+            // writeToUDP() calls rescheduleTimer() at the end
         }
         timer.resume()
+        retransmitTimer?.cancel()
         retransmitTimer = timer
     }
 
@@ -500,8 +728,10 @@ private let quicRecvStreamDataCB: @convention(c) (
     } else if fin {
         qc.streamDataHandler?(sid, Data(), true)
     }
-    ngtcp2_conn_extend_max_stream_offset(conn, sid, UInt64(datalen))
-    ngtcp2_conn_extend_max_offset(conn, UInt64(datalen))
+    // Flow control window is NOT extended here.  It is extended later by
+    // extendStreamOffset() when the application actually consumes the data.
+    // This provides backpressure to the server so it doesn't outrun lwIP's
+    // pbuf pool.
     return 0
 }
 

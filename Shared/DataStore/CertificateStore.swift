@@ -55,6 +55,7 @@ final class CertificateStore: ObservableObject {
 
     private func save() {
         AWCore.userDefaults.set(fingerprints, forKey: Self.key)
+        AWCore.notifyCertificatePolicyChanged()
     }
 
     private static func normalize(_ fingerprint: String) -> String {

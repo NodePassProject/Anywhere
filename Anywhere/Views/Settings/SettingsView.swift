@@ -10,7 +10,7 @@ import SwiftUI
 /// Settings that affect the Network Extension are stored in App Group UserDefaults
 /// and propagated via Darwin notifications:
 ///
-/// - "settingsChanged": triggers LWIPStack restart. Posted when ipv6, encrypted DNS, or bypass changes.
+/// - "tunnelSettingsChanged": triggers LWIPStack restart. Posted when ipv6, encrypted DNS, or bypass changes.
 ///   LWIPStack re-reads all settings from UserDefaults during restart.
 ///   IPv6 and encrypted DNS changes also trigger tunnel settings re-apply.
 ///
@@ -83,7 +83,7 @@ struct SettingsView: View {
                             showInsecureAlert = true
                         } else {
                             allowInsecure = false
-                            AWCore.notifySettingsChanged()
+                            AWCore.notifyCertificatePolicyChanged()
                         }
                     }
                 )) {
@@ -140,7 +140,7 @@ struct SettingsView: View {
         }
         .onChange(of: proxyMode) {
             AWCore.setProxyMode(proxyMode)
-            AWCore.notifySettingsChanged()
+            AWCore.notifyTunnelSettingsChanged()
         }
         .onChange(of: adBlockEnabled) { _, newValue in
             if let adBlockRuleSet = RuleSetStore.shared.adBlockRuleSet {
@@ -155,13 +155,13 @@ struct SettingsView: View {
         .onChange(of: bypassCountryCode) { _, _ in
             Task {
                 await viewModel.syncRoutingConfigurationToNE()
-                AWCore.notifySettingsChanged()
+                AWCore.notifyTunnelSettingsChanged()
             }
         }
         .alert("Allow Insecure", isPresented: $showInsecureAlert) {
             Button("Allow Anyway", role: .destructive) {
                 allowInsecure = true
-                AWCore.notifySettingsChanged()
+                AWCore.notifyCertificatePolicyChanged()
             }
             Button("Cancel", role: .cancel) {}
         } message: {

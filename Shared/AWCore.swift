@@ -46,8 +46,9 @@ final class AWCore {
     // MARK: - Darwin Notification Names
 
     enum Notification {
-        static let settingsChanged = "com.argsment.Anywhere.settingsChanged" as CFString
+        static let tunnelSettingsChanged = "com.argsment.Anywhere.tunnelSettingsChanged" as CFString
         static let routingChanged = "com.argsment.Anywhere.routingChanged" as CFString
+        static let certificatePolicyChanged = "com.argsment.Anywhere.certificatePolicyChanged" as CFString
     }
 
     private static var lastPostTimes = [CFNotificationName: CFAbsoluteTime]()
@@ -86,11 +87,15 @@ final class AWCore {
         }
     }
 
-    static func notifySettingsChanged() {
-        postThrottled(CFNotificationName(Notification.settingsChanged))
+    static func notifyTunnelSettingsChanged() {
+        postThrottled(CFNotificationName(Notification.tunnelSettingsChanged))
     }
 
     static func notifyRoutingChanged() {
         postThrottled(CFNotificationName(Notification.routingChanged))
+    }
+
+    static func notifyCertificatePolicyChanged() {
+        postThrottled(CFNotificationName(Notification.certificatePolicyChanged))
     }
 }

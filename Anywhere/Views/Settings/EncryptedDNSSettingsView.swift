@@ -30,7 +30,7 @@ struct EncryptedDNSSettingsView: View {
                             showEnableAlert = true
                         } else {
                             enabled = false
-                            AWCore.notifySettingsChanged()
+                            AWCore.notifyTunnelSettingsChanged()
                         }
                     }
                 ))
@@ -62,12 +62,12 @@ struct EncryptedDNSSettingsView: View {
         .onDisappear { commitServer() }
         .onChange(of: dnsProtocol) {
             commitServer()
-            AWCore.notifySettingsChanged()
+            AWCore.notifyTunnelSettingsChanged()
         }
         .alert("Encrypted DNS", isPresented: $showEnableAlert) {
             Button("Enable Anyway", role: .destructive) {
                 enabled = true
-                AWCore.notifySettingsChanged()
+                AWCore.notifyTunnelSettingsChanged()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -79,6 +79,6 @@ struct EncryptedDNSSettingsView: View {
         let trimmed = editingServer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed != storedServer else { return }
         storedServer = trimmed
-        AWCore.notifySettingsChanged()
+        AWCore.notifyTunnelSettingsChanged()
     }
 }

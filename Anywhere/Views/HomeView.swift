@@ -80,7 +80,7 @@ struct HomeView: View {
         .picker3D($pickerConfig, items: viewModel.allPickerItems)
         .onChange(of: proxyMode) {
             AWCore.setProxyMode(proxyMode)
-            AWCore.notifySettingsChanged()
+            AWCore.notifyTunnelSettingsChanged()
         }
         .onChange(of: pickerConfig.show) {
             if !pickerConfig.show, let id = pickerConfig.selectedId {

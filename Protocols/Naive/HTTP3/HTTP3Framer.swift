@@ -2,8 +2,7 @@
 //  HTTP3Framer.swift
 //  Anywhere
 //
-//  HTTP/3 frame encoding and decoding (RFC 9114).
-//  Supports the minimal set of frames needed for a CONNECT tunnel.
+//  Created by Argsment Limited on 4/11/26.
 //
 
 import Foundation
