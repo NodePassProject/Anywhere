@@ -209,6 +209,23 @@ class QUICConnection {
         }
     }
 
+    /// Queues multiple QUIC DATAGRAM frames for sending atomically.
+    ///
+    /// All datagrams are appended to the pending queue before a single
+    /// `writeToUDP()` cycle, preventing interleaving with datagrams from
+    /// other concurrent callers.
+    func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
+        queue.async { [weak self] in
+            guard let self, self.conn != nil, self.state == .connected else {
+                completion(QUICError.closed)
+                return
+            }
+            self.pendingDatagrams.append(contentsOf: datagrams)
+            self.writeToUDP()
+            completion(nil)
+        }
+    }
+
     /// Maximum datagram payload size the remote endpoint can receive.
     /// Returns 0 if datagrams are not supported or the connection isn't ready.
     /// This accounts for the DATAGRAM frame overhead (up to 9 bytes).
