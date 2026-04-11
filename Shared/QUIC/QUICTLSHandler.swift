@@ -58,7 +58,7 @@ class QUICTLSHandler {
 
     // MARK: - Properties
 
-    private let sni: String
+    private let serverName: String
     private let alpn: [String]
     private var state: HandshakeState = .initial
 
@@ -96,8 +96,8 @@ class QUICTLSHandler {
 
     // MARK: - Initialization
 
-    init(sni: String, alpn: [String] = ["h3"]) {
-        self.sni = sni
+    init(serverName: String, alpn: [String] = ["h3"]) {
+        self.serverName = serverName
         self.alpn = alpn
 
         // Generate ECDHE key pair
@@ -125,7 +125,7 @@ class QUICTLSHandler {
         var candidatePSK: Data?
 
         ticketCacheLock.lock()
-        let cachedTicket = sessionTicketCache[sni]
+        let cachedTicket = sessionTicketCache[serverName]
         ticketCacheLock.unlock()
 
         if let ticket = cachedTicket,
@@ -139,7 +139,7 @@ class QUICTLSHandler {
         // Build ClientHello (PSK extension appended last if present)
         var clientHello = TLSClientHelloBuilder.buildQUICClientHello(
             random: clientRandom,
-            sni: sni,
+            serverName: serverName,
             alpn: alpn,
             publicKey: publicKeyData,
             quicTransportParams: transportParams,
@@ -614,7 +614,7 @@ class QUICTLSHandler {
             lifetime: lifetime, ageAdd: ageAdd
         )
         ticketCacheLock.lock()
-        sessionTicketCache[sni] = cached
+        sessionTicketCache[serverName] = cached
         ticketCacheLock.unlock()
         
         return .success
@@ -768,7 +768,7 @@ class QUICTLSHandler {
         }
 
         var trust: SecTrust?
-        let policy = SecPolicyCreateSSL(true, sni as CFString)
+        let policy = SecPolicyCreateSSL(true, serverName as CFString)
 
         let status = SecTrustCreateWithCertificates(
             serverCertificates as CFArray,

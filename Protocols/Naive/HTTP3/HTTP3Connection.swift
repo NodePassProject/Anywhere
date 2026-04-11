@@ -62,7 +62,7 @@ class HTTP3Connection: NaiveTunnel {
         self.quic = QUICConnection(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
-            sni: configuration.effectiveSNI,
+            serverName: configuration.effectiveSNI,
             alpn: ["h3"]
         )
     }
