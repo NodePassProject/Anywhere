@@ -10,7 +10,6 @@ import Foundation
 /// Outbound protocol type.
 enum OutboundProtocol: String, Codable {
     case vless
-    case hysteria2
     case shadowsocks
     case socks5
     case http11
@@ -24,8 +23,6 @@ enum OutboundProtocol: String, Codable {
         switch self {
         case .vless:
             "VLESS"
-        case .hysteria2:
-            "Hysteria 2"
         case .shadowsocks:
             "Shadowsocks"
         case .socks5:
@@ -46,7 +43,6 @@ enum OutboundProtocol: String, Codable {
 /// Replaces the flat `outboundProtocol` + per-protocol credential fields.
 enum Outbound: Hashable {
     case vless(uuid: UUID, encryption: String, flow: String?)
-    case hysteria2(auth: String)
     case shadowsocks(password: String, method: String)
     case socks5(username: String?, password: String?)
     case http11(username: String, password: String)
@@ -176,7 +172,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case transport, websocket, httpUpgrade, xhttp
         case security, tls, reality
         case testseed, muxEnabled, xudpEnabled
-        case hysteriaAuth
         case ssPassword, ssMethod
         case socks5Username, socks5Password
         case http11Username, http11Password
@@ -205,10 +200,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 uuid: try container.decode(UUID.self, forKey: .uuid),
                 encryption: try container.decode(String.self, forKey: .encryption),
                 flow: try container.decodeIfPresent(String.self, forKey: .flow)
-            )
-        case .hysteria2:
-            outbound = .hysteria2(
-                auth: try container.decodeIfPresent(String.self, forKey: .hysteriaAuth) ?? ""
             )
         case .shadowsocks:
             outbound = .shadowsocks(
@@ -286,10 +277,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(uuid, forKey: .uuid)
             try container.encode(encryption, forKey: .encryption)
             try container.encodeIfPresent(flow, forKey: .flow)
-        case .hysteria2(let auth):
-            try container.encode(id, forKey: .uuid)
-            try container.encode("none", forKey: .encryption)
-            try container.encode(auth, forKey: .hysteriaAuth)
         case .shadowsocks(let password, let method):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
@@ -352,7 +339,6 @@ extension ProxyConfiguration {
     var outboundProtocol: OutboundProtocol {
         switch outbound {
         case .vless:        .vless
-        case .hysteria2:    .hysteria2
         case .shadowsocks:  .shadowsocks
         case .socks5:       .socks5
         case .http11:       .http11
@@ -376,12 +362,6 @@ extension ProxyConfiguration {
     /// VLESS flow (e.g. `"xtls-rprx-vision"`). `nil` for non-VLESS.
     var flow: String? {
         if case .vless(_, _, let flow) = outbound { return flow }
-        return nil
-    }
-    
-    /// Hysteria2 auth token. `nil` for non-Hysteria.
-    var hysteriaAuth: String? {
-        if case .hysteria2(let auth) = outbound { return auth }
         return nil
     }
 

@@ -1577,9 +1577,6 @@
         }
       }
     },
-    "Anywhere Premium Proxy" : {
-      "shouldTranslate" : false
-    },
     "Anywhere Rule List URL" : {
       "localizations" : {
         "ar" : {
@@ -1754,9 +1751,6 @@
           }
         }
       }
-    },
-    "Auth" : {
-
     },
     "Auto" : {
       "localizations" : {
@@ -4466,9 +4460,6 @@
     "HTTPUpgrade" : {
       "shouldTranslate" : false
     },
-    "Hysteria 2" : {
-
-    },
     "Import" : {
       "localizations" : {
         "ar" : {
@@ -7145,9 +7136,6 @@
           }
         }
       }
-    },
-    "Powered by Centent Delivery Network" : {
-      "shouldTranslate" : false
     },
     "Protocol" : {
       "localizations" : {

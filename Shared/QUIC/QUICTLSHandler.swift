@@ -24,9 +24,29 @@ struct QUICSessionTicket {
     let ageAdd: UInt32      // obfuscation factor for ticket age
 }
 
-/// Global session ticket cache, keyed by SNI.
+/// Global session ticket cache, keyed by (SNI, ALPN list).
+/// Tickets are not portable across ALPN contexts.
 private let ticketCacheLock = UnfairLock()
 private var sessionTicketCache: [String: QUICSessionTicket] = [:]
+
+/// Builds the cache key for a given SNI + ALPN list. ALPN order is preserved
+/// because offering "h3,hq" is a different context than "hq,h3".
+private func sessionTicketCacheKey(serverName: String, alpn: [String]) -> String {
+    return "\(serverName)\u{0}\(alpn.joined(separator: ","))"
+}
+
+/// SHA-256("HelloRetryRequest") — the magic server_random value that marks an
+/// incoming ServerHello as a HelloRetryRequest (RFC 8446 §4.1.3).
+private let kHelloRetryRequestRandom: [UInt8] = [
+    0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+    0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+    0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+    0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+]
+
+/// Named groups we advertise in supported_groups / key_share.
+private let kNamedGroupX25519: UInt16 = 0x001D
+private let kNamedGroupSecp256r1: UInt16 = 0x0017
 
 /// Result of processing a TLS crypto data message.
 enum QUICTLSResult {
@@ -67,8 +87,9 @@ class QUICTLSHandler {
     private var handshakeSecret: Data?
     private var clientHandshakeTrafficSecret: Data?
 
-    // ECDHE
-    private var privateKey: P256.KeyAgreement.PrivateKey?
+    // ECDHE — we offer both X25519 and secp256r1 key shares; the server picks one.
+    private var privateKeyP256: P256.KeyAgreement.PrivateKey?
+    private var privateKeyX25519: Curve25519.KeyAgreement.PrivateKey?
     private var clientRandom = Data(count: 32)
 
     // Transcript (concatenation of all handshake messages)
@@ -94,14 +115,20 @@ class QUICTLSHandler {
     // Server's transport parameters (extracted from EncryptedExtensions)
     private(set) var serverTransportParams: Data?
 
+    /// ALPN protocol selected by the server in EncryptedExtensions (RFC 7301).
+    /// Nil until EncryptedExtensions is parsed or if the server omitted the
+    /// application_layer_protocol_negotiation extension.
+    private(set) var negotiatedALPN: String?
+
     // MARK: - Initialization
 
     init(serverName: String, alpn: [String] = ["h3"]) {
         self.serverName = serverName
         self.alpn = alpn
 
-        // Generate ECDHE key pair
-        privateKey = P256.KeyAgreement.PrivateKey()
+        // Generate ECDHE key pairs for each group we advertise.
+        privateKeyP256 = P256.KeyAgreement.PrivateKey()
+        privateKeyX25519 = Curve25519.KeyAgreement.PrivateKey()
 
         // Generate client random
         _ = clientRandom.withUnsafeMutableBytes { buf in
@@ -116,16 +143,25 @@ class QUICTLSHandler {
     /// The returned data is the raw TLS Handshake message (type + length + body),
     /// suitable for submission via `ngtcp2_conn_submit_crypto_data`.
     func buildClientHello(transportParams: Data) -> Data? {
-        guard let privateKey else { return nil }
+        guard let privateKeyP256, let privateKeyX25519 else { return nil }
 
-        let publicKeyData = privateKey.publicKey.x963Representation
+        let p256Public = privateKeyP256.publicKey.x963Representation
+        let x25519Public = privateKeyX25519.publicKey.rawRepresentation
+
+        // Real Chrome offers X25519 first, then secp256r1 — match that ordering
+        // both in supported_groups and key_share so the server can pick either.
+        let keyShares: [(group: UInt16, keyData: Data)] = [
+            (kNamedGroupX25519, x25519Public),
+            (kNamedGroupSecp256r1, p256Public),
+        ]
 
         // Check for a cached session ticket for resumption
         var pskExtData: Data?
         var candidatePSK: Data?
 
+        let cacheKey = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
         ticketCacheLock.lock()
-        let cachedTicket = sessionTicketCache[serverName]
+        let cachedTicket = sessionTicketCache[cacheKey]
         ticketCacheLock.unlock()
 
         if let ticket = cachedTicket,
@@ -141,7 +177,7 @@ class QUICTLSHandler {
             random: clientRandom,
             serverName: serverName,
             alpn: alpn,
-            publicKey: publicKeyData,
+            keyShares: keyShares,
             quicTransportParams: transportParams,
             pskExtension: pskExtData
         )
@@ -232,6 +268,16 @@ class QUICTLSHandler {
         // Parse server random (bytes 2-33 after version)
         let serverRandom = Data(body[2..<34])
 
+        // RFC 8446 §4.1.3: a ServerHello with this specific random is actually
+        // a HelloRetryRequest. We only offer groups we already sent key shares
+        // for, so any HRR means unrecoverable group mismatch — fail loudly
+        // rather than silently treating the message as a real ServerHello and
+        // dereferencing bogus key material.
+        if serverRandom == Data(kHelloRetryRequestRandom) {
+            logger.error("[QUIC-TLS] HelloRetryRequest received — offered groups rejected")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
         // Parse session ID length and skip
         var offset = 34
         guard offset < body.count else { return .error(NGTCP2_ERR_CALLBACK_FAILURE) }
@@ -251,8 +297,11 @@ class QUICTLSHandler {
         let extLen = (Int(body[offset]) << 8) | Int(body[offset + 1])
         offset += 2
 
+        var serverKeyShareGroup: UInt16 = 0
         var serverPublicKey: Data?
         var pskAccepted = false
+        var supportedVersionsSeen = false
+        var negotiatedVersion: UInt16 = 0
         let extEnd = offset + extLen
         while offset + 4 <= extEnd && offset + 4 <= body.count {
             let extType = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
@@ -262,10 +311,16 @@ class QUICTLSHandler {
             if extType == 0x0033 { // key_share
                 // key_share extension: named_group(2) + key_exchange_length(2) + key_exchange
                 if offset + 4 <= body.count {
+                    serverKeyShareGroup = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
                     let keyExchangeLen = (Int(body[offset + 2]) << 8) | Int(body[offset + 3])
                     if offset + 4 + keyExchangeLen <= body.count {
                         serverPublicKey = Data(body[(offset + 4)..<(offset + 4 + keyExchangeLen)])
                     }
+                }
+            } else if extType == 0x002B { // supported_versions
+                if extDataLen >= 2 {
+                    negotiatedVersion = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
+                    supportedVersionsSeen = true
                 }
             } else if extType == 0x0029 { // pre_shared_key
                 // Server accepted PSK: selected_identity (UInt16), must be 0
@@ -277,15 +332,42 @@ class QUICTLSHandler {
             offset += extDataLen
         }
 
-        guard let serverPublicKey, let privateKey else {
+        // RFC 8446 §4.2.1: a TLS 1.3 server MUST send supported_versions = 0x0304.
+        // Rejecting anything else prevents a downgrade-advertising server from
+        // getting past the handshake.
+        guard supportedVersionsSeen, negotiatedVersion == 0x0304 else {
+            logger.error("[QUIC-TLS] Invalid supported_versions: seen=\(supportedVersionsSeen) value=\(String(format: "0x%04x", negotiatedVersion))")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
-        // Compute shared secret via ECDHE
+        guard let serverPublicKey else {
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        // Compute shared secret via ECDHE using the private key matching the
+        // group the server chose. The server MUST pick from the groups we
+        // offered, so anything else is a protocol violation.
         do {
-            let serverKey = try P256.KeyAgreement.PublicKey(x963Representation: serverPublicKey)
-            let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: serverKey)
-            let sharedSecretData = sharedSecret.withUnsafeBytes { Data($0) }
+            let sharedSecretData: Data
+            switch serverKeyShareGroup {
+            case kNamedGroupX25519:
+                guard let priv = privateKeyX25519 else {
+                    return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                }
+                let serverKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverPublicKey)
+                let shared = try priv.sharedSecretFromKeyAgreement(with: serverKey)
+                sharedSecretData = shared.withUnsafeBytes { Data($0) }
+            case kNamedGroupSecp256r1:
+                guard let priv = privateKeyP256 else {
+                    return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                }
+                let serverKey = try P256.KeyAgreement.PublicKey(x963Representation: serverPublicKey)
+                let shared = try priv.sharedSecretFromKeyAgreement(with: serverKey)
+                sharedSecretData = shared.withUnsafeBytes { Data($0) }
+            default:
+                logger.error("[QUIC-TLS] Server selected unoffered group: \(String(format: "0x%04x", serverKeyShareGroup))")
+                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            }
 
             // Initialize key derivation
             keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
@@ -348,6 +430,29 @@ class QUICTLSHandler {
                     }
                     if rv != 0 {
                         logger.error("[QUIC-TLS] Failed to set remote transport params: \(rv)")
+                    }
+                }
+            } else if extType == 0x0010 { // application_layer_protocol_negotiation (RFC 7301)
+                // ProtocolNameList: uint16 list_len, then one ProtocolName:
+                // uint8 name_len, opaque name[name_len].
+                if extDataLen >= 3, offset + extDataLen <= body.count {
+                    let listLen = (Int(body[offset]) << 8) | Int(body[offset + 1])
+                    if listLen >= 1, 2 + listLen <= extDataLen {
+                        let nameLen = Int(body[offset + 2])
+                        if nameLen >= 1, 3 + nameLen <= extDataLen {
+                            let nameStart = offset + 3
+                            let nameData = Data(body[nameStart..<(nameStart + nameLen)])
+                            negotiatedALPN = String(data: nameData, encoding: .utf8)
+                        }
+                    }
+                }
+                // Enforce ALPN: the server MUST pick from the list we offered.
+                // If it picked something else (or omitted ALPN when we offered one)
+                // treat the handshake as a protocol violation.
+                if !alpn.isEmpty {
+                    guard let picked = negotiatedALPN, alpn.contains(picked) else {
+                        logger.error("[QUIC-TLS] ALPN mismatch: offered \(alpn), server picked \(negotiatedALPN ?? "<none>")")
+                        return .error(NGTCP2_ERR_CALLBACK_FAILURE)
                     }
                 }
             }
@@ -613,8 +718,9 @@ class QUICTLSHandler {
             cipherSuite: cipherSuite, createdAt: Date(),
             lifetime: lifetime, ageAdd: ageAdd
         )
+        let cacheKey = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
         ticketCacheLock.lock()
-        sessionTicketCache[serverName] = cached
+        sessionTicketCache[cacheKey] = cached
         ticketCacheLock.unlock()
         
         return .success

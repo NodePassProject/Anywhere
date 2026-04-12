@@ -20,18 +20,9 @@ struct ProxyListView: View {
     @State private var collapsedSubscriptions: Set<UUID> = []
     @State private var renamingSubscription: Subscription?
     @State private var renameText = ""
-    
-    private var anywherePremiumProxyConfiguration: ProxyConfiguration? {
-        viewModel.configurations.first {
-            if case .vless(let id, _, _) = $0.outbound {
-                if id == $0.id { return true }
-            }
-            return false
-        }
-    }
 
     private var standaloneConfigurations: [ProxyConfiguration] {
-        viewModel.configurations.filter { $0.subscriptionId == nil && $0.id != anywherePremiumProxyConfiguration?.id }
+        viewModel.configurations.filter { $0.subscriptionId == nil }
     }
 
     private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
@@ -43,11 +34,6 @@ struct ProxyListView: View {
 
     var body: some View {
         List {
-            if let anywherePremiumProxyConfiguration {
-                Section {
-                    anywherePremiumProxyConfigurationRow(anywherePremiumProxyConfiguration)
-                }
-            }
             if !standaloneConfigurations.isEmpty {
                 Section {
                     ForEach(standaloneConfigurations) { configuration in
@@ -79,7 +65,6 @@ struct ProxyListView: View {
                     var visibleConfigurations = standaloneConfigurations + subscribedGroups
                         .filter { !collapsedSubscriptions.contains($0.0.id) }
                         .flatMap(\.1)
-                    if let anywherePremiumProxyConfiguration { visibleConfigurations.append(anywherePremiumProxyConfiguration) }
                     viewModel.testLatencies(for: visibleConfigurations)
                 } label: {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
@@ -297,66 +282,6 @@ struct ProxyListView: View {
                 Label("Edit", systemImage: "pencil")
             }
             .tint(.orange)
-        }
-    }
-    
-    @ViewBuilder
-    private func anywherePremiumProxyConfigurationRow(_ configuration: ProxyConfiguration) -> some View {
-        let latency = viewModel.latencyResults[configuration.id]
-
-        Button {
-            viewModel.selectedConfiguration = configuration
-        } label: {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        HStack {
-                            Image("anywhere")
-                            Text(configuration.name)
-                        }
-                        if viewModel.selectedConfiguration?.id == configuration.id {
-                            Image(systemName: "checkmark")
-                                .font(.caption.bold())
-                                .foregroundStyle(Color.anywhere.gradient)
-                        }
-                    }
-                    HStack(spacing: 4) {
-                        Text("Powered by Centent Delivery Network")
-                            .foregroundStyle(.cloudflare)
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                }
-                
-                Spacer()
-                
-                latencyView(latency)
-                    .onTapGesture {
-                        viewModel.testLatency(for: configuration)
-                    }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button {
-                viewModel.testLatency(for: configuration)
-            } label: {
-                Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-            }
-
-            Button(role: .destructive) {
-                viewModel.deleteConfiguration(configuration)
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
-        }
-        .swipeActions(edge: .trailing) {
-            Button(role: .destructive) {
-                viewModel.deleteConfiguration(configuration)
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
         }
     }
 

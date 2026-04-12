@@ -21,18 +21,31 @@ enum QPACKEncoder {
 
     /// Encodes HTTP/3 CONNECT headers into a QPACK header block.
     ///
-    /// For a CONNECT request, the pseudo-headers are:
+    /// For a classic CONNECT request, the pseudo-headers are:
     /// - `:method` = CONNECT (static table index 15)
     /// - `:authority` = host:port (literal with name reference)
     ///
-    /// No `:scheme` or `:path` headers for CONNECT (RFC 9114 §4.4).
+    /// No `:scheme` or `:path` headers for classic CONNECT (RFC 9114 §4.4).
+    ///
+    /// For **extended CONNECT** (RFC 9220) — e.g. CONNECT-UDP (RFC 9298) or
+    /// WebTransport — the `protocolPseudo` parameter adds a `:protocol`
+    /// pseudo-header, and `:scheme` / `:path` become mandatory:
+    /// - `:method` = CONNECT
+    /// - `:protocol` = <value> (e.g. "connect-udp")
+    /// - `:scheme` = "https"
+    /// - `:path` = <path> (e.g. `/.well-known/masque/udp/<host>/<port>/`)
+    /// - `:authority` = <authority>
     ///
     /// - Parameters:
     ///   - authority: The target `host:port`.
+    ///   - protocolPseudo: Optional `:protocol` value for extended CONNECT.
+    ///   - path: Request path; required when `protocolPseudo` is set.
     ///   - extraHeaders: Additional headers (User-Agent, padding, auth, etc.).
     /// - Returns: QPACK-encoded header block (with required prefix bytes).
     static func encodeConnectHeaders(
         authority: String,
+        protocolPseudo: String? = nil,
+        path: String? = nil,
         extraHeaders: [(name: String, value: String)]
     ) -> Data {
         var block = Data()
@@ -46,8 +59,21 @@ enum QPACKEncoder {
         // Prefix 1xxxxxxx, T=1 (static), index 15
         block.append(contentsOf: encodeIndexedFieldLine(QPACKStaticIndex.methodConnect.rawValue))
 
-        // :authority = <authority> (literal with name reference)
-        // :authority is static table index 0
+        if let protocolPseudo {
+            // Extended CONNECT (RFC 9220 §3 / RFC 9298 §3): :protocol, :scheme,
+            // :path are all mandatory alongside :method and :authority.
+            block.append(contentsOf: encodeLiteralFieldLine(
+                name: ":protocol", value: protocolPseudo
+            ))
+            // :scheme = https (static table index 23)
+            block.append(contentsOf: encodeIndexedFieldLine(23))
+            // :path (literal with name ref, static index 1)
+            block.append(contentsOf: encodeLiteralWithNameRef(
+                staticIndex: 1, value: path ?? "/"
+            ))
+        }
+
+        // :authority = <authority> (literal with name reference, static index 0)
         block.append(contentsOf: encodeLiteralWithNameRef(
             staticIndex: 0, value: authority
         ))
@@ -164,7 +190,7 @@ enum QPACKEncoder {
     /// - `:path`               (literal with name ref, static index 1)
     ///
     /// - Parameters:
-    ///   - authority: The target host (e.g. "hysteria").
+    ///   - authority: The target host (e.g. "example.com").
     ///   - path: The request path (e.g. "/auth").
     ///   - extraHeaders: Additional headers.
     /// - Returns: QPACK-encoded header block.

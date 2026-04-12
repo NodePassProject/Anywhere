@@ -46,10 +46,6 @@ extension ProxyConfiguration {
             let encryption = (configurationDict["encryption"] as? String) ?? "none"
             let flow = (configurationDict["flow"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             outbound = .vless(uuid: uuid, encryption: encryption, flow: flow)
-        case .hysteria2:
-            outbound = .hysteria2(
-                auth: (configurationDict["hysteriaAuth"] as? String) ?? ""
-            )
         case .shadowsocks:
             let password = (configurationDict["ssPassword"] as? String) ?? ""
             let method = (configurationDict["ssMethod"] as? String) ?? ""

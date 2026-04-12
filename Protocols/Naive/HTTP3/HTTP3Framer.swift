@@ -22,9 +22,37 @@ enum HTTP3FrameType: UInt64 {
 // MARK: - Settings IDs
 
 enum HTTP3SettingsID: UInt64 {
-    case maxFieldSectionSize = 0x06
-    case qpackMaxTableCapacity = 0x01
-    case qpackBlockedStreams = 0x07
+    case qpackMaxTableCapacity  = 0x01
+    case maxFieldSectionSize    = 0x06
+    case qpackBlockedStreams    = 0x07
+    /// RFC 9220 — enables extended CONNECT with the `:protocol` pseudo-header.
+    case enableConnectProtocol  = 0x08
+    /// RFC 9297 — HTTP Datagrams for CONNECT-UDP and friends.
+    case h3Datagram             = 0x33
+}
+
+// MARK: - Error Codes (RFC 9114 §8.1)
+
+/// Application error codes carried on QUIC CONNECTION_CLOSE / RESET_STREAM /
+/// STOP_SENDING frames for the HTTP/3 protocol layer.
+enum HTTP3ErrorCode: UInt64 {
+    case noError                = 0x0100
+    case generalProtocolError   = 0x0101
+    case internalError          = 0x0102
+    case streamCreationError    = 0x0103
+    case closedCriticalStream   = 0x0104
+    case frameUnexpected        = 0x0105
+    case frameError             = 0x0106
+    case excessiveLoad          = 0x0107
+    case idError                = 0x0108
+    case settingsError          = 0x0109
+    case missingSettings        = 0x010A
+    case requestRejected        = 0x010B
+    case requestCancelled       = 0x010C
+    case requestIncomplete      = 0x010D
+    case messageError           = 0x010E
+    case connectError           = 0x010F
+    case versionFallback        = 0x0110
 }
 
 // MARK: - HTTP3Framer
@@ -126,6 +154,14 @@ enum HTTP3Framer {
         // MAX_FIELD_SECTION_SIZE = 262144
         payload.append(contentsOf: encodeVarInt(HTTP3SettingsID.maxFieldSectionSize.rawValue))
         payload.append(contentsOf: encodeVarInt(262144))
+
+        // SETTINGS_ENABLE_CONNECT_PROTOCOL = 1 (RFC 9220 — extended CONNECT)
+        payload.append(contentsOf: encodeVarInt(HTTP3SettingsID.enableConnectProtocol.rawValue))
+        payload.append(contentsOf: encodeVarInt(1))
+
+        // SETTINGS_H3_DATAGRAM = 1 (RFC 9297 — HTTP Datagrams / CONNECT-UDP)
+        payload.append(contentsOf: encodeVarInt(HTTP3SettingsID.h3Datagram.rawValue))
+        payload.append(contentsOf: encodeVarInt(1))
 
         var frame = Data()
         frame.append(contentsOf: encodeVarInt(HTTP3FrameType.settings.rawValue))

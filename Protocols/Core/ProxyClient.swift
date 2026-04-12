@@ -327,15 +327,6 @@ class ProxyClient {
             return
         }
         
-        if configuration.outboundProtocol == .hysteria2 {
-            if command == .mux {
-                completion(.failure(ProxyError.protocolError("Mux is not supported with Hysteria2")))
-                return
-            }
-            connectWithHysteria(command: command, destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
-            return
-        }
-        
         if isShadowsocks {
             if command == .mux {
                 completion(.failure(ProxyError.protocolError("Mux is not supported with Shadowsocks")))
@@ -1182,85 +1173,6 @@ class ProxyClient {
             uuidBytes.12, uuidBytes.13, uuidBytes.14, uuidBytes.15
         ])
         return VLESSVisionConnection(connection: connection, userUUID: uuidData, testseed: configuration.testseed)
-    }
-    
-    // MARK: - Hysteria
-
-    /// Connects through a Hysteria2 proxy using QUIC.
-    ///
-    /// For TCP, opens a new QUIC stream with Hysteria TCPRequest framing.
-    /// For UDP, creates a QUIC datagram session with UDPMessage framing.
-    /// The underlying QUIC connection is pooled per server address.
-    private func connectWithHysteria(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        guard let auth = configuration.hysteriaAuth else {
-            completion(.failure(ProxyError.protocolError("Hysteria2 auth not configured")))
-            return
-        }
-
-        let serverName = configuration.tls?.serverName ?? configuration.serverAddress
-
-        HysteriaClientPool.client(
-            host: configuration.connectAddress,
-            port: configuration.serverPort,
-            serverName: serverName,
-            auth: auth
-        ) { [weak self] result in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let client):
-                let address = "\(destinationHost):\(destinationPort)"
-                if command == .udp {
-                    self.connectHysteriaUDP(client: client, address: address, completion: completion)
-                } else {
-                    self.connectHysteriaTCP(client: client, address: address, completion: completion)
-                }
-            }
-        }
-    }
-
-    private func connectHysteriaTCP(
-        client: HysteriaClient,
-        address: String,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        client.openTCPStream(address: address) { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let conn):
-                completion(.success(conn))
-            }
-        }
-    }
-
-    private func connectHysteriaUDP(
-        client: HysteriaClient,
-        address: String,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        client.openUDPSession { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let session):
-                let conn = HysteriaUDPConnection(
-                    session: session, address: address,
-                    queue: DispatchQueue(label: "com.argsment.Anywhere.hysteria.udp"),
-                    owner: client
-                )
-                completion(.success(conn))
-            }
-        }
     }
 
     // MARK: - Shadowsocks

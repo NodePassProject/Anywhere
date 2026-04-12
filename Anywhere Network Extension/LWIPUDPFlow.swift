@@ -152,14 +152,6 @@ class LWIPUDPFlow {
                         self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                     }
                 }
-            } else if configuration.outboundProtocol == .hysteria2 {
-                // Hysteria2: send raw payload; HysteriaUDPSession adds its own
-                // UDPMessage framing (sessionID, address, fragmentation).
-                connection.sendRaw(data: payload) { [weak self] error in
-                    if let error {
-                        self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
-                    }
-                }
             } else {
                 sendUDPThroughProxy(connection: connection, payload: data, payloadLength: payloadLength)
             }
@@ -336,16 +328,6 @@ class LWIPUDPFlow {
                             // SS: send raw payloads (connection handles encryption)
                             for payload in self.pendingData {
                                 proxyConnection.send(data: payload) { [weak self] error in
-                                    if let error {
-                                        self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
-                                    }
-                                }
-                            }
-                        } else if self.configuration.outboundProtocol == .hysteria2 {
-                            // Hysteria2: send each payload individually (HysteriaUDPSession
-                            // adds its own UDPMessage framing per datagram).
-                            for payload in self.pendingData {
-                                proxyConnection.sendRaw(data: payload) { [weak self] error in
                                     if let error {
                                         self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                                     }
