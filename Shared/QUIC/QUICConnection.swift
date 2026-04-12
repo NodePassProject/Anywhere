@@ -165,10 +165,12 @@ class QUICConnection {
 
     /// Shuts down a stream (sends RESET_STREAM + STOP_SENDING).
     /// This frees the stream ID slot so the server grants new ones via MAX_STREAMS.
-    func shutdownStream(_ streamId: Int64) {
+    /// - Parameter appErrorCode: Application-layer error code (e.g. an HTTP/3
+    ///   error code per RFC 9114 §8.1). Defaults to `H3_NO_ERROR` (0x100).
+    func shutdownStream(_ streamId: Int64, appErrorCode: UInt64 = 0x0100) {
         queue.async { [weak self] in
             guard let self, let conn = self.conn else { return }
-            ngtcp2_conn_shutdown_stream(conn, 0, streamId, 0)
+            ngtcp2_conn_shutdown_stream(conn, 0, streamId, appErrorCode)
             self.writeToUDP()
         }
     }
@@ -564,6 +566,14 @@ class QUICConnection {
         params.initial_max_stream_data_bidi_local = 64 * 1024 * 1024
         params.initial_max_stream_data_bidi_remote = 64 * 1024 * 1024
         params.initial_max_stream_data_uni = 64 * 1024 * 1024
+        // 30s idle timeout (ngtcp2 durations are nanoseconds). Without this
+        // ngtcp2 advertises 0 which disables the idle timer entirely, so a
+        // half-dead connection would linger until the peer sends CLOSE.
+        params.max_idle_timeout = 30 * 1_000_000_000
+        // We don't implement client-initiated migration and don't want the
+        // server migrating us to a preferred address, so signal this to the
+        // server (RFC 9000 §18.2).
+        params.disable_active_migration = 1
         if datagramsEnabled {
             params.max_datagram_frame_size = Self.maxDatagramFrameSize
         }

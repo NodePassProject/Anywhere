@@ -12,7 +12,7 @@ import Foundation
 extension ProxyConfiguration {
 
     /// URL scheme prefixes that ``parse(url:)`` can handle.
-    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "ss://", "socks5://", "socks://", "https://", "quic://"]
+    static let parsableURLPrefixes = ["vless://", "ss://", "socks5://", "socks://", "https://", "quic://"]
 
     /// Whether the given string starts with a URL scheme that ``parse(url:)`` can handle.
     static func canParseURL(_ string: String) -> Bool {
@@ -25,9 +25,6 @@ extension ProxyConfiguration {
     /// SOCKS5 format: socks5://user:pass@host:port#name  or  socks5://host:port#name
     /// Naive format: https://user:pass@host:port#name  or  quic://user:pass@host:port#name
     static func parse(url: String, naiveProtocol: OutboundProtocol? = nil) throws -> ProxyConfiguration {
-        if url.hasPrefix("hysteria2://") || url.hasPrefix("hy2://") {
-            return try parseHysteria2(url: url)
-        }
         if url.hasPrefix("ss://") {
             return try parseShadowsocks(url: url)
         }
@@ -38,7 +35,7 @@ extension ProxyConfiguration {
             return try parseNaive(url: url, protocolOverride: naiveProtocol)
         }
         guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless://, ss://, socks5://, https://, quic://, or hysteria2://")
+            throw ProxyError.invalidURL("URL must start with vless://, ss://, socks5://, https://, or quic://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -146,58 +143,6 @@ extension ProxyConfiguration {
         )
     }
     
-    /// Parse a Shadowsocks URL into configuration.
-    /// Format: hysteria2://auth@host:port?sni=...&insecure=1#name or hy2://auth@host:port?sni=...&insecure=1#name
-    private static func parseHysteria2(url: String) throws -> ProxyConfiguration {
-        let scheme = url.hasPrefix("hy2://") ? "hy2://" : "hysteria2://"
-        var remainder = String(url.dropFirst(scheme.count))
-
-        // Extract fragment (#name)
-        var name: String?
-        if let hashIndex = remainder.lastIndex(of: "#") {
-            name = String(remainder[remainder.index(after: hashIndex)...]).removingPercentEncoding
-            remainder = String(remainder[..<hashIndex])
-        }
-        DeviceCensorship.deCensor(&name)
-
-        // Extract query string
-        var queryParams: [String: String] = [:]
-        if let qIndex = remainder.firstIndex(of: "?") {
-            let query = String(remainder[remainder.index(after: qIndex)...])
-            remainder = String(remainder[..<qIndex])
-            for pair in query.split(separator: "&") {
-                let parts = pair.split(separator: "=", maxSplits: 1)
-                if parts.count == 2 {
-                    queryParams[String(parts[0])] = String(parts[1]).removingPercentEncoding ?? String(parts[1])
-                }
-            }
-        }
-
-        // Extract auth@host:port
-        var auth = ""
-        if let atIndex = remainder.lastIndex(of: "@") {
-            auth = String(remainder[..<atIndex]).removingPercentEncoding ?? String(remainder[..<atIndex])
-            remainder = String(remainder[remainder.index(after: atIndex)...])
-        }
-
-        let (host, port) = try parseHostPort(remainder)
-        let serverName = queryParams["sni"] ?? host
-
-        let tlsConfig = TLSConfiguration(
-            serverName: serverName,
-            alpn: ["h3"],
-            fingerprint: .chrome133
-        )
-
-        return ProxyConfiguration(
-            name: name ?? "\(host):\(port)",
-            serverAddress: host,
-            serverPort: port,
-            outbound: .hysteria2(auth: auth),
-            securityLayer: .tls(tlsConfig)
-        )
-    }
-
     /// Parse a Shadowsocks URL into configuration.
     /// Format: ss://base64(method:password)@host:port#name
     /// Also handles: ss://base64(method:password@host:port)#name (SIP002)

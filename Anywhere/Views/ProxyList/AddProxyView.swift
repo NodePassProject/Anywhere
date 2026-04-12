@@ -19,21 +19,12 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
     case qrCode = "qrCode"
     case link = "link"
     case manual = "manual"
-    case anywherePremiumProxy = "anywherePremiumProxy"
-    
-    var useCustomSymbol: Bool {
-        switch self {
-        case .qrCode, .link, .manual: false
-        case .anywherePremiumProxy: true
-        }
-    }
 
     var image: String {
         switch self {
         case .qrCode: "qrcode.viewfinder"
         case .link: "link"
         case .manual: "hand.point.up.left"
-        case .anywherePremiumProxy: "anywhere"
         }
     }
 
@@ -42,7 +33,6 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
         case .qrCode: String(localized: "QR Code")
         case .link: String(localized: "Link")
         case .manual: String(localized: "Manual")
-        case .anywherePremiumProxy: String(localized: "Anywhere Premium Proxy")
         }
     }
 }
@@ -60,19 +50,6 @@ struct AddProxyView: View {
     @State private var isLoading = false
     @State private var showingError = false
     @State private var errorMessage = ""
-    
-    private var anywherePremiumProxyConfiguration: ProxyConfiguration? {
-        viewModel.configurations.first {
-            if case .vless(let id, _, _) = $0.outbound {
-                if id == $0.id { return true }
-            }
-            return false
-        }
-    }
-    private var availableMethods: [Method] {
-        if anywherePremiumProxyConfiguration == nil { return Method.allCases }
-        return Method.allCases.filter { $0 != .anywherePremiumProxy }
-    }
 
     init(showingManualAddSheet: Binding<Bool>, deepLinkAction: DeepLinkAction? = nil) {
         _showingManualAddSheet = showingManualAddSheet
@@ -172,20 +149,13 @@ struct AddProxyView: View {
     
     @ViewBuilder
     var methodPicker: some View {
-        ForEach(availableMethods) { method in
+        ForEach(Method.allCases) { method in
             let isSelected: Bool = selectedMethod == method
             
             HStack(spacing: 10) {
-                let image = method.image
-                if method.useCustomSymbol {
-                    Image(image)
-                        .font(.title)
-                        .frame(width: 40)
-                } else {
-                    Image(systemName: image)
-                        .font(.title)
-                        .frame(width: 40)
-                }
+                Image(systemName: method.image)
+                    .font(.title)
+                    .frame(width: 40)
                 
                 Text(method.title)
                     .fontWeight(.semibold)
@@ -291,64 +261,19 @@ struct AddProxyView: View {
         case .manual:
             showingManualAddSheet = true
             dismiss()
-        case .anywherePremiumProxy:
-            importAnywherePremiumProxy()
         case .none:
             break
-        }
-    }
-
-    private func importAnywherePremiumProxy() {
-        isLoading = true
-        Task {
-            do {
-                struct CreateUserResponse: Decodable { let uuid: UUID }
-                var request = URLRequest(url: URL(string: "https://anywhere-premium-proxy.argsment.com/users")!)
-                request.httpMethod = "POST"
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                let (data, response) = try await URLSession.shared.data(for: request)
-                if let httpResponse = response as? HTTPURLResponse,
-                   !(200...299).contains(httpResponse.statusCode) {
-                    throw NSError(
-                        domain: "AnywherePremiumProxy",
-                        code: httpResponse.statusCode,
-                        userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"]
-                    )
-                }
-                let uuid = try JSONDecoder().decode(CreateUserResponse.self, from: data).uuid
-                let configuration = ProxyConfiguration(
-                    id: uuid,
-                    name: String(localized: "Anywhere Premium Proxy"),
-                    serverAddress: "anywhere.stdco.de",
-                    serverPort: 443,
-                    outbound: .vless(uuid: uuid, encryption: "none", flow: nil),
-                    transportLayer: .xhttp(
-                        XHTTPConfiguration(host: "anywhere.stdco.de", path: "/app")
-                    ),
-                    securityLayer: .tls(
-                        TLSConfiguration(serverName: "anywhere.stdco.de", fingerprint: .chrome120)
-                    ),
-                    muxEnabled: true,
-                    xudpEnabled: true
-                )
-                viewModel.addConfiguration(configuration)
-                dismiss()
-            } catch {
-                errorMessage = error.localizedDescription
-                showingError = true
-            }
-            isLoading = false
         }
     }
 
     private func importFromString(_ string: String) {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         let isHTTP = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
-
-        if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") ||
+        
+        if trimmed.hasPrefix("vless://") ||
+            trimmed.hasPrefix("ss://") ||
             trimmed.hasPrefix("socks5://") || trimmed.hasPrefix("socks://") ||
-            trimmed.hasPrefix("quic://") ||
-            (isHTTP && httpsLinkType != .subscription) {
+            (isHTTP && httpsLinkType != .subscription) || trimmed.hasPrefix("quic://") {
             // Single proxy link (VLESS, Shadowsocks, SOCKS5, or NaiveProxy)
             let naiveProtocol: OutboundProtocol? = switch httpsLinkType {
             case .http11Proxy: .http11

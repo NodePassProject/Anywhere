@@ -292,7 +292,7 @@ class HTTP3Connection: NaiveTunnel {
             break // QPACK encoder/decoder — dynamic table disabled, discard.
         default:
             if !(streamType >= 0x21 && (UInt64(streamType) - 0x21) % 0x1f == 0) {
-                quic.shutdownStream(streamId)
+                quic.shutdownStream(streamId, appErrorCode: HTTP3ErrorCode.streamCreationError.rawValue)
             }
         }
     }

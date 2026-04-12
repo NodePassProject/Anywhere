@@ -1178,7 +1178,7 @@ struct TLSClientHelloBuilder {
         random: Data,
         serverName: String,
         alpn: [String],
-        publicKey: Data,
+        keyShares: [(group: UInt16, keyData: Data)],
         quicTransportParams: Data,
         pskExtension: Data? = nil
     ) -> Data {
@@ -1192,7 +1192,7 @@ struct TLSClientHelloBuilder {
         // Extensions
         var extsData = Data()
         extsData.append(buildSNIExtension(serverName: serverName))
-        extsData.append(supportedGroupsExt([0x0017])) // secp256r1
+        extsData.append(supportedGroupsExt([0x001D, 0x0017])) // x25519, secp256r1
         extsData.append(signatureAlgorithmsExt([
             0x0403, 0x0804, 0x0401, // ECDSA
             0x0503, 0x0805, 0x0501, // ECDSA (larger)
@@ -1202,7 +1202,7 @@ struct TLSClientHelloBuilder {
         extsData.append(alpnExt(alpn))
         extsData.append(supportedVersionsExt([0x0304])) // TLS 1.3 only
         extsData.append(pskKeyExchangeModesExt())
-        extsData.append(keyShareExt([(group: 0x0017, keyData: publicKey)]))
+        extsData.append(keyShareExt(keyShares))
 
         // QUIC transport parameters extension (type 0x0039)
         extsData.append(ext(0x0039, quicTransportParams))

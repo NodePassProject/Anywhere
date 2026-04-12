@@ -52,6 +52,14 @@ class HTTP3Session {
     /// Defaults to unlimited until SETTINGS arrives.
     private(set) var peerMaxFieldSectionSize: UInt64 = UInt64.max
 
+    /// Peer advertised SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 9220). Only when
+    /// true may the client issue CONNECT with a `:protocol` pseudo-header.
+    private(set) var peerSupportsExtendedConnect = false
+
+    /// Peer advertised SETTINGS_H3_DATAGRAM (RFC 9297). Required for CONNECT-UDP
+    /// and other datagram-tunneling extensions.
+    private(set) var peerSupportsH3Datagram = false
+
     // Pool-visible state — accessed from the pool's lock context (arbitrary thread).
     // Must NOT touch `streams` or other queue-protected state.
     private let _poolLock = UnfairLock()
@@ -223,8 +231,8 @@ class HTTP3Session {
         quic.extendStreamOffset(streamID, count: count)
     }
 
-    func shutdownStream(_ streamID: Int64) {
-        quic.shutdownStream(streamID)
+    func shutdownStream(_ streamID: Int64, code: HTTP3ErrorCode = .noError) {
+        quic.shutdownStream(streamID, appErrorCode: code.rawValue)
     }
 
     // MARK: - Stream Data Demux
@@ -278,7 +286,7 @@ class HTTP3Session {
                 // types follow `0x1f * N + 0x21`; for everything else we
                 // abort reading via STOP_SENDING rather than trust the bytes.
                 if !isReservedStreamType(streamType) {
-                    quic.shutdownStream(streamID)
+                    quic.shutdownStream(streamID, appErrorCode: HTTP3ErrorCode.streamCreationError.rawValue)
                 }
             }
         }
@@ -353,6 +361,15 @@ class HTTP3Session {
             switch id {
             case HTTP3SettingsID.maxFieldSectionSize.rawValue:
                 peerMaxFieldSectionSize = value
+            case HTTP3SettingsID.enableConnectProtocol.rawValue:
+                // RFC 9220 §3: only 0 or 1 are valid; any other value is a
+                // settings error. 1 enables extended CONNECT.
+                guard value == 0 || value == 1 else { return false }
+                peerSupportsExtendedConnect = (value == 1)
+            case HTTP3SettingsID.h3Datagram.rawValue:
+                // RFC 9297 §2.1: only 0 or 1 are valid.
+                guard value == 0 || value == 1 else { return false }
+                peerSupportsH3Datagram = (value == 1)
             case HTTP3SettingsID.qpackMaxTableCapacity.rawValue,
                  HTTP3SettingsID.qpackBlockedStreams.rawValue:
                 // We don't use the dynamic table, so we don't need to react.

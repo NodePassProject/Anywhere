@@ -202,9 +202,11 @@ class HTTP3Stream: NaiveTunnel {
             session.removeStream(self)
 
             // Shut down the QUIC stream so the server can reclaim the stream
-            // slot and grant new ones via MAX_STREAMS.
+            // slot and grant new ones via MAX_STREAMS. A caller-initiated
+            // close before completion is signalled as H3_REQUEST_CANCELLED.
             if let sid = quicStreamID {
-                session.shutdownStream(sid)
+                let code: HTTP3ErrorCode = headersReceived ? .noError : .requestCancelled
+                session.shutdownStream(sid, code: code)
             }
 
             if let cb = connectCompletion {
@@ -326,7 +328,16 @@ class HTTP3Stream: NaiveTunnel {
     private func handleStreamError(_ error: Error) {
         guard state != .closed else { return }
         streamError = error
-        closeAndShutdown()
+        // Map the error to an HTTP/3 error code for RESET_STREAM/STOP_SENDING.
+        let code: HTTP3ErrorCode
+        if let h3 = error as? HTTP3Error, case .tunnelFailed = h3 {
+            code = .connectError
+        } else if error is HTTP3Error {
+            code = .requestCancelled
+        } else {
+            code = .internalError
+        }
+        closeAndShutdown(code: code)
 
         if let cb = connectCompletion {
             connectCompletion = nil
@@ -340,12 +351,12 @@ class HTTP3Stream: NaiveTunnel {
 
     /// Closes the stream and sends RESET_STREAM/STOP_SENDING so the server
     /// can reclaim the stream slot and grant new stream IDs via MAX_STREAMS.
-    private func closeAndShutdown() {
+    private func closeAndShutdown(code: HTTP3ErrorCode = .noError) {
         guard state != .closed else { return }
         state = .closed
         session?.removeStream(self)
         if let sid = quicStreamID {
-            session?.shutdownStream(sid)
+            session?.shutdownStream(sid, code: code)
         }
     }
 }
