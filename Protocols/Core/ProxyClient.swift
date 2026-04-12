@@ -1255,7 +1255,8 @@ class ProxyClient {
             case .success(let session):
                 let conn = HysteriaUDPConnection(
                     session: session, address: address,
-                    queue: DispatchQueue(label: "com.argsment.Anywhere.hysteria.udp")
+                    queue: DispatchQueue(label: "com.argsment.Anywhere.hysteria.udp"),
+                    owner: client
                 )
                 completion(.success(conn))
             }

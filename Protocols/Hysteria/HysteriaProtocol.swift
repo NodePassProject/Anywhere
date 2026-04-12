@@ -41,6 +41,11 @@ enum HysteriaConstants {
     /// Random padding range for TCP response (bytes).
     static let tcpResponsePaddingMin = 128
     static let tcpResponsePaddingMax = 1024
+
+    /// DoS guards on parsed length fields (matches Go reference).
+    static let maxAddressLength: UInt64 = 2048
+    static let maxMessageLength: UInt64 = 2048
+    static let maxPaddingLength: UInt64 = 4096
 }
 
 // MARK: - QUIC Variable-Length Integer Codec
@@ -155,7 +160,8 @@ enum HysteriaPadding {
 
 enum HysteriaTCPFraming {
 
-    /// Builds a Hysteria TCP request payload.
+    /// Builds a Hysteria TCP request body (the frame-type prefix is written
+    /// separately by the caller).
     ///
     /// Format: `[addr_len (varint)][addr][padding_len (varint)][padding]`
     static func buildTCPRequest(address: String) -> Data {
@@ -190,6 +196,7 @@ enum HysteriaTCPFraming {
         var offset = 1
 
         guard let (msgLen, msgLenSize) = QUICVarint.decode(data, at: offset) else { return nil }
+        guard msgLen <= HysteriaConstants.maxMessageLength else { return nil }
         offset += msgLenSize
 
         guard offset + Int(msgLen) <= data.count else { return nil }
@@ -202,7 +209,10 @@ enum HysteriaTCPFraming {
         }
 
         guard let (padLen, padLenSize) = QUICVarint.decode(data, at: offset) else { return nil }
-        offset += padLenSize + Int(padLen)
+        guard padLen <= HysteriaConstants.maxPaddingLength else { return nil }
+        offset += padLenSize
+        guard offset + Int(padLen) <= data.count else { return nil }
+        offset += Int(padLen)
 
         return (status == 0, message, offset)
     }
@@ -270,8 +280,9 @@ struct HysteriaUDPMessage {
         let fragCount = raw[si + 7]
 
         guard let (addrLen, addrLenSize) = QUICVarint.decode(raw, at: 8) else { return nil }
+        guard addrLen > 0, addrLen <= HysteriaConstants.maxAddressLength else { return nil }
         let addrStart = 8 + addrLenSize
-        guard addrLen > 0, addrStart + Int(addrLen) < raw.count else { return nil }
+        guard addrStart + Int(addrLen) < raw.count else { return nil }
 
         let address = String(data: Data(raw[(si + addrStart)..<(si + addrStart + Int(addrLen))]), encoding: .utf8) ?? ""
         let dataStart = addrStart + Int(addrLen)

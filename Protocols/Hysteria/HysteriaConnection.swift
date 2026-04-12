@@ -23,9 +23,8 @@ class HysteriaConnection: ProxyConnection {
     private let quic: QUICConnection
     private let streamId: Int64
     private let address: String
+    private weak var owner: HysteriaClient?
 
-    /// Whether the TCPRequest has been sent on this stream.
-    private var requestSent = false
     /// Whether the TCPResponse has been parsed.
     private var responseReceived = false
 
@@ -38,11 +37,12 @@ class HysteriaConnection: ProxyConnection {
     /// is called on (i.e. HysteriaClient's queue).
     let queue: DispatchQueue
 
-    init(quic: QUICConnection, streamId: Int64, address: String, queue: DispatchQueue) {
+    init(quic: QUICConnection, streamId: Int64, address: String, queue: DispatchQueue, owner: HysteriaClient) {
         self.quic = quic
         self.streamId = streamId
         self.address = address
         self.queue = queue
+        self.owner = owner
         super.init()
         self.responseHeaderReceived = true // No VLESS header to strip
     }
@@ -75,16 +75,7 @@ class HysteriaConnection: ProxyConnection {
                 completion(QUICConnection.QUICError.closed)
                 return
             }
-            if !self.requestSent {
-                self.requestSent = true
-                // First write: send TCPRequest header (address + padding) + user data
-                let tcpRequest = HysteriaTCPFraming.buildTCPRequest(address: self.address)
-                var payload = tcpRequest
-                payload.append(data)
-                self.quic.writeStream(self.streamId, data: payload, completion: completion)
-            } else {
-                self.quic.writeStream(self.streamId, data: data, completion: completion)
-            }
+            self.quic.writeStream(self.streamId, data: data, completion: completion)
         }
     }
 
@@ -101,8 +92,7 @@ class HysteriaConnection: ProxyConnection {
                 return
             }
 
-            if !self.responseReceived && !self.receiveBuffer.isEmpty {
-                // Parse TCPResponse header first
+            if !self.responseReceived {
                 if let (ok, message, consumed) = HysteriaTCPFraming.parseTCPResponse(self.receiveBuffer) {
                     self.responseReceived = true
                     self.receiveBuffer = Data(self.receiveBuffer.dropFirst(consumed))
@@ -113,7 +103,11 @@ class HysteriaConnection: ProxyConnection {
                         return
                     }
                     // Fall through to deliver any remaining data
-                } else if !self.streamClosed {
+                } else if self.streamClosed {
+                    // Stream ended before a complete TCPResponse arrived.
+                    completion(nil, HysteriaClient.HysteriaError.connectionFailed("stream closed before TCPResponse"))
+                    return
+                } else {
                     // Need more data for response header
                     self.pendingReceiveCompletion = completion
                     return
@@ -147,7 +141,11 @@ class HysteriaConnection: ProxyConnection {
                     completion(nil, HysteriaClient.HysteriaError.connectionFailed(message))
                     return
                 }
-            } else if !streamClosed {
+            } else if streamClosed {
+                pendingReceiveCompletion = nil
+                completion(nil, HysteriaClient.HysteriaError.connectionFailed("stream closed before TCPResponse"))
+                return
+            } else {
                 return // Need more data
             }
         }
@@ -180,6 +178,7 @@ class HysteriaConnection: ProxyConnection {
             self.quic.shutdownStream(self.streamId)
             self.pendingReceiveCompletion?(nil, nil)
             self.pendingReceiveCompletion = nil
+            self.owner?.removeTCPStream(self.streamId)
         }
     }
 }
@@ -194,12 +193,14 @@ class HysteriaUDPConnection: ProxyConnection {
     private let session: HysteriaUDPSession
     private let address: String
     private let queue: DispatchQueue
+    private weak var owner: HysteriaClient?
     private var isCancelled = false
 
-    init(session: HysteriaUDPSession, address: String, queue: DispatchQueue) {
+    init(session: HysteriaUDPSession, address: String, queue: DispatchQueue, owner: HysteriaClient) {
         self.session = session
         self.address = address
         self.queue = queue
+        self.owner = owner
         super.init()
         self.responseHeaderReceived = true
     }
@@ -244,6 +245,9 @@ class HysteriaUDPConnection: ProxyConnection {
     // MARK: - Cancel
 
     override func cancel() {
+        guard !isCancelled else { return }
         isCancelled = true
+        session.close(error: HysteriaClient.HysteriaError.closed)
+        owner?.removeUDPSession(session.sessionID)
     }
 }
