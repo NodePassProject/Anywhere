@@ -117,7 +117,9 @@ class HysteriaClient {
                         session.close(error: error)
                     }
                     self.udpSessions.removeAll()
+                    self.tcpStreams.removeAll()
                 }
+                HysteriaClientPool.remove(host: self.host, port: self.port, client: self)
             }
 
             quicConn.streamDataHandler = { [weak self] streamId, data, fin in
@@ -227,13 +229,25 @@ class HysteriaClient {
         }
     }
 
+    /// Tears down the QUIC connection and reports an auth failure to the caller.
+    /// The connectionClosedHandler will fire as a result of `quic.close()`, but
+    /// it bails when `connectCompletion` is already nil, so the caller is
+    /// notified exactly once.
+    private func failAuth(_ error: Error) {
+        let cb = connectCompletion
+        connectCompletion = nil
+        state = .closed
+        quic?.close()
+        quic = nil
+        cb?(error)
+    }
+
     private func parseAuthResponseHeaders() {
         guard let (frame, consumed) = HTTP3Framer.parseFrame(from: authResponseBuffer) else {
             return // Incomplete, wait for more data
         }
         guard frame.type == HTTP3FrameType.headers.rawValue else {
-            connectCompletion?(HysteriaError.authFailed("unexpected frame type \(frame.type)"))
-            connectCompletion = nil
+            failAuth(HysteriaError.authFailed("unexpected frame type \(frame.type)"))
             return
         }
 
@@ -241,8 +255,7 @@ class HysteriaClient {
         let statusHeader = headers.first(where: { $0.name == ":status" })
         guard let status = statusHeader?.value, status == "\(HysteriaConstants.statusAuthOK)" else {
             let code = statusHeader?.value ?? "unknown"
-            connectCompletion?(HysteriaError.authFailed("status \(code)"))
-            connectCompletion = nil
+            failAuth(HysteriaError.authFailed("status \(code)"))
             return
         }
 
@@ -287,17 +300,28 @@ class HysteriaClient {
                 return
             }
 
-            let conn = HysteriaConnection(quic: quic, streamId: streamId, address: address, queue: self.queue)
+            let conn = HysteriaConnection(quic: quic, streamId: streamId, address: address, queue: self.queue, owner: self)
             self.tcpStreams[streamId] = conn
 
-            // Write the Hysteria TCP frame type prefix (0x401 as QUIC varint)
+            // Send the full TCPRequest (frame type + address + padding) eagerly so
+            // server-first protocols (SSH, SMTP, MySQL, …) don't stall waiting for
+            // the client to write first. The frame type is written separately
+            // before the body.
             let frameTypeData = QUICVarint.encode(HysteriaConstants.frameTypeTCPRequest)
+            let requestBody = HysteriaTCPFraming.buildTCPRequest(address: address)
             quic.writeStream(streamId, data: frameTypeData) { error in
                 if let error {
                     self.queue.async { self.tcpStreams[streamId] = nil }
                     completion(.failure(error))
-                } else {
-                    completion(.success(conn))
+                    return
+                }
+                quic.writeStream(streamId, data: requestBody) { error in
+                    if let error {
+                        self.queue.async { self.tcpStreams[streamId] = nil }
+                        completion(.failure(error))
+                    } else {
+                        completion(.success(conn))
+                    }
                 }
             }
         }
@@ -331,6 +355,22 @@ class HysteriaClient {
         }
     }
 
+    // MARK: - Internal Cleanup
+
+    /// Removes a TCP stream from the routing table. Called by HysteriaConnection.cancel().
+    func removeTCPStream(_ streamId: Int64) {
+        queue.async { [weak self] in
+            self?.tcpStreams[streamId] = nil
+        }
+    }
+
+    /// Removes a UDP session from the session table. Called by HysteriaUDPConnection.cancel().
+    func removeUDPSession(_ sessionID: UInt32) {
+        queue.async { [weak self] in
+            self?.udpSessions[sessionID] = nil
+        }
+    }
+
     // MARK: - Datagram Handling
 
     private func handleDatagram(_ data: Data) {
@@ -355,7 +395,9 @@ class HysteriaClient {
                 session.close(error: HysteriaError.closed)
             }
             self.udpSessions.removeAll()
+            self.tcpStreams.removeAll()
         }
+        HysteriaClientPool.remove(host: host, port: port, client: self)
     }
 
     /// Whether the QUIC connection is authenticated and ready.
@@ -519,11 +561,15 @@ enum HysteriaClientPool {
         }
     }
 
-    /// Removes a client from the pool (e.g. on close or error).
-    static func remove(host: String, port: UInt16) {
+    /// Removes a client from the pool (e.g. on close or error). The client
+    /// identity check ensures that a newer client that already replaced the
+    /// closed one is not accidentally evicted.
+    static func remove(host: String, port: UInt16, client: HysteriaClient) {
         let key = "\(host):\(port)"
         lock.lock()
-        clients[key] = nil
+        if clients[key] === client {
+            clients[key] = nil
+        }
         lock.unlock()
     }
 }
