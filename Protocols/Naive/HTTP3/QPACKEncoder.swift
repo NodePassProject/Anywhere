@@ -64,23 +64,28 @@ enum QPACKEncoder {
 
     /// Decodes QPACK-encoded headers from a response header block.
     ///
-    /// Returns an array of (name, value) pairs.
-    static func decodeHeaders(from data: Data) -> [(name: String, value: String)] {
+    /// Returns an array of (name, value) pairs, or nil if the block is malformed
+    /// or references the dynamic table. We advertise `QPACK_MAX_TABLE_CAPACITY=0`
+    /// in SETTINGS, so a compliant server must not emit dynamic references; treat
+    /// any such reference as a protocol violation rather than silently dropping
+    /// the field.
+    static func decodeHeaders(from data: Data) -> [(name: String, value: String)]? {
         var headers: [(name: String, value: String)] = []
-        guard data.count >= 2 else { return headers }
+        guard data.count >= 2 else { return nil }
 
         var offset = 0
 
-        // Skip QPACK prefix (Required Insert Count + Delta Base)
-        guard let (_, ricLen) = decodeVarIntPrefix(from: data, offset: offset, prefixBits: 8) else {
-            return headers
-        }
+        // QPACK header block prefix: Required Insert Count + Delta Base.
+        // With a disabled dynamic table, Required Insert Count MUST be 0.
+        guard let (requiredInsertCount, ricLen) =
+                decodeVarIntPrefix(from: data, offset: offset, prefixBits: 8) else { return nil }
         offset += ricLen
+        guard requiredInsertCount == 0 else { return nil }
 
-        guard offset < data.count else { return headers }
+        guard offset < data.count else { return nil }
         // Delta Base uses 7-bit prefix after the sign bit
         guard let (_, dbLen) = decodeVarIntPrefix(from: data, offset: offset, prefixBits: 7) else {
-            return headers
+            return nil
         }
         offset += dbLen
 
@@ -89,36 +94,41 @@ enum QPACKEncoder {
             let byte = data[offset]
 
             if byte & 0x80 != 0 {
-                // Indexed field line (1xxxxxxx)
+                // Indexed field line (1 T=static index).
+                // Dynamic table (T=0) is not supported.
                 let isStatic = (byte & 0x40) != 0
-                guard let (index, len) = decodeVarIntPrefix(from: data, offset: offset, prefixBits: 6) else { break }
+                guard isStatic else { return nil }
+                guard let (index, len) =
+                        decodeVarIntPrefix(from: data, offset: offset, prefixBits: 6) else { return nil }
                 offset += len
-
-                if isStatic, let entry = staticTableEntry(Int(index)) {
+                // Our static table is a subset of RFC 9204 Appendix A. Indices
+                // we don't recognise belong to the canonical static table too
+                // (e.g. "content-type") — skip them rather than fail, matching
+                // how the previous silent-drop behaviour interoperated with
+                // real origin servers.
+                if let entry = staticTableEntry(Int(index)) {
                     headers.append(entry)
                 }
             } else if byte & 0x40 != 0 {
-                // Literal with name reference (01xxxxxx)
+                // Literal with name reference (01 N T=static name-index).
+                // Dynamic table name references (T=0) are not supported.
                 let isStatic = (byte & 0x10) != 0
-                guard let (nameIdx, nameLen) = decodeVarIntPrefix(from: data, offset: offset, prefixBits: 4) else { break }
+                guard isStatic else { return nil }
+                guard let (nameIdx, nameLen) =
+                        decodeVarIntPrefix(from: data, offset: offset, prefixBits: 4) else { return nil }
                 offset += nameLen
-
-                guard let (value, valueLen) = decodeString(from: data, offset: offset) else { break }
+                guard let (value, valueLen) = decodeString(from: data, offset: offset) else { return nil }
                 offset += valueLen
-
-                let name: String
-                if isStatic, let entry = staticTableName(Int(nameIdx)) {
-                    name = entry
-                } else {
-                    name = "unknown-\(nameIdx)"
+                if let name = staticTableName(Int(nameIdx)) {
+                    headers.append((name: name, value: value))
                 }
-                headers.append((name: name, value: value))
             } else if byte & 0x20 != 0 {
                 // Literal field line with literal name: 001 N H NameLen(3+) Name Value
                 let nameHuffman = (byte & 0x08) != 0
-                guard let (nameLen, nameLenBytes) = decodeVarIntPrefix(from: data, offset: offset, prefixBits: 3) else { break }
+                guard let (nameLen, nameLenBytes) =
+                        decodeVarIntPrefix(from: data, offset: offset, prefixBits: 3) else { return nil }
                 offset += nameLenBytes
-                guard offset + Int(nameLen) <= data.count else { break }
+                guard offset + Int(nameLen) <= data.count else { return nil }
                 let nameData = Data(data[offset..<(offset + Int(nameLen))])
                 offset += Int(nameLen)
                 let nameStr: String?
@@ -129,14 +139,16 @@ enum QPACKEncoder {
                 } else {
                     nameStr = String(data: nameData, encoding: .utf8)
                 }
-                guard let name = nameStr else { break }
+                guard let name = nameStr else { return nil }
 
-                guard let (value, vLen) = decodeString(from: data, offset: offset) else { break }
+                guard let (value, vLen) = decodeString(from: data, offset: offset) else { return nil }
                 offset += vLen
                 headers.append((name: name, value: value))
             } else {
-                // Skip unknown
-                offset += 1
+                // Remaining patterns are Indexed field line with post-base index
+                // (0001xxxx) and Literal with post-base name reference (0000xxxx),
+                // both of which reference the dynamic table.
+                return nil
             }
         }
 

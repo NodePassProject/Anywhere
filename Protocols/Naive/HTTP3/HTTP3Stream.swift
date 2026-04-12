@@ -102,6 +102,15 @@ class HTTP3Stream: NaiveTunnel {
                     fastOpen: cachedType != nil
                 ))
 
+                // Ensure we don't exceed the peer's advertised MAX_FIELD_SECTION_SIZE.
+                var allHeaders = extraHeaders
+                allHeaders.insert((name: ":method", value: "CONNECT"), at: 0)
+                allHeaders.insert((name: ":authority", value: self.destination), at: 1)
+                guard session.isWithinPeerFieldSectionLimit(allHeaders) else {
+                    self.handleStreamError(HTTP3Error.connectionFailed("Request headers exceed peer MAX_FIELD_SECTION_SIZE"))
+                    return
+                }
+
                 let headerBlock = QPACKEncoder.encodeConnectHeaders(
                     authority: self.destination, extraHeaders: extraHeaders
                 )
@@ -259,7 +268,10 @@ class HTTP3Stream: NaiveTunnel {
             return
         }
 
-        let headers = QPACKEncoder.decodeHeaders(from: frame.payload)
+        guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
+            handleStreamError(HTTP3Error.connectionFailed("Malformed QPACK header block"))
+            return
+        }
         let statusHeader = headers.first(where: { $0.name == ":status" })
 
         guard let status = statusHeader?.value, status == "200" else {

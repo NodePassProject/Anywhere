@@ -50,6 +50,14 @@ class HTTP3Connection: NaiveTunnel {
     private var headersReceived = false
     private var pendingQuicBytes = 0
 
+    /// Server control stream ID and in-flight frame buffer.
+    private var serverControlStreamId: Int64?
+    private var serverControlBuffer = Data()
+    private var pendingServerStreams: [Int64: Data] = [:]
+    private var serverSettingsReceived = false
+    /// Peer-advertised MAX_FIELD_SECTION_SIZE; UInt64.max until SETTINGS arrives.
+    private var peerMaxFieldSectionSize: UInt64 = UInt64.max
+
     private(set) var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType = .none
 
     var isConnected: Bool { state == .tunnelOpen }
@@ -216,6 +224,15 @@ class HTTP3Connection: NaiveTunnel {
             fastOpen: cachedType != nil
         ))
 
+        var allHeaders = extraHeaders
+        allHeaders.insert((name: ":method", value: "CONNECT"), at: 0)
+        allHeaders.insert((name: ":authority", value: destination), at: 1)
+        guard isWithinPeerFieldSectionLimit(allHeaders) else {
+            tunnelCompletion?(HTTP3Error.connectionFailed("Request headers exceed peer MAX_FIELD_SECTION_SIZE"))
+            tunnelCompletion = nil
+            return
+        }
+
         let headerBlock = QPACKEncoder.encodeConnectHeaders(
             authority: destination, extraHeaders: extraHeaders
         )
@@ -237,7 +254,117 @@ class HTTP3Connection: NaiveTunnel {
     private func handleStreamData(streamId: Int64, data: Data, fin: Bool) {
         if streamId == requestStreamId {
             handleRequestStreamData(data, fin: fin)
+            return
         }
+
+        // Server-initiated unidirectional stream (bits 0x03).
+        guard (streamId & 0x03) == 0x03, !data.isEmpty else { return }
+
+        // Consume immediately so connection-level flow control isn't leaked.
+        quic.extendStreamOffset(streamId, count: data.count)
+
+        if streamId == serverControlStreamId {
+            serverControlBuffer.append(data)
+            processServerControlFrames()
+            return
+        }
+
+        var buf = pendingServerStreams.removeValue(forKey: streamId) ?? Data()
+        buf.append(data)
+        guard !buf.isEmpty else { return }
+        let streamType = buf[buf.startIndex]
+        switch streamType {
+        case 0x00:
+            guard serverControlStreamId == nil else {
+                tunnelCompletion?(HTTP3Error.connectionFailed("Duplicate server control stream"))
+                tunnelCompletion = nil
+                state = .closed
+                return
+            }
+            serverControlStreamId = streamId
+            serverControlBuffer = Data(buf.dropFirst())
+            processServerControlFrames()
+        case 0x01:
+            tunnelCompletion?(HTTP3Error.connectionFailed("Server opened push stream without MAX_PUSH_ID"))
+            tunnelCompletion = nil
+            state = .closed
+        case 0x02, 0x03:
+            break // QPACK encoder/decoder — dynamic table disabled, discard.
+        default:
+            if !(streamType >= 0x21 && (UInt64(streamType) - 0x21) % 0x1f == 0) {
+                quic.shutdownStream(streamId)
+            }
+        }
+    }
+
+    private func processServerControlFrames() {
+        while !serverControlBuffer.isEmpty {
+            guard let (frame, consumed) = HTTP3Framer.parseFrame(from: serverControlBuffer) else { break }
+            serverControlBuffer = Data(serverControlBuffer.dropFirst(consumed))
+
+            if !serverSettingsReceived {
+                guard frame.type == HTTP3FrameType.settings.rawValue else {
+                    tunnelCompletion?(HTTP3Error.connectionFailed("First control-stream frame was not SETTINGS"))
+                    tunnelCompletion = nil
+                    state = .closed
+                    return
+                }
+                serverSettingsReceived = true
+                if !parseServerSettings(frame.payload) {
+                    tunnelCompletion?(HTTP3Error.connectionFailed("Malformed SETTINGS frame"))
+                    tunnelCompletion = nil
+                    state = .closed
+                    return
+                }
+                continue
+            }
+
+            switch frame.type {
+            case HTTP3FrameType.goaway.rawValue:
+                state = .closed
+            case HTTP3FrameType.settings.rawValue:
+                tunnelCompletion?(HTTP3Error.connectionFailed("Duplicate SETTINGS frame"))
+                tunnelCompletion = nil
+                state = .closed
+                return
+            case HTTP3FrameType.data.rawValue,
+                 HTTP3FrameType.headers.rawValue,
+                 HTTP3FrameType.pushPromise.rawValue:
+                tunnelCompletion?(HTTP3Error.connectionFailed("Forbidden frame on control stream"))
+                tunnelCompletion = nil
+                state = .closed
+                return
+            default:
+                break
+            }
+        }
+    }
+
+    private func parseServerSettings(_ payload: Data) -> Bool {
+        var offset = 0
+        var seen = Set<UInt64>()
+        while offset < payload.count {
+            guard let (id, idLen) = HTTP3Framer.decodeVarInt(from: payload, offset: offset) else { return false }
+            offset += idLen
+            guard let (value, valLen) = HTTP3Framer.decodeVarInt(from: payload, offset: offset) else { return false }
+            offset += valLen
+            if !seen.insert(id).inserted { return false }
+            if id == HTTP3SettingsID.maxFieldSectionSize.rawValue {
+                peerMaxFieldSectionSize = value
+            }
+        }
+        return true
+    }
+
+    private func isWithinPeerFieldSectionLimit(_ headers: [(name: String, value: String)]) -> Bool {
+        let limit = peerMaxFieldSectionSize
+        if limit == UInt64.max { return true }
+        var total: UInt64 = 0
+        for h in headers {
+            total = total &+ UInt64(h.name.utf8.count) &+ UInt64(h.value.utf8.count) &+ 32
+            if total > limit { return false }
+        }
+        return true
     }
 
     private func handleRequestStreamData(_ data: Data, fin: Bool) {
@@ -272,7 +399,11 @@ class HTTP3Connection: NaiveTunnel {
             return
         }
 
-        let headers = QPACKEncoder.decodeHeaders(from: frame.payload)
+        guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
+            tunnelCompletion?(HTTP3Error.connectionFailed("Malformed QPACK header block"))
+            tunnelCompletion = nil
+            return
+        }
 
         let statusHeader = headers.first(where: { $0.name == ":status" })
         guard let status = statusHeader?.value, status == "200" else {
