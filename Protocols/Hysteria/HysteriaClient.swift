@@ -251,7 +251,10 @@ class HysteriaClient {
             return
         }
 
-        let headers = QPACKEncoder.decodeHeaders(from: frame.payload)
+        guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
+            failAuth(HysteriaError.authFailed("malformed QPACK header block"))
+            return
+        }
         let statusHeader = headers.first(where: { $0.name == ":status" })
         guard let status = statusHeader?.value, status == "\(HysteriaConstants.statusAuthOK)" else {
             let code = statusHeader?.value ?? "unknown"
@@ -305,23 +308,15 @@ class HysteriaClient {
 
             // Send the full TCPRequest (frame type + address + padding) eagerly so
             // server-first protocols (SSH, SMTP, MySQL, …) don't stall waiting for
-            // the client to write first. The frame type is written separately
-            // before the body.
-            let frameTypeData = QUICVarint.encode(HysteriaConstants.frameTypeTCPRequest)
-            let requestBody = HysteriaTCPFraming.buildTCPRequest(address: address)
-            quic.writeStream(streamId, data: frameTypeData) { error in
+            // the client to write first.
+            var request = QUICVarint.encode(HysteriaConstants.frameTypeTCPRequest)
+            request.append(HysteriaTCPFraming.buildTCPRequest(address: address))
+            quic.writeStream(streamId, data: request) { error in
                 if let error {
                     self.queue.async { self.tcpStreams[streamId] = nil }
                     completion(.failure(error))
-                    return
-                }
-                quic.writeStream(streamId, data: requestBody) { error in
-                    if let error {
-                        self.queue.async { self.tcpStreams[streamId] = nil }
-                        completion(.failure(error))
-                    } else {
-                        completion(.success(conn))
-                    }
+                } else {
+                    completion(.success(conn))
                 }
             }
         }

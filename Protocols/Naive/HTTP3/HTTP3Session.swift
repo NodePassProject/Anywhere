@@ -44,6 +44,13 @@ class HTTP3Session {
     private var serverControlBuffer = Data()
     /// Tracks server-initiated streams whose type byte hasn't been read yet.
     private var pendingServerStreams: [Int64: Data] = [:]
+    /// True once we've parsed the server's SETTINGS frame on its control stream.
+    /// RFC 9114 §7.2.4: SETTINGS MUST be the first frame on the control stream.
+    private var serverSettingsReceived = false
+
+    /// Peer-advertised MAX_FIELD_SECTION_SIZE from SETTINGS. RFC 9114 §4.2.2.
+    /// Defaults to unlimited until SETTINGS arrives.
+    private(set) var peerMaxFieldSectionSize: UInt64 = UInt64.max
 
     // Pool-visible state — accessed from the pool's lock context (arbitrary thread).
     // Must NOT touch `streams` or other queue-protected state.
@@ -238,25 +245,53 @@ class HTTP3Session {
         quic.extendStreamOffset(streamID, count: data.count)
 
         if streamID == serverControlStreamID {
-            // Data on the established control stream — parse for GOAWAY
+            // Data on the established control stream — parse for SETTINGS/GOAWAY
             serverControlBuffer.append(data)
             processServerControlFrames()
-        } else if pendingServerStreams[streamID] != nil || serverControlStreamID == nil {
-            // First data on a new server-initiated stream — read the stream type byte
+        } else {
+            // Any server-initiated unidirectional stream other than the control
+            // stream needs its type byte read and classified. If the stream is
+            // already known to be non-control (e.g. QPACK) we keep discarding.
             var buf = pendingServerStreams.removeValue(forKey: streamID) ?? Data()
             buf.append(data)
             guard !buf.isEmpty else { return }
             let streamType = buf[buf.startIndex]
-            if streamType == 0x00 { // Control stream
+            switch streamType {
+            case 0x00: // Control stream (RFC 9114 §6.2.1)
+                guard serverControlStreamID == nil else {
+                    // RFC 9114 §6.2.1: more than one control stream is a
+                    // connection error of type H3_STREAM_CREATION_ERROR.
+                    failSession(HTTP3Error.connectionFailed("Duplicate server control stream"))
+                    return
+                }
                 serverControlStreamID = streamID
                 serverControlBuffer = Data(buf.dropFirst())
                 processServerControlFrames()
+            case 0x01: // Push (RFC 9114 §6.2.2) — we never send MAX_PUSH_ID
+                failSession(HTTP3Error.connectionFailed("Server opened push stream without MAX_PUSH_ID"))
+            case 0x02, 0x03: // QPACK encoder / decoder (RFC 9204 §4.2)
+                // We advertised QPACK_MAX_TABLE_CAPACITY=0 so there's nothing
+                // meaningful on these streams; drain silently.
+                break
+            default:
+                // RFC 9114 §6.2: unknown or reserved stream types. Reserved
+                // types follow `0x1f * N + 0x21`; for everything else we
+                // abort reading via STOP_SENDING rather than trust the bytes.
+                if !isReservedStreamType(streamType) {
+                    quic.shutdownStream(streamID)
+                }
             }
-            // QPACK streams (0x02, 0x03) are silently ignored
         }
     }
 
-    /// Parses HTTP/3 frames on the server's control stream, looking for GOAWAY.
+    /// RFC 9114 §7.2.9 reserved stream type grease values.
+    private func isReservedStreamType(_ t: UInt8) -> Bool {
+        t >= 0x21 && (UInt64(t) - 0x21) % 0x1f == 0
+    }
+
+    /// Parses HTTP/3 frames on the server's control stream.
+    /// RFC 9114 §7.2.4: SETTINGS MUST be the first frame; anything else before
+    /// SETTINGS is a connection error (H3_MISSING_SETTINGS).
     private func processServerControlFrames() {
         while !serverControlBuffer.isEmpty {
             guard let (frame, consumed) = HTTP3Framer.parseFrame(from: serverControlBuffer) else {
@@ -264,11 +299,82 @@ class HTTP3Session {
             }
             serverControlBuffer = Data(serverControlBuffer.dropFirst(consumed))
 
-            if frame.type == HTTP3FrameType.goaway.rawValue {
-                handleGoaway(frame.payload)
+            if !serverSettingsReceived {
+                guard frame.type == HTTP3FrameType.settings.rawValue else {
+                    failSession(HTTP3Error.connectionFailed("First control-stream frame was not SETTINGS"))
+                    return
+                }
+                serverSettingsReceived = true
+                if !parseServerSettings(frame.payload) {
+                    failSession(HTTP3Error.connectionFailed("Malformed SETTINGS frame"))
+                    return
+                }
+                continue
             }
-            // SETTINGS and other frames on control stream are acknowledged but ignored
+
+            switch frame.type {
+            case HTTP3FrameType.goaway.rawValue:
+                handleGoaway(frame.payload)
+            case HTTP3FrameType.settings.rawValue:
+                // Only one SETTINGS frame is permitted (RFC 9114 §7.2.4).
+                failSession(HTTP3Error.connectionFailed("Duplicate SETTINGS frame"))
+                return
+            case HTTP3FrameType.data.rawValue,
+                 HTTP3FrameType.headers.rawValue,
+                 HTTP3FrameType.pushPromise.rawValue:
+                // These frames are forbidden on the control stream
+                // (RFC 9114 §7.2.1/§7.2.2/§7.2.5): H3_FRAME_UNEXPECTED.
+                failSession(HTTP3Error.connectionFailed("Forbidden frame type \(frame.type) on control stream"))
+                return
+            default:
+                break // Unknown/grease types are ignored.
+            }
         }
+    }
+
+    /// Parses the server's SETTINGS payload into peer limits we care about.
+    /// Returns false if the payload is malformed.
+    private func parseServerSettings(_ payload: Data) -> Bool {
+        var offset = 0
+        var seen = Set<UInt64>()
+        while offset < payload.count {
+            guard let (id, idLen) = HTTP3Framer.decodeVarInt(from: payload, offset: offset) else {
+                return false
+            }
+            offset += idLen
+            guard let (value, valLen) = HTTP3Framer.decodeVarInt(from: payload, offset: offset) else {
+                return false
+            }
+            offset += valLen
+
+            // RFC 9114 §7.2.4: the same identifier MUST NOT occur more than once.
+            if !seen.insert(id).inserted { return false }
+
+            switch id {
+            case HTTP3SettingsID.maxFieldSectionSize.rawValue:
+                peerMaxFieldSectionSize = value
+            case HTTP3SettingsID.qpackMaxTableCapacity.rawValue,
+                 HTTP3SettingsID.qpackBlockedStreams.rawValue:
+                // We don't use the dynamic table, so we don't need to react.
+                break
+            default:
+                break // Unknown / reserved identifiers are ignored.
+            }
+        }
+        return true
+    }
+
+    /// RFC 9114 §4.2.2 — Sum of (name.utf8.count + value.utf8.count + 32)
+    /// over all fields. Returns true if the list fits under the peer's limit.
+    func isWithinPeerFieldSectionLimit(_ headers: [(name: String, value: String)]) -> Bool {
+        let limit = peerMaxFieldSectionSize
+        if limit == UInt64.max { return true }
+        var total: UInt64 = 0
+        for h in headers {
+            total = total &+ UInt64(h.name.utf8.count) &+ UInt64(h.value.utf8.count) &+ 32
+            if total > limit { return false }
+        }
+        return true
     }
 
     /// Handles a GOAWAY frame: stops accepting new streams and drains existing ones.

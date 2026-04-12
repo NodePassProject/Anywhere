@@ -556,7 +556,6 @@ class QUICConnection {
         ngtcp2_swift_settings_default(&settings)
         settings.initial_ts = currentTimestamp()
         settings.max_tx_udp_payload_size = Self.maxUDPPayload
-        settings.ack_thresh = 1
         var params = ngtcp2_transport_params()
         ngtcp2_swift_transport_params_default(&params)
         params.initial_max_streams_bidi = 100
