@@ -1473,16 +1473,76 @@ class ProxyClient {
             }
 
         case .http3:
-            HTTP3SessionPool.shared.acquireStream(
-                host: proxyHost,
-                port: configuration.serverPort,
-                sni: naiveConfig.effectiveSNI,
-                configuration: naiveConfig,
-                destination: destination
-            ) { [self] stream in
-                openTunnelAndWrap(stream, completion: completion)
+            acquireHTTP3StreamWithRetry(
+                proxyHost: proxyHost,
+                naiveConfig: naiveConfig,
+                destination: destination,
+                retriesLeft: 1,
+                completion: completion
+            )
+        }
+    }
+
+    /// Acquires an HTTP/3 stream and opens the CONNECT tunnel, retrying once
+    /// on a fresh session for failures that kill the underlying QUIC
+    /// connection — handshake timeout, DRAINING, IDLE_CLOSE, or peer
+    /// `STREAM_ID_BLOCKED`. Without this, a single bad handshake fails every
+    /// concurrent `acquireStream` caller queued on the same `readyCallbacks`
+    /// list; the pool evicts the dead session on `onClose`, so the retry
+    /// lands on a freshly-built one (or joins a newer connecting session).
+    private func acquireHTTP3StreamWithRetry(
+        proxyHost: String,
+        naiveConfig: NaiveConfiguration,
+        destination: String,
+        retriesLeft: Int,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        HTTP3SessionPool.shared.acquireStream(
+            host: proxyHost,
+            port: configuration.serverPort,
+            sni: naiveConfig.effectiveSNI,
+            configuration: naiveConfig,
+            destination: destination
+        ) { [self] stream in
+            stream.openTunnel { [self] error in
+                if let error {
+                    stream.close()
+                    if retriesLeft > 0 && Self.isRetryableHTTP3Error(error) {
+                        self.acquireHTTP3StreamWithRetry(
+                            proxyHost: proxyHost,
+                            naiveConfig: naiveConfig,
+                            destination: destination,
+                            retriesLeft: retriesLeft - 1,
+                            completion: completion
+                        )
+                        return
+                    }
+                    completion(.failure(error))
+                    return
+                }
+                let connection = NaiveProxyConnection(
+                    tunnel: stream,
+                    paddingType: stream.negotiatedPaddingType
+                )
+                completion(.success(connection))
             }
         }
+    }
+
+    /// Session-level failures that warrant one fresh-session retry.
+    /// Excludes stream-level protocol errors (407 auth, tunnel status, etc.)
+    /// which would fail the same way on any new session.
+    private static func isRetryableHTTP3Error(_ error: Error) -> Bool {
+        if error is QUICConnection.QUICError { return true }
+        if case HTTP3Error.streamIdBlocked = error { return true }
+        if case HTTP3Error.streamClosed = error { return true }
+        if case let HTTP3Error.connectionFailed(msg) = error {
+            // `connectionFailed` covers both "Session closed" / "Session
+            // draining" (retry worthwhile) and malformed-frame protocol
+            // errors (retry pointless). Distinguish by the message we emit.
+            return msg.hasPrefix("Session ")
+        }
+        return false
     }
 
     /// Opens a ``NaiveTunnel`` and wraps it in a ``NaiveProxyConnection``.

@@ -15,6 +15,10 @@ enum HTTP3Error: Error, LocalizedError {
     case tunnelFailed(statusCode: String)
     case authenticationRequired
     case streamClosed
+    /// ngtcp2 returned STREAM_ID_BLOCKED — peer hasn't granted enough bidi
+    /// stream credit on this session. The pool marks the session blocked so
+    /// the caller can retry once on a fresh session.
+    case streamIdBlocked
 
     var errorDescription: String? {
         switch self {
@@ -23,6 +27,7 @@ enum HTTP3Error: Error, LocalizedError {
         case .tunnelFailed(let code): return "HTTP/3 CONNECT tunnel failed with status \(code)"
         case .authenticationRequired: return "HTTP/3 proxy authentication required (407)"
         case .streamClosed: return "HTTP/3 stream closed"
+        case .streamIdBlocked: return "HTTP/3 peer stream limit reached"
         }
     }
 }
@@ -112,8 +117,12 @@ class HTTP3Connection: NaiveTunnel {
                 self.queue.async {
                     self.openControlStream()
                     self.quic.streamDataHandler = { [weak self] streamId, data, fin in
+                        // `data` is a zero-copy view into ngtcp2's receive
+                        // buffer and is only valid for this synchronous call.
+                        // We hop to our own queue, so copy before escaping.
+                        let copied = Data(data)
                         self?.queue.async {
-                            self?.handleStreamData(streamId: streamId, data: data, fin: fin)
+                            self?.handleStreamData(streamId: streamId, data: copied, fin: fin)
                         }
                     }
                     self.sendConnect()

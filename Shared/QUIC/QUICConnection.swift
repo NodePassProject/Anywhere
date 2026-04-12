@@ -52,6 +52,18 @@ class QUICConnection {
     fileprivate var conn: OpaquePointer?
     private var connRefStorage = ngtcp2_crypto_conn_ref()
 
+    /// True while `handleReceivedPacket` is inside `ngtcp2_swift_conn_read_pkt`.
+    /// Callbacks fired by ngtcp2 during read (e.g. recv_stream_data → app →
+    /// `extendStreamOffset`) must not trigger a reentrant write — the
+    /// tail-flush at the end of `handleReceivedPacket` covers it.
+    private var inReadPkt = false
+
+    /// Set when an operation (e.g. `extendStreamOffset`) has queued a
+    /// MAX_STREAM_DATA/MAX_DATA update that needs to go out but we don't
+    /// want to flush synchronously on the hot path.  Drained at the end
+    /// of the current queue cycle via a single coalesced `writeToUDP`.
+    private var flushScheduled = false
+
     private var udpConnection: NWConnection?
     private var localAddr = sockaddr_storage()
     private var remoteAddr = sockaddr_storage()
@@ -66,6 +78,10 @@ class QUICConnection {
     private var scid = ngtcp2_cid()
 
     fileprivate var connectCompletion: ((Error?) -> Void)?
+    /// Stream data delivery. The `Data` is a zero-copy view into ngtcp2's
+    /// receive buffer and is only valid for the duration of this synchronous
+    /// call — the handler MUST consume or copy it before returning. Dispatching
+    /// the view to another queue without copying is a use-after-free.
     var streamDataHandler: ((Int64, Data, Bool) -> Void)?
     /// Called when a QUIC DATAGRAM frame is received.
     var datagramHandler: ((Data) -> Void)?
@@ -94,6 +110,19 @@ class QUICConnection {
     private var pendingDatagrams: [Data] = []
 
     static let maxUDPPayload = 1452
+
+    /// Reusable send buffer. writeToUDP() and writeStreamSync() are called
+    /// thousands of times per second under bulk transfer; allocating a fresh
+    /// 1452-byte `[UInt8]` on each call was a measurable CPU hit. Both run
+    /// on `queue` so sharing is safe.
+    private var sendBuf = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
+
+    /// Payload sizes PMTUD probes. Must be in (1200, max_tx_udp_payload_size]
+    /// — ngtcp2 silently skips probes above `hard_max_udp_payload_size =
+    /// min(remote_max_udp_payload_size, settings.max_tx_udp_payload_size)`.
+    /// Ascending so each success advances to the next size.
+    /// Values copied internally by ngtcp2 at conn-new time.
+    private static let pmtudProbes: [UInt16] = [1350, 1400, 1452]
 
     // MARK: Init
 
@@ -158,9 +187,41 @@ class QUICConnection {
     /// Called when the application has consumed `count` bytes from a stream,
     /// allowing the server to send more data.
     func extendStreamOffset(_ streamId: Int64, count: Int) {
-        guard let conn, count > 0 else { return }
+        guard count > 0 else { return }
+        // All ngtcp2_conn_* calls and `flushScheduled`/`inReadPkt` mutation
+        // must happen on the QUIC queue.  Off-queue callers bounce through
+        // an async; the same async coalesces with any pending flush.
+        if isOnQueue {
+            extendStreamOffsetOnQueue(streamId, count: count)
+        } else {
+            queue.async { [weak self] in
+                self?.extendStreamOffsetOnQueue(streamId, count: count)
+            }
+        }
+    }
+
+    private func extendStreamOffsetOnQueue(_ streamId: Int64, count: Int) {
+        guard let conn else { return }
         ngtcp2_conn_extend_max_stream_offset(conn, streamId, UInt64(count))
         ngtcp2_conn_extend_max_offset(conn, UInt64(count))
+        // Coalesce MAX_STREAM_DATA/MAX_DATA flushes: on bulk receive the
+        // reader drains one ~1300-byte chunk at a time, each triggering an
+        // ack.  Flushing a full writeToUDP cycle per ack burnt CPU on the
+        // hot path.  ngtcp2 queues the frame internally; schedule one
+        // coalesced flush per queue cycle and let the next organic write
+        // (or this async bounce) carry it out.
+        //
+        // Inside read_pkt: skip entirely — handleReceivedPacket's tail-flush
+        // already drains pending updates.  Outside read_pkt: schedule once
+        // via queue.async so a run of acks merges into one writeToUDP.
+        if inReadPkt { return }
+        if flushScheduled { return }
+        flushScheduled = true
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.flushScheduled = false
+            self.writeToUDP()
+        }
     }
 
     /// Shuts down a stream (sends RESET_STREAM + STOP_SENDING).
@@ -269,7 +330,6 @@ class QUICConnection {
         var offset = 0
 
         while offset < data.count {
-            var packetBuf = [UInt8](repeating: 0, count: Self.maxUDPPayload)
             var pi = ngtcp2_pkt_info()
             var pdatalen: ngtcp2_ssize = 0
 
@@ -288,7 +348,7 @@ class QUICConnection {
                 var vec = ngtcp2_vec(base: UnsafeMutablePointer(mutating: ptr),
                                     len: remaining)
                 return ngtcp2_swift_conn_writev_stream(
-                    conn, nil, &pi, &packetBuf, packetBuf.count,
+                    conn, nil, &pi, &sendBuf, sendBuf.count,
                     &pdatalen, flags,
                     streamId, &vec, 1, ts
                 )
@@ -312,7 +372,7 @@ class QUICConnection {
                 break
             }
 
-            sendUDPPacket(Data(packetBuf.prefix(Int(nwrite))))
+            sendUDPPacket(Data(sendBuf.prefix(Int(nwrite))))
             if pdatalen > 0 { offset += Int(pdatalen) }
             if pdatalen == 0 { break }
         }
@@ -356,6 +416,15 @@ class QUICConnection {
         let work = { [weak self] in
             guard let self else { return }
             guard self.state != .closed else { return }
+            // Any close that happens before we reached `.connected` means the
+            // TLS handshake didn't complete — invalidate any cached session
+            // ticket for this (SNI, ALPN) so the next attempt does a full
+            // handshake instead of replaying a ticket whose keys the server
+            // may have rotated. Without this, one bad ticket produces a
+            // permanent HANDSHAKE_TIMEOUT loop across every future session.
+            if self.state != .connected {
+                invalidateCachedSessionTicket(serverName: self.serverName, alpn: self.alpn)
+            }
             self.retransmitTimer?.cancel()
             self.retransmitTimer = nil
             if let conn = self.conn {
@@ -505,11 +574,13 @@ class QUICConnection {
     }
 
     private func sendUDPPacket(_ data: Data) {
-        udpConnection?.send(content: data, completion: .contentProcessed { error in
-            if let error {
-                logger.error("[QUIC] UDP send error: \(error.localizedDescription)")
-            }
-        })
+        // `.idempotent` skips per-packet completion delivery. UDP is
+        // fire-and-forget; `NWConnection` still surfaces fatal transport
+        // errors via its stateUpdateHandler, so we don't need per-datagram
+        // error callbacks — and allocating a completion closure per packet
+        // was a measurable hot-path cost under bulk (~9k packets/s at
+        // 100 Mbps).
+        udpConnection?.send(content: data, completion: .idempotent)
     }
 
     private func readFromUDP() {
@@ -558,21 +629,27 @@ class QUICConnection {
         ngtcp2_swift_settings_default(&settings)
         settings.initial_ts = currentTimestamp()
         settings.max_tx_udp_payload_size = Self.maxUDPPayload
+        // Match naiveproxy/Chromium defaults. CUBIC is what the upstream
+        // server stack is tuned against; BBR is a reasonable proxy-side
+        // choice but deviates from the reference implementation.
+        settings.cc_algo = NGTCP2_CC_ALGO_CUBIC
+        settings.max_stream_window = 32 * 1024 * 1024
+        settings.max_window = 96 * 1024 * 1024
+        // Matches naive's `kMaxTimeForCryptoHandshakeSecs = 10`
+        // (quic_constants.h). Covers ~three PTO retransmissions (1/2/4 s)
+        // before the pool's one-shot retry kicks in — tight enough to
+        // recover from a stale PSK quickly, loose enough not to trip on
+        // high-RTT / lossy mobile paths.
+        settings.handshake_timeout = 10 * 1_000_000_000
         var params = ngtcp2_transport_params()
         ngtcp2_swift_transport_params_default(&params)
         params.initial_max_streams_bidi = 100
         params.initial_max_streams_uni = 100
-        params.initial_max_data = 64 * 1024 * 1024
-        params.initial_max_stream_data_bidi_local = 64 * 1024 * 1024
-        params.initial_max_stream_data_bidi_remote = 64 * 1024 * 1024
-        params.initial_max_stream_data_uni = 64 * 1024 * 1024
-        // 30s idle timeout (ngtcp2 durations are nanoseconds). Without this
-        // ngtcp2 advertises 0 which disables the idle timer entirely, so a
-        // half-dead connection would linger until the peer sends CLOSE.
+        params.initial_max_data = 15 * 1024 * 1024
+        params.initial_max_stream_data_bidi_local = 6 * 1024 * 1024
+        params.initial_max_stream_data_bidi_remote = 6 * 1024 * 1024
+        params.initial_max_stream_data_uni = 6 * 1024 * 1024
         params.max_idle_timeout = 30 * 1_000_000_000
-        // We don't implement client-initiated migration and don't want the
-        // server migrating us to a preferred address, so signal this to the
-        // server (RFC 9000 §18.2).
         params.disable_active_migration = 1
         if datagramsEnabled {
             params.max_datagram_frame_size = Self.maxDatagramFrameSize
@@ -597,14 +674,25 @@ class QUICConnection {
         }
 
         var connPtr: OpaquePointer?
-        let rv = ngtcp2_swift_conn_client_new(
-            &connPtr, &dcid, &scid, &path, NGTCP2_PROTO_VER_V1,
-            &callbacks, &settings, &params, nil, &connRefStorage
-        )
+        let rv = Self.pmtudProbes.withUnsafeBufferPointer { probes -> Int32 in
+            settings.pmtud_probes = probes.baseAddress
+            settings.pmtud_probeslen = probes.count
+            return ngtcp2_swift_conn_client_new(
+                &connPtr, &dcid, &scid, &path, NGTCP2_PROTO_VER_V1,
+                &callbacks, &settings, &params, nil, &connRefStorage
+            )
+        }
         guard rv == 0, let connPtr else {
             throw QUICError.connectionFailed("ngtcp2_conn_client_new: \(rv)")
         }
         self.conn = connPtr
+
+        // Emit a PING every 15 s of inactivity so a silently-broken UDP path
+        // (carrier NAT rebind, server-side idle sweep) surfaces as a loss /
+        // idle-close within one retransmission cycle rather than waiting for
+        // the next app write to hit CONNECTION_CLOSE. Mirrors naiveproxy's
+        // `set_keep_alive_ping_timeout(kPingTimeoutSecs)`.
+        ngtcp2_conn_set_keep_alive_timeout(connPtr, 15 * 1_000_000_000)
 
         ngtcp2_conn_set_tls_native_handle(connPtr,
             UnsafeMutableRawPointer(bitPattern: UInt(NGTCP2_APPLE_CS_AES_128_GCM_SHA256)))
@@ -616,6 +704,9 @@ class QUICConnection {
         guard let conn else { return }
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
+
+        inReadPkt = true
+        defer { inReadPkt = false }
 
         let rv: Int32 = data.withUnsafeBytes { raw in
             guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
@@ -664,7 +755,6 @@ class QUICConnection {
     fileprivate func writeToUDP() {
         guard let conn else { return }
         let ts = currentTimestamp()
-        var buf = [UInt8](repeating: 0, count: Self.maxUDPPayload)
         var pi = ngtcp2_pkt_info()
 
         // Drain pending datagrams first. `write_datagram` also flushes ACKs,
@@ -680,7 +770,7 @@ class QUICConnection {
                     return 0
                 }
                 return ngtcp2_swift_conn_write_datagram(
-                    conn, nil, &pi, &buf, buf.count,
+                    conn, nil, &pi, &sendBuf, sendBuf.count,
                     &accepted, 0, 0, ptr, dgram.count, ts
                 )
             }
@@ -691,7 +781,7 @@ class QUICConnection {
                 continue
             }
             if nwrite > 0 {
-                sendUDPPacket(Data(buf.prefix(Int(nwrite))))
+                sendUDPPacket(Data(sendBuf.prefix(Int(nwrite))))
             }
             if accepted != 0 {
                 pendingDatagrams.removeFirst()
@@ -705,9 +795,9 @@ class QUICConnection {
         // Flush any remaining control/stream packets that write_datagram
         // didn't cover (e.g. when no datagrams were pending).
         while true {
-            let nwrite = ngtcp2_swift_conn_write_pkt(conn, nil, &pi, &buf, buf.count, ts)
+            let nwrite = ngtcp2_swift_conn_write_pkt(conn, nil, &pi, &sendBuf, sendBuf.count, ts)
             if nwrite <= 0 { break }
-            sendUDPPacket(Data(buf.prefix(Int(nwrite))))
+            sendUDPPacket(Data(sendBuf.prefix(Int(nwrite))))
         }
         // Any ngtcp2 operation may change the next deadline (retransmission,
         // ACK, PING, etc.).  Keep the timer aligned with ngtcp2's state.
@@ -725,42 +815,49 @@ class QUICConnection {
     private func rescheduleTimer() {
         guard let conn else { return }
         let expiry = ngtcp2_conn_get_expiry(conn)
-        guard expiry != UInt64.max else {
-            retransmitTimer?.cancel()
-            retransmitTimer = nil
-            lastScheduledExpiry = 0
-            return
-        }
 
-        // Avoid creating a new timer if the deadline hasn't changed
+        // Short-circuit when the deadline hasn't moved.  Under bulk transfer
+        // ngtcp2's expiry shifts on nearly every ACK — creating a fresh
+        // DispatchSourceTimer each time was a measurable CPU sink.
         if expiry == lastScheduledExpiry && retransmitTimer != nil { return }
         lastScheduledExpiry = expiry
 
-        let now = currentTimestamp()
-        let delay: UInt64 = expiry > now ? expiry - now : 0
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + .nanoseconds(Int(delay)),
-                      leeway: .microseconds(500))
-        timer.setEventHandler { [weak self] in
-            guard let self, let conn = self.conn else { return }
-            self.lastScheduledExpiry = 0  // allow reschedule after handling
-            let ts = self.currentTimestamp()
-            let rv = ngtcp2_conn_handle_expiry(conn, ts)
-            if rv != 0 {
-                let error = QUICError.connectionFailed("expiry error: \(rv)")
-                if let cb = self.connectCompletion {
-                    self.connectCompletion = nil
-                    cb(error)
+        if retransmitTimer == nil {
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.setEventHandler { [weak self] in
+                guard let self, let conn = self.conn else { return }
+                self.lastScheduledExpiry = 0
+                let ts = self.currentTimestamp()
+                let rv = ngtcp2_conn_handle_expiry(conn, ts)
+                if rv != 0 {
+                    let error = QUICError.connectionFailed("expiry error: \(rv)")
+                    if let cb = self.connectCompletion {
+                        self.connectCompletion = nil
+                        cb(error)
+                    }
+                    self.close(error: error)
+                    return
                 }
-                self.close(error: error)
-                return
+                self.writeToUDP()
+                // writeToUDP() calls rescheduleTimer() at the end
             }
-            self.writeToUDP()
-            // writeToUDP() calls rescheduleTimer() at the end
+            retransmitTimer = timer
+            timer.resume()
         }
-        timer.resume()
-        retransmitTimer?.cancel()
-        retransmitTimer = timer
+
+        let deadline: DispatchTime
+        if expiry == UInt64.max {
+            deadline = .distantFuture
+        } else {
+            let now = currentTimestamp()
+            let delay = expiry > now ? expiry - now : 0
+            deadline = .now() + .nanoseconds(Int(min(delay, UInt64(Int.max))))
+        }
+        // BBR relies on sub-millisecond inter-packet pacing accuracy; a loose
+        // leeway lets the dispatch scheduler coalesce wakeups, converting
+        // smooth pacing into bursts that trip loss detection.  Matches
+        // QUICHE's `QuicAlarm` precision (no leeway).
+        retransmitTimer?.schedule(deadline: deadline, leeway: .nanoseconds(0))
     }
 
     // MARK: Utilities
@@ -843,7 +940,17 @@ private let quicRecvStreamDataCB: @convention(c) (
     guard let conn, let qc = qcFromUserData(ud) else { return 0 }
     let fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0
     if let data, datalen > 0 {
-        qc.streamDataHandler?(sid, Data(bytes: data, count: datalen), fin)
+        // Wrap ngtcp2's buffer without copying. streamDataHandler runs
+        // synchronously on this thread and appends into its own storage
+        // before returning, so the pointer stays valid. Saves one
+        // full memcpy (≈ datalen bytes) per received packet — meaningful
+        // under bulk transfer where this fires thousands of times/s.
+        let view = Data(
+            bytesNoCopy: UnsafeMutableRawPointer(mutating: data),
+            count: datalen,
+            deallocator: .none
+        )
+        qc.streamDataHandler?(sid, view, fin)
     } else if fin {
         qc.streamDataHandler?(sid, Data(), true)
     }

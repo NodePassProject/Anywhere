@@ -88,9 +88,14 @@ enum HTTP3Framer {
     }
 
     /// Decodes a variable-length integer. Returns (value, bytesConsumed) or nil.
+    /// `offset` is **relative to `data.startIndex`**, so callers can pass a
+    /// zero-copy slice of another `Data` (e.g. `frame.payload`) without
+    /// rebasing. Indexing `data[0]` on a slice with a non-zero startIndex
+    /// traps; `base + offset` makes that safe.
     static func decodeVarInt(from data: Data, offset: Int = 0) -> (UInt64, Int)? {
         guard offset < data.count else { return nil }
-        let first = data[offset]
+        let base = data.startIndex
+        let first = data[base + offset]
         let prefix = first >> 6
 
         switch prefix {
@@ -98,20 +103,20 @@ enum HTTP3Framer {
             return (UInt64(first), 1)
         case 1:
             guard offset + 2 <= data.count else { return nil }
-            let value = (UInt64(first & 0x3F) << 8) | UInt64(data[offset + 1])
+            let value = (UInt64(first & 0x3F) << 8) | UInt64(data[base + offset + 1])
             return (value, 2)
         case 2:
             guard offset + 4 <= data.count else { return nil }
             var value = UInt64(first & 0x3F) << 24
-            value |= UInt64(data[offset + 1]) << 16
-            value |= UInt64(data[offset + 2]) << 8
-            value |= UInt64(data[offset + 3])
+            value |= UInt64(data[base + offset + 1]) << 16
+            value |= UInt64(data[base + offset + 2]) << 8
+            value |= UInt64(data[base + offset + 3])
             return (value, 4)
         case 3:
             guard offset + 8 <= data.count else { return nil }
             var value = UInt64(first & 0x3F) << 56
             for i in 1..<8 {
-                value |= UInt64(data[offset + i]) << ((7 - i) * 8)
+                value |= UInt64(data[base + offset + i]) << ((7 - i) * 8)
             }
             return (value, 8)
         default:
@@ -179,7 +184,15 @@ enum HTTP3Framer {
     }
 
     /// Attempts to parse one HTTP/3 frame from the buffer.
-    /// Returns the frame and the number of bytes consumed, or nil if incomplete.
+    /// `offset` is relative to `data.startIndex`; the returned `consumed`
+    /// count is also relative, so callers advance their own offset by it.
+    ///
+    /// The returned `payload` is a **zero-copy slice** of `data` — it shares
+    /// underlying storage and has a non-zero `startIndex`. Downstream parsers
+    /// that index `payload` MUST either use `data.startIndex`-relative access
+    /// (like `decodeVarInt`) or rebase with `Data(payload)` first (QPACK).
+    /// Bulk DATA frames just forward the slice, avoiding an O(payload) copy
+    /// per frame on the hot receive path.
     static func parseFrame(from data: Data, offset: Int = 0) -> (Frame, Int)? {
         var pos = offset
 
@@ -192,7 +205,9 @@ enum HTTP3Framer {
         let totalLen = pos - offset + Int(payloadLen)
         guard offset + totalLen <= data.count else { return nil }
 
-        let payload = Data(data[pos..<(pos + Int(payloadLen))])
+        // Slice with absolute indices (startIndex + relative offset).
+        let base = data.startIndex
+        let payload = data[(base + pos)..<(base + pos + Int(payloadLen))]
         return (Frame(type: frameType, payload: payload), totalLen)
     }
 }

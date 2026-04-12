@@ -99,6 +99,27 @@ class HTTP3Session {
         return true
     }
 
+    /// Pool overflow path: reserves a slot bypassing `maxConcurrentStreams`.
+    /// Used only when every session in the pool is saturated *and* the pool
+    /// has hit its hard session cap — rather than grow unbounded, we queue
+    /// an extra stream onto the least-loaded session and let ngtcp2's
+    /// STREAM_ID_BLOCKED + the caller's retry path handle flow control.
+    /// Returns false if the session is closed or stream-blocked.
+    func forceReserveStream() -> Bool {
+        _poolLock.lock()
+        defer { _poolLock.unlock() }
+        guard !poolIsClosed && !poolIsStreamBlocked else { return false }
+        _reservedStreams += 1
+        return true
+    }
+
+    /// Current reserved + active stream count. For pool load-balancing.
+    var currentStreamLoad: Int {
+        _poolLock.lock()
+        defer { _poolLock.unlock() }
+        return _poolStreamCount + _reservedStreams
+    }
+
     // MARK: - Stream Creation
 
     func createStream(destination: String) -> HTTP3Stream {

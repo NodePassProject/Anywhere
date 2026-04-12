@@ -28,18 +28,20 @@ class HTTP3Stream: NaiveTunnel {
     private var state: StreamState = .idle
     private var headersReceived = false
 
-    // Receive buffering
-    private var receiveQueue: [Data] = []
+    // Receive buffering. Each queued element carries the QUIC byte count
+    // (frame header + payload) so flow control is extended in lockstep with
+    // the chunk leaving our buffer — not in one big over-grant when any
+    // chunk drains. Preserves the "backpressure when app is slow" invariant.
+    private var receiveQueue: [(chunk: Data, quicBytes: Int)] = []
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var endStreamReceived = false
     private var streamError: Error?
 
-    // Partial HTTP/3 frame buffer (frames may span multiple QUIC deliveries)
+    // Partial HTTP/3 frame buffer (frames may span multiple QUIC deliveries).
+    // Parsing advances `frameBufferOffset` in place; the buffer is compacted
+    // lazily to keep parse-per-frame amortized O(1) instead of O(n) per frame.
     private var frameBuffer = Data()
-
-    /// QUIC-level bytes received but not yet acknowledged to flow control.
-    /// Decremented (and window extended) when the application consumes data.
-    private var pendingQuicBytes = 0
+    private var frameBufferOffset = 0
 
     // CONNECT handshake callback
     private var connectCompletion: ((Error?) -> Void)?
@@ -78,7 +80,7 @@ class HTTP3Stream: NaiveTunnel {
                 guard let sid = session.openBidiStream() else {
                     self.state = .closed
                     session.markStreamBlocked()
-                    completion(HTTP3Error.connectionFailed("Failed to open QUIC stream"))
+                    completion(HTTP3Error.streamIdBlocked)
                     return
                 }
                 self.quicStreamID = sid
@@ -163,16 +165,14 @@ class HTTP3Stream: NaiveTunnel {
                 return
             }
             if !receiveQueue.isEmpty {
-                ackConsumedBytes()
-                if receiveQueue.count == 1 {
-                    let data = receiveQueue.removeFirst()
-                    completion(data, nil)
-                } else {
-                    var merged = Data(capacity: receiveQueue.reduce(0) { $0 + $1.count })
-                    for chunk in receiveQueue { merged.append(chunk) }
-                    receiveQueue.removeAll()
-                    completion(merged, nil)
-                }
+                // Hand out one chunk at a time and let the caller re-arm.
+                // Merging multiple queued chunks into a single Data required
+                // allocating + copying O(total) bytes on every slow-reader
+                // drain; the upstream pipeline doesn't care about chunk
+                // size, so this matches TCP socket semantics for free.
+                let (data, quicBytes) = receiveQueue.removeFirst()
+                ackQuicBytes(quicBytes)
+                completion(data, nil)
                 return
             }
             if endStreamReceived {
@@ -211,7 +211,7 @@ class HTTP3Stream: NaiveTunnel {
 
             if let cb = connectCompletion {
                 connectCompletion = nil
-                cb(HTTP3Error.connectionFailed("Stream closed"))
+                cb(HTTP3Error.streamClosed)
             }
             if let pending = pendingReceive {
                 pendingReceive = nil
@@ -225,7 +225,6 @@ class HTTP3Stream: NaiveTunnel {
     /// Handles raw QUIC stream data delivered by the session.
     func handleStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty {
-            pendingQuicBytes += data.count
             frameBuffer.append(data)
             processFrameBuffer()
         }
@@ -249,18 +248,45 @@ class HTTP3Stream: NaiveTunnel {
     // MARK: - HTTP/3 Frame Processing
 
     private func processFrameBuffer() {
-        while !frameBuffer.isEmpty {
-            guard let (frame, consumed) = HTTP3Framer.parseFrame(from: frameBuffer) else {
+        // Non-DATA frames (HEADERS, SETTINGS, GOAWAY) are consumed internally
+        // and never reach the app. Ack their QUIC bytes as a batch at the end
+        // of this parse pass — one flow-control extension per delivery rather
+        // than one per parsed frame.
+        var controlBytes = 0
+        while frameBufferOffset < frameBuffer.count {
+            guard let (frame, consumed) = HTTP3Framer.parseFrame(
+                from: frameBuffer, offset: frameBufferOffset
+            ) else {
                 break // Incomplete frame, wait for more data
             }
-            frameBuffer = Data(frameBuffer.dropFirst(consumed)) // Re-base to index 0
+            frameBufferOffset += consumed
 
             if !headersReceived {
                 processResponseHeaders(frame)
+                controlBytes += consumed
             } else if frame.type == HTTP3FrameType.data.rawValue {
-                deliverData(frame.payload)
+                deliverData(frame.payload, quicBytes: consumed)
+            } else {
+                // SETTINGS/GOAWAY/etc. — internally consumed.
+                controlBytes += consumed
             }
-            // Ignore other frame types (SETTINGS, GOAWAY, etc.)
+        }
+        if controlBytes > 0 {
+            ackQuicBytes(controlBytes)
+        }
+
+        // Compact only when fully drained or after a generous threshold — avoids
+        // the O(n²) "copy remaining bytes every frame" cost on bulk streams.
+        // Reassign instead of mutating in place: `Data.removeFirst` / `removeAll`
+        // leave `startIndex` shifted, but HTTP3Framer.decodeVarInt assumes
+        // `data[0]` is the first byte.  `Data(...)` copies into fresh storage
+        // with startIndex 0.
+        if frameBufferOffset >= frameBuffer.count {
+            frameBuffer = Data()
+            frameBufferOffset = 0
+        } else if frameBufferOffset > 64 * 1024 {
+            frameBuffer = Data(frameBuffer[(frameBuffer.startIndex + frameBufferOffset)...])
+            frameBufferOffset = 0
         }
     }
 
@@ -270,7 +296,9 @@ class HTTP3Stream: NaiveTunnel {
             return
         }
 
-        guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
+        // parseFrame hands back a zero-copy slice with a non-zero startIndex;
+        // QPACK decoder indexes with offset=0 so rebase via copy here.
+        guard let headers = QPACKEncoder.decodeHeaders(from: Data(frame.payload)) else {
             handleStreamError(HTTP3Error.connectionFailed("Malformed QPACK header block"))
             return
         }
@@ -305,23 +333,25 @@ class HTTP3Stream: NaiveTunnel {
         cb?(nil)
     }
 
-    private func deliverData(_ data: Data) {
-        guard !data.isEmpty else { return }
+    private func deliverData(_ data: Data, quicBytes: Int) {
+        guard !data.isEmpty else {
+            // Empty DATA frame — still consumed QUIC bytes (frame header).
+            if quicBytes > 0 { ackQuicBytes(quicBytes) }
+            return
+        }
         if let pending = pendingReceive {
             pendingReceive = nil
-            ackConsumedBytes()
+            ackQuicBytes(quicBytes)
             pending(data, nil)
         } else {
-            receiveQueue.append(data)
+            receiveQueue.append((data, quicBytes))
         }
     }
 
-    /// Extends the QUIC flow control window by the bytes we've received,
+    /// Extends the QUIC flow control window by the given byte count,
     /// signaling the server that we've consumed the data and can accept more.
-    private func ackConsumedBytes() {
-        let count = pendingQuicBytes
+    private func ackQuicBytes(_ count: Int) {
         guard count > 0, let sid = quicStreamID else { return }
-        pendingQuicBytes = 0
         session?.extendStreamOffset(sid, count: count)
     }
 

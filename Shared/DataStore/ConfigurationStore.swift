@@ -71,16 +71,30 @@ class ConfigurationStore: ObservableObject {
     private func loadFromDisk() -> [ProxyConfiguration] {
         if FileManager.default.fileExists(atPath: fileURL.path),
            let data = try? Data(contentsOf: fileURL),
-           let result = try? JSONDecoder().decode([ProxyConfiguration].self, from: data) {
+           let result = Self.decodeSkippingInvalid(data) {
             return result
         }
         #if os(tvOS)
         if let data = AWCore.userDefaults.data(forKey: Self.userDefaultsKey),
-           let result = try? JSONDecoder().decode([ProxyConfiguration].self, from: data) {
+           let result = Self.decodeSkippingInvalid(data) {
             return result
         }
         #endif
         return []
+    }
+
+    private static func decodeSkippingInvalid(_ data: Data) -> [ProxyConfiguration]? {
+        guard let wrapped = try? JSONDecoder().decode([FailableDecodable<ProxyConfiguration>].self, from: data) else {
+            return nil
+        }
+        return wrapped.compactMap(\.value)
+    }
+
+    private struct FailableDecodable<T: Decodable>: Decodable {
+        let value: T?
+        init(from decoder: Decoder) throws {
+            value = try? T(from: decoder)
+        }
     }
 
     private func saveToDisk() {

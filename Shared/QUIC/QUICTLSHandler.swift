@@ -35,6 +35,19 @@ private func sessionTicketCacheKey(serverName: String, alpn: [String]) -> String
     return "\(serverName)\u{0}\(alpn.joined(separator: ","))"
 }
 
+/// Drops any cached session ticket for (serverName, alpn) so the next
+/// handshake falls back to a full TLS exchange. Called when a handshake
+/// fails before reaching `.connected` — a cached ticket whose encryption
+/// keys the server has rotated (naive server restart) would otherwise
+/// cause every subsequent ClientHello to be silently dropped, producing
+/// a permanent HANDSHAKE_TIMEOUT loop.
+func invalidateCachedSessionTicket(serverName: String, alpn: [String]) {
+    let key = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
+    ticketCacheLock.lock()
+    sessionTicketCache.removeValue(forKey: key)
+    ticketCacheLock.unlock()
+}
+
 /// SHA-256("HelloRetryRequest") — the magic server_random value that marks an
 /// incoming ServerHello as a HelloRetryRequest (RFC 8446 §4.1.3).
 private let kHelloRetryRequestRandom: [UInt8] = [

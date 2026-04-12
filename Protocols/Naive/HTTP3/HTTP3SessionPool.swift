@@ -21,8 +21,15 @@ class HTTP3SessionPool {
     /// Last activity time per session (for idle eviction).
     private var lastActivity: [ObjectIdentifier: Date] = [:]
 
-    /// Maximum sessions per pool key.
+    /// Soft cap on sessions per pool key. When reached, acquire tries to
+    /// evict an idle session before creating a new one.
     private static let maxSessionsPerKey = 8
+
+    /// Hard cap on sessions per pool key. If every session is busy, the pool
+    /// may grow past the soft cap up to this ceiling to avoid breaking live
+    /// streams. Beyond this, acquire reuses the least-busy session instead
+    /// of opening another — preventing runaway growth under sustained load.
+    private static let hardMaxSessionsPerKey = 16
 
     /// Sessions idle longer than this are evicted.
     private static let idleTimeout: TimeInterval = 60
@@ -56,17 +63,25 @@ class HTTP3SessionPool {
         if let existing = sessions[key]?.first(where: { $0.tryReserveStream() }) {
             lastActivity[ObjectIdentifier(existing)] = Date()
             session = existing
+        } else if let overflow = overflowSession(key: key) {
+            // Hard cap hit and every session is saturated — pile onto the
+            // least-loaded one rather than grow the pool unbounded.
+            lastActivity[ObjectIdentifier(overflow)] = Date()
+            session = overflow
         } else {
-            // Enforce max sessions per key
+            // Soft cap: never close a session that still has live streams —
+            // doing so would abort in-flight tunnels on unrelated
+            // destinations. Prefer evicting an idle session; if all are
+            // busy, allow the pool to grow past the soft cap (up to
+            // `hardMaxSessionsPerKey`) rather than break working streams.
             let currentCount = sessions[key]?.count ?? 0
             if currentCount >= Self.maxSessionsPerKey {
-                // Evict the oldest session to make room
-                if let oldest = sessions[key]?.first {
+                if let victim = sessions[key]?.first(where: { !$0.hasActiveStreams }) {
                     lock.unlock()
-                    oldest.close()
+                    victim.close()
                     lock.lock()
-                    sessions[key]?.removeAll { $0 === oldest }
-                    lastActivity.removeValue(forKey: ObjectIdentifier(oldest))
+                    sessions[key]?.removeAll { $0 === victim }
+                    lastActivity.removeValue(forKey: ObjectIdentifier(victim))
                 }
             }
 
@@ -88,6 +103,22 @@ class HTTP3SessionPool {
             let stream = session.createStream(destination: destination)
             completion(stream)
         }
+    }
+
+    /// Returns the least-loaded existing session when the pool is at its
+    /// hard cap, bypassing per-session `maxConcurrentStreams`. Returns nil
+    /// when we still have room to grow the pool. Must be called with `lock`
+    /// held.
+    private func overflowSession(key: String) -> HTTP3Session? {
+        guard let pool = sessions[key], pool.count >= Self.hardMaxSessionsPerKey else {
+            return nil
+        }
+        let candidate = pool
+            .filter { !$0.poolIsClosed && !$0.poolIsStreamBlocked }
+            .min(by: { $0.currentStreamLoad < $1.currentStreamLoad })
+        guard let candidate, candidate.forceReserveStream() else { return nil }
+        logger.warning("[HTTP3Pool] Pool hit hard cap (\(Self.hardMaxSessionsPerKey)) for \(key); overflowing onto existing session")
+        return candidate
     }
 
     // MARK: - Eviction
