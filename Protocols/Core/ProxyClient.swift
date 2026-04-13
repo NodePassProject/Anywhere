@@ -237,10 +237,15 @@ class ProxyClient {
 
     // MARK: - Protocol Handshake
 
-    /// Sends the VLESS or Shadowsocks protocol handshake over an established transport connection.
+    /// Wraps an established transport connection in the appropriate outbound
+    /// protocol (VLESS or Shadowsocks) for the requested command.
     ///
-    /// For UDP commands, wraps the connection with ``UDPProxyConnection``.
-    /// For Vision flow, validates TLS 1.3 and wraps with ``VLESSVisionConnection``.
+    /// - Shadowsocks: returns a Shadowsocks{,2022,UDP} connection that owns
+    ///   its own wire encryption and framing.
+    /// - VLESS: wraps in ``VLESSConnection``, writes the VLESS request header
+    ///   (plus `initialData` for non-Vision TCP), then layers
+    ///   ``VLESSUDPConnection`` (UDP) or ``VLESSVisionConnection`` (Vision)
+    ///   on top as needed.
     private func sendProtocolHandshake(
         over connection: ProxyConnection,
         command: ProxyCommand,
@@ -250,9 +255,7 @@ class ProxyClient {
         supportsVision: Bool,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        // Shadowsocks wraps the TCP connection directly (handles UDP internally)
         if isShadowsocks {
-            connection.responseHeaderReceived = true
             completion(wrapWithShadowsocks(
                 inner: connection, command: command,
                 destinationHost: destinationHost, destinationPort: destinationPort
@@ -263,7 +266,7 @@ class ProxyClient {
         // VLESS path
         let isVision = supportsVision && isVisionFlow && (command == .tcp || command == .mux)
 
-        var requestData = VLESSProtocol.encodeRequestHeader(
+        let requestHeader = VLESSProtocol.encodeRequestHeader(
             uuid: configuration.uuid,
             command: command,
             destinationAddress: destinationHost,
@@ -271,27 +274,22 @@ class ProxyClient {
             flow: isVision ? Self.visionFlow : nil
         )
 
-        // For Vision flow, initial data needs separate padding — don't append to header
-        if let initialData, !isVision {
-            requestData.append(initialData)
-        }
-
-        connection.sendRaw(data: requestData) { [weak self] error in
+        let vless = VLESSConnection(inner: connection)
+        // For Vision flow, initial data needs separate padding — don't append to the header.
+        let handshakeInitialData = isVision ? nil : initialData
+        vless.sendHandshake(requestHeader: requestHeader, initialData: handshakeInitialData) { [weak self] error in
             if let error {
                 completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
                 return
             }
-
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
 
-            // Wrap for UDP (VLESS uses length-prefixed framing)
-            var proxyConnection: ProxyConnection = connection
-            if command == .udp {
-                proxyConnection = UDPProxyConnection(inner: connection)
-            }
+            let proxyConnection: ProxyConnection = (command == .udp)
+                ? VLESSUDPConnection(inner: vless)
+                : vless
 
             if isVision {
                 if let tlsError = self.validateOuterTLSForVision(proxyConnection) {
@@ -324,6 +322,20 @@ class ProxyClient {
         // Vision silently drops UDP/443 (QUIC) unless the -udp443 flow variant is used
         if command == .udp && destinationPort == 443 && isVisionFlow && !allowUDP443 {
             completion(.failure(ProxyError.dropped))
+            return
+        }
+        
+        if configuration.outboundProtocol == .hysteria {
+            if command == .mux {
+                completion(.failure(ProxyError.protocolError("Mux is not supported with Hysteria")))
+                return
+            }
+            connectWithHysteria(
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                completion: completion
+            )
             return
         }
         
@@ -1174,6 +1186,69 @@ class ProxyClient {
         ])
         return VLESSVisionConnection(connection: connection, userUUID: uuidData, testseed: configuration.testseed)
     }
+    
+    // MARK: - Hysteria v2
+
+    /// Connects through a Hysteria v2 server. Shares one authenticated
+    /// QUIC session per (host, port, SNI, password) via ``HysteriaSessionPool``.
+    private func connectWithHysteria(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        guard let password = configuration.hysteriaPassword else {
+            completion(.failure(ProxyError.protocolError("Hysteria password not set")))
+            return
+        }
+
+        let sni: String? = {
+            if case .tls(let tls) = configuration.securityLayer { return tls.serverName }
+            return nil
+        }()
+
+        let hyConfig = HysteriaConfiguration(
+            proxyHost: configuration.serverAddress,
+            proxyPort: configuration.serverPort,
+            password: password,
+            sni: sni,
+            clientRxBytesPerSec: 0 // "please probe" — server picks CC on its side
+        )
+
+        // RFC 3986 §3.2.2: IPv6 literals must be bracketed.
+        let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
+        let destination = "\(bracketedHost):\(destinationPort)"
+
+        HysteriaSessionPool.shared.acquireSession(configuration: hyConfig) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let session):
+                switch command {
+                case .tcp, .mux:
+                    let conn = HysteriaConnection(session: session, destination: destination)
+                    conn.open { error in
+                        if let error {
+                            conn.cancel()
+                            completion(.failure(error))
+                        } else {
+                            completion(.success(conn))
+                        }
+                    }
+                case .udp:
+                    let conn = HysteriaUDPConnection(session: session, destination: destination)
+                    conn.open { error in
+                        if let error {
+                            conn.cancel()
+                            completion(.failure(error))
+                        } else {
+                            completion(.success(conn))
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // MARK: - Shadowsocks
 
@@ -1396,7 +1471,6 @@ class ProxyClient {
                     wrappedTransport = transport
                 }
                 let proxyConnection = DirectProxyConnection(connection: wrappedTransport)
-                proxyConnection.responseHeaderReceived = true
                 completion(.success(proxyConnection))
             }
         }

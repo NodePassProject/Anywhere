@@ -143,17 +143,16 @@ class LWIPUDPFlow {
             return
         }
 
-        // Non-mux path: send payload through proxy connection
+        // Non-mux path: hand the raw payload to the proxy connection. Each
+        // protocol's UDP connection class applies its own per-packet wire
+        // framing (VLESSUDPConnection adds the 2-byte length prefix,
+        // ShadowsocksUDPConnection encrypts, HysteriaUDPConnection emits a
+        // QUIC DATAGRAM, …).
         if let connection = proxyConnection {
-            if configuration.outboundProtocol == .shadowsocks {
-                // SS connection handles encryption; send raw payload
-                connection.send(data: payload) { [weak self] error in
-                    if let error {
-                        self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
-                    }
+            connection.send(data: payload) { [weak self] error in
+                if let error {
+                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                 }
-            } else {
-                sendUDPThroughProxy(connection: connection, payload: data, payloadLength: payloadLength)
             }
             return
         }
@@ -168,25 +167,8 @@ class LWIPUDPFlow {
         if pendingBufferSize + payloadLength > TunnelConstants.udpMaxBufferSize {
             return
         }
-
-        // Always buffer raw payloads. Framing for VLESS non-mux is deferred
-        // to send time so that bypass and mux paths receive unframed data.
         pendingData.append(data.prefix(payloadLength))
         pendingBufferSize += payloadLength
-    }
-
-    private func sendUDPThroughProxy(connection: ProxyConnection, payload: Data, payloadLength: Int) {
-        let slice = payload.prefix(payloadLength)
-        var framedPayload = Data(capacity: 2 + slice.count)
-        framedPayload.append(UInt8(slice.count >> 8))
-        framedPayload.append(UInt8(slice.count & 0xFF))
-        framedPayload.append(slice)
-
-        connection.sendRaw(data: framedPayload) { [weak self] error in
-            if let error {
-                self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
-            }
-        }
     }
 
     // MARK: - Proxy Connection
@@ -322,35 +304,18 @@ class LWIPUDPFlow {
                 case .success(let proxyConnection):
                     self.proxyConnection = proxyConnection
 
-                    // Send buffered raw payloads
-                    if !self.pendingData.isEmpty {
-                        if self.configuration.outboundProtocol == .shadowsocks {
-                            // SS: send raw payloads (connection handles encryption)
-                            for payload in self.pendingData {
-                                proxyConnection.send(data: payload) { [weak self] error in
-                                    if let error {
-                                        self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
-                                    }
-                                }
-                            }
-                        } else {
-                            // VLESS: frame each payload with 2-byte length prefix
-                            let totalSize = self.pendingData.reduce(0) { $0 + 2 + $1.count }
-                            var dataToSend = Data(capacity: totalSize)
-                            for payload in self.pendingData {
-                                dataToSend.append(UInt8(payload.count >> 8))
-                                dataToSend.append(UInt8(payload.count & 0xFF))
-                                dataToSend.append(payload)
-                            }
-                            proxyConnection.sendRaw(data: dataToSend) { [weak self] error in
-                                if let error {
-                                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
-                                }
+                    // Drain buffered payloads. `send` preserves packet
+                    // boundaries — each protocol's UDP connection applies its
+                    // own wire framing.
+                    for payload in self.pendingData {
+                        proxyConnection.send(data: payload) { [weak self] error in
+                            if let error {
+                                self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                             }
                         }
-                        self.pendingData.removeAll()
-                        self.pendingBufferSize = 0
                     }
+                    self.pendingData.removeAll()
+                    self.pendingBufferSize = 0
 
                     // Start receiving proxy responses
                     self.startProxyReceiving(proxyConnection: proxyConnection)

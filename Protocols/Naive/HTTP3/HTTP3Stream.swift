@@ -296,9 +296,7 @@ class HTTP3Stream: NaiveTunnel {
             return
         }
 
-        // parseFrame hands back a zero-copy slice with a non-zero startIndex;
-        // QPACK decoder indexes with offset=0 so rebase via copy here.
-        guard let headers = QPACKEncoder.decodeHeaders(from: Data(frame.payload)) else {
+        guard let headers = QPACKEncoder.decodeHeaders(from: frame.payload) else {
             handleStreamError(HTTP3Error.connectionFailed("Malformed QPACK header block"))
             return
         }

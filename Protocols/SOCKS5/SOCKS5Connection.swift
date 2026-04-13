@@ -503,7 +503,6 @@ class SOCKS5UDPProxyConnection: ProxyConnection {
         self.udpHeader = header
 
         super.init()
-        self.responseHeaderReceived = true
     }
 
     /// Connects the UDP socket to the relay endpoint and waits for it to become ready.

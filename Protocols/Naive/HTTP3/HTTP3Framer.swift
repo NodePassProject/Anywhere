@@ -189,8 +189,8 @@ enum HTTP3Framer {
     ///
     /// The returned `payload` is a **zero-copy slice** of `data` — it shares
     /// underlying storage and has a non-zero `startIndex`. Downstream parsers
-    /// that index `payload` MUST either use `data.startIndex`-relative access
-    /// (like `decodeVarInt`) or rebase with `Data(payload)` first (QPACK).
+    /// (`decodeVarInt`, `QPACKEncoder.decodeHeaders`, etc.) use
+    /// `data.startIndex`-relative indexing so they accept the slice directly.
     /// Bulk DATA frames just forward the slice, avoiding an O(payload) copy
     /// per frame on the hot receive path.
     static func parseFrame(from data: Data, offset: Int = 0) -> (Frame, Int)? {

@@ -83,7 +83,7 @@ class HTTP3Session {
 
     init(host: String, port: UInt16, serverName: String, configuration: NaiveConfiguration) {
         self.configuration = configuration
-        self.quic = QUICConnection(host: host, port: port, serverName: serverName, alpn: ["h3"])
+        self.quic = QUICConnection(host: host, port: port, serverName: serverName, alpn: ["h3"], tuning: .naive)
     }
 
     // MARK: - Pool Interface

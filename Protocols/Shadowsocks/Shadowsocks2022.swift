@@ -67,7 +67,6 @@ class Shadowsocks2022Connection: ProxyConnection {
         self.writeNonce = ShadowsocksNonce(size: cipher.nonceSize)
         self.readNonce = ShadowsocksNonce(size: cipher.nonceSize)
         super.init()
-        self.responseHeaderReceived = true
     }
 
     override var isConnected: Bool { inner.isConnected }
@@ -487,7 +486,6 @@ class Shadowsocks2022AESUDPConnection: ProxyConnection {
         self.sessionCipher = ShadowsocksKeyDerivation.deriveSessionKey(psk: pskList.last!, salt: sidData, keySize: cipher.keySize)
 
         super.init()
-        self.responseHeaderReceived = true
     }
 
     override var isConnected: Bool { inner.isConnected }
@@ -706,7 +704,6 @@ class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
         }
         self.sessionID = sid
         super.init()
-        self.responseHeaderReceived = true
     }
 
     override var isConnected: Bool { inner.isConnected }

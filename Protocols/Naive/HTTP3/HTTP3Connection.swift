@@ -76,7 +76,8 @@ class HTTP3Connection: NaiveTunnel {
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             serverName: configuration.effectiveSNI,
-            alpn: ["h3"]
+            alpn: ["h3"],
+            tuning: .naive
         )
     }
 

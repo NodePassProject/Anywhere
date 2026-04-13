@@ -50,6 +50,9 @@ struct ProxyEditorView: View {
     @State private var publicKey = ""
     @State private var shortId = ""
     @State private var fingerprint: TLSFingerprint = .chrome133
+    
+    // Hysteria fields
+    @State private var hysteriaPassword = ""
 
     // Shadowsocks fields
     @State private var ssPassword = ""
@@ -63,6 +66,7 @@ struct ProxyEditorView: View {
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
 
+    private var isHysteria: Bool { selectedProtocol == .hysteria }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isNaive: Bool { selectedProtocol.isNaive }
@@ -71,6 +75,9 @@ struct ProxyEditorView: View {
 
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
+        if isHysteria {
+            return !hysteriaPassword.isEmpty
+        }
         if isShadowsocks {
             return !ssPassword.isEmpty
         }
@@ -105,6 +112,7 @@ struct ProxyEditorView: View {
                 Section {
                     Picker(selection: $selectedProtocol) {
                         Text("VLESS").tag(OutboundProtocol.vless)
+                        Text("Hysteria").tag(OutboundProtocol.hysteria)
                         Text("Shadowsocks").tag(OutboundProtocol.shadowsocks)
                         Text("SOCKS5").tag(OutboundProtocol.socks5)
                         Text("HTTPS").tag(OutboundProtocol.http11)
@@ -138,7 +146,16 @@ struct ProxyEditorView: View {
                     } label: {
                         TextWithColorfulIcon(titleKey: "Port", systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
                     }
-                    if isShadowsocks {
+                    if isHysteria {
+                       LabeledContent {
+                           SecureField("Password", text: $hysteriaPassword)
+                               .autocorrectionDisabled()
+                               .textInputAutocapitalization(.never)
+                               .multilineTextAlignment(.trailing)
+                       } label: {
+                           TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                       }
+                   } else if isShadowsocks {
                         LabeledContent {
                             SecureField("Password", text: $ssPassword)
                                 .autocorrectionDisabled()
@@ -209,7 +226,7 @@ struct ProxyEditorView: View {
                     }
                 }
                 
-                if !isSOCKS5 && !isNaive { Section("Transport") {
+                if !isHysteria && !isSOCKS5 && !isNaive { Section("Transport") {
                     Picker(selection: $transport) {
                         Text("TCP").tag("tcp")
                         Text("WebSocket").tag("ws")
@@ -480,6 +497,8 @@ struct ProxyEditorView: View {
         case .http11(let user, let pass), .http2(let user, let pass), .http3(let user, let pass):
             naiveUsername = user
             naivePassword = pass
+        case .hysteria(let password):
+            hysteriaPassword = password
         case .vless:
             break
         }
@@ -529,7 +548,7 @@ struct ProxyEditorView: View {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isShadowsocks || isSOCKS5 || isNaive {
+        if isHysteria || isShadowsocks || isSOCKS5 || isNaive {
             parsedUUID = self.configuration?.uuid ?? UUID()
         } else {
             guard let u = UUID(uuidString: uuid) else { return }
@@ -597,6 +616,8 @@ struct ProxyEditorView: View {
         switch selectedProtocol {
         case .vless:
             outbound = .vless(uuid: parsedUUID, encryption: encryption, flow: flow.isEmpty ? nil : flow)
+        case .hysteria:
+            outbound = .hysteria(password: hysteriaPassword)
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)
         case .socks5:

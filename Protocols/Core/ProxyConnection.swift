@@ -14,7 +14,6 @@ private let logger = AnywhereLogger(category: "Proxy")
 /// Defines the interface for all proxy connection types.
 protocol ProxyConnectionProtocol: AnyObject {
     var isConnected: Bool { get }
-    var responseHeaderReceived: Bool { get set }
 
     func send(data: Data, completion: @escaping (Error?) -> Void)
     func send(data: Data)
@@ -38,9 +37,10 @@ enum TLSVersion: UInt16, Codable {
 /// Subclasses must override ``isConnected``, ``sendRaw(data:completion:)``,
 /// ``sendRaw(data:)``, ``receiveRaw(completion:)``, and ``cancel()``.
 class ProxyConnection: ProxyConnectionProtocol {
-    var responseHeaderReceived = false
+    /// Generic per-connection lock. Used by several subclasses for
+    /// protocol-specific state (Vision traffic state, SS session keys, HTTP
+    /// upgrade framing, …); no base-class invariant depends on it.
     let lock = UnfairLock()
-    private var pendingResponseHeaderBuffer = Data()
 
     /// The negotiated TLS version of the outer transport, if applicable.
     /// Returns `nil` for non-TLS transports (raw TCP).
@@ -153,162 +153,5 @@ class ProxyConnection: ProxyConnectionProtocol {
     func cancel() {
         fatalError("Subclass must override cancel")
     }
-
-    // MARK: Response Header
-
-    /// Processes the VLESS response header on first receive.
-    ///
-    /// Strips the 2-byte response header and returns the remaining payload.
-    /// If the header consumes all available data, issues another receive.
-    ///
-    /// - Parameters:
-    ///   - data: The raw received data that may contain the response header.
-    ///   - completion: Called with the payload data (header stripped) or an error.
-    func processResponseHeader(data: Data, completion: @escaping (Data?, Error?) -> Void) {
-        var output: Data?
-        var shouldReceiveMore = false
-
-        lock.lock()
-        if responseHeaderReceived {
-            output = data
-            lock.unlock()
-        } else {
-            pendingResponseHeaderBuffer.append(data)
-
-            let buffer = pendingResponseHeaderBuffer
-            if buffer.count < 2 {
-                shouldReceiveMore = true
-                lock.unlock()
-            } else if buffer[buffer.startIndex] != VLESSProtocol.version {
-                // No response header present; deliver buffered bytes as payload.
-                responseHeaderReceived = true
-                output = buffer
-                pendingResponseHeaderBuffer.removeAll(keepingCapacity: true)
-                lock.unlock()
-            } else {
-                let addonsLength = Int(buffer[buffer.index(buffer.startIndex, offsetBy: 1)])
-                let headerLength = 2 + addonsLength
-                if buffer.count < headerLength {
-                    shouldReceiveMore = true
-                    lock.unlock()
-                } else {
-                    responseHeaderReceived = true
-                    if buffer.count > headerLength {
-                        output = Data(buffer.suffix(from: headerLength))
-                    } else {
-                        shouldReceiveMore = true
-                    }
-                    pendingResponseHeaderBuffer.removeAll(keepingCapacity: true)
-                    lock.unlock()
-                }
-            }
-        }
-
-        if let output {
-            completion(output, nil)
-        } else if shouldReceiveMore {
-            receive(completion: completion)
-        } else {
-            completion(data, nil)
-        }
-    }
 }
 
-// MARK: - UDPProxyConnection
-
-/// Generic UDP proxy connection wrapper that adds length-prefixed framing to any TCP proxy connection.
-///
-/// Replaces transport-specific UDP subclasses by composing UDP framing with any ``ProxyConnection``.
-class UDPProxyConnection: ProxyConnection, UDPFramingCapable {
-    private let inner: ProxyConnection
-    var udpBuffer = Data()
-    var udpBufferOffset = 0
-    let udpLock = UnfairLock()
-
-    init(inner: ProxyConnection) {
-        self.inner = inner
-    }
-
-    override var isConnected: Bool { inner.isConnected }
-    override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
-
-    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendRaw(data: data, completion: completion)
-    }
-
-    override func sendRaw(data: Data) {
-        inner.sendRaw(data: data)
-    }
-
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveRaw(completion: completion)
-    }
-
-    override func send(data: Data, completion: @escaping (Error?) -> Void) {
-        super.send(data: frameUDPPacket(data), completion: completion)
-    }
-
-    override func send(data: Data) {
-        super.send(data: frameUDPPacket(data))
-    }
-
-    override func receive(completion: @escaping (Data?, Error?) -> Void) {
-        udpLock.lock()
-        if let packet = extractUDPPacket() {
-            udpLock.unlock()
-            completion(packet, nil)
-            return
-        }
-        udpLock.unlock()
-        receiveMore(completion: completion)
-    }
-
-    private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receive { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
-            }
-
-            if let error {
-                completion(nil, error)
-                return
-            }
-
-            guard let data else {
-                completion(nil, nil)
-                return
-            }
-
-            self.udpLock.lock()
-            self.udpBuffer.append(data)
-
-            if let packet = self.extractUDPPacket() {
-                self.udpLock.unlock()
-                completion(packet, nil)
-            } else {
-                self.udpLock.unlock()
-                self.receiveMore(completion: completion)
-            }
-        }
-    }
-
-    override func cancel() {
-        udpLock.lock()
-        clearUDPBuffer()
-        udpLock.unlock()
-        inner.cancel()
-    }
-
-    override func receiveDirectRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveDirectRaw(completion: completion)
-    }
-
-    override func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        inner.sendDirectRaw(data: data, completion: completion)
-    }
-
-    override func sendDirectRaw(data: Data) {
-        inner.sendDirectRaw(data: data)
-    }
-}

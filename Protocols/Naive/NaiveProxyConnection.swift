@@ -45,7 +45,6 @@ class NaiveProxyConnection: ProxyConnection {
         self.tunnel = tunnel
         self.paddingType = paddingType
         super.init()
-        self.responseHeaderReceived = true  // No VLESS response header
     }
 
     override var isConnected: Bool { tunnel.isConnected }

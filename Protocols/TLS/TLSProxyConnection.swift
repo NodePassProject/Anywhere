@@ -34,27 +34,14 @@ class TLSProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        tlsConnection.receive { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
+        tlsConnection.receive { data, error in
+            // Reality passes decryption-failure data through so upstream
+            // can attempt recovery on malformed/fake records.
+            if let error, case RealityError.decryptionFailed = error {
+                completion(data, error)
                 return
             }
-
-            if let error {
-                if case RealityError.decryptionFailed = error {
-                    completion(data, error)
-                    return
-                }
-                completion(nil, error)
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-
-            self.processResponseHeader(data: data, completion: completion)
+            completion(data, error)
         }
     }
 

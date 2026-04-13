@@ -12,7 +12,7 @@ import Foundation
 extension ProxyConfiguration {
 
     /// URL scheme prefixes that ``parse(url:)`` can handle.
-    static let parsableURLPrefixes = ["vless://", "ss://", "socks5://", "socks://", "https://", "quic://"]
+    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "ss://", "socks5://", "socks://", "https://", "quic://"]
 
     /// Whether the given string starts with a URL scheme that ``parse(url:)`` can handle.
     static func canParseURL(_ string: String) -> Bool {
@@ -25,6 +25,9 @@ extension ProxyConfiguration {
     /// SOCKS5 format: socks5://user:pass@host:port#name  or  socks5://host:port#name
     /// Naive format: https://user:pass@host:port#name  or  quic://user:pass@host:port#name
     static func parse(url: String, naiveProtocol: OutboundProtocol? = nil) throws -> ProxyConfiguration {
+        if url.hasPrefix("hysteria2://") || url.hasPrefix("hy2://") {
+            return try parseHysteria(url: url)
+        }
         if url.hasPrefix("ss://") {
             return try parseShadowsocks(url: url)
         }
@@ -140,6 +143,63 @@ extension ProxyConfiguration {
             testseed: testseed,
             muxEnabled: muxEnabled,
             xudpEnabled: xudpEnabled
+        )
+    }
+    
+    /// Parse a Hysteria v2 URL.
+    /// Format: `hysteria2://password@host:port/?sni=...&insecure=0#name`
+    /// (`hy2://` is accepted as an alias.)
+    private static func parseHysteria(url: String) throws -> ProxyConfiguration {
+        let rawPrefix: String = url.hasPrefix("hysteria2://") ? "hysteria2://" : "hy2://"
+        var remaining = String(url.dropFirst(rawPrefix.count))
+
+        // 1) Strip fragment
+        var fragmentName: String?
+        if let hashIndex = remaining.lastIndex(of: "#") {
+            fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
+            remaining = String(remaining[..<hashIndex])
+        }
+        DeviceCensorship.deCensor(&fragmentName)
+
+        // 2) Strip query
+        var queryString: String?
+        if let questionIndex = remaining.firstIndex(of: "?") {
+            queryString = String(remaining[remaining.index(after: questionIndex)...])
+            remaining = String(remaining[..<questionIndex])
+        }
+
+        // 3) Require @
+        guard let atIndex = remaining.lastIndex(of: "@") else {
+            throw ProxyError.invalidURL("Missing @ separator in hysteria URL")
+        }
+        let userInfo = String(remaining[..<atIndex])
+        var serverPart = String(remaining[remaining.index(after: atIndex)...])
+
+        // Strip trailing `/`
+        if serverPart.hasSuffix("/") { serverPart.removeLast() }
+        if let slashIndex = serverPart.firstIndex(of: "/") {
+            serverPart = String(serverPart[..<slashIndex])
+        }
+
+        // Whole userinfo is the password (no user:pass split)
+        let password = userInfo.removingPercentEncoding ?? userInfo
+
+        let (host, port) = try parseHostPort(serverPart)
+        let params = parseQueryParams(queryString)
+
+        var securityLayer: SecurityLayer = .none
+        if let sni = params["sni"], !sni.isEmpty {
+            securityLayer = .tls(TLSConfiguration(
+                serverName: sni, alpn: ["h3"], fingerprint: .chrome133
+            ))
+        }
+
+        return ProxyConfiguration(
+            name: fragmentName ?? "Untitled",
+            serverAddress: host,
+            serverPort: port,
+            outbound: .hysteria(password: password),
+            securityLayer: securityLayer
         )
     }
     

@@ -44,6 +44,7 @@ class QUICConnection {
     private let port: UInt16
     private let serverName: String
     private let alpn: [String]
+    private let tuning: QUICTuning
 
     fileprivate var state: State = .idle
     let queue: DispatchQueue
@@ -130,12 +131,13 @@ class QUICConnection {
     var isOnQueue: Bool { DispatchQueue.getSpecific(key: Self.queueKey) == true }
 
     init(host: String, port: UInt16, serverName: String? = nil, alpn: [String] = ["h3"],
-         datagramsEnabled: Bool = false) {
+         datagramsEnabled: Bool = false, tuning: QUICTuning) {
         self.host = host
         self.port = port
         self.serverName = serverName ?? host
         self.alpn = alpn
         self.datagramsEnabled = datagramsEnabled
+        self.tuning = tuning
         self.queue = DispatchQueue(label: "com.argsment.Anywhere.quic")
         queue.setSpecific(key: Self.queueKey, value: true)
     }
@@ -629,28 +631,20 @@ class QUICConnection {
         ngtcp2_swift_settings_default(&settings)
         settings.initial_ts = currentTimestamp()
         settings.max_tx_udp_payload_size = Self.maxUDPPayload
-        // Match naiveproxy/Chromium defaults. CUBIC is what the upstream
-        // server stack is tuned against; BBR is a reasonable proxy-side
-        // choice but deviates from the reference implementation.
-        settings.cc_algo = NGTCP2_CC_ALGO_CUBIC
-        settings.max_stream_window = 32 * 1024 * 1024
-        settings.max_window = 96 * 1024 * 1024
-        // Matches naive's `kMaxTimeForCryptoHandshakeSecs = 10`
-        // (quic_constants.h). Covers ~three PTO retransmissions (1/2/4 s)
-        // before the pool's one-shot retry kicks in — tight enough to
-        // recover from a stale PSK quickly, loose enough not to trip on
-        // high-RTT / lossy mobile paths.
-        settings.handshake_timeout = 10 * 1_000_000_000
+        settings.cc_algo = tuning.ccAlgo
+        settings.max_stream_window = tuning.maxStreamWindow
+        settings.max_window = tuning.maxWindow
+        settings.handshake_timeout = tuning.handshakeTimeout
         var params = ngtcp2_transport_params()
         ngtcp2_swift_transport_params_default(&params)
-        params.initial_max_streams_bidi = 100
-        params.initial_max_streams_uni = 100
-        params.initial_max_data = 15 * 1024 * 1024
-        params.initial_max_stream_data_bidi_local = 6 * 1024 * 1024
-        params.initial_max_stream_data_bidi_remote = 6 * 1024 * 1024
-        params.initial_max_stream_data_uni = 6 * 1024 * 1024
-        params.max_idle_timeout = 30 * 1_000_000_000
-        params.disable_active_migration = 1
+        params.initial_max_streams_bidi = tuning.initialMaxStreamsBidi
+        params.initial_max_streams_uni = tuning.initialMaxStreamsUni
+        params.initial_max_data = tuning.initialMaxData
+        params.initial_max_stream_data_bidi_local = tuning.initialMaxStreamDataBidiLocal
+        params.initial_max_stream_data_bidi_remote = tuning.initialMaxStreamDataBidiRemote
+        params.initial_max_stream_data_uni = tuning.initialMaxStreamDataUni
+        params.max_idle_timeout = tuning.maxIdleTimeout
+        params.disable_active_migration = tuning.disableActiveMigration ? 1 : 0
         if datagramsEnabled {
             params.max_datagram_frame_size = Self.maxDatagramFrameSize
         }
