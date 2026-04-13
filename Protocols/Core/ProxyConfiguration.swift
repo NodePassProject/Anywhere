@@ -46,13 +46,25 @@ enum OutboundProtocol: String, Codable {
 /// Replaces the flat `outboundProtocol` + per-protocol credential fields.
 enum Outbound: Hashable {
     case vless(uuid: UUID, encryption: String, flow: String?)
-    case hysteria(password: String)
+    /// `uploadMbps` is the client's declared upload bandwidth (1…100 Mbit/s)
+    /// used by Brutal CC for both the initial target rate and the post-auth
+    /// `min(server_rx, client_max_tx)` cap.
+    case hysteria(password: String, uploadMbps: Int)
     case shadowsocks(password: String, method: String)
     case socks5(username: String?, password: String?)
     case http11(username: String, password: String)
     case http2(username: String, password: String)
     case http3(username: String, password: String)
 }
+
+/// Clamps any integer to the 1-100 Mbit/s range used by `.hysteria`.
+/// Used at every construction boundary so the associated value is always
+/// valid regardless of source (URL, dict, legacy Codable without the key).
+func clampHysteriaUploadMbps(_ raw: Int) -> Int {
+    max(HysteriaUploadMbpsRange.lowerBound, min(HysteriaUploadMbpsRange.upperBound, raw))
+}
+let HysteriaUploadMbpsRange: ClosedRange<Int> = 1...100
+let HysteriaUploadMbpsDefault: Int = 20
 
 // MARK: - Transport Layer Configuration
 
@@ -176,7 +188,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case transport, websocket, httpUpgrade, xhttp
         case security, tls, reality
         case testseed, muxEnabled, xudpEnabled
-        case hysteriaPassword
+        case hysteriaPassword, hysteriaUploadMbps
         case ssPassword, ssMethod
         case socks5Username, socks5Password
         case http11Username, http11Password
@@ -207,8 +219,11 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 flow: try container.decodeIfPresent(String.self, forKey: .flow)
             )
         case .hysteria:
+            let raw = try container.decodeIfPresent(Int.self, forKey: .hysteriaUploadMbps)
+                ?? HysteriaUploadMbpsDefault
             outbound = .hysteria(
-                password: try container.decodeIfPresent(String.self, forKey: .hysteriaPassword) ?? ""
+                password: try container.decodeIfPresent(String.self, forKey: .hysteriaPassword) ?? "",
+                uploadMbps: clampHysteriaUploadMbps(raw)
             )
         case .shadowsocks:
             outbound = .shadowsocks(
@@ -286,10 +301,11 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(uuid, forKey: .uuid)
             try container.encode(encryption, forKey: .encryption)
             try container.encodeIfPresent(flow, forKey: .flow)
-        case .hysteria(let password):
+        case .hysteria(let password, let uploadMbps):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .hysteriaPassword)
+            try container.encode(uploadMbps, forKey: .hysteriaUploadMbps)
         case .shadowsocks(let password, let method):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
@@ -381,7 +397,14 @@ extension ProxyConfiguration {
     
     /// Hysteria password. `nil` for non-Hysteria.
     var hysteriaPassword: String? {
-        if case .hysteria(let password) = outbound { return password }
+        if case .hysteria(let password, _) = outbound { return password }
+        return nil
+    }
+
+    /// Client's declared upload bandwidth (Mbit/s) for Hysteria Brutal CC.
+    /// `nil` for non-Hysteria.
+    var hysteriaUploadMbps: Int? {
+        if case .hysteria(_, let mbps) = outbound { return mbps }
         return nil
     }
 

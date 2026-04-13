@@ -43,6 +43,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var ssPassword = ""
     private var ssMethod = "aes-128-gcm"
     private var hysteriaPassword = ""
+    private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
     private var socks5Username = ""
     private var socks5Password = ""
     private var naiveUsername = ""
@@ -70,7 +71,7 @@ class TVProxyEditorViewController: UITableViewController {
         case wsHost, wsPath, huHost, huPath, xhttpHost, xhttpPath, xhttpMode
         case tlsSNI, tlsALPN, fingerprint
         case realitySNI, publicKey, shortId
-        case hysteriaPassword
+        case hysteriaPassword, hysteriaUploadMbps
         case ssPassword, ssMethod
         case naiveUsername, naivePassword
         case socks5Username, socks5Password
@@ -99,6 +100,7 @@ class TVProxyEditorViewController: UITableViewController {
         ]
         if isHysteria {
             serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: "Password", key: .hysteriaPassword, secure: true))
+            serverRows.append(.text(label: String(localized: "Upload Speed"), value: hysteriaUploadMbpsText, placeholder: "Mbps", key: .hysteriaUploadMbps))
         } else if isShadowsocks {
             serverRows.append(.text(label: String(localized: "Password"), value: ssPassword, placeholder: "Password", key: .ssPassword, secure: true))
             let methods: [(String, String)] = [
@@ -190,7 +192,12 @@ class TVProxyEditorViewController: UITableViewController {
 
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
-        if isHysteria { return !hysteriaPassword.isEmpty }
+        if isHysteria {
+            if hysteriaPassword.isEmpty { return false }
+            guard let v = Int(hysteriaUploadMbpsText),
+                  HysteriaUploadMbpsRange.contains(v) else { return false }
+            return true
+        }
         if isShadowsocks { return !ssPassword.isEmpty }
         if isSOCKS5 { return true }
         if isNaive { return !naiveUsername.isEmpty && !naivePassword.isEmpty }
@@ -376,6 +383,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .publicKey: publicKey = value
         case .shortId: shortId = value
         case .hysteriaPassword: hysteriaPassword = value
+        case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
         case .ssPassword: ssPassword = value
         case .ssMethod: ssMethod = value
         case .socks5Username: socks5Username = value
@@ -429,8 +437,9 @@ class TVProxyEditorViewController: UITableViewController {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password):
+        case .hysteria(let password, let uploadMbps):
             hysteriaPassword = password
+            hysteriaUploadMbpsText = String(uploadMbps)
         case .shadowsocks(let password, let method):
             ssPassword = password
             ssMethod = method
@@ -549,7 +558,8 @@ class TVProxyEditorViewController: UITableViewController {
         case .vless:
             outbound = .vless(uuid: parsedUUID, encryption: encryption, flow: flow.isEmpty ? nil : flow)
         case .hysteria:
-            outbound = .hysteria(password: hysteriaPassword)
+            let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
+            outbound = .hysteria(password: hysteriaPassword, uploadMbps: mbps)
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)
         case .socks5:

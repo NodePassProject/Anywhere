@@ -92,7 +92,7 @@ final class HysteriaSession {
             serverName: configuration.effectiveSNI,
             alpn: ["h3"],
             datagramsEnabled: true,
-            tuning: .hysteria
+            tuning: .hysteria(uploadMbps: configuration.uploadMbps)
         )
     }
 
@@ -295,8 +295,20 @@ final class HysteriaSession {
         udpSupported = (headers.first(where: { $0.name == "hysteria-udp" })?.value).map {
             $0.lowercased() == "true"
         } ?? false
-        let ccRx = headers.first(where: { $0.name == "hysteria-cc-rx" })?.value ?? ""
-        serverRxBytesPerSec = UInt64(ccRx) ?? 0
+        let ccRxValue = headers.first(where: { $0.name == "hysteria-cc-rx" })?.value ?? ""
+        // Server may respond with "auto" — treat that, and any unparseable
+        // value, as 0 ("unlimited / use whatever").
+        serverRxBytesPerSec = UInt64(ccRxValue) ?? 0
+
+        // Brutal tx rate = min(server_rx, client_max_tx), treating a
+        // server-side 0 as "no server cap". The client cap is always set
+        // (validated 1…100 Mbit/s at construction time) so we always
+        // have something to install.
+        let clientTxBps = configuration.uploadBytesPerSec
+        let effectiveTxBps: UInt64 = serverRxBytesPerSec == 0
+            ? clientTxBps
+            : min(serverRxBytesPerSec, clientTxBps)
+        quic.setBrutalBandwidth(effectiveTxBps)
 
         // Tear down the auth stream — we don't need it anymore.
         quic.shutdownStream(authStreamID, appErrorCode: HysteriaProtocol.closeErrCodeOK)

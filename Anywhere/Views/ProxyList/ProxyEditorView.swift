@@ -53,6 +53,7 @@ struct ProxyEditorView: View {
     
     // Hysteria fields
     @State private var hysteriaPassword = ""
+    @State private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
 
     // Shadowsocks fields
     @State private var ssPassword = ""
@@ -76,7 +77,10 @@ struct ProxyEditorView: View {
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
         if isHysteria {
-            return !hysteriaPassword.isEmpty
+            if hysteriaPassword.isEmpty { return false }
+            guard let v = Int(hysteriaUploadMbpsText),
+                  HysteriaUploadMbpsRange.contains(v) else { return false }
+            return true
         }
         if isShadowsocks {
             return !ssPassword.isEmpty
@@ -154,6 +158,13 @@ struct ProxyEditorView: View {
                                .multilineTextAlignment(.trailing)
                        } label: {
                            TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                       }
+                       LabeledContent {
+                           TextField("Mbps", text: $hysteriaUploadMbpsText)
+                               .keyboardType(.numberPad)
+                               .multilineTextAlignment(.trailing)
+                       } label: {
+                           TextWithColorfulIcon(titleKey: "Upload Speed", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
                        }
                    } else if isShadowsocks {
                         LabeledContent {
@@ -338,7 +349,7 @@ struct ProxyEditorView: View {
                     }
                 } }
 
-                if !isNaive { Section("TLS") {
+                if !isNaive && !isHysteria { Section("TLS") {
                     Picker(selection: $security) {
                         Text("None").tag("none")
                         Text("TLS").tag("tls")
@@ -497,8 +508,9 @@ struct ProxyEditorView: View {
         case .http11(let user, let pass), .http2(let user, let pass), .http3(let user, let pass):
             naiveUsername = user
             naivePassword = pass
-        case .hysteria(let password):
+        case .hysteria(let password, let uploadMbps):
             hysteriaPassword = password
+            hysteriaUploadMbpsText = String(uploadMbps)
         case .vless:
             break
         }
@@ -617,7 +629,8 @@ struct ProxyEditorView: View {
         case .vless:
             outbound = .vless(uuid: parsedUUID, encryption: encryption, flow: flow.isEmpty ? nil : flow)
         case .hysteria:
-            outbound = .hysteria(password: hysteriaPassword)
+            let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
+            outbound = .hysteria(password: hysteriaPassword, uploadMbps: mbps)
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)
         case .socks5:

@@ -1212,7 +1212,8 @@ class ProxyClient {
             proxyPort: configuration.serverPort,
             password: password,
             sni: sni,
-            clientRxBytesPerSec: 0 // "please probe" — server picks CC on its side
+            clientRxBytesPerSec: 0, // "please probe" — server picks CC on its side
+            uploadMbps: configuration.hysteriaUploadMbps ?? HysteriaUploadMbpsDefault
         )
 
         // RFC 3986 §3.2.2: IPv6 literals must be bracketed.

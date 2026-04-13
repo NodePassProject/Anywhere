@@ -194,11 +194,16 @@ extension ProxyConfiguration {
             ))
         }
 
+        // `upmbps` matches the Hysteria v2 share-link convention for the
+        // client's declared upload bandwidth (Mbit/s). Clamped to 1...100.
+        let rawMbps = params["upmbps"].flatMap { Int($0) } ?? HysteriaUploadMbpsDefault
+        let uploadMbps = clampHysteriaUploadMbps(rawMbps)
+
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
-            outbound: .hysteria(password: password),
+            outbound: .hysteria(password: password, uploadMbps: uploadMbps),
             securityLayer: securityLayer
         )
     }
