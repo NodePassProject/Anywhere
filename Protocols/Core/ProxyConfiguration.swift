@@ -43,19 +43,42 @@ enum OutboundProtocol: String, Codable {
 // MARK: - Outbound Protocol Configuration
 
 /// Type-safe outbound protocol with associated credentials and settings.
-/// Replaces the flat `outboundProtocol` + per-protocol credential fields.
+/// Protocol-specific plumbing (VLESS transport/security/flow, Hysteria SNI,
+/// etc.) lives on each case's associated values — outbounds that don't need
+/// a given knob simply don't expose it.
 enum Outbound: Hashable {
-    case vless(uuid: UUID, encryption: String, flow: String?)
-    /// `uploadMbps` is the client's declared upload bandwidth (1…100 Mbit/s)
-    /// used by Brutal CC for both the initial target rate and the post-auth
-    /// `min(server_rx, client_max_tx)` cap.
-    case hysteria(password: String, uploadMbps: Int)
+    /// VLESS is the only outbound with a user-selectable transport layer and
+    /// TLS/Reality security layer, plus flow/mux/xudp/Vision-testseed knobs.
+    case vless(
+        uuid: UUID,
+        encryption: String,
+        flow: String?,
+        transport: TransportLayer,
+        security: SecurityLayer,
+        muxEnabled: Bool,
+        xudpEnabled: Bool,
+        testseed: [UInt32]
+    )
+    /// Hysteria2 runs over QUIC with its own internal TLS. It needs only an
+    /// optional SNI override (otherwise the server address is used) and the
+    /// client's declared upload bandwidth for Brutal congestion control.
+    /// `uploadMbps` is clamped to `HysteriaUploadMbpsRange`.
+    case hysteria(password: String, uploadMbps: Int, sni: String?)
+    /// Shadowsocks runs over bare TCP with AEAD / 2022 wire encryption.
     case shadowsocks(password: String, method: String)
+    /// SOCKS5 runs over bare TCP in the clear.
     case socks5(username: String?, password: String?)
+    /// Naive over HTTP/1.1-over-TLS. TLS is managed internally by the Naive stack.
     case http11(username: String, password: String)
+    /// Naive over HTTP/2-over-TLS.
     case http2(username: String, password: String)
+    /// Naive over HTTP/3-over-QUIC.
     case http3(username: String, password: String)
 }
+
+/// Default Vision padding seed — `[contentThreshold, longPaddingMax,
+/// longPaddingBase, shortPaddingMax]`, matches Xray-core's defaults.
+let VLESSDefaultTestseed: [UInt32] = [900, 500, 900, 256]
 
 /// Clamps any integer to the 1-100 Mbit/s range used by `.hysteria`.
 /// Used at every construction boundary so the associated value is always
@@ -63,7 +86,7 @@ enum Outbound: Hashable {
 func clampHysteriaUploadMbps(_ raw: Int) -> Int {
     max(HysteriaUploadMbpsRange.lowerBound, min(HysteriaUploadMbpsRange.upperBound, raw))
 }
-let HysteriaUploadMbpsRange: ClosedRange<Int> = 1...100
+let HysteriaUploadMbpsRange: ClosedRange<Int> = 0...100
 let HysteriaUploadMbpsDefault: Int = 20
 
 // MARK: - Transport Layer Configuration
@@ -101,21 +124,10 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let resolvedIP: String?
     /// The subscription this configuration belongs to, if any.
     let subscriptionId: UUID?
-    /// Protocol-specific settings and credentials.
+    /// Protocol-specific settings. All VLESS transport/security/flow/mux/xudp
+    /// knobs and Hysteria's optional SNI live on the `Outbound` enum's
+    /// associated values — read them via the computed accessors below.
     let outbound: Outbound
-    /// Transport layer: TCP (default), WebSocket, HTTP Upgrade, or XHTTP.
-    let transportLayer: TransportLayer
-    /// Security layer: none (default), TLS, or Reality.
-    let securityLayer: SecurityLayer
-    /// Vision padding seed: `[contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]`.
-    /// Default `[900, 500, 900, 256]` matches Xray-core.
-    let testseed: [UInt32]
-    /// Whether to multiplex UDP flows through the VLESS connection.
-    /// Only effective when Vision flow is active. Default `true` matches Xray-core behavior.
-    let muxEnabled: Bool
-    /// Whether to use XUDP (GlobalID-based flow identification) for muxed UDP.
-    /// Only effective when `muxEnabled` is `true`. Default `true` matches Xray-core behavior.
-    let xudpEnabled: Bool
     /// Ordered list of proxy configurations to chain through before reaching this proxy's server.
     /// The first element is the outermost proxy (real TCP connection); the last tunnels to this proxy.
     /// `nil` or empty means a direct connection to the server.
@@ -125,6 +137,39 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     /// Used by opt-in first-hop dials (for example latency testing) and logging.
     var connectAddress: String { resolvedIP ?? serverAddress }
 
+    // MARK: - VLESS-specific computed accessors
+    //
+    // These derive from the `.vless` case's associated values and return
+    // harmless defaults for every other outbound. Callers that are ready
+    // for a type-safe switch can pattern-match on `outbound` directly.
+
+    /// Transport layer. Always `.tcp` for non-VLESS outbounds.
+    var transportLayer: TransportLayer {
+        if case .vless(_, _, _, let t, _, _, _, _) = outbound { return t }
+        return .tcp
+    }
+    /// Security layer. Always `.none` for non-VLESS outbounds.
+    var securityLayer: SecurityLayer {
+        if case .vless(_, _, _, _, let s, _, _, _) = outbound { return s }
+        return .none
+    }
+    /// Whether Mux is enabled. Only meaningful for VLESS+TCP with Vision flow.
+    var muxEnabled: Bool {
+        if case .vless(_, _, _, _, _, let m, _, _) = outbound { return m }
+        return false
+    }
+    /// Whether XUDP (GlobalID-based flow identification) is enabled for muxed UDP.
+    var xudpEnabled: Bool {
+        if case .vless(_, _, _, _, _, _, let x, _) = outbound { return x }
+        return false
+    }
+    /// Vision padding seed `[contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]`.
+    /// VLESS-only; the default is returned for every other outbound.
+    var testseed: [UInt32] {
+        if case .vless(_, _, _, _, _, _, _, let ts) = outbound { return ts }
+        return VLESSDefaultTestseed
+    }
+
     init(
         id: UUID = UUID(),
         name: String,
@@ -133,11 +178,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         resolvedIP: String? = nil,
         subscriptionId: UUID? = nil,
         outbound: Outbound,
-        transportLayer: TransportLayer = .tcp,
-        securityLayer: SecurityLayer = .none,
-        testseed: [UInt32]? = nil,
-        muxEnabled: Bool = true,
-        xudpEnabled: Bool = true,
         chain: [ProxyConfiguration]? = nil
     ) {
         self.id = id
@@ -147,11 +187,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         self.resolvedIP = resolvedIP
         self.subscriptionId = subscriptionId
         self.outbound = outbound
-        self.transportLayer = transportLayer
-        self.securityLayer = securityLayer
-        self.testseed = (testseed?.count ?? 0) >= 4 ? testseed! : [900, 500, 900, 256]
-        self.muxEnabled = muxEnabled
-        self.xudpEnabled = xudpEnabled
         self.chain = chain
     }
 
@@ -160,8 +195,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         ProxyConfiguration(
             id: id, name: name, serverAddress: serverAddress, serverPort: serverPort,
             resolvedIP: resolvedIP, subscriptionId: subscriptionId,
-            outbound: outbound, transportLayer: transportLayer, securityLayer: securityLayer,
-            testseed: testseed, muxEnabled: muxEnabled, xudpEnabled: xudpEnabled, chain: chain
+            outbound: outbound, chain: chain
         )
     }
 
@@ -172,11 +206,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         serverAddress == other.serverAddress &&
         serverPort == other.serverPort &&
         outbound == other.outbound &&
-        transportLayer == other.transportLayer &&
-        securityLayer == other.securityLayer &&
-        testseed == other.testseed &&
-        muxEnabled == other.muxEnabled &&
-        xudpEnabled == other.xudpEnabled &&
         chain == other.chain
     }
 
@@ -188,7 +217,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case transport, websocket, httpUpgrade, xhttp
         case security, tls, reality
         case testseed, muxEnabled, xudpEnabled
-        case hysteriaPassword, hysteriaUploadMbps
+        case hysteriaPassword, hysteriaUploadMbps, hysteriaSNI
         case ssPassword, ssMethod
         case socks5Username, socks5Password
         case http11Username, http11Password
@@ -197,8 +226,10 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case chain
     }
 
-    /// Custom decoder for backward compatibility. Reads flat legacy keys and
-    /// reconstructs the `Outbound`, `TransportLayer`, and `SecurityLayer` enums.
+    /// Custom decoder. Legacy on-disk JSON stored transport/security/mux/xudp
+    /// at the top level; we now fold those into the `.vless` case and
+    /// Hysteria's SNI into `.hysteria`, discarding any fields that appear on
+    /// outbounds that no longer support them (Shadowsocks/SOCKS5 TLS, etc.).
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
@@ -209,22 +240,63 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         resolvedIP = try container.decodeIfPresent(String.self, forKey: .resolvedIP)
         subscriptionId = try container.decodeIfPresent(UUID.self, forKey: .subscriptionId)
 
-        // Reconstruct outbound from flat protocol-specific fields
         let proto = try container.decodeIfPresent(OutboundProtocol.self, forKey: .outboundProtocol) ?? .vless
+
         switch proto {
         case .vless:
+            // Transport layer
+            let transportStr = try container.decodeIfPresent(String.self, forKey: .transport) ?? "tcp"
+            let transport: TransportLayer
+            switch transportStr {
+            case "ws":
+                transport = (try container.decodeIfPresent(WebSocketConfiguration.self, forKey: .websocket)).map { .ws($0) } ?? .tcp
+            case "httpupgrade":
+                transport = (try container.decodeIfPresent(HTTPUpgradeConfiguration.self, forKey: .httpUpgrade)).map { .httpUpgrade($0) } ?? .tcp
+            case "xhttp":
+                transport = (try container.decodeIfPresent(XHTTPConfiguration.self, forKey: .xhttp)).map { .xhttp($0) } ?? .tcp
+            default:
+                transport = .tcp
+            }
+            // Security layer
+            let securityStr = try container.decodeIfPresent(String.self, forKey: .security) ?? "none"
+            let security: SecurityLayer
+            switch securityStr {
+            case "tls":
+                security = (try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)).map { .tls($0) } ?? .none
+            case "reality":
+                security = (try container.decodeIfPresent(RealityConfiguration.self, forKey: .reality)).map { .reality($0) } ?? .none
+            default:
+                security = .none
+            }
+            let ts = try container.decodeIfPresent([UInt32].self, forKey: .testseed)
+            let testseed = (ts?.count ?? 0) >= 4 ? ts! : VLESSDefaultTestseed
             outbound = .vless(
                 uuid: try container.decode(UUID.self, forKey: .uuid),
                 encryption: try container.decode(String.self, forKey: .encryption),
-                flow: try container.decodeIfPresent(String.self, forKey: .flow)
+                flow: try container.decodeIfPresent(String.self, forKey: .flow),
+                transport: transport,
+                security: security,
+                muxEnabled: try container.decodeIfPresent(Bool.self, forKey: .muxEnabled) ?? true,
+                xudpEnabled: try container.decodeIfPresent(Bool.self, forKey: .xudpEnabled) ?? true,
+                testseed: testseed
             )
+
         case .hysteria:
+            // Older builds stashed SNI inside a top-level TLSConfiguration
+            // blob; read from either the dedicated key or the legacy blob.
+            let legacySNI: String? = {
+                guard let legacyTLS = try? container.decodeIfPresent(TLSConfiguration.self, forKey: .tls) else { return nil }
+                return legacyTLS.serverName
+            }()
+            let sni = try container.decodeIfPresent(String.self, forKey: .hysteriaSNI) ?? legacySNI
             let raw = try container.decodeIfPresent(Int.self, forKey: .hysteriaUploadMbps)
                 ?? HysteriaUploadMbpsDefault
             outbound = .hysteria(
                 password: try container.decodeIfPresent(String.self, forKey: .hysteriaPassword) ?? "",
-                uploadMbps: clampHysteriaUploadMbps(raw)
+                uploadMbps: clampHysteriaUploadMbps(raw),
+                sni: sni
             )
+
         case .shadowsocks:
             outbound = .shadowsocks(
                 password: try container.decodeIfPresent(String.self, forKey: .ssPassword) ?? "",
@@ -252,34 +324,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             )
         }
 
-        // Reconstruct transport from flat fields
-        let transportStr = try container.decodeIfPresent(String.self, forKey: .transport) ?? "tcp"
-        switch transportStr {
-        case "ws":
-            transportLayer = (try container.decodeIfPresent(WebSocketConfiguration.self, forKey: .websocket)).map { .ws($0) } ?? .tcp
-        case "httpupgrade":
-            transportLayer = (try container.decodeIfPresent(HTTPUpgradeConfiguration.self, forKey: .httpUpgrade)).map { .httpUpgrade($0) } ?? .tcp
-        case "xhttp":
-            transportLayer = (try container.decodeIfPresent(XHTTPConfiguration.self, forKey: .xhttp)).map { .xhttp($0) } ?? .tcp
-        default:
-            transportLayer = .tcp
-        }
-
-        // Reconstruct security from flat fields
-        let securityStr = try container.decodeIfPresent(String.self, forKey: .security) ?? "none"
-        switch securityStr {
-        case "tls":
-            securityLayer = (try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)).map { .tls($0) } ?? .none
-        case "reality":
-            securityLayer = (try container.decodeIfPresent(RealityConfiguration.self, forKey: .reality)).map { .reality($0) } ?? .none
-        default:
-            securityLayer = .none
-        }
-
-        let ts = try container.decodeIfPresent([UInt32].self, forKey: .testseed)
-        testseed = (ts?.count ?? 0) >= 4 ? ts! : [900, 500, 900, 256]
-        muxEnabled = try container.decodeIfPresent(Bool.self, forKey: .muxEnabled) ?? true
-        xudpEnabled = try container.decodeIfPresent(Bool.self, forKey: .xudpEnabled) ?? true
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
     }
 
@@ -294,18 +338,42 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         try container.encodeIfPresent(resolvedIP, forKey: .resolvedIP)
         try container.encodeIfPresent(subscriptionId, forKey: .subscriptionId)
 
-        // Flatten outbound to legacy keys
+        // Flatten outbound back to the legacy JSON schema. VLESS carries
+        // its own transport/security/mux/xudp/testseed associated values;
+        // Hysteria carries an optional SNI; every other outbound writes
+        // only its protocol-specific credential fields.
         try container.encode(outboundProtocol, forKey: .outboundProtocol)
         switch outbound {
-        case .vless(let uuid, let encryption, let flow):
+        case .vless(let uuid, let encryption, let flow, let transport, let security, let muxEnabled, let xudpEnabled, let testseed):
             try container.encode(uuid, forKey: .uuid)
             try container.encode(encryption, forKey: .encryption)
             try container.encodeIfPresent(flow, forKey: .flow)
-        case .hysteria(let password, let uploadMbps):
+
+            try container.encode(transportString(for: transport), forKey: .transport)
+            switch transport {
+            case .tcp: break
+            case .ws(let config): try container.encode(config, forKey: .websocket)
+            case .httpUpgrade(let config): try container.encode(config, forKey: .httpUpgrade)
+            case .xhttp(let config): try container.encode(config, forKey: .xhttp)
+            }
+
+            try container.encode(securityString(for: security), forKey: .security)
+            switch security {
+            case .none: break
+            case .tls(let config): try container.encode(config, forKey: .tls)
+            case .reality(let config): try container.encode(config, forKey: .reality)
+            }
+
+            try container.encode(testseed, forKey: .testseed)
+            try container.encode(muxEnabled, forKey: .muxEnabled)
+            try container.encode(xudpEnabled, forKey: .xudpEnabled)
+
+        case .hysteria(let password, let uploadMbps, let sni):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .hysteriaPassword)
             try container.encode(uploadMbps, forKey: .hysteriaUploadMbps)
+            try container.encodeIfPresent(sni, forKey: .hysteriaSNI)
         case .shadowsocks(let password, let method):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
@@ -333,27 +401,25 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(password, forKey: .http3Password)
         }
 
-        // Flatten transport to legacy keys
-        try container.encode(transport, forKey: .transport)
-        switch transportLayer {
-        case .tcp: break
-        case .ws(let config): try container.encode(config, forKey: .websocket)
-        case .httpUpgrade(let config): try container.encode(config, forKey: .httpUpgrade)
-        case .xhttp(let config): try container.encode(config, forKey: .xhttp)
-        }
-
-        // Flatten security to legacy keys
-        try container.encode(security, forKey: .security)
-        switch securityLayer {
-        case .none: break
-        case .tls(let config): try container.encode(config, forKey: .tls)
-        case .reality(let config): try container.encode(config, forKey: .reality)
-        }
-
-        try container.encode(testseed, forKey: .testseed)
-        try container.encode(muxEnabled, forKey: .muxEnabled)
-        try container.encode(xudpEnabled, forKey: .xudpEnabled)
         try container.encodeIfPresent(chain, forKey: .chain)
+    }
+
+    // Serialize a transport/security layer to the legacy string tag used in
+    // URL query params and the flat JSON schema.
+    private func transportString(for layer: TransportLayer) -> String {
+        switch layer {
+        case .tcp:          "tcp"
+        case .ws:           "ws"
+        case .httpUpgrade:  "httpupgrade"
+        case .xhttp:        "xhttp"
+        }
+    }
+    private func securityString(for layer: SecurityLayer) -> String {
+        switch layer {
+        case .none:     "none"
+        case .tls:      "tls"
+        case .reality:  "reality"
+        }
     }
 }
 
@@ -379,32 +445,40 @@ extension ProxyConfiguration {
 
     /// VLESS UUID (returns `id` as stable fallback for non-VLESS protocols).
     var uuid: UUID {
-        if case .vless(let uuid, _, _) = outbound { return uuid }
+        if case .vless(let uuid, _, _, _, _, _, _, _) = outbound { return uuid }
         return id
     }
 
     /// Encryption type (always `"none"` for non-VLESS).
     var encryption: String {
-        if case .vless(_, let encryption, _) = outbound { return encryption }
+        if case .vless(_, let encryption, _, _, _, _, _, _) = outbound { return encryption }
         return "none"
     }
 
     /// VLESS flow (e.g. `"xtls-rprx-vision"`). `nil` for non-VLESS.
     var flow: String? {
-        if case .vless(_, _, let flow) = outbound { return flow }
+        if case .vless(_, _, let flow, _, _, _, _, _) = outbound { return flow }
         return nil
     }
-    
+
     /// Hysteria password. `nil` for non-Hysteria.
     var hysteriaPassword: String? {
-        if case .hysteria(let password, _) = outbound { return password }
+        if case .hysteria(let password, _, _) = outbound { return password }
         return nil
     }
 
     /// Client's declared upload bandwidth (Mbit/s) for Hysteria Brutal CC.
     /// `nil` for non-Hysteria.
     var hysteriaUploadMbps: Int? {
-        if case .hysteria(_, let mbps) = outbound { return mbps }
+        if case .hysteria(_, let mbps, _) = outbound { return mbps }
+        return nil
+    }
+
+    /// Optional SNI override for Hysteria's internal TLS handshake.
+    /// `nil` for non-Hysteria (and for Hysteria configs that accept the
+    /// default, where the server address is used).
+    var hysteriaSNI: String? {
+        if case .hysteria(_, _, let sni) = outbound { return sni }
         return nil
     }
 

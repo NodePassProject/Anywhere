@@ -344,12 +344,10 @@ class ProxyClient {
                 completion(.failure(ProxyError.protocolError("Mux is not supported with Shadowsocks")))
                 return
             }
-            if configuration.reality != nil {
-                completion(.failure(ProxyError.protocolError("Reality is not supported with Shadowsocks")))
-                return
-            }
+            connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            return
         }
-        
+
         if configuration.outboundProtocol == .socks5 {
             if command == .mux {
                 completion(.failure(ProxyError.protocolError("Mux is not supported with SOCKS5")))
@@ -368,30 +366,34 @@ class ProxyClient {
             return
         }
 
-        if configuration.transport == "ws" {
+        // Only VLESS reaches this point
+        switch configuration.transportLayer {
+        case .ws:
             if isVisionFlow {
                 completion(.failure(ProxyError.protocolError("Vision flow is not supported over WebSocket transport")))
                 return
             }
             connectWithWebSocket(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        } else if configuration.transport == "httpupgrade" {
+        case .httpUpgrade:
             if isVisionFlow {
                 completion(.failure(ProxyError.protocolError("Vision flow is not supported over HTTP upgrade transport")))
                 return
             }
             connectWithHTTPUpgrade(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        } else if configuration.transport == "xhttp" {
+        case .xhttp:
             if isVisionFlow {
                 completion(.failure(ProxyError.protocolError("Vision flow is not supported over XHTTP transport")))
                 return
             }
             connectWithXHTTP(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        } else if let tlsConfig = configuration.tls {
-            connectWithTLS(tlsConfig: tlsConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        } else if let realityConfig = configuration.reality {
-            connectWithReality(realityConfig: realityConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        } else {
-            connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+        case .tcp:
+            if let tlsConfig = configuration.tls {
+                connectWithTLS(tlsConfig: tlsConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            } else if let realityConfig = configuration.reality {
+                connectWithReality(realityConfig: realityConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            } else {
+                connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            }
         }
     }
 
@@ -1202,16 +1204,11 @@ class ProxyClient {
             return
         }
 
-        let sni: String? = {
-            if case .tls(let tls) = configuration.securityLayer { return tls.serverName }
-            return nil
-        }()
-
         let hyConfig = HysteriaConfiguration(
             proxyHost: configuration.serverAddress,
             proxyPort: configuration.serverPort,
             password: password,
-            sni: sni,
+            sni: configuration.hysteriaSNI,
             clientRxBytesPerSec: 0, // "please probe" — server picks CC on its side
             uploadMbps: configuration.hysteriaUploadMbps ?? HysteriaUploadMbpsDefault
         )
@@ -1330,19 +1327,11 @@ class ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        if let tlsConfig = configuration.tls, configuration.security == "tls" {
-            connectSOCKS5WithTLS(
-                tlsConfig: tlsConfig, command: command,
-                destinationHost: destinationHost, destinationPort: destinationPort,
-                completion: completion
-            )
-        } else {
-            connectSOCKS5Direct(
-                command: command,
-                destinationHost: destinationHost, destinationPort: destinationPort,
-                completion: completion
-            )
-        }
+        connectSOCKS5Direct(
+            command: command,
+            destinationHost: destinationHost, destinationPort: destinationPort,
+            completion: completion
+        )
     }
 
     /// SOCKS5 over plain TCP: TCP → SOCKS5 handshake.
@@ -1354,7 +1343,7 @@ class ProxyClient {
     ) {
         let onTransportReady: (any RawTransport) -> Void = { [weak self] transport in
             self?.performSOCKS5Handshake(
-                transport: transport, tlsClient: nil, tlsConnection: nil,
+                transport: transport,
                 command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, completion: completion
             )
@@ -1376,47 +1365,9 @@ class ProxyClient {
     }
 
     /// SOCKS5 over TLS: TCP → TLS handshake → SOCKS5 handshake.
-    private func connectSOCKS5WithTLS(
-        tlsConfig: TLSConfiguration,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let tlsClient = TLSClient(configuration: tlsConfig)
-
-        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            switch result {
-            case .success(let tlsConn):
-                self.tlsClient = tlsClient
-                self.tlsConnection = tlsConn
-                let transport = TLSRecordTransport(tlsConnection: tlsConn)
-                self.performSOCKS5Handshake(
-                    transport: transport, tlsClient: tlsClient, tlsConnection: tlsConn,
-                    command: command, destinationHost: destinationHost,
-                    destinationPort: destinationPort, completion: completion
-                )
-            case .failure(let error):
-                completion(.failure(error))
-            }
-        }
-
-        if let tunnel = self.tunnel {
-            tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
-        } else {
-            tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
-        }
-    }
-
     /// Performs the SOCKS5 handshake and returns the appropriate connection.
     private func performSOCKS5Handshake(
         transport: any RawTransport,
-        tlsClient: TLSClient?,
-        tlsConnection: TLSRecordConnection?,
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
@@ -1436,8 +1387,8 @@ class ProxyClient {
                 case .success(let relay):
                     let udpConnection = SOCKS5UDPProxyConnection(
                         tcpTransport: transport,
-                        tlsClient: tlsClient,
-                        tlsConnection: tlsConnection,
+                        tlsClient: nil,
+                        tlsConnection: nil,
                         destinationHost: destinationHost,
                         destinationPort: destinationPort
                     )

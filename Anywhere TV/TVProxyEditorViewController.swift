@@ -49,6 +49,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var naiveUsername = ""
     private var naivePassword = ""
 
+    private var isVLESS: Bool { selectedProtocol == .vless }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
@@ -121,15 +122,14 @@ class TVProxyEditorViewController: UITableViewController {
             serverRows.append(.selection(label: String(localized: "Encryption"), value: encryption, options: [("None", "none")], key: .encryption))
         }
         sections.append((String(localized: "Server"), serverRows))
-
-        // Transport (hidden for Naive, Hysteria, and SOCKS5)
-        if !isHysteria && !isSOCKS5 && !isNaive {
+        
+        if isVLESS {
             var transportRows: [RowType] = [
                 .selection(label: String(localized: "Transport"), value: transport.uppercased(), options: [
                     ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("XHTTP", "xhttp"),
                 ], key: .transport),
             ]
-            if !isShadowsocks && transport == "tcp" {
+            if transport == "tcp" {
                 transportRows.append(.selection(label: String(localized: "Flow"), value: flowDisplayValue, options: [
                     ("None", ""), ("Vision", "xtls-rprx-vision"), ("Vision + UDP 443", "xtls-rprx-vision-udp443"),
                 ], key: .flow))
@@ -155,13 +155,12 @@ class TVProxyEditorViewController: UITableViewController {
             }
             sections.append((String(localized: "Transport"), transportRows))
         }
-
-        // TLS (hidden for Naive)
-        if !isNaive {
+        
+        if isVLESS {
             var tlsRows: [RowType] = [
                 .selection(label: String(localized: "Security"), value: security.uppercased(), options: {
                     var opts: [(String, String)] = [("None", "none"), ("TLS", "tls")]
-                    if !isShadowsocks && !isSOCKS5 { opts.append(("Reality", "reality")) }
+                    opts.append(("Reality", "reality"))
                     return opts
                 }(), key: .security),
             ]
@@ -437,7 +436,7 @@ class TVProxyEditorViewController: UITableViewController {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let uploadMbps):
+        case .hysteria(let password, let uploadMbps, _):
             hysteriaPassword = password
             hysteriaUploadMbpsText = String(uploadMbps)
         case .shadowsocks(let password, let method):
@@ -508,13 +507,13 @@ class TVProxyEditorViewController: UITableViewController {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isShadowsocks || isNaive || isSOCKS5 {
+        if isShadowsocks || isSOCKS5 || isNaive {
             parsedUUID = existingConfiguration?.uuid ?? UUID()
         } else {
-            guard let u = UUID(uuidString: uuid) else { return }
-            parsedUUID = u
+            guard let uuid = UUID(uuidString: uuid) else { return }
+            parsedUUID = uuid
         }
-
+        
         var tlsConfiguration: TLSConfiguration?
         if isTLS {
             let sniValue = tlsSNI.isEmpty ? serverAddress : tlsSNI
@@ -556,10 +555,34 @@ class TVProxyEditorViewController: UITableViewController {
         let outbound: Outbound
         switch selectedProtocol {
         case .vless:
-            outbound = .vless(uuid: parsedUUID, encryption: encryption, flow: flow.isEmpty ? nil : flow)
+            let transportLayer: TransportLayer
+            if let wsConfig { transportLayer = .ws(wsConfig) }
+            else if let huConfig { transportLayer = .httpUpgrade(huConfig) }
+            else if let xhttpConfig { transportLayer = .xhttp(xhttpConfig) }
+            else { transportLayer = .tcp }
+
+            let securityLayer: SecurityLayer
+            if let realityConfiguration { securityLayer = .reality(realityConfiguration) }
+            else if let tlsConfiguration { securityLayer = .tls(tlsConfiguration) }
+            else { securityLayer = .none }
+
+            outbound = .vless(
+                uuid: parsedUUID,
+                encryption: encryption,
+                flow: flow.isEmpty ? nil : flow,
+                transport: transportLayer,
+                security: securityLayer,
+                muxEnabled: muxEnabled,
+                xudpEnabled: xudpEnabled,
+                testseed: existingConfiguration?.testseed ?? VLESSDefaultTestseed
+            )
         case .hysteria:
             let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
-            outbound = .hysteria(password: hysteriaPassword, uploadMbps: mbps)
+            outbound = .hysteria(
+                password: hysteriaPassword,
+                uploadMbps: mbps,
+                sni: existingConfiguration?.hysteriaSNI ?? nil
+            )
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)
         case .socks5:
@@ -575,29 +598,13 @@ class TVProxyEditorViewController: UITableViewController {
             outbound = .http3(username: naiveUsername, password: naivePassword)
         }
 
-        let transportLayer: TransportLayer
-        if let wsConfig { transportLayer = .ws(wsConfig) }
-        else if let huConfig { transportLayer = .httpUpgrade(huConfig) }
-        else if let xhttpConfig { transportLayer = .xhttp(xhttpConfig) }
-        else { transportLayer = .tcp }
-
-        let securityLayer: SecurityLayer
-        if let realityConfiguration { securityLayer = .reality(realityConfiguration) }
-        else if let tlsConfiguration { securityLayer = .tls(tlsConfiguration) }
-        else { securityLayer = .none }
-
         let configuration = ProxyConfiguration(
             id: existingConfiguration?.id ?? UUID(),
             name: name,
             serverAddress: bareAddress,
             serverPort: port,
             subscriptionId: existingConfiguration?.subscriptionId,
-            outbound: outbound,
-            transportLayer: transportLayer,
-            securityLayer: securityLayer,
-            testseed: existingConfiguration?.testseed,
-            muxEnabled: muxEnabled,
-            xudpEnabled: xudpEnabled
+            outbound: outbound
         )
 
         onSave(configuration)

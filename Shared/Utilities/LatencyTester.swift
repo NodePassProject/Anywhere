@@ -117,11 +117,6 @@ nonisolated enum LatencyTester {
             resolvedIP: configuration.resolvedIP ?? VPNViewModel.resolveServerAddress(configuration.serverAddress),
             subscriptionId: configuration.subscriptionId,
             outbound: configuration.outbound,
-            transportLayer: configuration.transportLayer,
-            securityLayer: configuration.securityLayer,
-            testseed: configuration.testseed,
-            muxEnabled: configuration.muxEnabled,
-            xudpEnabled: configuration.xudpEnabled,
             chain: resolvedChain
         )
     }

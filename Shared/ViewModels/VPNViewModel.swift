@@ -255,11 +255,6 @@ class VPNViewModel: ObservableObject {
             serverAddress: exitProxy.serverAddress,
             serverPort: exitProxy.serverPort,
             outbound: exitProxy.outbound,
-            transportLayer: exitProxy.transportLayer,
-            securityLayer: exitProxy.securityLayer,
-            testseed: exitProxy.testseed,
-            muxEnabled: exitProxy.muxEnabled,
-            xudpEnabled: exitProxy.xudpEnabled,
             chain: chainProxies
         )
     }
@@ -318,9 +313,7 @@ class VPNViewModel: ObservableObject {
                 id: configuration.id, name: configuration.name,
                 serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
                 subscriptionId: subscription.id,
-                outbound: configuration.outbound, transportLayer: configuration.transportLayer,
-                securityLayer: configuration.securityLayer, testseed: configuration.testseed,
-                muxEnabled: configuration.muxEnabled, xudpEnabled: configuration.xudpEnabled
+                outbound: configuration.outbound
             )
         }
         // Single batch write + single @Published emission.
@@ -365,9 +358,7 @@ class VPNViewModel: ObservableObject {
                 id: id, name: configuration.name,
                 serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
                 subscriptionId: subscription.id,
-                outbound: configuration.outbound, transportLayer: configuration.transportLayer,
-                securityLayer: configuration.securityLayer, testseed: configuration.testseed,
-                muxEnabled: configuration.muxEnabled, xudpEnabled: configuration.xudpEnabled
+                outbound: configuration.outbound
             ))
         }
 
@@ -838,9 +829,10 @@ class VPNViewModel: ObservableObject {
         // Add protocol-specific credential fields
         switch configuration.outbound {
         case .vless: break
-        case .hysteria(let password, let uploadMbps):
+        case .hysteria(let password, let uploadMbps, let sni):
             configurationDict["hysteriaPassword"] = password
             configurationDict["hysteriaUploadMbps"] = uploadMbps
+            if let sni { configurationDict["hysteriaSNI"] = sni }
         case .shadowsocks(let password, let method):
             configurationDict["ssPassword"] = password
             configurationDict["ssMethod"] = method
@@ -874,37 +866,36 @@ class VPNViewModel: ObservableObject {
             }
             configurationDict["tlsFingerprint"] = tls.fingerprint.rawValue
         }
-
-        // Add transport and WebSocket configuration
-        configurationDict["transport"] = configuration.transport
-        if let ws = configuration.websocket {
-            configurationDict["wsHost"] = ws.host
-            configurationDict["wsPath"] = ws.path
-            if !ws.headers.isEmpty {
-                configurationDict["wsHeaders"] = ws.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+        
+        if configuration.outboundProtocol == .vless {
+            configurationDict["transport"] = configuration.transport
+            if let ws = configuration.websocket {
+                configurationDict["wsHost"] = ws.host
+                configurationDict["wsPath"] = ws.path
+                if !ws.headers.isEmpty {
+                    configurationDict["wsHeaders"] = ws.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+                }
+                configurationDict["wsMaxEarlyData"] = ws.maxEarlyData
+                configurationDict["wsEarlyDataHeaderName"] = ws.earlyDataHeaderName
             }
-            configurationDict["wsMaxEarlyData"] = ws.maxEarlyData
-            configurationDict["wsEarlyDataHeaderName"] = ws.earlyDataHeaderName
-        }
 
-        // Add HTTP upgrade configuration
-        if let hu = configuration.httpUpgrade {
-            configurationDict["huHost"] = hu.host
-            configurationDict["huPath"] = hu.path
-            if !hu.headers.isEmpty {
-                configurationDict["huHeaders"] = hu.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+            if let hu = configuration.httpUpgrade {
+                configurationDict["huHost"] = hu.host
+                configurationDict["huPath"] = hu.path
+                if !hu.headers.isEmpty {
+                    configurationDict["huHeaders"] = hu.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+                }
             }
-        }
 
-        // Add XHTTP configuration
-        if let xhttp = configuration.xhttp {
-            configurationDict["xhttpHost"] = xhttp.host
-            configurationDict["xhttpPath"] = xhttp.path
-            configurationDict["xhttpMode"] = xhttp.mode.rawValue
-            if !xhttp.headers.isEmpty {
-                configurationDict["xhttpHeaders"] = xhttp.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+            if let xhttp = configuration.xhttp {
+                configurationDict["xhttpHost"] = xhttp.host
+                configurationDict["xhttpPath"] = xhttp.path
+                configurationDict["xhttpMode"] = xhttp.mode.rawValue
+                if !xhttp.headers.isEmpty {
+                    configurationDict["xhttpHeaders"] = xhttp.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+                }
+                configurationDict["xhttpNoGRPCHeader"] = xhttp.noGRPCHeader
             }
-            configurationDict["xhttpNoGRPCHeader"] = xhttp.noGRPCHeader
         }
 
         // Add proxy chain if present

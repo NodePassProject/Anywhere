@@ -46,8 +46,7 @@ extension ProxyConfiguration {
         if transport != "tcp" {
             params.append("type=\(transport)")
         }
-
-        // TLS parameters
+        
         if security == "tls", let tls {
             if tls.serverName != serverAddress {
                 params.append("sni=\(tls.serverName)")
@@ -59,8 +58,7 @@ extension ProxyConfiguration {
                 params.append("fp=\(tls.fingerprint.rawValue)")
             }
         }
-
-        // Reality parameters
+        
         if security == "reality", let reality {
             params.append("sni=\(reality.serverName)")
             params.append("pbk=\(reality.publicKey.base64URLEncodedString())")
@@ -71,20 +69,18 @@ extension ProxyConfiguration {
                 params.append("fp=\(reality.fingerprint.rawValue)")
             }
         }
-
-        // Transport parameters
+        
         appendTransportParams(to: &params)
-
-        // Mux/XUDP
+        
         if !muxEnabled {
             params.append("mux=false")
         }
+        
         if !xudpEnabled {
             params.append("xudp=false")
         }
-
-        // Testseed (only if non-default)
-        if testseed != [900, 500, 900, 256] {
+        
+        if testseed != VLESSDefaultTestseed {
             params.append("testseed=\(testseed.map { String($0) }.joined(separator: ","))")
         }
 
@@ -97,8 +93,8 @@ extension ProxyConfiguration {
         let password = (hysteriaPassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var params: [String] = []
-        if let tls, tls.serverName != serverAddress {
-            params.append("sni=\(tls.serverName)")
+        if let sni = hysteriaSNI, sni != serverAddress {
+            params.append("sni=\(sni)")
         }
         if let mbps = hysteriaUploadMbps, mbps != HysteriaUploadMbpsDefault {
             params.append("upmbps=\(mbps)")
@@ -114,34 +110,9 @@ extension ProxyConfiguration {
         let userInfo = "\(method):\(password)"
         let encoded = Data(userInfo.utf8).base64EncodedString()
             .replacingOccurrences(of: "=", with: "")
-
-        var params: [String] = []
-        if transport != "tcp" {
-            params.append("type=\(transport)")
-        }
-        if security != "none" {
-            params.append("security=\(security)")
-        }
-
-        // TLS parameters
-        if security == "tls", let tls {
-            if tls.serverName != serverAddress {
-                params.append("sni=\(tls.serverName)")
-            }
-            if let alpn = tls.alpn, !alpn.isEmpty {
-                params.append("alpn=\(alpn.joined(separator: ",").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? alpn.joined(separator: ","))")
-            }
-            if tls.fingerprint != .chrome120 {
-                params.append("fp=\(tls.fingerprint.rawValue)")
-            }
-        }
-
-        // Transport parameters
-        appendTransportParams(to: &params)
-
-        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        return "ss://\(encoded)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
+        return "ss://\(encoded)@\(bracketedServerAddress):\(serverPort)/#\(fragment)"
     }
 
     private func toSOCKS5URL() -> String {

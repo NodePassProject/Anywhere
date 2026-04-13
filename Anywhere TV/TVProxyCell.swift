@@ -101,7 +101,7 @@ class TVProxyCell: UITableViewCell {
         name: String,
         isSelected: Bool,
         protocolName: String,
-        transport: String,
+        transport: String?,
         security: String,
         flow: String?
     ) {
@@ -109,7 +109,8 @@ class TVProxyCell: UITableViewCell {
         checkmarkView.isHidden = !isSelected
 
         // Build tag list
-        var tags = [protocolName, transport.uppercased()]
+        var tags = [protocolName]
+        if let transport, !transport.isEmpty { tags.append(transport.uppercased()) }
         let sec = security.uppercased()
         if sec != "NONE" { tags.append(sec) }
         if let flow, flow.uppercased().contains("VISION") { tags.append("Vision") }

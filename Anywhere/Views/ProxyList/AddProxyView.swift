@@ -181,7 +181,7 @@ struct AddProxyView: View {
 
     private var linkInputField: some View {
         VStack {
-            if linkURL.hasPrefix("http://") || linkURL.hasPrefix("https://") {
+            if linkURL.hasPrefix("https://") {
                 Picker("Link Type", selection: $httpsLinkType) {
                     Text("Subscription").tag(HTTPSLinkType.subscription)
                     Text("HTTPS Proxy").tag(HTTPSLinkType.http11Proxy)
@@ -268,12 +268,12 @@ struct AddProxyView: View {
 
     private func importFromString(_ string: String) {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isHTTP = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
         
         if trimmed.hasPrefix("vless://") ||
+            trimmed.hasPrefix("hysteria2://") || trimmed.hasPrefix("hy2://") ||
             trimmed.hasPrefix("ss://") ||
             trimmed.hasPrefix("socks5://") || trimmed.hasPrefix("socks://") ||
-            (isHTTP && httpsLinkType != .subscription) || trimmed.hasPrefix("quic://") {
+            (trimmed.hasPrefix("https://") && httpsLinkType != .subscription) || trimmed.hasPrefix("quic://") {
             // Single proxy link (VLESS, Shadowsocks, SOCKS5, or NaiveProxy)
             let naiveProtocol: OutboundProtocol? = switch httpsLinkType {
             case .http11Proxy: .http11

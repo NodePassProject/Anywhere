@@ -241,9 +241,16 @@ struct DemoProxyListView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 4) {
-                    Text(configuration.transport.uppercased())
-                    Text("·")
-                    Text(configuration.security.uppercased())
+                    Text(configuration.outboundProtocol.name)
+                    if configuration.outboundProtocol == .vless {
+                        Text("·")
+                        Text(configuration.transport.uppercased())
+                    }
+                    let security = configuration.security.uppercased()
+                    if security != "NONE" {
+                        Text("·")
+                        Text(security)
+                    }
                     if let flow = configuration.flow, flow.contains("vision") {
                         Text("·")
                         Text("Vision")

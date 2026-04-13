@@ -67,6 +67,7 @@ struct ProxyEditorView: View {
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
 
+    private var isVLESS: Bool { selectedProtocol == .vless }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
@@ -237,189 +238,191 @@ struct ProxyEditorView: View {
                     }
                 }
                 
-                if !isHysteria && !isSOCKS5 && !isNaive { Section("Transport") {
-                    Picker(selection: $transport) {
-                        Text("TCP").tag("tcp")
-                        Text("WebSocket").tag("ws")
-                        Text("HTTPUpgrade").tag("httpupgrade")
-                        Text("XHTTP").tag("xhttp")
-                    } label: {
-                        TextWithColorfulIcon(titleKey: "Transport", systemName: "arrow.triangle.swap", foregroundColor: .white, backgroundColor: .purple)
-                    }
-                    .onChange(of: transport) {
-                        if flow != "" && transport != "tcp" {
-                            flow = ""
-                        }
-                    }
-                    if !isShadowsocks && transport == "tcp" {
-                        Picker(selection: $flow) {
-                            Text("None").tag("")
-                            Text("Vision").tag("xtls-rprx-vision")
-                            Text("Vision with UDP 443").tag("xtls-rprx-vision-udp443")
+                if isVLESS {
+                    Section("Transport") {
+                        Picker(selection: $transport) {
+                            Text("TCP").tag("tcp")
+                            Text("WebSocket").tag("ws")
+                            Text("HTTPUpgrade").tag("httpupgrade")
+                            Text("XHTTP").tag("xhttp")
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Flow", systemName: "arrow.left.arrow.right", foregroundColor: .white, backgroundColor: .indigo)
+                            TextWithColorfulIcon(titleKey: "Transport", systemName: "arrow.triangle.swap", foregroundColor: .white, backgroundColor: .purple)
                         }
-                        Toggle(isOn: $muxEnabled) {
-                            TextWithColorfulIcon(titleKey: "Mux", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
+                        .onChange(of: transport) {
+                            if flow != "" && transport != "tcp" {
+                                flow = ""
+                            }
                         }
+                        if transport == "tcp" {
+                            Picker(selection: $flow) {
+                                Text("None").tag("")
+                                Text("Vision").tag("xtls-rprx-vision")
+                                Text("Vision with UDP 443").tag("xtls-rprx-vision-udp443")
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Flow", systemName: "arrow.left.arrow.right", foregroundColor: .white, backgroundColor: .indigo)
+                            }
+                            Toggle(isOn: $muxEnabled) {
+                                TextWithColorfulIcon(titleKey: "Mux", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
+                            }
                             .onChange(of: muxEnabled) {
                                 if muxEnabled == false {
                                     xudpEnabled = false
                                 }
                             }
-                        if muxEnabled {
-                            Toggle(isOn: $xudpEnabled) {
-                                TextWithColorfulIcon(titleKey: "XUDP", systemName: "arrow.up.arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .cyan)
+                            if muxEnabled {
+                                Toggle(isOn: $xudpEnabled) {
+                                    TextWithColorfulIcon(titleKey: "XUDP", systemName: "arrow.up.arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .cyan)
+                                }
+                            }
+                        }
+                        if transport == "ws" {
+                            LabeledContent {
+                                TextField("Host", text: $wsHost)
+                                    .keyboardType(.URL)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            LabeledContent {
+                                TextField("/", text: $wsPath)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                        }
+                        if transport == "httpupgrade" {
+                            LabeledContent {
+                                TextField("Host", text: $huHost)
+                                    .keyboardType(.URL)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            LabeledContent {
+                                TextField("/", text: $huPath)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                        }
+                        if transport == "xhttp" {
+                            LabeledContent {
+                                TextField("Host", text: $xhttpHost)
+                                    .keyboardType(.URL)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            LabeledContent {
+                                TextField("/", text: $xhttpPath)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            Picker(selection: $xhttpMode) {
+                                Text("Auto").tag("auto")
+                                Text("Packet Up").tag("packet-up")
+                                Text("Stream Up").tag("stream-up")
+                                Text("Stream One").tag("stream-one")
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Mode", systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .purple)
+                            }
+                            LabeledContent {
+                                TextEditor(text: $xhttpExtra)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .lineLimit(1...5)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Extra", systemName: "ellipsis.rectangle", foregroundColor: .white, backgroundColor: .gray)
                             }
                         }
                     }
-                    if transport == "ws" {
-                        LabeledContent {
-                            TextField("Host", text: $wsHost)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                        LabeledContent {
-                            TextField("/", text: $wsPath)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                    }
-                    if transport == "httpupgrade" {
-                        LabeledContent {
-                            TextField("Host", text: $huHost)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                        LabeledContent {
-                            TextField("/", text: $huPath)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                    }
-                    if transport == "xhttp" {
-                        LabeledContent {
-                            TextField("Host", text: $xhttpHost)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                        LabeledContent {
-                            TextField("/", text: $xhttpPath)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                        Picker(selection: $xhttpMode) {
-                            Text("Auto").tag("auto")
-                            Text("Packet Up").tag("packet-up")
-                            Text("Stream Up").tag("stream-up")
-                            Text("Stream One").tag("stream-one")
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Mode", systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .purple)
-                        }
-                        LabeledContent {
-                            TextEditor(text: $xhttpExtra)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .font(.system(.caption, design: .monospaced))
-                                .lineLimit(1...5)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Extra", systemName: "ellipsis.rectangle", foregroundColor: .white, backgroundColor: .gray)
-                        }
-                    }
-                } }
+                }
 
-                if !isNaive && !isHysteria { Section("TLS") {
-                    Picker(selection: $security) {
-                        Text("None").tag("none")
-                        Text("TLS").tag("tls")
-                        if !isShadowsocks && !isSOCKS5 {
+                if isVLESS {
+                    Section("TLS") {
+                        Picker(selection: $security) {
+                            Text("None").tag("none")
+                            Text("TLS").tag("tls")
                             Text("Reality").tag("reality")
-                        }
-                    } label: {
-                        TextWithColorfulIcon(titleKey: "Security", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
-                    }
-                    if isTLS {
-                        LabeledContent {
-                            TextField("SNI", text: $tlsSNI)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(titleKey: "SNI", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                            TextWithColorfulIcon(titleKey: "Security", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
                         }
-                        LabeledContent {
-                            TextField("h2,http/1.1", text: $tlsALPN)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "ALPN", systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                        Picker(selection: $fingerprint) {
-                            ForEach(TLSFingerprint.allCases, id: \.self) { fp in
-                                Text(fp.displayName).tag(fp)
+                        if isTLS {
+                            LabeledContent {
+                                TextField("SNI", text: $tlsSNI)
+                                    .keyboardType(.URL)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "SNI", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                             }
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
-                        }
-                    }
-                    if isReality {
-                        LabeledContent {
-                            TextField("SNI", text: $sni)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "SNI", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                        LabeledContent {
-                            TextField("Public Key", text: $publicKey)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Public Key", systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .green)
-                        }
-                        LabeledContent {
-                            TextField("Short ID", text: $shortId)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Short ID", systemName: "person.crop.square.filled.and.at.rectangle.fill", foregroundColor: .white, backgroundColor: .green)
-                        }
-                        Picker(selection: $fingerprint) {
-                            ForEach(TLSFingerprint.allCases, id: \.self) { fp in
-                                Text(fp.displayName).tag(fp)
+                            LabeledContent {
+                                TextField("h2,http/1.1", text: $tlsALPN)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "ALPN", systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
                             }
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
+                            Picker(selection: $fingerprint) {
+                                ForEach(TLSFingerprint.allCases, id: \.self) { fp in
+                                    Text(fp.displayName).tag(fp)
+                                }
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
+                            }
+                        }
+                        if isReality {
+                            LabeledContent {
+                                TextField("SNI", text: $sni)
+                                    .keyboardType(.URL)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "SNI", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            LabeledContent {
+                                TextField("Public Key", text: $publicKey)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Public Key", systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .green)
+                            }
+                            LabeledContent {
+                                TextField("Short ID", text: $shortId)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Short ID", systemName: "person.crop.square.filled.and.at.rectangle.fill", foregroundColor: .white, backgroundColor: .green)
+                            }
+                            Picker(selection: $fingerprint) {
+                                ForEach(TLSFingerprint.allCases, id: \.self) { fp in
+                                    Text(fp.displayName).tag(fp)
+                                }
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
+                            }
                         }
                     }
-                } }
+                }
             }
             .navigationTitle(configuration != nil ? "Edit Configuration" : "Add Configuration")
             .navigationBarTitleDisplayMode(.inline)
@@ -499,6 +502,11 @@ struct ProxyEditorView: View {
         }
 
         switch configuration.outbound {
+        case .vless:
+            break
+        case .hysteria(let password, let uploadMbps, _):
+            hysteriaPassword = password
+            hysteriaUploadMbpsText = String(uploadMbps)
         case .shadowsocks(let password, let method):
             ssPassword = password
             ssMethod = method
@@ -508,11 +516,6 @@ struct ProxyEditorView: View {
         case .http11(let user, let pass), .http2(let user, let pass), .http3(let user, let pass):
             naiveUsername = user
             naivePassword = pass
-        case .hysteria(let password, let uploadMbps):
-            hysteriaPassword = password
-            hysteriaUploadMbpsText = String(uploadMbps)
-        case .vless:
-            break
         }
     }
 
@@ -566,7 +569,7 @@ struct ProxyEditorView: View {
             guard let u = UUID(uuidString: uuid) else { return }
             parsedUUID = u
         }
-
+        
         var tlsConfiguration: TLSConfiguration?
         if isTLS {
             let sni = tlsSNI.isEmpty ? serverAddress : tlsSNI
@@ -577,7 +580,7 @@ struct ProxyEditorView: View {
                 fingerprint: fingerprint
             )
         }
-
+        
         var realityConfiguration: RealityConfiguration?
         if isReality {
             guard let pk = Data(base64URLEncoded: publicKey) else { return }
@@ -627,10 +630,34 @@ struct ProxyEditorView: View {
         let outbound: Outbound
         switch selectedProtocol {
         case .vless:
-            outbound = .vless(uuid: parsedUUID, encryption: encryption, flow: flow.isEmpty ? nil : flow)
+            let transportLayer: TransportLayer
+            if let websocketConfiguration { transportLayer = .ws(websocketConfiguration) }
+            else if let httpUpgradeConfiguration { transportLayer = .httpUpgrade(httpUpgradeConfiguration) }
+            else if let xhttpConfiguration { transportLayer = .xhttp(xhttpConfiguration) }
+            else { transportLayer = .tcp }
+
+            let securityLayer: SecurityLayer
+            if let realityConfiguration { securityLayer = .reality(realityConfiguration) }
+            else if let tlsConfiguration { securityLayer = .tls(tlsConfiguration) }
+            else { securityLayer = .none }
+
+            outbound = .vless(
+                uuid: parsedUUID,
+                encryption: encryption,
+                flow: flow.isEmpty ? nil : flow,
+                transport: transportLayer,
+                security: securityLayer,
+                muxEnabled: muxEnabled,
+                xudpEnabled: xudpEnabled,
+                testseed: self.configuration?.testseed ?? VLESSDefaultTestseed
+            )
         case .hysteria:
             let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
-            outbound = .hysteria(password: hysteriaPassword, uploadMbps: mbps)
+            outbound = .hysteria(
+                password: hysteriaPassword,
+                uploadMbps: mbps,
+                sni: self.configuration?.hysteriaSNI ?? nil
+            )
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)
         case .socks5:
@@ -646,29 +673,13 @@ struct ProxyEditorView: View {
             outbound = .http3(username: naiveUsername, password: naivePassword)
         }
 
-        let transportLayer: TransportLayer
-        if let websocketConfiguration { transportLayer = .ws(websocketConfiguration) }
-        else if let httpUpgradeConfiguration { transportLayer = .httpUpgrade(httpUpgradeConfiguration) }
-        else if let xhttpConfiguration { transportLayer = .xhttp(xhttpConfiguration) }
-        else { transportLayer = .tcp }
-
-        let securityLayer: SecurityLayer
-        if let realityConfiguration { securityLayer = .reality(realityConfiguration) }
-        else if let tlsConfiguration { securityLayer = .tls(tlsConfiguration) }
-        else { securityLayer = .none }
-
         let configuration = ProxyConfiguration(
             id: self.configuration?.id ?? UUID(),
             name: name,
             serverAddress: bareAddress,
             serverPort: port,
             subscriptionId: self.configuration?.subscriptionId,
-            outbound: outbound,
-            transportLayer: transportLayer,
-            securityLayer: securityLayer,
-            testseed: self.configuration?.testseed,
-            muxEnabled: muxEnabled,
-            xudpEnabled: xudpEnabled
+            outbound: outbound
         )
 
         onSave(configuration)
