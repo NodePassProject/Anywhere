@@ -15,7 +15,6 @@ private let logger = AnywhereLogger(category: "Shadowsocks")
 ///
 /// The address header is prepended to the first `send()` call's data
 /// (encrypted as part of the stream, not a separate message).
-/// Shadowsocks has no response header, so `responseHeaderReceived` starts as `true`.
 class ShadowsocksConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let writer: ShadowsocksAEADWriter
@@ -28,7 +27,6 @@ class ShadowsocksConnection: ProxyConnection {
         self.reader = ShadowsocksAEADReader(cipher: cipher, masterKey: masterKey)
         self.addressHeader = addressHeader
         super.init()
-        self.responseHeaderReceived = true
     }
 
     override var isConnected: Bool { inner.isConnected }
@@ -112,7 +110,6 @@ class ShadowsocksUDPConnection: ProxyConnection {
         self.dstHost = dstHost
         self.dstPort = dstPort
         super.init()
-        self.responseHeaderReceived = true
     }
 
     override var isConnected: Bool { inner.isConnected }

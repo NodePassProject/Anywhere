@@ -99,6 +99,9 @@ enum QPACKEncoder {
         var headers: [(name: String, value: String)] = []
         guard data.count >= 2 else { return nil }
 
+        // All byte access through `base + offset` so this decoder works on
+        // zero-copy slices (non-zero `startIndex`) as well as rebased `Data`.
+        let base = data.startIndex
         var offset = 0
 
         // QPACK header block prefix: Required Insert Count + Delta Base.
@@ -117,7 +120,7 @@ enum QPACKEncoder {
 
         // Decode field lines
         while offset < data.count {
-            let byte = data[offset]
+            let byte = data[base + offset]
 
             if byte & 0x80 != 0 {
                 // Indexed field line (1 T=static index).
@@ -155,7 +158,9 @@ enum QPACKEncoder {
                         decodeVarIntPrefix(from: data, offset: offset, prefixBits: 3) else { return nil }
                 offset += nameLenBytes
                 guard offset + Int(nameLen) <= data.count else { return nil }
-                let nameData = Data(data[offset..<(offset + Int(nameLen))])
+                let nameStart = base + offset
+                let nameEnd = nameStart + Int(nameLen)
+                let nameData = Data(data[nameStart..<nameEnd])
                 offset += Int(nameLen)
                 let nameStr: String?
                 if nameHuffman {
@@ -278,39 +283,49 @@ enum QPACKEncoder {
 
     // MARK: - Decoding Helpers
 
+    /// `offset` is **relative to `data.startIndex`**, so slices (e.g. the
+    /// `payload` view returned by `HTTP3Framer.parseFrame`) work without
+    /// rebasing. Indexing a slice as `data[0]` would trap.
     private static func decodeVarIntPrefix(from data: Data, offset: Int, prefixBits: Int) -> (UInt64, Int)? {
         guard offset < data.count else { return nil }
+        let base = data.startIndex
         let mask = UInt8((1 << prefixBits) - 1)
-        let first = data[offset] & mask
+        let first = data[base + offset] & mask
 
         if first < mask {
             return (UInt64(first), 1)
         }
 
         var value = UInt64(mask)
-        var shift = 0
+        var shift: UInt64 = 0
         var pos = offset + 1
         while pos < data.count {
-            let byte = data[pos]
+            let byte = data[base + pos]
             value += UInt64(byte & 0x7F) << shift
             pos += 1
             if byte & 0x80 == 0 {
                 return (value, pos - offset)
             }
             shift += 7
+            if shift > 63 { return nil }
         }
         return nil
     }
 
+    /// `offset` is relative to `data.startIndex`; slice-safe.
     private static func decodeString(from data: Data, offset: Int) -> (String, Int)? {
+        guard offset < data.count else { return nil }
+        let base = data.startIndex
+        let isHuffman = (data[base + offset] & 0x80) != 0
         guard let (length, lenBytes) = decodeVarIntPrefix(from: data, offset: offset, prefixBits: 7) else {
             return nil
         }
-        let isHuffman = (data[offset] & 0x80) != 0
         let strStart = offset + lenBytes
         guard strStart + Int(length) <= data.count else { return nil }
 
-        let strData = Data(data[strStart..<(strStart + Int(length))])
+        let absStart = base + strStart
+        let absEnd = absStart + Int(length)
+        let strData = Data(data[absStart..<absEnd])
         let str: String?
         if isHuffman {
             if let decoded = HPACKHuffman.decode(strData) {
@@ -325,13 +340,17 @@ enum QPACKEncoder {
         return (str, lenBytes + Int(length))
     }
 
+    /// `offset` is relative to `data.startIndex`; slice-safe.
     private static func decodeStringAfterPrefix(from data: Data, offset: Int, prefixBits: Int) -> (String, Int)? {
         guard let (nameLen, nLenBytes) = decodeVarIntPrefix(from: data, offset: offset, prefixBits: prefixBits) else {
             return nil
         }
         let strStart = offset + nLenBytes
         guard strStart + Int(nameLen) <= data.count else { return nil }
-        let strData = Data(data[strStart..<(strStart + Int(nameLen))])
+        let base = data.startIndex
+        let absStart = base + strStart
+        let absEnd = absStart + Int(nameLen)
+        let strData = Data(data[absStart..<absEnd])
         guard let str = String(data: strData, encoding: .utf8) else { return nil }
         return (str, nLenBytes + Int(nameLen))
     }

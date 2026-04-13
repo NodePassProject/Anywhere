@@ -28,23 +28,8 @@ class HTTPUpgradeProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        huConnection.receive { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
-            }
-
-            if let error {
-                completion(nil, error)
-                return
-            }
-
-            guard let data, !data.isEmpty else {
-                completion(nil, nil)
-                return
-            }
-
-            self.processResponseHeader(data: data, completion: completion)
+        huConnection.receive { data, error in
+            completion(data, error)
         }
     }
 

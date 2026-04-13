@@ -4460,6 +4460,9 @@
     "HTTPUpgrade" : {
       "shouldTranslate" : false
     },
+    "Hysteria" : {
+      "shouldTranslate" : false
+    },
     "Import" : {
       "localizations" : {
         "ar" : {

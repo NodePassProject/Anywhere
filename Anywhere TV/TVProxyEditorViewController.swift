@@ -42,11 +42,13 @@ class TVProxyEditorViewController: UITableViewController {
     private var fingerprint: TLSFingerprint = .chrome133
     private var ssPassword = ""
     private var ssMethod = "aes-128-gcm"
-    private var naiveUsername = ""
-    private var naivePassword = ""
+    private var hysteriaPassword = ""
     private var socks5Username = ""
     private var socks5Password = ""
+    private var naiveUsername = ""
+    private var naivePassword = ""
 
+    private var isHysteria: Bool { selectedProtocol == .hysteria }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isNaive: Bool { selectedProtocol.isNaive }
@@ -68,6 +70,7 @@ class TVProxyEditorViewController: UITableViewController {
         case wsHost, wsPath, huHost, huPath, xhttpHost, xhttpPath, xhttpMode
         case tlsSNI, tlsALPN, fingerprint
         case realitySNI, publicKey, shortId
+        case hysteriaPassword
         case ssPassword, ssMethod
         case naiveUsername, naivePassword
         case socks5Username, socks5Password
@@ -83,7 +86,7 @@ class TVProxyEditorViewController: UITableViewController {
 
         // Protocol
         let protocolOptions: [(String, String)] = [
-            ("VLESS", "vless"), ("Shadowsocks", "shadowsocks"), ("SOCKS5", "socks5"), ("HTTPS", "http11"), ("HTTP2", "http2"), ("QUIC", "http3"),
+            ("VLESS", "vless"), ("Hysteria", "hysteria"), ("Shadowsocks", "shadowsocks"), ("SOCKS5", "socks5"), ("HTTPS", "http11"), ("HTTP2", "http2"), ("QUIC", "http3"),
         ]
         sections.append((String(localized: "Protocol"), [
             .selection(label: String(localized: "Protocol"), value: selectedProtocol.name, options: protocolOptions, key: .outboundProtocol),
@@ -94,12 +97,8 @@ class TVProxyEditorViewController: UITableViewController {
             .text(label: String(localized: "Address"), value: serverAddress, placeholder: "Address", key: .address),
             .text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port),
         ]
-        if isNaive {
-            serverRows.append(.text(label: String(localized: "Username"), value: naiveUsername, placeholder: "Username", key: .naiveUsername))
-            serverRows.append(.text(label: String(localized: "Password"), value: naivePassword, placeholder: "Password", key: .naivePassword, secure: true))
-        } else if isSOCKS5 {
-            serverRows.append(.text(label: String(localized: "Username"), value: socks5Username, placeholder: "Username", key: .socks5Username))
-            serverRows.append(.text(label: String(localized: "Password"), value: socks5Password, placeholder: "Password", key: .socks5Password, secure: true))
+        if isHysteria {
+            serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: "Password", key: .hysteriaPassword, secure: true))
         } else if isShadowsocks {
             serverRows.append(.text(label: String(localized: "Password"), value: ssPassword, placeholder: "Password", key: .ssPassword, secure: true))
             let methods: [(String, String)] = [
@@ -109,14 +108,20 @@ class TVProxyEditorViewController: UITableViewController {
                 ("BLAKE3-ChaCha20", "2022-blake3-chacha20-poly1305"),
             ]
             serverRows.append(.selection(label: String(localized: "Method"), value: ssMethod, options: methods, key: .ssMethod))
+        } else if isSOCKS5 {
+            serverRows.append(.text(label: String(localized: "Username"), value: socks5Username, placeholder: "Username", key: .socks5Username))
+            serverRows.append(.text(label: String(localized: "Password"), value: socks5Password, placeholder: "Password", key: .socks5Password, secure: true))
+        } else if isNaive {
+            serverRows.append(.text(label: String(localized: "Username"), value: naiveUsername, placeholder: "Username", key: .naiveUsername))
+            serverRows.append(.text(label: String(localized: "Password"), value: naivePassword, placeholder: "Password", key: .naivePassword, secure: true))
         } else {
             serverRows.append(.text(label: "UUID", value: uuid, placeholder: "UUID", key: .uuid))
             serverRows.append(.selection(label: String(localized: "Encryption"), value: encryption, options: [("None", "none")], key: .encryption))
         }
         sections.append((String(localized: "Server"), serverRows))
 
-        // Transport (hidden for Naive and SOCKS5)
-        if !isNaive && !isSOCKS5 {
+        // Transport (hidden for Naive, Hysteria, and SOCKS5)
+        if !isHysteria && !isSOCKS5 && !isNaive {
             var transportRows: [RowType] = [
                 .selection(label: String(localized: "Transport"), value: transport.uppercased(), options: [
                     ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("XHTTP", "xhttp"),
@@ -185,9 +190,10 @@ class TVProxyEditorViewController: UITableViewController {
 
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
-        if isNaive { return !naiveUsername.isEmpty && !naivePassword.isEmpty }
-        if isSOCKS5 { return true }
+        if isHysteria { return !hysteriaPassword.isEmpty }
         if isShadowsocks { return !ssPassword.isEmpty }
+        if isSOCKS5 { return true }
+        if isNaive { return !naiveUsername.isEmpty && !naivePassword.isEmpty }
         return UUID(uuidString: uuid) != nil && (!isReality || (!sni.isEmpty && !publicKey.isEmpty))
     }
 
@@ -340,7 +346,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .outboundProtocol:
             if let proto = OutboundProtocol(rawValue: value) {
                 selectedProtocol = proto
-                if isShadowsocks || isNaive || isSOCKS5 {
+                if isHysteria || isShadowsocks || isSOCKS5 || isNaive {
                     flow = ""
                     if security == "reality" { security = "none" }
                 }
@@ -369,12 +375,13 @@ class TVProxyEditorViewController: UITableViewController {
         case .realitySNI: sni = value
         case .publicKey: publicKey = value
         case .shortId: shortId = value
+        case .hysteriaPassword: hysteriaPassword = value
         case .ssPassword: ssPassword = value
         case .ssMethod: ssMethod = value
-        case .naiveUsername: naiveUsername = value
-        case .naivePassword: naivePassword = value
         case .socks5Username: socks5Username = value
         case .socks5Password: socks5Password = value
+        case .naiveUsername: naiveUsername = value
+        case .naivePassword: naivePassword = value
         }
     }
 
@@ -422,6 +429,8 @@ class TVProxyEditorViewController: UITableViewController {
         switch configuration.outbound {
         case .vless:
             break
+        case .hysteria(let password):
+            hysteriaPassword = password
         case .shadowsocks(let password, let method):
             ssPassword = password
             ssMethod = method
@@ -539,6 +548,8 @@ class TVProxyEditorViewController: UITableViewController {
         switch selectedProtocol {
         case .vless:
             outbound = .vless(uuid: parsedUUID, encryption: encryption, flow: flow.isEmpty ? nil : flow)
+        case .hysteria:
+            outbound = .hysteria(password: hysteriaPassword)
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)
         case .socks5:
@@ -583,4 +594,3 @@ class TVProxyEditorViewController: UITableViewController {
         dismiss(animated: true)
     }
 }
-

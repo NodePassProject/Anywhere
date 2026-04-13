@@ -55,7 +55,7 @@ class RealityProxyConnection: ProxyConnection {
                 return
             }
 
-            self.processResponseHeader(data: data, completion: completion)
+            completion(data, nil)
         }
     }
 

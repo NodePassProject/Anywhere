@@ -22,6 +22,8 @@ extension ProxyConfiguration {
         switch outboundProtocol {
         case .vless:
             return toVLESSURL()
+        case .hysteria:
+            return toHysteriaURL()
         case .shadowsocks:
             return toShadowsocksURL()
         case .socks5:
@@ -89,6 +91,17 @@ extension ProxyConfiguration {
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "vless://\(uuid.uuidString.lowercased())@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
+    }
+    
+    private func toHysteriaURL() -> String {
+        let password = (hysteriaPassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        var params: [String] = []
+        if let tls, tls.serverName != serverAddress {
+            params.append("sni=\(tls.serverName)")
+        }
+        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        return "hysteria2://\(password)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
     }
 
     private func toShadowsocksURL() -> String {
