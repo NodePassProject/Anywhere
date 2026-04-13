@@ -90,6 +90,13 @@ class QUICConnection {
     /// Allows the session to react immediately rather than discovering it on the next operation.
     var connectionClosedHandler: ((Error) -> Void)?
 
+    /// When `.brutal` is selected, the Swift-side CC state. Kept alive here
+    /// because its lifetime must match the QUIC connection.
+    private var brutalCC: BrutalCongestionControl?
+    /// `ngtcp2_cc *` returned by `ngtcp2_swift_install_brutal`. Used as the
+    /// registry key so the `@_cdecl` trampolines can dispatch to `brutalCC`.
+    private var brutalCCKey: OpaquePointer?
+
     /// When true, advertises DATAGRAM frame support in transport params.
     private let datagramsEnabled: Bool
     /// Maximum DATAGRAM frame size advertised to the peer (what we can receive).
@@ -429,6 +436,14 @@ class QUICConnection {
             }
             self.retransmitTimer?.cancel()
             self.retransmitTimer = nil
+            // Drop the Brutal CC registration before `ngtcp2_conn_del` frees
+            // `conn->cc` — trampolines fired after this point would otherwise
+            // look up a dangling key.
+            if let key = self.brutalCCKey {
+                brutalRegistryRemove(cc: key)
+                self.brutalCCKey = nil
+                self.brutalCC = nil
+            }
             if let conn = self.conn {
                 ngtcp2_conn_del(conn)
                 self.conn = nil
@@ -631,7 +646,7 @@ class QUICConnection {
         ngtcp2_swift_settings_default(&settings)
         settings.initial_ts = currentTimestamp()
         settings.max_tx_udp_payload_size = Self.maxUDPPayload
-        settings.cc_algo = tuning.ccAlgo
+        settings.cc_algo = tuning.ngtcp2CCAlgo
         settings.max_stream_window = tuning.maxStreamWindow
         settings.max_window = tuning.maxWindow
         settings.handshake_timeout = tuning.handshakeTimeout
@@ -690,6 +705,27 @@ class QUICConnection {
 
         ngtcp2_conn_set_tls_native_handle(connPtr,
             UnsafeMutableRawPointer(bitPattern: UInt(NGTCP2_APPLE_CS_AES_128_GCM_SHA256)))
+
+        // Install Brutal CC on top of the CUBIC state ngtcp2 just set up.
+        // Done *after* `ngtcp2_conn_client_new` so the CC struct is valid,
+        // and before any packets have been read/sent so no stale CUBIC
+        // decisions leak through.
+        if case .brutal(let initialBps) = tuning.cc {
+            let brutal = BrutalCongestionControl(initialBps: initialBps)
+            if let ccKey = ngtcp2_swift_install_brutal(connPtr) {
+                brutalRegistryInstall(cc: ccKey, brutal: brutal)
+                self.brutalCC = brutal
+                self.brutalCCKey = ccKey
+            }
+        }
+    }
+
+    /// Updates the Brutal target send rate (bytes/sec). No-op if this
+    /// connection isn't running Brutal. Safe to call off-queue.
+    func setBrutalBandwidth(_ bps: UInt64) {
+        queue.async { [weak self] in
+            self?.brutalCC?.setTargetBandwidth(bps)
+        }
     }
 
     // MARK: Packet Processing

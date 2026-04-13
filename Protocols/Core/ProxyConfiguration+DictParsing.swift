@@ -47,8 +47,10 @@ extension ProxyConfiguration {
             let flow = (configurationDict["flow"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             outbound = .vless(uuid: uuid, encryption: encryption, flow: flow)
         case .hysteria:
+            let rawMbps = (configurationDict["hysteriaUploadMbps"] as? Int) ?? HysteriaUploadMbpsDefault
             outbound = .hysteria(
-                password: (configurationDict["hysteriaPassword"] as? String) ?? ""
+                password: (configurationDict["hysteriaPassword"] as? String) ?? "",
+                uploadMbps: clampHysteriaUploadMbps(rawMbps)
             )
         case .shadowsocks:
             let password = (configurationDict["ssPassword"] as? String) ?? ""

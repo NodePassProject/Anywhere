@@ -5510,6 +5510,9 @@
         }
       }
     },
+    "Mbps" : {
+
+    },
     "Method" : {
       "localizations" : {
         "ar" : {
@@ -9954,6 +9957,9 @@
           }
         }
       }
+    },
+    "Upload Speed" : {
+
     },
     "Username" : {
       "localizations" : {

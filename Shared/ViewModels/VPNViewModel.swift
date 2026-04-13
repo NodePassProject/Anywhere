@@ -838,8 +838,9 @@ class VPNViewModel: ObservableObject {
         // Add protocol-specific credential fields
         switch configuration.outbound {
         case .vless: break
-        case .hysteria(let password):
+        case .hysteria(let password, let uploadMbps):
             configurationDict["hysteriaPassword"] = password
+            configurationDict["hysteriaUploadMbps"] = uploadMbps
         case .shadowsocks(let password, let method):
             configurationDict["ssPassword"] = password
             configurationDict["ssMethod"] = method

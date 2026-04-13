@@ -100,6 +100,9 @@ extension ProxyConfiguration {
         if let tls, tls.serverName != serverAddress {
             params.append("sni=\(tls.serverName)")
         }
+        if let mbps = hysteriaUploadMbps, mbps != HysteriaUploadMbpsDefault {
+            params.append("upmbps=\(mbps)")
+        }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         return "hysteria2://\(password)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
     }
