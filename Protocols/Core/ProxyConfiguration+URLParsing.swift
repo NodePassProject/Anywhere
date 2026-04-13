@@ -137,12 +137,16 @@ extension ProxyConfiguration {
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
-            outbound: .vless(uuid: uuid, encryption: encryption, flow: flow),
-            transportLayer: transportLayer,
-            securityLayer: securityLayer,
-            testseed: testseed,
-            muxEnabled: muxEnabled,
-            xudpEnabled: xudpEnabled
+            outbound: .vless(
+                uuid: uuid,
+                encryption: encryption,
+                flow: flow,
+                transport: transportLayer,
+                security: securityLayer,
+                muxEnabled: muxEnabled,
+                xudpEnabled: xudpEnabled,
+                testseed: (testseed?.count ?? 0) >= 4 ? testseed! : VLESSDefaultTestseed
+            )
         )
     }
     
@@ -186,13 +190,8 @@ extension ProxyConfiguration {
 
         let (host, port) = try parseHostPort(serverPart)
         let params = parseQueryParams(queryString)
-
-        var securityLayer: SecurityLayer = .none
-        if let sni = params["sni"], !sni.isEmpty {
-            securityLayer = .tls(TLSConfiguration(
-                serverName: sni, alpn: ["h3"], fingerprint: .chrome133
-            ))
-        }
+        
+        let sni: String? = (params["sni"]?.isEmpty == false) ? params["sni"] : nil
 
         // `upmbps` matches the Hysteria v2 share-link convention for the
         // client's declared upload bandwidth (Mbit/s). Clamped to 1...100.
@@ -203,8 +202,7 @@ extension ProxyConfiguration {
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
-            outbound: .hysteria(password: password, uploadMbps: uploadMbps),
-            securityLayer: securityLayer
+            outbound: .hysteria(password: password, uploadMbps: uploadMbps, sni: sni)
         )
     }
     
@@ -276,27 +274,12 @@ extension ProxyConfiguration {
         guard ShadowsocksCipher(method: method) != nil else {
             throw ProxyError.invalidURL("Unsupported SS method: \(method)")
         }
-
-        let params = parseQueryParams(queryString)
-        let transportStr = params["type"] ?? "tcp"
-        let security = params["security"] ?? "none"
-
-        let securityLayer: SecurityLayer
-        if security == "tls", let tlsConfig = try TLSConfiguration.parse(from: params, serverAddress: host) {
-            securityLayer = .tls(tlsConfig)
-        } else {
-            securityLayer = .none
-        }
-
-        let transportLayer = parseTransportLayer(from: params, transport: transportStr, serverAddress: host, securityLayer: securityLayer)
-
+        
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
-            outbound: .shadowsocks(password: password, method: method),
-            transportLayer: transportLayer,
-            securityLayer: securityLayer
+            outbound: .shadowsocks(password: password, method: method)
         )
     }
     

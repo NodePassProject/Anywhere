@@ -191,9 +191,16 @@ struct ClashProxyParser {
             name: name,
             serverAddress: server,
             serverPort: port,
-            outbound: .vless(uuid: uuid, encryption: encryption, flow: flow),
-            transportLayer: transportLayer,
-            securityLayer: securityLayer
+            outbound: .vless(
+                uuid: uuid,
+                encryption: encryption,
+                flow: flow,
+                transport: transportLayer,
+                security: securityLayer,
+                muxEnabled: true,
+                xudpEnabled: true,
+                testseed: VLESSDefaultTestseed
+            )
         )
     }
 
@@ -206,6 +213,9 @@ struct ClashProxyParser {
             let portInt = getInt(node, key: "port"),
             portInt > 0, portInt <= Int(UInt16.max)
         else { return nil }
+        // Anywhere speaks SOCKS5 strictly in the clear — reject SOCKS5-over-TLS
+        // nodes rather than silently downgrading them.
+        if getBool(node, key: "tls") == true { return nil }
         let username = getString(node, key: "username")
         let password = getString(node, key: "password")
         return ProxyConfiguration(
@@ -234,46 +244,18 @@ struct ClashProxyParser {
         else { return nil }
         let port = UInt16(portInt)
 
-        // Transport: tcp (default) or ws
+        // Anywhere only supports bare Shadowsocks — no configurable transport
+        // (ws/httpupgrade/xhttp) and no TLS wrapper. Reject nodes that try
+        // to layer either on top.
         let network = getString(node, key: "network") ?? getString(node, key: "plugin-opts-network") ?? "tcp"
-        guard network != "h2" && network != "grpc" else { return nil }
-        let transport = (network == "ws") ? "ws" : "tcp"
-
-        // TLS
-        let tlsEnabled = getBool(node, key: "tls") ?? false
-
-        var tlsConfig: TLSConfiguration? = nil
-        if tlsEnabled {
-            let sni = getString(node, key: "servername")
-                ?? getString(node, key: "sni")
-                ?? server
-            let alpn = getStringSequence(node, key: "alpn")
-            let clientFP = getString(node, key: "client-fingerprint")
-            let fingerprint = TLSFingerprint(rawValue: mapFingerprint(clientFP)) ?? .chrome133
-
-            tlsConfig = TLSConfiguration(
-                serverName: sni,
-                alpn: alpn,
-                fingerprint: fingerprint
-            )
-        }
-
-        // Build transport layer from ws-opts (WebSocket or HTTP Upgrade)
-        let transportLayer: TransportLayer
-        if transport == "ws" {
-            transportLayer = parseWSTransportLayer(from: node, server: server)
-        } else {
-            transportLayer = .tcp
-        }
-        let securityLayer: SecurityLayer = tlsConfig.map { .tls($0) } ?? .none
+        guard network == "tcp" else { return nil }
+        if getBool(node, key: "tls") == true { return nil }
 
         return ProxyConfiguration(
             name: name,
             serverAddress: server,
             serverPort: port,
-            outbound: .shadowsocks(password: password, method: cipher),
-            transportLayer: transportLayer,
-            securityLayer: securityLayer
+            outbound: .shadowsocks(password: password, method: cipher)
         )
     }
 

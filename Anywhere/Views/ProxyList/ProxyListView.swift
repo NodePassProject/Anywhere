@@ -62,7 +62,7 @@ struct ProxyListView: View {
         .toolbar {
             ToolbarItem {
                 Button {
-                    var visibleConfigurations = standaloneConfigurations + subscribedGroups
+                    let visibleConfigurations = standaloneConfigurations + subscribedGroups
                         .filter { !collapsedSubscriptions.contains($0.0.id) }
                         .flatMap(\.1)
                     viewModel.testLatencies(for: visibleConfigurations)
@@ -219,8 +219,10 @@ struct ProxyListView: View {
                         .lineLimit(1)
                     HStack(spacing: 4) {
                         Text(configuration.outboundProtocol.name)
-                        Text("·")
-                        Text(configuration.transport.uppercased())
+                        if configuration.outboundProtocol == .vless {
+                            Text("·")
+                            Text(configuration.transport.uppercased())
+                        }
                         let security = configuration.security.uppercased()
                         if security != "NONE" {
                             Text("·")

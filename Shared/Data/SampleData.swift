@@ -21,27 +21,50 @@ enum SampleData {
         TLSConfiguration(serverName: "example.com")
     )
 
+    /// Builds a VLESS `Outbound` with the app's current defaults and the
+    /// provided transport/security/flow so the sample data stays terse.
+    private static func sampleVLESS(
+        flow: String? = nil,
+        transport: TransportLayer = .tcp,
+        security: SecurityLayer
+    ) -> Outbound {
+        .vless(
+            uuid: UUID(),
+            encryption: "none",
+            flow: flow,
+            transport: transport,
+            security: security,
+            muxEnabled: true,
+            xudpEnabled: true,
+            testseed: VLESSDefaultTestseed
+        )
+    }
+
     // MARK: - Configurations
 
     static let configurations: [ProxyConfiguration] = [
         ProxyConfiguration(name: "Tokyo", serverAddress: "jp-tok.example.com", serverPort: 443,
-                           outbound: .vless(uuid: UUID(), encryption: "none", flow: "xtls-rprx-vision"), securityLayer: dummyReality),
+                           outbound: sampleVLESS(flow: "xtls-rprx-vision", security: dummyReality)),
         ProxyConfiguration(name: "Seoul", serverAddress: "kr.example.com", serverPort: 443,
-                           outbound: .vless(uuid: UUID(), encryption: "none", flow: nil),
-                           transportLayer: .ws(WebSocketConfiguration(host: "kr.example.com", path: "/")), securityLayer: dummyTLS),
+                           outbound: sampleVLESS(
+                               transport: .ws(WebSocketConfiguration(host: "kr.example.com", path: "/")),
+                               security: dummyTLS)),
         ProxyConfiguration(name: "US - New York", serverAddress: "us-ny.example.com", serverPort: 443, subscriptionId: subscriptionId,
-                           outbound: .vless(uuid: UUID(), encryption: "none", flow: "xtls-rprx-vision"), securityLayer: dummyReality),
+                           outbound: sampleVLESS(flow: "xtls-rprx-vision", security: dummyReality)),
         ProxyConfiguration(name: "US - Los Angeles", serverAddress: "us-la.example.com", serverPort: 443, subscriptionId: subscriptionId,
-                           outbound: .vless(uuid: UUID(), encryption: "none", flow: "xtls-rprx-vision"), securityLayer: dummyReality),
+                           outbound: sampleVLESS(flow: "xtls-rprx-vision", security: dummyReality)),
         ProxyConfiguration(name: "JP - Tokyo", serverAddress: "jp-tok.example.net", serverPort: 443, subscriptionId: subscriptionId,
-                           outbound: .vless(uuid: UUID(), encryption: "none", flow: nil),
-                           transportLayer: .ws(WebSocketConfiguration(host: "jp-tok.example.net", path: "/")), securityLayer: dummyTLS),
+                           outbound: sampleVLESS(
+                               transport: .ws(WebSocketConfiguration(host: "jp-tok.example.net", path: "/")),
+                               security: dummyTLS)),
         ProxyConfiguration(name: "DE - Frankfurt", serverAddress: "de-fra.example.net", serverPort: 443, subscriptionId: subscriptionId,
-                           outbound: .vless(uuid: UUID(), encryption: "none", flow: nil),
-                           transportLayer: .httpUpgrade(HTTPUpgradeConfiguration(host: "de-fra.example.net", path: "/")), securityLayer: dummyTLS),
+                           outbound: sampleVLESS(
+                               transport: .httpUpgrade(HTTPUpgradeConfiguration(host: "de-fra.example.net", path: "/")),
+                               security: dummyTLS)),
         ProxyConfiguration(name: "SG - Singapore", serverAddress: "sg.example.net", serverPort: 443, subscriptionId: subscriptionId,
-                           outbound: .vless(uuid: UUID(), encryption: "none", flow: nil),
-                           transportLayer: .xhttp(XHTTPConfiguration(host: "sg.example.net", path: "/")), securityLayer: dummyReality),
+                           outbound: sampleVLESS(
+                               transport: .xhttp(XHTTPConfiguration(host: "sg.example.net", path: "/")),
+                               security: dummyReality)),
     ]
 
     // MARK: - Subscription

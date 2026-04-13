@@ -368,7 +368,7 @@ class TVDemoProxyListViewController: UITableViewController {
             name: config.name,
             isSelected: isSelected,
             protocolName: config.outboundProtocol.name,
-            transport: config.transport,
+            transport: config.outboundProtocol == .vless ? config.transport : nil,
             security: config.security,
             flow: config.flow
         )
