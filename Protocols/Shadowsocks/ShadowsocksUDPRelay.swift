@@ -80,7 +80,7 @@ class ShadowsocksUDPRelay {
     /// Connects the UDP connection to the Shadowsocks server.
     func connect(serverHost: String, serverPort: UInt16, lwipQueue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
-        // Resolve via proxy DNS cache (shared with NWTransport/TCP connections)
+        // Resolve via proxy DNS cache (shared with BSDSocket/TCP connections)
         let resolvedHost = ProxyDNSCache.shared.resolveHost(serverHost) ?? serverHost
 
         let host = NWEndpoint.Host(resolvedHost)

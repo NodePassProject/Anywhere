@@ -10,11 +10,11 @@ import Foundation
 private let logger = AnywhereLogger(category: "DirectTCP")
 
 class DirectTCPRelay {
-    private let transport: NWTransport
+    private let transport: BSDSocket
     private var cancelled = false
 
     init() {
-        self.transport = NWTransport()
+        self.transport = BSDSocket()
     }
 
     /// Connects to the destination host:port asynchronously.
@@ -22,7 +22,7 @@ class DirectTCPRelay {
     /// - Parameters:
     ///   - host: Destination hostname or IP address.
     ///   - port: Destination port.
-    ///   - queue: Queue for the completion callback (passed to NWTransport for API compat).
+    ///   - queue: Queue for the completion callback (passed to BSDSocket for API compat).
     ///   - completion: Called with `nil` on success or an error on failure.
     func connect(host: String, port: UInt16, queue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {

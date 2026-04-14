@@ -19,7 +19,7 @@ private let logger = AnywhereLogger(category: "Proxy")
 class ProxyClient {
     private let configuration: ProxyConfiguration
     private let useResolvedAddressForDirectDial: Bool
-    private var connection: NWTransport?
+    private var connection: BSDSocket?
     private var realityClient: RealityClient?
     private var realityConnection: TLSRecordConnection?
     private var tlsClient: TLSClient?
@@ -29,7 +29,7 @@ class ProxyClient {
     private var xhttpConnection: XHTTPConnection?
 
     /// Proxy tunnel from a previous chain link (for proxy chaining).
-    /// When set, all transport connections use this tunnel instead of creating a ``NWTransport``.
+    /// When set, all transport connections use this tunnel instead of creating a ``BSDSocket``.
     private var tunnel: ProxyConnection?
     /// Intermediate chain proxy clients (retained for lifecycle management).
     private var chainClients: [ProxyClient] = []
@@ -407,7 +407,7 @@ class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         if let tunnel = self.tunnel {
-            // Chained: use tunnel instead of NWTransport
+            // Chained: use tunnel instead of BSDSocket
             let directProxyConnection = DirectProxyConnection(connection: TunneledTransport(tunnel: tunnel))
             sendProtocolHandshake(
                 over: directProxyConnection, command: command, destinationHost: destinationHost,
@@ -415,7 +415,7 @@ class ProxyClient {
                 supportsVision: false, completion: completion
             )
         } else {
-            let transport = NWTransport()
+            let transport = BSDSocket()
             self.connection = transport
 
             transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
@@ -574,7 +574,7 @@ class ProxyClient {
                 )
             } else {
                 // Plain WS: TCP → WebSocket → VLESS
-                let transport = NWTransport()
+                let transport = BSDSocket()
                 self.connection = transport
 
                 transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
@@ -678,7 +678,7 @@ class ProxyClient {
                 )
             } else {
                 // Plain HTTP Upgrade: TCP → HTTP Upgrade → raw TCP → VLESS
-                let transport = NWTransport()
+                let transport = BSDSocket()
                 self.connection = transport
 
                 transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
@@ -900,11 +900,11 @@ class ProxyClient {
             if let tunnel = self.tunnel {
                 xhttpConnection = XHTTPConnection(tunnel: tunnel, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
             } else {
-                guard let nwTransport = transport as? NWTransport else {
-                    completion(.failure(ProxyError.connectionFailed("Expected NWTransport for plain XHTTP")))
+                guard let socket = transport as? BSDSocket else {
+                    completion(.failure(ProxyError.connectionFailed("Expected BSDSocket for plain XHTTP")))
                     return
                 }
-                xhttpConnection = XHTTPConnection(transport: nwTransport, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
+                xhttpConnection = XHTTPConnection(transport: socket, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
             }
             self.xhttpConnection = xhttpConnection
             self.performXHTTPSetup(
@@ -916,7 +916,7 @@ class ProxyClient {
         if let tunnel = self.tunnel {
             setupXHTTP(TunneledTransport(tunnel: tunnel))
         } else {
-            let transport = NWTransport()
+            let transport = BSDSocket()
             self.connection = transport
             transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
                 if let error {
@@ -952,7 +952,7 @@ class ProxyClient {
                 }
             }
         } else {
-            let uploadTransport = NWTransport()
+            let uploadTransport = BSDSocket()
             uploadTransport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
                 if let error {
                     factoryCompletion(.failure(error))
@@ -1352,7 +1352,7 @@ class ProxyClient {
         if let tunnel = self.tunnel {
             onTransportReady(TunneledTransport(tunnel: tunnel))
         } else {
-            let transport = NWTransport()
+            let transport = BSDSocket()
             self.connection = transport
             transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
                 if let error {

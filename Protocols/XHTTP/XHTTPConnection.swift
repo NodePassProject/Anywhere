@@ -13,7 +13,7 @@ let defaultUserAgent = ProxyUserAgent.chrome
 
 // MARK: - Transport Closures
 
-/// Type alias for the set of closures that abstract the underlying transport (NWTransport / TLSRecordConnection).
+/// Type alias for the set of closures that abstract the underlying transport (BSDSocket / TLSRecordConnection).
 struct TransportClosures {
     let send: (Data, @escaping (Error?) -> Void) -> Void
     let receive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
@@ -231,10 +231,10 @@ class XHTTPConnection {
         return "\(method) \(url) HTTP/1.1\r\n"
     }
 
-    // MARK: - Initializers (NWTransport)
+    // MARK: - Initializers (BSDSocket)
 
-    /// Creates an XHTTP connection over a plain NWTransport (security=none).
-    init(transport: NWTransport, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
+    /// Creates an XHTTP connection over a plain BSDSocket (security=none).
+    init(transport: BSDSocket, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
         self.configuration = configuration
         self.mode = mode
         self.sessionId = sessionId

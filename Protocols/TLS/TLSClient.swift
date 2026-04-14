@@ -122,7 +122,7 @@ class TLSClient {
         }
         storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
-        let transport = NWTransport()
+        let transport = BSDSocket()
         self.connection = transport
 
         transport.connect(host: host, port: port, queue: .global(), initialData: clientHello) { [weak self] error in

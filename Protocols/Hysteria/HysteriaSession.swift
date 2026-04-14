@@ -135,12 +135,20 @@ final class HysteriaSession {
                 }
 
                 self.quic.streamDataHandler = { [weak self] sid, data, fin in
-                    let copied = Data(data)
-                    self?.queue.async { self?.handleStreamData(sid: sid, data: copied, fin: fin) }
+                    // Runs synchronously on quic.queue (== session.queue)
+                    // from inside ngtcp2's read_pkt call. Processing inline
+                    // lets the MAX_STREAM_DATA ACK ride read_pkt's tail-flush
+                    // and keeps the hot RX loop free of per-packet queue hops.
+                    // `data` is a zero-copy view into ngtcp2's receive buffer;
+                    // handleStreamData is responsible for detaching it before
+                    // the view is invalidated on return.
+                    self?.handleStreamData(sid: sid, data: data, fin: fin)
                 }
                 self.quic.datagramHandler = { [weak self] data in
-                    let copied = Data(data)
-                    self?.queue.async { self?.handleDatagram(copied) }
+                    // Runs synchronously on quic.queue. QUICConnection already
+                    // hands datagramHandler a standalone Data, so we can
+                    // process inline without an intermediate copy.
+                    self?.handleDatagram(data)
                 }
 
                 self.openHTTP3Control()

@@ -81,7 +81,27 @@ final class HysteriaConnection: ProxyConnection {
     // MARK: - Stream data (from HysteriaSession.handleStreamData)
 
     func handleStreamData(_ data: Data, fin: Bool) {
-        // On session queue.
+        // On session queue (== quic.queue), called synchronously from
+        // ngtcp2's read_pkt callback. `data` is a zero-copy view into
+        // ngtcp2's receive buffer — any path that escapes to another
+        // queue must detach it with Data(...) first; Data.append also
+        // copies into our own storage.
+
+        // Fast path: handshake done, nothing buffered, receiver waiting.
+        // Deliver inline so the flow-control credit (extendStreamOffset)
+        // rides read_pkt's tail-flush instead of an extra queue hop, and
+        // we skip the intermediate append/extract through receiveBuffer.
+        if responseParsed, receiveBuffer.isEmpty, !data.isEmpty,
+           let cb = pendingReceive {
+            pendingReceive = nil
+            let ackCount = pendingQuicBytes + data.count
+            pendingQuicBytes = 0
+            session.extendStreamOffset(streamID, count: ackCount)
+            cb(Data(data), nil)
+            if fin { state = .closed }
+            return
+        }
+
         if !data.isEmpty {
             pendingQuicBytes += data.count
             receiveBuffer.append(data)

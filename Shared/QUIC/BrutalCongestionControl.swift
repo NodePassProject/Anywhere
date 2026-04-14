@@ -127,22 +127,27 @@ final class BrutalCongestionControl {
         if lossRate < 0 { lossRate = 0 }
         if lossRate > Self.maxLossRate { lossRate = Self.maxLossRate }
 
-        // Inflate the send rate so (rate * (1 - loss)) = target.
-        let effectiveBps = Double(targetBps) / (1.0 - lossRate) * Self.congestionWindowMultiplier
+        // Pace at `target / ackRate` so that over time
+        //     paced_rate * ackRate ≈ target,
+        // compensating for the fraction of bytes lost.  maxLossRate caps
+        // the inflation at 1.25× target to avoid pathological floods.
+        let ackRate = 1.0 - lossRate
+        let pacingBps = Double(targetBps) / ackRate
 
-        // cwnd bytes = effectiveBps * rttSeconds
-        let cwndBytes = effectiveBps * Double(rttNs) / 1_000_000_000.0
+        // Cwnd overshoots pacing by `congestionWindowMultiplier` so a full
+        // RTT of paced sends can be in flight before ACKs return.  Matches
+        // Go's reference: `cwnd = bps * rtt * 2 / ackRate`.
+        let cwndBytes = pacingBps * Self.congestionWindowMultiplier * Double(rttNs) / 1_000_000_000.0
         let minCwnd = Self.minCwndPackets &* max(mss, 1)
         let cwnd = max(UInt64(cwndBytes), minCwnd)
 
         // pacing_interval_m = (1 / pacing_rate) * MSS, in units of 1/1024 ns.
         // ngtcp2 schedules one MSS per interval, so interval = MSS / rate.
-        // Divide-by-zero guarded by the `targetBps > 0` check above and the
-        // constant multiplier ensures effectiveBps > 0.
-        let pacingRateBps = effectiveBps
+        // `targetBps > 0` above and `ackRate ≥ 0.8` (maxLossRate clamp)
+        // keep pacingBps finite.
         let pacingIntervalM: UInt64
-        if pacingRateBps >= 1.0 {
-            let seconds = Double(mss) / pacingRateBps
+        if pacingBps >= 1.0 {
+            let seconds = Double(mss) / pacingBps
             let nanos = seconds * 1_000_000_000.0
             pacingIntervalM = UInt64(nanos * 1024.0)
         } else {
