@@ -22,8 +22,14 @@ final class HysteriaUDPConnection: ProxyConnection {
     /// Per-datagram FIFO. Hysteria delivers one UDP packet per QUIC DATAGRAM,
     /// so the packet boundary is already preserved on the wire — no
     /// stream-style length framing is involved.
+    ///
+    /// Bounded at `maxQueuedPackets` with drop-oldest semantics when the
+    /// receiver can't keep up — matches the reference Go client's 1024-slot
+    /// `ReceiveCh` (core/client/udp.go:18) and preserves UDP's lossy
+    /// contract instead of growing memory without bound.
     private var packetQueue: [Data] = []
     private let packetLock = UnfairLock()
+    private static let maxQueuedPackets = 1024
 
     private var pendingReceive: ((Data?, Error?) -> Void)?
 
@@ -80,6 +86,9 @@ final class HysteriaUDPConnection: ProxyConnection {
             packetLock.unlock()
             cb(payload, nil)
             return
+        }
+        if packetQueue.count >= Self.maxQueuedPackets {
+            packetQueue.removeFirst()
         }
         packetQueue.append(payload)
         packetLock.unlock()

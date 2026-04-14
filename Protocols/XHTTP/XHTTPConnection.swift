@@ -11,15 +11,6 @@ private let logger = AnywhereLogger(category: "XHTTP")
 
 let defaultUserAgent = ProxyUserAgent.chrome
 
-// MARK: - Transport Closures
-
-/// Type alias for the set of closures that abstract the underlying transport (BSDSocket / TLSRecordConnection).
-struct TransportClosures {
-    let send: (Data, @escaping (Error?) -> Void) -> Void
-    let receive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
-    let cancel: () -> Void
-}
-
 // MARK: - XHTTPConnection
 
 /// XHTTP connection implementing packet-up, stream-up, and stream-one modes.
@@ -231,77 +222,35 @@ class XHTTPConnection {
         return "\(method) \(url) HTTP/1.1\r\n"
     }
 
-    // MARK: - Initializers (BSDSocket)
+    // MARK: - Initializers
 
-    /// Creates an XHTTP connection over a plain BSDSocket (security=none).
-    init(transport: BSDSocket, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
+    /// Designated initializer. Takes a pre-built download ``TransportClosures``
+    /// so the three convenience inits below are each one line.
+    init(download: TransportClosures, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
         self.configuration = configuration
         self.mode = mode
         self.sessionId = sessionId
         self.useHTTP2 = useHTTP2
         self.uploadConnectionFactory = uploadConnectionFactory
-        self.downloadSend = { data, completion in
-            transport.send(data: data, completion: completion)
-        }
-        self.downloadReceive = { completion in
-            transport.receive(maximumLength: 65536, completion: completion)
-        }
-        self.downloadCancel = {
-            transport.forceCancel()
-        }
+        self.downloadSend = download.send
+        self.downloadReceive = download.receive
+        self.downloadCancel = download.cancel
         self._isConnected = true
     }
 
-    // MARK: - Initializers (Proxy Tunnel)
+    /// Creates an XHTTP connection over a plain ``RawTCPSocket`` (security=none).
+    convenience init(transport: RawTCPSocket, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
+        self.init(download: TransportClosures(rawTCP: transport), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
+    }
+
+    /// Creates an XHTTP connection over a ``TLSRecordConnection`` (security=tls or reality).
+    convenience init(tlsConnection: TLSRecordConnection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
+        self.init(download: TransportClosures(tls: tlsConnection), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
+    }
 
     /// Creates an XHTTP connection over a proxy tunnel (for proxy chaining).
-    init(tunnel: ProxyConnection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
-        self.configuration = configuration
-        self.mode = mode
-        self.sessionId = sessionId
-        self.useHTTP2 = useHTTP2
-        self.uploadConnectionFactory = uploadConnectionFactory
-        self.downloadSend = { data, completion in
-            tunnel.sendRaw(data: data, completion: completion)
-        }
-        self.downloadReceive = { completion in
-            tunnel.receiveRaw { data, error in
-                if let error {
-                    completion(nil, true, error)
-                } else if let data, !data.isEmpty {
-                    completion(data, false, nil)
-                } else {
-                    completion(nil, true, nil)
-                }
-            }
-        }
-        self.downloadCancel = {
-            tunnel.cancel()
-        }
-        self._isConnected = true
-    }
-
-    // MARK: - Initializers (TLSRecordConnection)
-
-    /// Creates an XHTTP connection over a TLS record connection (security=tls or reality).
-    init(tlsConnection: TLSRecordConnection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
-        self.configuration = configuration
-        self.mode = mode
-        self.sessionId = sessionId
-        self.useHTTP2 = useHTTP2
-        self.uploadConnectionFactory = uploadConnectionFactory
-        self.downloadSend = { data, completion in
-            tlsConnection.send(data: data, completion: completion)
-        }
-        self.downloadReceive = { completion in
-            tlsConnection.receive { data, error in
-                completion(data, false, error)
-            }
-        }
-        self.downloadCancel = {
-            tlsConnection.cancel()
-        }
-        self._isConnected = true
+    convenience init(tunnel: ProxyConnection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
+        self.init(download: TransportClosures(tunnel: tunnel), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
     }
 
     // MARK: - Setup

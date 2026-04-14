@@ -18,7 +18,7 @@ private let logger = AnywhereLogger(category: "HTTP2Session")
 /// Modelled after Chromium's `SpdySession`: one TCP/TLS connection carries
 /// many independent CONNECT streams, each with its own flow-control window
 /// and padding state.
-class HTTP2Session {
+class HTTP2Session: PoolableSession {
 
     // MARK: - State
 

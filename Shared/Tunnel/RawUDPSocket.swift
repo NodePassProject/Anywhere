@@ -30,14 +30,40 @@ final class RawUDPSocket {
         case cancelled
     }
 
-    // MARK: - Properties
+    // MARK: Constants
+
+    /// 65 KiB covers the largest possible UDP payload. Reused across
+    /// `recv(2)` calls so the loop only allocates for the per-packet
+    /// `Data` copy handed to the handler.
+    private static let receiveBufferSize = 65536
+
+    /// Kernel socket buffer size. macOS defaults (~9 KB) cap
+    /// high-bandwidth relays at that per-RTT.
+    private static let kernelSocketBufferSize: Int32 = 4 * 1024 * 1024
+
+    // MARK: State
 
     private let stateLock = UnfairLock()
     private var _state: State = .setup
-    var isReady: Bool { stateLock.withLock { if case .ready = _state { return true } else { return false } } }
 
+    /// The current state. Thread-safe.
+    private var state: State {
+        stateLock.withLock { _state }
+    }
+
+    /// Whether the socket is connected and ready for I/O. Thread-safe.
+    var isReady: Bool {
+        if case .ready = state { return true }
+        return false
+    }
+
+    // MARK: Concurrency
+
+    /// Serial queue for all socket I/O and state transitions.
     private let ioQueue = DispatchQueue(label: "com.argsment.Anywhere.RawUDPSocket",
                                         qos: .userInitiated)
+
+    // MARK: Socket
 
     /// Socket file descriptor. `-1` when no socket is open.
     private var socketFD: Int32 = -1
@@ -45,19 +71,19 @@ final class RawUDPSocket {
     /// Fires on socket readability; handler drains to `EAGAIN`.
     private var readSource: DispatchSourceRead?
 
+    // MARK: Receive
+
     private var receiveHandler: ((Data) -> Void)?
     private var receiveHandlerQueue: DispatchQueue?
-
-    /// 65 KiB covers the largest possible UDP payload; reused across
-    /// `recv(2)` calls so the loop only allocates for the per-packet
-    /// `Data` copy handed to the handler.
-    private var rxBuffer = [UInt8](repeating: 0, count: 65536)
+    private var rxBuffer = [UInt8](repeating: 0, count: RawUDPSocket.receiveBufferSize)
 
     // MARK: - Lifecycle
 
     init() {}
 
     deinit {
+        // Defensive: if `cancel()` wasn't called, still close the fd so we
+        // don't leak a descriptor.
         if socketFD >= 0 {
             _ = Darwin.close(socketFD)
             socketFD = -1
@@ -73,7 +99,7 @@ final class RawUDPSocket {
     ///   - host: Remote hostname or literal IP.
     ///   - port: Remote UDP port.
     ///   - completionQueue: Queue on which `completion` is invoked.
-    ///   - completion: `nil` on success, a `SocketError` on failure.
+    ///   - completion: `nil` on success, a ``SocketError`` on failure.
     func connect(host: String, port: UInt16,
                  completionQueue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
@@ -82,7 +108,7 @@ final class RawUDPSocket {
                 completionQueue.async { completion(SocketError.connectionFailed("Deallocated")) }
                 return
             }
-            if case .cancelled = self.stateLock.withLock({ self._state }) {
+            if case .cancelled = self.state {
                 completionQueue.async { completion(SocketError.connectionFailed("Cancelled")) }
                 return
             }
@@ -95,11 +121,11 @@ final class RawUDPSocket {
                 return
             }
 
-            // Try each resolved IP in order, matching BSDSocket's
-            // behavior on mixed v4/v6 records.
+            // Try each resolved IP in order, matching RawTCPSocket's behavior on
+            // mixed v4/v6 records.
             var lastError: SocketError?
             for ip in ips {
-                switch self.connectToIP(ip, port: port) {
+                switch self.attemptConnect(ip: ip, port: port) {
                 case .success:
                     self.stateLock.withLock { self._state = .ready }
                     self.armReadSource()
@@ -115,74 +141,28 @@ final class RawUDPSocket {
         }
     }
 
-    /// Runs on `ioQueue`. Builds a sockaddr from `ip`, creates the socket,
-    /// applies options, and calls `connect(2)`.
-    private func connectToIP(_ ip: String, port: UInt16) -> Result<Void, SocketError> {
-        var storage = sockaddr_storage()
-        let addrLen: socklen_t
-        let family: Int32
-
-        if ip.contains(":") {
-            var a6 = sockaddr_in6()
-            a6.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
-            a6.sin6_family = sa_family_t(AF_INET6)
-            a6.sin6_port = port.bigEndian
-            let ok = ip.withCString { inet_pton(AF_INET6, $0, &a6.sin6_addr) }
-            guard ok == 1 else {
-                return .failure(.connectionFailed("inet_pton(v6) failed for \(ip)"))
-            }
-            family = AF_INET6
-            addrLen = socklen_t(MemoryLayout<sockaddr_in6>.size)
-            withUnsafeMutablePointer(to: &storage) { dst in
-                withUnsafePointer(to: &a6) { src in
-                    memcpy(UnsafeMutableRawPointer(dst), UnsafeRawPointer(src), Int(addrLen))
-                }
-            }
-        } else {
-            var a4 = sockaddr_in()
-            a4.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-            a4.sin_family = sa_family_t(AF_INET)
-            a4.sin_port = port.bigEndian
-            let ok = ip.withCString { inet_pton(AF_INET, $0, &a4.sin_addr) }
-            guard ok == 1 else {
-                return .failure(.connectionFailed("inet_pton(v4) failed for \(ip)"))
-            }
-            family = AF_INET
-            addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-            withUnsafeMutablePointer(to: &storage) { dst in
-                withUnsafePointer(to: &a4) { src in
-                    memcpy(UnsafeMutableRawPointer(dst), UnsafeRawPointer(src), Int(addrLen))
-                }
-            }
+    /// Builds a sockaddr from `ip`, creates the socket, applies options, and
+    /// calls `connect(2)`. Must run on `ioQueue`.
+    private func attemptConnect(ip: String, port: UInt16) -> Result<Void, SocketError> {
+        guard let endpoint = IPEndpoint(ip: ip, port: port) else {
+            return .failure(.connectionFailed("inet_pton failed for \(ip)"))
         }
 
-        let fd = Darwin.socket(family, SOCK_DGRAM, 0)
+        let fd = Darwin.socket(endpoint.family, SOCK_DGRAM, 0)
         guard fd >= 0 else {
             return .failure(.socketCreationFailed("socket() errno=\(errno)"))
         }
 
-        let flags = fcntl(fd, F_GETFL, 0)
-        if flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 {
+        guard SocketHelpers.makeNonBlocking(fd) else {
+            let e = errno
             _ = Darwin.close(fd)
-            return .failure(.socketCreationFailed("fcntl(O_NONBLOCK) errno=\(errno)"))
+            return .failure(.socketCreationFailed("fcntl(O_NONBLOCK) errno=\(e)"))
         }
 
-        var on: Int32 = 1
-        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on,
-                       socklen_t(MemoryLayout<Int32>.size))
+        applyUDPSocketOptions(fd: fd)
 
-        // Widen the kernel buffers. macOS defaults ~9 KB, which caps
-        // high-bandwidth relays at that per-RTT.
-        var bufSize: Int32 = 4 * 1024 * 1024
-        _ = setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufSize,
-                       socklen_t(MemoryLayout<Int32>.size))
-        _ = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufSize,
-                       socklen_t(MemoryLayout<Int32>.size))
-
-        let rc = withUnsafePointer(to: &storage) { p -> Int32 in
-            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                Darwin.connect(fd, sa, addrLen)
-            }
+        let rc = endpoint.withSockAddr { sa, len in
+            Darwin.connect(fd, sa, len)
         }
         if rc != 0 {
             let err = errno
@@ -194,11 +174,17 @@ final class RawUDPSocket {
         return .success(())
     }
 
+    /// Applies Darwin-specific UDP socket options.
+    private func applyUDPSocketOptions(fd: Int32) {
+        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_NOSIGPIPE, value: 1)
+        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_SNDBUF, value: Self.kernelSocketBufferSize)
+        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_RCVBUF, value: Self.kernelSocketBufferSize)
+    }
+
     // MARK: - Receive
 
-    /// Installs a receive handler. Fires on `handlerQueue` (or `ioQueue`
-    /// if nil) once per datagram. Calling twice replaces the previous
-    /// handler.
+    /// Installs a receive handler. Fires on `handlerQueue` (or `ioQueue` if
+    /// nil) once per datagram. Calling twice replaces the previous handler.
     func startReceiving(queue handlerQueue: DispatchQueue? = nil,
                         handler: @escaping (Data) -> Void) {
         ioQueue.async { [weak self] in
@@ -208,8 +194,8 @@ final class RawUDPSocket {
         }
     }
 
+    /// Arms the read source. Runs on `ioQueue` via the connect path.
     private func armReadSource() {
-        // Runs on ioQueue via the connect path.
         guard socketFD >= 0, readSource == nil else { return }
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: ioQueue)
         source.setEventHandler { [weak self] in
@@ -219,6 +205,8 @@ final class RawUDPSocket {
         source.resume()
     }
 
+    /// Loops `recv(2)` until `EAGAIN` so one wake-up drains a burst of
+    /// packets. Must run on `ioQueue`.
     private func drainReads() {
         guard socketFD >= 0 else { return }
         while true {
@@ -233,8 +221,8 @@ final class RawUDPSocket {
             }
             if n == 0 { return }
             guard let handler = receiveHandler else {
-                // No handler installed yet; drop but keep draining so
-                // the dispatch source stops firing.
+                // No handler installed yet; drop but keep draining so the
+                // dispatch source stops firing.
                 continue
             }
             let data = rxBuffer.withUnsafeBufferPointer { buf -> Data in
@@ -253,21 +241,22 @@ final class RawUDPSocket {
     /// Fire-and-forget datagram send.
     func send(data: Data) {
         ioQueue.async { [weak self] in
-            _ = self?.sendOnQueue(data)
+            _ = self?.performSend(data)
         }
     }
 
     /// Datagram send with completion on the internal `ioQueue`.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         ioQueue.async { [weak self] in
-            let err = self?.sendOnQueue(data)
+            let err = self?.performSend(data)
             completion(err)
         }
     }
 
-    private func sendOnQueue(_ data: Data) -> Error? {
+    /// Issues a single `send(2)`. Must run on `ioQueue`.
+    private func performSend(_ data: Data) -> Error? {
         guard socketFD >= 0 else { return SocketError.notConnected }
-        if case .cancelled = stateLock.withLock({ _state }) {
+        if case .cancelled = state {
             return SocketError.notConnected
         }
         let sent = data.withUnsafeBytes { buf -> Int in

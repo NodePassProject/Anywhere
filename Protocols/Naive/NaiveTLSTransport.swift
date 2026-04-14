@@ -25,7 +25,7 @@ enum NaiveTLSError: Error, LocalizedError {
 
 // MARK: - NaiveTLSTransport
 
-/// TLS transport for NaiveProxy connections using ``BSDSocket`` + ``TLSClient``.
+/// TLS transport for NaiveProxy connections using ``RawTCPSocket`` + ``TLSClient``.
 ///
 /// Reuses Anywhere's existing TLS infrastructure to establish a TLS 1.3 connection
 /// to the proxy server. The ALPN protocol list is configurable (e.g. `["h2"]` for
@@ -69,7 +69,7 @@ class NaiveTLSTransport {
 
     /// Establishes a TLS connection to the proxy server.
     ///
-    /// Uses ``BSDSocket`` for TCP (or tunnels through an existing ``ProxyConnection``)
+    /// Uses ``RawTCPSocket`` for TCP (or tunnels through an existing ``ProxyConnection``)
     /// and ``TLSClient`` for the TLS 1.3 handshake. On success, stores the
     /// ``TLSRecordConnection`` for subsequent I/O.
     ///

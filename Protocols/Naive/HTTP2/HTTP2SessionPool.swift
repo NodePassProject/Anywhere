@@ -13,25 +13,22 @@ private let logger = AnywhereLogger(category: "HTTP2Pool")
 ///
 /// Sessions are keyed by `host:port:sni`. When a new stream is requested the
 /// pool returns an existing session with available capacity, or creates a new
-/// one.  This mirrors Chromium's `SpdySessionPool`, which lets many CONNECT
+/// one. This mirrors Chromium's `SpdySessionPool`, which lets many CONNECT
 /// tunnels share a single TCP/TLS connection.
 ///
 /// When a session receives GOAWAY or the transport closes, the pool evicts it
 /// automatically via the session's `onClose` callback.
-class HTTP2SessionPool {
+final class HTTP2SessionPool: SessionPool<HTTP2Session> {
 
     static let shared = HTTP2SessionPool()
 
-    private let lock = UnfairLock()
-
-    /// Sessions keyed by "host:port:sni".
-    private var sessions: [String: [HTTP2Session]] = [:]
-
-    /// Dedicated (non-pooled) sessions for chained connections.
-    /// Retained here so the session stays alive while its streams are in use.
+    /// Dedicated (non-pooled) sessions for chained connections, plus
+    /// post-GOAWAY sessions that need to stay alive while their existing
+    /// streams drain. Retained here so the session isn't deallocated while
+    /// streams are still in use.
     private var dedicatedSessions: [ObjectIdentifier: HTTP2Session] = [:]
 
-    private init() {}
+    private override init() {}
 
     // MARK: - Acquire
 
@@ -39,8 +36,8 @@ class HTTP2SessionPool {
     ///
     /// For direct connections (`tunnel == nil`), sessions are pooled by server
     /// identity so multiple CONNECT tunnels share a single HTTP/2 connection.
-    /// For chained connections (`tunnel != nil`), a dedicated session is created
-    /// because the transport path is unique.
+    /// For chained connections (`tunnel != nil`), a dedicated session is
+    /// created because the transport path is unique.
     ///
     /// - Parameters:
     ///   - host: Proxy server address (IP or hostname).
@@ -59,8 +56,8 @@ class HTTP2SessionPool {
         destination: String,
         completion: @escaping (HTTP2Stream) -> Void
     ) {
-        // Chained connections cannot be pooled (each outer tunnel is unique)
-        guard tunnel == nil else {
+        // Chained connections cannot be pooled (each outer tunnel is unique).
+        if tunnel != nil {
             let session = HTTP2Session(
                 host: host, port: port, sni: sni,
                 tunnel: tunnel, configuration: configuration
@@ -83,13 +80,13 @@ class HTTP2SessionPool {
             return
         }
 
-        let key = "\(host):\(port):\(sni)"
+        let key = Self.makeKey(host: host, port: port, sni: sni)
         let session: HTTP2Session
 
         lock.lock()
-        // Evict closed and GOAWAY sessions.
-        // GOAWAY sessions move to dedicatedSessions so they stay alive
-        // while their existing streams drain.
+        // Move post-GOAWAY sessions out of the pool into dedicatedSessions so
+        // they stay alive until their existing streams drain, then evict any
+        // closed or going-away entries from the active bucket.
         if let array = sessions[key] {
             for s in array where s.poolIsGoingAway {
                 dedicatedSessions[ObjectIdentifier(s)] = s
@@ -122,30 +119,25 @@ class HTTP2SessionPool {
 
     // MARK: - Eviction
 
-    private func removeSession(_ session: HTTP2Session, key: String) {
+    /// Drops the bucket entry plus any draining-after-GOAWAY copy in
+    /// ``dedicatedSessions``.
+    override func removeSession(_ session: HTTP2Session, key: String) {
+        super.removeSession(session, key: key)
         lock.lock()
-        sessions[key]?.removeAll { $0 === session }
-        if sessions[key]?.isEmpty == true {
-            sessions.removeValue(forKey: key)
-        }
-        // Also clean up if the session was draining after GOAWAY
         dedicatedSessions.removeValue(forKey: ObjectIdentifier(session))
         lock.unlock()
         logger.info("[HTTP2Pool] Evicted session for \(key)")
     }
 
-    /// Closes all pooled sessions (e.g. on VPN tunnel teardown).
-    func closeAll() {
+    /// Closes pooled and dedicated sessions on VPN tunnel teardown.
+    override func closeAll() {
         lock.lock()
-        let all = sessions.values.flatMap { $0 }
         let dedicated = Array(dedicatedSessions.values)
-        sessions.removeAll()
         dedicatedSessions.removeAll()
         lock.unlock()
 
-        for session in all {
-            session.close()
-        }
+        super.closeAll()
+
         for session in dedicated {
             session.close()
         }

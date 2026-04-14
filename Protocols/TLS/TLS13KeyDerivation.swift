@@ -142,6 +142,39 @@ struct TLSApplicationKeys {
     let serverIV: Data
 }
 
+/// Handshake-time TLS 1.3 state shared between ``TLSClient`` and
+/// ``RealityClient``.
+///
+/// All fields are populated incrementally during the handshake, then cleared
+/// (by reassigning a fresh value) once the application keys move into the
+/// long-lived ``TLSRecordConnection``.
+struct TLS13HandshakeState {
+    /// Per-cipher-suite key derivation helper. Set when the ServerHello
+    /// cipher suite is parsed.
+    var keyDerivation: TLS13KeyDerivation?
+
+    /// Handshake secret derived from `ECDHE × early_secret`. Held until the
+    /// application keys are derived from the full transcript.
+    var handshakeSecret: Data?
+
+    /// Symmetric handshake-traffic keys (one direction each). Used to decrypt
+    /// the encrypted handshake messages
+    /// (`Certificate`/`CertificateVerify`/`Finished`).
+    var handshakeKeys: TLSHandshakeKeys?
+
+    /// Application-traffic keys, derived after the server `Finished` is
+    /// verified.
+    var applicationKeys: TLSApplicationKeys?
+
+    /// Running hash of every handshake message processed so far. Updated as
+    /// each message is consumed.
+    var handshakeTranscript: Data?
+
+    /// Per-record sequence number for handshake-traffic decryption. Increments
+    /// after every encrypted record from the server.
+    var serverHandshakeSeqNum: UInt64 = 0
+}
+
 /// TLS 1.3 key derivation utilities
 struct TLS13KeyDerivation {
     let cipherSuite: UInt16

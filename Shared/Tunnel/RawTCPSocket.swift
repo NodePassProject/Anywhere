@@ -1,5 +1,5 @@
 //
-//  BSDSocket.swift
+//  RawTCPSocket.swift
 //  Anywhere
 //
 //  Created by Argsment Limited on 3/24/26.
@@ -8,13 +8,15 @@
 import Foundation
 import Darwin
 
-private let logger = AnywhereLogger(category: "BSDSocket")
+private let logger = AnywhereLogger(category: "RawTCPSocket")
 
 // MARK: - RawTransport
 
-/// Protocol abstracting the raw I/O layer used by TLS/Reality handshakes and proxy chaining.
+/// Protocol abstracting the raw I/O layer used by TLS/Reality handshakes and
+/// proxy chaining.
 ///
-/// Both ``BSDSocket`` (real TCP) and ``TunneledTransport`` (tunneled TCP via proxy chain) conform.
+/// Both ``RawTCPSocket`` (real TCP) and ``TunneledTransport`` (tunneled TCP via a
+/// proxy chain) conform.
 protocol RawTransport: AnyObject {
     /// Whether the transport is connected and ready for I/O.
     var isTransportReady: Bool { get }
@@ -22,7 +24,7 @@ protocol RawTransport: AnyObject {
     /// Sends data through the transport.
     func send(data: Data, completion: @escaping (Error?) -> Void)
 
-    /// Sends data through the transport without tracking completion.
+    /// Sends data without tracking completion.
     func send(data: Data)
 
     /// Receives up to `maximumLength` bytes from the transport.
@@ -32,7 +34,7 @@ protocol RawTransport: AnyObject {
     func forceCancel()
 }
 
-// MARK: - Error
+// MARK: - SocketError
 
 /// Errors that can occur during socket/transport operations.
 enum SocketError: Error, LocalizedError {
@@ -55,15 +57,98 @@ enum SocketError: Error, LocalizedError {
     }
 }
 
-// MARK: - BSDSocket
+// MARK: - IPEndpoint
+
+/// A numeric IPv4/IPv6 address + port packed into a `sockaddr_storage`, ready
+/// to hand to `connect(2)` or `sendto(2)`.
+///
+/// Shared between ``RawTCPSocket`` and ``RawUDPSocket`` so neither file needs to
+/// duplicate the `inet_pton` / family-branch boilerplate.
+struct IPEndpoint {
+    /// Socket family — `AF_INET` or `AF_INET6`.
+    let family: Int32
+
+    /// Address length to pass to BSD socket APIs.
+    let length: socklen_t
+
+    private let storage: sockaddr_storage
+
+    /// Parses `ip` as an IPv4 or IPv6 literal. Returns `nil` if the string
+    /// isn't a valid literal for its inferred family.
+    init?(ip: String, port: UInt16) {
+        var storage = sockaddr_storage()
+        let family: Int32
+        let length: socklen_t
+
+        if ip.contains(":") {
+            var addr = sockaddr_in6()
+            addr.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            addr.sin6_family = sa_family_t(AF_INET6)
+            addr.sin6_port = port.bigEndian
+            guard ip.withCString({ inet_pton(AF_INET6, $0, &addr.sin6_addr) }) == 1 else {
+                return nil
+            }
+            family = AF_INET6
+            length = socklen_t(MemoryLayout<sockaddr_in6>.size)
+            _ = memcpy(&storage, &addr, Int(length))
+        } else {
+            var addr = sockaddr_in()
+            addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            addr.sin_family = sa_family_t(AF_INET)
+            addr.sin_port = port.bigEndian
+            guard ip.withCString({ inet_pton(AF_INET, $0, &addr.sin_addr) }) == 1 else {
+                return nil
+            }
+            family = AF_INET
+            length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            _ = memcpy(&storage, &addr, Int(length))
+        }
+
+        self.family = family
+        self.length = length
+        self.storage = storage
+    }
+
+    /// Invokes `body` with a `sockaddr *` suitable for `connect`/`sendto`/etc.
+    func withSockAddr<T>(_ body: (UnsafePointer<sockaddr>, socklen_t) -> T) -> T {
+        return withUnsafePointer(to: storage) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                body(sa, length)
+            }
+        }
+    }
+}
+
+// MARK: - SocketHelpers
+
+/// Low-level POSIX helpers shared between ``RawTCPSocket`` and ``RawUDPSocket``.
+enum SocketHelpers {
+    /// Sets a boolean-like `Int32` socket option. Failure is ignored — a
+    /// missing option should never sink the connection.
+    @inline(__always)
+    static func setInt(_ fd: Int32, level: Int32, name: Int32, value: Int32) {
+        var v = value
+        _ = setsockopt(fd, level, name, &v, socklen_t(MemoryLayout<Int32>.size))
+    }
+
+    /// Puts `fd` into non-blocking mode. Returns `false` on failure.
+    @inline(__always)
+    static func makeNonBlocking(_ fd: Int32) -> Bool {
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0 else { return false }
+        return fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0
+    }
+}
+
+// MARK: - RawTCPSocket
 
 /// A TCP transport using BSD (POSIX) sockets with asynchronous I/O.
 /// All callers reach this through the ``RawTransport`` protocol.
 ///
 /// ### DNS
-/// DNS resolution is performed via ``ProxyDNSCache`` to avoid tunnel routing loops,
-/// and the resolved IP address strings are fed directly into the socket via
-/// `inet_pton`. This bypasses the system resolver at connect time.
+/// DNS resolution is performed via ``ProxyDNSCache`` to avoid tunnel routing
+/// loops, and the resolved IP address strings are fed directly into the socket
+/// via `inet_pton`. This bypasses the system resolver at connect time.
 ///
 /// ### Socket Options (match Xray-core `sockopt_darwin.go`)
 /// - `O_NONBLOCK`     — non-blocking socket for async I/O via DispatchSource.
@@ -76,13 +161,14 @@ enum SocketError: Error, LocalizedError {
 ///
 /// ### Threading
 /// All socket I/O and state-machine transitions are serialized on an internal
-/// serial dispatch queue (`ioQueue`). All DispatchSources (read/write/timer) are
-/// bound to that queue, so their handlers are implicitly serialized against each
-/// other. The `state` property is additionally protected by an unfair lock so
-/// that `isTransportReady` and `forceCancel()` can be called safely from any
-/// thread without deadlocking on `ioQueue`. `forceCancel()` synchronously
-/// latches the cancelled state and then dispatches teardown to `ioQueue`; any
-/// blocks already pending on the queue re-check state and bail out.
+/// serial dispatch queue (`ioQueue`). All DispatchSources (read/write/timer)
+/// are bound to that queue, so their handlers are implicitly serialized
+/// against each other. The `state` property is additionally protected by an
+/// unfair lock so that `isTransportReady` and `forceCancel()` can be called
+/// safely from any thread without deadlocking on `ioQueue`. `forceCancel()`
+/// synchronously latches the cancelled state and then dispatches teardown to
+/// `ioQueue`; any blocks already pending on the queue re-check state and bail
+/// out.
 ///
 /// ### Loopback
 /// Inside a `NEPacketTunnelProvider`, the provider's own socket traffic is
@@ -96,9 +182,8 @@ enum SocketError: Error, LocalizedError {
 /// soon as connect completes. No kernel TFO (`connectx`) — we trade one
 /// RTT in the best case for a simpler non-blocking connect flow. Callers
 /// (TLS ClientHello, Reality ClientHello) stay correct because the first
-/// `receive` still waits on
-/// the server's response.
-class BSDSocket: RawTransport {
+/// `receive` still waits on the server's response.
+class RawTCPSocket: RawTransport {
 
     /// The current connection state.
     enum State {
@@ -108,7 +193,22 @@ class BSDSocket: RawTransport {
         case cancelled
     }
 
-    // MARK: Properties
+    // MARK: Private types
+
+    /// An entry in the partial-send FIFO. The head may have a non-zero
+    /// `offset` representing bytes already written.
+    private struct PendingSend {
+        var data: Data
+        var offset: Int
+        let completion: ((Error?) -> Void)?
+    }
+
+    // MARK: Constants
+
+    /// Per-attempt connect timeout (seconds). Matches Xray-core `system_dialer.go`.
+    private static let connectTimeout: Int = 16
+
+    // MARK: State
 
     private let stateLock = UnfairLock()
     private var _state: State = .setup
@@ -118,12 +218,16 @@ class BSDSocket: RawTransport {
         stateLock.withLock { _state }
     }
 
+    // MARK: Concurrency
+
     /// Serial queue for all socket I/O and state transitions.
-    /// All DispatchSources are bound to this queue, so their event handlers run
-    /// here and are naturally serialized against each other and against async
-    /// operations dispatched from outside.
-    private let ioQueue = DispatchQueue(label: "com.argsment.Anywhere.BSDSocket",
+    /// All DispatchSources are bound to this queue, so their event handlers
+    /// run here and are naturally serialized against each other and against
+    /// async operations dispatched from outside.
+    private let ioQueue = DispatchQueue(label: "com.argsment.Anywhere.RawTCPSocket",
                                         qos: .userInitiated)
+
+    // MARK: Socket & DispatchSources
 
     /// The socket file descriptor. `-1` when no socket is open.
     /// Mutated only on `ioQueue`; read cross-thread only via the sticky
@@ -133,12 +237,14 @@ class BSDSocket: RawTransport {
     /// Monitors socket readability. Armed on demand while a receive is pending.
     private var readSource: DispatchSourceRead?
 
-    /// Monitors socket writability. Armed during non-blocking connect and when a
-    /// send has buffered a partial write.
+    /// Monitors socket writability. Armed during non-blocking connect and when
+    /// a send has buffered a partial write.
     private var writeSource: DispatchSourceWrite?
 
-    /// Per-attempt connect timer (16s, matches Xray-core system_dialer.go).
+    /// Per-attempt connect timer.
     private var connectTimer: DispatchSourceTimer?
+
+    // MARK: Connect pipeline
 
     /// Pending connect completion, cleared once invoked.
     private var connectCompletion: ((Error?) -> Void)?
@@ -148,29 +254,20 @@ class BSDSocket: RawTransport {
     private var remainingPort: UInt16 = 0
     private var pendingInitialData: Data?
 
+    // MARK: Send pipeline
+
+    /// Partial-send FIFO. Each entry is drained in order.
+    private var sendQueue: [PendingSend] = []
+
+    // MARK: Receive pipeline
+
     /// One receive may be in flight at a time; the contract is that callers
     /// call `receive` again only after the previous completion fires.
     private var pendingReceive: (max: Int, completion: (Data?, Bool, Error?) -> Void)?
 
-    /// Partial-send FIFO. Each entry is drained in order; the head may have a
-    /// non-zero offset representing bytes already written.
-    private struct PendingSend {
-        var data: Data
-        var offset: Int
-        let completion: ((Error?) -> Void)?
-    }
-    private var sendQueue: [PendingSend] = []
-
     /// Latched when the remote half-closes; subsequent `receive` calls return
     /// EOF immediately without touching the socket.
     private var receivedEOF = false
-
-    /// Legacy hook; never invoked — BSD sockets don't surface a
-    /// "better path" signal and no caller registers it.
-    var betterPathAvailableHandler: (() -> Void)?
-
-    /// Per-attempt connect timeout in seconds.
-    private static let connectTimeout: Int = 16
 
     // MARK: - Lifecycle
 
@@ -186,7 +283,12 @@ class BSDSocket: RawTransport {
         }
     }
 
-    // MARK: - Connect
+    // MARK: - RawTransport
+
+    var isTransportReady: Bool {
+        if case .ready = state { return true }
+        return false
+    }
 
     /// Connects to a remote host asynchronously.
     ///
@@ -204,11 +306,14 @@ class BSDSocket: RawTransport {
     ///     Completion fires on the internal `ioQueue`.
     ///   - initialData: Optional data to send immediately after connect.
     ///   - completion: Called with `nil` on success or an error on failure.
-    func connect(host: String, port: UInt16, queue: DispatchQueue, initialData: Data? = nil, completion: @escaping (Error?) -> Void) {
+    func connect(host: String, port: UInt16, queue: DispatchQueue,
+                 initialData: Data? = nil,
+                 completion: @escaping (Error?) -> Void) {
         ioQueue.async { [self] in
             // If forceCancel() was called before we ran, bail immediately. No
-            // teardown path involves `completion` here because we never stored it.
-            if case .cancelled = _state_locked() {
+            // teardown path involves `completion` here because we never
+            // stored it.
+            if case .cancelled = state {
                 completion(SocketError.connectionFailed("Cancelled"))
                 return
             }
@@ -216,7 +321,8 @@ class BSDSocket: RawTransport {
             let ips = ProxyDNSCache.shared.resolveAll(host)
             guard !ips.isEmpty else {
                 let err = SocketError.resolutionFailed("DNS resolution failed for \(host)")
-                // Move to .failed if still in setup; keep .cancelled if already latched.
+                // Move to .failed if still in setup; keep .cancelled if already
+                // latched.
                 stateLock.withLock {
                     if case .setup = _state { _state = .failed(err) }
                 }
@@ -227,16 +333,117 @@ class BSDSocket: RawTransport {
             remainingIPs = ips
             remainingPort = port
             pendingInitialData = initialData
-            // Stash the completion before any further state transitions so that
-            // forceCancel()'s teardown block can fire it if we get pre-empted.
+            // Stash the completion before any further state transitions so
+            // that forceCancel()'s teardown block can fire it if we get
+            // pre-empted.
             connectCompletion = completion
             tryConnectNext()
         }
     }
 
+    /// Sends data through the socket.
+    ///
+    /// Data is enqueued on `ioQueue` and written non-blockingly. Partial
+    /// writes are re-armed via a write-ready dispatch source.
+    func send(data: Data, completion: @escaping (Error?) -> Void) {
+        ioQueue.async { [self] in
+            switch state {
+            case .ready:
+                sendQueue.append(PendingSend(data: data, offset: 0, completion: completion))
+                drainSendQueue()
+            case .failed(let err):
+                completion(err)
+            default:
+                completion(SocketError.notConnected)
+            }
+        }
+    }
+
+    /// Fire-and-forget send.
+    func send(data: Data) {
+        ioQueue.async { [self] in
+            guard case .ready = state else { return }
+            sendQueue.append(PendingSend(data: data, offset: 0, completion: nil))
+            drainSendQueue()
+        }
+    }
+
+    /// Receives up to `maximumLength` bytes from the socket.
+    ///
+    /// Completion semantics match the prior implementation:
+    /// - `(data, false, nil)` — data received successfully.
+    /// - `(nil, true, nil)` — EOF (remote closed).
+    /// - `(nil, true, error)` — a receive error occurred.
+    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void) {
+        ioQueue.async { [self] in
+            if receivedEOF {
+                completion(nil, true, nil)
+                return
+            }
+            switch state {
+            case .ready:
+                break
+            case .failed(let err):
+                completion(nil, true, err)
+                return
+            case .cancelled, .setup:
+                completion(nil, true, SocketError.notConnected)
+                return
+            }
+            // Contract: callers issue receive serially.
+            if pendingReceive != nil {
+                // Unexpected — prior callback hasn't fired. Don't clobber it;
+                // surface an error on this one.
+                completion(nil, true, SocketError.receiveFailed("Concurrent receive"))
+                return
+            }
+            pendingReceive = (maximumLength, completion)
+            tryReceive()
+        }
+    }
+
+    /// Closes the socket and cancels all pending operations.
+    ///
+    /// Safe to call from any thread. The cancelled state is set synchronously
+    /// under the state lock so subsequent `isTransportReady` reads and queued
+    /// blocks observe it immediately. Actual socket/source teardown and
+    /// completion fan-out happen asynchronously on `ioQueue` to keep the data
+    /// structures free of races.
+    func forceCancel() {
+        // Synchronously latch .cancelled. Sticky: `transitionFromSetup` will
+        // refuse to move off of it.
+        let alreadyCancelled: Bool = stateLock.withLock {
+            if case .cancelled = _state { return true }
+            _state = .cancelled
+            return false
+        }
+        if alreadyCancelled { return }
+
+        ioQueue.async { [self] in
+            if let c = connectCompletion {
+                connectCompletion = nil
+                c(SocketError.connectionFailed("Cancelled"))
+            }
+            if let req = pendingReceive {
+                pendingReceive = nil
+                req.completion(nil, true, SocketError.notConnected)
+            }
+            if !sendQueue.isEmpty {
+                failPendingSends(with: SocketError.sendFailed("Cancelled"))
+            }
+            pendingInitialData = nil
+            remainingIPs.removeAll()
+            connectTimer?.cancel()
+            connectTimer = nil
+            tearDownSocket()
+        }
+    }
+
+    // MARK: - Connect pipeline
+
     /// Attempts the next resolved IP. Must run on `ioQueue`.
     private func tryConnectNext() {
-        if case .cancelled = _state_locked() {
+        if case .cancelled = state {
             // Teardown handles the pending connect completion.
             return
         }
@@ -249,62 +456,22 @@ class BSDSocket: RawTransport {
         let ip = remainingIPs.removeFirst()
         let port = remainingPort
 
-        // Parse IP and set up sockaddr.
-        var storage = sockaddr_storage()
-        var addrLen: socklen_t = 0
-        let family: Int32
-
-        if ip.contains(":") {
-            var a6 = sockaddr_in6()
-            a6.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
-            a6.sin6_family = sa_family_t(AF_INET6)
-            a6.sin6_port = port.bigEndian
-            let ok = ip.withCString { inet_pton(AF_INET6, $0, &a6.sin6_addr) }
-            guard ok == 1 else {
-                logger.debug("[TCP] inet_pton(AF_INET6) failed for \(ip)")
-                tryConnectNext()
-                return
-            }
-            family = AF_INET6
-            addrLen = socklen_t(MemoryLayout<sockaddr_in6>.size)
-            withUnsafeMutablePointer(to: &storage) { dst in
-                withUnsafePointer(to: &a6) { src in
-                    memcpy(UnsafeMutableRawPointer(dst), UnsafeRawPointer(src), Int(addrLen))
-                }
-            }
-        } else {
-            var a4 = sockaddr_in()
-            a4.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-            a4.sin_family = sa_family_t(AF_INET)
-            a4.sin_port = port.bigEndian
-            let ok = ip.withCString { inet_pton(AF_INET, $0, &a4.sin_addr) }
-            guard ok == 1 else {
-                logger.debug("[TCP] inet_pton(AF_INET) failed for \(ip)")
-                tryConnectNext()
-                return
-            }
-            family = AF_INET
-            addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-            withUnsafeMutablePointer(to: &storage) { dst in
-                withUnsafePointer(to: &a4) { src in
-                    memcpy(UnsafeMutableRawPointer(dst), UnsafeRawPointer(src), Int(addrLen))
-                }
-            }
+        guard let endpoint = IPEndpoint(ip: ip, port: port) else {
+            logger.debug("[TCP] inet_pton failed for \(ip)")
+            tryConnectNext()
+            return
         }
 
-        // Create the socket.
-        let fd = Darwin.socket(family, SOCK_STREAM, IPPROTO_TCP)
+        let fd = Darwin.socket(endpoint.family, SOCK_STREAM, IPPROTO_TCP)
         guard fd >= 0 else {
             logger.debug("[TCP] socket() failed: \(String(cString: strerror(errno)))")
             tryConnectNext()
             return
         }
 
-        applySocketOptions(fd: fd)
+        applyTCPSocketOptions(fd: fd)
 
-        // Non-blocking mode.
-        let flags = fcntl(fd, F_GETFL, 0)
-        if flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 {
+        guard SocketHelpers.makeNonBlocking(fd) else {
             logger.debug("[TCP] fcntl(O_NONBLOCK) failed: \(String(cString: strerror(errno)))")
             _ = Darwin.close(fd)
             tryConnectNext()
@@ -314,11 +481,8 @@ class BSDSocket: RawTransport {
         socketFD = fd
         armConnectTimer()
 
-        // Issue non-blocking connect.
-        let rc = withUnsafePointer(to: &storage) { p -> Int32 in
-            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                Darwin.connect(fd, sa, addrLen)
-            }
+        let rc = endpoint.withSockAddr { sa, len in
+            Darwin.connect(fd, sa, len)
         }
 
         if rc == 0 {
@@ -334,29 +498,22 @@ class BSDSocket: RawTransport {
         }
 
         logger.debug("[TCP] connect(\(ip):\(port)) failed: \(String(cString: strerror(err)))")
-        closeSocketAndSources()
+        tearDownSocket()
         tryConnectNext()
     }
 
-    /// Applies Darwin-specific TCP tuning options. Errors are logged but not
-    /// fatal — a missing option should not sink the connection.
-    private func applySocketOptions(fd: Int32) {
-        var one: Int32 = 1
-        let int32Len = socklen_t(MemoryLayout<Int32>.size)
-
-        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, int32Len)
-        _ = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, int32Len)
-        _ = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, int32Len)
-
-        var idle: Int32 = 30
-        _ = setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, int32Len)
-        var intvl: Int32 = 10
-        _ = setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, int32Len)
-        var cnt: Int32 = 3
-        _ = setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, int32Len)
+    /// Applies Darwin-specific TCP tuning. Errors are logged but not fatal —
+    /// a missing option should not sink the connection.
+    private func applyTCPSocketOptions(fd: Int32) {
+        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_NOSIGPIPE, value: 1)
+        SocketHelpers.setInt(fd, level: IPPROTO_TCP, name: TCP_NODELAY, value: 1)
+        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_KEEPALIVE, value: 1)
+        SocketHelpers.setInt(fd, level: IPPROTO_TCP, name: TCP_KEEPALIVE, value: 30)
+        SocketHelpers.setInt(fd, level: IPPROTO_TCP, name: TCP_KEEPINTVL, value: 10)
+        SocketHelpers.setInt(fd, level: IPPROTO_TCP, name: TCP_KEEPCNT, value: 3)
     }
 
-    /// Arms the per-attempt connect timer. Replaces any prior timer.
+    /// Arms the per-attempt connect timer, replacing any prior timer.
     private func armConnectTimer() {
         connectTimer?.cancel()
         let t = DispatchSource.makeTimerSource(queue: ioQueue)
@@ -371,12 +528,9 @@ class BSDSocket: RawTransport {
     /// Timer fired: current attempt timed out. Try the next address.
     private func handleConnectTimeout() {
         // If we've already transitioned out of setup, the timer lost the race.
-        switch _state_locked() {
-        case .setup: break
-        default: return
-        }
+        guard case .setup = state else { return }
         logger.debug("[TCP] connect timed out, trying next address")
-        closeSocketAndSources()
+        tearDownSocket()
         tryConnectNext()
     }
 
@@ -392,7 +546,7 @@ class BSDSocket: RawTransport {
         ws.resume()
     }
 
-    /// Write source fired during connect: check SO_ERROR.
+    /// Write source fired during connect: check `SO_ERROR`.
     private func handleConnectWritable() {
         guard socketFD >= 0 else { return }
         var soerr: Int32 = 0
@@ -401,22 +555,21 @@ class BSDSocket: RawTransport {
         if gsr != 0 {
             let e = errno
             logger.debug("[TCP] getsockopt(SO_ERROR) failed: \(String(cString: strerror(e)))")
-            closeSocketAndSources()
+            tearDownSocket()
             tryConnectNext()
             return
         }
         if soerr != 0 {
             logger.debug("[TCP] connect completed with error: \(String(cString: strerror(soerr)))")
-            closeSocketAndSources()
+            tearDownSocket()
             tryConnectNext()
             return
         }
         handleConnectReady()
     }
 
-    /// Promote to .ready and fire the connect completion exactly once.
+    /// Promotes to `.ready` and fires the connect completion exactly once.
     private func handleConnectReady() {
-        // Disarm the connect-phase signals.
         disarmWriteSource()
         connectTimer?.cancel()
         connectTimer = nil
@@ -437,13 +590,13 @@ class BSDSocket: RawTransport {
         c?(nil)
 
         if !sendQueue.isEmpty {
-            trySendDrain()
+            drainSendQueue()
         }
     }
 
-    /// No more addresses to try. Transition to failed and fire the completion.
+    /// No more addresses to try. Transitions to `.failed` and fires the completion.
     private func finishConnectFailure(_ error: Error) {
-        closeSocketAndSources()
+        tearDownSocket()
         connectTimer?.cancel()
         connectTimer = nil
         pendingInitialData = nil
@@ -456,68 +609,13 @@ class BSDSocket: RawTransport {
         }
     }
 
-    // MARK: - State transitions
-
-    private func _state_locked() -> State {
-        stateLock.withLock { _state }
-    }
-
-    /// Transitions only if the current state is `.setup`. Returns true if the
-    /// transition occurred. Used to guarantee that `.cancelled` is sticky: once
-    /// `forceCancel()` latches the cancelled state, no later code path can move
-    /// us to `.ready` or `.failed`.
-    @discardableResult
-    private func transitionFromSetup(to new: State) -> Bool {
-        stateLock.withLock {
-            if case .setup = _state {
-                _state = new
-                return true
-            }
-            return false
-        }
-    }
-
-    // MARK: - RawTransport Conformance
-
-    var isTransportReady: Bool {
-        if case .ready = state { return true }
-        return false
-    }
-
-    // MARK: - Send
-
-    /// Sends data through the socket.
-    ///
-    /// Data is enqueued on `ioQueue` and written non-blockingly. Partial writes
-    /// are re-armed via a write-ready dispatch source.
-    func send(data: Data, completion: @escaping (Error?) -> Void) {
-        ioQueue.async { [self] in
-            switch _state_locked() {
-            case .ready:
-                sendQueue.append(PendingSend(data: data, offset: 0, completion: completion))
-                trySendDrain()
-            case .failed(let err):
-                completion(err)
-            default:
-                completion(SocketError.notConnected)
-            }
-        }
-    }
-
-    /// Fire-and-forget send.
-    func send(data: Data) {
-        ioQueue.async { [self] in
-            guard case .ready = _state_locked() else { return }
-            sendQueue.append(PendingSend(data: data, offset: 0, completion: nil))
-            trySendDrain()
-        }
-    }
+    // MARK: - Send pipeline
 
     /// Drains the send queue. Must run on `ioQueue`.
-    private func trySendDrain() {
+    private func drainSendQueue() {
         while !sendQueue.isEmpty {
             guard socketFD >= 0 else {
-                failAllPendingSends(with: SocketError.sendFailed("Socket closed"))
+                failPendingSends(with: SocketError.sendFailed("Socket closed"))
                 return
             }
 
@@ -559,7 +657,7 @@ class BSDSocket: RawTransport {
             }
 
             let err = SocketError.sendFailed(String(cString: strerror(e)))
-            failAllPendingSends(with: err)
+            failPendingSends(with: err)
             // Move state to failed so subsequent sends/receives fail fast.
             stateLock.withLock {
                 if case .ready = _state { _state = .failed(err) }
@@ -575,7 +673,7 @@ class BSDSocket: RawTransport {
     }
 
     /// Fails every buffered send with `err`. Must run on `ioQueue`.
-    private func failAllPendingSends(with err: Error) {
+    private func failPendingSends(with err: Error) {
         let q = sendQueue
         sendQueue.removeAll()
         for p in q { p.completion?(err) }
@@ -588,9 +686,9 @@ class BSDSocket: RawTransport {
         let ws = DispatchSource.makeWriteSource(fileDescriptor: socketFD, queue: ioQueue)
         ws.setEventHandler { [weak self] in
             guard let self else { return }
-            // Tear down this write source; `trySendDrain` will re-arm if needed.
+            // Tear down this write source; `drainSendQueue` will re-arm if needed.
             self.disarmWriteSource()
-            self.trySendDrain()
+            self.drainSendQueue()
         }
         writeSource = ws
         ws.resume()
@@ -603,46 +701,10 @@ class BSDSocket: RawTransport {
         }
     }
 
-    // MARK: - Receive
+    // MARK: - Receive pipeline
 
-    /// Receives up to `maximumLength` bytes from the socket.
-    ///
-    /// Completion semantics match the prior implementation:
-    /// - `(data, false, nil)` — data received successfully.
-    /// - `(nil, true, nil)` — EOF (remote closed).
-    /// - `(nil, true, error)` — a receive error occurred.
-    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void) {
-        ioQueue.async { [self] in
-            if receivedEOF {
-                completion(nil, true, nil)
-                return
-            }
-            switch _state_locked() {
-            case .ready:
-                break
-            case .failed(let err):
-                completion(nil, true, err)
-                return
-            case .cancelled:
-                completion(nil, true, SocketError.notConnected)
-                return
-            case .setup:
-                completion(nil, true, SocketError.notConnected)
-                return
-            }
-            // Contract: callers issue receive serially.
-            if pendingReceive != nil {
-                // Unexpected — prior callback hasn't fired. Don't clobber it;
-                // surface an error on this one.
-                completion(nil, true, SocketError.receiveFailed("Concurrent receive"))
-                return
-            }
-            pendingReceive = (maximumLength, completion)
-            tryReceive()
-        }
-    }
-
-    /// Attempts one recv(2). Arms the read source on EAGAIN. Must run on `ioQueue`.
+    /// Attempts one `recv(2)`. Arms the read source on `EAGAIN`. Must run on
+    /// `ioQueue`.
     private func tryReceive() {
         guard let req = pendingReceive else { return }
         guard socketFD >= 0 else {
@@ -697,55 +759,32 @@ class BSDSocket: RawTransport {
         }
     }
 
-    // MARK: - Cancel
+    // MARK: - State transitions
 
-    /// Closes the socket and cancels all pending operations.
-    ///
-    /// Safe to call from any thread. The cancelled state is set synchronously
-    /// under the state lock so subsequent `isTransportReady` reads and queued
-    /// blocks observe it immediately. Actual socket/source teardown and
-    /// completion fan-out happen asynchronously on `ioQueue` to keep the data
-    /// structures free of races.
-    func forceCancel() {
-        // Synchronously latch .cancelled. Sticky: `transitionFromSetup` will
-        // refuse to move off of it.
-        let alreadyCancelled: Bool = stateLock.withLock {
-            if case .cancelled = _state { return true }
-            _state = .cancelled
+    /// Transitions only if the current state is `.setup`. Returns true if the
+    /// transition occurred. Used to guarantee that `.cancelled` is sticky:
+    /// once `forceCancel()` latches the cancelled state, no later code path
+    /// can move us to `.ready` or `.failed`.
+    @discardableResult
+    private func transitionFromSetup(to new: State) -> Bool {
+        stateLock.withLock {
+            if case .setup = _state {
+                _state = new
+                return true
+            }
             return false
-        }
-        if alreadyCancelled { return }
-
-        ioQueue.async { [self] in
-            // Fail any pending connect completion first.
-            if let c = connectCompletion {
-                connectCompletion = nil
-                c(SocketError.connectionFailed("Cancelled"))
-            }
-            // Fail any pending receive.
-            if let req = pendingReceive {
-                pendingReceive = nil
-                req.completion(nil, true, SocketError.notConnected)
-            }
-            // Fail buffered sends.
-            if !sendQueue.isEmpty {
-                let err = SocketError.sendFailed("Cancelled")
-                failAllPendingSends(with: err)
-            }
-            pendingInitialData = nil
-            remainingIPs.removeAll()
-            connectTimer?.cancel()
-            connectTimer = nil
-            closeSocketAndSources()
         }
     }
 
+    // MARK: - Teardown
+
     /// Closes the current fd and tears down its DispatchSources.
     ///
-    /// The close is deferred to the sources' cancel handler so that libdispatch
-    /// is done monitoring the descriptor before we actually close it — this is
-    /// required by the `DispatchSource` contract. Must run on `ioQueue`.
-    private func closeSocketAndSources() {
+    /// The close is deferred to the sources' cancel handler so that
+    /// libdispatch is done monitoring the descriptor before we actually close
+    /// it — this is required by the `DispatchSource` contract. Must run on
+    /// `ioQueue`.
+    private func tearDownSocket() {
         let fdToClose = socketFD
         socketFD = -1
 
