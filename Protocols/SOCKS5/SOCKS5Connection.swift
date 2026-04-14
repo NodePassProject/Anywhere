@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import Network
 
 private let logger = AnywhereLogger(category: "SOCKS5")
 
@@ -473,16 +472,23 @@ class TLSRecordTransport: RawTransport {
 
 /// ProxyConnection subclass for SOCKS5 UDP ASSOCIATE relay.
 ///
-/// Wraps a UDP ``NWConnection`` to the relay address, encoding outgoing packets with the
+/// Wraps a ``RawUDPSocket`` to the relay address, encoding outgoing packets with the
 /// SOCKS5 UDP header and decoding incoming packets by stripping the header.
 /// Also retains the TCP control connection to keep the UDP session alive.
 class SOCKS5UDPProxyConnection: ProxyConnection {
     private let tcpTransport: any RawTransport
     private let tlsClient: TLSClient?
     private let tlsConnection: TLSRecordConnection?
-    private var udpConnection: NWConnection?
+    private let socket = RawUDPSocket()
     private let udpHeader: Data
     private var cancelled = false
+
+    /// Bridges the socket's continuous receive loop to the one-shot
+    /// `receiveRaw` contract: each incoming datagram either satisfies a
+    /// pending completion or queues up for the next `receiveRaw` call.
+    private let stateLock = UnfairLock()
+    private var inbox: [Data] = []
+    private var pendingReceive: ((Data?, Error?) -> Void)?
 
     init(
         tcpTransport: any RawTransport,
@@ -507,92 +513,87 @@ class SOCKS5UDPProxyConnection: ProxyConnection {
 
     /// Connects the UDP socket to the relay endpoint and waits for it to become ready.
     func connectRelay(relayHost: String, relayPort: UInt16, completion: @escaping (Error?) -> Void) {
-        let host = NWEndpoint.Host(relayHost)
-        guard let port = NWEndpoint.Port(rawValue: relayPort) else {
-            completion(ProxyError.connectionFailed("SOCKS5 invalid relay port: \(relayPort)"))
-            return
-        }
-        let connection = NWConnection(host: host, port: port, using: .udp)
-        self.udpConnection = connection
-
-        var completed = false
-        connection.stateUpdateHandler = { [weak self] state in
-            guard self != nil, !completed else { return }
-            switch state {
-            case .ready:
-                completed = true
-                connection.stateUpdateHandler = nil
-                completion(nil)
-            case .failed(let error):
-                completed = true
-                connection.stateUpdateHandler = nil
-                completion(ProxyError.connectionFailed("SOCKS5 UDP relay failed: \(error.localizedDescription)"))
-            default:
-                break
+        socket.connect(host: relayHost, port: relayPort,
+                       completionQueue: .global()) { [weak self] error in
+            guard let self else {
+                completion(ProxyError.connectionFailed("SOCKS5 UDP relay deallocated"))
+                return
             }
+            if let error {
+                completion(ProxyError.connectionFailed("SOCKS5 UDP relay failed: \(error.localizedDescription)"))
+                return
+            }
+            self.socket.startReceiving { [weak self] data in
+                self?.handleIncoming(data)
+            }
+            completion(nil)
         }
-        connection.start(queue: .global())
     }
 
     override var isConnected: Bool {
-        udpConnection?.state == .ready
+        socket.isReady
     }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        guard let connection = udpConnection, !cancelled else {
+        guard !cancelled else {
             completion(ProxyError.connectionFailed("SOCKS5 UDP not connected"))
             return
         }
         var packet = udpHeader
         packet.append(data)
-        connection.send(content: packet, completion: .contentProcessed({ error in
-            if let error {
-                completion(SocketError.sendFailed(error.localizedDescription))
-            } else {
-                completion(nil)
-            }
-        }))
+        socket.send(data: packet, completion: completion)
     }
 
     override func sendRaw(data: Data) {
-        guard let connection = udpConnection, !cancelled else { return }
+        guard !cancelled else { return }
         var packet = udpHeader
         packet.append(data)
-        connection.send(content: packet, completion: .contentProcessed({ _ in }))
+        socket.send(data: packet)
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        guard let connection = udpConnection, !cancelled else {
+        guard !cancelled else {
             completion(nil, ProxyError.connectionFailed("SOCKS5 UDP not connected"))
             return
         }
-        connection.receiveMessage { [weak self] data, _, _, error in
-            guard let self, !self.cancelled else {
-                completion(nil, nil)
-                return
-            }
-            if let error {
-                completion(nil, SocketError.receiveFailed(error.localizedDescription))
-                return
-            }
-            guard let data, !data.isEmpty else {
-                self.receiveRaw(completion: completion)
-                return
-            }
-            guard let payload = self.stripUDPHeader(data) else {
-                self.receiveRaw(completion: completion)
-                return
-            }
-            completion(payload, nil)
+        let ready: Data? = stateLock.withLock {
+            if !inbox.isEmpty { return inbox.removeFirst() }
+            pendingReceive = completion
+            return nil
+        }
+        if let ready {
+            completion(ready, nil)
         }
     }
 
     override func cancel() {
         guard !cancelled else { return }
         cancelled = true
-        udpConnection?.forceCancel()
-        udpConnection = nil
+        socket.cancel()
         tcpTransport.forceCancel()
+
+        // Fail any pending `receiveRaw` so the upper layer doesn't hang.
+        let pending: ((Data?, Error?) -> Void)? = stateLock.withLock {
+            let cb = pendingReceive
+            pendingReceive = nil
+            inbox.removeAll()
+            return cb
+        }
+        pending?(nil, ProxyError.connectionFailed("SOCKS5 UDP cancelled"))
+    }
+
+    private func handleIncoming(_ data: Data) {
+        if cancelled { return }
+        guard let payload = stripUDPHeader(data) else { return }
+        let pending: ((Data?, Error?) -> Void)? = stateLock.withLock {
+            if let cb = pendingReceive {
+                pendingReceive = nil
+                return cb
+            }
+            inbox.append(payload)
+            return nil
+        }
+        pending?(payload, nil)
     }
 
     /// Strips the SOCKS5 UDP header from a received packet, returning the payload.

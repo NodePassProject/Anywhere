@@ -57,28 +57,28 @@ final class BrutalCongestionControl {
     func onPacketAcked(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
         let idx = slotIndex(for: ts)
         slots[idx].ackCount &+= 1
-        updateCwnd(cstat: cstat)
+        updateCwnd(cstat: cstat, ts: ts)
     }
 
     func onPacketLost(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
         let idx = slotIndex(for: ts)
         slots[idx].lossCount &+= 1
-        updateCwnd(cstat: cstat)
+        updateCwnd(cstat: cstat, ts: ts)
     }
 
     func onAckReceived(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
-        updateCwnd(cstat: cstat)
+        updateCwnd(cstat: cstat, ts: ts)
     }
 
-    func onPacketSent(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>) {
-        updateCwnd(cstat: cstat)
+    func onPacketSent(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
+        updateCwnd(cstat: cstat, ts: ts)
     }
 
-    func reset(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>) {
+    func reset(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
         for i in 0..<slots.count {
             slots[i] = Slot()
         }
-        updateCwnd(cstat: cstat)
+        updateCwnd(cstat: cstat, ts: ts)
     }
 
     // MARK: - Internals
@@ -115,47 +115,52 @@ final class BrutalCongestionControl {
         return Double(totalLoss) / Double(total)
     }
 
-    /// Recomputes `cstat->cwnd` and `cstat->pacing_interval_m` from the
-    /// target bandwidth, smoothed RTT, and recent loss rate.
-    private func updateCwnd(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>) {
+    /// Recomputes `cstat->cwnd`, `pacing_interval_m`, and `send_quantum`
+    /// from the target bandwidth, smoothed RTT, and recent loss rate.
+    private func updateCwnd(cstat: UnsafeMutablePointer<ngtcp2_conn_stat>, ts: UInt64) {
         guard targetBps > 0 else { return }
 
         let rttNs = max(cstat.pointee.smoothed_rtt, Self.minRTTNs)
         let mss = UInt64(cstat.pointee.max_tx_udp_payload_size)
 
-        var lossRate = observedLossRate(at: cstat.pointee.first_rtt_sample_ts &+ rttNs)
+        var lossRate = observedLossRate(at: ts)
         if lossRate < 0 { lossRate = 0 }
         if lossRate > Self.maxLossRate { lossRate = Self.maxLossRate }
 
-        // Pace at `target / ackRate` so that over time
-        //     paced_rate * ackRate ≈ target,
-        // compensating for the fraction of bytes lost.  maxLossRate caps
-        // the inflation at 1.25× target to avoid pathological floods.
+        // Pace at `target / ackRate`: over time `paced_rate * ackRate ≈
+        // target`. `maxLossRate` caps inflation at ~1.25× target.
         let ackRate = 1.0 - lossRate
         let pacingBps = Double(targetBps) / ackRate
 
-        // Cwnd overshoots pacing by `congestionWindowMultiplier` so a full
-        // RTT of paced sends can be in flight before ACKs return.  Matches
-        // Go's reference: `cwnd = bps * rtt * 2 / ackRate`.
+        // `cwnd = bps * rtt * 2 / ackRate` — a full RTT of paced sends
+        // in flight before ACKs return. Matches the Go reference.
         let cwndBytes = pacingBps * Self.congestionWindowMultiplier * Double(rttNs) / 1_000_000_000.0
         let minCwnd = Self.minCwndPackets &* max(mss, 1)
         let cwnd = max(UInt64(cwndBytes), minCwnd)
 
-        // pacing_interval_m = (1 / pacing_rate) * MSS, in units of 1/1024 ns.
-        // ngtcp2 schedules one MSS per interval, so interval = MSS / rate.
-        // `targetBps > 0` above and `ackRate ≥ 0.8` (maxLossRate clamp)
-        // keep pacingBps finite.
+        // ngtcp2 defines pacing_interval_m as (ns/byte) << 10 — i.e.
+        // `wait_ns = (pktlen * pacing_interval_m) >> 10`, so
+        // `pacing_interval_m = (1e9 / pacing_bps) * 1024`.
         let pacingIntervalM: UInt64
         if pacingBps >= 1.0 {
-            let seconds = Double(mss) / pacingBps
-            let nanos = seconds * 1_000_000_000.0
-            pacingIntervalM = UInt64(nanos * 1024.0)
+            let nsPerByte = 1_000_000_000.0 / pacingBps
+            pacingIntervalM = UInt64(nsPerByte * 1024.0)
         } else {
-            pacingIntervalM = 0 // "library default pacing"
+            pacingIntervalM = 0 // library default pacing
         }
+
+        // `send_quantum` is the max burst before re-pacing. Size it to
+        // 1 ms of bytes at the current rate, floored at 10 MSS, capped
+        // at 64 KB — without this update we'd inherit CUBIC's static
+        // 10 MSS and cap single bursts around 14 KB.
+        let mssFloor = Self.minCwndPackets &* max(mss, 1)
+        let bytesPerMs = pacingBps / 1000.0
+        let cappedQuantum = UInt64(min(bytesPerMs, 64.0 * 1024.0))
+        let sendQuantum = max(cappedQuantum, mssFloor)
 
         cstat.pointee.cwnd = cwnd
         cstat.pointee.pacing_interval_m = pacingIntervalM
+        cstat.pointee.send_quantum = Int(sendQuantum)
     }
 }
 
@@ -237,7 +242,9 @@ func ngtcp2_swift_brutal_on_pkt_sent(
     pkt: OpaquePointer?
 ) {
     guard let cstat, let brutal = brutalForCC(cc) else { return }
-    brutal.onPacketSent(cstat: cstat)
+    // on_pkt_sent has no ts arg; sample from the same monotonic source
+    // as QUICConnection.currentTimestamp so slot bookkeeping is consistent.
+    brutal.onPacketSent(cstat: cstat, ts: DispatchTime.now().uptimeNanoseconds)
     _ = pkt
 }
 
@@ -248,6 +255,5 @@ func ngtcp2_swift_brutal_reset(
     ts: UInt64
 ) {
     guard let cstat, let brutal = brutalForCC(cc) else { return }
-    brutal.reset(cstat: cstat)
-    _ = ts
+    brutal.reset(cstat: cstat, ts: ts)
 }

@@ -91,8 +91,8 @@ class LWIPStack {
     // Stores recent log messages for display in the main app's log viewer.
     // Entries older than 5 minutes or exceeding 50 items are pruned on
     // each append or fetch.
-    // Thread-safe via NSLock — logs may be appended from NWConnection
-    // completion handlers (not on lwipQueue), while fetches come from IPC.
+    // Thread-safe via NSLock — logs may be appended from I/O completion
+    // handlers off lwipQueue, while fetches come from IPC.
 
     enum LogLevel: String {
         case info

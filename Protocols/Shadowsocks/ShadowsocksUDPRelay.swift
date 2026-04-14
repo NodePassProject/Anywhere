@@ -8,7 +8,6 @@
 import Foundation
 import CryptoKit
 import CommonCrypto
-import Network
 import Security
 
 private let logger = AnywhereLogger(category: "SS-UDP-Relay")
@@ -38,7 +37,7 @@ class ShadowsocksUDPRelay {
     private let dstPort: UInt16
 
     // UDP connection
-    private var connection: NWConnection?
+    private let socket = RawUDPSocket()
     private var cancelled = false
 
     // SS 2022 AES session state
@@ -80,45 +79,19 @@ class ShadowsocksUDPRelay {
     /// Connects the UDP connection to the Shadowsocks server.
     func connect(serverHost: String, serverPort: UInt16, lwipQueue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
-        // Resolve via proxy DNS cache (shared with BSDSocket/TCP connections)
-        let resolvedHost = ProxyDNSCache.shared.resolveHost(serverHost) ?? serverHost
-
-        let host = NWEndpoint.Host(resolvedHost)
-        guard let port = NWEndpoint.Port(rawValue: serverPort) else {
-            lwipQueue.async { completion(SocketError.connectionFailed("Invalid port")) }
-            return
+        socket.connect(host: serverHost, port: serverPort,
+                       completionQueue: lwipQueue) { [weak self] error in
+            if let self, self.cancelled { return }
+            completion(error)
         }
-
-        let connection = NWConnection(host: host, port: port, using: .udp)
-        self.connection = connection
-
-        var completed = false
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self, !self.cancelled, !completed else { return }
-            switch state {
-            case .ready:
-                completed = true
-                connection.stateUpdateHandler = nil
-                lwipQueue.async { completion(nil) }
-            case .failed(let error):
-                completed = true
-                connection.stateUpdateHandler = nil
-                self.connection = nil
-                lwipQueue.async { completion(SocketError.connectionFailed(error.localizedDescription)) }
-            default:
-                break
-            }
-        }
-
-        connection.start(queue: .global())
     }
 
     /// Encrypts and sends a UDP payload to the SS server.
     func send(data: Data) {
-        guard let connection, !cancelled else { return }
+        guard !cancelled else { return }
         do {
             let encrypted = try encryptPacket(payload: data)
-            connection.send(content: encrypted, completion: .contentProcessed({ _ in }))
+            socket.send(data: encrypted)
         } catch {
             logger.error("[SS-UDP] Encrypt error: \(error.localizedDescription)")
         }
@@ -126,24 +99,14 @@ class ShadowsocksUDPRelay {
 
     /// Starts receiving and decrypting datagrams asynchronously.
     func startReceiving(handler: @escaping (Data) -> Void) {
-        guard let connection, !cancelled else { return }
-        receiveNext(connection: connection, handler: handler)
-    }
-
-    private func receiveNext(connection: NWConnection, handler: @escaping (Data) -> Void) {
-        connection.receiveMessage { [weak self] data, _, _, error in
+        guard !cancelled else { return }
+        socket.startReceiving { [weak self] data in
             guard let self, !self.cancelled else { return }
-            if let data, !data.isEmpty {
-                do {
-                    let payload = try self.decryptPacket(data)
-                    handler(payload)
-                } catch {
-                    logger.error("[SS-UDP] Decrypt error: \(error.localizedDescription)")
-                }
-            }
-            // UDP doesn't have EOF, continue receiving
-            if error == nil {
-                self.receiveNext(connection: connection, handler: handler)
+            do {
+                let payload = try self.decryptPacket(data)
+                handler(payload)
+            } catch {
+                logger.error("[SS-UDP] Decrypt error: \(error.localizedDescription)")
             }
         }
     }
@@ -151,8 +114,7 @@ class ShadowsocksUDPRelay {
     func cancel() {
         guard !cancelled else { return }
         cancelled = true
-        connection?.forceCancel()
-        connection = nil
+        socket.cancel()
     }
 
     // MARK: - Packet Encryption
