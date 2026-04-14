@@ -6,7 +6,8 @@
 //
 
 import Foundation
-import Network
+import Darwin
+import Dispatch
 import CryptoKit
 import Security
 
@@ -65,7 +66,12 @@ class QUICConnection {
     /// of the current queue cycle via a single coalesced `writeToUDP`.
     private var flushScheduled = false
 
-    private var udpConnection: NWConnection?
+    /// Connected UDP socket. -1 when not open.
+    private var socketFD: Int32 = -1
+    /// Dispatch source that fires when the socket has at least one datagram
+    /// queued.  We drain to EAGAIN inside the handler.
+    private var readSource: DispatchSourceRead?
+
     private var localAddr = sockaddr_storage()
     private var remoteAddr = sockaddr_storage()
     /// Actual sockaddr size (either `sockaddr_in` or `sockaddr_in6`).
@@ -119,11 +125,12 @@ class QUICConnection {
 
     static let maxUDPPayload = 1452
 
-    /// Reusable send buffer. writeToUDP() and writeStreamSync() are called
-    /// thousands of times per second under bulk transfer; allocating a fresh
-    /// 1452-byte `[UInt8]` on each call was a measurable CPU hit. Both run
-    /// on `queue` so sharing is safe.
-    private var sendBuf = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
+    /// Reusable per-packet buffers. ngtcp2 is single-threaded on `queue`
+    /// so a single slot for each direction is sufficient; bursts are
+    /// amortised at the dispatch-source level (drain the kernel queue
+    /// to EAGAIN on every wake-up), not via a per-syscall batch.
+    private var rxBuf = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
+    private var txBuf = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
 
     /// Payload sizes PMTUD probes. Must be in (1200, max_tx_udp_payload_size]
     /// — ngtcp2 silently skips probes above `hard_max_udp_payload_size =
@@ -331,8 +338,11 @@ class QUICConnection {
         }
     }
 
-    /// Writes as much stream data as possible synchronously.
-    /// Returns the number of bytes accepted by ngtcp2.
+    /// Writes as much stream data as possible synchronously. Returns the
+    /// number of bytes accepted by ngtcp2. Each ngtcp2 packet is flushed
+    /// to the socket immediately via `send(2)`; the tail `writeToUDP`
+    /// call drains any remaining control/datagram packets and updates the
+    /// pacing deadline.
     private func writeStreamSync(conn: OpaquePointer, streamId: Int64,
                                   data: Data, fin: Bool) -> Int {
         let ts = currentTimestamp()
@@ -356,11 +366,13 @@ class QUICConnection {
                 let ptr = rawBuf.baseAddress!.assumingMemoryBound(to: UInt8.self)
                 var vec = ngtcp2_vec(base: UnsafeMutablePointer(mutating: ptr),
                                     len: remaining)
-                return ngtcp2_swift_conn_writev_stream(
-                    conn, nil, &pi, &sendBuf, sendBuf.count,
-                    &pdatalen, flags,
-                    streamId, &vec, 1, ts
-                )
+                return txBuf.withUnsafeMutableBufferPointer { dest -> ngtcp2_ssize in
+                    ngtcp2_swift_conn_writev_stream(
+                        conn, nil, &pi, dest.baseAddress, dest.count,
+                        &pdatalen, flags,
+                        streamId, &vec, 1, ts
+                    )
+                }
             }
 
             if nwrite == 0 { break }
@@ -381,7 +393,7 @@ class QUICConnection {
                 break
             }
 
-            sendUDPPacket(Data(sendBuf.prefix(Int(nwrite))))
+            sendTxBuf(length: Int(nwrite))
             if pdatalen > 0 { offset += Int(pdatalen) }
             if pdatalen == 0 { break }
         }
@@ -448,8 +460,7 @@ class QUICConnection {
                 ngtcp2_conn_del(conn)
                 self.conn = nil
             }
-            self.udpConnection?.forceCancel()
-            self.udpConnection = nil
+            self.closeSocket()
             self.state = .closed
             // Fail any pending writes; drop pending datagrams
             let writes = self.pendingWrites
@@ -473,37 +484,151 @@ class QUICConnection {
     // MARK: UDP
 
     private func setupUDP(completion: @escaping (Error?) -> Void) {
-        let endpoint = NWEndpoint.hostPort(
-            host: NWEndpoint.Host(host),
-            port: NWEndpoint.Port(integerLiteral: port)
-        )
-        let connection = NWConnection(to: endpoint, using: .udp)
-        connection.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            switch state {
-            case .ready:
-                self.queue.async {
-                    self.populateRemoteAddr()
-                    do {
-                        try self.initializeNgtcp2()
-                        self.state = .handshaking
-                        self.writeToUDP()
-                        self.readFromUDP()
-                        self.rescheduleTimer()
-                    } catch {
-                        self.state = .closed
-                        completion(error)
-                    }
-                }
-            case .failed(let error):
-                self.state = .closed
-                completion(error)
-            default:
-                break
+        // Non-blocking SOCK_DGRAM driven by a DispatchSource for reads.
+        do {
+            populateRemoteAddr()
+            guard remoteAddr.ss_family != 0 else {
+                throw QUICError.connectionFailed("DNS lookup failed for \(host)")
+            }
+            try createSocket()
+            try initializeNgtcp2()
+            state = .handshaking
+            startReadSource()
+            writeToUDP()    // send client initial
+            rescheduleTimer()
+        } catch {
+            state = .closed
+            closeSocket()
+            completion(error)
+        }
+    }
+
+    private func createSocket() throws {
+        let family = Int32(remoteAddr.ss_family)
+        let fd = socket(family, SOCK_DGRAM, 0)
+        guard fd >= 0 else {
+            throw QUICError.connectionFailed("socket() failed errno=\(errno)")
+        }
+
+        // Non-blocking so `recv(2)` / `send(2)` return EAGAIN instead of
+        // stalling the QUIC queue when the kernel buffer is empty/full.
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 {
+            Darwin.close(fd)
+            throw QUICError.connectionFailed("fcntl(O_NONBLOCK) failed errno=\(errno)")
+        }
+
+        // Widen the kernel buffers. macOS defaults ~9 KB, which caps
+        // throughput at that per-RTT regardless of cwnd.
+        var bufSize: Int32 = 4 * 1024 * 1024
+        _ = setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufSize, socklen_t(MemoryLayout<Int32>.size))
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufSize, socklen_t(MemoryLayout<Int32>.size))
+
+        // Best-effort ECN reporting for ngtcp2. Silently ignored on
+        // older kernels.
+        var on: Int32 = 1
+        if family == AF_INET {
+            _ = setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &on, socklen_t(MemoryLayout<Int32>.size))
+        } else {
+            _ = setsockopt(fd, IPPROTO_IPV6, IPV6_RECVTCLASS, &on, socklen_t(MemoryLayout<Int32>.size))
+        }
+
+        let connectRv = withUnsafePointer(to: &remoteAddr) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.connect(fd, sa, socklen_t(addrLen))
             }
         }
-        self.udpConnection = connection
-        connection.start(queue: queue)
+        if connectRv != 0 {
+            Darwin.close(fd)
+            throw QUICError.connectionFailed("connect() failed errno=\(errno)")
+        }
+
+        // Populate localAddr with the kernel-assigned 4-tuple so ngtcp2's
+        // path matches reality. Cosmetic (migration is disabled).
+        var localStorage = sockaddr_storage()
+        var localLen = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let gotLocal = withUnsafeMutablePointer(to: &localStorage) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                getsockname(fd, sa, &localLen)
+            }
+        }
+        if gotLocal == 0 {
+            if localStorage.ss_family == sa_family_t(AF_INET) {
+                withUnsafePointer(to: &localStorage) { src in
+                    src.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
+                        withUnsafeMutablePointer(to: &localAddr) { dst in
+                            dst.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { dsin in
+                                dsin.pointee.sin_port = sin.pointee.sin_port
+                                dsin.pointee.sin_addr = sin.pointee.sin_addr
+                            }
+                        }
+                    }
+                }
+            } else if localStorage.ss_family == sa_family_t(AF_INET6) {
+                withUnsafePointer(to: &localStorage) { src in
+                    src.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
+                        withUnsafeMutablePointer(to: &localAddr) { dst in
+                            dst.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { dsin6 in
+                                dsin6.pointee.sin6_port = sin6.pointee.sin6_port
+                                dsin6.pointee.sin6_addr = sin6.pointee.sin6_addr
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        socketFD = fd
+    }
+
+    private func startReadSource() {
+        guard socketFD >= 0 else { return }
+        let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
+        source.setEventHandler { [weak self] in
+            self?.drainSocketReads()
+        }
+        readSource = source
+        source.resume()
+    }
+
+    /// Drains the kernel queue via public `recv(2)` until EAGAIN. One
+    /// wake-up of the dispatch source pulls every pending datagram, so
+    /// the per-syscall overhead is amortised at burst level.
+    private func drainSocketReads() {
+        guard socketFD >= 0 else { return }
+        while true {
+            let n = rxBuf.withUnsafeMutableBufferPointer { buf -> Int in
+                Darwin.recv(socketFD, buf.baseAddress, buf.count, 0)
+            }
+            if n < 0 {
+                let err = errno
+                if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
+                logger.error("[QUIC] recv errno=\(err)")
+                return
+            }
+            if n == 0 { return }
+            // Wrap this packet without copying; handleReceivedPacket and
+            // its callbacks copy out before returning, so the view stays
+            // valid only for this call.
+            rxBuf.withUnsafeBufferPointer { buf in
+                let view = Data(
+                    bytesNoCopy: UnsafeMutableRawPointer(mutating: buf.baseAddress!),
+                    count: n, deallocator: .none
+                )
+                handleReceivedPacket(view)
+            }
+        }
+    }
+
+    private func closeSocket() {
+        if let source = readSource {
+            source.cancel()
+            readSource = nil
+        }
+        if socketFD >= 0 {
+            Darwin.close(socketFD)
+            socketFD = -1
+        }
     }
 
     private func populateRemoteAddr() {
@@ -590,25 +715,22 @@ class QUICConnection {
         }
     }
 
-    private func sendUDPPacket(_ data: Data) {
-        // `.idempotent` skips per-packet completion delivery. UDP is
-        // fire-and-forget; `NWConnection` still surfaces fatal transport
-        // errors via its stateUpdateHandler, so we don't need per-datagram
-        // error callbacks — and allocating a completion closure per packet
-        // was a measurable hot-path cost under bulk (~9k packets/s at
-        // 100 Mbps).
-        udpConnection?.send(content: data, completion: .idempotent)
-    }
-
-    private func readFromUDP() {
-        udpConnection?.receiveMessage { [weak self] data, _, _, error in
-            guard let self else { return }
-            // NWConnection dispatches on our queue (started with queue:),
-            // so no need for queue.async — process immediately.
-            if let data, !data.isEmpty {
-                self.handleReceivedPacket(data)
+    /// Sends a single datagram of `length` bytes from `txBuf` via the
+    /// connected socket. EAGAIN drops the packet — ngtcp2's loss
+    /// recovery handles the retransmit.
+    private func sendTxBuf(length: Int) {
+        guard socketFD >= 0, length > 0 else { return }
+        while true {
+            let n = txBuf.withUnsafeBufferPointer { buf -> Int in
+                Darwin.send(socketFD, buf.baseAddress, length, 0)
             }
-            if error == nil { self.readFromUDP() }
+            if n >= 0 { return }
+            let err = errno
+            if err == EINTR { continue }
+            if err != EAGAIN && err != EWOULDBLOCK {
+                logger.error("[QUIC] send errno=\(err)")
+            }
+            return
         }
     }
 
@@ -787,50 +909,56 @@ class QUICConnection {
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
 
-        // Drain pending datagrams first. `write_datagram` also flushes ACKs,
-        // retransmissions and control frames — so the datagram is coalesced
-        // into the same packet, giving it fair access to the congestion window
-        // instead of being starved by `write_pkt`.
+        // Drain pending datagrams first: `write_datagram` coalesces
+        // ACKs/retransmits/control frames into the same packet, so the
+        // datagram gets fair access to the congestion window.
         while !pendingDatagrams.isEmpty {
             var accepted: Int32 = 0
             let dgram = pendingDatagrams[0]
 
             let nwrite: ngtcp2_ssize = dgram.withUnsafeBytes { rawBuf in
-                guard let ptr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                guard let srcPtr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                     return 0
                 }
-                return ngtcp2_swift_conn_write_datagram(
-                    conn, nil, &pi, &sendBuf, sendBuf.count,
-                    &accepted, 0, 0, ptr, dgram.count, ts
-                )
+                return txBuf.withUnsafeMutableBufferPointer { dest -> ngtcp2_ssize in
+                    ngtcp2_swift_conn_write_datagram(
+                        conn, nil, &pi, dest.baseAddress, dest.count,
+                        &accepted, 0, 0, srcPtr, dgram.count, ts
+                    )
+                }
             }
 
             if nwrite < 0 {
-                // Fatal error (too large, unsupported) — drop this datagram
+                // Fatal (too large, unsupported) — drop this datagram.
                 pendingDatagrams.removeFirst()
                 continue
             }
             if nwrite > 0 {
-                sendUDPPacket(Data(sendBuf.prefix(Int(nwrite))))
+                sendTxBuf(length: Int(nwrite))
             }
             if accepted != 0 {
                 pendingDatagrams.removeFirst()
             } else {
-                // Congestion window full — stop trying, remaining datagrams
-                // will be attempted on the next writeToUDP() cycle.
+                // Congestion window full; retry on the next writeToUDP.
                 break
             }
         }
 
-        // Flush any remaining control/stream packets that write_datagram
-        // didn't cover (e.g. when no datagrams were pending).
+        // Drain remaining control/stream packets.
         while true {
-            let nwrite = ngtcp2_swift_conn_write_pkt(conn, nil, &pi, &sendBuf, sendBuf.count, ts)
+            let nwrite = txBuf.withUnsafeMutableBufferPointer { dest -> ngtcp2_ssize in
+                ngtcp2_swift_conn_write_pkt(conn, nil, &pi, dest.baseAddress, dest.count, ts)
+            }
             if nwrite <= 0 { break }
-            sendUDPPacket(Data(sendBuf.prefix(Int(nwrite))))
+            sendTxBuf(length: Int(nwrite))
         }
-        // Any ngtcp2 operation may change the next deadline (retransmission,
-        // ACK, PING, etc.).  Keep the timer aligned with ngtcp2's state.
+
+        // Must be called after writev_stream / write_datagram / write_pkt
+        // cycles to update conn->tx.pacing.next_ts; without it the pacer
+        // stays disabled and transmits become cwnd-only bursts.
+        ngtcp2_conn_update_pkt_tx_time(conn, ts)
+
+        // Any ngtcp2 op may shift the next deadline.
         rescheduleTimer()
     }
 

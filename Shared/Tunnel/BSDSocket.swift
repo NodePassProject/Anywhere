@@ -58,9 +58,7 @@ enum SocketError: Error, LocalizedError {
 // MARK: - BSDSocket
 
 /// A TCP transport using BSD (POSIX) sockets with asynchronous I/O.
-///
-/// Replaces the prior `NWConnection`-based transport. All callers use this type
-/// through the ``RawTransport`` protocol.
+/// All callers reach this through the ``RawTransport`` protocol.
 ///
 /// ### DNS
 /// DNS resolution is performed via ``ProxyDNSCache`` to avoid tunnel routing loops,
@@ -87,21 +85,18 @@ enum SocketError: Error, LocalizedError {
 /// blocks already pending on the queue re-check state and bail out.
 ///
 /// ### Loopback
-/// When this transport runs inside a `NEPacketTunnelProvider`, the provider's
-/// own socket traffic is excluded from the tunnel by the kernel, so a direct
-/// `connect(2)` issued here does not loop back through the tunnel it provides.
-/// Loopback targets (127.0.0.0/8, ::1) are always routed via `lo0`. No explicit
-/// interface binding is performed — we rely on the OS routing table and the
-/// kernel-level NE bypass that was already in effect for `NWConnection`.
+/// Inside a `NEPacketTunnelProvider`, the provider's own socket traffic is
+/// kernel-excluded from the tunnel, so a direct `connect(2)` here does not
+/// loop back. Loopback targets (127.0.0.0/8, ::1) are always routed via
+/// `lo0`. No explicit interface binding — we rely on the OS routing table
+/// plus the kernel-level NE bypass.
 ///
-/// ### `initialData` / TCP Fast Open
-/// For parity with the previous implementation, when `initialData` is provided
-/// it is sent on the socket as soon as connect completes (eagerly enqueued in
-/// the send buffer). This mirrors the observable behaviour of the Network
-/// framework's `enableFastOpen = true` + immediate send, but without kernel
-/// TFO (no `connectx`): we trade one RTT in the best case for a much simpler
-/// non-blocking connect flow. Callers that use `initialData` (TLS ClientHello,
-/// Reality ClientHello) remain correct — the first `receive` still waits on
+/// ### `initialData`
+/// When provided, `initialData` is eagerly enqueued on the send buffer as
+/// soon as connect completes. No kernel TFO (`connectx`) — we trade one
+/// RTT in the best case for a simpler non-blocking connect flow. Callers
+/// (TLS ClientHello, Reality ClientHello) stay correct because the first
+/// `receive` still waits on
 /// the server's response.
 class BSDSocket: RawTransport {
 
@@ -170,9 +165,8 @@ class BSDSocket: RawTransport {
     /// EOF immediately without touching the socket.
     private var receivedEOF = false
 
-    /// Retained for API compatibility with the previous `NWConnection`-based
-    /// transport. BSD sockets do not surface a "better path" signal; this is
-    /// never invoked. No caller registers it.
+    /// Legacy hook; never invoked — BSD sockets don't surface a
+    /// "better path" signal and no caller registers it.
     var betterPathAvailableHandler: (() -> Void)?
 
     /// Per-attempt connect timeout in seconds.
