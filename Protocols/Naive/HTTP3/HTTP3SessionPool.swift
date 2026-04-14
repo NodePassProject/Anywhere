@@ -9,14 +9,12 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "HTTP3Pool")
 
-class HTTP3SessionPool {
+/// Pools ``HTTP3Session`` instances (each a QUIC connection) for reuse
+/// across CONNECT streams. Adds idle eviction plus soft/hard caps on top
+/// of ``SessionPool``'s scaffolding to keep QUIC connection growth bounded.
+final class HTTP3SessionPool: SessionPool<HTTP3Session> {
 
     static let shared = HTTP3SessionPool()
-
-    private let lock = UnfairLock()
-
-    /// Sessions keyed by "host:port:sni".
-    private var sessions: [String: [HTTP3Session]] = [:]
 
     /// Last activity time per session (for idle eviction).
     private var lastActivity: [ObjectIdentifier: Date] = [:]
@@ -38,7 +36,8 @@ class HTTP3SessionPool {
     private var cleanupTimer: DispatchSourceTimer?
     private let cleanupQueue = DispatchQueue(label: "com.argsment.Anywhere.http3pool.cleanup")
 
-    private init() {
+    private override init() {
+        super.init()
         startCleanupTimer()
     }
 
@@ -52,12 +51,12 @@ class HTTP3SessionPool {
         destination: String,
         completion: @escaping (HTTP3Stream) -> Void
     ) {
-        let key = "\(host):\(port):\(sni)"
+        let key = Self.makeKey(host: host, port: port, sni: sni)
         let session: HTTP3Session
 
         lock.lock()
 
-        // Evict closed, stream-blocked, and idle sessions
+        // Evict closed, stream-blocked, and idle sessions.
         evictStale(key: key)
 
         if let existing = sessions[key]?.first(where: { $0.tryReserveStream() }) {
@@ -123,6 +122,8 @@ class HTTP3SessionPool {
 
     // MARK: - Eviction
 
+    /// Removes closed, stream-blocked, and idle sessions from `key`'s bucket.
+    /// Must be called with ``lock`` held.
     private func evictStale(key: String) {
         let now = Date()
         sessions[key]?.removeAll { session in
@@ -130,7 +131,7 @@ class HTTP3SessionPool {
                 lastActivity.removeValue(forKey: ObjectIdentifier(session))
                 return true
             }
-            // Only evict idle sessions that have NO active streams
+            // Only evict idle sessions that have NO active streams.
             if !session.hasActiveStreams,
                let activity = lastActivity[ObjectIdentifier(session)],
                now.timeIntervalSince(activity) > Self.idleTimeout {
@@ -145,13 +146,12 @@ class HTTP3SessionPool {
         }
     }
 
-    private func removeSession(_ session: HTTP3Session, key: String) {
+    /// Drops the bucket entry plus the activity record. The base implementation
+    /// is otherwise sufficient.
+    override func removeSession(_ session: HTTP3Session, key: String) {
+        super.removeSession(session, key: key)
         lock.lock()
-        sessions[key]?.removeAll { $0 === session }
         lastActivity.removeValue(forKey: ObjectIdentifier(session))
-        if sessions[key]?.isEmpty == true {
-            sessions.removeValue(forKey: key)
-        }
         lock.unlock()
     }
 
@@ -179,7 +179,7 @@ class HTTP3SessionPool {
                     lastActivity.removeValue(forKey: ObjectIdentifier(session))
                     return true
                 }
-                // Never evict sessions that still have active streams
+                // Never evict sessions that still have active streams.
                 if !session.hasActiveStreams,
                    let activity = lastActivity[ObjectIdentifier(session)],
                    now.timeIntervalSince(activity) > Self.idleTimeout {
@@ -200,16 +200,12 @@ class HTTP3SessionPool {
         }
     }
 
-    /// Closes all pooled sessions.
-    func closeAll() {
+    /// Closes every pooled session and clears the activity table.
+    override func closeAll() {
         lock.lock()
-        let all = sessions.values.flatMap { $0 }
-        sessions.removeAll()
         lastActivity.removeAll()
         lock.unlock()
 
-        for session in all {
-            session.close()
-        }
+        super.closeAll()
     }
 }

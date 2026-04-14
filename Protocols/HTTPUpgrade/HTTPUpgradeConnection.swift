@@ -12,7 +12,7 @@ import Foundation
 /// HTTP upgrade connection that performs an HTTP upgrade handshake and then
 /// passes data through as raw TCP bytes (no WebSocket framing).
 ///
-/// Closure-based transport abstraction avoids modifying ``BSDSocket`` or ``TLSRecordConnection``.
+/// Closure-based transport abstraction avoids modifying ``RawTCPSocket`` or ``TLSRecordConnection``.
 class HTTPUpgradeConnection {
 
     // MARK: Transport closures
@@ -40,59 +40,29 @@ class HTTPUpgradeConnection {
 
     // MARK: - Initializers
 
-    /// Creates an HTTP upgrade connection over a plain BSDSocket.
-    init(transport: BSDSocket, configuration: HTTPUpgradeConfiguration) {
+    /// Designated initializer. Takes a pre-built ``TransportClosures`` so the
+    /// three convenience inits below are each one line.
+    init(transport: TransportClosures, configuration: HTTPUpgradeConfiguration) {
         self.configuration = configuration
-        self.transportSend = { data, completion in
-            transport.send(data: data, completion: completion)
-        }
-        self.transportReceive = { completion in
-            transport.receive(maximumLength: 65536, completion: completion)
-        }
-        self.transportCancel = {
-            transport.forceCancel()
-        }
+        self.transportSend = transport.send
+        self.transportReceive = transport.receive
+        self.transportCancel = transport.cancel
         self._isConnected = true
     }
 
-    /// Creates an HTTP upgrade connection over a TLS record connection.
-    init(tlsConnection: TLSRecordConnection, configuration: HTTPUpgradeConfiguration) {
-        self.configuration = configuration
-        self.transportSend = { data, completion in
-            tlsConnection.send(data: data, completion: completion)
-        }
-        self.transportReceive = { completion in
-            tlsConnection.receive { data, error in
-                completion(data, false, error)
-            }
-        }
-        self.transportCancel = {
-            tlsConnection.cancel()
-        }
-        self._isConnected = true
+    /// Creates an HTTP upgrade connection over a plain ``RawTCPSocket``.
+    convenience init(transport: RawTCPSocket, configuration: HTTPUpgradeConfiguration) {
+        self.init(transport: TransportClosures(rawTCP: transport), configuration: configuration)
+    }
+
+    /// Creates an HTTP upgrade connection over a ``TLSRecordConnection``.
+    convenience init(tlsConnection: TLSRecordConnection, configuration: HTTPUpgradeConfiguration) {
+        self.init(transport: TransportClosures(tls: tlsConnection), configuration: configuration)
     }
 
     /// Creates an HTTP upgrade connection over a proxy tunnel (for proxy chaining).
-    init(tunnel: ProxyConnection, configuration: HTTPUpgradeConfiguration) {
-        self.configuration = configuration
-        self.transportSend = { data, completion in
-            tunnel.sendRaw(data: data, completion: completion)
-        }
-        self.transportReceive = { completion in
-            tunnel.receiveRaw { data, error in
-                if let error {
-                    completion(nil, true, error)
-                } else if let data, !data.isEmpty {
-                    completion(data, false, nil)
-                } else {
-                    completion(nil, true, nil)
-                }
-            }
-        }
-        self.transportCancel = {
-            tunnel.cancel()
-        }
-        self._isConnected = true
+    convenience init(tunnel: ProxyConnection, configuration: HTTPUpgradeConfiguration) {
+        self.init(transport: TransportClosures(tunnel: tunnel), configuration: configuration)
     }
 
     // MARK: - HTTP Upgrade Handshake

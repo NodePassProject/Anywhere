@@ -9,7 +9,7 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "HTTP3Session")
 
-class HTTP3Session {
+class HTTP3Session: PoolableSession {
 
     // MARK: - State
 
@@ -69,7 +69,11 @@ class HTTP3Session {
     private(set) var poolIsStreamBlocked = false
     private var _poolStreamCount = 0
     private var _reservedStreams = 0
-    private let maxConcurrentStreams = 100
+    /// Kept in sync with `QUICTuning.naive.initialMaxStreamsBidi` so the pool's
+    /// per-session reservation ceiling doesn't fall below what ngtcp2 is willing
+    /// to open. Undersizing this forces the pool to spin up fresh sessions (and
+    /// pay a handshake) long before the existing connection runs out of stream IDs.
+    private let maxConcurrentStreams = 512
 
     /// Whether the session has active or reserved streams. Thread-safe.
     /// Used by the pool to avoid evicting sessions that are still in use.

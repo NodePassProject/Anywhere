@@ -19,8 +19,6 @@ class LWIPTCPConnection {
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
     private var proxyConnecting = false
-    private var directRelay: DirectTCPRelay?
-    private var directConnecting = false
     private let bypass: Bool
     private var pendingData = Data()
     private var closed = false
@@ -63,7 +61,7 @@ class LWIPTCPConnection {
         // Start handshake timeout (Xray-core Timeout.Handshake = 60s)
         let timer = DispatchWorkItem { [weak self] in
             guard let self, !self.closed else { return }
-            if self.proxyConnecting || self.directConnecting {
+            if self.proxyConnecting {
                 logger.error("[TCP] Handshake timeout for \(self.dstHost):\(self.dstPort)")
                 self.abort()
             }
@@ -93,12 +91,12 @@ class LWIPTCPConnection {
         guard !closed else { return }
         activityTimer?.update()
 
-        if proxyConnecting || directConnecting {
+        if proxyConnecting {
             pendingData.append(data)
             return
         }
 
-        guard directRelay != nil || proxyConnection != nil else {
+        guard proxyConnection != nil else {
             pendingData.append(data)
             if bypass { connectDirect() } else { connectProxy() }
             return
@@ -157,11 +155,7 @@ class LWIPTCPConnection {
                 lwip_bridge_tcp_recved(self.pcb, recvLen)
             }
         }
-        if let relay = directRelay {
-            relay.send(data: data, completion: completion)
-        } else if let connection = proxyConnection {
-            connection.send(data: data, completion: completion)
-        }
+        proxyConnection?.send(data: data, completion: completion)
     }
 
     /// Flushes the coalesced upload buffer — encrypts and sends all accumulated
@@ -210,11 +204,7 @@ class LWIPTCPConnection {
             }
         }
 
-        if let relay = directRelay {
-            relay.send(data: data, completion: completion)
-        } else if let connection = proxyConnection {
-            connection.send(data: data, completion: completion)
-        }
+        proxyConnection?.send(data: data, completion: completion)
     }
 
     /// Called when the local app acknowledges receipt of data sent via lwIP.
@@ -285,21 +275,22 @@ class LWIPTCPConnection {
     // MARK: - Direct Connection (bypass)
 
     private func connectDirect() {
-        guard !directConnecting && directRelay == nil && !closed else { return }
-        directConnecting = true
+        guard !proxyConnecting && proxyConnection == nil && !closed else { return }
+        proxyConnecting = true
 
         let initialData = pendingData.isEmpty ? nil : pendingData
         if initialData != nil {
             pendingData.removeAll(keepingCapacity: true)
         }
 
-        let relay = DirectTCPRelay()
-        self.directRelay = relay
-        relay.connect(host: dstHost, port: dstPort, queue: lwipQueue) { [weak self] error in
+        let transport = RawTCPSocket()
+        let connection = DirectProxyConnection(connection: transport)
+        self.proxyConnection = connection
+        transport.connect(host: dstHost, port: dstPort, queue: lwipQueue) { [weak self] error in
             guard let self else { return }
 
             self.lwipQueue.async {
-                self.directConnecting = false
+                self.proxyConnecting = false
                 guard !self.closed else { return }
 
                 if let error {
@@ -319,7 +310,7 @@ class LWIPTCPConnection {
 
                 if let initialData {
                     let totalReceiveLength = initialData.count
-                    relay.send(data: initialData) { [weak self] error in
+                    connection.send(data: initialData) { [weak self] error in
                         guard let self else { return }
                         if let error {
                             self.logTransportFailure("Send", error: error)
@@ -342,7 +333,7 @@ class LWIPTCPConnection {
                     let dataToSend = self.pendingData
                     self.pendingData.removeAll(keepingCapacity: true)
                     let totalReceiveLength = dataToSend.count
-                    relay.send(data: dataToSend) { [weak self] error in
+                    connection.send(data: dataToSend) { [weak self] error in
                         guard let self else { return }
                         if let error {
                             self.logTransportFailure("Send", error: error)
@@ -457,37 +448,6 @@ class LWIPTCPConnection {
     /// drains it completely.
     private func requestNextReceive() {
         guard !closed else { return }
-
-        if let relay = directRelay {
-            relay.receive { [weak self] data, error in
-                guard let self else { return }
-
-                self.lwipQueue.async {
-                    guard !self.closed else { return }
-
-                    if let error {
-                        self.logTransportFailure("Receive", error: error)
-                        self.abort()
-                        return
-                    }
-
-                    guard let data, !data.isEmpty else {
-                        self.downlinkDone = true
-                        if self.uplinkDone {
-                            self.close()
-                        } else {
-                            self.activityTimer?.setTimeout(TunnelConstants.uplinkOnlyTimeout)
-                        }
-                        return
-                    }
-
-                    self.activityTimer?.update()
-                    self.writeToLWIP(data)
-                }
-            }
-            return
-        }
-
         guard let connection = proxyConnection else { return }
 
         connection.receive { [weak self] data, error in
@@ -668,11 +628,8 @@ class LWIPTCPConnection {
         handshakeTimer = nil
         activityTimer?.cancel()
         activityTimer = nil
-        let relay = directRelay
         let connection = proxyConnection
         let client = proxyClient
-        directRelay = nil
-        directConnecting = false
         proxyConnection = nil
         proxyClient = nil
         proxyConnecting = false
@@ -681,13 +638,11 @@ class LWIPTCPConnection {
         uploadCoalesceBuffer = Data()
         uploadCoalesceRecvLen = 0
         uploadFlushInFlight = false
-        relay?.cancel()
         connection?.cancel()
         client?.cancel()
     }
 
     deinit {
-        directRelay?.cancel()
         proxyConnection?.cancel()
         proxyClient?.cancel()
     }

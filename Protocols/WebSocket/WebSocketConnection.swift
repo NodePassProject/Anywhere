@@ -11,7 +11,7 @@ import Foundation
 
 /// WebSocket connection implementing RFC 6455 framing over an arbitrary transport.
 ///
-/// Closure-based transport abstraction avoids modifying ``BSDSocket`` or ``TLSRecordConnection``.
+/// Closure-based transport abstraction avoids modifying ``RawTCPSocket`` or ``TLSRecordConnection``.
 class WebSocketConnection {
 
     // MARK: Transport closures
@@ -41,59 +41,29 @@ class WebSocketConnection {
 
     // MARK: - Initializers
 
-    /// Creates a WebSocket connection over a plain BSDSocket.
-    init(transport: BSDSocket, configuration: WebSocketConfiguration) {
+    /// Designated initializer. Takes a pre-built ``TransportClosures`` so the
+    /// three convenience inits below are each one line.
+    init(transport: TransportClosures, configuration: WebSocketConfiguration) {
         self.configuration = configuration
-        self.transportSend = { data, completion in
-            transport.send(data: data, completion: completion)
-        }
-        self.transportReceive = { completion in
-            transport.receive(maximumLength: 65536, completion: completion)
-        }
-        self.transportCancel = {
-            transport.forceCancel()
-        }
+        self.transportSend = transport.send
+        self.transportReceive = transport.receive
+        self.transportCancel = transport.cancel
         self._isConnected = true
     }
 
-    /// Creates a WebSocket connection over a TLS record connection (WSS).
-    init(tlsConnection: TLSRecordConnection, configuration: WebSocketConfiguration) {
-        self.configuration = configuration
-        self.transportSend = { data, completion in
-            tlsConnection.send(data: data, completion: completion)
-        }
-        self.transportReceive = { completion in
-            tlsConnection.receive { data, error in
-                completion(data, false, error)
-            }
-        }
-        self.transportCancel = {
-            tlsConnection.cancel()
-        }
-        self._isConnected = true
+    /// Creates a WebSocket connection over a plain ``RawTCPSocket``.
+    convenience init(transport: RawTCPSocket, configuration: WebSocketConfiguration) {
+        self.init(transport: TransportClosures(rawTCP: transport), configuration: configuration)
+    }
+
+    /// Creates a WebSocket connection over a ``TLSRecordConnection`` (WSS).
+    convenience init(tlsConnection: TLSRecordConnection, configuration: WebSocketConfiguration) {
+        self.init(transport: TransportClosures(tls: tlsConnection), configuration: configuration)
     }
 
     /// Creates a WebSocket connection over a proxy tunnel (for proxy chaining).
-    init(tunnel: ProxyConnection, configuration: WebSocketConfiguration) {
-        self.configuration = configuration
-        self.transportSend = { data, completion in
-            tunnel.sendRaw(data: data, completion: completion)
-        }
-        self.transportReceive = { completion in
-            tunnel.receiveRaw { data, error in
-                if let error {
-                    completion(nil, true, error)
-                } else if let data, !data.isEmpty {
-                    completion(data, false, nil)
-                } else {
-                    completion(nil, true, nil)
-                }
-            }
-        }
-        self.transportCancel = {
-            tunnel.cancel()
-        }
-        self._isConnected = true
+    convenience init(tunnel: ProxyConnection, configuration: WebSocketConfiguration) {
+        self.init(transport: TransportClosures(tunnel: tunnel), configuration: configuration)
     }
 
     // MARK: - HTTP Upgrade Handshake

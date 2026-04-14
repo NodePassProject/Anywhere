@@ -79,6 +79,12 @@ extension QUICTuning {
     /// server stack is tuned against; BBR is a reasonable proxy-side
     /// choice but deviates from the reference implementation.
     ///
+    /// Flow-control windows are sized after upstream naiveproxy
+    /// (`naive_proxy_bin.cc`): 64 MB stream / 128 MB connection, the
+    /// 2× BDP target for 125 Mbps × 256 ms links. Initial per-stream
+    /// window is bumped to 16 MB so the first RTT after CONNECT can
+    /// fill a high-BDP pipe before the ngtcp2 auto-scaler ramps.
+    ///
     /// Handshake timeout matches naive's `kMaxTimeForCryptoHandshakeSecs = 10`
     /// (quic_constants.h). Covers ~three PTO retransmissions (1/2/4 s)
     /// before the pool's one-shot retry kicks in — tight enough to
@@ -86,13 +92,13 @@ extension QUICTuning {
     /// high-RTT / lossy mobile paths.
     static let naive = QUICTuning(
         cc: .cubic,
-        maxStreamWindow: 32 * 1024 * 1024,
-        maxWindow: 96 * 1024 * 1024,
-        initialMaxData: 15 * 1024 * 1024,
-        initialMaxStreamDataBidiLocal: 6 * 1024 * 1024,
-        initialMaxStreamDataBidiRemote: 6 * 1024 * 1024,
-        initialMaxStreamDataUni: 6 * 1024 * 1024,
-        initialMaxStreamsBidi: 100,
+        maxStreamWindow: 64 * 1024 * 1024,
+        maxWindow: 128 * 1024 * 1024,
+        initialMaxData: 64 * 1024 * 1024,
+        initialMaxStreamDataBidiLocal: 16 * 1024 * 1024,
+        initialMaxStreamDataBidiRemote: 16 * 1024 * 1024,
+        initialMaxStreamDataUni: 16 * 1024 * 1024,
+        initialMaxStreamsBidi: 1024,
         initialMaxStreamsUni: 100,
         maxIdleTimeout: 30 * 1_000_000_000,
         handshakeTimeout: 10 * 1_000_000_000,
@@ -103,16 +109,25 @@ extension QUICTuning {
     /// upload rate (Mbit/s). The rate applies from the moment the QUIC
     /// connection opens; `HysteriaSession` replaces it with
     /// `min(server_rx, client_max_tx)` once the auth response lands.
+    ///
+    /// Flow-control windows match the reference Hysteria client
+    /// (`core/client/config.go`): 8 MB per stream, 20 MB per connection,
+    /// with `max == initial` to disable ngtcp2's receive-window auto-tuner.
+    /// Brutal sends at a fixed configured rate with no backoff, so a larger
+    /// receive window doesn't raise useful throughput — it only deepens the
+    /// in-flight pipe, turning path-capacity mismatches into multi-megabyte
+    /// loss bursts that trip the server's idle/loss detection. The reference
+    /// quic-go setup gets this right by construction (`Initial == Max`).
     static func hysteria(uploadMbps: Int) -> QUICTuning {
         let bps = UInt64(uploadMbps) * 1_000_000 / 8
         return QUICTuning(
             cc: .brutal(initialBps: bps),
-            maxStreamWindow: 32 * 1024 * 1024,
-            maxWindow: 96 * 1024 * 1024,
-            initialMaxData: 15 * 1024 * 1024,
-            initialMaxStreamDataBidiLocal: 6 * 1024 * 1024,
-            initialMaxStreamDataBidiRemote: 6 * 1024 * 1024,
-            initialMaxStreamDataUni: 6 * 1024 * 1024,
+            maxStreamWindow: 8 * 1024 * 1024,
+            maxWindow: 20 * 1024 * 1024,
+            initialMaxData: 20 * 1024 * 1024,
+            initialMaxStreamDataBidiLocal: 8 * 1024 * 1024,
+            initialMaxStreamDataBidiRemote: 8 * 1024 * 1024,
+            initialMaxStreamDataUni: 8 * 1024 * 1024,
             initialMaxStreamsBidi: 1024,
             initialMaxStreamsUni: 16,
             maxIdleTimeout: 30 * 1_000_000_000,

@@ -26,7 +26,7 @@ class LWIPUDPFlow {
     var lastActivity: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
 
     // Direct bypass path
-    private var directRelay: DirectUDPRelay?
+    private var directSocket: RawUDPSocket?
 
     // Non-mux path
     private var proxyClient: ProxyClient?
@@ -112,7 +112,7 @@ class LWIPUDPFlow {
         lastActivity = CFAbsoluteTimeGetCurrent()
 
         // Buffer data while the outbound connection is being established.
-        // directRelay is set before its socket connects; sending to an
+        // directSocket is set before its socket connects; sending to an
         // unconnected UDP socket silently drops the datagram.
         if proxyConnecting {
             bufferPayload(data: data, payloadLength: payloadLength)
@@ -122,8 +122,8 @@ class LWIPUDPFlow {
         let payload = data.prefix(payloadLength)
 
         // Direct bypass path
-        if let relay = directRelay {
-            relay.send(data: payload)
+        if let socket = directSocket {
+            socket.send(data: payload)
             return
         }
 
@@ -174,7 +174,7 @@ class LWIPUDPFlow {
     // MARK: - Proxy Connection
 
     private func connectProxy() {
-        guard !proxyConnecting && proxyConnection == nil && muxSession == nil && directRelay == nil && ssUDPRelay == nil && !closed else { return }
+        guard !proxyConnecting && proxyConnection == nil && muxSession == nil && directSocket == nil && ssUDPRelay == nil && !closed else { return }
 
         if forceBypass || LWIPStack.shared?.shouldBypass(host: dstHost) == true {
             connectDirectUDP()
@@ -396,12 +396,12 @@ class LWIPUDPFlow {
     }
 
     private func connectDirectUDP() {
-        guard directRelay == nil && !closed else { return }
+        guard directSocket == nil && !closed else { return }
         proxyConnecting = true  // reuse flag to prevent re-entry
 
-        let relay = DirectUDPRelay()
-        self.directRelay = relay
-        relay.connect(dstHost: dstHost, dstPort: dstPort, lwipQueue: lwipQueue) { [weak self] error in
+        let socket = RawUDPSocket()
+        self.directSocket = socket
+        socket.connect(host: dstHost, port: dstPort, completionQueue: lwipQueue) { [weak self] error in
             guard let self else { return }
 
             self.lwipQueue.async {
@@ -417,13 +417,13 @@ class LWIPUDPFlow {
 
                 // Send buffered payloads
                 for payload in self.pendingData {
-                    relay.send(data: payload)
+                    socket.send(data: payload)
                 }
                 self.pendingData.removeAll()
                 self.pendingBufferSize = 0
 
                 // Start receiving responses
-                relay.startReceiving { [weak self] data in
+                socket.startReceiving { [weak self] data in
                     self?.handleProxyData(data)
                 }
             }
@@ -482,12 +482,12 @@ class LWIPUDPFlow {
     }
 
     private func releaseProxy() {
-        let relay = directRelay
+        let socket = directSocket
         let ssRelay = ssUDPRelay
         let connection = proxyConnection
         let client = proxyClient
         let session = muxSession
-        directRelay = nil
+        directSocket = nil
         ssUDPRelay = nil
         proxyConnection = nil
         proxyClient = nil
@@ -495,7 +495,7 @@ class LWIPUDPFlow {
         proxyConnecting = false
         pendingData.removeAll()
         pendingBufferSize = 0
-        relay?.cancel()
+        socket?.cancel()
         ssRelay?.cancel()
         connection?.cancel()
         client?.cancel()
@@ -503,7 +503,7 @@ class LWIPUDPFlow {
     }
 
     deinit {
-        directRelay?.cancel()
+        directSocket?.cancel()
         ssUDPRelay?.cancel()
         proxyConnection?.cancel()
         proxyClient?.cancel()

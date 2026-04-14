@@ -44,13 +44,9 @@ class TLSClient {
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var storedClientHello: Data?
 
-    // TLS 1.3 session state (cleared after handshake)
-    private var keyDerivation: TLS13KeyDerivation?
-    private var handshakeSecret: Data?
-    private var handshakeKeys: TLSHandshakeKeys?
-    private var applicationKeys: TLSApplicationKeys?
-    private var handshakeTranscript: Data?
-    private var serverHandshakeSeqNum: UInt64 = 0
+    /// TLS 1.3 session state (cleared after handshake by reassigning a
+    /// fresh ``TLS13HandshakeState``).
+    private var tls13 = TLS13HandshakeState()
 
     // TLS 1.2 session state (cleared after handshake)
     private var clientRandom: Data?
@@ -122,7 +118,7 @@ class TLSClient {
         }
         storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
-        let transport = BSDSocket()
+        let transport = RawTCPSocket()
         self.connection = transport
 
         transport.connect(host: host, port: port, queue: .global(), initialData: clientHello) { [weak self] error in
@@ -545,16 +541,16 @@ class TLSClient {
 
             let serverHello = extractServerHelloMessage(from: buffer)
 
-            keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
+            tls13.keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
 
             var transcript = Data()
             transcript.append(clientHello)
             transcript.append(serverHello)
 
-            let (hs, keys) = keyDerivation!.deriveHandshakeKeys(sharedSecret: sharedSecretData, transcript: transcript)
-            handshakeSecret = hs
-            handshakeKeys = keys
-            handshakeTranscript = transcript
+            let (hs, keys) = tls13.keyDerivation!.deriveHandshakeKeys(sharedSecret: sharedSecretData, transcript: transcript)
+            tls13.handshakeSecret = hs
+            tls13.handshakeKeys = keys
+            tls13.handshakeTranscript = transcript
             negotiatedVersion = 0x0304
 
             consumeRemainingTLS13Handshake(buffer: buffer, completion: completion)
@@ -572,13 +568,13 @@ class TLSClient {
         startOffset: Int = 0,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
-        guard let keys = handshakeKeys, let kd = keyDerivation else {
+        guard let keys = tls13.handshakeKeys, let kd = tls13.keyDerivation else {
             completion(.failure(TLSError.handshakeFailed("Missing handshake keys")))
             return
         }
 
         var offset = startOffset
-        var fullTranscript = handshakeTranscript ?? Data()
+        var fullTranscript = tls13.handshakeTranscript ?? Data()
         var foundServerFinished = false
 
         var transcriptBeforeCertVerify: Data? = nil
@@ -599,7 +595,7 @@ class TLSClient {
                 let ciphertext = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
 
                 do {
-                    let seqNum = serverHandshakeSeqNum
+                    let seqNum = tls13.serverHandshakeSeqNum
                     let decrypted = try TLSRecordCrypto.decryptRecord(
                         ciphertext: ciphertext,
                         key: SymmetricKey(data: keys.serverKey),
@@ -608,7 +604,7 @@ class TLSClient {
                         recordHeader: recordHeader,
                         cipherSuite: kd.cipherSuite
                     )
-                    serverHandshakeSeqNum += 1
+                    tls13.serverHandshakeSeqNum += 1
 
                     var hsOffset = 0
                     while hsOffset + 4 <= decrypted.count {
@@ -640,7 +636,7 @@ class TLSClient {
                             }
 
                         case 0x14: // Finished
-                            if let keys = self.handshakeKeys {
+                            if let keys = self.tls13.handshakeKeys {
                                 let expectedVerifyData = kd.computeFinishedVerifyData(
                                     trafficSecret: keys.serverTrafficSecret,
                                     transcript: fullTranscript
@@ -681,7 +677,7 @@ class TLSClient {
         }
 
         let processedOffset = offset
-        handshakeTranscript = fullTranscript
+        tls13.handshakeTranscript = fullTranscript
 
         let remainingBuffer = offset < buffer.count ? Data(buffer[offset...]) : nil
         self.postHandshakeBuffer = remainingBuffer
@@ -789,12 +785,12 @@ class TLSClient {
         fullTranscript: Data,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
-        guard let kd = keyDerivation, let hs = handshakeSecret else {
+        guard let kd = tls13.keyDerivation, let hs = tls13.handshakeSecret else {
             completion(.failure(TLSError.handshakeFailed("Missing handshake state")))
             return
         }
 
-        applicationKeys = kd.deriveApplicationKeys(handshakeSecret: hs, fullTranscript: fullTranscript)
+        tls13.applicationKeys = kd.deriveApplicationKeys(handshakeSecret: hs, fullTranscript: fullTranscript)
 
         sendTLS13ClientFinished { [weak self] error in
             guard let self else { return }
@@ -805,7 +801,7 @@ class TLSClient {
                 return
             }
 
-            guard let appKeys = self.applicationKeys else {
+            guard let appKeys = self.tls13.applicationKeys else {
                 logger.error("[TLS] Application keys not available")
                 completion(.failure(TLSError.handshakeFailed("Application keys not available")))
                 return
@@ -816,7 +812,7 @@ class TLSClient {
                 clientIV: appKeys.clientIV,
                 serverKey: appKeys.serverKey,
                 serverIV: appKeys.serverIV,
-                cipherSuite: self.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
+                cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
             )
             tlsConnection.connection = self.connection
             self.connection = nil
@@ -832,9 +828,9 @@ class TLSClient {
 
     /// Sends the ChangeCipherSpec and encrypted Client Finished messages (TLS 1.3).
     private func sendTLS13ClientFinished(completion: @escaping (Error?) -> Void) {
-        guard let keys = handshakeKeys,
-              let transcript = handshakeTranscript,
-              let kd = keyDerivation else {
+        guard let keys = tls13.handshakeKeys,
+              let transcript = tls13.handshakeTranscript,
+              let kd = tls13.keyDerivation else {
             completion(TLSError.handshakeFailed("Missing handshake keys"))
             return
         }
@@ -857,7 +853,7 @@ class TLSClient {
                 key: SymmetricKey(data: keys.clientKey),
                 iv: keys.clientIV,
                 seqNum: 0,
-                cipherSuite: keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
+                cipherSuite: tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
             )
             ccsRecord.append(finishedRecord)
 
@@ -1902,7 +1898,7 @@ class TLSClient {
         algorithm: UInt16,
         signature: Data
     ) throws {
-        guard let kd = keyDerivation else {
+        guard let kd = tls13.keyDerivation else {
             throw TLSError.handshakeFailed("Missing key derivation")
         }
 
@@ -2030,12 +2026,7 @@ class TLSClient {
     private func clearHandshakeState() {
         ephemeralPrivateKey = nil
         storedClientHello = nil
-        keyDerivation = nil
-        handshakeSecret = nil
-        handshakeKeys = nil
-        applicationKeys = nil
-        handshakeTranscript = nil
-        serverHandshakeSeqNum = 0
+        tls13 = TLS13HandshakeState()
         postHandshakeBuffer = nil
         serverCertificates.removeAll()
         // TLS 1.2 state

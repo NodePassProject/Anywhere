@@ -617,6 +617,10 @@ class QUICConnection {
                 )
                 handleReceivedPacket(view)
             }
+            // handleReceivedPacket may synchronously close the socket
+            // (e.g. on NGTCP2_ERR_DRAINING). Re-check before the next recv
+            // so we don't issue recv(-1) → EBADF.
+            if socketFD < 0 { return }
         }
     }
 

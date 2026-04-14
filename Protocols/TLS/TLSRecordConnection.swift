@@ -35,7 +35,7 @@ class TLSRecordConnection {
 
     // MARK: Properties
 
-    /// The underlying transport (``BSDSocket`` for direct connections,
+    /// The underlying transport (``RawTCPSocket`` for direct connections,
     /// ``TunneledTransport`` for proxy-chained connections).
     var connection: (any RawTransport)?
 
