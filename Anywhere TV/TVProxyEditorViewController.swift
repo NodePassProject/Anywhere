@@ -573,8 +573,7 @@ class TVProxyEditorViewController: UITableViewController {
                 transport: transportLayer,
                 security: securityLayer,
                 muxEnabled: muxEnabled,
-                xudpEnabled: xudpEnabled,
-                testseed: existingConfiguration?.testseed ?? VLESSDefaultTestseed
+                xudpEnabled: xudpEnabled
             )
         case .hysteria:
             let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)

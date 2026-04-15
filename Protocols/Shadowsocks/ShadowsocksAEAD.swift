@@ -135,7 +135,7 @@ enum ShadowsocksKeyDerivation {
     /// Returns nil if any PSK fails to decode or has wrong size.
     static func decodePSKList(password: String, keySize: Int) -> [Data]? {
         let parts = password.split(separator: ":")
-        var result: [Data] = []
+        var psks: [Data] = []
         for part in parts {
             guard let psk = Data(base64Encoded: padBase64(String(part))) else {
                 return nil
@@ -143,9 +143,9 @@ enum ShadowsocksKeyDerivation {
             guard psk.count == keySize else {
                 return nil
             }
-            result.append(psk)
+            psks.append(psk)
         }
-        return result.isEmpty ? nil : result
+        return psks.isEmpty ? nil : psks
     }
 
     /// Computes the first 16 bytes of BLAKE3 hash of the given data.

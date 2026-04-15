@@ -23,4 +23,9 @@ struct ProxyChain: Identifiable, Codable, Hashable {
         self.name = name
         self.proxyIds = proxyIds
     }
+
+    /// Resolves this chain's ordered proxy IDs against the given pool. Missing IDs are skipped.
+    func resolveProxies(from pool: [ProxyConfiguration]) -> [ProxyConfiguration] {
+        proxyIds.compactMap { id in pool.first(where: { $0.id == id }) }
+    }
 }

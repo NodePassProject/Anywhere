@@ -198,8 +198,7 @@ struct ClashProxyParser {
                 transport: transportLayer,
                 security: securityLayer,
                 muxEnabled: true,
-                xudpEnabled: true,
-                testseed: VLESSDefaultTestseed
+                xudpEnabled: true
             )
         )
     }

@@ -302,11 +302,9 @@ class RawTCPSocket: RawTransport {
     /// - Parameters:
     ///   - host: The remote hostname or IP address.
     ///   - port: The remote port number.
-    ///   - queue: Accepted for API compatibility but unused internally.
-    ///     Completion fires on the internal `ioQueue`.
     ///   - initialData: Optional data to send immediately after connect.
-    ///   - completion: Called with `nil` on success or an error on failure.
-    func connect(host: String, port: UInt16, queue: DispatchQueue,
+    ///   - completion: Called with `nil` on success or an error on failure. Fires on the internal `ioQueue`.
+    func connect(host: String, port: UInt16,
                  initialData: Data? = nil,
                  completion: @escaping (Error?) -> Void) {
         ioQueue.async { [self] in

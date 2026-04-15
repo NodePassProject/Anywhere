@@ -648,8 +648,7 @@ struct ProxyEditorView: View {
                 transport: transportLayer,
                 security: securityLayer,
                 muxEnabled: muxEnabled,
-                xudpEnabled: xudpEnabled,
-                testseed: self.configuration?.testseed ?? VLESSDefaultTestseed
+                xudpEnabled: xudpEnabled
             )
         case .hysteria:
             let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)

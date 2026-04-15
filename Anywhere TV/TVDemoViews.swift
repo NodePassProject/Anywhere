@@ -452,7 +452,7 @@ class TVDemoChainListViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: TVChainCell.reuseIdentifier, for: indexPath) as! TVChainCell
         let chain = chains[indexPath.row]
-        let proxies = chain.proxyIds.compactMap { id in configurations.first(where: { $0.id == id }) }
+        let proxies = chain.resolveProxies(from: configurations)
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
         let isSelected = chain.id == selectedChainId
 

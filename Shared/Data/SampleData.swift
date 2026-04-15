@@ -35,8 +35,7 @@ enum SampleData {
             transport: transport,
             security: security,
             muxEnabled: true,
-            xudpEnabled: true,
-            testseed: VLESSDefaultTestseed
+            xudpEnabled: true
         )
     }
 

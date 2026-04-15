@@ -80,10 +80,6 @@ extension ProxyConfiguration {
             params.append("xudp=false")
         }
         
-        if testseed != VLESSDefaultTestseed {
-            params.append("testseed=\(testseed.map { String($0) }.joined(separator: ","))")
-        }
-
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "vless://\(uuid.uuidString.lowercased())@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"

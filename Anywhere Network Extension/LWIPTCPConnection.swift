@@ -49,14 +49,23 @@ class LWIPTCPConnection {
 
     // MARK: Upload Coalescing
 
-    /// Accumulates segments from lwIP callbacks within a single processing batch.
-    /// Flushed via `lwipQueue.async` after the current `lwip_bridge_input` loop,
-    /// so all segments in one batch are encrypted and sent as a single chunk.
-    /// This reduces AES-GCM operations from 2×N (per-segment) to 2×ceil(total/16383).
-    private var uploadCoalesceBuffer = Data()
-    private var uploadCoalesceRecvLen: Int = 0
-    private var uploadCoalesceScheduled = false
-    private var uploadFlushInFlight = false
+    /// Segments from lwIP callbacks within one `lwip_bridge_input` batch,
+    /// accumulated and flushed as a single encrypted chunk via `lwipQueue.async`.
+    /// Reduces AES-GCM operations from 2×N (per-segment) to 2×ceil(total/16383).
+    ///
+    /// Invariants:
+    /// - `recvLen == buffer.count` at all times outside `flushUploadBuffer`.
+    /// - `isScheduled` implies an async flush is queued; cleared at the start of `flushUploadBuffer`.
+    /// - `isFlushInFlight` is true from the `proxyConnection.send` call until its completion runs.
+    /// - New scheduled flushes are only enqueued when neither flag is set; the in-flight completion
+    ///   chains a follow-up flush to preserve order.
+    private struct UploadCoalesceState {
+        var buffer = Data()
+        var recvLen: Int = 0
+        var isScheduled = false
+        var isFlushInFlight = false
+    }
+    private var uploadCoalesce = UploadCoalesceState()
 
     private var activityTimer: ActivityTimer?
     private var handshakeTimer: DispatchWorkItem?
@@ -180,11 +189,11 @@ class LWIPTCPConnection {
 
         // Buffer would overflow — flush accumulated data first to
         // maintain stream ordering, then fall back to per-segment sends.
-        if uploadCoalesceRecvLen + data.count > TunnelConstants.tcpMaxCoalesceSize {
-            if uploadCoalesceRecvLen > 0 && !uploadFlushInFlight {
+        if uploadCoalesce.recvLen + data.count > TunnelConstants.tcpMaxCoalesceSize {
+            if uploadCoalesce.recvLen > 0 && !uploadCoalesce.isFlushInFlight {
                 flushUploadBuffer()
             }
-            if uploadCoalesceRecvLen == 0 {
+            if uploadCoalesce.recvLen == 0 {
                 // Buffer is empty (was empty or just flushed) — safe to
                 // send per-segment for backpressure without reordering.
                 sendSegmentDirect(data)
@@ -192,8 +201,8 @@ class LWIPTCPConnection {
                 // A flush is in-flight and the buffer has unsent data.
                 // Coalesce to preserve ordering; the chain-flush on
                 // completion will send it after the in-flight data.
-                uploadCoalesceBuffer.append(data)
-                uploadCoalesceRecvLen += data.count
+                uploadCoalesce.buffer.append(data)
+                uploadCoalesce.recvLen += data.count
             }
             return
         }
@@ -203,13 +212,13 @@ class LWIPTCPConnection {
         // scMinPostsIntervalMs sleep and is sent as one large POST.
         // Without this, each individual TCP segment (~1-2 KB) would become its
         // own POST request during the delay, causing massive HTTP overhead.
-        uploadCoalesceBuffer.append(data)
-        uploadCoalesceRecvLen += data.count
+        uploadCoalesce.buffer.append(data)
+        uploadCoalesce.recvLen += data.count
 
         // Schedule flush only when no send is in-flight (data accumulated
         // during an in-flight send will be flushed when it completes).
-        if !uploadFlushInFlight && !uploadCoalesceScheduled {
-            uploadCoalesceScheduled = true
+        if !uploadCoalesce.isFlushInFlight && !uploadCoalesce.isScheduled {
+            uploadCoalesce.isScheduled = true
             lwipQueue.async { [weak self] in
                 self?.flushUploadBuffer()
             }
@@ -237,26 +246,26 @@ class LWIPTCPConnection {
     /// Flushes the coalesced upload buffer — encrypts and sends all accumulated
     /// segments as a single chunk, then acknowledges to lwIP on completion.
     private func flushUploadBuffer() {
-        uploadCoalesceScheduled = false
+        uploadCoalesce.isScheduled = false
         guard !closed else {
-            uploadCoalesceBuffer.removeAll()
-            uploadCoalesceRecvLen = 0
+            uploadCoalesce.buffer.removeAll()
+            uploadCoalesce.recvLen = 0
             return
         }
 
-        let data = uploadCoalesceBuffer
-        let recvLen = uploadCoalesceRecvLen
-        uploadCoalesceBuffer = Data()
-        uploadCoalesceRecvLen = 0
+        let data = uploadCoalesce.buffer
+        let recvLen = uploadCoalesce.recvLen
+        uploadCoalesce.buffer = Data()
+        uploadCoalesce.recvLen = 0
 
         guard !data.isEmpty else { return }
 
-        uploadFlushInFlight = true
+        uploadCoalesce.isFlushInFlight = true
 
         let completion: (Error?) -> Void = { [weak self] error in
             guard let self else { return }
             self.lwipQueue.async {
-                self.uploadFlushInFlight = false
+                self.uploadCoalesce.isFlushInFlight = false
                 guard !self.closed else { return }
                 if let error {
                     self.logTransportFailure("Send", error: error)
@@ -274,7 +283,7 @@ class LWIPTCPConnection {
                 // This is the key to matching Xray-core's batched upload behavior:
                 // data coalesces while the previous POST + delay runs, then flushes
                 // as one large POST instead of many small per-segment POSTs.
-                if self.uploadCoalesceRecvLen > 0 {
+                if self.uploadCoalesce.recvLen > 0 {
                     self.flushUploadBuffer()
                 }
             }
@@ -382,26 +391,28 @@ class LWIPTCPConnection {
     ///
     /// Behavior:
     ///   - Found a matching domain rule: apply it (may switch proxy, flip
-    ///     bypass, or reject the connection).
-    ///   - No rule matches: keep the IP-derived configuration, only swap the
-    ///     destination to the hostname so the proxy resolves it fresh.
+    ///     bypass, or reject the connection) and swap `dstHost` to the SNI so
+    ///     the new route resolves the name itself.
+    ///   - No rule matches: keep the IP-derived `dstHost` and configuration.
+    ///     Rewriting to the SNI hostname would force the outbound proxy to
+    ///     re-resolve via its own DNS, which can land on a different CDN IP
+    ///     than the one the caller already chose (breaks latency tests that
+    ///     pre-resolve a specific server, and risks cert/host mismatches).
     ///
     /// Must be called only while in sniff phase (sniffer has just cleared).
     private func applySNI(_ sni: String) {
         guard let stack = LWIPStack.shared else { return }
         let router = stack.domainRouter
 
-        // Always take on the hostname — downstream transports (VLESS/SOCKS5/
-        // Shadowsocks) are happier with a name than a raw IP.
-        dstHost = sni
-
         guard let action = router.matchDomain(sni) else {
-            // Domain was valid but matched no user rule; fall back to the
-            // tentative IP-based configuration. Re-check bypass against the
-            // new host so we don't loop through a proxy server by name.
-            bypass = bypass || stack.shouldBypass(host: sni)
+            // No domain rule — keep the IP-derived route as-is.
             return
         }
+
+        // Rule matched: the sniffed hostname is what drives the new route,
+        // so forward the proxy CONNECT to the name rather than the tentative
+        // IP.
+        dstHost = sni
 
         switch action {
         case .direct:
@@ -440,7 +451,7 @@ class LWIPTCPConnection {
         let transport = RawTCPSocket()
         let connection = DirectProxyConnection(connection: transport)
         self.proxyConnection = connection
-        transport.connect(host: dstHost, port: dstPort, queue: lwipQueue) { [weak self] error in
+        transport.connect(host: dstHost, port: dstPort) { [weak self] error in
             guard let self else { return }
 
             self.lwipQueue.async {
@@ -792,9 +803,7 @@ class LWIPTCPConnection {
         proxyConnecting = false
         pendingData = Data()
         pendingWrite = Data()
-        uploadCoalesceBuffer = Data()
-        uploadCoalesceRecvLen = 0
-        uploadFlushInFlight = false
+        uploadCoalesce = UploadCoalesceState()
         connection?.cancel()
         client?.cancel()
     }

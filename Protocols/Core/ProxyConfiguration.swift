@@ -48,7 +48,7 @@ enum OutboundProtocol: String, Codable {
 /// a given knob simply don't expose it.
 enum Outbound: Hashable {
     /// VLESS is the only outbound with a user-selectable transport layer and
-    /// TLS/Reality security layer, plus flow/mux/xudp/Vision-testseed knobs.
+    /// TLS/Reality security layer, plus flow/mux/xudp knobs.
     case vless(
         uuid: UUID,
         encryption: String,
@@ -56,8 +56,7 @@ enum Outbound: Hashable {
         transport: TransportLayer,
         security: SecurityLayer,
         muxEnabled: Bool,
-        xudpEnabled: Bool,
-        testseed: [UInt32]
+        xudpEnabled: Bool
     )
     /// Hysteria2 runs over QUIC with its own internal TLS. It needs only an
     /// optional SNI override (otherwise the server address is used) and the
@@ -75,10 +74,6 @@ enum Outbound: Hashable {
     /// Naive over HTTP/3-over-QUIC.
     case http3(username: String, password: String)
 }
-
-/// Default Vision padding seed — `[contentThreshold, longPaddingMax,
-/// longPaddingBase, shortPaddingMax]`, matches Xray-core's defaults.
-let VLESSDefaultTestseed: [UInt32] = [900, 500, 900, 256]
 
 /// Clamps any integer to the 1-100 Mbit/s range used by `.hysteria`.
 /// Used at every construction boundary so the associated value is always
@@ -145,29 +140,23 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
     /// Transport layer. Always `.tcp` for non-VLESS outbounds.
     var transportLayer: TransportLayer {
-        if case .vless(_, _, _, let t, _, _, _, _) = outbound { return t }
+        if case .vless(_, _, _, let t, _, _, _) = outbound { return t }
         return .tcp
     }
     /// Security layer. Always `.none` for non-VLESS outbounds.
     var securityLayer: SecurityLayer {
-        if case .vless(_, _, _, _, let s, _, _, _) = outbound { return s }
+        if case .vless(_, _, _, _, let s, _, _) = outbound { return s }
         return .none
     }
     /// Whether Mux is enabled. Only meaningful for VLESS+TCP with Vision flow.
     var muxEnabled: Bool {
-        if case .vless(_, _, _, _, _, let m, _, _) = outbound { return m }
+        if case .vless(_, _, _, _, _, let m, _) = outbound { return m }
         return false
     }
     /// Whether XUDP (GlobalID-based flow identification) is enabled for muxed UDP.
     var xudpEnabled: Bool {
-        if case .vless(_, _, _, _, _, _, let x, _) = outbound { return x }
+        if case .vless(_, _, _, _, _, _, let x) = outbound { return x }
         return false
-    }
-    /// Vision padding seed `[contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]`.
-    /// VLESS-only; the default is returned for every other outbound.
-    var testseed: [UInt32] {
-        if case .vless(_, _, _, _, _, _, _, let ts) = outbound { return ts }
-        return VLESSDefaultTestseed
     }
 
     init(
@@ -216,7 +205,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case outboundProtocol, uuid, encryption, flow
         case transport, websocket, httpUpgrade, xhttp
         case security, tls, reality
-        case testseed, muxEnabled, xudpEnabled
+        case muxEnabled, xudpEnabled
         case hysteriaPassword, hysteriaUploadMbps, hysteriaSNI
         case ssPassword, ssMethod
         case socks5Username, socks5Password
@@ -268,8 +257,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             default:
                 security = .none
             }
-            let ts = try container.decodeIfPresent([UInt32].self, forKey: .testseed)
-            let testseed = (ts?.count ?? 0) >= 4 ? ts! : VLESSDefaultTestseed
             outbound = .vless(
                 uuid: try container.decode(UUID.self, forKey: .uuid),
                 encryption: try container.decode(String.self, forKey: .encryption),
@@ -277,8 +264,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 transport: transport,
                 security: security,
                 muxEnabled: try container.decodeIfPresent(Bool.self, forKey: .muxEnabled) ?? true,
-                xudpEnabled: try container.decodeIfPresent(Bool.self, forKey: .xudpEnabled) ?? true,
-                testseed: testseed
+                xudpEnabled: try container.decodeIfPresent(Bool.self, forKey: .xudpEnabled) ?? true
             )
 
         case .hysteria:
@@ -339,12 +325,12 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         try container.encodeIfPresent(subscriptionId, forKey: .subscriptionId)
 
         // Flatten outbound back to the legacy JSON schema. VLESS carries
-        // its own transport/security/mux/xudp/testseed associated values;
+        // its own transport/security/mux/xudp associated values;
         // Hysteria carries an optional SNI; every other outbound writes
         // only its protocol-specific credential fields.
         try container.encode(outboundProtocol, forKey: .outboundProtocol)
         switch outbound {
-        case .vless(let uuid, let encryption, let flow, let transport, let security, let muxEnabled, let xudpEnabled, let testseed):
+        case .vless(let uuid, let encryption, let flow, let transport, let security, let muxEnabled, let xudpEnabled):
             try container.encode(uuid, forKey: .uuid)
             try container.encode(encryption, forKey: .encryption)
             try container.encodeIfPresent(flow, forKey: .flow)
@@ -364,7 +350,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             case .reality(let config): try container.encode(config, forKey: .reality)
             }
 
-            try container.encode(testseed, forKey: .testseed)
             try container.encode(muxEnabled, forKey: .muxEnabled)
             try container.encode(xudpEnabled, forKey: .xudpEnabled)
 
@@ -445,19 +430,19 @@ extension ProxyConfiguration {
 
     /// VLESS UUID (returns `id` as stable fallback for non-VLESS protocols).
     var uuid: UUID {
-        if case .vless(let uuid, _, _, _, _, _, _, _) = outbound { return uuid }
+        if case .vless(let uuid, _, _, _, _, _, _) = outbound { return uuid }
         return id
     }
 
     /// Encryption type (always `"none"` for non-VLESS).
     var encryption: String {
-        if case .vless(_, let encryption, _, _, _, _, _, _) = outbound { return encryption }
+        if case .vless(_, let encryption, _, _, _, _, _) = outbound { return encryption }
         return "none"
     }
 
     /// VLESS flow (e.g. `"xtls-rprx-vision"`). `nil` for non-VLESS.
     var flow: String? {
-        if case .vless(_, _, let flow, _, _, _, _, _) = outbound { return flow }
+        if case .vless(_, _, let flow, _, _, _, _) = outbound { return flow }
         return nil
     }
 

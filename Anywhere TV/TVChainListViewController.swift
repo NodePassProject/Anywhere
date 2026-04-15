@@ -65,7 +65,7 @@ class TVChainListViewController: UITableViewController {
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: TVChainCell.reuseIdentifier, for: indexPath) as! TVChainCell
         let chain = viewModel.chains[indexPath.row]
-        let proxies = chain.proxyIds.compactMap { id in viewModel.configurations.first(where: { $0.id == id }) }
+        let proxies = chain.resolveProxies(from: viewModel.configurations)
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
         let isSelected = viewModel.selectedChainId == chain.id
 
@@ -105,7 +105,7 @@ class TVChainListViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         let chain = viewModel.chains[indexPath.row]
-        let proxies = chain.proxyIds.compactMap { id in viewModel.configurations.first(where: { $0.id == id }) }
+        let proxies = chain.resolveProxies(from: viewModel.configurations)
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
         if isValid {
             viewModel.selectChain(chain)
@@ -117,7 +117,7 @@ class TVChainListViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
         let chain = viewModel.chains[indexPath.row]
-        let proxies = chain.proxyIds.compactMap { id in viewModel.configurations.first(where: { $0.id == id }) }
+        let proxies = chain.resolveProxies(from: viewModel.configurations)
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
 
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
@@ -216,7 +216,7 @@ class TVChainListViewController: UITableViewController {
             guard let indexPath = tableView.indexPath(for: cell) else { continue }
             guard indexPath.row < viewModel.chains.count else { continue }
             let chain = viewModel.chains[indexPath.row]
-            let proxies = chain.proxyIds.compactMap { id in viewModel.configurations.first(where: { $0.id == id }) }
+            let proxies = chain.resolveProxies(from: viewModel.configurations)
             let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
             applyLatencyAccessory(to: cell, chainId: chain.id, isValid: isValid)
         }
