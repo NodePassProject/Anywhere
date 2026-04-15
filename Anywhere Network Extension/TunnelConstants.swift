@@ -44,6 +44,11 @@ enum TunnelConstants {
     /// Handshake timeout matching Xray-core's `Timeout.Handshake` (60 seconds).
     /// Bounds the entire connection setup phase (TCP + TLS + WS/HTTPUpgrade + VLESS header).
     static let handshakeTimeout: TimeInterval = 60
+    /// Maximum time to wait for a TLS ClientHello on a real-IP TCP connection
+    /// before falling back to IP-based routing. Covers server-speaks-first
+    /// protocols (SSH, SMTP, FTP) so they don't stall inside the sniff phase.
+    /// TLS clients typically send ClientHello within a few ms of TCP accept.
+    static let sniffDeadline: TimeInterval = 0.5
 
     // MARK: - TCP Buffer Sizes
 

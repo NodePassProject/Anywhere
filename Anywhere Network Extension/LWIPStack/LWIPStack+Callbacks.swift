@@ -48,6 +48,11 @@ extension LWIPStack {
             var dstHost = dstIPString
             var connectionConfiguration = defaultConfiguration
             var forceBypass = false
+            // Enable TLS ClientHello sniffing only on real-IP connections.
+            // Fake-IP connections already know the domain via the fake-IP pool;
+            // sniffing would add latency for no benefit (and could miscategorize
+            // if the SNI disagrees with the DNS-resolved name).
+            var sniffSNI = false
 
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
             case .passthrough:
@@ -69,6 +74,7 @@ extension LWIPStack {
                         }
                     }
                 }
+                sniffSNI = true
             case .resolved(let domain, let configurationOverride, let bypass):
                 dstHost = domain
                 if var configuration = configurationOverride {
@@ -88,6 +94,7 @@ extension LWIPStack {
                 dstPort: dstPort,
                 configuration: connectionConfiguration,
                 forceBypass: forceBypass,
+                sniffSNI: sniffSNI,
                 lwipQueue: shared.lwipQueue
             )
             return Unmanaged.passRetained(connection).toOpaque()

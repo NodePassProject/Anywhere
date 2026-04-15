@@ -11,17 +11,34 @@ private let logger = AnywhereLogger(category: "LWIP-TCP")
 
 class LWIPTCPConnection {
     let pcb: UnsafeMutableRawPointer
-    let dstHost: String
     let dstPort: UInt16
-    let configuration: ProxyConfiguration
     let lwipQueue: DispatchQueue
+
+    /// The destination the proxy will be asked to connect to. Initialized
+    /// from the tcp_accept signal and may be replaced with the SNI hostname
+    /// once sniffing resolves.
+    private(set) var dstHost: String
+
+    /// The routing configuration for this connection. Mutable because a
+    /// successful SNI sniff can re-match a domain rule that points to a
+    /// different proxy.
+    private(set) var configuration: ProxyConfiguration
 
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
     private var proxyConnecting = false
-    private let bypass: Bool
+    private var bypass: Bool
     private var pendingData = Data()
     private var closed = false
+
+    // MARK: SNI Sniffing
+    //
+    // When present, the connection is in the "sniff" phase: inbound bytes are
+    // buffered (in `pendingData`) and fed to the sniffer before the proxy is
+    // dialed. The first terminal state (.found / .notTLS / .unavailable)
+    // commits the route and kicks off the proxy connect. Cleared to nil once
+    // the route is committed.
+    private var sniffer: TLSClientHelloSniffer?
 
     // MARK: Backpressure State
 
@@ -43,6 +60,10 @@ class LWIPTCPConnection {
 
     private var activityTimer: ActivityTimer?
     private var handshakeTimer: DispatchWorkItem?
+    /// Fires if the sniff phase doesn't resolve within
+    /// `TunnelConstants.sniffDeadline` — commits the IP-based route so
+    /// server-speaks-first protocols don't stall waiting for a ClientHello.
+    private var sniffDeadline: DispatchWorkItem?
     private var uplinkDone = false
     private var downlinkDone = false
 
@@ -50,6 +71,7 @@ class LWIPTCPConnection {
 
     init(pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
          configuration: ProxyConfiguration, forceBypass: Bool = false,
+         sniffSNI: Bool = false,
          lwipQueue: DispatchQueue) {
         self.pcb = pcb
         self.dstHost = dstHost
@@ -57,11 +79,16 @@ class LWIPTCPConnection {
         self.configuration = configuration
         self.lwipQueue = lwipQueue
         self.bypass = forceBypass || (LWIPStack.shared?.shouldBypass(host: dstHost) == true)
+        if sniffSNI {
+            self.sniffer = TLSClientHelloSniffer()
+        }
 
-        // Start handshake timeout (Xray-core Timeout.Handshake = 60s)
+        // Handshake timeout (Xray-core Timeout.Handshake = 60s) — covers both
+        // the SNI-sniff wait and the proxy dial, so a stalled client can't
+        // hold a connection open indefinitely before we ever call connect.
         let timer = DispatchWorkItem { [weak self] in
             guard let self, !self.closed else { return }
-            if self.proxyConnecting {
+            if self.isEstablishing {
                 logger.error("[TCP] Handshake timeout for \(self.dstHost):\(self.dstPort)")
                 self.abort()
             }
@@ -69,11 +96,37 @@ class LWIPTCPConnection {
         handshakeTimer = timer
         lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.handshakeTimeout, execute: timer)
 
-        if bypass {
-            connectDirect()
+        // If we're sniffing, wait for the first ClientHello bytes in
+        // `handleReceivedData` before choosing a route. Otherwise commit
+        // immediately using the IP-derived configuration.
+        if sniffer == nil {
+            beginConnecting()
         } else {
-            connectProxy()
+            // Safety net: non-TLS protocols where the server speaks first
+            // (SSH, SMTP, FTP) never send client bytes of their own accord.
+            // If we haven't decided by `sniffDeadline`, commit the IP-based
+            // route and proceed.
+            let deadline = DispatchWorkItem { [weak self] in
+                guard let self, !self.closed, self.sniffer != nil else { return }
+                self.sniffer = nil
+                self.beginConnecting()
+            }
+            sniffDeadline = deadline
+            lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.sniffDeadline, execute: deadline)
         }
+    }
+
+    /// Cancels the sniff deadline timer. Called whenever the sniff phase
+    /// resolves (successful SNI, fast reject, cap reached, close, abort).
+    private func cancelSniffDeadline() {
+        sniffDeadline?.cancel()
+        sniffDeadline = nil
+    }
+
+    /// True while the connection is still establishing — either waiting for
+    /// SNI bytes or dialing the proxy. Used by the handshake timer.
+    private var isEstablishing: Bool {
+        proxyConnecting || sniffer != nil
     }
 
     // MARK: - lwIP Callbacks (called on lwipQueue)
@@ -91,6 +144,29 @@ class LWIPTCPConnection {
         guard !closed else { return }
         activityTimer?.update()
 
+        // SNI sniff phase: buffer bytes and feed the sniffer before dialing.
+        // Once a terminal state is reached we re-evaluate routing (if SNI
+        // was found) and then kick off the proxy/direct connect.
+        if let state = sniffer?.feed(data) {
+            pendingData.append(data)
+            switch state {
+            case .needMore:
+                return
+            case .found(let sni):
+                sniffer = nil
+                cancelSniffDeadline()
+                applySNI(sni)
+                guard !closed else { return }  // rule may have rejected
+                beginConnecting()
+                return
+            case .notTLS, .unavailable:
+                sniffer = nil
+                cancelSniffDeadline()
+                beginConnecting()
+                return
+            }
+        }
+
         if proxyConnecting {
             pendingData.append(data)
             return
@@ -98,7 +174,7 @@ class LWIPTCPConnection {
 
         guard proxyConnection != nil else {
             pendingData.append(data)
-            if bypass { connectDirect() } else { connectProxy() }
+            beginConnecting()
             return
         }
 
@@ -218,6 +294,20 @@ class LWIPTCPConnection {
 
     func handleRemoteClose() {
         guard !closed else { return }
+
+        // Client FIN'd before we finished sniffing. If we never received any
+        // bytes, there's nothing to forward — drop the connection. Otherwise
+        // commit the tentative IP-based route and forward what we have.
+        if sniffer != nil {
+            sniffer = nil
+            cancelSniffDeadline()
+            if pendingData.isEmpty {
+                close()
+                return
+            }
+            beginConnecting()
+        }
+
         uplinkDone = true
         if downlinkDone {
             close()
@@ -270,6 +360,70 @@ class LWIPTCPConnection {
         }
 
         logger.error("[TCP] \(operation) failed: \(endpointDescription): \(errorDescription)")
+    }
+
+    // MARK: - Route Commit
+
+    /// Kicks off the outbound connection using the currently committed
+    /// routing (`configuration`, `bypass`, `dstHost`). Idempotent — no-op
+    /// once the connect has started or completed.
+    private func beginConnecting() {
+        guard !closed, !proxyConnecting, proxyConnection == nil else { return }
+        if bypass {
+            connectDirect()
+        } else {
+            connectProxy()
+        }
+    }
+
+    /// Re-evaluates routing using the hostname extracted from the TLS
+    /// ClientHello. Updates `dstHost`, `configuration`, and `bypass` in place
+    /// so the subsequent ``beginConnecting()`` sees the SNI-based decision.
+    ///
+    /// Behavior:
+    ///   - Found a matching domain rule: apply it (may switch proxy, flip
+    ///     bypass, or reject the connection).
+    ///   - No rule matches: keep the IP-derived configuration, only swap the
+    ///     destination to the hostname so the proxy resolves it fresh.
+    ///
+    /// Must be called only while in sniff phase (sniffer has just cleared).
+    private func applySNI(_ sni: String) {
+        guard let stack = LWIPStack.shared else { return }
+        let router = stack.domainRouter
+
+        // Always take on the hostname — downstream transports (VLESS/SOCKS5/
+        // Shadowsocks) are happier with a name than a raw IP.
+        dstHost = sni
+
+        guard let action = router.matchDomain(sni) else {
+            // Domain was valid but matched no user rule; fall back to the
+            // tentative IP-based configuration. Re-check bypass against the
+            // new host so we don't loop through a proxy server by name.
+            bypass = bypass || stack.shouldBypass(host: sni)
+            return
+        }
+
+        switch action {
+        case .direct:
+            bypass = true
+        case .reject:
+            logger.debug("[TCP] SNI rejected: \(sni)")
+            abort()
+        case .proxy:
+            if var resolved = router.resolveConfiguration(action: action) {
+                // Preserve the ambient chain from the default configuration
+                // if the rule-targeted configuration didn't specify one.
+                if let defaultChain = configuration.chain,
+                   !defaultChain.isEmpty,
+                   resolved.chain == nil {
+                    resolved = resolved.withChain(defaultChain)
+                }
+                configuration = resolved
+            } else {
+                logger.warning("[TCP] SNI routing configuration not found for \(sni)")
+            }
+            bypass = stack.shouldBypass(host: sni)
+        }
     }
 
     // MARK: - Direct Connection (bypass)
@@ -626,6 +780,9 @@ class LWIPTCPConnection {
     private func releaseProxy() {
         handshakeTimer?.cancel()
         handshakeTimer = nil
+        sniffDeadline?.cancel()
+        sniffDeadline = nil
+        sniffer = nil
         activityTimer?.cancel()
         activityTimer = nil
         let connection = proxyConnection
