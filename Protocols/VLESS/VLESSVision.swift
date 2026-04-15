@@ -63,15 +63,14 @@ class VisionTrafficState {
     // First packet flag for UUID
     var writeOnceUserUUID: Data?
 
-    // Vision padding seed: [contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]
-    let testseed: [UInt32]
-
-    init(userUUID: Data, testseed: [UInt32] = [900, 500, 900, 256]) {
+    init(userUUID: Data) {
         self.userUUID = userUUID
         self.writeOnceUserUUID = userUUID
-        self.testseed = testseed.count >= 4 ? testseed : [900, 500, 900, 256]
     }
 }
+
+/// Vision padding seed from Xray-core: `[contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]`.
+private let visionPaddingSeed: [UInt32] = [900, 500, 900, 256]
 
 // MARK: - Buffer Reshaping
 
@@ -113,21 +112,24 @@ private func reshapeData(_ data: Data) -> [Data] {
 
 // MARK: - Padding Functions
 
-/// Add Vision padding to data
-/// Format: [UUID (16 bytes, first packet only)] [command (1)] [contentLen (2)] [paddingLen (2)] [content] [padding]
+/// Encode a frame with Vision padding (XTLS-RPRX-Vision flow).
+///
+/// Frame layout: `[UUID (16 bytes, first packet only)] [command (1)] [contentLen (2)] [paddingLen (2)] [content] [padding]`.
+///
+/// When `longPadding` is true and content is short, pads with a large random block (900..1399 bytes)
+/// to obscure the VLESS header; otherwise uses short random padding (0..255 bytes).
 func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficState, longPadding: Bool) -> Data {
     let contentLen = Int32(data?.count ?? 0)
     var paddingLen: Int32 = 0
 
-    // Calculate padding length using testseed: [contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]
-    let seed = state.testseed
-    if contentLen < Int32(seed[0]) && longPadding {
-        paddingLen = Int32.random(in: 0..<Int32(seed[1])) + Int32(seed[2]) - contentLen
+    if contentLen < Int32(visionPaddingSeed[0]) && longPadding {
+        paddingLen = Int32.random(in: 0..<Int32(visionPaddingSeed[1])) + Int32(visionPaddingSeed[2]) - contentLen
     } else {
-        paddingLen = Int32.random(in: 0..<Int32(seed[3]))
+        paddingLen = Int32.random(in: 0..<Int32(visionPaddingSeed[3]))
     }
 
-    // Ensure padding doesn't exceed buffer limits (matches Xray-core buf.Size = 8192)
+    // Total frame (21-byte header + content + padding) must fit in Xray-core's 8192-byte buf.Buffer,
+    // otherwise the peer's Vision reshaper fragments the frame and breaks padding detection.
     let maxPadding = 8192 - 21 - contentLen
     if paddingLen > maxPadding {
         paddingLen = maxPadding
@@ -381,9 +383,9 @@ class VLESSVisionConnection: ProxyConnection {
     private let innerConnection: ProxyConnection
     private let trafficState: VisionTrafficState
 
-    init(connection: ProxyConnection, userUUID: Data, testseed: [UInt32] = [900, 500, 900, 256]) {
+    init(connection: ProxyConnection, userUUID: Data) {
         self.innerConnection = connection
-        self.trafficState = VisionTrafficState(userUUID: userUUID, testseed: testseed)
+        self.trafficState = VisionTrafficState(userUUID: userUUID)
         super.init()
     }
 

@@ -30,8 +30,6 @@ enum HysteriaProtocol {
     static let authPaddingRange: ClosedRange<Int> = 256...2047
     /// Random padding length on TCP requests.
     static let tcpRequestPaddingRange: ClosedRange<Int> = 64...511
-    /// Random padding length on TCP responses (unused on client side).
-    static let tcpResponsePaddingRange: ClosedRange<Int> = 128...1023
 
     // MARK: Limits
 
@@ -80,11 +78,11 @@ enum HysteriaProtocol {
         let length = 1 << Int(prefix)
         guard offset + length <= data.count else { return nil }
 
-        var value: UInt64 = UInt64(first & 0x3F)
+        var decoded: UInt64 = UInt64(first & 0x3F)
         for i in 1..<length {
-            value = (value << 8) | UInt64(data[data.index(data.startIndex, offsetBy: offset + i)])
+            decoded = (decoded << 8) | UInt64(data[data.index(data.startIndex, offsetBy: offset + i)])
         }
-        return (value, length)
+        return (decoded, length)
     }
 
     /// Number of bytes an already-bounded varint will take on the wire.

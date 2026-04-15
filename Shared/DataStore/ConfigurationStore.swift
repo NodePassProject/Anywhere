@@ -16,21 +16,11 @@ class ConfigurationStore: ObservableObject {
 
     private let fileURL: URL
 
-    #if os(tvOS)
-    private static let userDefaultsKey = "store.configurations"
-    #endif
-
     private init() {
         AWCore.migrateToAppGroup(fileName: "configurations.json")
         let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
         fileURL = container.appendingPathComponent("configurations.json")
         configurations = loadFromDisk()
-    }
-
-    // MARK: - ConfigurationProviding
-
-    func loadConfigurations() -> [ProxyConfiguration] {
-        configurations
     }
 
     // MARK: - CRUD
@@ -74,12 +64,6 @@ class ConfigurationStore: ObservableObject {
            let result = Self.decodeSkippingInvalid(data) {
             return result
         }
-        #if os(tvOS)
-        if let data = AWCore.userDefaults.data(forKey: Self.userDefaultsKey),
-           let result = Self.decodeSkippingInvalid(data) {
-            return result
-        }
-        #endif
         return []
     }
 
@@ -109,11 +93,6 @@ class ConfigurationStore: ObservableObject {
             } catch {
                 print("Failed to save configurations: \(error)")
             }
-            #if os(tvOS)
-            if let data = try? JSONEncoder().encode(snapshot) {
-                AWCore.userDefaults.set(data, forKey: ConfigurationStore.userDefaultsKey)
-            }
-            #endif
         }
     }
 }

@@ -58,8 +58,7 @@ extension ProxyConfiguration {
                 transport: transportLayer,
                 security: securityLayer,
                 muxEnabled: muxEnabled,
-                xudpEnabled: xudpEnabled,
-                testseed: VLESSDefaultTestseed
+                xudpEnabled: xudpEnabled
             )
 
         case .hysteria:

@@ -67,9 +67,7 @@ struct ChainListView: View {
 
     @ViewBuilder
     private func chainRow(_ chain: ProxyChain) -> some View {
-        let proxies = chain.proxyIds.compactMap { id in
-            viewModel.configurations.first(where: { $0.id == id })
-        }
+        let proxies = chain.resolveProxies(from: viewModel.configurations)
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
         let isSelected = viewModel.selectedChainId == chain.id
         let latency = viewModel.chainLatencyResults[chain.id]

@@ -925,11 +925,11 @@ class TLSRecordConnection {
     /// Constant-time comparison of two Data values to prevent timing side-channel attacks.
     private func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
         guard a.count == b.count else { return false }
-        var result: UInt8 = 0
+        var diff: UInt8 = 0
         for i in 0..<a.count {
-            result |= a[a.startIndex + i] ^ b[b.startIndex + i]
+            diff |= a[a.startIndex + i] ^ b[b.startIndex + i]
         }
-        return result == 0
+        return diff == 0
     }
 
     // MARK: - AEAD Helpers

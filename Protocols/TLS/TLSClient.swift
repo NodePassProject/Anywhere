@@ -69,7 +69,9 @@ class TLSClient {
     // Buffer for data received after Server Finished (e.g. NewSessionTicket)
     private var postHandshakeBuffer: Data?
 
-    /// RFC 8446 §4.1.3: HelloRetryRequest is signaled by this special random value.
+    /// RFC 8446 §4.1.3: a TLS 1.3 server signals HelloRetryRequest by sending this
+    /// SHA-256("HelloRetryRequest") value in the ServerHello.random slot instead
+    /// of a real random. Used to trigger a second ClientHello with an updated key share.
     private static let helloRetryRequestRandom = Data([
         0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
         0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
@@ -121,7 +123,7 @@ class TLSClient {
         let transport = RawTCPSocket()
         self.connection = transport
 
-        transport.connect(host: host, port: port, queue: .global(), initialData: clientHello) { [weak self] error in
+        transport.connect(host: host, port: port, initialData: clientHello) { [weak self] error in
             if let error {
                 logger.error("[TLS] TCP connection failed: \(error.localizedDescription)")
                 completion(.failure(TLSError.connectionFailed(error.localizedDescription)))

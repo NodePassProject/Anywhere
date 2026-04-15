@@ -17,9 +17,9 @@ private let logger = AnywhereLogger(category: "Proxy")
 /// Supports multiple transports (TCP, WebSocket, HTTP Upgrade, XHTTP) and security layers
 /// (TLS, Reality). For the XTLS Vision flow, the connection is wrapped in a ``VLESSVisionConnection``.
 class ProxyClient {
-    private let configuration: ProxyConfiguration
+    let configuration: ProxyConfiguration
     private let useResolvedAddressForDirectDial: Bool
-    private var connection: RawTCPSocket?
+    var connection: RawTCPSocket?
     private var realityClient: RealityClient?
     private var realityConnection: TLSRecordConnection?
     private var tlsClient: TLSClient?
@@ -30,7 +30,7 @@ class ProxyClient {
 
     /// Proxy tunnel from a previous chain link (for proxy chaining).
     /// When set, all transport connections use this tunnel instead of creating a ``RawTCPSocket``.
-    private var tunnel: ProxyConnection?
+    var tunnel: ProxyConnection?
     /// Intermediate chain proxy clients (retained for lifecycle management).
     private var chainClients: [ProxyClient] = []
 
@@ -67,7 +67,7 @@ class ProxyClient {
     /// Host used for direct first-hop transport dials when not already tunneled through
     /// another proxy. Normal VPN traffic keeps using the configured hostname so DNS can
     /// refresh naturally; latency tests may opt into the pre-resolved IP.
-    private var directDialHost: String {
+    var directDialHost: String {
         useResolvedAddressForDirectDial ? configuration.connectAddress : configuration.serverAddress
     }
 
@@ -418,7 +418,7 @@ class ProxyClient {
             let transport = RawTCPSocket()
             self.connection = transport
 
-            transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
+            transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
                 if let error {
                     completion(.failure(error))
                     return
@@ -577,7 +577,7 @@ class ProxyClient {
                 let transport = RawTCPSocket()
                 self.connection = transport
 
-                transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
+                transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
                     if let error {
                         completion(.failure(error))
                         return
@@ -681,7 +681,7 @@ class ProxyClient {
                 let transport = RawTCPSocket()
                 self.connection = transport
 
-                transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { [weak self] error in
+                transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
                     if let error {
                         completion(.failure(error))
                         return
@@ -837,10 +837,14 @@ class ProxyClient {
             return
         }
 
+        // HTTP/3 is intentionally unsupported: XHTTP-over-QUIC would require a
+        // full QUIC stack (DATAGRAM frames, 0-RTT resumption, connection
+        // migration). Server configs that negotiate ALPN "h3" must be rejected
+        // here; clients should downgrade to h2 in the XHTTP config.
         let httpVersion = decideXHTTPHTTPVersion()
         if httpVersion == .http3 {
             completion(.failure(ProxyError.connectionFailed(
-                "XHTTP over TLS with ALPN h3 requires QUIC/HTTP/3, which is not implemented yet"
+                "XHTTP over TLS with ALPN h3 requires QUIC/HTTP/3, which is not implemented"
             )))
             return
         }
@@ -918,7 +922,7 @@ class ProxyClient {
         } else {
             let transport = RawTCPSocket()
             self.connection = transport
-            transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
+            transport.connect(host: directDialHost, port: configuration.serverPort) { error in
                 if let error {
                     completion(.failure(error))
                     return
@@ -943,7 +947,7 @@ class ProxyClient {
             }
         } else {
             let uploadTransport = RawTCPSocket()
-            uploadTransport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
+            uploadTransport.connect(host: directDialHost, port: configuration.serverPort) { error in
                 if let error {
                     factoryCompletion(.failure(error))
                     return
@@ -1164,68 +1168,9 @@ class ProxyClient {
             uuidBytes.8, uuidBytes.9, uuidBytes.10, uuidBytes.11,
             uuidBytes.12, uuidBytes.13, uuidBytes.14, uuidBytes.15
         ])
-        return VLESSVisionConnection(connection: connection, userUUID: uuidData, testseed: configuration.testseed)
+        return VLESSVisionConnection(connection: connection, userUUID: uuidData)
     }
     
-    // MARK: - Hysteria v2
-
-    /// Connects through a Hysteria v2 server. Shares one authenticated
-    /// QUIC session per (host, port, SNI, password) via ``HysteriaSessionPool``.
-    private func connectWithHysteria(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        guard let password = configuration.hysteriaPassword else {
-            completion(.failure(ProxyError.protocolError("Hysteria password not set")))
-            return
-        }
-
-        let hyConfig = HysteriaConfiguration(
-            proxyHost: configuration.serverAddress,
-            proxyPort: configuration.serverPort,
-            password: password,
-            sni: configuration.hysteriaSNI,
-            clientRxBytesPerSec: 0, // "please probe" — server picks CC on its side
-            uploadMbps: configuration.hysteriaUploadMbps ?? HysteriaUploadMbpsDefault
-        )
-
-        // RFC 3986 §3.2.2: IPv6 literals must be bracketed.
-        let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
-        let destination = "\(bracketedHost):\(destinationPort)"
-
-        HysteriaSessionPool.shared.acquireSession(configuration: hyConfig) { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let session):
-                switch command {
-                case .tcp, .mux:
-                    let conn = HysteriaConnection(session: session, destination: destination)
-                    conn.open { error in
-                        if let error {
-                            conn.cancel()
-                            completion(.failure(error))
-                        } else {
-                            completion(.success(conn))
-                        }
-                    }
-                case .udp:
-                    let conn = HysteriaUDPConnection(session: session, destination: destination)
-                    conn.open { error in
-                        if let error {
-                            conn.cancel()
-                            completion(.failure(error))
-                        } else {
-                            completion(.success(conn))
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     // MARK: - Shadowsocks
 
     /// Whether this client is configured for Shadowsocks outbound.
@@ -1288,283 +1233,6 @@ class ProxyClient {
                     addressHeader: addressHeader
                 ))
             }
-        }
-    }
-    
-    // MARK: - SOCKS5
-
-    /// Connects through a SOCKS5 proxy server.
-    ///
-    /// Supports three modes:
-    /// - **TCP CONNECT**: SOCKS5 handshake → raw bidirectional tunnel.
-    /// - **UDP ASSOCIATE**: SOCKS5 handshake → UDP relay via ``SOCKS5UDPProxyConnection``.
-    /// - **TLS**: When `security == "tls"`, wraps the TCP connection with TLS before the handshake.
-    private func connectWithSOCKS5(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        connectSOCKS5Direct(
-            command: command,
-            destinationHost: destinationHost, destinationPort: destinationPort,
-            completion: completion
-        )
-    }
-
-    /// SOCKS5 over plain TCP: TCP → SOCKS5 handshake.
-    private func connectSOCKS5Direct(
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let onTransportReady: (any RawTransport) -> Void = { [weak self] transport in
-            self?.performSOCKS5Handshake(
-                transport: transport,
-                command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, completion: completion
-            )
-        }
-
-        if let tunnel = self.tunnel {
-            onTransportReady(TunneledTransport(tunnel: tunnel))
-        } else {
-            let transport = RawTCPSocket()
-            self.connection = transport
-            transport.connect(host: directDialHost, port: configuration.serverPort, queue: .global()) { error in
-                if let error {
-                    completion(.failure(error))
-                    return
-                }
-                onTransportReady(transport)
-            }
-        }
-    }
-
-    /// SOCKS5 over TLS: TCP → TLS handshake → SOCKS5 handshake.
-    /// Performs the SOCKS5 handshake and returns the appropriate connection.
-    private func performSOCKS5Handshake(
-        transport: any RawTransport,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let buffer = SOCKS5Buffer(transport: transport)
-
-        if command == .udp {
-            SOCKS5Handshake.performUDPAssociate(
-                buffer: buffer,
-                transport: transport,
-                username: configuration.socks5Username,
-                password: configuration.socks5Password,
-                serverAddress: configuration.serverAddress
-            ) { result in
-                switch result {
-                case .success(let relay):
-                    let udpConnection = SOCKS5UDPProxyConnection(
-                        tcpTransport: transport,
-                        tlsClient: nil,
-                        tlsConnection: nil,
-                        destinationHost: destinationHost,
-                        destinationPort: destinationPort
-                    )
-                    udpConnection.connectRelay(relayHost: relay.host, relayPort: relay.port) { error in
-                        if let error {
-                            completion(.failure(error))
-                        } else {
-                            completion(.success(udpConnection))
-                        }
-                    }
-                case .failure(let error):
-                    completion(.failure(error))
-                }
-            }
-        } else {
-            SOCKS5Handshake.perform(
-                buffer: buffer,
-                transport: transport,
-                destinationHost: destinationHost,
-                destinationPort: destinationPort,
-                username: configuration.socks5Username,
-                password: configuration.socks5Password
-            ) { error in
-                if let error {
-                    completion(.failure(error))
-                    return
-                }
-                let wrappedTransport: any RawTransport
-                if let excess = buffer.remaining {
-                    wrappedTransport = SOCKS5Transport(inner: transport, initialData: excess)
-                } else {
-                    wrappedTransport = transport
-                }
-                let proxyConnection = DirectProxyConnection(connection: wrappedTransport)
-                completion(.success(proxyConnection))
-            }
-        }
-    }
-    
-    // MARK: - Naive (HTTPS/HTTP2/HTTP3 CONNECT)
-
-    /// Connects through a CONNECT tunnel using HTTP/1.1, HTTP/2, or HTTP/3.
-    ///
-    /// The scheme is determined by ``OutboundProtocol``:
-    /// - `.http11` → HTTP/1.1 CONNECT over TLS
-    /// - `.http2` → HTTP/2 CONNECT over TLS (NaiveProxy)
-    /// - `.quic`  → HTTP/3 CONNECT over QUIC (NaiveProxy)
-    ///
-    /// All schemes produce a ``NaiveProxyConnection`` wrapping the appropriate ``NaiveTunnel``.
-    private func connectWithNaive(
-        destinationHost: String,
-        destinationPort: UInt16,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let scheme: NaiveConfiguration.NaiveScheme
-        switch configuration.outboundProtocol {
-        case .http11: scheme = .http11
-        case .http2:  scheme = .http2
-        case .http3:  scheme = .http3
-        default:      scheme = .http2
-        }
-
-        let naiveConfig = NaiveConfiguration(
-            proxyHost: configuration.serverAddress,
-            proxyPort: configuration.serverPort,
-            username: configuration.activeUsername,
-            password: configuration.activePassword,
-            sni: nil,
-            scheme: scheme
-        )
-
-        // RFC 3986 §3.2.2: IPv6 literals must be bracketed in authority strings.
-        let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
-        let destination = "\(bracketedHost):\(destinationPort)"
-
-        // Use serverAddress (hostname) instead of connectAddress (which may
-        // contain a fake IP from FakeIPPool when switching proxies while the
-        // VPN is active).  The Network Extension resolves hostnames via the
-        // real network interface, bypassing the tunnel.
-        let proxyHost = configuration.serverAddress
-
-        switch scheme {
-        case .http11:
-            let transport = NaiveTLSTransport(
-                host: proxyHost,
-                port: configuration.serverPort,
-                sni: naiveConfig.effectiveSNI,
-                alpn: ["http/1.1"],
-                tunnel: self.tunnel
-            )
-            let tunnel = HTTP11Connection(
-                transport: transport,
-                configuration: naiveConfig,
-                destination: destination
-            )
-            openTunnelAndWrap(tunnel, completion: completion)
-
-        case .http2:
-            HTTP2SessionPool.shared.acquireStream(
-                host: proxyHost,
-                port: configuration.serverPort,
-                sni: naiveConfig.effectiveSNI,
-                tunnel: self.tunnel,
-                configuration: naiveConfig,
-                destination: destination
-            ) { [self] stream in
-                openTunnelAndWrap(stream, completion: completion)
-            }
-
-        case .http3:
-            acquireHTTP3StreamWithRetry(
-                proxyHost: proxyHost,
-                naiveConfig: naiveConfig,
-                destination: destination,
-                retriesLeft: 1,
-                completion: completion
-            )
-        }
-    }
-
-    /// Acquires an HTTP/3 stream and opens the CONNECT tunnel, retrying once
-    /// on a fresh session for failures that kill the underlying QUIC
-    /// connection — handshake timeout, DRAINING, IDLE_CLOSE, or peer
-    /// `STREAM_ID_BLOCKED`. Without this, a single bad handshake fails every
-    /// concurrent `acquireStream` caller queued on the same `readyCallbacks`
-    /// list; the pool evicts the dead session on `onClose`, so the retry
-    /// lands on a freshly-built one (or joins a newer connecting session).
-    private func acquireHTTP3StreamWithRetry(
-        proxyHost: String,
-        naiveConfig: NaiveConfiguration,
-        destination: String,
-        retriesLeft: Int,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        HTTP3SessionPool.shared.acquireStream(
-            host: proxyHost,
-            port: configuration.serverPort,
-            sni: naiveConfig.effectiveSNI,
-            configuration: naiveConfig,
-            destination: destination
-        ) { [self] stream in
-            stream.openTunnel { [self] error in
-                if let error {
-                    stream.close()
-                    if retriesLeft > 0 && Self.isRetryableHTTP3Error(error) {
-                        self.acquireHTTP3StreamWithRetry(
-                            proxyHost: proxyHost,
-                            naiveConfig: naiveConfig,
-                            destination: destination,
-                            retriesLeft: retriesLeft - 1,
-                            completion: completion
-                        )
-                        return
-                    }
-                    completion(.failure(error))
-                    return
-                }
-                let connection = NaiveProxyConnection(
-                    tunnel: stream,
-                    paddingType: stream.negotiatedPaddingType
-                )
-                completion(.success(connection))
-            }
-        }
-    }
-
-    /// Session-level failures that warrant one fresh-session retry.
-    /// Excludes stream-level protocol errors (407 auth, tunnel status, etc.)
-    /// which would fail the same way on any new session.
-    private static func isRetryableHTTP3Error(_ error: Error) -> Bool {
-        if error is QUICConnection.QUICError { return true }
-        if case HTTP3Error.streamIdBlocked = error { return true }
-        if case HTTP3Error.streamClosed = error { return true }
-        if case let HTTP3Error.connectionFailed(msg) = error {
-            // `connectionFailed` covers both "Session closed" / "Session
-            // draining" (retry worthwhile) and malformed-frame protocol
-            // errors (retry pointless). Distinguish by the message we emit.
-            return msg.hasPrefix("Session ")
-        }
-        return false
-    }
-
-    /// Opens a ``NaiveTunnel`` and wraps it in a ``NaiveProxyConnection``.
-    private func openTunnelAndWrap(
-        _ tunnel: NaiveTunnel,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        tunnel.openTunnel { error in
-            if let error {
-                tunnel.close()
-                completion(.failure(error))
-                return
-            }
-            let connection = NaiveProxyConnection(
-                tunnel: tunnel,
-                paddingType: tunnel.negotiatedPaddingType
-            )
-            completion(.success(connection))
         }
     }
 }

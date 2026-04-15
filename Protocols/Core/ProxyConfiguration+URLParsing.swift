@@ -91,15 +91,6 @@ extension ProxyConfiguration {
         let security = params["security"] ?? "none"
         let transportStr = params["type"] ?? "tcp"
 
-        // Parse testseed (comma-separated 4 uint32 values, e.g. "900,500,900,256")
-        var testseed: [UInt32]? = nil
-        if let testseedStr = params["testseed"] {
-            let values = testseedStr.split(separator: ",").compactMap { UInt32($0) }
-            if values.count >= 4 {
-                testseed = Array(values.prefix(4))
-            }
-        }
-
         // Parse security layer
         let securityLayer: SecurityLayer
         if security == "reality" {
@@ -144,8 +135,7 @@ extension ProxyConfiguration {
                 transport: transportLayer,
                 security: securityLayer,
                 muxEnabled: muxEnabled,
-                xudpEnabled: xudpEnabled,
-                testseed: (testseed?.count ?? 0) >= 4 ? testseed! : VLESSDefaultTestseed
+                xudpEnabled: xudpEnabled
             )
         )
     }

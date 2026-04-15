@@ -81,7 +81,7 @@ class RealityClient {
         let transport = RawTCPSocket()
         self.connection = transport
 
-        transport.connect(host: host, port: port, queue: .global(), initialData: clientHello) { [weak self] error in
+        transport.connect(host: host, port: port, initialData: clientHello) { [weak self] error in
             if let error {
                 logger.error("[Reality] TCP connection failed: \(error.localizedDescription)")
                 completion(.failure(RealityError.connectionFailed(error.localizedDescription)))

@@ -57,9 +57,19 @@ class VPNViewModel: ObservableObject {
     private var subscriptionStoreCancellable: AnyCancellable?
     private var chainStoreCancellable: AnyCancellable?
     @Published private(set) var pendingReconnect = false
-    /// Suppresses UserDefaults persistence in `selectedConfiguration.didSet`
-    /// so that `selectChain` can set the chain ID without the didSet clearing it.
+    /// Read by `selectedConfiguration.didSet` to skip the default behavior that clears
+    /// `selectedChainId`. Set only via `withoutSelectionPersistence` so the flag always
+    /// resets, even if the assignment inside the block throws.
     private var _suppressSelectionPersistence = false
+
+    /// Assign to `selectedConfiguration` without triggering the chain-clearing branch
+    /// of its didSet. Used when restoring a chain selection or re-resolving an already
+    /// selected chain, where the chain ID has already been persisted.
+    private func withoutSelectionPersistence(_ block: () -> Void) {
+        _suppressSelectionPersistence = true
+        defer { _suppressSelectionPersistence = false }
+        block()
+    }
 
     private static let selectedConfigurationIdKey = "selectedConfigurationId"
     private static let selectedChainIdKey = "selectedChainId"
@@ -75,9 +85,7 @@ class VPNViewModel: ObservableObject {
            let chain = chains.first(where: { $0.id == savedChainId }),
            let resolved = resolveChain(chain) {
             selectedChainId = savedChainId
-            _suppressSelectionPersistence = true
-            selectedConfiguration = resolved
-            _suppressSelectionPersistence = false
+            withoutSelectionPersistence { selectedConfiguration = resolved }
         } else if let savedConfigurationIdString = AWCore.userDefaults.string(forKey: Self.selectedConfigurationIdKey),
                   let savedConfigurationId = UUID(uuidString: savedConfigurationIdString),
                   let configuration = configurations.first(where: { $0.id == savedConfigurationId }) {
@@ -220,9 +228,7 @@ class VPNViewModel: ObservableObject {
         // Re-resolve if this is the active chain
         if selectedChainId == chain.id {
             if let resolved = resolveChain(chain) {
-                _suppressSelectionPersistence = true
-                selectedConfiguration = resolved
-                _suppressSelectionPersistence = false
+                withoutSelectionPersistence { selectedConfiguration = resolved }
             }
         }
     }
@@ -237,16 +243,14 @@ class VPNViewModel: ObservableObject {
         selectedChainId = chain.id
         AWCore.userDefaults.set(chain.id.uuidString, forKey: Self.selectedChainIdKey)
         AWCore.userDefaults.removeObject(forKey: Self.selectedConfigurationIdKey)
-        _suppressSelectionPersistence = true
-        selectedConfiguration = resolved
-        _suppressSelectionPersistence = false
+        withoutSelectionPersistence { selectedConfiguration = resolved }
     }
 
     /// Resolves a chain into a composite ProxyConfiguration.
     ///
     /// The last proxy becomes the main config; preceding proxies fill the `chain` field.
     func resolveChain(_ chain: ProxyChain) -> ProxyConfiguration? {
-        let configs = chain.proxyIds.compactMap { id in configurations.first(where: { $0.id == id }) }
+        let configs = chain.resolveProxies(from: configurations)
         guard configs.count == chain.proxyIds.count, configs.count >= 2 else { return nil }
         let exitProxy = configs.last!
         let chainProxies = Array(configs.dropLast())
@@ -267,9 +271,7 @@ class VPNViewModel: ObservableObject {
             return
         }
         if let resolved = resolveChain(chain) {
-            _suppressSelectionPersistence = true
-            selectedConfiguration = resolved
-            _suppressSelectionPersistence = false
+            withoutSelectionPersistence { selectedConfiguration = resolved }
         } else {
             // Chain is broken (proxies deleted), fall back
             selectedChainId = nil
@@ -282,7 +284,7 @@ class VPNViewModel: ObservableObject {
     var allPickerItems: [PickerItem] {
         var items: [PickerItem] = []
         for chain in chains {
-            let proxies = chain.proxyIds.compactMap { id in configurations.first(where: { $0.id == id }) }
+            let proxies = chain.resolveProxies(from: configurations)
             guard proxies.count == chain.proxyIds.count, proxies.count >= 2 else { continue }
             items.append(PickerItem(id: chain.id, name: chain.name))
         }
@@ -720,14 +722,14 @@ class VPNViewModel: ObservableObject {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
         hints.ai_socktype = SOCK_STREAM
-        var result: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(bare, nil, &hints, &result) == 0, let res = result else {
+        var resolvedAddresses: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(bare, nil, &hints, &resolvedAddresses) == 0, let head = resolvedAddresses else {
             return nil
         }
-        defer { freeaddrinfo(res) }
+        defer { freeaddrinfo(head) }
 
         // Extract the first resolved IP as a string
-        var current: UnsafeMutablePointer<addrinfo>? = res
+        var current: UnsafeMutablePointer<addrinfo>? = head
         while let info = current {
             let family = info.pointee.ai_family
             if family == AF_INET {
