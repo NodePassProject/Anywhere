@@ -131,7 +131,9 @@ extension LWIPStack {
     }
 
     /// Minimum interval between stack restarts (seconds).
-    private static let restartThrottleInterval: CFAbsoluteTime = 1.0
+    /// 2s absorbs bursts where a path update and a settings/routing notification arrive
+    /// back-to-back (e.g., user toggling a setting while Wi-Fi is handing off).
+    private static let restartThrottleInterval: CFAbsoluteTime = 2.0
 
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.
     ///

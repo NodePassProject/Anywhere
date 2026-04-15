@@ -45,6 +45,8 @@ class SessionPool<S: PoolableSession> {
     var sessions: [String: [S]] = [:]
 
     init() {}
+    
+    deinit {}
 
     /// Builds the bucket key shared by every subclass.
     static func makeKey(host: String, port: UInt16, sni: String) -> String {

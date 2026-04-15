@@ -17,19 +17,37 @@ enum RouteAction {
 
 class DomainRouter {
 
-    // MARK: - Suffix Trie (reverse-label)
+    // MARK: - Suffix Trie (reverse-label) & Keyword List
     //
-    // All domain filters are normalized to suffix rules.
-    // Domains are split into labels and reversed: "www.google.com" → ["com","google","www"].
-    // Walking the trie from root matches progressively more-specific suffixes.
-    // Bypass country rules are loaded first as .direct, then user rules overwrite.
+    // DOMAIN-SUFFIX rules live in a reverse-label trie: "www.google.com" is
+    // inserted as ["com","google","www"]. Lookup walks the domain from the TLD
+    // inward and remembers the deepest action seen — naturally label-aligned
+    // and longest-match, O(labels) per query.
+    //
+    // DOMAIN-KEYWORD rules are substring matches, evaluated only if no suffix
+    // rule matched. Keyword rule sets are small enough that a linear scan keeps
+    // the precedence model explicit: suffix tier first, keyword tier second.
+    // Within the keyword tier, longer patterns win and later inserts win ties.
 
     private final class TrieNode {
         var children: [String: TrieNode] = [:]
         var userAction: RouteAction?
     }
 
+    private struct KeywordRule {
+        let pattern: String
+        let action: RouteAction
+        let patternLength: Int
+
+        init(pattern: String, action: RouteAction) {
+            self.pattern = pattern
+            self.action = action
+            self.patternLength = pattern.utf8.count
+        }
+    }
+
     private var trieRoot = TrieNode()
+    private var keywordRules: [KeywordRule] = []
 
     // MARK: - IP CIDR Binary Tries
     //
@@ -53,6 +71,7 @@ class DomainRouter {
     /// Used when switching to global mode to ensure no stale rules affect routing.
     func reset() {
         trieRoot = TrieNode()
+        keywordRules.removeAll()
         domainRuleCount = 0
         ipRuleCount = 0
         ipv4Trie = CIDRTrie()
@@ -83,6 +102,9 @@ class DomainRouter {
                 case .domainSuffix:
                     trieInsert(value.lowercased(), action: .direct)
                     bypassDomainRuleCount += 1
+                case .domainKeyword:
+                    insertKeywordRule(value.lowercased(), action: .direct)
+                    bypassDomainRuleCount += 1
                 case .ipCIDR:
                     if let parsed = Self.parseIPv4CIDR(value) {
                         ipv4Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: .direct)
@@ -111,7 +133,7 @@ class DomainRouter {
             }
         }
 
-        // Parse user rules — these overwrite bypass rules on the same node
+        // Parse user rules — these overwrite bypass rules within the same tier
         guard let rules = json["rules"] as? [[String: Any]] else {
             logger.warning("[VPN] Routing data malformed: missing rules")
             return
@@ -141,6 +163,9 @@ class DomainRouter {
                     case .domainSuffix:
                         trieInsert(lowered, action: action)
                         domainRuleCount += 1
+                    case .domainKeyword:
+                        insertKeywordRule(lowered, action: action)
+                        domainRuleCount += 1
                     case .ipCIDR, .ipCIDR6:
                         break
                     }
@@ -164,7 +189,7 @@ class DomainRouter {
                             ipv6Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
                             ipRuleCount += 1
                         }
-                    case .domainSuffix:
+                    case .domainSuffix, .domainKeyword:
                         break
                     }
                 }
@@ -181,10 +206,11 @@ class DomainRouter {
         domainRuleCount > 0 || ipRuleCount > 0
     }
 
-    /// Matches a domain against the suffix trie.
+    /// Matches a domain in two tiers: suffix rules first, keyword rules second.
     func matchDomain(_ domain: String) -> RouteAction? {
         guard !domain.isEmpty else { return nil }
-        return trieLookup(domain)
+        let lowered = domain.lowercased()
+        return trieLookup(lowered) ?? lookupKeywordRule(lowered)
     }
 
     /// Matches an IP address against CIDR rules via binary trie.
@@ -215,12 +241,24 @@ class DomainRouter {
         }
     }
 
-    // MARK: - Suffix Trie (private)
+    // MARK: - Domain Matching (private)
 
-    /// Inserts a suffix rule into the trie, overwriting any existing action.
+    /// Inserts a suffix rule into the reverse-label trie, overwriting any existing action.
     private func trieInsert(_ suffix: String, action: RouteAction) {
         let node = trieWalkOrCreate(suffix)
         node.userAction = action
+    }
+
+    /// Inserts a keyword pattern, overwriting any existing entry with the same pattern
+    /// so user rules replace bypass rules (mirroring the suffix trie's overwrite behavior).
+    private func insertKeywordRule(_ pattern: String, action: RouteAction) {
+        guard !pattern.isEmpty else { return }
+        let rule = KeywordRule(pattern: pattern, action: action)
+        if let index = keywordRules.firstIndex(where: { $0.pattern == pattern }) {
+            keywordRules[index] = rule
+        } else {
+            keywordRules.append(rule)
+        }
     }
 
     /// Walks (or creates) the trie path for a domain suffix, returning the leaf node.
@@ -255,24 +293,27 @@ class DomainRouter {
         return deepestAction
     }
 
+    /// Linearly scans keyword rules only after suffix lookup has failed.
+    /// Longer keywords win; ties go to the later inserted rule.
+    private func lookupKeywordRule(_ domain: String) -> RouteAction? {
+        var bestAction: RouteAction? = nil
+        var bestLength = -1
+
+        for rule in keywordRules where domain.contains(rule.pattern) {
+            if rule.patternLength >= bestLength {
+                bestAction = rule.action
+                bestLength = rule.patternLength
+            }
+        }
+
+        return bestAction
+    }
+
     // MARK: - CIDR Parsing
 
-    /// Accepts the new integer format and older string payloads during migration.
     private static func parseRuleType(_ rawValue: Any?) -> DomainRuleType? {
-        if let rawValue = rawValue as? Int {
-            return DomainRuleType(rawValue: rawValue)
-        }
-        guard let legacy = rawValue as? String else { return nil }
-        switch legacy {
-        case "ipCIDR":
-            return .ipCIDR
-        case "ipCIDR6":
-            return .ipCIDR6
-        case "domain", "domainKeyword", "domainSuffix":
-            return .domainSuffix
-        default:
-            return nil
-        }
+        guard let rawValue = rawValue as? Int else { return nil }
+        return DomainRuleType(rawValue: rawValue)
     }
 
     /// Parses "A.B.C.D/prefix" into (network, prefixLen) with host bits zeroed.

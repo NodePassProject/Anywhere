@@ -98,7 +98,7 @@ struct CustomRuleSetDetailView: View {
 
     private func ruleRow(_ rule: DomainRule) -> some View {
         HStack {
-            Image(systemName: rule.type == .domainSuffix ? "globe" : "network")
+            Image(systemName: iconName(for: rule.type))
                 .foregroundStyle(.secondary)
                 .frame(width: 24)
             VStack(alignment: .leading) {
@@ -142,8 +142,17 @@ struct CustomRuleSetDetailView: View {
     private func ruleTypeLabel(_ type: DomainRuleType) -> String {
         switch type {
         case .domainSuffix: return String(localized: "Domain Suffix")
+        case .domainKeyword: return String(localized: "Domain Keyword")
         case .ipCIDR: return String(localized: "IPv4 CIDR")
         case .ipCIDR6: return String(localized: "IPv6 CIDR")
+        }
+    }
+
+    private func iconName(for type: DomainRuleType) -> String {
+        switch type {
+        case .domainSuffix: return "globe"
+        case .domainKeyword: return "magnifyingglass"
+        case .ipCIDR, .ipCIDR6: return "network"
         }
     }
 }
@@ -164,6 +173,7 @@ private struct AddRuleView: View {
             Form {
                 Picker("Type", selection: $ruleType) {
                     Text("Domain Suffix").tag(DomainRuleType.domainSuffix)
+                    Text("Domain Keyword").tag(DomainRuleType.domainKeyword)
                     Text("IPv4 CIDR").tag(DomainRuleType.ipCIDR)
                     Text("IPv6 CIDR").tag(DomainRuleType.ipCIDR6)
                 }
@@ -198,6 +208,7 @@ private struct AddRuleView: View {
     private var placeholder: String {
         switch ruleType {
         case .domainSuffix: return "example.com"
+        case .domainKeyword: return "example"
         case .ipCIDR: return "10.0.0.0/8"
         case .ipCIDR6: return "2001:db8::/32"
         }
@@ -358,6 +369,7 @@ enum RuleParser {
             // "0, ..."(IPv4 CIDR)
             // "1, ..."(IPv6 CIDR)
             // "2, ..."(Domain Suffix)
+            // "3, ..."(Domain Keyword)
             if let typeInt = Int(prefix), let type = DomainRuleType(rawValue: typeInt) {
                 return DomainRule(type: type, value: normalizeValue(value, type: type))
             }
@@ -381,7 +393,7 @@ enum RuleParser {
                 return value + "/128"
             }
             return value
-        case .domainSuffix:
+        case .domainSuffix, .domainKeyword:
             return value
         }
     }

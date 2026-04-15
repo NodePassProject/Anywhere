@@ -228,7 +228,7 @@ class RuleSetStore: ObservableObject {
 
                 let domainRulesArray: [[String: Any]] = domainRules.compactMap {
                     switch $0.type {
-                    case .domainSuffix:
+                    case .domainSuffix, .domainKeyword:
                         return ["type": $0.type.rawValue, "value": $0.value]
                     case .ipCIDR, .ipCIDR6:
                         return nil
@@ -238,7 +238,7 @@ class RuleSetStore: ObservableObject {
                     switch $0.type {
                     case .ipCIDR, .ipCIDR6:
                         return ["type": $0.type.rawValue, "value": $0.value]
-                    case .domainSuffix:
+                    case .domainSuffix, .domainKeyword:
                         return nil
                     }
                 }

@@ -30,10 +30,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let status: Network.NWPath.Status
         let unsatisfiedReason: String?
         let interfaceSummary: String
+        let primaryInterfaceName: String?
         let supportsIPv4: Bool
         let supportsIPv6: Bool
         let isExpensive: Bool
         let isConstrained: Bool
+
+        // Equality intentionally excludes supportsIPv4/supportsIPv6/isExpensive/isConstrained.
+        // Those flags can flip on the same interface (Low Data Mode toggles, IPv6 RA arriving late)
+        // without invalidating existing connections — restarting on them is wasted work.
+        // The primary interface name (e.g., en0, pdp_ip0) is included so genuine interface swaps
+        // are caught even when the summary string collapses to the same type (e.g., Wi-Fi → Wi-Fi).
+        // Only the primary (satisfied) interface is tracked — standby interfaces in
+        // availableInterfaces can appear/disappear without affecting the active route.
+        static func == (lhs: PathSnapshot, rhs: PathSnapshot) -> Bool {
+            lhs.status == rhs.status &&
+            lhs.unsatisfiedReason == rhs.unsatisfiedReason &&
+            lhs.interfaceSummary == rhs.interfaceSummary &&
+            lhs.primaryInterfaceName == rhs.primaryInterfaceName
+        }
 
         var summary: String {
             var parts = [interfaceSummary]
@@ -495,6 +510,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             status: path.status,
             unsatisfiedReason: unsatisfiedReason,
             interfaceSummary: interfaceTypes.isEmpty ? "no interface" : interfaceTypes.joined(separator: "+"),
+            primaryInterfaceName: path.availableInterfaces.first?.name,
             supportsIPv4: path.supportsIPv4,
             supportsIPv6: path.supportsIPv6,
             isExpensive: path.isExpensive,
