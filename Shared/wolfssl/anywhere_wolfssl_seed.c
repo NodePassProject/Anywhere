@@ -1,10 +1,9 @@
-/* anywhere_wolfssl_seed.c
- *
- * Entropy source for wolfSSL on Apple platforms. Wired in via
- * CUSTOM_RAND_GENERATE_SEED in user_settings.h. Routes wc_GenerateSeed through
- * Security.framework's SecRandomCopyBytes — avoids /dev/urandom, which can be
- * unreliable under the Network Extension sandbox.
- */
+//
+//  anywhere_wolfssl_seed.c
+//  Anywhere
+//
+//  Created by Argsment Limited on 4/16/26.
+//
 
 #include <Security/SecRandom.h>
 #include <stdint.h>

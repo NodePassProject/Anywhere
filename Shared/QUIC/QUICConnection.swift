@@ -27,6 +27,11 @@ class QUICConnection {
         case streamError(String)
         case timeout
         case closed
+        /// Server rejected 0-RTT (no early_data extension echoed, or the
+        /// resumed PSK was no longer valid). The connection itself remains
+        /// usable on 1-RTT — the application must reopen streams and replay
+        /// any data it had sent as early data.
+        case earlyDataRejected
 
         var errorDescription: String? {
             switch self {
@@ -35,6 +40,7 @@ class QUICConnection {
             case .streamError(let m): return "QUIC stream: \(m)"
             case .timeout: return "QUIC timeout"
             case .closed: return "QUIC closed"
+            case .earlyDataRejected: return "QUIC: 0-RTT rejected by server"
             }
         }
     }
@@ -43,8 +49,8 @@ class QUICConnection {
 
     private let host: String
     private let port: UInt16
-    private let serverName: String
-    private let alpn: [String]
+    fileprivate let serverName: String
+    fileprivate let alpn: [String]
     private let tuning: QUICTuning
 
     fileprivate var state: State = .idle
@@ -95,6 +101,13 @@ class QUICConnection {
     /// Called when the QUIC connection is closed (draining, error, etc.).
     /// Allows the session to react immediately rather than discovering it on the next operation.
     var connectionClosedHandler: ((Error) -> Void)?
+    /// Fires once at handshake completion if the server rejected the 0-RTT
+    /// data we sent (or if early data was offered but no early_data
+    /// extension was echoed). The connection is still alive on 1-RTT — the
+    /// upper layer should reopen streams and replay anything that was sent
+    /// over 0-RTT. The associated `pendingWrites` have already been failed
+    /// with `.earlyDataRejected` by the time this fires.
+    var earlyDataRejectedHandler: (() -> Void)?
 
     /// When `.brutal` is selected, the Swift-side CC state. Kept alive here
     /// because its lifetime must match the QUIC connection.
@@ -110,9 +123,9 @@ class QUICConnection {
 
     /// Pending writes that were blocked by stream flow control.
     /// Flushed when incoming packets extend the window (MAX_STREAM_DATA).
-    private var pendingWrites: [PendingWrite] = []
+    fileprivate var pendingWrites: [PendingWrite] = []
 
-    private struct PendingWrite {
+    fileprivate struct PendingWrite {
         let streamId: Int64
         var data: Data
         let fin: Bool
@@ -121,7 +134,7 @@ class QUICConnection {
 
     /// Pending datagrams waiting to be sent. Drained in `writeToUDP()` where
     /// they get first priority for congestion window space.
-    private var pendingDatagrams: [Data] = []
+    fileprivate var pendingDatagrams: [Data] = []
 
     static let maxUDPPayload = 1452
 
@@ -174,8 +187,16 @@ class QUICConnection {
 
     // MARK: Streams
 
+    /// True while writes will be carried by either the 1-RTT or the 0-RTT
+    /// keys. ngtcp2 silently drops stream writes outside these states.
+    private var canSendApplicationData: Bool {
+        if state == .connected { return true }
+        if state == .handshaking && earlyDataArmed { return true }
+        return false
+    }
+
     func openBidiStream() -> Int64? {
-        guard state == .connected, let conn else { return nil }
+        guard canSendApplicationData, let conn else { return nil }
         var streamId: Int64 = -1
         let streamData: UnsafeMutableRawPointer? = nil
         let rv = ngtcp2_conn_open_bidi_stream(conn, &streamId, streamData)
@@ -187,7 +208,7 @@ class QUICConnection {
     }
 
     func openUniStream() -> Int64? {
-        guard state == .connected, let conn else { return nil }
+        guard canSendApplicationData, let conn else { return nil }
         var streamId: Int64 = -1
         let streamData: UnsafeMutableRawPointer? = nil
         let rv = ngtcp2_conn_open_uni_stream(conn, &streamId, streamData)
@@ -254,7 +275,8 @@ class QUICConnection {
     func writeStream(_ streamId: Int64, data: Data, fin: Bool = false,
                      completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
-            guard let self, let conn = self.conn, self.state == .connected else {
+            guard let self, let conn = self.conn,
+                  self.canSendApplicationData else {
                 completion(QUICError.closed)
                 return
             }
@@ -277,7 +299,8 @@ class QUICConnection {
     /// exceeds the remote's max_datagram_frame_size).
     func writeDatagram(_ data: Data, completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
-            guard let self, self.conn != nil, self.state == .connected else {
+            guard let self, self.conn != nil,
+                  self.canSendApplicationData else {
                 completion(QUICError.closed)
                 return
             }
@@ -294,7 +317,8 @@ class QUICConnection {
     /// other concurrent callers.
     func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
-            guard let self, self.conn != nil, self.state == .connected else {
+            guard let self, self.conn != nil,
+                  self.canSendApplicationData else {
                 completion(QUICError.closed)
                 return
             }
@@ -862,6 +886,11 @@ class QUICConnection {
                 "wolfSSL_set_quic_transport_params: \(setRv)")
         }
 
+        // Try to arm 0-RTT before the next writeToUDP triggers client_initial
+        // (and with it the wolfSSL handshake). After client_initial fires,
+        // wolfSSL_set_quic_early_data_enabled becomes a no-op.
+        armEarlyDataIfAvailable(connPtr: connPtr, tls: tls)
+
         // Install Brutal CC on top of the CUBIC state ngtcp2 just set up.
         // Done *after* `ngtcp2_conn_client_new` so the CC struct is valid,
         // and before any packets have been read/sent so no stale CUBIC
@@ -874,6 +903,43 @@ class QUICConnection {
                 self.brutalCCKey = ccKey
             }
         }
+    }
+
+    // MARK: 0-RTT
+    //
+    // Two preconditions must be met *before* the first call into
+    // `ngtcp2_swift_conn_write_pkt` (which kicks off the wolfSSL handshake
+    // and, with early data enabled, derives the 0-RTT secret):
+    //
+    //   1. `ngtcp2_conn_decode_and_set_0rtt_transport_params` has restored
+    //      the server's previous transport params on the conn — without
+    //      this, ngtcp2 won't let us open streams or write before HANDSHAKE
+    //      completes, because the conn's stream-limit / flow-control state
+    //      is still at the spec defaults.
+    //   2. `wolfSSL_set_quic_early_data_enabled(ssl, 1)` has raised
+    //      `maxEarlyDataSz`. Once the wolfSSL handshake has started, that
+    //      knob is read-only — late toggles are silently ignored.
+    //
+    // Both are no-ops if no usable cached session/TPs are present, so it's
+    // safe to call them unconditionally on every connect attempt.
+    private(set) var earlyDataArmed: Bool = false
+
+    private func armEarlyDataIfAvailable(connPtr: OpaquePointer, tls: QUICTLSHandler) {
+        guard let tpBytes = tls.cachedTransportParams, !tpBytes.isEmpty else {
+            return
+        }
+        let rv = tpBytes.withUnsafeBytes { raw -> Int32 in
+            guard let p = raw.baseAddress?.assumingMemoryBound(to: UInt8.self)
+            else { return -1 }
+            return ngtcp2_conn_decode_and_set_0rtt_transport_params(
+                connPtr, p, tpBytes.count)
+        }
+        guard rv == 0 else {
+            logger.error("[QUIC] decode_0rtt_transport_params failed rv=\(rv)")
+            return
+        }
+        guard tls.enableEarlyData() else { return }
+        earlyDataArmed = true
     }
 
     /// Updates the Brutal target send rate (bytes/sec). No-op if this
@@ -1153,8 +1219,35 @@ private let quicHandshakeCompletedCB: @convention(c) (
     OpaquePointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { _, ud in
     guard let qc = qcFromUserData(ud) else { return 0 }
+    // Sample the rejection flag *now* — we're still inside read_pkt and the
+    // wolfSSL state is current — but defer the cleanup work (which calls
+    // ngtcp2_conn_tls_early_data_rejected) to an async block so we don't
+    // re-enter ngtcp2 from inside its own callback.
+    // wolfSSL's `WOLFSSL_EARLY_DATA_REJECTED` macro (= 1) doesn't always
+    // surface as a typed Swift constant from the bridging header — fall
+    // back to the literal that ssl.h pins it to.
+    let rejected = qc.earlyDataArmed
+        && qc.tlsHandshaker?.earlyDataStatus == Int32(1)
     qc.queue.async {
+        if rejected, let conn = qc.conn {
+            _ = ngtcp2_conn_tls_early_data_rejected(conn)
+            invalidateCachedSessionTicket(
+                serverName: qc.serverName, alpn: qc.alpn)
+            // Anything we sent as 0-RTT is gone with the discarded stream
+            // state. Fail those completions so the upper layer knows to
+            // re-issue them once `earlyDataRejectedHandler` fires.
+            let writes = qc.pendingWrites
+            qc.pendingWrites.removeAll()
+            qc.pendingDatagrams.removeAll()
+            for pw in writes {
+                pw.completion(QUICConnection.QUICError.earlyDataRejected)
+            }
+        }
         qc.state = .connected
+        if rejected {
+            qc.earlyDataRejectedHandler?()
+            qc.earlyDataRejectedHandler = nil
+        }
         qc.connectCompletion?(nil)
         qc.connectCompletion = nil
     }
