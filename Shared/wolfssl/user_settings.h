@@ -1,8 +1,9 @@
-/* user_settings.h — wolfSSL configuration for Anywhere
- *
- * Activated by -DWOLFSSL_USER_SETTINGS in the target build settings.
- * Scope: TLS 1.3 + QUIC client only. AES-GCM, ChaCha20-Poly1305, X25519, P-256.
- */
+//
+//  user_settings.h
+//  Anywhere
+//
+//  Created by Argsment Limited on 4/16/26.
+//
 
 #ifndef ANYWHERE_WOLFSSL_USER_SETTINGS_H
 #define ANYWHERE_WOLFSSL_USER_SETTINGS_H
@@ -71,6 +72,7 @@ int anywhere_wolfssl_seed(unsigned char *output, unsigned int sz);
 #define ECC_USER_CURVES
 #define HAVE_ECC256
 #define HAVE_ECC384
+#define NO_ECC521
 #define HAVE_SUPPORTED_CURVES
 #define HAVE_CURVE25519
 #define HAVE_ED25519
@@ -82,7 +84,7 @@ int anywhere_wolfssl_seed(unsigned char *output, unsigned int sz);
 #define HAVE_SESSION_TICKET
 #define HAVE_ALPN
 #define HAVE_SNI
-#define HAVE_EARLY_DATA         /* 0-RTT, may go unused; cheap to enable */
+#define WOLFSSL_EARLY_DATA      /* 0-RTT — gates wolfSSL_{set_quic,get}_early_data_* */
 #define HAVE_EX_DATA            /* required for SSL_{set,get}_app_data */
 #define OPENSSL_EXTRA           /* exposes the *_ex_data and a few QUIC helpers */
 #define WOLFSSL_HAVE_QSH_OFF
@@ -92,6 +94,40 @@ int anywhere_wolfssl_seed(unsigned char *output, unsigned int sz);
 #define WOLFSSL_HAVE_SP_RSA
 #define WOLFSSL_HAVE_SP_ECC
 #define WOLFSSL_SP_NO_DYN_STACK
+
+/* ARM64 NEON acceleration. Apple Silicon and every 64-bit Apple mobile SoC
+ * (A7+) has NEON, the ARMv8 AES/SHA crypto extensions, and — from the A11
+ * onward — the ARMv8.2 SHA-512 extension. The upstream asm sources sit
+ * under wolfcrypt/src/port/arm/ and wolfcrypt/src/sp_arm64.c; they become
+ * empty translation units on x86_64 simulator builds thanks to the
+ * `__aarch64__` guard inside each file, so no target filtering needed.
+ *
+ *   WOLFSSL_ARMASM        — master gate for the port/arm/* sources.
+ *   WOLFSSL_ARMASM_INLINE — pick the intrinsic-C variants (*_c.c) instead
+ *                           of the hand-rolled .S files; clang auto-targets
+ *                           aarch64+crypto with -target arm64-apple, so no
+ *                           extra -march flag is needed.
+ *   WOLFSSL_ARMASM_NO_HW_CRYPTO — force AES and SHA-256 onto the NEON-only
+ *                           paths. The AESE/AESMC + SHA256H/SHA256H2
+ *                           intrinsic paths in wolfSSL v5.9.1's generated
+ *                           armv8-aes-asm_c.c / armv8-sha256-asm_c.c
+ *                           produce wrong output on iOS arm64 — QUIC
+ *                           Initial packets come out with either a bad
+ *                           header-protection mask or a bad GCM tag, the
+ *                           server drops them silently, and the handshake
+ *                           stalls at WANT_READ. NEON is still ~2x the
+ *                           baseline C path, so this is a cheap downgrade
+ *                           until wolfSSL upstream repairs the generated
+ *                           HW-crypto path and we re-vendor.
+ *   WOLFSSL_SP_ARM64_ASM  — swap sp_c64.c's body out for sp_arm64.c's
+ *                           hand-vectorised RSA/ECC scalar primitives.
+ *                           Unaffected by the HW-crypto issue above. */
+#if defined(__aarch64__)
+#  define WOLFSSL_ARMASM
+#  define WOLFSSL_ARMASM_INLINE
+#  define WOLFSSL_ARMASM_NO_HW_CRYPTO
+#  define WOLFSSL_SP_ARM64_ASM
+#endif
 
 /* Disable DH — TLS 1.3 only does ECDHE for our config; if a TLS 1.2
  * server picks DHE we'll just renegotiate or fail. */
@@ -115,6 +151,6 @@ int anywhere_wolfssl_seed(unsigned char *output, unsigned int sz);
  * unconditionally. */
 
 /* Logging — opt-in at build time */
-#define DEBUG_WOLFSSL
+/* #define DEBUG_WOLFSSL */
 
 #endif /* ANYWHERE_WOLFSSL_USER_SETTINGS_H */

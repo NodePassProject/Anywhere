@@ -33,7 +33,7 @@
 #include "ngtcp2_macro.h"
 #include "shared.h"
 
-#define PRINTF_DEBUG 1
+#define PRINTF_DEBUG 0
 #if PRINTF_DEBUG
 #  define DEBUG_MSG(...) fprintf(stderr, __VA_ARGS__)
 #else /* !PRINTF_DEBUG */

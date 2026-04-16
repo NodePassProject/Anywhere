@@ -20,20 +20,30 @@ private let logger = AnywhereLogger(category: "QUIC-TLS")
 
 // MARK: - Session ticket cache
 
-/// Serialized wolfSSL sessions keyed by `"\(SNI)\u{0}\(alpn.joined(","))"`.
-/// Tickets are not portable across ALPN contexts. In-memory only; lost on
-/// process restart (matches the pre-migration behavior).
+/// Serialized wolfSSL session paired with the encoded ngtcp2 0-RTT transport
+/// parameters captured from the connection that issued the ticket. RFC 9001
+/// §4.6.1 requires the client to remember both — sending 0-RTT data with
+/// stale flow-control / stream-limit values is a protocol violation, so the
+/// ticket alone is insufficient.
+private struct CachedSession {
+    let session: Data
+    let transportParams: Data
+}
+
+/// Cache keyed by `"\(SNI)\u{0}\(alpn.joined(","))"`. Tickets and TPs are not
+/// portable across ALPN contexts. In-memory only; lost on process restart.
 private let ticketCacheLock = UnfairLock()
-private var sessionTicketCache: [String: Data] = [:]
+private var sessionTicketCache: [String: CachedSession] = [:]
 
 private func sessionTicketCacheKey(serverName: String, alpn: [String]) -> String {
     return "\(serverName)\u{0}\(alpn.joined(separator: ","))"
 }
 
 /// Drops any cached session for `(serverName, alpn)`. Called by QUICConnection
-/// when a handshake fails before reaching `.connected` — a cached session
-/// whose keys the server has rotated would otherwise send us into a permanent
-/// HANDSHAKE_TIMEOUT loop on resumption retries.
+/// when a handshake fails before reaching `.connected`, or when the server
+/// rejects a 0-RTT attempt — a cached session whose keys the server has
+/// rotated would otherwise send us into a permanent HANDSHAKE_TIMEOUT loop
+/// (or a rejection loop) on resumption retries.
 func invalidateCachedSessionTicket(serverName: String, alpn: [String]) {
     let key = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
     ticketCacheLock.lock()
@@ -95,7 +105,6 @@ final class QUICTLSHandler {
             logger.error("wolfSSL_Init failed rv=\(wolfSSLInitRv)")
             return nil
         }
-        wolfSSL_Debugging_ON()
         guard let method = wolfTLSv1_3_client_method() else {
             logger.error("wolfTLSv1_3_client_method returned NULL")
             return nil
@@ -167,11 +176,52 @@ final class QUICTLSHandler {
         if let c = ctx { wolfSSL_CTX_free(c) }
     }
 
-    fileprivate func storeSession(_ data: Data) {
+    fileprivate func storeSession(_ session: Data, transportParams: Data) {
         let key = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
         ticketCacheLock.lock()
-        sessionTicketCache[key] = data
+        sessionTicketCache[key] = CachedSession(
+            session: session, transportParams: transportParams)
         ticketCacheLock.unlock()
+    }
+
+    /// Serialised 0-RTT transport parameters for this `(SNI, ALPN)` paired
+    /// with the cached session ticket, or `nil` if no cached session exists.
+    /// QUICConnection feeds these to
+    /// `ngtcp2_conn_decode_and_set_0rtt_transport_params` before driving any
+    /// I/O so the conn's stream limits / flow-control match what the server
+    /// promised in the previous session.
+    var cachedTransportParams: Data? {
+        let key = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
+        ticketCacheLock.lock()
+        defer { ticketCacheLock.unlock() }
+        return sessionTicketCache[key]?.transportParams
+    }
+
+    /// True if `loadCachedSession` installed a resumable session on the SSL.
+    /// Kept on the handler (rather than re-querying wolfSSL) because
+    /// `wolfSSL_session_reused` only flips on after the server confirms
+    /// resumption — by then the 0-RTT-arming decision has already been made.
+    private(set) var hasCachedSession: Bool = false
+
+    /// Enables 0-RTT on the underlying SSL by raising
+    /// `maxEarlyDataSz` to UINT32_MAX (per
+    /// `wolfSSL_set_quic_early_data_enabled`). Must be called *before*
+    /// `wolfSSL_quic_do_handshake` runs — wolfSSL ignores the call once the
+    /// handshake has started. Returns false if early data could not be
+    /// enabled (no SSL, or no cached session to resume against).
+    @discardableResult
+    func enableEarlyData() -> Bool {
+        guard hasCachedSession, let ssl else { return false }
+        wolfSSL_set_quic_early_data_enabled(ssl, 1)
+        return true
+    }
+
+    /// Reads `wolfSSL_get_early_data_status` after the handshake completes.
+    /// Returns one of `WOLFSSL_EARLY_DATA_{NOT_SENT,REJECTED,ACCEPTED}`,
+    /// or a negative wolfSSL error.
+    var earlyDataStatus: Int32 {
+        guard let ssl else { return -1 }
+        return wolfSSL_get_early_data_status(ssl)
     }
 
     private func loadCachedSession(into ssl: OpaquePointer) {
@@ -179,7 +229,8 @@ final class QUICTLSHandler {
         ticketCacheLock.lock()
         let cached = sessionTicketCache[key]
         ticketCacheLock.unlock()
-        guard let bytes = cached else { return }
+        guard let cached else { return }
+        let bytes = cached.session
         let length = bytes.count
 
         let session: OpaquePointer? = bytes.withUnsafeBytes { raw in
@@ -192,7 +243,9 @@ final class QUICTLSHandler {
         }
         guard let session else { return }
         defer { wolfSSL_SESSION_free(session) }
-        _ = wolfSSL_set_session(ssl, session)
+        if wolfSSL_set_session(ssl, session) == WOLFSSL_SUCCESS {
+            hasCachedSession = true
+        }
     }
 }
 
@@ -268,16 +321,37 @@ private let certVerifyCallback:
 
 // MARK: - Session resumption
 
-/// Invoked by wolfSSL when a NewSessionTicket arrives. Serializes the session
-/// into the Swift cache keyed by the handler's (SNI, ALPN). We return 0 to
-/// let wolfSSL free its own reference — we keep the serialized bytes, not the
-/// WOLFSSL_SESSION object.
+/// Invoked by wolfSSL when a NewSessionTicket arrives. Serialises both the
+/// session and the conn's current 0-RTT transport parameters into the cache
+/// keyed by the handler's (SNI, ALPN). We return 0 to let wolfSSL free its
+/// own reference — we keep the serialised bytes, not the WOLFSSL_SESSION
+/// object.
+///
+/// The TPs come from `ngtcp2_conn_encode_0rtt_transport_params`, which on a
+/// client synthesises them from the *remote* params received from the server
+/// during this handshake. Pairing them with the ticket is mandatory: per
+/// RFC 9001 §4.6.1 the client must restore these limits before sending any
+/// 0-RTT packet, otherwise it can violate flow-control or stream-count
+/// promises and the server will close the connection.
 private let sessionNewCallback:
     @convention(c) (OpaquePointer?, OpaquePointer?) -> CInt = { sslPtr, sessionPtr in
         guard let sslPtr, let sessionPtr else { return 0 }
         guard let selfVoid = wolfSSL_get_ex_data(sslPtr, 1) else { return 0 }
         let handler = Unmanaged<QUICTLSHandler>.fromOpaque(selfVoid)
             .takeUnretainedValue()
+
+        // Recover the ngtcp2_conn from the back-pointer chain wolfSSL keeps:
+        //   ssl → app_data → ngtcp2_crypto_conn_ref → get_conn(ref) → conn
+        // QUICConnection wired this up in `initializeNgtcp2`. Without conn
+        // we can still cache the session, but the next attempt won't be
+        // able to send 0-RTT (no TPs to restore).
+        let conn: OpaquePointer? = {
+            guard let appData = wolfSSL_get_app_data(sslPtr) else { return nil }
+            let refPtr = appData.assumingMemoryBound(
+                to: ngtcp2_crypto_conn_ref.self)
+            guard let getConn = refPtr.pointee.get_conn else { return nil }
+            return getConn(refPtr)
+        }()
 
         // Two-phase i2d: first NULL call sizes, second encodes. wolfSSL's
         // wolfSSL_i2d_SSL_SESSION writes into a caller-supplied buffer if
@@ -295,6 +369,20 @@ private let sessionNewCallback:
             }
         }
         guard written == len else { return 0 }
-        handler.storeSession(Data(buf))
+
+        // Encode TPs only if we have the conn handle. The 256-byte buffer is
+        // sized for the documented 0-RTT subset (the ten-or-so flow-control
+        // / stream-limit fields plus the DATAGRAM size).
+        var tpData = Data()
+        if let conn {
+            var tpBuf = [UInt8](repeating: 0, count: 256)
+            let tpLen = tpBuf.withUnsafeMutableBufferPointer { tpPtr -> Int in
+                Int(ngtcp2_conn_encode_0rtt_transport_params(
+                    conn, tpPtr.baseAddress, tpPtr.count))
+            }
+            if tpLen > 0 { tpData = Data(tpBuf.prefix(tpLen)) }
+        }
+
+        handler.storeSession(Data(buf), transportParams: tpData)
         return 0
     }
