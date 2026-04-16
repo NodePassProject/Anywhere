@@ -16,15 +16,16 @@ extension LWIPStack {
     /// Registers C callbacks that route lwIP events through ``shared``.
     func registerCallbacks() {
         // Output: lwIP → tunnel packet flow (batched)
-        // Accumulates output packets during synchronous lwip_bridge_input processing,
-        // then flushes them all in a single writePackets call. This reduces kernel
-        // crossings from N per batch to 1, speeding up ACK delivery to the OS TCP
-        // stack and improving upload throughput.
         lwip_bridge_set_output_fn { data, len, isIPv6 in
             guard let shared = LWIPStack.shared, let data else { return }
             let byteCount = Int(len)
             shared.totalBytesIn += Int64(byteCount)
-            shared.outputPackets.append(Data(bytes: data, count: byteCount))
+            let packet = Data(
+                bytesNoCopy: UnsafeMutableRawPointer(mutating: data),
+                count: byteCount,
+                deallocator: .free
+            )
+            shared.outputPackets.append(packet)
             shared.outputProtocols.append(isIPv6 != 0 ? LWIPStack.ipv6Proto : LWIPStack.ipv4Proto)
             if !shared.outputFlushScheduled {
                 shared.outputFlushScheduled = true

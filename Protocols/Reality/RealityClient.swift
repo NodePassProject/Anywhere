@@ -216,7 +216,10 @@ class RealityClient {
             }
         }
 
-        // Build ClientHello with zero SessionId for AAD (matching Xray-core)
+        // Build ClientHello with zero SessionId — this IS the AAD per Xray-core's
+        // Reality protocol. The final ClientHello differs only in the SessionId
+        // bytes; we patch them in-place rather than rebuilding the whole
+        // fingerprinted extension block a second time.
         let zeroSessionId = Data(count: 32)
         let rawClientHelloForAAD = TLSClientHelloBuilder.buildRawClientHello(
             fingerprint: configuration.fingerprint,
@@ -227,10 +230,9 @@ class RealityClient {
             mlkemEncapsulationKey: mlkemEncapsulationKey
         )
 
-        // Encrypt first 16 bytes of SessionId using AES-GCM
+        // Encrypt first 16 bytes of SessionId using AES-GCM (16 plaintext + 16 tag = 32).
         let nonce = random.suffix(12)
         let plaintext = sessionId.prefix(16)
-
         let encryptedSessionId = try TLSRecordCrypto.encryptAESGCM(
             plaintext: Data(plaintext),
             key: SymmetricKey(data: authKey),
@@ -238,15 +240,13 @@ class RealityClient {
             aad: rawClientHelloForAAD
         )
 
-        // Build final ClientHello with encrypted sessionId
-        let finalClientHello = TLSClientHelloBuilder.buildRawClientHello(
-            fingerprint: configuration.fingerprint,
-            random: random,
-            sessionId: encryptedSessionId,
-            serverName: configuration.serverName,
-            publicKey: privateKey.publicKey.rawRepresentation,
-            mlkemEncapsulationKey: mlkemEncapsulationKey
-        )
+        // SessionId always lands at offset 39 in the raw ClientHello:
+        // 1 (msg type) + 3 (length) + 2 (legacy_version) + 32 (random) +
+        // 1 (session_id length prefix) = 39. Length is 32 (matches zeroSessionId).
+        assert(rawClientHelloForAAD.count >= 71)
+        assert(encryptedSessionId.count == 32)
+        var finalClientHello = rawClientHelloForAAD
+        finalClientHello.replaceSubrange(39..<71, with: encryptedSessionId)
 
         return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: finalClientHello)
     }

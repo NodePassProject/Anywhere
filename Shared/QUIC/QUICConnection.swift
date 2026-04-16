@@ -166,7 +166,6 @@ class QUICConnection {
                 completion(QUICError.connectionFailed("Invalid state"))
                 return
             }
-            QUICCrypto.registerCallbacks()
             self.state = .connecting
             self.connectCompletion = completion
             self.setupUDP(completion: completion)
@@ -744,11 +743,24 @@ class QUICConnection {
         generateConnectionID(&dcid, length: 16)
         generateConnectionID(&scid, length: 16)
 
-        tlsHandshaker = QUICTLSHandler(serverName: serverName, alpn: alpn)
+        // wolfSSL's QUIC callbacks fetch ngtcp2_crypto_conn_ref from the SSL
+        // object's app_data — wire the back-pointer before the TLS handler is
+        // constructed so its wolfSSL_set_app_data sees a valid struct.
+        connRefStorage.user_data = Unmanaged.passUnretained(self).toOpaque()
+        connRefStorage.get_conn = { ref in
+            guard let ref, let ud = ref.pointee.user_data else { return nil }
+            return Unmanaged<QUICConnection>.fromOpaque(ud).takeUnretainedValue().conn
+        }
+
+        guard let tls = QUICTLSHandler(
+            serverName: serverName, alpn: alpn, connRef: &connRefStorage) else {
+            throw QUICError.handshakeFailed("wolfSSL: context/SSL init failed")
+        }
+        self.tlsHandshaker = tls
 
         var callbacks = ngtcp2_callbacks()
-        callbacks.client_initial = quicClientInitialCB
-        callbacks.recv_crypto_data = quicRecvCryptoDataCB
+        callbacks.client_initial = ngtcp2_crypto_client_initial_cb
+        callbacks.recv_crypto_data = ngtcp2_crypto_recv_crypto_data_cb
         callbacks.encrypt = ngtcp2_crypto_encrypt_cb
         callbacks.decrypt = ngtcp2_crypto_decrypt_cb
         callbacks.hp_mask = ngtcp2_crypto_hp_mask_cb
@@ -802,12 +814,6 @@ class QUICConnection {
             }
         }
 
-        connRefStorage.user_data = Unmanaged.passUnretained(self).toOpaque()
-        connRefStorage.get_conn = { ref in
-            guard let ref, let ud = ref.pointee.user_data else { return nil }
-            return Unmanaged<QUICConnection>.fromOpaque(ud).takeUnretainedValue().conn
-        }
-
         var connPtr: OpaquePointer?
         let rv = Self.pmtudProbes.withUnsafeBufferPointer { probes -> Int32 in
             settings.pmtud_probes = probes.baseAddress
@@ -829,8 +835,32 @@ class QUICConnection {
         // `set_keep_alive_ping_timeout(kPingTimeoutSecs)`.
         ngtcp2_conn_set_keep_alive_timeout(connPtr, 15 * 1_000_000_000)
 
-        ngtcp2_conn_set_tls_native_handle(connPtr,
-            UnsafeMutableRawPointer(bitPattern: UInt(NGTCP2_APPLE_CS_AES_128_GCM_SHA256)))
+        // Bind the WOLFSSL* as ngtcp2's TLS handle — the crypto helpers read
+        // it back via `ngtcp2_conn_get_tls_native_handle` to drive the
+        // handshake (wolfSSL_quic_do_handshake) and to query negotiated
+        // cipher / MD when installing packet-protection keys.
+        ngtcp2_conn_set_tls_native_handle(connPtr, tls.sslHandle)
+
+        // Encode our local transport parameters and hand them to wolfSSL so
+        // they're emitted in the ClientHello `quic_transport_parameters`
+        // extension.
+        var tpBuf = [UInt8](repeating: 0, count: 256)
+        let tpLen = tpBuf.withUnsafeMutableBufferPointer { buf -> Int in
+            ngtcp2_conn_encode_local_transport_params(
+                connPtr, buf.baseAddress, buf.count)
+        }
+        guard tpLen >= 0 else {
+            throw QUICError.handshakeFailed(
+                "encode_local_transport_params: \(tpLen)")
+        }
+        let setRv = tpBuf.withUnsafeBufferPointer { buf -> Int32 in
+            ngtcp2_crypto_set_local_transport_params(
+                tls.sslHandle, buf.baseAddress, tpLen)
+        }
+        guard setRv == 0 else {
+            throw QUICError.handshakeFailed(
+                "wolfSSL_set_quic_transport_params: \(setRv)")
+        }
 
         // Install Brutal CC on top of the CUBIC state ngtcp2 just set up.
         // Done *after* `ngtcp2_conn_client_new` so the CC struct is valid,
@@ -1048,50 +1078,6 @@ private func qcFromUserData(_ ud: UnsafeMutableRawPointer?) -> QUICConnection? {
     let ref = ud.assumingMemoryBound(to: ngtcp2_crypto_conn_ref.self)
     guard let p = ref.pointee.user_data else { return nil }
     return Unmanaged<QUICConnection>.fromOpaque(p).takeUnretainedValue()
-}
-
-private let quicClientInitialCB: @convention(c) (
-    OpaquePointer?, UnsafeMutableRawPointer?
-) -> Int32 = { conn, ud in
-    guard let conn else { return NGTCP2_ERR_CALLBACK_FAILURE }
-    guard let dcid = ngtcp2_conn_get_client_initial_dcid(conn) else {
-        return NGTCP2_ERR_CALLBACK_FAILURE
-    }
-    let n: UnsafeMutablePointer<UInt8>? = nil
-    if ngtcp2_crypto_derive_and_install_initial_key(
-        conn, n, n, n, n, n, n, n, n, n, NGTCP2_PROTO_VER_V1, dcid) != 0 {
-        return NGTCP2_ERR_CALLBACK_FAILURE
-    }
-    guard let qc = qcFromUserData(ud), let tls = qc.tlsHandshaker else {
-        return NGTCP2_ERR_CALLBACK_FAILURE
-    }
-    var pb = [UInt8](repeating: 0, count: 256)
-    let pLen = ngtcp2_conn_encode_local_transport_params(conn, &pb, pb.count)
-    guard pLen >= 0 else { return NGTCP2_ERR_CALLBACK_FAILURE }
-    guard let ch = tls.buildClientHello(transportParams: Data(pb.prefix(Int(pLen)))) else {
-        return NGTCP2_ERR_CALLBACK_FAILURE
-    }
-    return ch.withUnsafeBytes { buf -> Int32 in
-        guard let p = buf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-            return NGTCP2_ERR_CALLBACK_FAILURE
-        }
-        return ngtcp2_conn_submit_crypto_data(conn, NGTCP2_ENCRYPTION_LEVEL_INITIAL, p, ch.count)
-    }
-}
-
-private let quicRecvCryptoDataCB: @convention(c) (
-    OpaquePointer?, ngtcp2_encryption_level, UInt64,
-    UnsafePointer<UInt8>?, Int, UnsafeMutableRawPointer?
-) -> Int32 = { conn, level, _, data, datalen, ud in
-    guard let conn, let data, datalen > 0 else { return 0 }
-    guard let qc = qcFromUserData(ud), let tls = qc.tlsHandshaker else {
-        return NGTCP2_ERR_CALLBACK_FAILURE
-    }
-    let d = Data(bytes: data, count: datalen)
-    switch tls.processCryptoData(d, level: level, conn: conn) {
-    case .success, .needMoreData: return 0
-    case .error(let c): return c
-    }
 }
 
 private let quicRecvStreamDataCB: @convention(c) (

@@ -78,6 +78,7 @@
 #define TCP_RCV_SCALE                   7
 
 /* --- Checksum configuration --- */
+#define LWIP_CHKSUM_ALGORITHM           3
 /* Trust incoming packets from iOS TUN interface */
 #define CHECKSUM_CHECK_IP               0
 #define CHECKSUM_CHECK_TCP              0

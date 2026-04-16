@@ -189,8 +189,6 @@ class HTTP3Session: PoolableSession {
     }
 
     private func startConnection() {
-        QUICCrypto.registerCallbacks()
-
         // React immediately when the QUIC connection closes (draining, error, etc.)
         // so the pool stops handing out streams on this dead session.
         quic.connectionClosedHandler = { [weak self] error in

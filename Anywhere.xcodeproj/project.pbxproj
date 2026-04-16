@@ -192,7 +192,7 @@
 				ngtcp2/ngtcp2_conn_info.c,
 				ngtcp2/ngtcp2_conn.c,
 				ngtcp2/ngtcp2_conv.c,
-				ngtcp2/ngtcp2_crypto_apple.c,
+				ngtcp2/ngtcp2_crypto_wolfssl.c,
 				ngtcp2/ngtcp2_crypto.c,
 				ngtcp2/ngtcp2_dcidtr.c,
 				ngtcp2/ngtcp2_err.c,
@@ -232,7 +232,6 @@
 				ngtcp2/shared.c,
 				QUIC/BrutalCongestionControl.swift,
 				QUIC/QUICConnection.swift,
-				QUIC/QUICCrypto.swift,
 				QUIC/QUICTLSHandler.swift,
 				QUIC/QUICTuning.swift,
 				Tunnel/ProxyDNSCache.swift,
@@ -243,6 +242,75 @@
 				"Utilities/Data+init.swift",
 				Utilities/DeviceCensorship.swift,
 				Utilities/UnfairLock.swift,
+				wolfssl/anywhere_wolfssl_seed.c,
+				wolfssl/src/bio.c,
+				wolfssl/src/conf.c,
+				wolfssl/src/crl.c,
+				wolfssl/src/internal.c,
+				wolfssl/src/keys.c,
+				wolfssl/src/ocsp.c,
+				wolfssl/src/pk_ec.c,
+				wolfssl/src/pk_rsa.c,
+				wolfssl/src/pk.c,
+				wolfssl/src/quic.c,
+				wolfssl/src/ssl_api_cert.c,
+				wolfssl/src/ssl_api_crl_ocsp.c,
+				wolfssl/src/ssl_api_pk.c,
+				wolfssl/src/ssl_asn1.c,
+				wolfssl/src/ssl_bn.c,
+				wolfssl/src/ssl_certman.c,
+				wolfssl/src/ssl_crypto.c,
+				wolfssl/src/ssl_ech.c,
+				wolfssl/src/ssl_load.c,
+				wolfssl/src/ssl_misc.c,
+				wolfssl/src/ssl_p7p12.c,
+				wolfssl/src/ssl_sess.c,
+				wolfssl/src/ssl_sk.c,
+				wolfssl/src/ssl.c,
+				wolfssl/src/tls.c,
+				wolfssl/src/tls13.c,
+				wolfssl/src/wolfio.c,
+				wolfssl/src/x509_str.c,
+				wolfssl/src/x509.c,
+				wolfssl/wolfcrypt/src/aes.c,
+				wolfssl/wolfcrypt/src/asm.c,
+				wolfssl/wolfcrypt/src/asn_orig.c,
+				wolfssl/wolfcrypt/src/asn.c,
+				wolfssl/wolfcrypt/src/chacha.c,
+				wolfssl/wolfcrypt/src/chacha20_poly1305.c,
+				wolfssl/wolfcrypt/src/coding.c,
+				wolfssl/wolfcrypt/src/cpuid.c,
+				wolfssl/wolfcrypt/src/cryptocb.c,
+				wolfssl/wolfcrypt/src/curve25519.c,
+				wolfssl/wolfcrypt/src/dh.c,
+				wolfssl/wolfcrypt/src/ecc_fp.c,
+				wolfssl/wolfcrypt/src/ecc.c,
+				wolfssl/wolfcrypt/src/ed25519.c,
+				wolfssl/wolfcrypt/src/error.c,
+				wolfssl/wolfcrypt/src/evp_pk.c,
+				wolfssl/wolfcrypt/src/evp.c,
+				wolfssl/wolfcrypt/src/fe_operations.c,
+				wolfssl/wolfcrypt/src/ge_operations.c,
+				wolfssl/wolfcrypt/src/hash.c,
+				wolfssl/wolfcrypt/src/hmac.c,
+				wolfssl/wolfcrypt/src/kdf.c,
+				wolfssl/wolfcrypt/src/logging.c,
+				wolfssl/wolfcrypt/src/md5.c,
+				wolfssl/wolfcrypt/src/memory.c,
+				wolfssl/wolfcrypt/src/misc.c,
+				wolfssl/wolfcrypt/src/poly1305.c,
+				wolfssl/wolfcrypt/src/pwdbased.c,
+				wolfssl/wolfcrypt/src/random.c,
+				wolfssl/wolfcrypt/src/rsa.c,
+				wolfssl/wolfcrypt/src/sha.c,
+				wolfssl/wolfcrypt/src/sha256.c,
+				wolfssl/wolfcrypt/src/sha512.c,
+				wolfssl/wolfcrypt/src/signature.c,
+				wolfssl/wolfcrypt/src/sp_c64.c,
+				wolfssl/wolfcrypt/src/sp_int.c,
+				wolfssl/wolfcrypt/src/wc_encrypt.c,
+				wolfssl/wolfcrypt/src/wc_port.c,
+				wolfssl/wolfcrypt/src/wolfmath.c,
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 		};
@@ -502,8 +570,6 @@
 				CB71CDC82F837D11002B9E1D /* Anywhere Widget */,
 			);
 			name = "Anywhere Widget";
-			packageProductDependencies = (
-			);
 			productName = WidgetExtension;
 			productReference = CB71CDC32F837D11002B9E1D /* Anywhere Widget.appex */;
 			productType = "com.apple.product-type.app-extension";
@@ -777,15 +843,22 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 193;
+				CURRENT_PROJECT_VERSION = 194;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"WOLFSSL_USER_SETTINGS=1",
+					"WC_CONFIG_H_INCLUDED=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)/Shared/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/wolfssl\"",
+					"\"$(SRCROOT)/Shared/wolfssl/wolfssl\"",
+				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -822,15 +895,22 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 193;
+				CURRENT_PROJECT_VERSION = 194;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"WOLFSSL_USER_SETTINGS=1",
+					"WC_CONFIG_H_INCLUDED=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)/Shared/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/wolfssl\"",
+					"\"$(SRCROOT)/Shared/wolfssl/wolfssl\"",
+				);
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -866,17 +946,22 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 193;
+				CURRENT_PROJECT_VERSION = 194;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"WOLFSSL_USER_SETTINGS=1",
+					"WC_CONFIG_H_INCLUDED=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
 					"\"$(SRCROOT)/Shared/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/wolfssl\"",
+					"\"$(SRCROOT)/Shared/wolfssl/wolfssl\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
@@ -911,17 +996,22 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 193;
+				CURRENT_PROJECT_VERSION = 194;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"WOLFSSL_USER_SETTINGS=1",
+					"WC_CONFIG_H_INCLUDED=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
 					"\"$(SRCROOT)/Shared/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/wolfssl\"",
+					"\"$(SRCROOT)/Shared/wolfssl/wolfssl\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
@@ -957,14 +1047,21 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 193;
+				CURRENT_PROJECT_VERSION = 194;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"WOLFSSL_USER_SETTINGS=1",
+					"WC_CONFIG_H_INCLUDED=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)/Shared/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/wolfssl\"",
+					"\"$(SRCROOT)/Shared/wolfssl/wolfssl\"",
+				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -999,14 +1096,21 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 193;
+				CURRENT_PROJECT_VERSION = 194;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"WOLFSSL_USER_SETTINGS=1",
+					"WC_CONFIG_H_INCLUDED=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"$(SRCROOT)/Shared/ngtcp2\"",
+					"\"$(SRCROOT)/Shared/wolfssl\"",
+					"\"$(SRCROOT)/Shared/wolfssl/wolfssl\"",
+				);
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1041,7 +1145,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 193;
+				CURRENT_PROJECT_VERSION = 194;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
@@ -1073,7 +1177,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 193;
+				CURRENT_PROJECT_VERSION = 194;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";

@@ -119,8 +119,6 @@ final class HysteriaSession {
     }
 
     private func startConnection() {
-        QUICCrypto.registerCallbacks()
-
         quic.connectionClosedHandler = { [weak self] error in
             self?.failSession(error)
         }

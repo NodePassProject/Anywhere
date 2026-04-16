@@ -12,21 +12,6 @@ extension LWIPStack {
 
     // MARK: - Output Batching
 
-    /// Flushes accumulated output packets to the TUN device immediately.
-    ///
-    /// Called inline from download write paths (``LWIPTCPConnection.writeToLWIP``
-    /// and ``drainPendingWrite``) to eliminate the extra dispatch-cycle latency
-    /// of the deferred ``lwipQueue.async`` flush. The deferred path still serves
-    /// as the fallback for output generated during input batch processing
-    /// (``startReadingPackets`` → ``lwip_bridge_input`` loop), where batching
-    /// across many connections is desirable.
-    ///
-    /// Safe to call at any time on lwipQueue — ``flushOutputPackets`` is a no-op
-    /// when there are no accumulated packets or a write is already in flight.
-    func flushOutputInline() {
-        flushOutputPackets()
-    }
-
     /// Flushes accumulated output packets to the TUN device in a single writePackets call.
     /// Called via deferred lwipQueue.async after the current batch of lwip_bridge_input
     /// calls completes. Reduces kernel crossings from N to 1 per processing cycle.

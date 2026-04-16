@@ -89,16 +89,18 @@ private func reshapeData(_ data: Data) -> [Data] {
         return [data]
     }
 
-    // Find last occurrence of TLS application data header (0x17 0x03 0x03) in valid range
+    // Find last occurrence of TLS application data header (0x17 0x03 0x03) in valid range.
+    // Cap the backward scan at reshapeThreshold: positions above it can never be accepted,
+    // so scanning them is pure waste. Without this bound, each recursion level scans the
+    // full remaining suffix (~n bytes), making total work O(n log n) instead of O(n).
     var splitIndex = data.count / 2
     data.withUnsafeBytes { ptr in
         let bytes = ptr.bindMemory(to: UInt8.self)
-        for i in stride(from: bytes.count - 3, through: 0, by: -1) {
+        let scanStart = min(bytes.count - 3, reshapeThreshold)
+        for i in stride(from: scanStart, through: 21, by: -1) {
             if bytes[i] == 0x17 && bytes[i + 1] == 0x03 && bytes[i + 2] == 0x03 {
-                if i >= 21 && i <= reshapeThreshold {
-                    splitIndex = i
-                    break
-                }
+                splitIndex = i
+                break
             }
         }
     }
@@ -140,38 +142,42 @@ func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficStat
 
     let uuidLen = state.writeOnceUserUUID != nil ? 16 : 0
     let totalLen = uuidLen + 5 + Int(contentLen) + Int(paddingLen)
-    var result = Data(count: totalLen)
-    result.withUnsafeMutableBytes { ptr in
-        let p = ptr.bindMemory(to: UInt8.self)
-        var offset = 0
 
-        // Add UUID on first packet
-        if let uuid = state.writeOnceUserUUID {
-            uuid.copyBytes(to: p.baseAddress! + offset, count: 16)
-            offset += 16
-        }
+    // Allocate without zero-fill — every byte is overwritten below. Ownership
+    // transfers to the returned Data via `.free` deallocator, matching the
+    // pattern used for lwIP output and RawTCPSocket receive buffers.
+    let raw = malloc(totalLen)!
+    let p = raw.assumingMemoryBound(to: UInt8.self)
+    var offset = 0
 
-        // Add command header: [command (1)] [contentLen (2)] [paddingLen (2)]
-        p[offset] = command.rawValue; offset += 1
-        p[offset] = UInt8(contentLen >> 8); offset += 1
-        p[offset] = UInt8(contentLen & 0xFF); offset += 1
-        p[offset] = UInt8(paddingLen >> 8); offset += 1
-        p[offset] = UInt8(paddingLen & 0xFF); offset += 1
-
-        // Add content
-        if let data = data {
-            data.copyBytes(to: p.baseAddress! + offset, count: data.count)
-            offset += data.count
-        }
-
-        // Add random padding
-        if paddingLen > 0 {
-            _ = SecRandomCopyBytes(kSecRandomDefault, Int(paddingLen), p.baseAddress! + offset)
-        }
+    if let uuid = state.writeOnceUserUUID {
+        uuid.copyBytes(to: p + offset, count: 16)
+        offset += 16
     }
-    state.writeOnceUserUUID = nil
 
-    return result
+    // Command header: [command (1)] [contentLen (2)] [paddingLen (2)]
+    p[offset] = command.rawValue; offset += 1
+    p[offset] = UInt8(contentLen >> 8); offset += 1
+    p[offset] = UInt8(contentLen & 0xFF); offset += 1
+    p[offset] = UInt8(paddingLen >> 8); offset += 1
+    p[offset] = UInt8(paddingLen & 0xFF); offset += 1
+
+    if let data = data {
+        data.copyBytes(to: p + offset, count: data.count)
+        offset += data.count
+    }
+
+    // Vision padding is discarded by the peer after reading the declared
+    // paddingLen — it exists purely to obscure record-size patterns on the
+    // wire. arc4random_buf (ChaCha20-based userspace CSPRNG) produces
+    // statistically indistinguishable bytes without SecRandomCopyBytes'
+    // per-call overhead.
+    if paddingLen > 0 {
+        arc4random_buf(p + offset, Int(paddingLen))
+    }
+
+    state.writeOnceUserUUID = nil
+    return Data(bytesNoCopy: raw, count: totalLen, deallocator: .free)
 }
 
 /// Remove Vision padding from data and extract content
@@ -453,6 +459,12 @@ class VLESSVisionConnection: ProxyConnection {
         // Reshape oversized buffers to ensure room for the 21-byte Vision padding header
         let chunks = reshapeData(data)
 
+        // Each padded chunk is hard-capped at 8192 bytes (Vision constraint enforced
+        // by visionPadding's maxPadding clamp). Reserve that upper bound plus the
+        // optional one-time UUID prefix to avoid log-N growth reallocations as
+        // visionPadding results are appended.
+        let reserved = chunks.count * 8192 + 16
+
         // Check if this is TLS application data and we should end padding
         let startIdx = data.startIndex
         if trafficState.isTLS && data.count >= 6 &&
@@ -463,6 +475,7 @@ class VLESSVisionConnection: ProxyConnection {
 
             // End padding mode — pad each chunk, last one gets the terminal command
             var result = Data()
+            result.reserveCapacity(reserved)
             for (i, chunk) in chunks.enumerated() {
                 if i == chunks.count - 1 {
                     var command: VisionCommand = .paddingEnd
@@ -483,6 +496,7 @@ class VLESSVisionConnection: ProxyConnection {
         if !trafficState.isTLS12orAbove && trafficState.numberOfPacketsToFilter <= 1 {
             trafficState.writerIsPadding = false
             var result = Data()
+            result.reserveCapacity(reserved)
             for (i, chunk) in chunks.enumerated() {
                 let cmd: VisionCommand = (i == chunks.count - 1) ? .paddingEnd : .paddingContinue
                 result.append(visionPadding(data: chunk, command: cmd, state: trafficState, longPadding: longPadding))
@@ -492,6 +506,7 @@ class VLESSVisionConnection: ProxyConnection {
 
         // Continue with padding
         var result = Data()
+        result.reserveCapacity(reserved)
         for chunk in chunks {
             result.append(visionPadding(data: chunk, command: .paddingContinue, state: trafficState, longPadding: longPadding))
         }

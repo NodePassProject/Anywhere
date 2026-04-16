@@ -556,11 +556,12 @@ class TLSRecordConnection {
         var nonce = clientIV
         xorSeqIntoNonce(&nonce, seqNum: seqNum)
 
-        var innerPlaintext = Data(count: innerLen)
-        innerPlaintext.withUnsafeMutableBytes { buffer in
-            plaintext.copyBytes(to: buffer)
-            buffer[plaintext.count] = contentType
-        }
+        // Allocate without zero-fill — every byte is overwritten below.
+        let rawInner = malloc(innerLen)!
+        let innerPtr = rawInner.assumingMemoryBound(to: UInt8.self)
+        plaintext.copyBytes(to: innerPtr, count: plaintext.count)
+        innerPtr[plaintext.count] = contentType
+        let innerPlaintext = Data(bytesNoCopy: rawInner, count: innerLen, deallocator: .free)
 
         let aad = Data([0x17, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
 

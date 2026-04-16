@@ -1,0 +1,289 @@
+/* curve25519.h
+ *
+ * Copyright (C) 2006-2026 wolfSSL Inc.
+ *
+ * This file is part of wolfSSL.
+ *
+ * wolfSSL is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfSSL is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335, USA
+ */
+
+/*!
+    \file wolfssl/wolfcrypt/curve25519.h
+*/
+
+
+#ifndef WOLF_CRYPT_CURVE25519_H
+#define WOLF_CRYPT_CURVE25519_H
+
+#include <wolfssl/wolfcrypt/types.h>
+
+#ifdef HAVE_CURVE25519
+
+#include <wolfssl/wolfcrypt/fe_operations.h>
+#include <wolfssl/wolfcrypt/random.h>
+
+#ifdef WOLFSSL_ASYNC_CRYPT
+    #include <wolfssl/wolfcrypt/async.h>
+#endif
+
+#ifdef __cplusplus
+    extern "C" {
+#endif
+
+#define CURVE25519_KEYSIZE 32
+#define CURVE25519_PUB_KEY_SIZE 32
+#define CURVE25519_MAX_KEY_TO_DER_SZ 82 /* for exported DER keys temp buffer */
+
+#ifdef WOLFSSL_NAMES_STATIC
+typedef char curve25519_str[12];
+#else
+typedef const char* curve25519_str;
+#endif
+
+/* curve25519 set type */
+typedef struct {
+    int size;             /* The size of the curve in octets */
+    curve25519_str name; /* name of this curve */
+} curve25519_set_type;
+
+
+/* ECC point, the internal structure is Little endian
+ * the mathematical functions used the endianness */
+typedef struct ECPoint {
+    ALIGN16 byte point[CURVE25519_KEYSIZE];
+#ifdef FREESCALE_LTC_ECC
+    ALIGN16 byte pointY[CURVE25519_KEYSIZE];
+#endif
+    byte pointSz;
+} ECPoint;
+
+#ifndef WC_CURVE25519KEY_TYPE_DEFINED
+    typedef struct curve25519_key curve25519_key;
+    #define WC_CURVE25519KEY_TYPE_DEFINED
+#endif
+
+#ifdef WC_X25519_NONBLOCK
+
+typedef struct fe_inv__distinct_nb_ctx_t {
+    int state;
+    int subState;
+    byte s[F25519_SIZE];
+    int i;
+} fe_inv__distinct_nb_ctx_t;
+
+typedef struct x25519_nb_ctx_t {
+    /* state for curve25519 operation */
+    int state;
+    int subState;
+    /* state for shared secret */
+    int ssState;
+    int i;
+    int bit;
+    /* Current point: P_m */
+    byte xm[F25519_SIZE];
+    byte zm[F25519_SIZE];
+    /* Predecessor: P_(m-1) */
+    byte xm1[F25519_SIZE];
+    byte zm1[F25519_SIZE];
+    /* Temporary P_(2m+1) */
+    byte xms[F25519_SIZE];
+    byte zms[F25519_SIZE];
+    /* Temporary buffers for non-blocking diffadd/double */
+    byte a[F25519_SIZE];
+    byte b[F25519_SIZE];
+    byte da[F25519_SIZE];
+    byte cb[F25519_SIZE];
+    byte x1sq[F25519_SIZE];
+    byte z1sq[F25519_SIZE];
+    byte x1z1[F25519_SIZE];
+    fe_inv__distinct_nb_ctx_t inv_distinct_nb_ctx;
+    ECPoint o; /* point for shared secret */
+} x25519_nb_ctx_t;
+
+#endif /* WC_X25519_NONBLOCK */
+
+/* A CURVE25519 Key */
+struct curve25519_key {
+    int idx;            /* Index into the ecc_sets[] for the parameters of
+                           this curve if -1, this key is using user supplied
+                           curve in dp */
+    const curve25519_set_type* dp;   /* domain parameters, either points to
+                                   curves (idx >= 0) or user supplied */
+    ECPoint      p;                     /* public point for key  */
+    ALIGN16 byte k[CURVE25519_KEYSIZE]; /* private scaler for key */
+
+#ifdef WOLFSSL_ASYNC_CRYPT
+    WC_ASYNC_DEV asyncDev;
+#endif
+#if defined(WOLF_CRYPTO_CB)
+    void* devCtx;
+    int devId;
+#endif
+    void *heap;
+#ifdef WOLFSSL_CURVE25519_BLINDING
+    WC_RNG* rng;
+#endif
+#ifdef WOLFSSL_SE050
+    word32 keyId;
+    byte   keyIdSet;
+#endif
+
+#ifdef WC_X25519_NONBLOCK
+    x25519_nb_ctx_t* nb_ctx;
+#endif /* WC_X25519_NONBLOCK */
+
+    /* bit fields */
+    WC_BITFIELD pubSet:1;
+    WC_BITFIELD privSet:1;
+};
+
+enum {
+    EC25519_LITTLE_ENDIAN=0,
+    EC25519_BIG_ENDIAN=1
+};
+
+WOLFSSL_API
+int wc_curve25519_make_pub(int public_size, byte* pub, int private_size,
+                           const byte* priv);
+#ifdef WOLFSSL_CURVE25519_BLINDING
+WOLFSSL_API
+int wc_curve25519_make_pub_blind(int public_size, byte* pub, int private_size,
+                                 const byte* priv, WC_RNG* rng);
+#endif
+
+WOLFSSL_API
+int wc_curve25519_generic(int public_size, byte* pub,
+                          int private_size, const byte* priv,
+                          int basepoint_size, const byte* basepoint);
+#ifdef WOLFSSL_CURVE25519_BLINDING
+WOLFSSL_API
+int wc_curve25519_generic_blind(int public_size, byte* pub,
+                                int private_size, const byte* priv,
+                                int basepoint_size, const byte* basepoint,
+                                WC_RNG* rng);
+#endif
+
+WOLFSSL_API
+int wc_curve25519_make_priv(WC_RNG* rng, int keysize, byte* priv);
+
+WOLFSSL_API
+int wc_curve25519_make_key(WC_RNG* rng, int keysize, curve25519_key* key);
+
+#ifdef WC_X25519_NONBLOCK
+
+/*!
+    \brief Enable non-blocking support for X25519 operations on a key.
+           When enabled, wc_curve25519_make_key() and
+           wc_curve25519_shared_secret() will return FP_WOULDBLOCK during
+           operation, allowing the caller to
+           yield and resume. Requires WC_X25519_NONBLOCK and CURVE25519_SMALL.
+
+    \param key   Pointer to curve25519_key structure to configure
+    \param ctx   Pointer to x25519_nb_ctx_t context for state tracking,
+                 or NULL to disable non-blocking mode
+
+    \return 0 on success, BAD_FUNC_ARG if key is NULL
+*/
+WOLFSSL_API
+int wc_curve25519_set_nonblock(curve25519_key* key, x25519_nb_ctx_t* ctx);
+
+#endif /* WC_X25519_NONBLOCK */
+
+WOLFSSL_API
+int wc_curve25519_shared_secret(curve25519_key* private_key,
+                                curve25519_key* public_key,
+                                byte* out, word32* outlen);
+
+WOLFSSL_API
+int wc_curve25519_shared_secret_ex(curve25519_key* private_key,
+                                   curve25519_key* public_key,
+                                   byte* out, word32* outlen, int endian);
+
+WOLFSSL_API
+int wc_curve25519_init(curve25519_key* key);
+WOLFSSL_API
+int wc_curve25519_init_ex(curve25519_key* key, void* heap, int devId);
+
+WOLFSSL_API
+void wc_curve25519_free(curve25519_key* key);
+
+#ifdef WOLFSSL_CURVE25519_BLINDING
+WOLFSSL_API
+int wc_curve25519_set_rng(curve25519_key* key, WC_RNG* rng);
+#endif
+
+#ifndef WC_NO_CONSTRUCTORS
+WOLFSSL_API
+curve25519_key* wc_curve25519_new(void* heap, int devId, int *result_code);
+WOLFSSL_API
+int wc_curve25519_delete(curve25519_key* key, curve25519_key** key_p);
+#endif
+
+/* raw key helpers */
+WOLFSSL_API
+int wc_curve25519_import_private(const byte* priv, word32 privSz,
+                                 curve25519_key* key);
+WOLFSSL_API
+int wc_curve25519_import_private_ex(const byte* priv, word32 privSz,
+                                    curve25519_key* key, int endian);
+
+WOLFSSL_API
+int wc_curve25519_import_private_raw(const byte* priv, word32 privSz,
+                            const byte* pub, word32 pubSz, curve25519_key* key);
+WOLFSSL_API
+int wc_curve25519_import_private_raw_ex(const byte* priv, word32 privSz,
+                                        const byte* pub, word32 pubSz,
+                                        curve25519_key* key, int endian);
+WOLFSSL_API
+int wc_curve25519_export_private_raw(curve25519_key* key, byte* out,
+                                     word32* outLen);
+WOLFSSL_API
+int wc_curve25519_export_private_raw_ex(curve25519_key* key, byte* out,
+                                        word32* outLen, int endian);
+
+WOLFSSL_API
+int wc_curve25519_import_public(const byte* in, word32 inLen,
+                                curve25519_key* key);
+WOLFSSL_API
+int wc_curve25519_import_public_ex(const byte* in, word32 inLen,
+                                   curve25519_key* key, int endian);
+WOLFSSL_API
+int wc_curve25519_check_public(const byte* pub, word32 pubSz, int endian);
+
+WOLFSSL_API
+int wc_curve25519_export_public(curve25519_key* key, byte* out, word32* outLen);
+WOLFSSL_API
+int wc_curve25519_export_public_ex(curve25519_key* key, byte* out,
+                                   word32* outLen, int endian);
+
+WOLFSSL_API
+int wc_curve25519_export_key_raw(curve25519_key* key,
+                                 byte* priv, word32 *privSz,
+                                 byte* pub, word32 *pubSz);
+WOLFSSL_API
+int wc_curve25519_export_key_raw_ex(curve25519_key* key,
+                                    byte* priv, word32 *privSz,
+                                    byte* pub, word32 *pubSz,
+                                    int endian);
+/* size helper */
+WOLFSSL_API
+int wc_curve25519_size(curve25519_key* key);
+
+#ifdef __cplusplus
+    }    /* extern "C" */
+#endif
+
+#endif /* HAVE_CURVE25519 */
+#endif /* WOLF_CRYPT_CURVE25519_H */

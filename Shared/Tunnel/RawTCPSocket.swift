@@ -703,6 +703,12 @@ class RawTCPSocket: RawTransport {
 
     /// Attempts one `recv(2)`. Arms the read source on `EAGAIN`. Must run on
     /// `ioQueue`.
+    ///
+    /// Allocates the receive buffer with `malloc` and hands ownership to the
+    /// completion via `Data(bytesNoCopy:deallocator:.free)`. Compared to
+    /// `Data(count:)`, this skips the zero-fill of the capacity bytes (~cap of
+    /// memset per call) and the `__DataStorage` allocation's initialization
+    /// path. On failure paths the buffer is explicitly freed.
     private func tryReceive() {
         guard let req = pendingReceive else { return }
         guard socketFD >= 0 else {
@@ -711,23 +717,27 @@ class RawTCPSocket: RawTransport {
             return
         }
         let cap = max(1, req.max)
-        var buf = Data(count: cap)
-        let fd = socketFD
-        let n = buf.withUnsafeMutableBytes { raw -> Int in
-            guard let base = raw.baseAddress else { return -1 }
-            return Darwin.recv(fd, base, cap, 0)
+        guard let ptr = malloc(cap) else {
+            pendingReceive = nil
+            disarmReadSource()
+            req.completion(nil, true, SocketError.receiveFailed("malloc failed"))
+            return
         }
+        let fd = socketFD
+        let n = Darwin.recv(fd, ptr, cap, 0)
         if n > 0 {
-            buf.count = n
+            let buf = Data(bytesNoCopy: ptr, count: n, deallocator: .free)
             pendingReceive = nil
             disarmReadSource()
             req.completion(buf, false, nil)
         } else if n == 0 {
+            free(ptr)
             receivedEOF = true
             pendingReceive = nil
             disarmReadSource()
             req.completion(nil, true, nil)
         } else {
+            free(ptr)
             let e = errno
             if e == EAGAIN || e == EWOULDBLOCK || e == EINTR {
                 armReadSource()
