@@ -66,6 +66,13 @@ final class TLSSession {
     /// custom-CH callback's `const unsigned char*` stays valid.
     var clientHelloBody: [UInt8] = []
 
+    /// Set from `certVerifyCallback` when SecTrust rejects the leaf chain
+    /// (and no pinned fingerprint matches). Read from the handshake pump
+    /// right after `wolfSSL_connect` returns so the caller can distinguish
+    /// "bad certificate" from a generic handshake failure, and fail fast
+    /// instead of waiting for wolfSSL to wind down through alert/close.
+    var certificateRejected = false
+
     init(ctx: OpaquePointer, ssl: OpaquePointer, queue: DispatchQueue) {
         self.ctx = ctx
         self.ssl = ssl

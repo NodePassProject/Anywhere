@@ -6,22 +6,30 @@
 //
 
 import Foundation
-import Darwin
+import Network
 
 private let logger = AnywhereLogger(category: "RawUDPSocket")
 
 // MARK: - RawUDPSocket
 
-/// UDP transport over a connected non-blocking POSIX `SOCK_DGRAM`.
+/// UDP transport built on Apple's `Network` framework.
 ///
-/// DNS goes through ``ProxyDNSCache``. Reads are driven by a
-/// `DispatchSourceRead` that loops `recv(2)` until `EAGAIN`, so one
-/// wake-up drains a burst of packets. Sends are non-blocking `send(2)`;
-/// `EAGAIN` drops the datagram (the upper layer retransmits).
+/// DNS goes through ``ProxyDNSCache`` so resolution bypasses the VPN tunnel.
+/// Each resolved IP is tried in order and wrapped in an `NWEndpoint.Host`
+/// literal, so `Network` never issues its own DNS lookup. Reads are driven by
+/// a self-re-arming `receiveMessage` chain — one datagram per callback — and
+/// sends are non-blocking; if `NWConnection`'s internal queue is full the
+/// error surfaces through the send completion.
 ///
-/// All I/O runs on the internal `ioQueue`. The connect completion and
-/// receive handler fire on the caller's queue when supplied; `send`,
-/// `startReceiving`, and `cancel` are safe to call from any thread.
+/// All I/O runs on the internal `ioQueue`. The connect completion fires on
+/// the caller-supplied queue; the receive handler fires on its own queue when
+/// supplied (otherwise on `ioQueue`). `send`, `startReceiving`, and `cancel`
+/// are safe to call from any thread.
+///
+/// ### Known limitation vs. BSD sockets
+/// `NWConnection` does not expose `SO_SNDBUF` / `SO_RCVBUF`, so the kernel
+/// socket buffer defaults apply. The previous POSIX implementation tuned
+/// both to 4 MiB; there is no direct equivalent in the `Network` framework.
 final class RawUDPSocket {
 
     enum State {
@@ -29,17 +37,6 @@ final class RawUDPSocket {
         case ready
         case cancelled
     }
-
-    // MARK: Constants
-
-    /// 65 KiB covers the largest possible UDP payload. Reused across
-    /// `recv(2)` calls so the loop only allocates for the per-packet
-    /// `Data` copy handed to the handler.
-    private static let receiveBufferSize = 65536
-
-    /// Kernel socket buffer size. macOS defaults (~9 KB) cap
-    /// high-bandwidth relays at that per-RTT.
-    private static let kernelSocketBufferSize: Int32 = 4 * 1024 * 1024
 
     // MARK: State
 
@@ -59,41 +56,38 @@ final class RawUDPSocket {
 
     // MARK: Concurrency
 
-    /// Serial queue for all socket I/O and state transitions.
+    /// Serial queue for all I/O and state transitions.
     private let ioQueue = DispatchQueue(label: "com.argsment.Anywhere.RawUDPSocket",
                                         qos: .userInitiated)
 
-    // MARK: Socket
+    // MARK: Connection
 
-    /// Socket file descriptor. `-1` when no socket is open.
-    private var socketFD: Int32 = -1
-
-    /// Fires on socket readability; handler drains to `EAGAIN`.
-    private var readSource: DispatchSourceRead?
+    /// The active `NWConnection`. Mutated only on `ioQueue`.
+    private var connection: NWConnection?
 
     // MARK: Receive
 
     private var receiveHandler: ((Data) -> Void)?
     private var receiveHandlerQueue: DispatchQueue?
-    private var rxBuffer = [UInt8](repeating: 0, count: RawUDPSocket.receiveBufferSize)
 
     // MARK: - Lifecycle
 
     init() {}
 
     deinit {
-        // Defensive: if `cancel()` wasn't called, still close the fd so we
-        // don't leak a descriptor.
-        if socketFD >= 0 {
-            _ = Darwin.close(socketFD)
-            socketFD = -1
+        // Defensive: if `cancel()` wasn't called, still tear down so we don't
+        // leak an NWConnection.
+        if let conn = connection {
+            conn.stateUpdateHandler = nil
+            conn.cancel()
+            connection = nil
         }
     }
 
     // MARK: - Connect
 
-    /// Resolves `host` via ``ProxyDNSCache`` and creates a connected
-    /// non-blocking UDP socket to `port`.
+    /// Resolves `host` via ``ProxyDNSCache`` and creates a connected UDP
+    /// `NWConnection` to `port`.
     ///
     /// - Parameters:
     ///   - host: Remote hostname or literal IP.
@@ -121,64 +115,88 @@ final class RawUDPSocket {
                 return
             }
 
-            // Try each resolved IP in order, matching RawTCPSocket's behavior on
-            // mixed v4/v6 records.
-            var lastError: SocketError?
-            for ip in ips {
-                switch self.attemptConnect(ip: ip, port: port) {
-                case .success:
-                    self.stateLock.withLock { self._state = .ready }
-                    self.armReadSource()
-                    completionQueue.async { completion(nil) }
-                    return
-                case .failure(let error):
-                    lastError = error
+            // Try each resolved IP in order, matching the prior POSIX
+            // implementation's behavior on mixed v4/v6 records.
+            self.attemptConnect(ips: ips, index: 0, port: port,
+                                completionQueue: completionQueue, completion: completion)
+        }
+    }
+
+    /// Tries `ips[index]`, then recurses on failure. Must run on `ioQueue`.
+    private func attemptConnect(ips: [String], index: Int, port: UInt16,
+                                completionQueue: DispatchQueue,
+                                completion: @escaping (Error?) -> Void) {
+        if case .cancelled = state {
+            completionQueue.async { completion(SocketError.connectionFailed("Cancelled")) }
+            return
+        }
+        guard index < ips.count else {
+            completionQueue.async { completion(SocketError.connectionFailed("All addresses failed")) }
+            return
+        }
+
+        let ip = ips[index]
+        guard let nwHost = Self.hostFromIP(ip), let nwPort = NWEndpoint.Port(rawValue: port) else {
+            logger.debug("[UDP] invalid IP literal for \(ip):\(port)")
+            attemptConnect(ips: ips, index: index + 1, port: port,
+                           completionQueue: completionQueue, completion: completion)
+            return
+        }
+
+        let endpoint = NWEndpoint.hostPort(host: nwHost, port: nwPort)
+        let params = NWParameters(dtls: nil, udp: NWProtocolUDP.Options())
+        params.includePeerToPeer = false
+        let conn = NWConnection(to: endpoint, using: params)
+        connection = conn
+
+        conn.stateUpdateHandler = { [weak self] newState in
+            guard let self else { return }
+            // Stale event from a replaced connection.
+            guard conn === self.connection else { return }
+
+            switch newState {
+            case .ready:
+                let promoted: Bool = self.stateLock.withLock {
+                    if case .setup = self._state {
+                        self._state = .ready
+                        return true
+                    }
+                    return false
                 }
+                // Handler no longer needed; receive errors will surface via
+                // `receiveMessage` completions instead.
+                conn.stateUpdateHandler = nil
+                if !promoted {
+                    // We were cancelled between scheduling and .ready.
+                    return
+                }
+                self.armReceive(for: conn)
+                completionQueue.async { completion(nil) }
+            case .failed(let error), .waiting(let error):
+                logger.debug("[UDP] connection failed for \(ip): \(error.localizedDescription)")
+                conn.stateUpdateHandler = nil
+                self.connection = nil
+                conn.cancel()
+                self.attemptConnect(ips: ips, index: index + 1, port: port,
+                                    completionQueue: completionQueue, completion: completion)
+            case .cancelled, .preparing, .setup:
+                break
+            @unknown default:
+                break
             }
-
-            let err = lastError ?? SocketError.connectionFailed("All addresses failed")
-            completionQueue.async { completion(err) }
         }
+        conn.start(queue: ioQueue)
     }
 
-    /// Builds a sockaddr from `ip`, creates the socket, applies options, and
-    /// calls `connect(2)`. Must run on `ioQueue`.
-    private func attemptConnect(ip: String, port: UInt16) -> Result<Void, SocketError> {
-        guard let endpoint = IPEndpoint(ip: ip, port: port) else {
-            return .failure(.connectionFailed("inet_pton failed for \(ip)"))
+    /// Parses an IPv4/IPv6 literal into an `NWEndpoint.Host`.
+    private static func hostFromIP(_ ip: String) -> NWEndpoint.Host? {
+        if ip.contains(":") {
+            guard let addr = IPv6Address(ip) else { return nil }
+            return .ipv6(addr)
+        } else {
+            guard let addr = IPv4Address(ip) else { return nil }
+            return .ipv4(addr)
         }
-
-        let fd = Darwin.socket(endpoint.family, SOCK_DGRAM, 0)
-        guard fd >= 0 else {
-            return .failure(.socketCreationFailed("socket() errno=\(errno)"))
-        }
-
-        guard SocketHelpers.makeNonBlocking(fd) else {
-            let e = errno
-            _ = Darwin.close(fd)
-            return .failure(.socketCreationFailed("fcntl(O_NONBLOCK) errno=\(e)"))
-        }
-
-        applyUDPSocketOptions(fd: fd)
-
-        let rc = endpoint.withSockAddr { sa, len in
-            Darwin.connect(fd, sa, len)
-        }
-        if rc != 0 {
-            let err = errno
-            _ = Darwin.close(fd)
-            return .failure(.connectionFailed("connect() errno=\(err)"))
-        }
-
-        socketFD = fd
-        return .success(())
-    }
-
-    /// Applies Darwin-specific UDP socket options.
-    private func applyUDPSocketOptions(fd: Int32) {
-        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_NOSIGPIPE, value: 1)
-        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_SNDBUF, value: Self.kernelSocketBufferSize)
-        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_RCVBUF, value: Self.kernelSocketBufferSize)
     }
 
     // MARK: - Receive
@@ -194,45 +212,24 @@ final class RawUDPSocket {
         }
     }
 
-    /// Arms the read source. Runs on `ioQueue` via the connect path.
-    private func armReadSource() {
-        guard socketFD >= 0, readSource == nil else { return }
-        let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: ioQueue)
-        source.setEventHandler { [weak self] in
-            self?.drainReads()
-        }
-        readSource = source
-        source.resume()
-    }
-
-    /// Loops `recv(2)` until `EAGAIN` so one wake-up drains a burst of
-    /// packets. Must run on `ioQueue`.
-    private func drainReads() {
-        guard socketFD >= 0 else { return }
-        while true {
-            let n = rxBuffer.withUnsafeMutableBufferPointer { buf -> Int in
-                Darwin.recv(socketFD, buf.baseAddress, buf.count, 0)
-            }
-            if n < 0 {
-                let err = errno
-                if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
-                logger.error("[RawUDP] recv errno=\(err)")
+    /// Arms a self-re-arming `receiveMessage` loop. Must run on `ioQueue`.
+    private func armReceive(for conn: NWConnection) {
+        conn.receiveMessage { [weak self] content, _, _, error in
+            guard let self else { return }
+            // Another connection took over, or we were cancelled.
+            guard conn === self.connection, case .ready = self.state else { return }
+            if let error {
+                logger.error("[RawUDP] receive error: \(error.localizedDescription)")
                 return
             }
-            if n == 0 { return }
-            guard let handler = receiveHandler else {
-                // No handler installed yet; drop but keep draining so the
-                // dispatch source stops firing.
-                continue
+            if let data = content, !data.isEmpty, let handler = self.receiveHandler {
+                if let hq = self.receiveHandlerQueue {
+                    hq.async { handler(data) }
+                } else {
+                    handler(data)
+                }
             }
-            let data = rxBuffer.withUnsafeBufferPointer { buf -> Data in
-                Data(bytes: buf.baseAddress!, count: n)
-            }
-            if let hq = receiveHandlerQueue {
-                hq.async { handler(data) }
-            } else {
-                handler(data)
-            }
+            self.armReceive(for: conn)
         }
     }
 
@@ -241,42 +238,35 @@ final class RawUDPSocket {
     /// Fire-and-forget datagram send.
     func send(data: Data) {
         ioQueue.async { [weak self] in
-            _ = self?.performSend(data)
+            guard let self, case .ready = self.state, let conn = self.connection else { return }
+            conn.send(content: data, completion: .contentProcessed { _ in })
         }
     }
 
     /// Datagram send with completion on the internal `ioQueue`.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         ioQueue.async { [weak self] in
-            let err = self?.performSend(data)
-            completion(err)
-        }
-    }
-
-    /// Issues a single `send(2)`. Must run on `ioQueue`.
-    private func performSend(_ data: Data) -> Error? {
-        guard socketFD >= 0 else { return SocketError.notConnected }
-        if case .cancelled = state {
-            return SocketError.notConnected
-        }
-        let sent = data.withUnsafeBytes { buf -> Int in
-            guard let base = buf.baseAddress else { return -1 }
-            return Darwin.send(socketFD, base, data.count, 0)
-        }
-        if sent < 0 {
-            let err = errno
-            if err == EAGAIN || err == EWOULDBLOCK {
-                // Kernel TX buffer full; drop and let the upper layer retransmit.
-                return nil
+            guard let self else {
+                completion(SocketError.notConnected)
+                return
             }
-            return SocketError.sendFailed("errno=\(err)")
+            guard case .ready = self.state, let conn = self.connection else {
+                completion(SocketError.notConnected)
+                return
+            }
+            conn.send(content: data, completion: .contentProcessed { error in
+                if let error {
+                    completion(SocketError.sendFailed(error.localizedDescription))
+                } else {
+                    completion(nil)
+                }
+            })
         }
-        return nil
     }
 
     // MARK: - Cancel
 
-    /// Latches cancelled state and tears down the socket on `ioQueue`.
+    /// Latches cancelled state and tears down the connection on `ioQueue`.
     /// Safe to call from any thread; idempotent.
     func cancel() {
         let alreadyCancelled: Bool = stateLock.withLock {
@@ -288,13 +278,10 @@ final class RawUDPSocket {
 
         ioQueue.async { [weak self] in
             guard let self else { return }
-            if let source = self.readSource {
-                source.cancel()
-                self.readSource = nil
-            }
-            if self.socketFD >= 0 {
-                _ = Darwin.close(self.socketFD)
-                self.socketFD = -1
+            if let conn = self.connection {
+                conn.stateUpdateHandler = nil
+                conn.cancel()
+                self.connection = nil
             }
             self.receiveHandler = nil
             self.receiveHandlerQueue = nil

@@ -384,6 +384,17 @@ final class TLSHandler {
         guard let session, !session.cancelled else { return }
 
         let rv = wolfSSL_connect(session.ssl)
+
+        // If the cert-verify callback rejected the server chain during this
+        // call, short-circuit with a dedicated error. wolfSSL may otherwise
+        // sit in WANT_READ waiting for bytes the server will never send,
+        // which would surface to callers as a generic timeout.
+        if session.certificateRejected {
+            deliver(.failure(TLSError.certificateValidationFailed(
+                "Server certificate chain did not pass system trust evaluation")))
+            return
+        }
+
         if rv == WOLFSSL_SUCCESS {
             flushTx(session: session) { [weak self] error in
                 guard let self else { return }
@@ -593,6 +604,14 @@ private let certVerifyCallback:
         }
         let ssl = OpaquePointer(sslVoid)
 
+        func reject() -> CInt {
+            if let sessionVoid = wolfSSL_get_ex_data(ssl, 1) {
+                Unmanaged<TLSSession>.fromOpaque(sessionVoid)
+                    .takeUnretainedValue().certificateRejected = true
+            }
+            return 0
+        }
+
         let serverName: String
         if let sniPtr = wolfSSL_get_servername(ssl, UInt8(WOLFSSL_SNI_HOST_NAME)) {
             serverName = String(cString: sniPtr)
@@ -600,7 +619,9 @@ private let certVerifyCallback:
             serverName = ""
         }
 
-        guard let stack = wolfSSL_X509_STORE_CTX_get_chain(storeCtxPtr) else { return 0 }
+        guard let stack = wolfSSL_X509_STORE_CTX_get_chain(storeCtxPtr) else {
+            return reject()
+        }
         var certs: [SecCertificate] = []
         let count = wolfSSL_sk_X509_num(stack)
         for i in 0..<count {
@@ -612,13 +633,13 @@ private let certVerifyCallback:
                 certs.append(cert)
             }
         }
-        guard let leaf = certs.first else { return 0 }
+        guard let leaf = certs.first else { return reject() }
 
         let policy = SecPolicyCreateSSL(true, serverName as CFString)
         var trust: SecTrust?
         guard SecTrustCreateWithCertificates(
             certs as CFArray, policy, &trust) == errSecSuccess,
-              let trust else { return 0 }
+              let trust else { return reject() }
 
         var evalErr: CFError?
         if SecTrustEvaluateWithError(trust, &evalErr) { return 1 }
@@ -630,7 +651,7 @@ private let certVerifyCallback:
             let hex = digest.map { String(format: "%02x", $0) }.joined()
             if pinned.contains(hex) { return 1 }
         }
-        return 0
+        return reject()
     }
 
 /// Session ticket cache — stashes the DER-encoded session into the
