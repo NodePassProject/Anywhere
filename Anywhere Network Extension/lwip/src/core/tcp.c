@@ -1298,7 +1298,13 @@ tcp_slowtmr_start:
 
             /* Reduce congestion window and ssthresh. */
             eff_wnd = LWIP_MIN(pcb->cwnd, pcb->snd_wnd);
+/* --- BEGIN ANYWHERE PATCH: softer MD on RTO (β=0.85) -------------------- */
+#ifdef ANYWHERE_LWIP_AGGRESSIVE_CC
+            pcb->ssthresh = (tcpwnd_size_t)((u64_t)eff_wnd * 17U / 20U);
+#else
             pcb->ssthresh = eff_wnd >> 1;
+#endif
+/* --- END ANYWHERE PATCH ------------------------------------------------- */
             if (pcb->ssthresh < (tcpwnd_size_t)(pcb->mss << 1)) {
               pcb->ssthresh = (tcpwnd_size_t)(pcb->mss << 1);
             }

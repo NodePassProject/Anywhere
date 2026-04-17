@@ -1798,7 +1798,13 @@ tcp_rexmit_fast(struct tcp_pcb *pcb)
     if (tcp_rexmit(pcb) == ERR_OK) {
       /* Set ssthresh to half of the minimum of the current
        * cwnd and the advertised window */
+/* --- BEGIN ANYWHERE PATCH: softer MD on fast-retransmit (β=0.85) -------- */
+#ifdef ANYWHERE_LWIP_AGGRESSIVE_CC
+      pcb->ssthresh = (tcpwnd_size_t)((u64_t)LWIP_MIN(pcb->cwnd, pcb->snd_wnd) * 17U / 20U);
+#else
       pcb->ssthresh = LWIP_MIN(pcb->cwnd, pcb->snd_wnd) / 2;
+#endif
+/* --- END ANYWHERE PATCH ------------------------------------------------- */
 
       /* The minimum value for ssthresh should be 2 MSS */
       if (pcb->ssthresh < (2U * pcb->mss)) {

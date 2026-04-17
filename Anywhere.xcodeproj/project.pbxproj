@@ -85,8 +85,27 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
+				lwip/MODIFICATIONS.md,
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
+		};
+		CB578D672F929F5600AA2F8B /* Exceptions for "Shared" folder in "Anywhere TV" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				wolfssl/MODIFICATIONS.md,
+				wolfssl/VERSION,
+				wolfssl/wolfssl/openssl/include.am,
+			);
+			target = CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */;
+		};
+		CB578D682F929F5800AA2F8B /* Exceptions for "Shared" folder in "Anywhere" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				wolfssl/MODIFICATIONS.md,
+				wolfssl/VERSION,
+				wolfssl/wolfssl/openssl/include.am,
+			);
+			target = CB1C10642F23B81500B74CD8 /* Anywhere */;
 		};
 		CB650E422F6307AF00C85E4A /* Exceptions for "Protocols" folder in "Anywhere Network Extension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
@@ -399,6 +418,8 @@
 		CB7A00022F65700100C85E4A /* Shared */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
+				CB578D682F929F5800AA2F8B /* Exceptions for "Shared" folder in "Anywhere" target */,
+				CB578D672F929F5600AA2F8B /* Exceptions for "Shared" folder in "Anywhere TV" target */,
 				CB65476A2F65715600C85E4A /* Exceptions for "Shared" folder in "Anywhere Network Extension" target */,
 				CB71D2EE2F838FF3002B9E1D /* Exceptions for "Shared" folder in "Anywhere Widget" target */,
 			);
@@ -858,7 +879,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 199;
+				CURRENT_PROJECT_VERSION = 200;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -910,7 +931,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 199;
+				CURRENT_PROJECT_VERSION = 200;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -961,7 +982,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 199;
+				CURRENT_PROJECT_VERSION = 200;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1011,7 +1032,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 199;
+				CURRENT_PROJECT_VERSION = 200;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1062,7 +1083,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 199;
+				CURRENT_PROJECT_VERSION = 200;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1111,7 +1132,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 199;
+				CURRENT_PROJECT_VERSION = 200;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1160,7 +1181,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 199;
+				CURRENT_PROJECT_VERSION = 200;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
@@ -1192,7 +1213,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 199;
+				CURRENT_PROJECT_VERSION = 200;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
