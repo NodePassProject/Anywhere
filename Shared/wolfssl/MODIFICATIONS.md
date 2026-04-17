@@ -48,7 +48,7 @@ caller for the wire bytes.
 | `user_settings.h`           | adds `ANYWHERE_CUSTOM_CLIENT_HELLO` define                                | n/a (project-owned file)          |
 | `wolfssl/ssl.h`             | public API declarations for the four new setter/cb functions              | `ANYWHERE PATCH: custom-CH API`   |
 | `wolfssl/internal.h`        | two fields on `struct WOLFSSL` (callback pointer + user ctx)              | `ANYWHERE PATCH: custom-CH state` |
-| `src/tls13.c`               | one branch in `SendTls13ClientHello` (client-hello body substitution)     | `ANYWHERE PATCH: custom-CH emit`  |
+| `src/tls13.c`               | two branches in `SendTls13ClientHello` (body substitution + PSK binder guard) | `ANYWHERE PATCH: custom-CH emit`, `ANYWHERE PATCH: skip PSK binders for custom-CH` |
 
 ### Files added
 
@@ -60,7 +60,8 @@ caller for the wire bytes.
 
 | Symbol | File | Upstream line (v5.9.1) | Change |
 |---|---|---|---|
-| `SendTls13ClientHello`      | `src/tls13.c`               | 4572 | Inside `TLS_ASYNC_FINALIZE`, right after the in-tree body write, branch on `ssl->anywhereChCb`. If set, invoke callback, grow the output buffer if needed, re-stamp headers via `AddTls13Headers`, `memcpy` custom body into place, adjust `args->idx`/`args->length`/`args->sendSz`. Then **re-copy the 32 random bytes from the custom body into `ssl->arrays->clientRandom`** so every downstream path that hashes client_random (1.3 key schedule, Finished, 1.2 PRF after downgrade, ECDHE SignatureVerify) sees what actually went on the wire — wolfSSL's `CONNECT_BEGIN` branch earlier in the same function regenerates a fresh random into `clientRandom` that the injected body has since replaced. Downstream `HashOutput` at upstream line 4995 runs unmodified over the injected body. |
+| `SendTls13ClientHello`      | `src/tls13.c`               | 4572 | **Body substitution (custom-CH emit):** Inside `TLS_ASYNC_FINALIZE`, right after the in-tree body write, branch on `ssl->anywhereChCb`. If set, invoke callback, grow the output buffer if needed, re-stamp headers via `AddTls13Headers`, `memcpy` custom body into place, adjust `args->idx`/`args->length`/`args->sendSz`. Then **re-copy the 32 random bytes from the custom body into `ssl->arrays->clientRandom`** so every downstream path that hashes client_random (1.3 key schedule, Finished, 1.2 PRF after downgrade, ECDHE SignatureVerify) sees what actually went on the wire — wolfSSL's `CONNECT_BEGIN` branch earlier in the same function regenerates a fresh random into `clientRandom` that the injected body has since replaced. |
+| `SendTls13ClientHello`      | `src/tls13.c`               | 5049 | **PSK binder skip (custom-CH binder guard):** Immediately before the `WritePSKBinders` branch, guard on `ssl->anywhereChCb`. When set, skip binders and fall through to `HashOutput`. `TLSX_PopulateExtensions` may add `TLSX_PRE_SHARED_KEY` to `ssl->extensions` (e.g. for session resumption). The upstream `WritePSKBinders` subtracts the binder length from `args->idx` to locate the binder slot — but the injected body has no `pre_shared_key` extension, so the write lands inside the custom body and corrupts it (server responds with `decode_error`). |
 
 ### Functions added (entirely downstream)
 

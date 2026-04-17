@@ -5046,6 +5046,20 @@ int SendTls13ClientHello(WOLFSSL* ssl)
     }
 #endif
 
+/* --- BEGIN ANYWHERE PATCH: skip PSK binders for custom-CH ------------ */
+#ifdef ANYWHERE_CUSTOM_CLIENT_HELLO
+    /* When the custom-CH callback supplied the body, that body does not
+     * contain a pre_shared_key extension. WritePSKBinders would subtract
+     * the binder length from args->idx to find where to write, landing
+     * inside (or before) the custom body and corrupting it.  Skip the
+     * binder path entirely and fall through to the normal HashOutput. */
+    if (ssl->anywhereChCb != NULL) {
+        ret = HashOutput(ssl, args->output, (int)args->idx, 0);
+    }
+    else
+#endif
+/* --- END ANYWHERE PATCH ---------------------------------------------- */
+
 #if defined(HAVE_SESSION_TICKET) || !defined(NO_PSK)
     /* Resumption has a specific set of extensions and binder is calculated
      * for each identity.

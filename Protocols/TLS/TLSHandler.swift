@@ -426,7 +426,15 @@ final class TLSHandler {
                 session.queue.async { self.pumpHandshake() }
             }
         } else {
-            deliver(.failure(TLSError.handshakeFailed("wolfSSL rv=\(rv) err=\(err)")))
+            var alertHistory = WOLFSSL_ALERT_HISTORY()
+            var detail = "wolfSSL rv=\(rv) err=\(err)"
+            if wolfSSL_get_alert_history(session.ssl, &alertHistory) == WOLFSSL_SUCCESS {
+                let rx = alertHistory.last_rx
+                if rx.code != -1 {
+                    detail += " alert_rx=\(rx.code)"
+                }
+            }
+            deliver(.failure(TLSError.handshakeFailed(detail)))
         }
     }
 

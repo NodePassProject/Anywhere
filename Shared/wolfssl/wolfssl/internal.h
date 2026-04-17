@@ -6506,6 +6506,7 @@ struct WOLFSSL {
 #endif
 #endif
 #endif
+
 /* --- BEGIN ANYWHERE PATCH: custom-CH state --------------------------- */
 #ifdef ANYWHERE_CUSTOM_CLIENT_HELLO
     /* See MODIFICATIONS.md. When anywhereChCb is non-NULL, the TLS 1.3
@@ -6516,6 +6517,7 @@ struct WOLFSSL {
     void* anywhereChCtx;
 #endif
 /* --- END ANYWHERE PATCH ---------------------------------------------- */
+
 };
 
 #if defined(WOLFSSL_SYS_CRYPTO_POLICY)
