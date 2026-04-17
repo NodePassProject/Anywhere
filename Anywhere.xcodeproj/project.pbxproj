@@ -144,6 +144,7 @@
 				Reality/RealityClient.swift,
 				Reality/RealityConfiguration.swift,
 				Reality/RealityProxyConnection.swift,
+				Reality/RealityRecordConnection.swift,
 				Shadowsocks/Shadowsocks2022.swift,
 				Shadowsocks/ShadowsocksAEAD.swift,
 				Shadowsocks/ShadowsocksConnection.swift,
@@ -152,12 +153,13 @@
 				SOCKS5/SOCKS5Connection.swift,
 				TLS/TLS12KeyDerivation.swift,
 				TLS/TLS13KeyDerivation.swift,
-				TLS/TLSClient.swift,
 				TLS/TLSClientHelloBuilder.swift,
 				TLS/TLSConfiguration.swift,
+				TLS/TLSHandler.swift,
 				TLS/TLSProxyConnection.swift,
 				TLS/TLSRecordConnection.swift,
 				TLS/TLSRecordCrypto.swift,
+				TLS/TLSSession.swift,
 				VLESS/VLESSConnection.swift,
 				VLESS/VLESSProtocol.swift,
 				VLESS/VLESSUDPConnection.swift,
@@ -243,6 +245,7 @@
 				Utilities/DeviceCensorship.swift,
 				Utilities/UnfairLock.swift,
 				wolfssl/anywhere_wolfssl_seed.c,
+				wolfssl/src/anywhere_customch.c,
 				wolfssl/src/bio.c,
 				wolfssl/src/conf.c,
 				wolfssl/src/crl.c,
@@ -854,7 +857,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 195;
+				CURRENT_PROJECT_VERSION = 196;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -906,7 +909,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Anywhere/Anywhere.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 195;
+				CURRENT_PROJECT_VERSION = 196;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				ENABLE_PREVIEWS = YES;
 				GCC_PREPROCESSOR_DEFINITIONS = (
@@ -957,7 +960,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 195;
+				CURRENT_PROJECT_VERSION = 196;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1007,7 +1010,7 @@
 				CLANG_ENABLE_MODULES = NO;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Network Extension/Anywhere Network Extension.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 195;
+				CURRENT_PROJECT_VERSION = 196;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1058,7 +1061,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 195;
+				CURRENT_PROJECT_VERSION = 196;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1107,7 +1110,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere TV/Anywhere TV.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 195;
+				CURRENT_PROJECT_VERSION = 196;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -1156,7 +1159,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 195;
+				CURRENT_PROJECT_VERSION = 196;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";
@@ -1188,7 +1191,7 @@
 				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
 				CODE_SIGN_ENTITLEMENTS = "Anywhere Widget/Anywhere Widget.entitlements";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 195;
+				CURRENT_PROJECT_VERSION = 196;
 				DEVELOPMENT_TEAM = C7AS5D38Q8;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "Anywhere Widget/Info.plist";

@@ -20,7 +20,7 @@ private let logger = AnywhereLogger(category: "Reality")
 /// - Uses X25519 ECDH with the server's public key for mutual authentication.
 /// - Derives application-layer encryption keys from the TLS 1.3 handshake transcript.
 ///
-/// After a successful handshake, returns a ``TLSRecordConnection`` that wraps
+/// After a successful handshake, returns a ``RealityRecordConnection`` that wraps
 /// the underlying ``RawTCPSocket`` with TLS record encryption/decryption.
 class RealityClient {
     private let configuration: RealityConfiguration
@@ -53,11 +53,11 @@ class RealityClient {
     /// - Parameters:
     ///   - host: The server hostname or IP address.
     ///   - port: The server port number.
-    ///   - completion: Called with the established ``TLSRecordConnection`` or an error.
+    ///   - completion: Called with the established ``RealityRecordConnection`` or an error.
     func connect(
         host: String,
         port: UInt16,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
+        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
     ) {
         ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
 
@@ -104,10 +104,10 @@ class RealityClient {
     ///
     /// - Parameters:
     ///   - tunnel: The proxy connection providing a TCP tunnel to the server.
-    ///   - completion: Called with the established ``TLSRecordConnection`` or an error.
+    ///   - completion: Called with the established ``RealityRecordConnection`` or an error.
     func connect(
         overTunnel tunnel: ProxyConnection,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
+        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
     ) {
         ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
         self.connection = TunneledTransport(tunnel: tunnel)
@@ -126,7 +126,7 @@ class RealityClient {
     /// Performs the Reality TLS handshake: sends ClientHello, processes ServerHello,
     /// derives encryption keys, and sends Client Finished.
     private func performRealityHandshake(
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
+        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
     ) {
         guard let privateKey = ephemeralPrivateKey else {
             logger.error("[Reality] No ephemeral key for handshake")
@@ -255,7 +255,7 @@ class RealityClient {
 
     /// Receives and processes the server's TLS response.
     private func receiveServerResponse(
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
+        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
     ) {
         guard let connection else {
             completion(.failure(RealityError.connectionFailed("Connection cancelled")))
@@ -298,7 +298,7 @@ class RealityClient {
     /// Continues receiving handshake messages until ServerHello is complete.
     private func continueReceivingHandshake(
         buffer: Data,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
+        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
     ) {
         // Wait until we have a complete TLS record containing ServerHello.
         // The server may split the response across multiple TCP segments,
@@ -502,7 +502,7 @@ class RealityClient {
     private func consumeRemainingHandshake(
         buffer: Data,
         startOffset: Int = 0,
-        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
+        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
     ) {
         guard let keys = tls13.handshakeKeys, let kd = tls13.keyDerivation else {
             completion(.failure(RealityError.handshakeFailed("Missing handshake keys")))
@@ -570,7 +570,7 @@ class RealityClient {
             offset += 5 + recordLen
 
             // After Server Finished, subsequent records (e.g. NewSessionTicket) are
-            // encrypted with application keys. Stop here and let TLSRecordConnection
+            // encrypted with application keys. Stop here and let RealityRecordConnection
             // handle them so the sequence numbers stay in sync.
             if foundServerFinished { break }
         }
@@ -602,7 +602,7 @@ class RealityClient {
                     return
                 }
 
-                let realityConnection = TLSRecordConnection(
+                let realityConnection = RealityRecordConnection(
                     clientKey: appKeys.clientKey,
                     clientIV: appKeys.clientIV,
                     serverKey: appKeys.serverKey,
@@ -613,7 +613,7 @@ class RealityClient {
                 self.connection = nil
 
                 // Feed remaining buffer data (post-Finished records like NewSessionTicket)
-                // to TLSRecordConnection so they are decrypted with application keys
+                // to RealityRecordConnection so they are decrypted with application keys
                 // and sequence numbers stay in sync.
                 let remaining = buffer.subdata(in: processedOffset..<buffer.count)
                 if !remaining.isEmpty {

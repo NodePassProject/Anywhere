@@ -6506,6 +6506,16 @@ struct WOLFSSL {
 #endif
 #endif
 #endif
+/* --- BEGIN ANYWHERE PATCH: custom-CH state --------------------------- */
+#ifdef ANYWHERE_CUSTOM_CLIENT_HELLO
+    /* See MODIFICATIONS.md. When anywhereChCb is non-NULL, the TLS 1.3
+     * ClientHello body is taken from the callback instead of being built
+     * by wolfSSL itself. Installed via wolfSSL_UseClientHelloRaw(). */
+    int  (*anywhereChCb)(WOLFSSL* ssl, const unsigned char** bodyOut,
+                         unsigned int* bodyLenOut, void* ctx);
+    void* anywhereChCtx;
+#endif
+/* --- END ANYWHERE PATCH ---------------------------------------------- */
 };
 
 #if defined(WOLFSSL_SYS_CRYPTO_POLICY)

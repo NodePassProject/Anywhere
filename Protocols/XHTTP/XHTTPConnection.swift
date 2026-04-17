@@ -243,8 +243,10 @@ class XHTTPConnection {
         self.init(download: TransportClosures(rawTCP: transport), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
     }
 
-    /// Creates an XHTTP connection over a ``TLSRecordConnection`` (security=tls or reality).
-    convenience init(tlsConnection: TLSRecordConnection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
+    /// Creates an XHTTP connection over a ``TLSRecordConnection`` (security=tls)
+    /// or a ``RealityRecordConnection`` (security=reality). Both conform to
+    /// ``TLSRecordTransport`` so the caller can pass either.
+    convenience init(tlsConnection: any TLSRecord, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
         self.init(download: TransportClosures(tls: tlsConnection), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
     }
 

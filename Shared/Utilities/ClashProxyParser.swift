@@ -313,9 +313,6 @@ struct ClashProxyParser {
         case "safari":  return TLSFingerprint.safari26.rawValue
         case "ios":     return TLSFingerprint.ios14.rawValue
         case "edge":    return TLSFingerprint.edge85.rawValue
-        case "android": return TLSFingerprint.android11.rawValue
-        case "qq":      return TLSFingerprint.qq11.rawValue
-        case "360":     return TLSFingerprint.browser360.rawValue
         case "random":  return TLSFingerprint.random.rawValue
         default:        return fp ?? TLSFingerprint.chrome133.rawValue
         }

@@ -4952,6 +4952,87 @@ int SendTls13ClientHello(WOLFSSL* ssl)
 
     args->idx += args->length;
 
+/* --- BEGIN ANYWHERE PATCH: custom-CH emit (body overwrite) ----------- */
+#ifdef ANYWHERE_CUSTOM_CLIENT_HELLO
+    /* Overwrite the body wolfSSL just assembled with the caller-supplied
+     * bytes. See MODIFICATIONS.md.
+     *
+     * Correctness invariant: the wire body is replaced in full, but the
+     * *state* used for ServerHello processing / ECDH / key schedule is
+     * the one wolfSSL built from the OfferKeyShare / OfferCipherSuites /
+     * SetClientHelloRandom setters called before wolfSSL_connect. The
+     * caller is responsible for making its wire body consistent with
+     * that state — see MODIFICATIONS.md §"Invariants the caller must
+     * preserve".
+     *
+     * Placed AFTER the internal body write so this is an additive patch:
+     * zero upstream lines are gated or rewritten. Cost is one throwaway
+     * TLSX_WriteRequest per handshake, which is fine for a client with
+     * one ClientHello per connection. */
+    if (ssl->anywhereChCb != NULL) {
+        const unsigned char* anywhereBody    = NULL;
+        unsigned int         anywhereBodyLen = 0;
+        word32               headersSz       =
+            RECORD_HEADER_SZ + HANDSHAKE_HEADER_SZ;
+        int anywhereRet;
+
+        anywhereRet = ssl->anywhereChCb(ssl, &anywhereBody, &anywhereBodyLen,
+                                        ssl->anywhereChCtx);
+        if (anywhereRet != 0 || anywhereBody == NULL ||
+                anywhereBodyLen == 0) {
+            return anywhereRet != 0 ? anywhereRet : BAD_FUNC_ARG;
+        }
+
+        /* If the caller's body is larger than the one we just built,
+         * grow the output buffer. CheckAvailableSize is idempotent
+         * when there's already room. */
+        {
+            int newSendSz =
+                (int)((word32)anywhereBodyLen + headersSz);
+            if (newSendSz > args->sendSz) {
+                ret = CheckAvailableSize(ssl, newSendSz);
+                if (ret != 0)
+                    return ret;
+                args->output = GetOutputBuffer(ssl);
+            }
+            args->sendSz = newSendSz;
+        }
+
+        /* Re-stamp the record + handshake headers with the new length,
+         * then drop the custom body in after them. AddTls13Headers
+         * rewrites both headers from scratch based on args->length. */
+        args->length = (word32)anywhereBodyLen;
+        AddTls13Headers(args->output, args->length, client_hello, ssl);
+        XMEMCPY(args->output + headersSz, anywhereBody, anywhereBodyLen);
+        args->idx = headersSz + anywhereBodyLen;
+
+        /* Sync `ssl->arrays->clientRandom` from the injected body. The
+         * CONNECT_BEGIN branch above already ran wc_RNG_GenerateBlock and
+         * copied a fresh random into arrays->clientRandom, but that random
+         * is no longer on the wire after our overwrite. Every downstream
+         * path that hashes client_random (TLS 1.3 key schedule + Finished,
+         * the TLS 1.2 PRF after downgrade, ECDHE SignatureVerify on
+         * TLS 1.2 ServerKeyExchange) must see the same bytes the server
+         * just verified against — i.e. what we actually put on the wire.
+         *
+         * Body layout:
+         *   offset 0..1  : legacy_version
+         *   offset 2..33 : random     <-- the 32 bytes we copy out
+         *   offset 34    : session_id length
+         *   ...
+         *
+         * Without this memcpy, TLS 1.3 handshakes still succeed by accident
+         * (wolfSSL hashes the wire bytes via HashOutput → transcript stays
+         * self-consistent), but TLS 1.2 ECDHE downgrade trips
+         * VERIFY_SIGN_ERROR (-330) on ServerKeyExchange. */
+        if (anywhereBodyLen >= 2 + RAN_LEN && ssl->arrays != NULL) {
+            XMEMCPY(ssl->arrays->clientRandom,
+                    anywhereBody + 2, RAN_LEN);
+        }
+    }
+#endif /* ANYWHERE_CUSTOM_CLIENT_HELLO */
+/* --- END ANYWHERE PATCH ---------------------------------------------- */
+
 #if defined(HAVE_ECH)
     /* encrypt and pack the ech innerClientHello */
     if (ssl->echConfigs != NULL && !ssl->options.disableECH &&

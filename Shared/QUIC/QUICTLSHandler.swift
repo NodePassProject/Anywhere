@@ -59,6 +59,7 @@ func invalidateCachedSessionTicket(serverName: String, alpn: [String]) {
 nonisolated(unsafe) private var wolfSSLInitRv: Int32 = 0
 private let wolfSSLInitialized: Bool = {
     wolfSSLInitRv = wolfSSL_Init()
+    // wolfSSL_Debugging_ON()  // uncomment + define DEBUG_WOLFSSL in user_settings.h
     return wolfSSLInitRv == WOLFSSL_SUCCESS
 }()
 

@@ -4819,6 +4819,53 @@ WOLFSSL_API int wolfSSL_UseKeyShare(WOLFSSL* ssl, word16 group);
 WOLFSSL_API int wolfSSL_NoKeyShares(WOLFSSL* ssl);
 #endif
 
+/* --- BEGIN ANYWHERE PATCH: custom-CH API ----------------------------- */
+#ifdef ANYWHERE_CUSTOM_CLIENT_HELLO
+/* Builds the ClientHello body (legacy_version .. last extension) on
+ * demand. `*bodyOut` must stay valid for the duration of the call; wolfSSL
+ * copies the bytes into its own output buffer before returning. Return 0
+ * on success, negative on failure. See MODIFICATIONS.md. */
+typedef int (*WOLFSSL_ClientHelloBuildCb)(
+    WOLFSSL*              ssl,
+    const unsigned char** bodyOut,
+    unsigned int*         bodyLenOut,
+    void*                 ctx);
+
+WOLFSSL_API int wolfSSL_UseClientHelloRaw(WOLFSSL* ssl,
+                                          WOLFSSL_ClientHelloBuildCb cb,
+                                          void* ctx);
+
+/* The 32-byte client random embedded in the injected ClientHello. Required
+ * for ssl->arrays->clientRandom to match what the server hashes. */
+WOLFSSL_API int wolfSSL_SetClientHelloRandom(WOLFSSL* ssl,
+                                             const unsigned char* random32);
+
+/* The legacy_session_id the injected ClientHello puts on the wire. wolfSSL's
+ * ServerHello validator at tls13.c:5701 compares the server's echo to
+ * ssl->session->sessionID; if our custom body carries a different ID than
+ * whatever wolfSSL's internal builder would have produced, the compare fails
+ * with INVALID_PARAMETER (-425). Call this with the same bytes embedded at
+ * offset 34 of the body. idLen 0 is allowed (no session_id). */
+WOLFSSL_API int wolfSSL_SetClientHelloLegacySessionId(WOLFSSL* ssl,
+                                                      const unsigned char* id,
+                                                      unsigned int idLen);
+
+/* Push a (group, pub, priv) entry onto ssl->extensions so ECDH uses the
+ * keypair the caller announced in key_share. Bytes are copied. */
+WOLFSSL_API int wolfSSL_OfferKeyShare(WOLFSSL* ssl, word16 group,
+                                      const unsigned char* pubKey,
+                                      unsigned int pubKeyLen,
+                                      const unsigned char* privKey,
+                                      unsigned int privKeyLen);
+
+/* Rewrite ssl->suites->suites from a wire-formatted byte sequence
+ * (two bytes per suite, no 16-bit length prefix). */
+WOLFSSL_API int wolfSSL_OfferCipherSuites(WOLFSSL* ssl,
+                                          const unsigned char* wireBytes,
+                                          unsigned int wireLen);
+#endif /* ANYWHERE_CUSTOM_CLIENT_HELLO */
+/* --- END ANYWHERE PATCH ---------------------------------------------- */
+
 #ifdef WOLFSSL_DUAL_ALG_CERTS
 #define WOLFSSL_CKS_SIGSPEC_NATIVE      0x0001
 #define WOLFSSL_CKS_SIGSPEC_ALTERNATIVE 0x0002

@@ -50,11 +50,12 @@ extension TransportClosures {
         )
     }
 
-    /// Adapts a ``TLSRecordConnection`` to the closure triple. The TLS
-    /// receive callback signature `(Data?, Error?)` is widened to include
-    /// the EOF bit; TLS surfaces EOF as `error == nil && data == nil`, which
-    /// the caller handles via its own framing layer.
-    init(tls tlsConnection: TLSRecordConnection) {
+    /// Adapts any TLS record transport (wolfSSL-backed or Reality-backed)
+    /// to the closure triple. The TLS receive callback signature
+    /// `(Data?, Error?)` is widened to include the EOF bit; TLS surfaces
+    /// EOF as `error == nil && data == nil`, which the caller handles via
+    /// its own framing layer.
+    init(tls tlsConnection: any TLSRecord) {
         self.init(
             send: { data, completion in
                 tlsConnection.send(data: data, completion: completion)
