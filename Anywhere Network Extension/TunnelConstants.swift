@@ -52,11 +52,11 @@ enum TunnelConstants {
 
     // MARK: - TCP Buffer Sizes
 
-    /// Maximum bytes per tcp_write call (64 KB ≈ 48 TCP segments at TCP_MSS=1360).
-    /// Sized to roughly half of TCP_SND_BUF (128 * MSS ≈ 174 KB) so feedLWIP can
+    /// Maximum bytes per tcp_write call (128 KB ≈ 96 TCP segments at TCP_MSS=1360).
+    /// Sized to roughly half of TCP_SND_BUF (256 * MSS ≈ 348 KB) so feedLWIP can
     /// usually consume a full proxy chunk in one call.
     /// Must stay in sync with lwipopts.h.
-    static let tcpMaxWriteSize = 64 * 1024
+    static let tcpMaxWriteSize = 128 * 1024
     /// Maximum upload coalesce buffer size, capped at UInt16.max because downstream
     /// protocols (Vision padding) use 2-byte content length fields.
     static let tcpMaxCoalesceSize = Int(UInt16.max)
@@ -64,7 +64,7 @@ enum TunnelConstants {
     // MARK: - UDP Settings
 
     /// Maximum buffer size for queued UDP datagrams.
-    static let udpMaxBufferSize = 16 * 1024
+    static let udpMaxBufferSize = 64 * 1024
     /// Idle timeout for UDP flows (seconds).
     static let udpIdleTimeout: CFAbsoluteTime = 60
 

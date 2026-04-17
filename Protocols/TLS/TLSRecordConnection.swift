@@ -252,7 +252,7 @@ class TLSRecordConnection: TLSRecord {
                 completion(nil, TLSError.connectionFailed("Connection cancelled"))
                 return
             }
-            transport.receive(maximumLength: 65536) { [weak self] data, isComplete, error in
+            transport.receive { [weak self] data, isComplete, error in
                 if let error { completion(nil, error); return }
                 guard let data, !data.isEmpty else {
                     if isComplete { completion(nil, nil) }

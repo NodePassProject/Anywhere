@@ -478,7 +478,7 @@ final class TLSHandler {
                 return
             }
             session.receiveInFlight = true
-            connection.receive(maximumLength: 65536) { data, isComplete, error in
+            connection.receive { data, isComplete, error in
                 session.queue.async {
                     session.receiveInFlight = false
                     if let data, !data.isEmpty { session.rxBuffer.append(data) }

@@ -74,7 +74,7 @@ class HTTP2Session: PoolableSession {
 
     // Read buffer
     private var receiveBuffer = Data()
-    private static let maxReceiveBufferSize = 2_097_152
+    private static let maxReceiveBufferSize = 4_194_304
 
     // Callbacks waiting for session to reach .ready
     private var readyCallbacks: [(Error?) -> Void] = []

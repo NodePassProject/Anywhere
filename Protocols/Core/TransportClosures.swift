@@ -31,10 +31,6 @@ struct TransportClosures {
 // MARK: - Transport adapters
 
 extension TransportClosures {
-    /// Default receive chunk size. Matches the largest typical TCP segment
-    /// aggregation we want from a single `recv(2)` wake-up.
-    private static let defaultReceiveChunk = 65536
-
     /// Adapts a ``RawTCPSocket`` to the closure triple.
     init(rawTCP transport: RawTCPSocket) {
         self.init(
@@ -42,7 +38,7 @@ extension TransportClosures {
                 transport.send(data: data, completion: completion)
             },
             receive: { completion in
-                transport.receive(maximumLength: Self.defaultReceiveChunk, completion: completion)
+                transport.receive(completion: completion)
             },
             cancel: {
                 transport.forceCancel()

@@ -89,6 +89,13 @@ int anywhere_wolfssl_seed(unsigned char *output, unsigned int sz);
 #define OPENSSL_EXTRA           /* exposes the *_ex_data and a few QUIC helpers */
 #define WOLFSSL_HAVE_QSH_OFF
 
+/* Keep the peer's full cert chain on the session so the verify callback in
+ * TLSHandler/QUICTLSHandler can hand it to Security.framework and honour
+ * user-pinned SHA-256 fingerprints. Without this, wolfSSL gates out the
+ * code that populates ctx->sesChain and wolfSSL_X509_STORE_CTX_get_chain()
+ * returns NULL during verification. */
+#define SESSION_CERTS
+
 /* Single-precision math (fast, constant-time) */
 #define WOLFSSL_SP_MATH_ALL
 #define WOLFSSL_HAVE_SP_RSA

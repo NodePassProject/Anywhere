@@ -28,7 +28,7 @@ protocol RawTransport: AnyObject {
     func send(data: Data)
 
     /// Receives up to `maximumLength` bytes from the transport.
-    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void)
+    func receive(completion: @escaping (Data?, Bool, Error?) -> Void)
 
     /// Closes the transport and cancels all pending operations.
     func forceCancel()
@@ -372,7 +372,7 @@ class RawTCPSocket: RawTransport {
     /// - `(data, false, nil)` — data received successfully.
     /// - `(nil, true, nil)` — EOF (remote closed).
     /// - `(nil, true, error)` — a receive error occurred.
-    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void) {
+    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
         ioQueue.async { [self] in
             if receivedEOF {
                 completion(nil, true, nil)
@@ -395,7 +395,7 @@ class RawTCPSocket: RawTransport {
                 completion(nil, true, SocketError.receiveFailed("Concurrent receive"))
                 return
             }
-            pendingReceive = (maximumLength, completion)
+            pendingReceive = (65536, completion)
             tryReceive()
         }
     }
