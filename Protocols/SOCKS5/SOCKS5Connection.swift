@@ -477,7 +477,7 @@ class TLSRecordTransport: RawTransport {
 /// Also retains the TCP control connection to keep the UDP session alive.
 class SOCKS5UDPProxyConnection: ProxyConnection {
     private let tcpTransport: any RawTransport
-    private let tlsClient: TLSClient?
+    private let tlsClient: TLSHandler?
     private let tlsConnection: TLSRecordConnection?
     private let socket = RawUDPSocket()
     private let udpHeader: Data
@@ -492,7 +492,7 @@ class SOCKS5UDPProxyConnection: ProxyConnection {
 
     init(
         tcpTransport: any RawTransport,
-        tlsClient: TLSClient?,
+        tlsClient: TLSHandler?,
         tlsConnection: TLSRecordConnection?,
         destinationHost: String,
         destinationPort: UInt16

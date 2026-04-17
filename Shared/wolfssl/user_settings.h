@@ -146,6 +146,18 @@ int anywhere_wolfssl_seed(unsigned char *output, unsigned int sz);
 #define NO_WRITE_TEMP_FILES
 #define WOLFSSL_NO_TLS12_HASH_ONLY_OFF
 
+/* Downstream feature: uTLS-style custom ClientHello injection. Gates every
+ * source-level patch listed in MODIFICATIONS.md. Leaving this define on
+ * compiles the hooks in; turning it off restores bit-for-bit upstream
+ * behavior of wolfSSL 5.9.1.
+ *
+ * Enables:
+ *   - wolfSSL_UseClientHelloRaw / SetClientHelloRandom /
+ *     OfferKeyShare / OfferCipherSuites in src/anywhere_customch.c
+ *   - the branch in SendTls13ClientHello that substitutes caller-provided
+ *     ClientHello body bytes for wolfSSL's internal builder. */
+#define ANYWHERE_CUSTOM_CLIENT_HELLO
+
 /* IO: keep BSD socket fallback available; we never call it for QUIC,
  * but the symbols (EmbedReceive/EmbedSend) are referenced from internal.c
  * unconditionally. */
