@@ -56,7 +56,7 @@ struct CustomRuleSetDetailView: View {
                 }
             }
         }
-        .navigationTitle(customRuleSet?.name ?? String(localized: "Rule Set"))
+        .navigationTitle(customRuleSet?.name ?? "Rule Set")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu("More", systemImage: "ellipsis") {

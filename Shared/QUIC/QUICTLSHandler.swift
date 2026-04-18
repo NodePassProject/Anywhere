@@ -2,14 +2,7 @@
 //  QUICTLSHandler.swift
 //  Anywhere
 //
-//  Per-connection wolfSSL TLS 1.3 handler for QUIC.
-//
-//  Owns a WOLFSSL_CTX* and WOLFSSL*. Once `ngtcp2_conn_set_tls_native_handle`
-//  has wired this handler's `sslHandle` into the ngtcp2 connection, the entire
-//  handshake is driven by ngtcp2's `client_initial` / `recv_crypto_data` crypto
-//  helpers (shared.c): they feed CRYPTO frames into `wolfSSL_quic_do_handshake`
-//  and wolfSSL pushes keys back through the QUIC_METHOD callbacks wired in
-//  `ngtcp2_crypto_wolfssl_configure_client_context`.
+//  Created by Argsment Limited on 4/11/26.
 //
 
 import Foundation
@@ -18,32 +11,36 @@ import Security
 
 private let logger = AnywhereLogger(category: "QUIC-TLS")
 
-// MARK: - Session ticket cache
+// MARK: - Session Ticket Cache
 
-/// Serialized wolfSSL session paired with the encoded ngtcp2 0-RTT transport
-/// parameters captured from the connection that issued the ticket. RFC 9001
-/// §4.6.1 requires the client to remember both — sending 0-RTT data with
-/// stale flow-control / stream-limit values is a protocol violation, so the
-/// ticket alone is insufficient.
-private struct CachedSession {
-    let session: Data
-    let transportParams: Data
+/// Cached session ticket for TLS resumption.
+struct QUICSessionTicket {
+    let ticket: Data
+    let nonce: Data
+    let psk: Data           // Pre-shared key derived from resumption master secret
+    let cipherSuite: UInt16
+    let createdAt: Date
+    let lifetime: UInt32    // seconds
+    let ageAdd: UInt32      // obfuscation factor for ticket age
 }
 
-/// Cache keyed by `"\(SNI)\u{0}\(alpn.joined(","))"`. Tickets and TPs are not
-/// portable across ALPN contexts. In-memory only; lost on process restart.
+/// Global session ticket cache, keyed by (SNI, ALPN list).
+/// Tickets are not portable across ALPN contexts.
 private let ticketCacheLock = UnfairLock()
-private var sessionTicketCache: [String: CachedSession] = [:]
+private var sessionTicketCache: [String: QUICSessionTicket] = [:]
 
+/// Builds the cache key for a given SNI + ALPN list. ALPN order is preserved
+/// because offering "h3,hq" is a different context than "hq,h3".
 private func sessionTicketCacheKey(serverName: String, alpn: [String]) -> String {
     return "\(serverName)\u{0}\(alpn.joined(separator: ","))"
 }
 
-/// Drops any cached session for `(serverName, alpn)`. Called by QUICConnection
-/// when a handshake fails before reaching `.connected`, or when the server
-/// rejects a 0-RTT attempt — a cached session whose keys the server has
-/// rotated would otherwise send us into a permanent HANDSHAKE_TIMEOUT loop
-/// (or a rejection loop) on resumption retries.
+/// Drops any cached session ticket for (serverName, alpn) so the next
+/// handshake falls back to a full TLS exchange. Called when a handshake
+/// fails before reaching `.connected` — a cached ticket whose encryption
+/// keys the server has rotated (naive server restart) would otherwise
+/// cause every subsequent ClientHello to be silently dropped, producing
+/// a permanent HANDSHAKE_TIMEOUT loop.
 func invalidateCachedSessionTicket(serverName: String, alpn: [String]) {
     let key = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
     ticketCacheLock.lock()
@@ -51,339 +48,957 @@ func invalidateCachedSessionTicket(serverName: String, alpn: [String]) {
     ticketCacheLock.unlock()
 }
 
-// MARK: - QUICTLSHandler
+/// SHA-256("HelloRetryRequest") — the magic server_random value that marks an
+/// incoming ServerHello as a HelloRetryRequest (RFC 8446 §4.1.3).
+private let kHelloRetryRequestRandom: [UInt8] = [
+    0xCF, 0x21, 0xAD, 0x74, 0xE5, 0x9A, 0x61, 0x11,
+    0xBE, 0x1D, 0x8C, 0x02, 0x1E, 0x65, 0xB8, 0x91,
+    0xC2, 0xA2, 0x11, 0x16, 0x7A, 0xBB, 0x8C, 0x5E,
+    0x07, 0x9E, 0x09, 0xE2, 0xC8, 0xA8, 0x33, 0x9C,
+]
 
-/// Lazy, process-wide `wolfSSL_Init()`. Every wolfSSL entry point assumes the
-/// library has been initialized; skipping this produces silent NULLs from
-/// `wolfSSL_CTX_new` and friends.
-nonisolated(unsafe) private var wolfSSLInitRv: Int32 = 0
-private let wolfSSLInitialized: Bool = {
-    wolfSSLInitRv = wolfSSL_Init()
-    // wolfSSL_Debugging_ON()  // uncomment + define DEBUG_WOLFSSL in user_settings.h
-    return wolfSSLInitRv == WOLFSSL_SUCCESS
-}()
+/// Named groups we advertise in supported_groups / key_share.
+private let kNamedGroupX25519: UInt16 = 0x001D
+private let kNamedGroupSecp256r1: UInt16 = 0x0017
 
-final class QUICTLSHandler {
+/// Result of processing a TLS crypto data message.
+enum QUICTLSResult {
+    case success
+    case needMoreData
+    case error(Int32)
+}
 
-    private var ctx: OpaquePointer?
-    private var ssl: OpaquePointer?
+/// Manages the TLS 1.3 handshake within a QUIC connection.
+///
+/// Instead of using TLS records, the handshake messages are transported in
+/// QUIC CRYPTO frames. This handler:
+/// 1. Builds a TLS ClientHello with QUIC transport parameters
+/// 2. Processes the server's TLS messages (ServerHello, EncryptedExtensions, etc.)
+/// 3. Derives and installs handshake/application keys into ngtcp2
+/// 4. Submits the client Finished message
+class QUICTLSHandler {
+
+    // MARK: - State
+
+    enum HandshakeState {
+        case initial
+        case clientHelloSent
+        case serverHelloReceived
+        case handshakeKeysInstalled
+        case serverFinishedReceived
+        case completed
+    }
+
+    // MARK: - Properties
+
     private let serverName: String
     private let alpn: [String]
+    private var state: HandshakeState = .initial
 
-    /// Raw `WOLFSSL*` for `ngtcp2_conn_set_tls_native_handle` and
-    /// `ngtcp2_crypto_set_local_transport_params`.
-    var sslHandle: UnsafeMutableRawPointer? {
-        ssl.map { UnsafeMutableRawPointer($0) }
-    }
+    // Key derivation
+    private var keyDerivation: TLS13KeyDerivation?
+    private var handshakeSecret: Data?
+    private var clientHandshakeTrafficSecret: Data?
 
-    /// Negotiated ALPN protocol. `nil` until the handshake has produced one.
-    var negotiatedALPN: String? {
-        guard let ssl else { return nil }
-        var name: UnsafeMutablePointer<CChar>? = nil
-        var length: UInt16 = 0
-        guard wolfSSL_ALPN_GetProtocol(ssl, &name, &length) == WOLFSSL_SUCCESS,
-              let name, length > 0 else { return nil }
-        return String(
-            bytesNoCopy: name, length: Int(length),
-            encoding: .utf8, freeWhenDone: false)
-    }
+    // ECDHE — we offer both X25519 and secp256r1 key shares; the server picks one.
+    private var privateKeyP256: P256.KeyAgreement.PrivateKey?
+    private var privateKeyX25519: Curve25519.KeyAgreement.PrivateKey?
+    private var clientRandom = Data(count: 32)
 
-    /// Creates the wolfSSL context + SSL object and wires it to `connRef` so
-    /// wolfSSL's QUIC callbacks (set_encryption_secrets / add_handshake_data /
-    /// send_alert) can reach back into ngtcp2. Returns `nil` on any wolfSSL
-    /// setup failure.
-    ///
-    /// The caller is expected to immediately call
-    /// `ngtcp2_conn_set_tls_native_handle(conn, sslHandle)` and
-    /// `ngtcp2_crypto_set_local_transport_params(sslHandle, bytes, len)` before
-    /// driving any packet I/O.
-    init?(serverName: String, alpn: [String],
-          connRef: UnsafeMutablePointer<ngtcp2_crypto_conn_ref>) {
+    // Transcript (concatenation of all handshake messages)
+    private var transcript = Data()
+
+    // Negotiated cipher suite
+    private(set) var cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256
+
+    // Accumulator for partial TLS messages
+    private var cryptoBuffer = Data()
+
+    // Certificate validation state
+    private var serverCertificates: [SecCertificate] = []
+    private var transcriptBeforeCertVerify: Data?
+    private var certificateVerifyAlgorithm: UInt16 = 0
+    private var certificateVerifySignature: Data?
+
+    // Session resumption
+    private var resumptionMasterSecret: Data?
+    private var activePSK: Data?           // PSK used in this handshake (when server accepts)
+    private var pskBinderLength: Int = 0   // Binder length used in ClientHello
+
+    // Server's transport parameters (extracted from EncryptedExtensions)
+    private(set) var serverTransportParams: Data?
+
+    /// ALPN protocol selected by the server in EncryptedExtensions (RFC 7301).
+    /// Nil until EncryptedExtensions is parsed or if the server omitted the
+    /// application_layer_protocol_negotiation extension.
+    private(set) var negotiatedALPN: String?
+
+    // MARK: - Initialization
+
+    init(serverName: String, alpn: [String] = ["h3"]) {
         self.serverName = serverName
         self.alpn = alpn
 
-        guard wolfSSLInitialized else {
-            logger.error("wolfSSL_Init failed rv=\(wolfSSLInitRv)")
-            return nil
+        // Generate ECDHE key pairs for each group we advertise.
+        privateKeyP256 = P256.KeyAgreement.PrivateKey()
+        privateKeyX25519 = Curve25519.KeyAgreement.PrivateKey()
+
+        // Generate client random
+        _ = clientRandom.withUnsafeMutableBytes { buf in
+            SecRandomCopyBytes(kSecRandomDefault, 32, buf.baseAddress!)
         }
-        guard let method = wolfTLSv1_3_client_method() else {
-            logger.error("wolfTLSv1_3_client_method returned NULL")
-            return nil
-        }
-        guard let ctxPtr = wolfSSL_CTX_new(method) else {
-            logger.error("wolfSSL_CTX_new returned NULL")
-            return nil
-        }
-        self.ctx = ctxPtr
-
-        guard ngtcp2_crypto_wolfssl_configure_client_context(ctxPtr) == 0 else {
-            logger.error("ngtcp2_crypto_wolfssl_configure_client_context failed")
-            wolfSSL_CTX_free(ctxPtr)
-            self.ctx = nil
-            return nil
-        }
-
-        // Route all chain validation through our SecTrust-backed callback.
-        wolfSSL_CTX_set_verify(
-            ctxPtr, Int32(WOLFSSL_VERIFY_PEER), certVerifyCallback)
-
-        // Capture NewSessionTickets as they arrive so the next connection to
-        // the same (SNI, ALPN) can resume.
-        wolfSSL_CTX_sess_set_new_cb(ctxPtr, sessionNewCallback)
-
-        guard let sslPtr = wolfSSL_new(ctxPtr) else {
-            logger.error("wolfSSL_new returned NULL")
-            wolfSSL_CTX_free(ctxPtr)
-            self.ctx = nil
-            return nil
-        }
-        self.ssl = sslPtr
-
-        // App-data slot is where ngtcp2_crypto_wolfssl.c reads conn_ref.
-        _ = wolfSSL_set_app_data(sslPtr, UnsafeMutableRawPointer(connRef))
-
-        // Stash self at ex_data idx 1 so the session-new callback can build
-        // the cache key from (serverName, alpn) without touching QUICConnection.
-        let selfPtr = UnsafeMutableRawPointer(
-            Unmanaged.passUnretained(self).toOpaque())
-        _ = wolfSSL_set_ex_data(sslPtr, 1, selfPtr)
-
-        // SNI (server_name extension + hostname used by our verify callback
-        // via wolfSSL_get_servername lookup).
-        _ = serverName.withCString { name in
-            wolfSSL_UseSNI(sslPtr, UInt8(WOLFSSL_SNI_HOST_NAME),
-                           name, UInt16(strlen(name)))
-        }
-
-        // ALPN — OpenSSL wire format: length-prefixed concatenation.
-        var alpnWire: [UInt8] = []
-        for proto in alpn {
-            let bytes = Array(proto.utf8)
-            precondition(bytes.count <= 255, "ALPN protocol too long: \(proto)")
-            alpnWire.append(UInt8(bytes.count))
-            alpnWire.append(contentsOf: bytes)
-        }
-        _ = alpnWire.withUnsafeBufferPointer { buf in
-            wolfSSL_set_alpn_protos(sslPtr, buf.baseAddress, UInt32(buf.count))
-        }
-
-        // If we have a cached session for this (SNI, ALPN), install it before
-        // the handshake starts so wolfSSL sends the PSK in ClientHello.
-        loadCachedSession(into: sslPtr)
     }
 
-    deinit {
-        if let s = ssl { wolfSSL_free(s) }
-        if let c = ctx { wolfSSL_CTX_free(c) }
-    }
+    // MARK: - Build ClientHello
 
-    fileprivate func storeSession(_ session: Data, transportParams: Data) {
-        let key = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
+    /// Builds a TLS 1.3 ClientHello message with QUIC transport parameters.
+    ///
+    /// The returned data is the raw TLS Handshake message (type + length + body),
+    /// suitable for submission via `ngtcp2_conn_submit_crypto_data`.
+    func buildClientHello(transportParams: Data) -> Data? {
+        guard let privateKeyP256, let privateKeyX25519 else { return nil }
+
+        let p256Public = privateKeyP256.publicKey.x963Representation
+        let x25519Public = privateKeyX25519.publicKey.rawRepresentation
+
+        // Real Chrome offers X25519 first, then secp256r1 — match that ordering
+        // both in supported_groups and key_share so the server can pick either.
+        let keyShares: [(group: UInt16, keyData: Data)] = [
+            (kNamedGroupX25519, x25519Public),
+            (kNamedGroupSecp256r1, p256Public),
+        ]
+
+        // Check for a cached session ticket for resumption
+        var pskExtData: Data?
+        var candidatePSK: Data?
+
+        let cacheKey = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
         ticketCacheLock.lock()
-        sessionTicketCache[key] = CachedSession(
-            session: session, transportParams: transportParams)
+        let cachedTicket = sessionTicketCache[cacheKey]
         ticketCacheLock.unlock()
+
+        if let ticket = cachedTicket,
+           Date().timeIntervalSince(ticket.createdAt) < Double(ticket.lifetime) {
+            let (extData, binderLen) = buildPSKExtension(ticket: ticket)
+            pskExtData = extData
+            pskBinderLength = binderLen
+            candidatePSK = ticket.psk
+        }
+
+        // Build ClientHello (PSK extension appended last if present)
+        var clientHello = TLSClientHelloBuilder.buildQUICClientHello(
+            random: clientRandom,
+            serverName: serverName,
+            alpn: alpn,
+            keyShares: keyShares,
+            quicTransportParams: transportParams,
+            pskExtension: pskExtData
+        )
+
+        // Compute and patch PSK binder if we included a PSK extension
+        if let psk = candidatePSK, pskBinderLength > 0 {
+            patchPSKBinder(clientHello: &clientHello, binderLen: pskBinderLength, psk: psk)
+            activePSK = psk
+        }
+
+        // Add to transcript
+        transcript.append(clientHello)
+        state = .clientHelloSent
+
+        return clientHello
     }
 
-    /// Serialised 0-RTT transport parameters for this `(SNI, ALPN)` paired
-    /// with the cached session ticket, or `nil` if no cached session exists.
-    /// QUICConnection feeds these to
-    /// `ngtcp2_conn_decode_and_set_0rtt_transport_params` before driving any
-    /// I/O so the conn's stream limits / flow-control match what the server
-    /// promised in the previous session.
-    var cachedTransportParams: Data? {
-        let key = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
-        ticketCacheLock.lock()
-        defer { ticketCacheLock.unlock() }
-        return sessionTicketCache[key]?.transportParams
-    }
+    // MARK: - Process Crypto Data
 
-    /// True if `loadCachedSession` installed a resumable session on the SSL.
-    /// Kept on the handler (rather than re-querying wolfSSL) because
-    /// `wolfSSL_session_reused` only flips on after the server confirms
-    /// resumption — by then the 0-RTT-arming decision has already been made.
-    private(set) var hasCachedSession: Bool = false
+    /// Processes TLS handshake data received in a QUIC CRYPTO frame.
+    func processCryptoData(_ data: Data, level: ngtcp2_encryption_level,
+                           conn: OpaquePointer) -> QUICTLSResult {
+        cryptoBuffer.append(data)
 
-    /// Enables 0-RTT on the underlying SSL by raising
-    /// `maxEarlyDataSz` to UINT32_MAX (per
-    /// `wolfSSL_set_quic_early_data_enabled`). Must be called *before*
-    /// `wolfSSL_quic_do_handshake` runs — wolfSSL ignores the call once the
-    /// handshake has started. Returns false if early data could not be
-    /// enabled (no SSL, or no cached session to resume against).
-    @discardableResult
-    func enableEarlyData() -> Bool {
-        guard hasCachedSession, let ssl else { return false }
-        wolfSSL_set_quic_early_data_enabled(ssl, 1)
-        return true
-    }
+        // Process all complete TLS messages in the buffer
+        while cryptoBuffer.count >= 4 {
+            // TLS handshake message: type(1) + length(3) + body
+            // Use startIndex-relative access since removeFirst shifts the base.
+            let si = cryptoBuffer.startIndex
+            let msgType = cryptoBuffer[si]
+            let msgLen = (Int(cryptoBuffer[si + 1]) << 16)
+                       | (Int(cryptoBuffer[si + 2]) << 8)
+                       |  Int(cryptoBuffer[si + 3])
+            let totalLen = 4 + msgLen
 
-    /// Reads `wolfSSL_get_early_data_status` after the handshake completes.
-    /// Returns one of `WOLFSSL_EARLY_DATA_{NOT_SENT,REJECTED,ACCEPTED}`,
-    /// or a negative wolfSSL error.
-    var earlyDataStatus: Int32 {
-        guard let ssl else { return -1 }
-        return wolfSSL_get_early_data_status(ssl)
-    }
+            guard cryptoBuffer.count >= totalLen else {
+                return .needMoreData
+            }
 
-    private func loadCachedSession(into ssl: OpaquePointer) {
-        let key = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
-        ticketCacheLock.lock()
-        let cached = sessionTicketCache[key]
-        ticketCacheLock.unlock()
-        guard let cached else { return }
-        let bytes = cached.session
-        let length = bytes.count
+            let message = Data(cryptoBuffer[si..<(si + totalLen)])
+            cryptoBuffer = Data(cryptoBuffer.dropFirst(totalLen))
 
-        let session: OpaquePointer? = bytes.withUnsafeBytes { raw in
-            guard let p = raw.baseAddress?.assumingMemoryBound(to: UInt8.self)
-            else { return nil as OpaquePointer? }
-            var cursor: UnsafePointer<UInt8>? = p
-            return withUnsafeMutablePointer(to: &cursor) { pp in
-                wolfSSL_d2i_SSL_SESSION(nil, pp, length)
+            // Save transcript state before CertificateVerify for signature verification
+            if msgType == 15 { // CertificateVerify
+                transcriptBeforeCertVerify = transcript
+            }
+
+            // Add to transcript
+            transcript.append(message)
+
+            // body starts after the 4-byte handshake header
+            let body = message.count > 4 ? Data(message[4...]) : Data()
+            let result = processHandshakeMessage(msgType: msgType, body: body,
+                                                  fullMessage: message, level: level, conn: conn)
+            if case .error = result {
+                return result
             }
         }
-        guard let session else { return }
-        defer { wolfSSL_SESSION_free(session) }
-        if wolfSSL_set_session(ssl, session) == WOLFSSL_SUCCESS {
-            hasCachedSession = true
+
+        return .success
+    }
+
+    // MARK: - Process Individual Messages
+
+    private func processHandshakeMessage(msgType: UInt8, body: Data, fullMessage: Data,
+                                          level: ngtcp2_encryption_level,
+                                          conn: OpaquePointer) -> QUICTLSResult {
+        switch msgType {
+        case 2:  return processServerHello(body, conn: conn)
+        case 8:  return processEncryptedExtensions(body, conn: conn)
+        case 11: return processCertificate(body)
+        case 15: return processCertificateVerify(body)
+        case 20: return processServerFinished(body, conn: conn)
+        case 4:  return processNewSessionTicket(body)
+        default:
+            logger.warning("[QUIC-TLS] Unknown message type: \(msgType)")
+            return .success
         }
+    }
+
+    // MARK: - ServerHello
+
+    private func processServerHello(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+        guard body.count >= 34 else {
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        // Parse server random (bytes 2-33 after version)
+        let serverRandom = Data(body[2..<34])
+
+        // RFC 8446 §4.1.3: a ServerHello with this specific random is actually
+        // a HelloRetryRequest. We only offer groups we already sent key shares
+        // for, so any HRR means unrecoverable group mismatch — fail loudly
+        // rather than silently treating the message as a real ServerHello and
+        // dereferencing bogus key material.
+        if serverRandom == Data(kHelloRetryRequestRandom) {
+            logger.error("[QUIC-TLS] HelloRetryRequest received — offered groups rejected")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        // Parse session ID length and skip
+        var offset = 34
+        guard offset < body.count else { return .error(NGTCP2_ERR_CALLBACK_FAILURE) }
+        let sessionIdLen = Int(body[offset])
+        offset += 1 + sessionIdLen
+
+        // Parse cipher suite
+        guard offset + 2 <= body.count else { return .error(NGTCP2_ERR_CALLBACK_FAILURE) }
+        cipherSuite = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
+        offset += 2
+
+        // Skip compression method
+        offset += 1
+
+        // Parse extensions to find key_share
+        guard offset + 2 <= body.count else { return .error(NGTCP2_ERR_CALLBACK_FAILURE) }
+        let extLen = (Int(body[offset]) << 8) | Int(body[offset + 1])
+        offset += 2
+
+        var serverKeyShareGroup: UInt16 = 0
+        var serverPublicKey: Data?
+        var pskAccepted = false
+        var supportedVersionsSeen = false
+        var negotiatedVersion: UInt16 = 0
+        let extEnd = offset + extLen
+        while offset + 4 <= extEnd && offset + 4 <= body.count {
+            let extType = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
+            let extDataLen = (Int(body[offset + 2]) << 8) | Int(body[offset + 3])
+            offset += 4
+
+            if extType == 0x0033 { // key_share
+                // key_share extension: named_group(2) + key_exchange_length(2) + key_exchange
+                if offset + 4 <= body.count {
+                    serverKeyShareGroup = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
+                    let keyExchangeLen = (Int(body[offset + 2]) << 8) | Int(body[offset + 3])
+                    if offset + 4 + keyExchangeLen <= body.count {
+                        serverPublicKey = Data(body[(offset + 4)..<(offset + 4 + keyExchangeLen)])
+                    }
+                }
+            } else if extType == 0x002B { // supported_versions
+                if extDataLen >= 2 {
+                    negotiatedVersion = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
+                    supportedVersionsSeen = true
+                }
+            } else if extType == 0x0029 { // pre_shared_key
+                // Server accepted PSK: selected_identity (UInt16), must be 0
+                if extDataLen >= 2 {
+                    let selectedIdentity = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
+                    pskAccepted = (selectedIdentity == 0 && activePSK != nil)
+                }
+            }
+            offset += extDataLen
+        }
+
+        // RFC 8446 §4.2.1: a TLS 1.3 server MUST send supported_versions = 0x0304.
+        // Rejecting anything else prevents a downgrade-advertising server from
+        // getting past the handshake.
+        guard supportedVersionsSeen, negotiatedVersion == 0x0304 else {
+            logger.error("[QUIC-TLS] Invalid supported_versions: seen=\(supportedVersionsSeen) value=\(String(format: "0x%04x", negotiatedVersion))")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        guard let serverPublicKey else {
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        // Compute shared secret via ECDHE using the private key matching the
+        // group the server chose. The server MUST pick from the groups we
+        // offered, so anything else is a protocol violation.
+        do {
+            let sharedSecretData: Data
+            switch serverKeyShareGroup {
+            case kNamedGroupX25519:
+                guard let priv = privateKeyX25519 else {
+                    return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                }
+                let serverKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverPublicKey)
+                let shared = try priv.sharedSecretFromKeyAgreement(with: serverKey)
+                sharedSecretData = shared.withUnsafeBytes { Data($0) }
+            case kNamedGroupSecp256r1:
+                guard let priv = privateKeyP256 else {
+                    return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                }
+                let serverKey = try P256.KeyAgreement.PublicKey(x963Representation: serverPublicKey)
+                let shared = try priv.sharedSecretFromKeyAgreement(with: serverKey)
+                sharedSecretData = shared.withUnsafeBytes { Data($0) }
+            default:
+                logger.error("[QUIC-TLS] Server selected unoffered group: \(String(format: "0x%04x", serverKeyShareGroup))")
+                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            }
+
+            // Initialize key derivation
+            keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
+
+            // Update ngtcp2's TLS native handle with negotiated cipher suite
+            ngtcp2_conn_set_tls_native_handle(conn,
+                UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
+
+            // Clear PSK if server didn't accept it
+            if !pskAccepted { activePSK = nil }
+
+            // Derive handshake keys (with PSK for resumption, or nil for full handshake)
+            let (hsSecret, hsKeys) = keyDerivation!.deriveHandshakeKeys(
+                sharedSecret: sharedSecretData, transcript: transcript,
+                psk: activePSK
+            )
+            handshakeSecret = hsSecret
+            clientHandshakeTrafficSecret = hsKeys.clientTrafficSecret
+
+            // Install handshake keys in ngtcp2
+            installHandshakeKeys(conn: conn, keys: hsKeys)
+
+            state = .serverHelloReceived
+
+        } catch {
+            logger.error("[QUIC-TLS] ECDHE failed: \(error)")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        return .success
+    }
+
+    // MARK: - EncryptedExtensions
+
+    private func processEncryptedExtensions(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+        // Parse extensions to find QUIC transport parameters (0x39)
+        guard body.count >= 2 else { return .success }
+        let extLen = (Int(body[0]) << 8) | Int(body[1])
+        var offset = 2
+        let extEnd = offset + extLen
+
+        while offset + 4 <= extEnd && offset + 4 <= body.count {
+            let extType = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
+            let extDataLen = (Int(body[offset + 2]) << 8) | Int(body[offset + 3])
+            offset += 4
+
+            if extType == 0x0039 { // quic_transport_parameters
+                if offset + extDataLen <= body.count {
+                    let params = Data(body[offset..<(offset + extDataLen)])
+                    serverTransportParams = params
+
+                    // Set remote transport params on the connection
+                    let rv = params.withUnsafeBytes { buf -> Int32 in
+                        guard let ptr = buf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                            return -1
+                        }
+                        return ngtcp2_conn_decode_and_set_remote_transport_params(
+                            conn, ptr, params.count
+                        )
+                    }
+                    if rv != 0 {
+                        logger.error("[QUIC-TLS] Failed to set remote transport params: \(rv)")
+                    }
+                }
+            } else if extType == 0x0010 { // application_layer_protocol_negotiation (RFC 7301)
+                // ProtocolNameList: uint16 list_len, then one ProtocolName:
+                // uint8 name_len, opaque name[name_len].
+                if extDataLen >= 3, offset + extDataLen <= body.count {
+                    let listLen = (Int(body[offset]) << 8) | Int(body[offset + 1])
+                    if listLen >= 1, 2 + listLen <= extDataLen {
+                        let nameLen = Int(body[offset + 2])
+                        if nameLen >= 1, 3 + nameLen <= extDataLen {
+                            let nameStart = offset + 3
+                            let nameData = Data(body[nameStart..<(nameStart + nameLen)])
+                            negotiatedALPN = String(data: nameData, encoding: .utf8)
+                        }
+                    }
+                }
+                // Enforce ALPN: the server MUST pick from the list we offered.
+                // If it picked something else (or omitted ALPN when we offered one)
+                // treat the handshake as a protocol violation.
+                if !alpn.isEmpty {
+                    guard let picked = negotiatedALPN, alpn.contains(picked) else {
+                        logger.error("[QUIC-TLS] ALPN mismatch: offered \(alpn), server picked \(negotiatedALPN ?? "<none>")")
+                        return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+                    }
+                }
+            }
+            offset += extDataLen
+        }
+
+        return .success
+    }
+
+    // MARK: - Server Finished
+
+    private func processServerFinished(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
+        guard let keyDerivation, let handshakeSecret, let clientHTS = clientHandshakeTrafficSecret else {
+            logger.error("[QUIC-TLS] Missing key derivation state for Finished")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        // Validate server certificate chain (respects allowInsecure setting)
+        if let error = validateCertificate() {
+            logger.error("[QUIC-TLS] \(error.localizedDescription)")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        // Verify CertificateVerify signature against transcript
+        if !serverCertificates.isEmpty,
+           let cvTranscript = transcriptBeforeCertVerify,
+           let signature = certificateVerifySignature {
+            if let error = verifyCertificateVerify(
+                transcript: cvTranscript,
+                algorithm: certificateVerifyAlgorithm,
+                signature: signature
+            ) {
+                logger.error("[QUIC-TLS] \(error.localizedDescription)")
+                return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+            }
+        }
+
+        let appKeys = keyDerivation.deriveApplicationKeys(
+            handshakeSecret: handshakeSecret, fullTranscript: transcript
+        )
+        installApplicationKeys(conn: conn, keys: appKeys)
+
+        let verifyData = keyDerivation.computeFinishedVerifyData(
+            trafficSecret: clientHTS, transcript: transcript
+        )
+        let finishedMessage = buildFinishedMessage(verifyData: verifyData)
+
+        // Submit client Finished on the handshake encryption level
+        let rv = finishedMessage.withUnsafeBytes { buf -> Int32 in
+            guard let ptr = buf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return NGTCP2_ERR_CALLBACK_FAILURE
+            }
+            return ngtcp2_conn_submit_crypto_data(
+                conn, NGTCP2_ENCRYPTION_LEVEL_HANDSHAKE, ptr, finishedMessage.count
+            )
+        }
+
+        if rv != 0 {
+            logger.error("[QUIC-TLS] Failed to submit client Finished: \(rv)")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+
+        ngtcp2_conn_tls_handshake_completed(conn)
+        state = .completed
+
+        // Compute resumption master secret for session ticket processing.
+        // Transcript must include client Finished for this derivation.
+        transcript.append(finishedMessage)
+        let hsKey = SymmetricKey(data: handshakeSecret)
+        let derivedHS = keyDerivation.deriveSecret(key: hsKey, label: "derived", messages: Data())
+        let (_, masterKey) = keyDerivation.hkdfExtract(
+            salt: derivedHS, ikm: Data(repeating: 0, count: keyDerivation.hashLength)
+        )
+        resumptionMasterSecret = keyDerivation.deriveSecret(
+            key: masterKey, label: "res master", messages: transcript
+        )
+
+        return .success
+    }
+
+    // MARK: - Key Installation
+
+    private func installHandshakeKeys(conn: OpaquePointer, keys: TLSHandshakeKeys) {
+        let aead = ngtcp2_crypto_aead()
+        let md = ngtcp2_crypto_md()
+
+        // Set crypto context based on cipher suite
+        var ctx = ngtcp2_crypto_ctx()
+        ngtcp2_crypto_ctx_tls(&ctx, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
+        ngtcp2_conn_set_crypto_ctx(conn, &ctx)
+
+        // Derive packet protection keys from traffic secrets
+        let kd = keyDerivation!
+        let clientKey = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: keys.clientTrafficSecret),
+            label: "quic key", context: Data(), length: kd.keyLength)
+        let clientIV = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: keys.clientTrafficSecret),
+            label: "quic iv", context: Data(), length: 12)
+        let clientHP = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: keys.clientTrafficSecret),
+            label: "quic hp", context: Data(), length: kd.keyLength)
+
+        let serverKey = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: keys.serverTrafficSecret),
+            label: "quic key", context: Data(), length: kd.keyLength)
+        let serverIV = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: keys.serverTrafficSecret),
+            label: "quic iv", context: Data(), length: 12)
+        let serverHP = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: keys.serverTrafficSecret),
+            label: "quic hp", context: Data(), length: kd.keyLength)
+
+        // Create AEAD and HP contexts
+        var rxAeadCtx = ngtcp2_crypto_aead_ctx()
+        var txAeadCtx = ngtcp2_crypto_aead_ctx()
+        var rxHPCtx = ngtcp2_crypto_cipher_ctx()
+        var txHPCtx = ngtcp2_crypto_cipher_ctx()
+
+        serverKey.withUnsafeBytes { keyBuf in
+            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &ctx.aead,
+                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
+        }
+        clientKey.withUnsafeBytes { keyBuf in
+            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &ctx.aead,
+                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
+        }
+        serverHP.withUnsafeBytes { keyBuf in
+            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &ctx.hp,
+                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        }
+        clientHP.withUnsafeBytes { keyBuf in
+            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &ctx.hp,
+                keyBuf.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        }
+
+        // Install keys
+        serverIV.withUnsafeBytes { ivBuf in
+            ngtcp2_conn_install_rx_handshake_key(conn, &rxAeadCtx,
+                ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12, &rxHPCtx)
+        }
+        clientIV.withUnsafeBytes { ivBuf in
+            ngtcp2_conn_install_tx_handshake_key(conn, &txAeadCtx,
+                ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12, &txHPCtx)
+        }
+    }
+
+    private func installApplicationKeys(conn: OpaquePointer, keys: TLSApplicationKeys) {
+        let kd = keyDerivation!
+        var ctx = ngtcp2_crypto_ctx()
+        ngtcp2_crypto_ctx_tls(&ctx, UnsafeMutableRawPointer(bitPattern: UInt(cipherSuite)))
+
+        // Derive proper application traffic secrets via the master secret chain:
+        //   derived = Derive-Secret(handshakeSecret, "derived", "")
+        //   masterSecret = HKDF-Extract(derived, 0...0)
+        //   server_ats = Derive-Secret(masterSecret, "s ap traffic", transcript)
+        //   client_ats = Derive-Secret(masterSecret, "c ap traffic", transcript)
+        let hsKey = SymmetricKey(data: handshakeSecret!)
+        let derivedHS = kd.deriveSecret(key: hsKey, label: "derived", messages: Data())
+        let (_, masterKey) = kd.hkdfExtract(salt: derivedHS, ikm: Data(repeating: 0, count: kd.hashLength))
+
+        let serverATS = kd.deriveSecret(key: masterKey, label: "s ap traffic", messages: transcript)
+        let clientATS = kd.deriveSecret(key: masterKey, label: "c ap traffic", messages: transcript)
+
+        // Derive QUIC packet protection keys from the traffic secrets
+        let serverATSKey = SymmetricKey(data: serverATS)
+        let rxKey = kd.hkdfExpandLabel(key: serverATSKey, label: "quic key", context: Data(), length: kd.keyLength)
+        let rxIV = kd.hkdfExpandLabel(key: serverATSKey, label: "quic iv", context: Data(), length: 12)
+        let rxHP = kd.hkdfExpandLabel(key: serverATSKey, label: "quic hp", context: Data(), length: kd.keyLength)
+
+        let clientATSKey = SymmetricKey(data: clientATS)
+        let txKey = kd.hkdfExpandLabel(key: clientATSKey, label: "quic key", context: Data(), length: kd.keyLength)
+        let txIV = kd.hkdfExpandLabel(key: clientATSKey, label: "quic iv", context: Data(), length: 12)
+        let txHP = kd.hkdfExpandLabel(key: clientATSKey, label: "quic hp", context: Data(), length: kd.keyLength)
+
+        // (keys derived)
+
+        // Create AEAD and HP contexts
+        var rxAeadCtx = ngtcp2_crypto_aead_ctx()
+        var rxHPCtx = ngtcp2_crypto_cipher_ctx()
+        var txAeadCtx = ngtcp2_crypto_aead_ctx()
+        var txHPCtx = ngtcp2_crypto_cipher_ctx()
+
+        rxKey.withUnsafeBytes { buf in
+            ngtcp2_crypto_aead_ctx_decrypt_init(&rxAeadCtx, &ctx.aead,
+                buf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
+        }
+        rxHP.withUnsafeBytes { buf in
+            ngtcp2_crypto_cipher_ctx_encrypt_init(&rxHPCtx, &ctx.hp,
+                buf.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        }
+        txKey.withUnsafeBytes { buf in
+            ngtcp2_crypto_aead_ctx_encrypt_init(&txAeadCtx, &ctx.aead,
+                buf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12)
+        }
+        txHP.withUnsafeBytes { buf in
+            ngtcp2_crypto_cipher_ctx_encrypt_init(&txHPCtx, &ctx.hp,
+                buf.baseAddress!.assumingMemoryBound(to: UInt8.self))
+        }
+
+        // Install rx (server → client) application keys
+        serverATS.withUnsafeBytes { secretBuf in
+            rxIV.withUnsafeBytes { ivBuf in
+                ngtcp2_conn_install_rx_key(conn,
+                    secretBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), kd.hashLength,
+                    &rxAeadCtx,
+                    ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12,
+                    &rxHPCtx)
+            }
+        }
+
+        // Install tx (client → server) application keys
+        clientATS.withUnsafeBytes { secretBuf in
+            txIV.withUnsafeBytes { ivBuf in
+                ngtcp2_conn_install_tx_key(conn,
+                    secretBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), kd.hashLength,
+                    &txAeadCtx,
+                    ivBuf.baseAddress!.assumingMemoryBound(to: UInt8.self), 12,
+                    &txHPCtx)
+            }
+        }
+
+    }
+
+    // MARK: - Session Tickets
+
+    /// Parses a NewSessionTicket message and caches it for future resumption.
+    private func processNewSessionTicket(_ body: Data) -> QUICTLSResult {
+        guard body.count >= 11 else { return .success }
+
+        var offset = 0
+        let lifetime = UInt32(body[0]) << 24 | UInt32(body[1]) << 16
+                     | UInt32(body[2]) << 8  | UInt32(body[3])
+        offset += 4
+
+        let ageAdd = UInt32(body[offset]) << 24 | UInt32(body[offset + 1]) << 16
+                   | UInt32(body[offset + 2]) << 8  | UInt32(body[offset + 3])
+        offset += 4
+
+        let nonceLen = Int(body[offset])
+        offset += 1
+        guard offset + nonceLen <= body.count else { return .success }
+        let nonce = Data(body[offset..<(offset + nonceLen)])
+        offset += nonceLen
+
+        guard offset + 2 <= body.count else { return .success }
+        let ticketLen = Int(body[offset]) << 8 | Int(body[offset + 1])
+        offset += 2
+        guard offset + ticketLen <= body.count else { return .success }
+        let ticket = Data(body[offset..<(offset + ticketLen)])
+
+        // Derive PSK from resumption master secret (RFC 8446 §4.6.1)
+        guard let kd = keyDerivation, let rms = resumptionMasterSecret else { return .success }
+        let psk = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: rms),
+            label: "resumption",
+            context: nonce,
+            length: kd.hashLength
+        )
+
+        let cached = QUICSessionTicket(
+            ticket: ticket, nonce: nonce, psk: psk,
+            cipherSuite: cipherSuite, createdAt: Date(),
+            lifetime: lifetime, ageAdd: ageAdd
+        )
+        let cacheKey = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
+        ticketCacheLock.lock()
+        sessionTicketCache[cacheKey] = cached
+        ticketCacheLock.unlock()
+        
+        return .success
+    }
+
+    // MARK: - PSK Extension Building
+
+    /// Builds a pre_shared_key extension (type 0x0029) with a zero-filled binder placeholder.
+    private func buildPSKExtension(ticket: QUICSessionTicket) -> (extensionData: Data, binderLen: Int) {
+        let ticketAgeMs = UInt32(Date().timeIntervalSince(ticket.createdAt) * 1000)
+        let obfuscatedAge = ticketAgeMs &+ ticket.ageAdd
+
+        // PskIdentity: identity_len(2) + identity + obfuscated_ticket_age(4)
+        var identities = Data()
+        identities.append(UInt8(ticket.ticket.count >> 8))
+        identities.append(UInt8(ticket.ticket.count & 0xFF))
+        identities.append(ticket.ticket)
+        identities.append(UInt8((obfuscatedAge >> 24) & 0xFF))
+        identities.append(UInt8((obfuscatedAge >> 16) & 0xFF))
+        identities.append(UInt8((obfuscatedAge >> 8) & 0xFF))
+        identities.append(UInt8(obfuscatedAge & 0xFF))
+
+        let kd = TLS13KeyDerivation(cipherSuite: ticket.cipherSuite)
+        let binderLen = kd.hashLength
+
+        // PskBinderEntry: binder_len(1) + binder (zero placeholder)
+        var binders = Data()
+        binders.append(UInt8(binderLen))
+        binders.append(Data(repeating: 0, count: binderLen))
+
+        // OfferedPsks: identities_len(2) + identities + binders_len(2) + binders
+        var payload = Data()
+        payload.append(UInt8(identities.count >> 8))
+        payload.append(UInt8(identities.count & 0xFF))
+        payload.append(identities)
+        payload.append(UInt8(binders.count >> 8))
+        payload.append(UInt8(binders.count & 0xFF))
+        payload.append(binders)
+
+        // Extension header: type(2) + length(2) + payload
+        var ext = Data()
+        ext.append(0x00); ext.append(0x29) // pre_shared_key
+        ext.append(UInt8(payload.count >> 8))
+        ext.append(UInt8(payload.count & 0xFF))
+        ext.append(payload)
+
+        return (ext, binderLen)
+    }
+
+    /// Computes and patches the PSK binder into a ClientHello that has a zero-filled placeholder.
+    private func patchPSKBinder(clientHello: inout Data, binderLen: Int, psk: Data) {
+        let kd = TLS13KeyDerivation(cipherSuite: cipherSuite)
+
+        // Derive binder key: early_secret → "res binder" → finished_key
+        let (_, earlyKey) = kd.hkdfExtract(salt: Data(), ikm: psk)
+        let binderKeySecret = kd.deriveSecret(key: earlyKey, label: "res binder", messages: Data())
+        let finishedKey = kd.hkdfExpandLabel(
+            key: SymmetricKey(data: binderKeySecret),
+            label: "finished",
+            context: Data(),
+            length: kd.hashLength
+        )
+
+        // Binder = HMAC(finished_key, Hash(partial_ClientHello))
+        // partial_ClientHello = everything except the binder value bytes at the end
+        let partialLen = clientHello.count - binderLen
+        let partial = Data(clientHello[0..<partialLen])
+        let transcriptHash = kd.transcriptHash(partial)
+
+        let symKey = SymmetricKey(data: finishedKey)
+        let binder: Data
+        if cipherSuite == TLSCipherSuite.TLS_AES_256_GCM_SHA384 {
+            binder = Data(HMAC<SHA384>.authenticationCode(for: transcriptHash, using: symKey))
+        } else {
+            binder = Data(HMAC<SHA256>.authenticationCode(for: transcriptHash, using: symKey))
+        }
+
+        // Patch binder into ClientHello
+        clientHello.replaceSubrange(partialLen..<clientHello.count, with: binder)
+    }
+
+    // MARK: - Certificate
+
+    private func processCertificate(_ body: Data) -> QUICTLSResult {
+        parseTLS13CertificateMessage(body)
+        return .success
+    }
+
+    /// Parses a TLS 1.3 Certificate message to extract X.509 certificates.
+    private func parseTLS13CertificateMessage(_ body: Data) {
+        serverCertificates.removeAll()
+        guard body.count >= 4 else { return }
+
+        var offset = 0
+        let contextLen = Int(body[offset])
+        offset += 1 + contextLen
+
+        guard offset + 3 <= body.count else { return }
+        let listLen = Int(body[offset]) << 16 | Int(body[offset + 1]) << 8 | Int(body[offset + 2])
+        offset += 3
+
+        let listEnd = offset + listLen
+        guard listEnd <= body.count else { return }
+
+        while offset + 3 <= listEnd {
+            let certLen = Int(body[offset]) << 16 | Int(body[offset + 1]) << 8 | Int(body[offset + 2])
+            offset += 3
+            guard offset + certLen <= listEnd else { break }
+
+            let certData = Data(body[offset..<(offset + certLen)])
+            offset += certLen
+
+            if let cert = SecCertificateCreateWithData(nil, certData as CFData) {
+                serverCertificates.append(cert)
+            }
+
+            // Skip per-certificate extensions
+            guard offset + 2 <= listEnd else { break }
+            let extLen = Int(body[offset]) << 8 | Int(body[offset + 1])
+            offset += 2 + extLen
+        }
+    }
+
+    // MARK: - CertificateVerify
+
+    private func processCertificateVerify(_ body: Data) -> QUICTLSResult {
+        guard body.count >= 4 else {
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+        certificateVerifyAlgorithm = UInt16(body[0]) << 8 | UInt16(body[1])
+        let sigLen = Int(body[2]) << 8 | Int(body[3])
+        guard body.count >= 4 + sigLen else {
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
+        certificateVerifySignature = Data(body[4..<(4 + sigLen)])
+        return .success
+    }
+
+    // MARK: - Certificate Validation
+
+    /// Validates the server certificate chain using SecTrust.
+    /// Respects `allowInsecure` and user-trusted certificate SHA-256 fingerprints,
+    /// matching the behavior of TLSClient for HTTP/2.
+    private func validateCertificate() -> Error? {
+        if CertificatePolicy.allowInsecure {
+            return nil
+        }
+
+        guard !serverCertificates.isEmpty else {
+            return TLSError.certificateValidationFailed("No server certificates received")
+        }
+
+        var trust: SecTrust?
+        let policy = SecPolicyCreateSSL(true, serverName as CFString)
+
+        let status = SecTrustCreateWithCertificates(
+            serverCertificates as CFArray,
+            policy,
+            &trust
+        )
+
+        guard status == errSecSuccess, let trust else {
+            return TLSError.certificateValidationFailed("Failed to create trust object")
+        }
+
+        var cfError: CFError?
+        let isValid = SecTrustEvaluateWithError(trust, &cfError)
+        if isValid {
+            return nil
+        }
+
+        if let leafCert = serverCertificates.first,
+           Self.isUserTrusted(certificate: leafCert) {
+            return nil
+        }
+
+        let message = (cfError as Error?)?.localizedDescription ?? "Certificate evaluation failed"
+        return TLSError.certificateValidationFailed(message)
+    }
+
+    /// Verifies the CertificateVerify signature against the handshake transcript.
+    private func verifyCertificateVerify(
+        transcript: Data,
+        algorithm: UInt16,
+        signature: Data
+    ) -> Error? {
+        guard let kd = keyDerivation else {
+            return TLSError.handshakeFailed("Missing key derivation")
+        }
+
+        guard let serverCert = serverCertificates.first else {
+            return TLSError.certificateValidationFailed("No server certificate for CertificateVerify")
+        }
+
+        guard let serverPublicKey = SecCertificateCopyKey(serverCert) else {
+            return TLSError.certificateValidationFailed("Failed to extract public key")
+        }
+
+        let transcriptHash = kd.transcriptHash(transcript)
+
+        // RFC 8446 §4.4.3: content = 64×0x20 + context_string + 0x00 + Hash(transcript)
+        var content = Data(repeating: 0x20, count: 64)
+        content.append("TLS 1.3, server CertificateVerify".data(using: .ascii)!)
+        content.append(0x00)
+        content.append(transcriptHash)
+
+        let secAlgorithm = Self.secKeyAlgorithm(for: algorithm)
+
+        var error: Unmanaged<CFError>?
+        let isValid = SecKeyVerifySignature(
+            serverPublicKey,
+            secAlgorithm,
+            content as CFData,
+            signature as CFData,
+            &error
+        )
+
+        if !isValid {
+            // Respect allowInsecure for signature verification too
+            if CertificatePolicy.allowInsecure {
+                return nil
+            }
+            let message = error?.takeRetainedValue().localizedDescription ?? "Signature verification failed"
+            return TLSError.certificateValidationFailed("CertificateVerify failed: \(message)")
+        }
+
+        return nil
+    }
+
+    /// Maps TLS signature algorithm identifier to Security.framework algorithm.
+    private static func secKeyAlgorithm(for tlsAlgorithm: UInt16) -> SecKeyAlgorithm {
+        switch tlsAlgorithm {
+        case 0x0403: return .ecdsaSignatureMessageX962SHA256
+        case 0x0503: return .ecdsaSignatureMessageX962SHA384
+        case 0x0603: return .ecdsaSignatureMessageX962SHA512
+        case 0x0804: return .rsaSignatureMessagePSSSHA256
+        case 0x0805: return .rsaSignatureMessagePSSSHA384
+        case 0x0806: return .rsaSignatureMessagePSSSHA512
+        case 0x0401: return .rsaSignatureMessagePKCS1v15SHA256
+        case 0x0501: return .rsaSignatureMessagePKCS1v15SHA384
+        case 0x0601: return .rsaSignatureMessagePKCS1v15SHA512
+        case 0x0201: return .rsaSignatureMessagePKCS1v15SHA1
+        default:     return .rsaSignatureMessagePSSSHA256
+        }
+    }
+
+    /// Checks whether the certificate's SHA-256 fingerprint is in the user's trusted list.
+    private static func isUserTrusted(certificate: SecCertificate) -> Bool {
+        let trusted = CertificatePolicy.trustedFingerprints
+        guard !trusted.isEmpty else { return false }
+        let certData = SecCertificateCopyData(certificate) as Data
+        let sha256 = SHA256.hash(data: certData).map { String(format: "%02x", $0) }.joined()
+        return trusted.contains(sha256)
+    }
+
+    // MARK: - Helpers
+
+    private func buildFinishedMessage(verifyData: Data) -> Data {
+        var msg = Data()
+        msg.append(20) // Finished type
+        let len = verifyData.count
+        msg.append(UInt8((len >> 16) & 0xFF))
+        msg.append(UInt8((len >> 8) & 0xFF))
+        msg.append(UInt8(len & 0xFF))
+        msg.append(verifyData)
+        return msg
     }
 }
-
-// MARK: - Certificate verification
-
-/// Called once per certificate in the received chain, leaf-last.
-/// Strategy: rubber-stamp everything above depth 0 so wolfSSL walks the full
-/// chain into the store, then at depth 0 pull the accumulated chain out and
-/// validate with Security.framework — matching the pre-migration behavior
-/// (system trust roots + `CertificatePolicy.allowInsecure` + fingerprint pins).
-private let certVerifyCallback:
-    @convention(c) (CInt, UnsafeMutablePointer<WOLFSSL_X509_STORE_CTX>?)
-    -> CInt = { _, storeCtxPtr in
-        guard let storeCtxPtr else { return 0 }
-        let depth = wolfSSL_X509_STORE_CTX_get_error_depth(storeCtxPtr)
-        if depth > 0 { return 1 }
-
-        if CertificatePolicy.allowInsecure { return 1 }
-
-        guard let sslVoid = wolfSSL_X509_STORE_CTX_get_ex_data(
-            storeCtxPtr, wolfSSL_get_ex_data_X509_STORE_CTX_idx()) else {
-            return 0
-        }
-        let ssl = OpaquePointer(sslVoid)
-
-        let serverName: String
-        if let sniPtr = wolfSSL_get_servername(
-            ssl, UInt8(WOLFSSL_SNI_HOST_NAME)) {
-            serverName = String(cString: sniPtr)
-        } else {
-            serverName = ""
-        }
-
-        guard let stack = wolfSSL_X509_STORE_CTX_get_chain(storeCtxPtr) else {
-            return 0
-        }
-        var certs: [SecCertificate] = []
-        let count = wolfSSL_sk_X509_num(stack)
-        for i in 0..<count {
-            guard let x = wolfSSL_sk_X509_value(stack, i) else { continue }
-            var size: Int32 = 0
-            guard let der = wolfSSL_X509_get_der(x, &size), size > 0 else {
-                continue
-            }
-            let data = Data(bytes: der, count: Int(size)) as CFData
-            if let cert = SecCertificateCreateWithData(nil, data) {
-                certs.append(cert)
-            }
-        }
-        guard let leaf = certs.first else { return 0 }
-
-        let policy = SecPolicyCreateSSL(true, serverName as CFString)
-        var trust: SecTrust?
-        guard SecTrustCreateWithCertificates(
-            certs as CFArray, policy, &trust) == errSecSuccess,
-              let trust else { return 0 }
-
-        var evalErr: CFError?
-        if SecTrustEvaluateWithError(trust, &evalErr) {
-            return 1
-        }
-
-        // Pinned-fingerprint override.
-        let pinned = CertificatePolicy.trustedFingerprints
-        if !pinned.isEmpty {
-            let certData = SecCertificateCopyData(leaf) as Data
-            let digest = SHA256.hash(data: certData)
-            let hex = digest.map { String(format: "%02x", $0) }.joined()
-            if pinned.contains(hex) { return 1 }
-        }
-        return 0
-    }
-
-// MARK: - Session resumption
-
-/// Invoked by wolfSSL when a NewSessionTicket arrives. Serialises both the
-/// session and the conn's current 0-RTT transport parameters into the cache
-/// keyed by the handler's (SNI, ALPN). We return 0 to let wolfSSL free its
-/// own reference — we keep the serialised bytes, not the WOLFSSL_SESSION
-/// object.
-///
-/// The TPs come from `ngtcp2_conn_encode_0rtt_transport_params`, which on a
-/// client synthesises them from the *remote* params received from the server
-/// during this handshake. Pairing them with the ticket is mandatory: per
-/// RFC 9001 §4.6.1 the client must restore these limits before sending any
-/// 0-RTT packet, otherwise it can violate flow-control or stream-count
-/// promises and the server will close the connection.
-private let sessionNewCallback:
-    @convention(c) (OpaquePointer?, OpaquePointer?) -> CInt = { sslPtr, sessionPtr in
-        guard let sslPtr, let sessionPtr else { return 0 }
-        guard let selfVoid = wolfSSL_get_ex_data(sslPtr, 1) else { return 0 }
-        let handler = Unmanaged<QUICTLSHandler>.fromOpaque(selfVoid)
-            .takeUnretainedValue()
-
-        // Recover the ngtcp2_conn from the back-pointer chain wolfSSL keeps:
-        //   ssl → app_data → ngtcp2_crypto_conn_ref → get_conn(ref) → conn
-        // QUICConnection wired this up in `initializeNgtcp2`. Without conn
-        // we can still cache the session, but the next attempt won't be
-        // able to send 0-RTT (no TPs to restore).
-        let conn: OpaquePointer? = {
-            guard let appData = wolfSSL_get_app_data(sslPtr) else { return nil }
-            let refPtr = appData.assumingMemoryBound(
-                to: ngtcp2_crypto_conn_ref.self)
-            guard let getConn = refPtr.pointee.get_conn else { return nil }
-            return getConn(refPtr)
-        }()
-
-        // Two-phase i2d: first NULL call sizes, second encodes. wolfSSL's
-        // wolfSSL_i2d_SSL_SESSION writes into a caller-supplied buffer if
-        // `*out` is non-NULL and advances the pointer.
-        var nullOut: UnsafeMutablePointer<UInt8>? = nil
-        let len = withUnsafeMutablePointer(to: &nullOut) { pp -> CInt in
-            wolfSSL_i2d_SSL_SESSION(sessionPtr, pp)
-        }
-        guard len > 0 else { return 0 }
-        var buf = [UInt8](repeating: 0, count: Int(len))
-        let written = buf.withUnsafeMutableBufferPointer { bufPtr -> CInt in
-            var cursor: UnsafeMutablePointer<UInt8>? = bufPtr.baseAddress
-            return withUnsafeMutablePointer(to: &cursor) { pp in
-                wolfSSL_i2d_SSL_SESSION(sessionPtr, pp)
-            }
-        }
-        guard written == len else { return 0 }
-
-        // Encode TPs only if we have the conn handle. The 256-byte buffer is
-        // sized for the documented 0-RTT subset (the ten-or-so flow-control
-        // / stream-limit fields plus the DATAGRAM size).
-        var tpData = Data()
-        if let conn {
-            var tpBuf = [UInt8](repeating: 0, count: 256)
-            let tpLen = tpBuf.withUnsafeMutableBufferPointer { tpPtr -> Int in
-                Int(ngtcp2_conn_encode_0rtt_transport_params(
-                    conn, tpPtr.baseAddress, tpPtr.count))
-            }
-            if tpLen > 0 { tpData = Data(tpBuf.prefix(tpLen)) }
-        }
-
-        handler.storeSession(Data(buf), transportParams: tpData)
-        return 0
-    }

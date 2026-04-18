@@ -1,10 +1,3 @@
-//
-//  TLS13KeyDerivation.swift
-//  Anywhere
-//
-//  Created by Argsment Limited on 3/1/26.
-//
-
 import Foundation
 import CryptoKit
 

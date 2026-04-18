@@ -11,7 +11,6 @@
 #include "lwip/ip_addr.h"
 
 #include <string.h>
-#include <stdlib.h>
 #include <arpa/inet.h>
 #include <os/log.h>
 
@@ -56,37 +55,43 @@ static ip_addr_t s_current_udp_dst_ip;
  *  Netif output callback
  * ======================================================================== */
 
-/* Always allocate a libc-malloc'd buffer and transfer ownership to Swift,
- * which wraps it in `Data(bytesNoCopy:deallocator:.free)`. The deallocator
- * runs on outputQueue (after writePackets) — libc free is thread-safe; lwIP's
- * own mem_malloc/mem_free are not (NO_SYS=1, SYS_LIGHTWEIGHT_PROT=0), so we
- * deliberately bypass them here. Single-pbuf vs chained-pbuf both copy once;
- * the win is removing the Swift-side Data(bytes:count:) copy + storage alloc. */
 static err_t netif_output_ip4(struct netif *netif, struct pbuf *p,
                                const ip4_addr_t *ipaddr) {
     (void)netif; (void)ipaddr;
-    if (!s_output_fn || !p) return ERR_OK;
-    void *buf = malloc(p->tot_len);
-    if (!buf) {
-        os_log_error(s_log, "[Bridge] netif_output_ip4: malloc failed for %u bytes", p->tot_len);
-        return ERR_MEM;
+    if (s_output_fn && p) {
+        if (p->next != NULL) {
+            void *buf = mem_malloc(p->tot_len);
+            if (buf) {
+                pbuf_copy_partial(p, buf, p->tot_len, 0);
+                s_output_fn(buf, p->tot_len, 0);
+                mem_free(buf);
+            } else {
+                os_log_error(s_log, "[Bridge] netif_output_ip4: mem_malloc failed for %u bytes", p->tot_len);
+            }
+        } else {
+            s_output_fn(p->payload, p->tot_len, 0);
+        }
     }
-    pbuf_copy_partial(p, buf, p->tot_len, 0);
-    s_output_fn(buf, p->tot_len, 0);
     return ERR_OK;
 }
 
 static err_t netif_output_ip6(struct netif *netif, struct pbuf *p,
                                const ip6_addr_t *ipaddr) {
     (void)netif; (void)ipaddr;
-    if (!s_output_fn || !p) return ERR_OK;
-    void *buf = malloc(p->tot_len);
-    if (!buf) {
-        os_log_error(s_log, "[Bridge] netif_output_ip6: malloc failed for %u bytes", p->tot_len);
-        return ERR_MEM;
+    if (s_output_fn && p) {
+        if (p->next != NULL) {
+            void *buf = mem_malloc(p->tot_len);
+            if (buf) {
+                pbuf_copy_partial(p, buf, p->tot_len, 0);
+                s_output_fn(buf, p->tot_len, 1);
+                mem_free(buf);
+            } else {
+                os_log_error(s_log, "[Bridge] netif_output_ip6: mem_malloc failed for %u bytes", p->tot_len);
+            }
+        } else {
+            s_output_fn(p->payload, p->tot_len, 1);
+        }
     }
-    pbuf_copy_partial(p, buf, p->tot_len, 0);
-    s_output_fn(buf, p->tot_len, 1);
     return ERR_OK;
 }
 

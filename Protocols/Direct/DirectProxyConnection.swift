@@ -31,7 +31,7 @@ class DirectProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        connection.receive { [weak self] data, isComplete, error in
+        connection.receive(maximumLength: 65536) { [weak self] data, isComplete, error in
             guard let self else {
                 completion(nil, nil)
                 return

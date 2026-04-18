@@ -31,6 +31,10 @@ struct TransportClosures {
 // MARK: - Transport adapters
 
 extension TransportClosures {
+    /// Default receive chunk size. Matches the largest typical TCP segment
+    /// aggregation we want from a single `recv(2)` wake-up.
+    private static let defaultReceiveChunk = 65536
+
     /// Adapts a ``RawTCPSocket`` to the closure triple.
     init(rawTCP transport: RawTCPSocket) {
         self.init(
@@ -38,7 +42,7 @@ extension TransportClosures {
                 transport.send(data: data, completion: completion)
             },
             receive: { completion in
-                transport.receive(completion: completion)
+                transport.receive(maximumLength: Self.defaultReceiveChunk, completion: completion)
             },
             cancel: {
                 transport.forceCancel()
@@ -46,12 +50,11 @@ extension TransportClosures {
         )
     }
 
-    /// Adapts any TLS record transport (wolfSSL-backed or Reality-backed)
-    /// to the closure triple. The TLS receive callback signature
-    /// `(Data?, Error?)` is widened to include the EOF bit; TLS surfaces
-    /// EOF as `error == nil && data == nil`, which the caller handles via
-    /// its own framing layer.
-    init(tls tlsConnection: any TLSRecord) {
+    /// Adapts a ``TLSRecordConnection`` to the closure triple. The TLS
+    /// receive callback signature `(Data?, Error?)` is widened to include
+    /// the EOF bit; TLS surfaces EOF as `error == nil && data == nil`, which
+    /// the caller handles via its own framing layer.
+    init(tls tlsConnection: TLSRecordConnection) {
         self.init(
             send: { data, completion in
                 tlsConnection.send(data: data, completion: completion)

@@ -20,7 +20,7 @@ private let logger = AnywhereLogger(category: "Reality")
 /// - Uses X25519 ECDH with the server's public key for mutual authentication.
 /// - Derives application-layer encryption keys from the TLS 1.3 handshake transcript.
 ///
-/// After a successful handshake, returns a ``RealityRecordConnection`` that wraps
+/// After a successful handshake, returns a ``TLSRecordConnection`` that wraps
 /// the underlying ``RawTCPSocket`` with TLS record encryption/decryption.
 class RealityClient {
     private let configuration: RealityConfiguration
@@ -53,11 +53,11 @@ class RealityClient {
     /// - Parameters:
     ///   - host: The server hostname or IP address.
     ///   - port: The server port number.
-    ///   - completion: Called with the established ``RealityRecordConnection`` or an error.
+    ///   - completion: Called with the established ``TLSRecordConnection`` or an error.
     func connect(
         host: String,
         port: UInt16,
-        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
+        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
 
@@ -104,10 +104,10 @@ class RealityClient {
     ///
     /// - Parameters:
     ///   - tunnel: The proxy connection providing a TCP tunnel to the server.
-    ///   - completion: Called with the established ``RealityRecordConnection`` or an error.
+    ///   - completion: Called with the established ``TLSRecordConnection`` or an error.
     func connect(
         overTunnel tunnel: ProxyConnection,
-        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
+        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
         self.connection = TunneledTransport(tunnel: tunnel)
@@ -126,7 +126,7 @@ class RealityClient {
     /// Performs the Reality TLS handshake: sends ClientHello, processes ServerHello,
     /// derives encryption keys, and sends Client Finished.
     private func performRealityHandshake(
-        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
+        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         guard let privateKey = ephemeralPrivateKey else {
             logger.error("[Reality] No ephemeral key for handshake")
@@ -216,10 +216,7 @@ class RealityClient {
             }
         }
 
-        // Build ClientHello with zero SessionId — this IS the AAD per Xray-core's
-        // Reality protocol. The final ClientHello differs only in the SessionId
-        // bytes; we patch them in-place rather than rebuilding the whole
-        // fingerprinted extension block a second time.
+        // Build ClientHello with zero SessionId for AAD (matching Xray-core)
         let zeroSessionId = Data(count: 32)
         let rawClientHelloForAAD = TLSClientHelloBuilder.buildRawClientHello(
             fingerprint: configuration.fingerprint,
@@ -230,9 +227,10 @@ class RealityClient {
             mlkemEncapsulationKey: mlkemEncapsulationKey
         )
 
-        // Encrypt first 16 bytes of SessionId using AES-GCM (16 plaintext + 16 tag = 32).
+        // Encrypt first 16 bytes of SessionId using AES-GCM
         let nonce = random.suffix(12)
         let plaintext = sessionId.prefix(16)
+
         let encryptedSessionId = try TLSRecordCrypto.encryptAESGCM(
             plaintext: Data(plaintext),
             key: SymmetricKey(data: authKey),
@@ -240,13 +238,15 @@ class RealityClient {
             aad: rawClientHelloForAAD
         )
 
-        // SessionId always lands at offset 39 in the raw ClientHello:
-        // 1 (msg type) + 3 (length) + 2 (legacy_version) + 32 (random) +
-        // 1 (session_id length prefix) = 39. Length is 32 (matches zeroSessionId).
-        assert(rawClientHelloForAAD.count >= 71)
-        assert(encryptedSessionId.count == 32)
-        var finalClientHello = rawClientHelloForAAD
-        finalClientHello.replaceSubrange(39..<71, with: encryptedSessionId)
+        // Build final ClientHello with encrypted sessionId
+        let finalClientHello = TLSClientHelloBuilder.buildRawClientHello(
+            fingerprint: configuration.fingerprint,
+            random: random,
+            sessionId: encryptedSessionId,
+            serverName: configuration.serverName,
+            publicKey: privateKey.publicKey.rawRepresentation,
+            mlkemEncapsulationKey: mlkemEncapsulationKey
+        )
 
         return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: finalClientHello)
     }
@@ -255,13 +255,13 @@ class RealityClient {
 
     /// Receives and processes the server's TLS response.
     private func receiveServerResponse(
-        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
+        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         guard let connection else {
             completion(.failure(RealityError.connectionFailed("Connection cancelled")))
             return
         }
-        connection.receive { [weak self] data, _, error in
+        connection.receive(maximumLength: 65536) { [weak self] data, _, error in
             guard let self else { return }
 
             if let error {
@@ -298,7 +298,7 @@ class RealityClient {
     /// Continues receiving handshake messages until ServerHello is complete.
     private func continueReceivingHandshake(
         buffer: Data,
-        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
+        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         // Wait until we have a complete TLS record containing ServerHello.
         // The server may split the response across multiple TCP segments,
@@ -308,7 +308,7 @@ class RealityClient {
                 completion(.failure(RealityError.connectionFailed("Connection cancelled")))
                 return
             }
-            connection.receive { [weak self] moreData, _, error in
+            connection.receive(maximumLength: 65536) { [weak self] moreData, _, error in
                 guard let self else { return }
 
                 if let error {
@@ -502,7 +502,7 @@ class RealityClient {
     private func consumeRemainingHandshake(
         buffer: Data,
         startOffset: Int = 0,
-        completion: @escaping (Result<RealityRecordConnection, Error>) -> Void
+        completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         guard let keys = tls13.handshakeKeys, let kd = tls13.keyDerivation else {
             completion(.failure(RealityError.handshakeFailed("Missing handshake keys")))
@@ -570,7 +570,7 @@ class RealityClient {
             offset += 5 + recordLen
 
             // After Server Finished, subsequent records (e.g. NewSessionTicket) are
-            // encrypted with application keys. Stop here and let RealityRecordConnection
+            // encrypted with application keys. Stop here and let TLSRecordConnection
             // handle them so the sequence numbers stay in sync.
             if foundServerFinished { break }
         }
@@ -602,7 +602,7 @@ class RealityClient {
                     return
                 }
 
-                let realityConnection = RealityRecordConnection(
+                let realityConnection = TLSRecordConnection(
                     clientKey: appKeys.clientKey,
                     clientIV: appKeys.clientIV,
                     serverKey: appKeys.serverKey,
@@ -613,7 +613,7 @@ class RealityClient {
                 self.connection = nil
 
                 // Feed remaining buffer data (post-Finished records like NewSessionTicket)
-                // to RealityRecordConnection so they are decrypted with application keys
+                // to TLSRecordConnection so they are decrypted with application keys
                 // and sequence numbers stay in sync.
                 let remaining = buffer.subdata(in: processedOffset..<buffer.count)
                 if !remaining.isEmpty {
@@ -629,7 +629,7 @@ class RealityClient {
                 completion(.failure(RealityError.connectionFailed("Connection cancelled")))
                 return
             }
-            connection.receive { [weak self] moreData, _, error in
+            connection.receive(maximumLength: 65536) { [weak self] moreData, _, error in
                 guard let self else { return }
 
                 if let error {

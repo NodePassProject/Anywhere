@@ -449,6 +449,9 @@ struct TLSClientHelloBuilder {
         case .ios14:      return buildIOS14(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .edge85:     return buildEdge85(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .edge106:    return buildEdge106(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
+        case .android11:  return buildAndroid11(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
+        case .qq11:       return buildQQ11(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
+        case .browser360: return build360_7(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .random:
             assertionFailure("random fingerprint must be resolved before dispatch")
             return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)

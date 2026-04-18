@@ -28,7 +28,7 @@ class TunneledTransport: RawTransport {
         tunnel.sendRaw(data: data)
     }
 
-    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
+    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void) {
         tunnel.receiveRaw { data, error in
             if let error {
                 completion(nil, true, error)

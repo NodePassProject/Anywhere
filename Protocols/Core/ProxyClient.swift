@@ -21,8 +21,8 @@ class ProxyClient {
     private let useResolvedAddressForDirectDial: Bool
     var connection: RawTCPSocket?
     private var realityClient: RealityClient?
-    private var realityConnection: RealityRecordConnection?
-    private var tlsClient: TLSHandler?
+    private var realityConnection: TLSRecordConnection?
+    private var tlsClient: TLSClient?
     private var tlsConnection: TLSRecordConnection?
     private var webSocketConnection: WebSocketConnection?
     private var httpUpgradeConnection: HTTPUpgradeConnection?
@@ -447,7 +447,7 @@ class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        let tlsClient = TLSHandler(configuration: tlsConfig)
+        let tlsClient = TLSClient(configuration: tlsConfig)
 
         let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
             guard let self else {
@@ -488,7 +488,7 @@ class ProxyClient {
     ) {
         let realityClient = RealityClient(configuration: realityConfig)
 
-        let handleRealityResult: (Result<RealityRecordConnection, Error>) -> Void = { [weak self, realityClient] result in
+        let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, realityClient] result in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
@@ -538,7 +538,7 @@ class ProxyClient {
                 alpn: ["http/1.1"],
                 fingerprint: baseTLSConfig.fingerprint
             )
-            let tlsClient = TLSHandler(configuration: wsTlsConfig)
+            let tlsClient = TLSClient(configuration: wsTlsConfig)
 
             let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
                 guard let self else {
@@ -642,7 +642,7 @@ class ProxyClient {
 
         if let tlsConfiguration = configuration.tls {
             // HTTPS Upgrade: TCP → TLS → HTTP Upgrade → raw TCP over TLS → VLESS
-            let tlsClient = TLSHandler(configuration: tlsConfiguration)
+            let tlsClient = TLSClient(configuration: tlsConfiguration)
 
             let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
                 guard let self else {
@@ -984,7 +984,7 @@ class ProxyClient {
 
         // Keep the original fingerprint/SNI, but do not advertise h3 on the TCP path.
         let tlsConfiguration = sanitizedXHTTPTLSConfiguration(from: baseTLSConfig, httpVersion: httpVersion)
-        let tlsClient = TLSHandler(configuration: tlsConfiguration)
+        let tlsClient = TLSClient(configuration: tlsConfiguration)
 
         let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
             guard let self else {
@@ -1018,12 +1018,12 @@ class ProxyClient {
                             factoryCompletion(.failure(ProxyError.connectionFailed("Client deallocated")))
                             return
                         }
-                        let uploadTLSHandler = TLSHandler(configuration: tlsConfiguration)
+                        let uploadTLSClient = TLSClient(configuration: tlsConfiguration)
                         if let chain = self.configuration.chain, !chain.isEmpty {
                             self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil) { tunnelResult in
                                 switch tunnelResult {
                                 case .success(let uploadTunnel):
-                                    uploadTLSHandler.connect(overTunnel: uploadTunnel) { result in
+                                    uploadTLSClient.connect(overTunnel: uploadTunnel) { result in
                                         switch result {
                                         case .success(let uploadTLSConnection):
                                             factoryCompletion(.success(TransportClosures(tls: uploadTLSConnection)))
@@ -1036,7 +1036,7 @@ class ProxyClient {
                                 }
                             }
                         } else {
-                            uploadTLSHandler.connect(host: self.directDialHost, port: self.configuration.serverPort) { result in
+                            uploadTLSClient.connect(host: self.directDialHost, port: self.configuration.serverPort) { result in
                                 switch result {
                                 case .success(let uploadTLSConnection):
                                     factoryCompletion(.success(TransportClosures(tls: uploadTLSConnection)))
@@ -1082,7 +1082,7 @@ class ProxyClient {
     ) {
         let realityClient = RealityClient(configuration: realityConfig)
 
-        let handleRealityResult: (Result<RealityRecordConnection, Error>) -> Void = { [weak self, realityClient] result in
+        let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, realityClient] result in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return

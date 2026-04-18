@@ -104,6 +104,9 @@ enum TLSFingerprint: String, Codable, CaseIterable {
     case safari26 = "safari_26"
     case ios14 = "ios_14"
     case edge85 = "edge_85"
+    case android11 = "android_11"     // TLS 1.2 only — Reality only
+    case qq11 = "qq_11"
+    case browser360 = "360_7"         // TLS 1.2 only — Reality only
 
     // Legacy fingerprints (kept for backward compatibility)
     case chrome120 = "chrome_120"
@@ -120,6 +123,9 @@ enum TLSFingerprint: String, Codable, CaseIterable {
         case .safari26:   return "Safari 26.3"
         case .ios14:      return "iOS 14"
         case .edge85:     return "Edge 85"
+        case .android11:  return "Android 11"
+        case .qq11:       return "QQ 11.1"
+        case .browser360: return "360 Browser 7.5"
         case .chrome120:  return "Chrome 120"
         case .firefox120: return "Firefox 120"
         case .safari16:   return "Safari 16.0"
@@ -128,9 +134,21 @@ enum TLSFingerprint: String, Codable, CaseIterable {
         }
     }
 
+    /// Whether this fingerprint supports TLS 1.3. Fingerprints that don't
+    /// (Android 11, 360 Browser) can only be used with Reality protocol,
+    /// which has its own authentication and doesn't complete a real TLS handshake.
+    var supportsTLS13: Bool {
+        switch self {
+        case .android11, .browser360:
+            return false
+        default:
+            return true
+        }
+    }
+
     /// All concrete (non-random) fingerprints for random selection.
     /// Excludes TLS 1.2-only fingerprints since they can't complete a standard TLS handshake.
-    static let concreteFingerprints: [TLSFingerprint] = allCases.filter { $0 != .random }
+    static let concreteFingerprints: [TLSFingerprint] = allCases.filter { $0 != .random && $0.supportsTLS13 }
 }
 
 /// Reality protocol errors

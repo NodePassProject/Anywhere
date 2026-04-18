@@ -21,13 +21,13 @@ final class HTTP3SessionPool: SessionPool<HTTP3Session> {
 
     /// Soft cap on sessions per pool key. When reached, acquire tries to
     /// evict an idle session before creating a new one.
-    private static let maxSessionsPerKey = 16
+    private static let maxSessionsPerKey = 8
 
     /// Hard cap on sessions per pool key. If every session is busy, the pool
     /// may grow past the soft cap up to this ceiling to avoid breaking live
     /// streams. Beyond this, acquire reuses the least-busy session instead
     /// of opening another — preventing runaway growth under sustained load.
-    private static let hardMaxSessionsPerKey = 32
+    private static let hardMaxSessionsPerKey = 16
 
     /// Sessions idle longer than this are evicted.
     private static let idleTimeout: TimeInterval = 60
