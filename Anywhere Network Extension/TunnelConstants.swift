@@ -59,6 +59,12 @@ enum TunnelConstants {
     /// Maximum upload coalesce buffer size, capped at UInt16.max because downstream
     /// protocols (Vision padding) use 2-byte content length fields.
     static let tcpMaxCoalesceSize = Int(UInt16.max)
+    /// Safety cap on per-connection `pendingData` (bytes accumulated while the
+    /// sniff phase runs or the proxy is dialing). Bounded naturally by TCP_WND
+    /// (~174 KB) since we defer `tcp_recved` until the route is committed;
+    /// this cap defends against pathological states where the window bookkeeping
+    /// drifts. Set to 2 × TCP_WND so it only fires on runaway growth.
+    static let tcpMaxPendingDataSize = 2 * 128 * 1360
 
     // MARK: - UDP Settings
 

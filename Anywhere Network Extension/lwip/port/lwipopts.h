@@ -41,7 +41,7 @@
 #define LWIP_CALLBACK_API               1
 
 /* --- Memory configuration --- */
-#define MEM_SIZE                        (16 * 1024 * 1024)
+#define MEM_SIZE                        (24 * 1024 * 1024)
 #define MEM_ALIGNMENT                   8
 #define MEMP_OVERFLOW_CHECK             0
 #define MEMP_SANITY_CHECK               0
@@ -49,8 +49,8 @@
 /* --- Pool sizes --- */
 #define MEMP_NUM_TCP_PCB                256
 #define MEMP_NUM_TCP_PCB_LISTEN         2
-#define MEMP_NUM_UDP_PCB                8
-#define MEMP_NUM_TCP_SEG                16384
+#define MEMP_NUM_UDP_PCB                64
+#define MEMP_NUM_TCP_SEG                4096
 #define MEMP_NUM_PBUF                   64
 #define MEMP_NUM_NETBUF                 0
 #define MEMP_NUM_NETCONN                0
@@ -78,6 +78,7 @@
 #define TCP_RCV_SCALE                   7
 
 /* --- Checksum configuration --- */
+#define LWIP_CHKSUM_ALGORITHM           3
 /* Trust incoming packets from iOS TUN interface */
 #define CHECKSUM_CHECK_IP               0
 #define CHECKSUM_CHECK_TCP              0

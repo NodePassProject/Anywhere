@@ -15,9 +15,11 @@ class FakeIPPool {
         let domain: String
     }
 
-    // IPv4: 198.18.0.0/15 → offsets 1..131071
+    // IPv4: 198.18.0.0/15 → offsets 1..131071 available; we cap LRU at a
+    // much smaller size so a long-running tunnel can't balloon the three
+    // dictionaries that back the pool (~200 B per entry × 3 maps).
     private static let baseIPv4: UInt32 = 0xC612_0000  // 198.18.0.0
-    private static let poolSize = 131_071              // usable offsets
+    private static let poolSize = 16_384               // usable offsets
 
     // IPv6: fc00:: + offset (same offset range as IPv4)
     // fc00::1 through fc00::1:ffff

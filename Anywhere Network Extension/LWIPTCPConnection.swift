@@ -132,6 +132,20 @@ class LWIPTCPConnection {
         sniffDeadline = nil
     }
 
+    /// Appends to `pendingData` and enforces ``TunnelConstants/tcpMaxPendingDataSize``.
+    /// Aborts the connection if the cap would be exceeded and returns `false`
+    /// so callers can bail out early.
+    @discardableResult
+    private func appendPendingData(_ data: Data) -> Bool {
+        if pendingData.count + data.count > TunnelConstants.tcpMaxPendingDataSize {
+            logger.warning("[TCP] pendingData cap exceeded for \(dstHost):\(dstPort) (\(pendingData.count) + \(data.count) > \(TunnelConstants.tcpMaxPendingDataSize)), aborting")
+            abort()
+            return false
+        }
+        pendingData.append(data)
+        return true
+    }
+
     /// True while the connection is still establishing — either waiting for
     /// SNI bytes or dialing the proxy. Used by the handshake timer.
     private var isEstablishing: Bool {
@@ -157,7 +171,7 @@ class LWIPTCPConnection {
         // Once a terminal state is reached we re-evaluate routing (if SNI
         // was found) and then kick off the proxy/direct connect.
         if let state = sniffer?.feed(data) {
-            pendingData.append(data)
+            guard appendPendingData(data) else { return }
             switch state {
             case .needMore:
                 return
@@ -177,12 +191,12 @@ class LWIPTCPConnection {
         }
 
         if proxyConnecting {
-            pendingData.append(data)
+            _ = appendPendingData(data)
             return
         }
 
         guard proxyConnection != nil else {
-            pendingData.append(data)
+            guard appendPendingData(data) else { return }
             beginConnecting()
             return
         }

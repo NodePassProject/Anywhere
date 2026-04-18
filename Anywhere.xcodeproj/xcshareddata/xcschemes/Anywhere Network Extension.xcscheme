@@ -76,16 +76,11 @@
       debugDocumentVersioning = "YES"
       askForAppToLaunch = "Yes"
       launchAutomaticallySubstyle = "2">
-      <BuildableProductRunnable
-         runnableDebuggingMode = "0">
-         <BuildableReference
-            BuildableIdentifier = "primary"
-            BlueprintIdentifier = "CB1C10642F23B81500B74CD8"
-            BuildableName = "Anywhere.app"
-            BlueprintName = "Anywhere"
-            ReferencedContainer = "container:Anywhere.xcodeproj">
-         </BuildableReference>
-      </BuildableProductRunnable>
+      <RemoteRunnable
+         runnableDebuggingMode = "0"
+         BundleIdentifier = "com.argsment.Anywhere"
+         RemotePath = "/var/containers/Bundle/Application/42B10ED2-2E0D-467C-869A-89030C07D222/Anywhere.app">
+      </RemoteRunnable>
    </ProfileAction>
    <AnalyzeAction
       buildConfiguration = "Debug">
