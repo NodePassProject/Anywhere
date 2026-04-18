@@ -15,13 +15,26 @@ struct HomeView: View {
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
-    @State private var pickerConfig = PickerConfig()
 
     private var isConnected: Bool {
         viewModel.vpnStatus == .connected
     }
 
     private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
+
+    private var selectedPickerId: Binding<UUID?> {
+        Binding(
+            get: { viewModel.selectedChainId ?? viewModel.selectedConfiguration?.id },
+            set: { newId in
+                guard let id = newId else { return }
+                if let chain = viewModel.chains.first(where: { $0.id == id }) {
+                    viewModel.selectChain(chain)
+                } else if let configuration = viewModel.configurations.first(where: { $0.id == id }) {
+                    viewModel.selectedConfiguration = configuration
+                }
+            }
+        )
+    }
 
     var body: some View {
         ZStack {
@@ -75,19 +88,9 @@ struct HomeView: View {
                 }
             }
         }
-        .picker3D($pickerConfig, items: viewModel.allPickerItems)
         .onChange(of: proxyMode) {
             AWCore.setProxyMode(proxyMode)
             AWCore.notifyTunnelSettingsChanged()
-        }
-        .onChange(of: pickerConfig.show) {
-            if !pickerConfig.show, let id = pickerConfig.selectedId {
-                if let configuration = viewModel.configurations.first(where: { $0.id == id }) {
-                    viewModel.selectedConfiguration = configuration
-                } else if let chain = viewModel.chains.first(where: { $0.id == id }) {
-                    viewModel.selectChain(chain)
-                }
-            }
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
@@ -212,30 +215,25 @@ struct HomeView: View {
     }
 
     private func selectedConfigurationCard(_ configuration: ProxyConfiguration) -> some View {
-        Button {
-            pickerConfig.text = configuration.name
-            pickerConfig.show = true
+        Menu {
+            Picker("Configuration", selection: selectedPickerId) {
+                ForEach(viewModel.allPickerItems) { item in
+                    Text(item.name).tag(Optional(item.id))
+                }
+            }
         } label: {
             cardContent {
-                VStack(spacing: 12) {
-                    HStack {
-                        Image("anywhere")
-                            .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
-                            .frame(width: 24)
-                        Text(configuration.name)
-                            .font(.body.weight(.medium))
-                            .foregroundStyle(isConnected ? .white : .primary)
-                            .onGeometryChange(for: CGRect.self) { proxy in
-                                proxy.frame(in: .global)
-                            } action: { newValue in
-                                pickerConfig.sourceFrame = newValue
-                            }
-                            .opacity(pickerConfig.show ? 0 : 1)
-                        Spacer()
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
-                    }
+                HStack {
+                    Image("anywhere")
+                        .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
+                        .frame(width: 24)
+                    Text(configuration.name)
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(isConnected ? .white : .primary)
+                    Spacer()
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
                 }
             }
         }

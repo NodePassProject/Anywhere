@@ -240,6 +240,7 @@ extension LWIPStack {
             let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
             let encryptedDNSServer = AWCore.getEncryptedDNSServer()
             let proxyMode = AWCore.getProxyMode()
+            let hideVPNIcon = AWCore.getHideVPNIcon()
 
             let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
             let bypassCountryChanged = bypassCountryCode != self.bypassCountryCode
@@ -247,26 +248,20 @@ extension LWIPStack {
             let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
             let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer
             let proxyModeChanged = proxyMode != self.proxyMode
+            let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
 
-            guard ipv6DNSEnabledChanged || bypassCountryChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || proxyModeChanged else {
+            guard ipv6DNSEnabledChanged || bypassCountryChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || proxyModeChanged || hideVPNIconChanged else {
                 return
             }
-
-            var changedSettings: [String] = []
-            if ipv6DNSEnabledChanged { changedSettings.append("IPv6 DNS") }
-            if bypassCountryChanged { changedSettings.append("bypass country") }
-            if encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged {
-                changedSettings.append("encrypted DNS")
-            }
-            if proxyModeChanged { changedSettings.append("proxy mode") }
-            let changedSummary = changedSettings.joined(separator: ", ")
-            logger.info("[VPN] Settings changed (\(changedSummary)); reconnecting active connections")
+            
+            logger.info("[VPN] Settings changed, reconnecting active connections")
             noteRecentTunnelInterruption(summary: "settings change", level: .info)
 
             // IPv6 connections toggle affects tunnel network settings (IPv6 routes + DNS servers).
             // Encrypted DNS changes also affect tunnel settings (NEDNSOverHTTPSSettings / NEDNSOverTLSSettings).
+            // Hide VPN Icon toggles IPv4 route shape and IPv6 claim, also tunnel settings.
             // Must re-apply via PacketTunnelProvider before restarting the stack.
-            if ipv6DNSEnabledChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged {
+            if ipv6DNSEnabledChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || hideVPNIconChanged {
                 onTunnelSettingsNeedReapply?()
             }
 

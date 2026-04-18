@@ -9,28 +9,6 @@ import Foundation
 
 enum TunnelConstants {
 
-    // MARK: - Tunnel Network Settings
-
-    /// Remote address for the TUN interface.
-    static let tunnelRemoteAddress = "10.8.0.1"
-    /// Local IPv4 address assigned to the TUN interface.
-    static let tunnelLocalIPv4Address = "10.8.0.2"
-    /// Subnet mask for the TUN IPv4 address.
-    static let tunnelSubnetMask = "255.255.255.0"
-    /// Local IPv6 address assigned to the TUN interface (when IPv6 is enabled).
-    static let tunnelLocalIPv6Address = "fd00::2"
-    /// Prefix length for the TUN IPv6 address.
-    static let tunnelIPv6PrefixLength: NSNumber = 64
-    /// Maximum transmission unit for the TUN interface.
-    static let tunnelMTU: NSNumber = 1400
-
-    // MARK: - DNS Servers
-
-    /// IPv4 DNS servers (Cloudflare).
-    static let dnsServersIPv4 = ["1.1.1.1", "1.0.0.1"]
-    /// IPv6 DNS servers (Cloudflare).
-    static let dnsServersIPv6 = ["2606:4700:4700::1111", "2606:4700:4700::1001"]
-
     // MARK: - Connection Timeouts
 
     /// Inactivity timeout for TCP connections (Xray-core `connIdle`, default 300s).

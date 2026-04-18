@@ -48,6 +48,7 @@ final class AWCore {
         static let routingData = "routingData"
         static let alwaysOnEnabled = "alwaysOnEnabled"
         static let allowInsecure = "allowInsecure"
+        static let hideVPNIcon = "hideVPNIcon"
         static let experimentalEnabled = "experimentalEnabled"
         static let onboardingCompleted = "onboardingCompleted"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
@@ -138,6 +139,14 @@ final class AWCore {
 
     static func setAllowInsecure(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.allowInsecure)
+    }
+
+    static func getHideVPNIcon() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.hideVPNIcon)
+    }
+
+    static func setHideVPNIcon(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.hideVPNIcon)
     }
 
     static func getExperimentalEnabled() -> Bool {

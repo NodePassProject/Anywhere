@@ -170,16 +170,19 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     ]
 
     private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: TunnelConstants.tunnelRemoteAddress)
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.8.0.1")
 
-        let ipv4Settings = NEIPv4Settings(addresses: [TunnelConstants.tunnelLocalIPv4Address], subnetMasks: [TunnelConstants.tunnelSubnetMask])
+        let hideVPNIcon = AWCore.getHideVPNIcon()
+        let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.0"])
         ipv4Settings.includedRoutes = [NEIPv4Route.default()]
-        ipv4Settings.excludedRoutes = Self.bypassIPv4Routes
+        ipv4Settings.excludedRoutes = (hideVPNIcon ? [NEIPv4Route(destinationAddress: "0.0.0.0", subnetMask: "255.255.255.254")] : []) + Self.bypassIPv4Routes
         settings.ipv4Settings = ipv4Settings
 
-        let ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
+        // Claiming IPv6 tunnel settings makes iOS show the VPN icon on cellular,
+        // so we drop IPv6 entirely when hideVPNIcon is enabled.
+        let ipv6DNSEnabled = AWCore.getIPv6DNSEnabled() && !hideVPNIcon
         if ipv6DNSEnabled {
-            let ipv6Settings = NEIPv6Settings(addresses: [TunnelConstants.tunnelLocalIPv6Address], networkPrefixLengths: [TunnelConstants.tunnelIPv6PrefixLength])
+            let ipv6Settings = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
             ipv6Settings.includedRoutes = [NEIPv6Route.default()]
             ipv6Settings.excludedRoutes = Self.bypassIPv6Routes
             settings.ipv6Settings = ipv6Settings
@@ -187,9 +190,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         let dnsServers: [String]
         if ipv6DNSEnabled {
-            dnsServers = TunnelConstants.dnsServersIPv4 + TunnelConstants.dnsServersIPv6
+            dnsServers = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
         } else {
-            dnsServers = TunnelConstants.dnsServersIPv4
+            dnsServers = ["1.1.1.1", "1.0.0.1"]
         }
 
         let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
@@ -216,7 +219,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         } else {
             settings.dnsSettings = NEDNSSettings(servers: dnsServers)
         }
-        settings.mtu = TunnelConstants.tunnelMTU
+        settings.mtu = 1400
 
         return settings
     }

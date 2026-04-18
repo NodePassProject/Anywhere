@@ -59,6 +59,7 @@ class LWIPStack {
     var encryptedDNSEnabled: Bool = false
     var encryptedDNSProtocol: String = "doh"
     var encryptedDNSServer: String = ""
+    var hideVPNIcon: Bool = false
     var proxyMode: ProxyMode = .rule
     var running = false
 
@@ -249,6 +250,7 @@ class LWIPStack {
         loadBypassCountry()
         loadEncryptedDNSSetting()
         loadProxyModeSetting()
+        loadHideVPNIconSetting()
         if shouldLoadProxyServerAddresses {
             loadProxyServerAddresses()
         }
@@ -374,6 +376,10 @@ class LWIPStack {
 
     private func loadProxyModeSetting() {
         proxyMode = AWCore.getProxyMode()
+    }
+
+    private func loadHideVPNIconSetting() {
+        hideVPNIcon = AWCore.getHideVPNIcon()
     }
 
     // MARK: - IP Address Helpers

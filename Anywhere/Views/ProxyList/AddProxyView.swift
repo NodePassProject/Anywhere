@@ -247,7 +247,11 @@ struct AddProxyView: View {
 
     private func checkClipboard() {
         if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-           clip.hasPrefix("vless://") || clip.hasPrefix("ss://") || clip.hasPrefix("http://") || clip.hasPrefix("https://") {
+           clip.hasPrefix("vless://") ||
+            clip.hasPrefix("hysteria2://") || clip.hasPrefix("hy2://") ||
+            clip.hasPrefix("ss://") ||
+            clip.hasPrefix("socks5://") || clip.hasPrefix("socks://") ||
+            clip.hasPrefix("http://") || clip.hasPrefix("https://") || clip.hasPrefix("quic://") {
             linkURL = clip
         }
     }
