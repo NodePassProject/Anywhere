@@ -54,7 +54,9 @@ final class HysteriaSession {
     /// Pending readiness callbacks (auth not yet complete).
     private var readyCallbacks: [(Error?) -> Void] = []
 
-    /// Pool eviction / close hook.
+    /// Fired when the session transitions to `.closed` (graceful close or
+    /// `failSession`). ``HysteriaClient`` uses this to clear its cached
+    /// slot so the next call reconnects.
     var onClose: (() -> Void)?
 
     /// Raw post-auth TCP stream handlers keyed by QUIC stream ID.
@@ -143,6 +145,12 @@ final class HysteriaSession {
                     // handleStreamData is responsible for detaching it before
                     // the view is invalidated on return.
                     self?.handleStreamData(sid: sid, data: data, fin: fin)
+                }
+                self.quic.streamTerminationHandler = { [weak self] sid, error in
+                    // Runs synchronously on quic.queue. Fired for RESET_STREAM
+                    // from the peer and for the terminal stream_close event.
+                    // Must be idempotent — both may fire for the same stream.
+                    self?.handleStreamTermination(sid: sid, error: error)
                 }
                 self.quic.datagramHandler = { [weak self] data in
                     // Runs synchronously on quic.queue. QUICConnection already
@@ -327,6 +335,18 @@ final class HysteriaSession {
         for cb in callbacks { cb(nil) }
 
         _ = fin // ignore; stream shutdown handled above
+    }
+
+    private func handleStreamTermination(sid: Int64, error: Error?) {
+        // On quic.queue == session.queue. Called from both the peer-reset
+        // and final-close ngtcp2 hooks; idempotent because `tcpStreams` is
+        // removed the first time through.
+        if sid == authStreamID { return }
+        guard let conn = tcpStreams.removeValue(forKey: sid) else { return }
+        _poolLock.lock()
+        _poolTCPCount = max(0, _poolTCPCount - 1)
+        _poolLock.unlock()
+        conn.handleStreamTermination(error: error)
     }
 
     // MARK: - Datagram dispatch (UDP)

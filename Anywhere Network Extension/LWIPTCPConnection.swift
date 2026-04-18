@@ -42,10 +42,16 @@ class LWIPTCPConnection {
 
     // MARK: Backpressure State
 
-    /// Remainder of the current receive that couldn't fit in lwIP's TCP send
-    /// buffer. Bounded to at most one receive chunk — no new receives are
-    /// issued until this is fully drained.
+    /// Downlink backlog: proxy-received bytes queued for lwIP's TCP send
+    /// buffer. Receives are issued whenever this drops below
+    /// `TunnelConstants.drainLowWaterMark` and no receive is in flight, so
+    /// the next chunk lands ready to push as lwIP's snd_buf frees up.
     private var pendingWrite = Data()
+
+    /// True from the moment `tryArmReceive` dispatches a proxy receive until
+    /// its completion runs on `lwipQueue`. Guarantees at most one outstanding
+    /// receive at a time (the proxy transports require serial receives).
+    private var receiveInFlight = false
 
     // MARK: Upload Coalescing
 
@@ -98,7 +104,8 @@ class LWIPTCPConnection {
         let timer = DispatchWorkItem { [weak self] in
             guard let self, !self.closed else { return }
             if self.isEstablishing {
-                logger.error("[TCP] Handshake timeout for \(self.dstHost):\(self.dstPort)")
+                let phase = self.sniffer != nil ? "TLS ClientHello sniff" : "proxy dial"
+                logger.error("[TCP] Handshake timeout during \(phase): \(self.dstHost):\(self.dstPort)")
                 self.abort()
             }
         }
@@ -339,7 +346,20 @@ class LWIPTCPConnection {
         }
     }
 
+    /// Surfaces why lwIP tore this connection down. Without this log the
+    /// connection simply vanishes from the user's perspective — no send/receive
+    /// error fires because the PCB has already been freed by the time
+    /// `tcp_err` runs. Common cases: ERR_RST (peer sent RST), ERR_ABRT
+    /// (lwIP timer aborted us), ERR_CLSD (FIN exchange completed).
     func handleError(err: Int32) {
+        let reason = TransportErrorLogger.describeLwIPError(err)
+        if err == -15 { // ERR_CLSD — orderly close, not a failure
+            logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
+        } else if let interruption = LWIPStack.shared?.recentTunnelInterruptionContext() {
+            logger.warning("[TCP] lwIP aborted after \(interruption.summary): \(endpointDescription): \(reason)")
+        } else {
+            logger.warning("[TCP] lwIP aborted connection: \(endpointDescription): \(reason)")
+        }
         closed = true
         releaseProxy()
     }
@@ -348,41 +368,14 @@ class LWIPTCPConnection {
         "\(dstHost):\(dstPort)"
     }
 
-    private static func conciseErrorDescription(_ error: Error) -> String {
-        var message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        let redundantPrefixes = [
-            "Connection failed: ",
-            "Send failed: ",
-            "Receive failed: ",
-            "DNS resolution failed: "
-        ]
-
-        for prefix in redundantPrefixes where message.hasPrefix(prefix) {
-            message.removeFirst(prefix.count)
-            break
-        }
-
-        return message
-    }
-
     private func logTransportFailure(_ operation: String, error: Error) {
-        let errorDescription = Self.conciseErrorDescription(error)
-
-        if error is HTTP2Error {
-            logger.debug("[TCP] \(operation) error: \(endpointDescription): \(errorDescription)")
-            return
-        }
-
-        if let interruption = LWIPStack.shared?.recentTunnelInterruptionContext() {
-            if interruption.level == .info {
-                logger.debug("[TCP] \(operation) ended after \(interruption.summary): \(endpointDescription): \(errorDescription)")
-            } else {
-                logger.warning("[TCP] \(operation) interrupted after \(interruption.summary): \(endpointDescription) (\(errorDescription))")
-            }
-            return
-        }
-
-        logger.error("[TCP] \(operation) failed: \(endpointDescription): \(errorDescription)")
+        TransportErrorLogger.log(
+            operation: operation,
+            endpoint: endpointDescription,
+            error: error,
+            logger: logger,
+            prefix: "[TCP]"
+        )
     }
 
     // MARK: - Route Commit
@@ -432,7 +425,7 @@ class LWIPTCPConnection {
         case .direct:
             bypass = true
         case .reject:
-            logger.debug("[TCP] SNI rejected: \(sni)")
+            logger.info("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
             abort()
         case .proxy:
             if var resolved = router.resolveConfiguration(action: action) {
@@ -531,7 +524,7 @@ class LWIPTCPConnection {
                     }
                 }
 
-                self.requestNextReceive()
+                self.tryArmReceive()
             }
         }
     }
@@ -542,17 +535,19 @@ class LWIPTCPConnection {
         guard !proxyConnecting && proxyConnection == nil && !closed else { return }
         proxyConnecting = true
 
-        // For VLESS, initial data is appended to the protocol header and sent in one packet.
-        // For Shadowsocks and NaiveProxy, data flows through send() after connection,
-        // so we keep it in pendingData to be sent after connection succeeds.
+        // If the protocol can embed the caller's first bytes in its handshake
+        // (VLESS + its transports), extract pendingData into initialData here.
+        // Otherwise leave pendingData intact so the post-connect send path
+        // below forwards it — ``ProxyClient.connectWithCommand`` drops the
+        // `initialData` argument for those protocols.
         let initialData: Data?
-        if configuration.outboundProtocol == .shadowsocks || configuration.outboundProtocol.isNaive {
-            initialData = nil
-        } else {
+        if configuration.outboundProtocol.handshakeCarriesInitialData {
             initialData = pendingData.isEmpty ? nil : pendingData
             if initialData != nil {
                 pendingData.removeAll(keepingCapacity: true)
             }
+        } else {
+            initialData = nil
         }
 
         let client = ProxyClient(configuration: configuration)
@@ -601,7 +596,7 @@ class LWIPTCPConnection {
                         }
                     }
 
-                    self.requestNextReceive()
+                    self.tryArmReceive()
 
                 case .failure(let error):
                     self.logTransportFailure("Connect", error: error)
@@ -613,26 +608,31 @@ class LWIPTCPConnection {
 
     // MARK: - Proxy Receive Loop
 
-    /// Requests the next chunk of data from the proxy connection.
+    /// Issues the next proxy receive if the downlink backlog is below the
+    /// low-water mark and no receive is already in flight.
     ///
-    /// Manages the receive loop manually (instead of `startReceiving`) to
-    /// support pause/resume for backpressure. Only issues a receive when
-    /// not paused and the connection is active.
+    /// Overlapping the next receive with the ongoing drain keeps the lwIP
+    /// send buffer saturated: by the time a client ACK frees space, a fresh
+    /// chunk is already queued in `pendingWrite` ready to push. Without this
+    /// overlap, a big receive (e.g. a speed-test server pushing >1 MB per
+    /// read) forces stop-and-wait — the proxy socket's receive window stays
+    /// closed for the entire drain, and upstream throttles.
     ///
-    /// Issues the next receive on the proxy transport.
-    ///
-    /// The next receive is only issued **after** ``writeToLWIP(_:)`` confirms
-    /// all data was consumed (pull model). If a remainder exists in
-    /// ``pendingWrite``, no receive is issued until ``handleSent(len:)``
-    /// drains it completely.
-    private func requestNextReceive() {
-        guard !closed else { return }
-        guard let connection = proxyConnection else { return }
+    /// Backpressure still applies: when `pendingWrite.count` is at or above
+    /// `drainLowWaterMark`, this is a no-op, so receives naturally pause
+    /// whenever lwIP can't keep up.
+    private func tryArmReceive() {
+        guard !closed,
+              !receiveInFlight,
+              pendingWrite.count < TunnelConstants.drainLowWaterMark,
+              let connection = proxyConnection else { return }
 
+        receiveInFlight = true
         connection.receive { [weak self] data, error in
             guard let self else { return }
 
             self.lwipQueue.async {
+                self.receiveInFlight = false
                 guard !self.closed else { return }
 
                 if let error {
@@ -686,84 +686,71 @@ class LWIPTCPConnection {
         return offset
     }
 
-    /// Writes data from proxy to the lwIP TCP send buffer.
-    ///
-    /// Feeds as much as possible to lwIP. Any remainder is saved in
-    /// ``pendingWrite`` and no further receives are issued until
-    /// ``handleSent(len:)`` drains it completely.
+    /// Appends data received from the proxy onto the downlink backlog, then
+    /// drains as much as lwIP will accept. All order-preservation lives in
+    /// `pendingWrite`, so a concurrently prefetched receive can land without
+    /// racing ahead of the chunk currently being drained.
     private func writeToLWIP(_ data: Data) {
-        guard !closed else { return }
-
-        var written = 0
-        data.withUnsafeBytes { buffer in
-            guard let base = buffer.baseAddress else { return }
-            let fed = feedLWIP(base, count: data.count, retryOnEmpty: true)
-            if fed == -1 {
-                logger.error("[TCP] Write failed: \(self.dstHost):\(self.dstPort)")
-                self.abort()
-                return
-            }
-            written = fed
-        }
-
-        guard !closed else { return }
-
-        lwip_bridge_tcp_output(pcb)
-        LWIPStack.shared?.flushOutputInline()
-
-        if written < data.count {
-            // Save remainder — no more receives until this is drained.
-            pendingWrite.append(data[written...])
-        } else {
-            // All consumed — pull the next chunk.
-            requestNextReceive()
-        }
+        guard !closed, !data.isEmpty else { return }
+        pendingWrite.append(data)
+        drainPendingWrite()
     }
 
-    /// Drains ``pendingWrite`` into lwIP's TCP send buffer.
+    /// Drains ``pendingWrite`` into lwIP's TCP send buffer and, on progress,
+    /// arms the next proxy receive if we've dropped below the low-water mark.
     ///
-    /// Called from ``handleSent(len:)`` when the local app acknowledges data,
-    /// freeing space in the send buffer. Once fully drained, resumes the
-    /// receive loop.
+    /// Called from ``handleSent(len:)`` on every client ACK, from
+    /// ``writeToLWIP(_:)`` after new proxy data is appended, and from a
+    /// 250 ms fallback timer when `tcp_write` couldn't place any bytes (snd_buf
+    /// full / zero window). That fallback is rare in practice — `handleSent`
+    /// drives nearly all progress — but bounds recovery time if no ACKs arrive.
     private func drainPendingWrite() {
-        guard !closed, !pendingWrite.isEmpty else { return }
-
-        let count = pendingWrite.count
-        let offset = pendingWrite.withUnsafeBytes { buffer -> Int in
-            guard let base = buffer.baseAddress else { return 0 }
-            let written = feedLWIP(base, count: count)
-            if written == -1 {
-                logger.error("[TCP] Write failed: \(self.dstHost):\(self.dstPort)")
-                self.abort()
-                return 0
-            }
-            return written
-        }
-
         guard !closed else { return }
 
-        if offset > 0 {
-            if offset >= count {
-                pendingWrite.removeAll(keepingCapacity: true)
+        if !pendingWrite.isEmpty {
+            let count = pendingWrite.count
+            let offset = pendingWrite.withUnsafeBytes { buffer -> Int in
+                guard let base = buffer.baseAddress else { return 0 }
+                let written = feedLWIP(base, count: count, retryOnEmpty: true)
+                if written == -1 {
+                    let sndbuf = Int(lwip_bridge_tcp_sndbuf(self.pcb))
+                    let queuelen = Int(lwip_bridge_tcp_snd_queuelen(self.pcb))
+                    logger.error("[TCP] tcp_write fatal: \(self.dstHost):\(self.dstPort) (pending=\(count), sndbuf=\(sndbuf), queuelen=\(queuelen))")
+                    self.abort()
+                    return 0
+                }
+                return written
+            }
+
+            guard !closed else { return }
+
+            if offset > 0 {
+                if offset >= count {
+                    pendingWrite.removeAll(keepingCapacity: true)
+                } else {
+                    pendingWrite.removeSubrange(0..<offset)
+                }
+                lwip_bridge_tcp_output(pcb)
+                LWIPStack.shared?.flushOutputInline()
             } else {
-                pendingWrite.removeSubrange(0..<offset)
+                // Nothing drained (ERR_MEM / zero window) — schedule a delayed
+                // retry. Skip `tryArmReceive` on purpose: piling more upstream
+                // bytes onto a stalled connection only grows `pendingWrite`.
+                // Once the retry makes progress, the tail call rearms.
+                let sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
+                let queuelen = Int(lwip_bridge_tcp_snd_queuelen(pcb))
+                let outputBacklog = LWIPStack.shared?.outputPackets.count ?? -1
+                lwipQueue.asyncAfter(deadline: .now() + .milliseconds(TunnelConstants.drainRetryDelayMs)) { [weak self] in
+                    guard let self, !self.closed else { return }
+                    self.drainPendingWrite()
+                }
+                return
             }
-            lwip_bridge_tcp_output(pcb)
-            LWIPStack.shared?.flushOutputInline()
-        } else if !pendingWrite.isEmpty {
-            // Nothing drained (ERR_MEM) — schedule a delayed retry.
-            logger.warning("[TCP] Drain stalled (\(self.pendingWrite.count) bytes pending), retrying in \(TunnelConstants.drainRetryDelayMs)ms: \(self.dstHost):\(self.dstPort)")
-            lwipQueue.asyncAfter(deadline: .now() + .milliseconds(TunnelConstants.drainRetryDelayMs)) { [weak self] in
-                guard let self, !self.closed else { return }
-                self.drainPendingWrite()
-            }
-            return
         }
 
-        // Fully drained — resume receiving.
-        if pendingWrite.isEmpty {
-            requestNextReceive()
-        }
+        // Made progress (or nothing was pending): prefetch the next chunk if
+        // the backlog is below the low-water mark.
+        tryArmReceive()
     }
 
     // MARK: - Close / Abort

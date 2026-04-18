@@ -8,14 +8,9 @@
 import SwiftUI
 
 struct EncryptedDNSSettingsView: View {
-    @AppStorage("encryptedDNSEnabled", store: AWCore.userDefaults)
-    private var enabled = false
-
-    @AppStorage("encryptedDNSProtocol", store: AWCore.userDefaults)
-    private var dnsProtocol = "doh"
-
-    @AppStorage("encryptedDNSServer", store: AWCore.userDefaults)
-    private var storedServer = ""
+    @State private var enabled = AWCore.getEncryptedDNSEnabled()
+    @State private var dnsProtocol = AWCore.getEncryptedDNSProtocol()
+    @State private var storedServer = AWCore.getEncryptedDNSServer()
 
     @State private var editingServer = ""
     @State private var showEnableAlert = false
@@ -30,6 +25,7 @@ struct EncryptedDNSSettingsView: View {
                             showEnableAlert = true
                         } else {
                             enabled = false
+                            AWCore.setEncryptedDNSEnabled(false)
                             AWCore.notifyTunnelSettingsChanged()
                         }
                     }
@@ -45,7 +41,7 @@ struct EncryptedDNSSettingsView: View {
                         Text("DNS over TLS").tag("dot")
                     }
                 }
-                
+
                 Section {
                     TextField("DNS Server", text: $editingServer)
                         .keyboardType(.URL)
@@ -60,13 +56,15 @@ struct EncryptedDNSSettingsView: View {
         .navigationTitle("Encrypted DNS")
         .onAppear { editingServer = storedServer }
         .onDisappear { commitServer() }
-        .onChange(of: dnsProtocol) {
+        .onChange(of: dnsProtocol) { _, newValue in
+            AWCore.setEncryptedDNSProtocol(newValue)
             commitServer()
             AWCore.notifyTunnelSettingsChanged()
         }
         .alert("Encrypted DNS", isPresented: $showEnableAlert) {
             Button("Enable Anyway", role: .destructive) {
                 enabled = true
+                AWCore.setEncryptedDNSEnabled(true)
                 AWCore.notifyTunnelSettingsChanged()
             }
             Button("Cancel", role: .cancel) {}
@@ -74,11 +72,12 @@ struct EncryptedDNSSettingsView: View {
             Text("Enabling Encrypted DNS will increase connection wait time and prevent routing rules from working.")
         }
     }
-    
+
     private func commitServer() {
         let trimmed = editingServer.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed != storedServer else { return }
         storedServer = trimmed
+        AWCore.setEncryptedDNSServer(trimmed)
         AWCore.notifyTunnelSettingsChanged()
     }
 }

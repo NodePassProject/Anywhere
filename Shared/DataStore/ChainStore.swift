@@ -16,13 +16,9 @@ class ChainStore: ObservableObject {
 
     private let fileURL: URL
 
-    #if os(tvOS)
-    private static let userDefaultsKey = "store.chains"
-    #endif
-
     private init() {
         AWCore.migrateToAppGroup(fileName: "chains.json")
-        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
+        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.Identifier.appGroupSuite)!
         fileURL = container.appendingPathComponent("chains.json")
         chains = loadFromDisk()
     }
@@ -55,7 +51,7 @@ class ChainStore: ObservableObject {
             return result
         }
         #if os(tvOS)
-        if let data = AWCore.userDefaults.data(forKey: Self.userDefaultsKey),
+        if let data = AWCore.getChainsData(),
            let result = try? JSONDecoder().decode([ProxyChain].self, from: data) {
             return result
         }
@@ -74,7 +70,7 @@ class ChainStore: ObservableObject {
         }
         #if os(tvOS)
         if let data = try? JSONEncoder().encode(chains) {
-            AWCore.userDefaults.set(data, forKey: Self.userDefaultsKey)
+            AWCore.setChainsData(data)
         }
         #endif
     }

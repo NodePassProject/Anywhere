@@ -8,13 +8,15 @@
 import SwiftUI
 
 struct AdvancedSettingsView: View {
-    @AppStorage("experimentalEnabled", store: AWCore.userDefaults)
-    private var experimentalEnabled = false
-    
+    @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
+
     var body: some View {
         List {
             Section("App") {
                 Toggle("Experimental Features", isOn: $experimentalEnabled)
+                    .onChange(of: experimentalEnabled) { _, newValue in
+                        AWCore.setExperimentalEnabled(newValue)
+                    }
             }
             
             Section("Network") {

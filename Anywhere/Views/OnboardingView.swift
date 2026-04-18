@@ -12,8 +12,7 @@ struct OnboardingView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
     @Binding var onboardingCompleted: Bool
 
-    @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
-    private var bypassCountryCode = ""
+    @State private var bypassCountryCode = AWCore.getBypassCountryCode()
 
     @State private var currentPage = 0
     @State private var isGoingForward = true
@@ -228,12 +227,13 @@ struct OnboardingView: View {
         // Sync routing to network extension
         Task { await viewModel.syncRoutingConfigurationToNE() }
 
-        // Notify settings changed for country bypass
+        // Persist country bypass and notify the tunnel.
+        AWCore.setBypassCountryCode(bypassCountryCode)
         if !bypassCountryCode.isEmpty {
             AWCore.notifyTunnelSettingsChanged()
         }
-        
-        AWCore.userDefaults.set(true, forKey: "onboardingCompleted")
+
+        AWCore.setOnboardingCompleted(true)
 
         withAnimation {
             onboardingCompleted = true

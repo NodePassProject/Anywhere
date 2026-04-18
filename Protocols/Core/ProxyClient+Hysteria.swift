@@ -9,7 +9,9 @@ import Foundation
 
 extension ProxyClient {
     /// Connects through a Hysteria v2 server. Shares one authenticated
-    /// QUIC session per (host, port, SNI, password) via ``HysteriaSessionPool``.
+    /// QUIC session per (host, port, SNI, password) via ``HysteriaClient``,
+    /// which reconnects lazily on session death — matching the reference
+    /// Hysteria client's `reconnectableClientImpl`.
     func connectWithHysteria(
         command: ProxyCommand,
         destinationHost: String,
@@ -34,34 +36,12 @@ extension ProxyClient {
         let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
         let destination = "\(bracketedHost):\(destinationPort)"
 
-        HysteriaSessionPool.shared.acquireSession(configuration: hyConfig) { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let session):
-                switch command {
-                case .tcp, .mux:
-                    let conn = HysteriaConnection(session: session, destination: destination)
-                    conn.open { error in
-                        if let error {
-                            conn.cancel()
-                            completion(.failure(error))
-                        } else {
-                            completion(.success(conn))
-                        }
-                    }
-                case .udp:
-                    let conn = HysteriaUDPConnection(session: session, destination: destination)
-                    conn.open { error in
-                        if let error {
-                            conn.cancel()
-                            completion(.failure(error))
-                        } else {
-                            completion(.success(conn))
-                        }
-                    }
-                }
-            }
+        let client = HysteriaClient.shared(for: hyConfig)
+        switch command {
+        case .tcp, .mux:
+            client.openTCP(destination: destination, completion: completion)
+        case .udp:
+            client.openUDP(destination: destination, completion: completion)
         }
     }
 }

@@ -63,8 +63,7 @@ extension ProxyConfiguration {
 
         case .hysteria:
             let rawMbps = (configurationDict["hysteriaUploadMbps"] as? Int) ?? HysteriaUploadMbpsDefault
-            // Accept a dedicated `hysteriaSNI` key or fall back to the legacy
-            // `tlsServerName` key that older builds used.
+            // Fall back to legacy `tlsServerName` when `hysteriaSNI` is absent.
             let sni = (configurationDict["hysteriaSNI"] as? String)
                 ?? (configurationDict["tlsServerName"] as? String)
             outbound = .hysteria(

@@ -130,23 +130,18 @@ extension LWIPStack {
         logger.debug("[LWIPStack] Shutdown complete, closed \(flowCount) UDP flows")
     }
 
-    /// Minimum interval between stack restarts (seconds).
-    /// 2s absorbs bursts where a path update and a settings/routing notification arrive
-    /// back-to-back (e.g., user toggling a setting while Wi-Fi is handing off).
-    private static let restartThrottleInterval: CFAbsoluteTime = 2.0
-
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.
     ///
-    /// Throttled to at most once per ``restartThrottleInterval``. When a restart is
+    /// Throttled to at most once per ``TunnelConstants/restartThrottleInterval``. When a restart is
     /// requested within the cooldown window the request is deferred; only the last
     /// deferred request executes (earlier ones are cancelled and replaced).
     private func restartStack(configuration: ProxyConfiguration) {
         let now = CFAbsoluteTimeGetCurrent()
         let elapsed = now - lastRestartTime
 
-        if elapsed < Self.restartThrottleInterval {
+        if elapsed < TunnelConstants.restartThrottleInterval {
             deferredRestart?.cancel()
-            let delay = Self.restartThrottleInterval - elapsed
+            let delay = TunnelConstants.restartThrottleInterval - elapsed
             let work = DispatchWorkItem { [self] in
                 deferredRestart = nil
                 guard running else { return }
@@ -206,7 +201,7 @@ extension LWIPStack {
                 let stack = Unmanaged<LWIPStack>.fromOpaque(observer).takeUnretainedValue()
                 stack.handleSettingsChanged()
             },
-            TunnelConstants.Notification.tunnelSettingsChanged,
+            AWCore.Notification.tunnelSettingsChanged,
             nil,
             .deliverImmediately
         )
@@ -219,7 +214,7 @@ extension LWIPStack {
                 let stack = Unmanaged<LWIPStack>.fromOpaque(observer).takeUnretainedValue()
                 stack.handleRoutingChanged()
             },
-            TunnelConstants.Notification.routingChanged,
+            AWCore.Notification.routingChanged,
             nil,
             .deliverImmediately
         )
@@ -239,12 +234,12 @@ extension LWIPStack {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
 
-            let ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.ipv6DNSEnabled)
-            let bypassCountryCode = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.bypassCountryCode) ?? ""
-            let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSEnabled)
-            let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSProtocol) ?? TunnelConstants.defaultEncryptedDNSProtocol
-            let encryptedDNSServer = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSServer) ?? ""
-            let proxyMode = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.proxyMode).flatMap(ProxyMode.init) ?? .rule
+            let ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
+            let bypassCountryCode = AWCore.getBypassCountryCode()
+            let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
+            let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
+            let encryptedDNSServer = AWCore.getEncryptedDNSServer()
+            let proxyMode = AWCore.getProxyMode()
 
             let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
             let bypassCountryChanged = bypassCountryCode != self.bypassCountryCode

@@ -8,6 +8,8 @@
 import Foundation
 import NetworkExtension
 
+private let logger = AnywhereLogger(category: "LWIPStack")
+
 extension LWIPStack {
 
     // MARK: - Output Batching

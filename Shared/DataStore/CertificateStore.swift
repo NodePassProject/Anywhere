@@ -18,12 +18,10 @@ import SwiftUI
 final class CertificateStore: ObservableObject {
     static let shared = CertificateStore()
 
-    private static let key = "trustedCertificateSHA256s"
-
     @Published private(set) var fingerprints: [String] = []
 
     private init() {
-        fingerprints = AWCore.userDefaults.stringArray(forKey: Self.key) ?? []
+        fingerprints = AWCore.getTrustedCertificateFingerprints()
     }
 
     /// Adds a SHA-256 fingerprint (hex string, case-insensitive).
@@ -54,7 +52,7 @@ final class CertificateStore: ObservableObject {
     // MARK: - Private
 
     private func save() {
-        AWCore.userDefaults.set(fingerprints, forKey: Self.key)
+        AWCore.setTrustedCertificateFingerprints(fingerprints)
         AWCore.notifyCertificatePolicyChanged()
     }
 

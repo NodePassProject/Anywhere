@@ -85,7 +85,7 @@ class DomainRouter {
         // Clear all matching structures
         reset()
 
-        guard let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.routingData),
+        guard let data = AWCore.getRoutingData(),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             logger.debug("[DomainRouter] No routing data available")
             return

@@ -52,6 +52,7 @@ void lwip_bridge_tcp_recved(void *pcb, uint16_t len);
 void lwip_bridge_tcp_close(void *pcb);
 void lwip_bridge_tcp_abort(void *pcb);
 int  lwip_bridge_tcp_sndbuf(void *pcb);
+int  lwip_bridge_tcp_snd_queuelen(void *pcb);
 
 /* --- UDP operations ---
  * IP addresses are raw bytes: 4 bytes for IPv4, 16 bytes for IPv6 */

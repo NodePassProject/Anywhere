@@ -67,6 +67,8 @@ struct QUICTuning {
 
     var maxIdleTimeout: UInt64
     var handshakeTimeout: UInt64
+    /// Idle period after which ngtcp2 emits a PING to keep the path alive.
+    var keepAliveTimeout: UInt64
 
     // MARK: Misc
 
@@ -102,6 +104,7 @@ extension QUICTuning {
         initialMaxStreamsUni: 100,
         maxIdleTimeout: 30 * 1_000_000_000,
         handshakeTimeout: 10 * 1_000_000_000,
+        keepAliveTimeout: 15 * 1_000_000_000,
         disableActiveMigration: true
     )
 
@@ -110,28 +113,34 @@ extension QUICTuning {
     /// connection opens; `HysteriaSession` replaces it with
     /// `min(server_rx, client_max_tx)` once the auth response lands.
     ///
-    /// Flow-control windows match the reference Hysteria client
-    /// (`core/client/config.go`): 8 MB per stream, 20 MB per connection,
-    /// with `max == initial` to disable ngtcp2's receive-window auto-tuner.
-    /// Brutal sends at a fixed configured rate with no backoff, so a larger
-    /// receive window doesn't raise useful throughput — it only deepens the
-    /// in-flight pipe, turning path-capacity mismatches into multi-megabyte
-    /// loss bursts that trip the server's idle/loss detection. The reference
-    /// quic-go setup gets this right by construction (`Initial == Max`).
+    /// Flow-control windows are smaller than the reference Hysteria client
+    /// (`core/client/config.go` uses 8 MB/20 MB). Each QUIC stream proxies
+    /// a TCP connection with `TCP_SND_BUF ≈ 696 KB`. When the server's
+    /// stream credit dwarfs `TCP_SND_BUF`, Brutal dumps 8 MB into our side
+    /// in milliseconds and then sits stalled behind `snd_buf=0` waiting for
+    /// iOS client ACKs. Matching the stream window to roughly 2× `TCP_SND_BUF`
+    /// keeps the server paced to what the downstream TCP can actually absorb,
+    /// eliminating the "burst-then-stall" pattern without capping throughput
+    /// (Brutal sends at a fixed rate with no window-driven backoff, so a
+    /// smaller window doesn't reduce steady-state goodput).
+    ///
+    /// `max == initial` disables ngtcp2's receive-window auto-tuner, so the
+    /// values here are also the effective ceiling.
     static func hysteria(uploadMbps: Int) -> QUICTuning {
         let bps = UInt64(uploadMbps) * 1_000_000 / 8
         return QUICTuning(
             cc: .brutal(initialBps: bps),
-            maxStreamWindow: 8 * 1024 * 1024,
-            maxWindow: 20 * 1024 * 1024,
-            initialMaxData: 20 * 1024 * 1024,
-            initialMaxStreamDataBidiLocal: 8 * 1024 * 1024,
-            initialMaxStreamDataBidiRemote: 8 * 1024 * 1024,
-            initialMaxStreamDataUni: 8 * 1024 * 1024,
+            maxStreamWindow: 2 * 1024 * 1024,
+            maxWindow: 4 * 1024 * 1024,
+            initialMaxData: 4 * 1024 * 1024,
+            initialMaxStreamDataBidiLocal: 2 * 1024 * 1024,
+            initialMaxStreamDataBidiRemote: 2 * 1024 * 1024,
+            initialMaxStreamDataUni: 2 * 1024 * 1024,
             initialMaxStreamsBidi: 1024,
             initialMaxStreamsUni: 16,
             maxIdleTimeout: 30 * 1_000_000_000,
             handshakeTimeout: 10 * 1_000_000_000,
+            keepAliveTimeout: 10 * 1_000_000_000,
             disableActiveMigration: true
         )
     }

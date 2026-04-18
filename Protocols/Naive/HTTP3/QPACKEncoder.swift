@@ -130,11 +130,10 @@ enum QPACKEncoder {
                 guard let (index, len) =
                         decodeVarIntPrefix(from: data, offset: offset, prefixBits: 6) else { return nil }
                 offset += len
-                // Our static table is a subset of RFC 9204 Appendix A. Indices
-                // we don't recognise belong to the canonical static table too
-                // (e.g. "content-type") — skip them rather than fail, matching
-                // how the previous silent-drop behaviour interoperated with
-                // real origin servers.
+                // Our static table is a subset of RFC 9204 Appendix A; indices
+                // outside that subset belong to the canonical static table
+                // (e.g. "content-type") — skip rather than fail so unknown
+                // headers don't break origin-server interop.
                 if let entry = staticTableEntry(Int(index)) {
                     headers.append(entry)
                 }

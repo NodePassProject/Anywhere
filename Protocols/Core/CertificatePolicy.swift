@@ -12,8 +12,8 @@ import Foundation
 /// Values are refreshed when the `certificatePolicyChanged` Darwin notification fires.
 enum CertificatePolicy {
     private static let lock = UnfairLock()
-    private static var _allowInsecure = AWCore.userDefaults.bool(forKey: "allowInsecure")
-    private static var _trustedFingerprints = AWCore.userDefaults.stringArray(forKey: "trustedCertificateSHA256s") ?? []
+    private static var _allowInsecure = AWCore.getAllowInsecure()
+    private static var _trustedFingerprints = AWCore.getTrustedCertificateFingerprints()
 
     /// One-time observer registration (called via `startObserving()`).
     private static var observerRegistered = false
@@ -43,8 +43,8 @@ enum CertificatePolicy {
     static func reload() {
         lock.lock()
         defer { lock.unlock() }
-        _allowInsecure = AWCore.userDefaults.bool(forKey: "allowInsecure")
-        _trustedFingerprints = AWCore.userDefaults.stringArray(forKey: "trustedCertificateSHA256s") ?? []
+        _allowInsecure = AWCore.getAllowInsecure()
+        _trustedFingerprints = AWCore.getTrustedCertificateFingerprints()
     }
 
     /// Whether the user has opted into accepting all certificates.

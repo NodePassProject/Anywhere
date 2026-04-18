@@ -43,9 +43,6 @@ class RuleSetStore: ObservableObject {
         ruleSets.filter { $0.name != "Direct" && $0.name != "ADBlock" }
     }
 
-    private static let assignmentsKey = "ruleSetAssignments"
-    private static let customRuleSetsKey = "customRuleSets"
-
     /// Bundled ruleset names: Direct + supported services + ADBlock.
     private static let builtIn: [String] = {
         ["Direct"] + serviceCatalog.supportedServices + ["ADBlock"]
@@ -56,10 +53,10 @@ class RuleSetStore: ObservableObject {
     private static let defaultAssignments: [String: String] = ["Direct": "DIRECT"]
 
     private init() {
-        let assignments = AWCore.userDefaults.dictionary(forKey: Self.assignmentsKey) as? [String: String] ?? [:]
+        let assignments = AWCore.getRuleSetAssignments()
 
         // Load custom rulesets
-        if let data = AWCore.userDefaults.data(forKey: Self.customRuleSetsKey),
+        if let data = AWCore.getCustomRuleSetsData(),
            let decoded = try? JSONDecoder().decode([CustomRuleSet].self, from: data) {
             customRuleSets = decoded
         }
@@ -68,12 +65,7 @@ class RuleSetStore: ObservableObject {
     }
 
     private func rebuildRuleSets(assignments: [String: String]? = nil) {
-        let assignmentsDict: [String: String]
-        if let assignments {
-            assignmentsDict = assignments
-        } else {
-            assignmentsDict = AWCore.userDefaults.dictionary(forKey: Self.assignmentsKey) as? [String: String] ?? [:]
-        }
+        let assignmentsDict = assignments ?? AWCore.getRuleSetAssignments()
 
         var sets = Self.builtIn.map { name in
             RuleSet(id: name, name: name, assignedConfigurationId: assignmentsDict[name] ?? Self.defaultAssignments[name])
@@ -149,9 +141,9 @@ class RuleSetStore: ObservableObject {
         saveCustomRuleSets()
 
         // Remove assignment for this custom ruleset
-        var assignments = AWCore.userDefaults.dictionary(forKey: Self.assignmentsKey) as? [String: String] ?? [:]
+        var assignments = AWCore.getRuleSetAssignments()
         assignments.removeValue(forKey: id.uuidString)
-        AWCore.userDefaults.set(assignments, forKey: Self.assignmentsKey)
+        AWCore.setRuleSetAssignments(assignments)
 
         rebuildRuleSets()
     }
@@ -269,7 +261,8 @@ class RuleSetStore: ObservableObject {
 
             // Fetch bypass country rules
             var bypassRules: [[String: Any]] = []
-            if let countryCode = await AWCore.userDefaults.string(forKey: "bypassCountryCode"), !countryCode.isEmpty {
+            let countryCode = AWCore.getBypassCountryCode()
+            if !countryCode.isEmpty {
                 let rules = await CountryBypassCatalog.shared.rules(for: countryCode)
                 bypassRules = rules.map {
                     ["type": $0.type.rawValue, "value": $0.value]
@@ -282,7 +275,7 @@ class RuleSetStore: ObservableObject {
             }
 
             if let data = try? JSONSerialization.data(withJSONObject: routing) {
-                await AWCore.userDefaults.set(data, forKey: "routingData")
+                AWCore.setRoutingData(data)
             }
 
             AWCore.notifyRoutingChanged()
@@ -295,12 +288,12 @@ class RuleSetStore: ObservableObject {
         let dict = Dictionary(uniqueKeysWithValues: ruleSets.compactMap { rs in
             rs.assignedConfigurationId.map { (rs.id, $0) }
         })
-        AWCore.userDefaults.set(dict, forKey: Self.assignmentsKey)
+        AWCore.setRuleSetAssignments(dict)
     }
 
     private func saveCustomRuleSets() {
         if let data = try? JSONEncoder().encode(customRuleSets) {
-            AWCore.userDefaults.set(data, forKey: Self.customRuleSetsKey)
+            AWCore.setCustomRuleSetsData(data)
         }
     }
 }

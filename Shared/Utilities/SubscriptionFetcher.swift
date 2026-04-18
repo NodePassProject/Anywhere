@@ -42,7 +42,7 @@ struct SubscriptionFetcher {
         var request = URLRequest(url: url)
         request.setValue("Anywhere", forHTTPHeaderField: "User-Agent")
 
-        let allowInsecure = AWCore.userDefaults.bool(forKey: "allowInsecure")
+        let allowInsecure = AWCore.getAllowInsecure()
         let delegate: InsecureSessionDelegate? = allowInsecure ? InsecureSessionDelegate() : nil
         let (data, response): (Data, URLResponse)
         do {

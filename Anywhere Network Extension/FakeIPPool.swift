@@ -16,11 +16,7 @@ class FakeIPPool {
     }
 
     // IPv4: 198.18.0.0/15 → offsets 1..131071 available; we cap LRU at a
-    // much smaller size so a long-running tunnel can't balloon the three
-    // dictionaries that back the pool (~200 B per entry × 3 maps).
-    private static let baseIPv4: UInt32 = 0xC612_0000  // 198.18.0.0
-    private static let poolSize = 16_384               // usable offsets
-
+    // much smaller size (see ``TunnelConstants/fakeIPPoolSize``).
     // IPv6: fc00:: + offset (same offset range as IPv4)
     // fc00::1 through fc00::1:ffff
 
@@ -53,7 +49,7 @@ class FakeIPPool {
 
     /// Convert an offset to 4-byte IPv4 address.
     static func ipv4Bytes(offset: Int) -> (UInt8, UInt8, UInt8, UInt8) {
-        let ip32 = baseIPv4 + UInt32(offset)
+        let ip32 = TunnelConstants.fakeIPPoolBaseIPv4 + UInt32(offset)
         return (
             UInt8((ip32 >> 24) & 0xFF),
             UInt8((ip32 >> 16) & 0xFF),
@@ -93,7 +89,7 @@ class FakeIPPool {
 
             // Need a new offset
             let offset: Int
-            if nextOffset <= Self.poolSize {
+            if nextOffset <= TunnelConstants.fakeIPPoolSize {
                 offset = nextOffset
                 nextOffset += 1
             } else {
@@ -169,8 +165,8 @@ class FakeIPPool {
         octets.3 = current
         guard octets.3 <= 255 else { return nil }
         let ip32 = (octets.0 << 24) | (octets.1 << 16) | (octets.2 << 8) | octets.3
-        let offset = Int(ip32 - Self.baseIPv4)
-        guard offset >= 1, offset <= Self.poolSize else { return nil }
+        let offset = Int(ip32 - TunnelConstants.fakeIPPoolBaseIPv4)
+        guard offset >= 1, offset <= TunnelConstants.fakeIPPoolSize else { return nil }
         return offset
     }
 
@@ -191,7 +187,7 @@ class FakeIPPool {
             // Extract offset from bytes 12-15
             let offset = (Int(bytes[12]) << 24) | (Int(bytes[13]) << 16)
                        | (Int(bytes[14]) << 8) | Int(bytes[15])
-            guard offset >= 1, offset <= Self.poolSize else { return nil }
+            guard offset >= 1, offset <= TunnelConstants.fakeIPPoolSize else { return nil }
             return offset
         }
     }

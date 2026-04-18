@@ -324,12 +324,16 @@ class ProxyClient {
             completion(.failure(ProxyError.dropped))
             return
         }
-        
+
+        // Centralised capability check — only VLESS carries mux framing.
+        if command == .mux, !configuration.outboundProtocol.supportsMux {
+            completion(.failure(ProxyError.protocolError(
+                "Mux is not supported with \(configuration.outboundProtocol.name)"
+            )))
+            return
+        }
+
         if configuration.outboundProtocol == .hysteria {
-            if command == .mux {
-                completion(.failure(ProxyError.protocolError("Mux is not supported with Hysteria")))
-                return
-            }
             connectWithHysteria(
                 command: command,
                 destinationHost: destinationHost,
@@ -338,21 +342,13 @@ class ProxyClient {
             )
             return
         }
-        
+
         if isShadowsocks {
-            if command == .mux {
-                completion(.failure(ProxyError.protocolError("Mux is not supported with Shadowsocks")))
-                return
-            }
             connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
             return
         }
 
         if configuration.outboundProtocol == .socks5 {
-            if command == .mux {
-                completion(.failure(ProxyError.protocolError("Mux is not supported with SOCKS5")))
-                return
-            }
             connectWithSOCKS5(command: command, destinationHost: destinationHost, destinationPort: destinationPort, completion: completion)
             return
         }

@@ -30,8 +30,6 @@ enum TunnelConstants {
     static let dnsServersIPv4 = ["1.1.1.1", "1.0.0.1"]
     /// IPv6 DNS servers (Cloudflare).
     static let dnsServersIPv6 = ["2606:4700:4700::1111", "2606:4700:4700::1001"]
-    /// Default encrypted DNS protocol when no preference is stored.
-    static let defaultEncryptedDNSProtocol = "doh"
 
     // MARK: - Connection Timeouts
 
@@ -53,7 +51,7 @@ enum TunnelConstants {
     // MARK: - TCP Buffer Sizes
 
     /// Maximum bytes per tcp_write call (16 KB ≈ 12 TCP segments at TCP_MSS=1360).
-    /// With MEMP_NUM_TCP_SEG=4096, this lets many connections make progress without
+    /// With MEMP_NUM_TCP_SEG=32768, this lets many connections make progress without
     /// exhausting the segment pool. Must stay in sync with lwipopts.h.
     static let tcpMaxWriteSize = 16 * 1024
     /// Maximum upload coalesce buffer size, capped at UInt16.max because downstream
@@ -61,10 +59,17 @@ enum TunnelConstants {
     static let tcpMaxCoalesceSize = Int(UInt16.max)
     /// Safety cap on per-connection `pendingData` (bytes accumulated while the
     /// sniff phase runs or the proxy is dialing). Bounded naturally by TCP_WND
-    /// (~174 KB) since we defer `tcp_recved` until the route is committed;
+    /// (~696 KB) since we defer `tcp_recved` until the route is committed;
     /// this cap defends against pathological states where the window bookkeeping
     /// drifts. Set to 2 × TCP_WND so it only fires on runaway growth.
-    static let tcpMaxPendingDataSize = 2 * 128 * 1360
+    static let tcpMaxPendingDataSize = 2 * 512 * 1360
+    /// Low-water mark for the per-connection downlink backlog (`pendingWrite`).
+    /// When the backlog drops below this we prefetch the next proxy receive in
+    /// parallel with the ongoing drain — without this overlap, big chunks turn
+    /// the downlink into stop-and-wait and throughput collapses. Sized to match
+    /// TCP_SND_BUF in lwipopts.h so a prefetched chunk can be pushed into lwIP
+    /// the moment space frees up.
+    static let drainLowWaterMark = 512 * 1360
 
     // MARK: - UDP Settings
 
@@ -91,24 +96,32 @@ enum TunnelConstants {
     /// Retry delay when TCP overflow drain makes no progress (milliseconds).
     static let drainRetryDelayMs = 250
 
-    // MARK: - UserDefaults Keys
+    // MARK: - Stack Lifecycle
 
-    enum UserDefaultsKey {
-        static let lastConfigurationData = "lastConfigurationData"
-        static let ipv6DNSEnabled = "ipv6DNSEnabled"
-        static let encryptedDNSEnabled = "encryptedDNSEnabled"
-        static let encryptedDNSProtocol = "encryptedDNSProtocol"
-        static let encryptedDNSServer = "encryptedDNSServer"
-        static let bypassCountryCode = "bypassCountryCode"
-        static let proxyMode = "proxyMode"
-        static let proxyServerAddresses = "proxyServerAddresses"
-        static let routingData = "routingData"
-    }
+    /// Minimum sleep duration (seconds) before proactively restarting the stack on wake.
+    /// Short sleeps leave TCP connections intact — they likely survive.
+    /// Long sleeps almost certainly leave dead proxy connections behind,
+    /// so we restart immediately instead of waiting for keepalive timeouts.
+    static let wakeRestartThreshold: CFAbsoluteTime = 60
 
-    // MARK: - Darwin Notification Names
+    /// Minimum interval between stack restarts (seconds).
+    /// 2s absorbs bursts where a path update and a settings/routing notification arrive
+    /// back-to-back (e.g., user toggling a setting while Wi-Fi is handing off).
+    static let restartThrottleInterval: CFAbsoluteTime = 2.0
 
-    enum Notification {
-        static let tunnelSettingsChanged = AWCore.Notification.tunnelSettingsChanged
-        static let routingChanged = AWCore.Notification.routingChanged
-    }
+    // MARK: - TLS Sniffer
+
+    /// Maximum bytes buffered while parsing a TLS ClientHello for SNI.
+    /// Typical ClientHellos fit in under 2 KB; post-quantum key shares push
+    /// that to ~4 KB. 8 KB is a safe ceiling that still bounds memory.
+    static let tlsSnifferBufferLimit = 8192
+
+    // MARK: - Fake-IP Pool
+
+    /// Base IPv4 address for the fake-IP pool (198.18.0.0 in 198.18.0.0/15).
+    static let fakeIPPoolBaseIPv4: UInt32 = 0xC612_0000
+    /// Usable offsets in the fake-IP pool. Bounds the three backing
+    /// dictionaries (~200 B per entry × 3 maps) in a long-running tunnel.
+    static let fakeIPPoolSize = 16_384
+
 }

@@ -27,18 +27,18 @@ class TVSettingsViewController: UIViewController {
     private let insecureValueLabel = UILabel()
 
     private var alwaysOnEnabled: Bool {
-        get { AWCore.userDefaults.bool(forKey: "alwaysOnEnabled") }
+        get { AWCore.getAlwaysOnEnabled() }
         set {
-            AWCore.userDefaults.set(newValue, forKey: "alwaysOnEnabled")
+            AWCore.setAlwaysOnEnabled(newValue)
             viewModel.reconnectVPN()
             updateAppearance()
         }
     }
 
     private var allowInsecure: Bool {
-        get { AWCore.userDefaults.bool(forKey: "allowInsecure") }
+        get { AWCore.getAllowInsecure() }
         set {
-            AWCore.userDefaults.set(newValue, forKey: "allowInsecure")
+            AWCore.setAllowInsecure(newValue)
             AWCore.notifyCertificatePolicyChanged()
             updateAppearance()
         }

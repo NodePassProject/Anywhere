@@ -150,6 +150,12 @@ static err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
     tcp_sent(newpcb, tcp_sent_cb);
     tcp_err(newpcb, tcp_err_cb);
 
+    /* The lwIP ↔ local-app leg rides over TUN with no real loss or congestion.
+     * Nagle coalescing only adds latency for small writes (HTTP/2 frames,
+     * WebSocket pings, interactive SSH). Upload coalescing already happens in
+     * LWIPTCPConnection before handing bytes to lwIP. */
+    tcp_nagle_disable(newpcb);
+
     return ERR_OK;
 }
 
@@ -419,7 +425,13 @@ void lwip_bridge_input(const void *data, int len) {
 int lwip_bridge_tcp_write(void *pcb, const void *data, uint16_t len) {
     struct tcp_pcb *tpcb = (struct tcp_pcb *)pcb;
     err_t err = tcp_write(tpcb, data, len, TCP_WRITE_FLAG_COPY);
-    if (err != ERR_OK) {
+    if (err == ERR_MEM) {
+        /* Transient — snd_buf, queuelen, or pbuf/seg pool is tight. The
+         * caller's drain path retries once ACKs free space, so this is
+         * expected under heavy load, not an error. */
+        os_log_debug(s_log, "[Bridge] tcp_write: ERR_MEM len=%u sndbuf=%u queuelen=%u",
+                     len, (unsigned)tpcb->snd_buf, (unsigned)tpcb->snd_queuelen);
+    } else if (err != ERR_OK) {
         os_log_error(s_log, "[Bridge] tcp_write: err=%d len=%u sndbuf=%u",
                      (int)err, len, (unsigned)tpcb->snd_buf);
     }
@@ -458,6 +470,10 @@ void lwip_bridge_tcp_abort(void *pcb) {
 
 int lwip_bridge_tcp_sndbuf(void *pcb) {
     return (int)((struct tcp_pcb *)pcb)->snd_buf;
+}
+
+int lwip_bridge_tcp_snd_queuelen(void *pcb) {
+    return (int)((struct tcp_pcb *)pcb)->snd_queuelen;
 }
 
 /* ========================================================================

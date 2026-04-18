@@ -25,6 +25,12 @@ class QUICConnection {
         case connectionFailed(String)
         case handshakeFailed(String)
         case streamError(String)
+        /// Peer sent RESET_STREAM (read side aborted).
+        case streamReset(appErrorCode: UInt64)
+        /// `stream_close` fired with an application error code set — either
+        /// the peer sent a terminating frame with a non-zero code or the
+        /// local endpoint shut the stream down with one.
+        case streamClosedWithError(appErrorCode: UInt64)
         case timeout
         case closed
 
@@ -33,6 +39,8 @@ class QUICConnection {
             case .connectionFailed(let m): return "QUIC: \(m)"
             case .handshakeFailed(let m): return "QUIC TLS: \(m)"
             case .streamError(let m): return "QUIC stream: \(m)"
+            case .streamReset(let c): return "QUIC stream reset (app code \(c))"
+            case .streamClosedWithError(let c): return "QUIC stream closed (app code \(c))"
             case .timeout: return "QUIC timeout"
             case .closed: return "QUIC closed"
             }
@@ -90,6 +98,18 @@ class QUICConnection {
     /// call — the handler MUST consume or copy it before returning. Dispatching
     /// the view to another queue without copying is a use-after-free.
     var streamDataHandler: ((Int64, Data, Bool) -> Void)?
+    /// Called when a stream is terminated at the QUIC level.
+    /// - `error == nil`: clean close (both sides FIN'd with no app error code).
+    /// - `error != nil`: RESET_STREAM from the peer, or `stream_close` fired
+    ///   with an app error code set. The carried error wraps the app code so
+    ///   callers can distinguish abort vs. orderly close.
+    ///
+    /// Fires synchronously on `queue` from inside ngtcp2's read_pkt callback,
+    /// for both the `stream_reset` and `stream_close` ngtcp2 hooks. Handlers
+    /// are called once per underlying event, so the Hysteria layer may see
+    /// reset followed by close on the same stream — idempotent handling is
+    /// required on the receiver side.
+    var streamTerminationHandler: ((Int64, Error?) -> Void)?
     /// Called when a QUIC DATAGRAM frame is received.
     var datagramHandler: ((Data) -> Void)?
     /// Called when the QUIC connection is closed (draining, error, etc.).
@@ -400,6 +420,27 @@ class QUICConnection {
 
         writeToUDP()
         return offset
+    }
+
+    /// Fails any queued pendingWrites that target a terminated stream. Called
+    /// from the `stream_close` / `stream_reset` callbacks — after the stream
+    /// is gone, those writes can never drain (ngtcp2 will return
+    /// `STREAM_NOT_FOUND` / `STREAM_SHUT_WR` on every retry), so their
+    /// completions would leak. Runs inline on `queue`.
+    fileprivate func failPendingWrites(streamId: Int64, error: Error) {
+        guard !pendingWrites.isEmpty else { return }
+        var remaining: [PendingWrite] = []
+        remaining.reserveCapacity(pendingWrites.count)
+        var failed: [(Error?) -> Void] = []
+        for pw in pendingWrites {
+            if pw.streamId == streamId {
+                failed.append(pw.completion)
+            } else {
+                remaining.append(pw)
+            }
+        }
+        pendingWrites = remaining
+        for cb in failed { cb(error) }
     }
 
     /// Retries pending writes that were blocked by stream flow control.
@@ -756,6 +797,7 @@ class QUICConnection {
         callbacks.recv_stream_data = quicRecvStreamDataCB
         callbacks.acked_stream_data_offset = quicAckedCB
         callbacks.stream_close = quicStreamCloseCB
+        callbacks.stream_reset = quicStreamResetCB
         callbacks.rand = quicRandCB
         callbacks.get_new_connection_id2 = quicGetNewCIDCB
         callbacks.update_key = ngtcp2_crypto_update_key_cb
@@ -822,12 +864,14 @@ class QUICConnection {
         }
         self.conn = connPtr
 
-        // Emit a PING every 15 s of inactivity so a silently-broken UDP path
-        // (carrier NAT rebind, server-side idle sweep) surfaces as a loss /
-        // idle-close within one retransmission cycle rather than waiting for
-        // the next app write to hit CONNECTION_CLOSE. Mirrors naiveproxy's
-        // `set_keep_alive_ping_timeout(kPingTimeoutSecs)`.
-        ngtcp2_conn_set_keep_alive_timeout(connPtr, 15 * 1_000_000_000)
+        // Emit a PING after a configurable idle period so a silently-broken
+        // UDP path (carrier NAT rebind, server-side idle sweep) surfaces as a
+        // loss / idle-close within one retransmission cycle rather than
+        // waiting for the next app write to hit CONNECTION_CLOSE. Naive uses
+        // 15 s (matching naiveproxy's `set_keep_alive_ping_timeout`); Hysteria
+        // uses 10 s (matching the reference client's `defaultKeepAlivePeriod`
+        // in `core/client/config.go`).
+        ngtcp2_conn_set_keep_alive_timeout(connPtr, tuning.keepAliveTimeout)
 
         ngtcp2_conn_set_tls_native_handle(connPtr,
             UnsafeMutableRawPointer(bitPattern: UInt(NGTCP2_APPLE_CS_AES_128_GCM_SHA256)))
@@ -969,8 +1013,7 @@ class QUICConnection {
     // MARK: Timer
 
     /// Schedules a one-shot timer at the exact deadline ngtcp2 needs
-    /// (retransmission, loss detection, etc.).  Replaces the old 50ms
-    /// polling timer with a precise, event-driven alarm — matching
+    /// (retransmission, loss detection, etc.). Event-driven alarm matching
     /// Chromium/QUICHE's QuicAlarm approach.
     private var lastScheduledExpiry: UInt64 = 0
 
@@ -1128,10 +1171,53 @@ private let quicAckedCB: @convention(c) (
     UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
 ) -> Int32 = { _, _, _, _, _, _ in 0 }
 
+/// Bit in `flags` that indicates `appErrorCode` was exchanged (RESET_STREAM
+/// or STOP_SENDING). Mirrors `NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET`
+/// from ngtcp2.h — redeclared here because the bare `#define` isn't imported
+/// into Swift.
+private let ngtcp2StreamCloseFlagAppErrorCodeSet: UInt32 = 0x01
+
+/// Fires after BOTH directions of a bidirectional stream are terminated
+/// (peer FIN + our FIN, or any reset/shutdown path). Without this the
+/// application layer would never learn that the stream is gone —
+/// `recv_stream_data` doesn't fire for RESET_STREAM, so pending receives
+/// would hang forever and orphan entries would accumulate in per-stream
+/// maps until the QUIC connection itself closed.
 private let quicStreamCloseCB: @convention(c) (
     OpaquePointer?, UInt32, Int64, UInt64,
     UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
-) -> Int32 = { _, _, _, _, _, _ in 0 }
+) -> Int32 = { _, flags, sid, appErrorCode, ud, _ in
+    guard let qc = qcFromUserData(ud) else { return 0 }
+    let hasError = (flags & ngtcp2StreamCloseFlagAppErrorCodeSet) != 0
+    let error: Error? = hasError
+        ? QUICConnection.QUICError.streamClosedWithError(appErrorCode: appErrorCode)
+        : nil
+    // Drain any queued writes for this stream — their completions would
+    // otherwise leak once ngtcp2 frees the per-stream state.
+    qc.failPendingWrites(
+        streamId: sid,
+        error: error ?? QUICConnection.QUICError.closed
+    )
+    qc.streamTerminationHandler?(sid, error)
+    return 0
+}
+
+/// Fires when the peer sends RESET_STREAM, signalling that the peer will
+/// not send any more data on this stream and discarded anything past
+/// `finalSize`. Our read side is effectively aborted. `stream_close` will
+/// still fire later once the write direction closes too, but surfacing the
+/// reset immediately lets pending receives fail fast instead of hanging
+/// until the write side is torn down.
+private let quicStreamResetCB: @convention(c) (
+    OpaquePointer?, Int64, UInt64, UInt64,
+    UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
+) -> Int32 = { _, sid, _, appErrorCode, ud, _ in
+    guard let qc = qcFromUserData(ud) else { return 0 }
+    let error = QUICConnection.QUICError.streamReset(appErrorCode: appErrorCode)
+    qc.failPendingWrites(streamId: sid, error: error)
+    qc.streamTerminationHandler?(sid, error)
+    return 0
+}
 
 private let quicRandCB: @convention(c) (
     UnsafeMutablePointer<UInt8>?, Int, UnsafePointer<ngtcp2_rand_ctx>?

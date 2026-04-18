@@ -66,43 +66,15 @@ class LWIPUDPFlow {
         self.lwipQueue = lwipQueue
     }
 
-    private static func conciseErrorDescription(_ error: Error) -> String {
-        var message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        let redundantPrefixes = [
-            "Connection failed: ",
-            "Send failed: ",
-            "Receive failed: ",
-            "DNS resolution failed: "
-        ]
-
-        for prefix in redundantPrefixes where message.hasPrefix(prefix) {
-            message.removeFirst(prefix.count)
-            break
-        }
-
-        return message
-    }
-
     private func logTransportFailure(_ operation: String, error: Error, defaultLevel: LWIPStack.LogLevel) {
-        let errorDescription = Self.conciseErrorDescription(error)
-
-        if let interruption = LWIPStack.shared?.recentTunnelInterruptionContext() {
-            if interruption.level == .info {
-                logger.debug("[UDP] \(operation) ended after \(interruption.summary): \(flowKey): \(errorDescription)")
-            } else {
-                logger.warning("[UDP] \(operation) interrupted after \(interruption.summary): \(flowKey) (\(errorDescription))")
-            }
-            return
-        }
-
-        switch defaultLevel {
-        case .info:
-            logger.info("[UDP] \(operation) failed: \(flowKey): \(errorDescription)")
-        case .warning:
-            logger.warning("[UDP] \(operation) failed: \(flowKey): \(errorDescription)")
-        case .error:
-            logger.error("[UDP] \(operation) failed: \(flowKey): \(errorDescription)")
-        }
+        TransportErrorLogger.log(
+            operation: operation,
+            endpoint: "\(flowKey)",
+            error: error,
+            logger: logger,
+            prefix: "[UDP]",
+            defaultLevel: defaultLevel
+        )
     }
 
     // MARK: - Data Handling (called on lwipQueue)
@@ -123,13 +95,21 @@ class LWIPUDPFlow {
 
         // Direct bypass path
         if let socket = directSocket {
-            socket.send(data: payload)
+            socket.send(data: payload) { [weak self] error in
+                if let error {
+                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                }
+            }
             return
         }
 
         // Shadowsocks direct UDP relay
         if let relay = ssUDPRelay {
-            relay.send(data: payload)
+            relay.send(data: payload) { [weak self] error in
+                if let error {
+                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                }
+            }
             return
         }
 
@@ -334,10 +314,22 @@ class LWIPUDPFlow {
     private func connectShadowsocksUDP() {
         guard ssUDPRelay == nil && !closed else { return }
 
-        guard let method = configuration.ssMethod,
-              let cipher = ShadowsocksCipher(method: method),
-              let password = configuration.ssPassword else {
-            logger.error("[UDP] Invalid Shadowsocks config for \(flowKey)")
+        guard let method = configuration.ssMethod else {
+            logger.error("[UDP] Shadowsocks config missing `method` for \(flowKey)")
+            proxyConnecting = false
+            close()
+            LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
+            return
+        }
+        guard let cipher = ShadowsocksCipher(method: method) else {
+            logger.error("[UDP] Unsupported Shadowsocks cipher `\(method)` for \(flowKey)")
+            proxyConnecting = false
+            close()
+            LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
+            return
+        }
+        guard let password = configuration.ssPassword else {
+            logger.error("[UDP] Shadowsocks config missing `password` for \(flowKey)")
             proxyConnecting = false
             close()
             LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
@@ -347,7 +339,7 @@ class LWIPUDPFlow {
         let mode: ShadowsocksUDPRelay.Mode
         if cipher.isSS2022 {
             guard let psk = ShadowsocksKeyDerivation.decodePSK(password: password, keySize: cipher.keySize) else {
-                logger.error("[UDP] Invalid SS2022 key for \(flowKey)")
+                logger.error("[UDP] Invalid SS2022 PSK (expected base64 of \(cipher.keySize) bytes) for \(flowKey)")
                 proxyConnecting = false
                 close()
                 LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
@@ -382,14 +374,27 @@ class LWIPUDPFlow {
 
                 // Send buffered payloads
                 for payload in self.pendingData {
-                    relay.send(data: payload)
+                    relay.send(data: payload) { [weak self] error in
+                        if let error {
+                            self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                        }
+                    }
                 }
                 self.pendingData.removeAll()
                 self.pendingBufferSize = 0
 
-                // Start receiving responses
+                // Start receiving responses — both encrypted-recv failures and
+                // the underlying UDP socket dying close the flow so the client
+                // re-resolves DNS instead of siliently stalling.
                 relay.startReceiving { [weak self] data in
                     self?.handleProxyData(data)
+                } errorHandler: { [weak self] error in
+                    guard let self else { return }
+                    self.logTransportFailure("Receive", error: error, defaultLevel: .warning)
+                    self.lwipQueue.async {
+                        self.close()
+                        LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    }
                 }
             }
         }
@@ -417,15 +422,27 @@ class LWIPUDPFlow {
 
                 // Send buffered payloads
                 for payload in self.pendingData {
-                    socket.send(data: payload)
+                    socket.send(data: payload) { [weak self] error in
+                        if let error {
+                            self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                        }
+                    }
                 }
                 self.pendingData.removeAll()
                 self.pendingBufferSize = 0
 
-                // Start receiving responses
-                socket.startReceiving { [weak self] data in
+                // Start receiving responses. Non-EAGAIN recv errors close the
+                // flow so we don't sit on a dead socket.
+                socket.startReceiving(handler: { [weak self] data in
                     self?.handleProxyData(data)
-                }
+                }, errorHandler: { [weak self] error in
+                    guard let self else { return }
+                    self.logTransportFailure("Receive", error: error, defaultLevel: .warning)
+                    self.lwipQueue.async {
+                        self.close()
+                        LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    }
+                })
             }
         }
     }

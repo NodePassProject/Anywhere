@@ -18,7 +18,7 @@ class ConfigurationStore: ObservableObject {
 
     private init() {
         AWCore.migrateToAppGroup(fileName: "configurations.json")
-        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
+        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.Identifier.appGroupSuite)!
         fileURL = container.appendingPathComponent("configurations.json")
         configurations = loadFromDisk()
     }

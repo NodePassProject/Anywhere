@@ -19,6 +19,19 @@ final class HysteriaConnection: ProxyConnection {
     private var state: State = .idle
     private var streamID: Int64 = -1
 
+    /// True once we've observed FIN on the downlink (server half-closed its
+    /// write side). The uplink is independent and stays open — `state`
+    /// remains `.ready` so the caller can continue to `sendRaw` until it
+    /// decides to tear the stream down. Blocks further reads: new
+    /// `receiveRaw` calls return `(nil, nil)` once the buffer drains.
+    ///
+    /// Conflating this with `state = .closed` (prior bug) broke TCP
+    /// half-close — any lwIP uplink bytes still coalesced at the moment the
+    /// peer FIN'd would fail with `HysteriaError.streamClosed`, which is
+    /// what produced the `[TCP] Send failed: host: Hysteria stream closed`
+    /// line observed on gracefully-closing HTTPS connections.
+    private var readClosed = false
+
     /// Buffer holding raw stream bytes we haven't yet delivered to a
     /// pending `receiveRaw` call, plus the unparsed response header.
     private var receiveBuffer = Data()
@@ -98,7 +111,7 @@ final class HysteriaConnection: ProxyConnection {
             pendingQuicBytes = 0
             session.extendStreamOffset(streamID, count: ackCount)
             cb(Data(data), nil)
-            if fin { state = .closed }
+            if fin { readClosed = true }
             return
         }
 
@@ -141,6 +154,15 @@ final class HysteriaConnection: ProxyConnection {
     }
 
     private func deliverBufferedOrEOF(eof: Bool) {
+        // Record the half-close up front so both branches below see it and
+        // the next receive can surface EOF. Previously this flag was only
+        // set inside the `if eof` block after the early return, which meant
+        // that when buffered data AND a pending receive AND FIN all arrived
+        // together the EOF signal was lost — the caller would deliver the
+        // buffer and then hang forever waiting for more data that would
+        // never come.
+        if eof { readClosed = true }
+
         if let cb = pendingReceive, !receiveBuffer.isEmpty {
             pendingReceive = nil
             let out = receiveBuffer
@@ -151,7 +173,6 @@ final class HysteriaConnection: ProxyConnection {
         }
 
         if eof {
-            state = .closed
             if let cb = pendingReceive {
                 pendingReceive = nil
                 cb(nil, nil)
@@ -168,6 +189,31 @@ final class HysteriaConnection: ProxyConnection {
 
     func handleSessionError(_ error: Error) {
         session.queue.async { [weak self] in self?.fail(error) }
+    }
+
+    /// Called by ``HysteriaSession`` when the QUIC layer signals that this
+    /// stream is terminated — either the peer sent RESET_STREAM or the
+    /// stream's `stream_close` callback fired. `error == nil` means a fully
+    /// clean close with no app error code; a non-nil error wraps the app
+    /// code the peer (or the local endpoint) sent.
+    ///
+    /// Runs on `session.queue`. Idempotent — `stream_reset` and
+    /// `stream_close` can both fire for the same stream, and local
+    /// `cancel()` may have already transitioned `state` to `.closed`.
+    func handleStreamTermination(error: Error?) {
+        guard state != .closed else { return }
+        if let error {
+            fail(error)
+            return
+        }
+        // Clean termination. Flush any pending receive with EOF rather than
+        // an error — the stream ended in good order.
+        readClosed = true
+        state = .closed
+        if let cb = pendingReceive {
+            pendingReceive = nil
+            cb(nil, nil)
+        }
     }
 
     private func fail(_ error: Error) {
@@ -216,6 +262,13 @@ final class HysteriaConnection: ProxyConnection {
                 return
             }
             if self.state == .closed {
+                completion(nil, nil)
+                return
+            }
+            // Downlink half-closed and nothing left buffered — report EOF so
+            // the caller can shut its read side without waiting on a packet
+            // that will never arrive.
+            if self.readClosed {
                 completion(nil, nil)
                 return
             }

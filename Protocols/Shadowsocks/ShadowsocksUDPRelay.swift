@@ -86,21 +86,41 @@ class ShadowsocksUDPRelay {
         }
     }
 
-    /// Encrypts and sends a UDP payload to the SS server.
+    /// Encrypts and sends a UDP payload to the SS server (fire-and-forget).
+    ///
+    /// Prefer the completion-accepting overload when the caller can log or
+    /// tear down on failure — this variant silently logs encrypt errors at
+    /// the relay level, where the calling flow's context is lost.
     func send(data: Data) {
-        guard !cancelled else { return }
+        send(data: data) { _ in }
+    }
+
+    /// Encrypts and sends a UDP payload, reporting both encrypt errors and
+    /// the underlying socket send errors through a single completion. This
+    /// lets the calling flow attribute failures (e.g., bad PSK, dead socket)
+    /// to the specific 5-tuple rather than losing them to a shared logger.
+    func send(data: Data, completion: @escaping (Error?) -> Void) {
+        guard !cancelled else { completion(nil); return }
         do {
             let encrypted = try encryptPacket(payload: data)
-            socket.send(data: encrypted)
+            socket.send(data: encrypted, completion: completion)
         } catch {
             logger.error("[SS-UDP] Encrypt error: \(error.localizedDescription)")
+            completion(error)
         }
     }
 
     /// Starts receiving and decrypting datagrams asynchronously.
-    func startReceiving(handler: @escaping (Data) -> Void) {
+    ///
+    /// `errorHandler`, when supplied, fires on the first terminal transport
+    /// failure (non-transient recv errno). Decrypt failures on individual
+    /// datagrams are NOT surfaced through `errorHandler` — corrupt packets
+    /// happen on the open Internet and closing the flow for a single bad one
+    /// would be fragile. They continue to log at the relay level.
+    func startReceiving(handler: @escaping (Data) -> Void,
+                        errorHandler: ((Error) -> Void)? = nil) {
         guard !cancelled else { return }
-        socket.startReceiving { [weak self] data in
+        socket.startReceiving(handler: { [weak self] data in
             guard let self, !self.cancelled else { return }
             do {
                 let payload = try self.decryptPacket(data)
@@ -108,7 +128,7 @@ class ShadowsocksUDPRelay {
             } catch {
                 logger.error("[SS-UDP] Decrypt error: \(error.localizedDescription)")
             }
-        }
+        }, errorHandler: errorHandler)
     }
 
     func cancel() {

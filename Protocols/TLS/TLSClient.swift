@@ -377,9 +377,8 @@ class TLSClient {
     /// Extracts only the ServerHello handshake message (type 0x02 + length + body)
     /// from the buffer, without the TLS record header.
     ///
-    /// Unlike the previous version, this correctly parses the handshake header
-    /// to return only the ServerHello — not the entire record payload (which may
-    /// contain coalesced Certificate/SKE/SHD messages in the same record).
+    /// A single TLS record may coalesce ServerHello with Certificate/SKE/SHD,
+    /// so we parse the handshake header to return just the ServerHello slice.
     private func extractServerHelloMessage(from buffer: Data) -> Data {
         var offset = 0
         while offset + 5 < buffer.count {

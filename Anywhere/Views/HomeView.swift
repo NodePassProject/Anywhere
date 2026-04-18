@@ -21,9 +21,7 @@ struct HomeView: View {
         viewModel.vpnStatus == .connected
     }
 
-    private var isTransitioning: Bool {
-        viewModel.vpnStatus == .connecting || viewModel.vpnStatus == .disconnecting || viewModel.vpnStatus == .reasserting
-    }
+    private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
 
     var body: some View {
         ZStack {

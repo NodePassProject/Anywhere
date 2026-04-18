@@ -57,8 +57,8 @@ extension ProxyClient {
         }
     }
 
-    /// SOCKS5 over TLS: TCP → TLS handshake → SOCKS5 handshake.
-    /// Performs the SOCKS5 handshake and returns the appropriate connection.
+    /// Performs the SOCKS5 handshake, dispatching on `.udp` for UDP ASSOCIATE
+    /// or CONNECT otherwise.
     private func performSOCKS5Handshake(
         transport: any RawTransport,
         command: ProxyCommand,

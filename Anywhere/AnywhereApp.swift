@@ -9,7 +9,7 @@ import SwiftUI
 
 @main
 struct AnywhereApp: App {
-    @State private var onboardingCompleted = AWCore.userDefaults.bool(forKey: "onboardingCompleted")
+    @State private var onboardingCompleted = AWCore.getOnboardingCompleted()
     @StateObject private var deepLinkManager = DeepLinkManager()
 
     var body: some Scene {

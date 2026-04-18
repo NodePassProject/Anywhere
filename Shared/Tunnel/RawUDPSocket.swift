@@ -74,6 +74,7 @@ final class RawUDPSocket {
     // MARK: Receive
 
     private var receiveHandler: ((Data) -> Void)?
+    private var receiveErrorHandler: ((Error) -> Void)?
     private var receiveHandlerQueue: DispatchQueue?
     private var rxBuffer = [UInt8](repeating: 0, count: RawUDPSocket.receiveBufferSize)
 
@@ -185,11 +186,20 @@ final class RawUDPSocket {
 
     /// Installs a receive handler. Fires on `handlerQueue` (or `ioQueue` if
     /// nil) once per datagram. Calling twice replaces the previous handler.
+    ///
+    /// `errorHandler`, when supplied, fires once on the same queue when the
+    /// recv loop encounters a non-transient `errno` (anything other than
+    /// EAGAIN/EWOULDBLOCK/EINTR). After the error handler fires, the read
+    /// source stops, so callers should treat this as a terminal event and
+    /// close the flow — otherwise the socket sits dead until the next send
+    /// surfaces ``SocketError/notConnected``.
     func startReceiving(queue handlerQueue: DispatchQueue? = nil,
-                        handler: @escaping (Data) -> Void) {
+                        handler: @escaping (Data) -> Void,
+                        errorHandler: ((Error) -> Void)? = nil) {
         ioQueue.async { [weak self] in
             guard let self else { return }
             self.receiveHandler = handler
+            self.receiveErrorHandler = errorHandler
             self.receiveHandlerQueue = handlerQueue
         }
     }
@@ -217,6 +227,22 @@ final class RawUDPSocket {
                 let err = errno
                 if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
                 logger.error("[RawUDP] recv errno=\(err)")
+                // Surface terminal recv failures so the flow can close; clear
+                // the read source so the dispatch event handler stops firing
+                // on the failed fd.
+                let errorHandler = self.receiveErrorHandler
+                let handlerQueue = self.receiveHandlerQueue
+                self.receiveErrorHandler = nil
+                self.readSource?.cancel()
+                self.readSource = nil
+                if let errorHandler {
+                    let socketError = SocketError.receiveFailed("errno=\(err)")
+                    if let handlerQueue {
+                        handlerQueue.async { errorHandler(socketError) }
+                    } else {
+                        errorHandler(socketError)
+                    }
+                }
                 return
             }
             if n == 0 { return }
@@ -297,6 +323,7 @@ final class RawUDPSocket {
                 self.socketFD = -1
             }
             self.receiveHandler = nil
+            self.receiveErrorHandler = nil
             self.receiveHandlerQueue = nil
         }
     }

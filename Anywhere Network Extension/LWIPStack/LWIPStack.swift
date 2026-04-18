@@ -25,10 +25,10 @@ class LWIPStack {
     // MARK: Properties
 
     /// Serial queue for all lwIP operations (lwIP is not thread-safe).
-    let lwipQueue = DispatchQueue(label: "com.argsment.Anywhere.lwip")
+    let lwipQueue = DispatchQueue(label: AWCore.Identifier.lwipQueue)
 
     /// Queue for writing packets back to the tunnel.
-    let outputQueue = DispatchQueue(label: "com.argsment.Anywhere.output")
+    let outputQueue = DispatchQueue(label: AWCore.Identifier.outputQueue)
 
     var packetFlow: NEPacketTunnelFlow?
     var configuration: ProxyConfiguration?
@@ -274,12 +274,12 @@ class LWIPStack {
 
     /// Reads IPv6 settings from app group UserDefaults.
     private func loadIPv6Settings() {
-        ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.ipv6DNSEnabled)
+        ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
     }
 
     /// Reads the bypass country code from app group UserDefaults.
     private func loadBypassCountry() {
-        bypassCountryCode = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.bypassCountryCode) ?? ""
+        bypassCountryCode = AWCore.getBypassCountryCode()
     }
 
     // MARK: - Proxy Server Address Bypass
@@ -287,7 +287,7 @@ class LWIPStack {
     /// Loads proxy server addresses from App Group UserDefaults and resolves
     /// domains to IPs in the background. Called on initial start.
     private func loadProxyServerAddresses() {
-        guard let data = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.proxyServerAddresses),
+        guard let data = AWCore.getProxyServerAddressesData(),
               let addresses = try? JSONSerialization.jsonObject(with: data) as? [String] else {
             return
         }
@@ -367,13 +367,13 @@ class LWIPStack {
 
     /// Reads encrypted DNS settings from app group UserDefaults.
     private func loadEncryptedDNSSetting() {
-        encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSEnabled)
-        encryptedDNSProtocol = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSProtocol) ?? TunnelConstants.defaultEncryptedDNSProtocol
-        encryptedDNSServer = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSServer) ?? ""
+        encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
+        encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
+        encryptedDNSServer = AWCore.getEncryptedDNSServer()
     }
 
     private func loadProxyModeSetting() {
-        proxyMode = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.proxyMode).flatMap(ProxyMode.init) ?? .rule
+        proxyMode = AWCore.getProxyMode()
     }
 
     // MARK: - IP Address Helpers

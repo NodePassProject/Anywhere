@@ -16,13 +16,9 @@ class SubscriptionStore: ObservableObject {
 
     private let fileURL: URL
 
-    #if os(tvOS)
-    private static let userDefaultsKey = "store.subscriptions"
-    #endif
-
     private init() {
         AWCore.migrateToAppGroup(fileName: "subscriptions.json")
-        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.suiteName)!
+        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.Identifier.appGroupSuite)!
         fileURL = container.appendingPathComponent("subscriptions.json")
         subscriptions = loadFromDisk()
     }
@@ -56,7 +52,7 @@ class SubscriptionStore: ObservableObject {
             return result
         }
         #if os(tvOS)
-        if let data = AWCore.userDefaults.data(forKey: Self.userDefaultsKey),
+        if let data = AWCore.getSubscriptionsData(),
            let result = try? JSONDecoder().decode([Subscription].self, from: data) {
             return result
         }
@@ -78,7 +74,7 @@ class SubscriptionStore: ObservableObject {
             }
             #if os(tvOS)
             if let data = try? JSONEncoder().encode(snapshot) {
-                AWCore.userDefaults.set(data, forKey: SubscriptionStore.userDefaultsKey)
+                AWCore.setSubscriptionsData(data)
             }
             #endif
         }

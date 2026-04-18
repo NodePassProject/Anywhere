@@ -46,6 +46,8 @@ struct AnywhereLogger {
 
     /// Logs to os.log only. Not shown in the user-facing log viewer.
     func debug(_ message: String) {
+#if DEBUG
         osLogger.debug("\(message, privacy: .public)")
+#endif
     }
 }

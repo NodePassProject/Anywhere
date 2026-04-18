@@ -7,11 +7,12 @@
 //  routing for traffic that reaches the tunnel by real IP (hardcoded IPs, DoH
 //  clients, etc.) — cases where the fake-IP ↔ domain mapping is unavailable.
 //
-//  The parser is strictly passive: it buffers up to ``defaultBufferLimit``
-//  bytes, walks the record / handshake / extensions structure with explicit
-//  bounds checks, and returns a terminal state as soon as the first byte
-//  rules out TLS or the first server_name extension is reached. No bytes
-//  beyond the ClientHello are retained.
+//  The parser is strictly passive: it buffers up to
+//  ``TunnelConstants/tlsSnifferBufferLimit`` bytes, walks the record /
+//  handshake / extensions structure with explicit bounds checks, and returns
+//  a terminal state as soon as the first byte rules out TLS or the first
+//  server_name extension is reached. No bytes beyond the ClientHello are
+//  retained.
 //
 
 import Foundation
@@ -31,15 +32,11 @@ struct TLSClientHelloSniffer {
         case unavailable
     }
 
-    /// Typical ClientHellos fit in under 2 KB; post-quantum key shares push
-    /// that to ~4 KB. 8 KB is a safe ceiling that still bounds memory.
-    static let defaultBufferLimit = 8192
-
     private let bufferLimit: Int
     private var buffer = Data()
     private(set) var state: State = .needMore
 
-    init(bufferLimit: Int = TLSClientHelloSniffer.defaultBufferLimit) {
+    init(bufferLimit: Int = TunnelConstants.tlsSnifferBufferLimit) {
         self.bufferLimit = bufferLimit
     }
 

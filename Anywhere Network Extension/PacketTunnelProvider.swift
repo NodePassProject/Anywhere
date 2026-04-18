@@ -15,16 +15,10 @@ private let logger = AnywhereLogger(category: "PacketTunnel")
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     private let lwipStack = LWIPStack()
-    private let pathMonitorQueue = DispatchQueue(label: "com.argsment.Anywhere.path-monitor")
+    private let pathMonitorQueue = DispatchQueue(label: AWCore.Identifier.pathMonitorQueue)
     private var pathMonitor: NWPathMonitor?
     private var lastPathSnapshot: PathSnapshot?
     private var sleepTimestamp: CFAbsoluteTime = 0
-
-    /// Minimum sleep duration (seconds) before proactively restarting the stack on wake.
-    /// Short sleeps leave TCP connections intact — they likely survive.
-    /// Long sleeps almost certainly leave dead proxy connections behind,
-    /// so we restart immediately instead of waiting for keepalive timeouts.
-    private static let wakeRestartThreshold: CFAbsoluteTime = 60
 
     private struct PathSnapshot: Equatable {
         let status: Network.NWPath.Status
@@ -99,7 +93,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let configurationDict: [String: Any]?
         if let dict = options?["config"] as? [String: Any] {
             configurationDict = dict
-        } else if let savedData = AWCore.userDefaults.data(forKey: TunnelConstants.UserDefaultsKey.lastConfigurationData),
+        } else if let savedData = AWCore.getLastConfigurationData(),
                   let dict = try? JSONSerialization.jsonObject(with: savedData) as? [String: Any] {
             configurationDict = dict
         } else {
@@ -108,7 +102,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         guard let configurationDict, let configuration = Self.parseConfiguration(from: configurationDict) else {
             logger.error("[VPN] Invalid or missing configuration")
-            completionHandler(NSError(domain: "com.argsment.Anywhere", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"]))
+            completionHandler(NSError(domain: AWCore.Identifier.errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"]))
             return
         }
 
@@ -183,7 +177,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         ipv4Settings.excludedRoutes = Self.bypassIPv4Routes
         settings.ipv4Settings = ipv4Settings
 
-        let ipv6DNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.ipv6DNSEnabled)
+        let ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
         if ipv6DNSEnabled {
             let ipv6Settings = NEIPv6Settings(addresses: [TunnelConstants.tunnelLocalIPv6Address], networkPrefixLengths: [TunnelConstants.tunnelIPv6PrefixLength])
             ipv6Settings.includedRoutes = [NEIPv6Route.default()]
@@ -198,9 +192,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             dnsServers = TunnelConstants.dnsServersIPv4
         }
 
-        let encryptedDNSEnabled = AWCore.userDefaults.bool(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSEnabled)
-        let encryptedDNSProtocol = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSProtocol) ?? TunnelConstants.defaultEncryptedDNSProtocol
-        let encryptedDNSServer = AWCore.userDefaults.string(forKey: TunnelConstants.UserDefaultsKey.encryptedDNSServer) ?? ""
+        let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
+        let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
+        let encryptedDNSServer = AWCore.getEncryptedDNSServer()
 
         if encryptedDNSEnabled, !encryptedDNSServer.isEmpty {
             if encryptedDNSProtocol == "dot" {
@@ -309,7 +303,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let sleepDuration = CFAbsoluteTimeGetCurrent() - sleepTimestamp
         logger.info("[VPN] Device woke up after \(Int(sleepDuration))s")
 
-        if sleepTimestamp > 0 && sleepDuration >= Self.wakeRestartThreshold {
+        if sleepTimestamp > 0 && sleepDuration >= TunnelConstants.wakeRestartThreshold {
             logger.warning("[VPN] Long sleep detected (\(Int(sleepDuration))s); restarting connections")
             lwipStack.handleNetworkPathChange(summary: "device wake after \(Int(sleepDuration))s sleep")
         }

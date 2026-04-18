@@ -8,8 +8,7 @@
 import SwiftUI
 
 struct IPv6SettingsView: View {
-    @AppStorage("ipv6DNSEnabled", store: AWCore.userDefaults)
-    private var ipv6DNSEnabled = false
+    @State private var ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
 
     var body: some View {
         Form {
@@ -18,6 +17,9 @@ struct IPv6SettingsView: View {
             }
         }
         .navigationTitle("IPv6")
-        .onChange(of: ipv6DNSEnabled) { AWCore.notifyTunnelSettingsChanged() }
+        .onChange(of: ipv6DNSEnabled) { _, newValue in
+            AWCore.setIPv6DNSEnabled(newValue)
+            AWCore.notifyTunnelSettingsChanged()
+        }
     }
 }

@@ -23,12 +23,8 @@ class VPNViewModel: ObservableObject {
             if !_suppressSelectionPersistence {
                 // Direct proxy selection — clear any chain selection
                 selectedChainId = nil
-                AWCore.userDefaults.removeObject(forKey: Self.selectedChainIdKey)
-                if let selectedConfiguration {
-                    AWCore.userDefaults.set(selectedConfiguration.id.uuidString, forKey: Self.selectedConfigurationIdKey)
-                } else {
-                    AWCore.userDefaults.removeObject(forKey: Self.selectedConfigurationIdKey)
-                }
+                AWCore.setSelectedChainId(nil)
+                AWCore.setSelectedConfigurationId(selectedConfiguration?.id)
             }
             // If VPN is connected, push new configuration to the tunnel
             if vpnStatus == .connected, let selectedConfiguration {
@@ -71,23 +67,18 @@ class VPNViewModel: ObservableObject {
         block()
     }
 
-    private static let selectedConfigurationIdKey = "selectedConfigurationId"
-    private static let selectedChainIdKey = "selectedChainId"
-
     init() {
         configurations = store.configurations
         subscriptions = subscriptionStore.subscriptions
         chains = chainStore.chains
 
         // Restore selection from UserDefaults — chain takes priority
-        if let savedChainIdString = AWCore.userDefaults.string(forKey: Self.selectedChainIdKey),
-           let savedChainId = UUID(uuidString: savedChainIdString),
+        if let savedChainId = AWCore.getSelectedChainId(),
            let chain = chains.first(where: { $0.id == savedChainId }),
            let resolved = resolveChain(chain) {
             selectedChainId = savedChainId
             withoutSelectionPersistence { selectedConfiguration = resolved }
-        } else if let savedConfigurationIdString = AWCore.userDefaults.string(forKey: Self.selectedConfigurationIdKey),
-                  let savedConfigurationId = UUID(uuidString: savedConfigurationIdString),
+        } else if let savedConfigurationId = AWCore.getSelectedConfigurationId(),
                   let configuration = configurations.first(where: { $0.id == savedConfigurationId }) {
             selectedConfiguration = configuration
         } else {
@@ -144,7 +135,7 @@ class VPNViewModel: ObservableObject {
                 if let chainId = self.selectedChainId,
                    !newChains.contains(where: { $0.id == chainId }) {
                     self.selectedChainId = nil
-                    AWCore.userDefaults.removeObject(forKey: Self.selectedChainIdKey)
+                    AWCore.setSelectedChainId(nil)
                     self.selectedConfiguration = self.configurations.first
                 }
             }
@@ -194,7 +185,7 @@ class VPNViewModel: ObservableObject {
     }
 
     var isButtonDisabled: Bool {
-        !isManagerReady || !hasConfigurations || (vpnStatus != .connected && vpnStatus != .disconnected)
+        !isManagerReady || !hasConfigurations || vpnStatus.isTransitioning
     }
 
     // MARK: - Configuration CRUD
@@ -241,8 +232,8 @@ class VPNViewModel: ObservableObject {
     func selectChain(_ chain: ProxyChain) {
         guard let resolved = resolveChain(chain) else { return }
         selectedChainId = chain.id
-        AWCore.userDefaults.set(chain.id.uuidString, forKey: Self.selectedChainIdKey)
-        AWCore.userDefaults.removeObject(forKey: Self.selectedConfigurationIdKey)
+        AWCore.setSelectedChainId(chain.id)
+        AWCore.setSelectedConfigurationId(nil)
         withoutSelectionPersistence { selectedConfiguration = resolved }
     }
 
@@ -275,7 +266,7 @@ class VPNViewModel: ObservableObject {
         } else {
             // Chain is broken (proxies deleted), fall back
             selectedChainId = nil
-            AWCore.userDefaults.removeObject(forKey: Self.selectedChainIdKey)
+            AWCore.setSelectedChainId(nil)
             selectedConfiguration = configurations.first
         }
     }
@@ -584,7 +575,7 @@ class VPNViewModel: ObservableObject {
             manager.localizedDescription = "Anywhere"
             manager.isEnabled = true
 
-            let alwaysOn = AWCore.userDefaults.bool(forKey: "alwaysOnEnabled")
+            let alwaysOn = AWCore.getAlwaysOnEnabled()
             if alwaysOn {
                 let rule = NEOnDemandRuleConnect()
                 rule.interfaceTypeMatch = .any
@@ -618,7 +609,7 @@ class VPNViewModel: ObservableObject {
                         // can read it when started from Settings or Always On (On Demand),
                         // where options is nil.
                         if let jsonData = try? JSONSerialization.data(withJSONObject: configurationDict) {
-                            AWCore.userDefaults.set(jsonData, forKey: "lastConfigurationData")
+                            AWCore.setLastConfigurationData(jsonData)
                         }
 
                         try manager.connection.startVPNTunnel(options: ["config": configurationDict as NSObject])
@@ -676,7 +667,7 @@ class VPNViewModel: ObservableObject {
 
             // Keep App Group in sync so On Demand restarts use the latest selection
             if let jsonData = try? JSONSerialization.data(withJSONObject: configurationDict) {
-                AWCore.userDefaults.set(jsonData, forKey: "lastConfigurationData")
+                AWCore.setLastConfigurationData(jsonData)
             }
 
             guard let data = try? JSONSerialization.data(withJSONObject: configurationDict) else { return }
@@ -797,7 +788,7 @@ class VPNViewModel: ObservableObject {
 
         // Persist to App Group so the extension can read them on start (Settings / Always On)
         if let data = try? JSONSerialization.data(withJSONObject: addressArray) {
-            AWCore.userDefaults.set(data, forKey: "proxyServerAddresses")
+            AWCore.setProxyServerAddressesData(data)
         }
 
         // Send to running tunnel via IPC
@@ -906,5 +897,15 @@ class VPNViewModel: ObservableObject {
         }
 
         return configurationDict
+    }
+}
+
+extension NEVPNStatus {
+    /// True while the VPN is moving between `.connected` and `.disconnected` —
+    /// `.connecting`, `.disconnecting`, or `.reasserting`. Callers use this to
+    /// gate UI affordances (disable the power button, show the spinner) during
+    /// states the user shouldn't be allowed to re-enter.
+    var isTransitioning: Bool {
+        self == .connecting || self == .disconnecting || self == .reasserting
     }
 }

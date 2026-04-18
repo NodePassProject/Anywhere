@@ -20,6 +20,37 @@ enum OutboundProtocol: String, Codable {
     /// Whether this protocol uses a CONNECT tunnel (HTTP/1.1, HTTP/2, or HTTP/3).
     var isNaive: Bool { self == .http11 || self == .http2 || self == .http3 }
 
+    /// Whether the protocol's handshake can carry the caller's first bytes
+    /// inline, letting the client ship the TLS ClientHello / MTProto nonce /
+    /// etc. in the same packet as the handshake.
+    ///
+    /// `false` for protocols whose handshake has no payload slot (Shadowsocks,
+    /// Naive's HTTP CONNECT, Hysteria's TCPRequest, SOCKS5's method negotiation).
+    /// ``LWIPTCPConnection`` checks this to decide whether to hand `pendingData`
+    /// to the handshake (true) or to leave it buffered and forward it via a
+    /// separate `send(...)` right after the tunnel is up (false).
+    ///
+    /// Getting this wrong for Hysteria silently swallowed the caller's first
+    /// bytes — `connectWithHysteria` drops any `initialData` argument — which
+    /// manifested as Telegram hanging at "Updating" because its 64-byte MTProto
+    /// obfuscation nonce never reached the server.
+    var handshakeCarriesInitialData: Bool {
+        switch self {
+        case .vless:
+            return true
+        case .hysteria, .shadowsocks, .socks5, .http11, .http2, .http3:
+            return false
+        }
+    }
+
+    /// Whether the protocol can multiplex several logical streams inside one
+    /// tunnel (Xray-compatible mux.cool, routed via ``MuxManager``). Only
+    /// VLESS carries a mux-capable framing on the wire; every other protocol
+    /// must reject a ``ProxyCommand/mux`` request at dispatch time.
+    var supportsMux: Bool {
+        self == .vless
+    }
+
     var name: String {
         switch self {
         case .vless:

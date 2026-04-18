@@ -45,10 +45,7 @@ class TVHomeViewController: UIViewController {
     private let emptyButton = UIButton(type: .custom)
 
     private var isConnected: Bool { viewModel.vpnStatus == .connected }
-    private var isTransitioning: Bool {
-        let s = viewModel.vpnStatus
-        return s == .connecting || s == .disconnecting || s == .reasserting
-    }
+    private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
 
     // MARK: - Lifecycle
 
@@ -395,7 +392,7 @@ class TVHomeViewController: UIViewController {
     }
 
     private func updatePowerButton() {
-        let disabled = viewModel.hasConfigurations && (!viewModel.isManagerReady || (viewModel.vpnStatus != .connected && viewModel.vpnStatus != .disconnected))
+        let disabled = viewModel.hasConfigurations && (!viewModel.isManagerReady || viewModel.vpnStatus.isTransitioning)
         powerButton.isEnabled = !disabled
         powerButton.alpha = disabled ? 0.5 : 1.0
 

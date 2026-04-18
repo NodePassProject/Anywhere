@@ -20,20 +20,11 @@ import SwiftUI
 /// - "alwaysOnEnabled": triggers VPN reconnect (if connected) so on-demand rules update immediately.
 struct SettingsView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
-    
-    @AppStorage("experimentalEnabled", store: AWCore.userDefaults)
-    private var experimentalEnabled = false
 
-    @AppStorage("alwaysOnEnabled", store: AWCore.userDefaults)
-    private var alwaysOnEnabled = false
-
+    @State private var alwaysOnEnabled = AWCore.getAlwaysOnEnabled()
     @State private var proxyMode = AWCore.getProxyMode()
-    
-    @AppStorage("bypassCountryCode", store: AWCore.userDefaults)
-    private var bypassCountryCode = ""
-
-    @AppStorage("allowInsecure", store: AWCore.userDefaults)
-    private var allowInsecure = false
+    @State private var bypassCountryCode = AWCore.getBypassCountryCode()
+    @State private var allowInsecure = AWCore.getAllowInsecure()
 
     @State private var adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
     @State private var showInsecureAlert = false
@@ -83,6 +74,7 @@ struct SettingsView: View {
                             showInsecureAlert = true
                         } else {
                             allowInsecure = false
+                            AWCore.setAllowInsecure(false)
                             AWCore.notifyCertificatePolicyChanged()
                         }
                     }
@@ -135,11 +127,12 @@ struct SettingsView: View {
         .onAppear {
             proxyMode = AWCore.getProxyMode()
         }
-        .onChange(of: alwaysOnEnabled) {
+        .onChange(of: alwaysOnEnabled) { _, newValue in
+            AWCore.setAlwaysOnEnabled(newValue)
             viewModel.reconnectVPN()
         }
-        .onChange(of: proxyMode) {
-            AWCore.setProxyMode(proxyMode)
+        .onChange(of: proxyMode) { _, newValue in
+            AWCore.setProxyMode(newValue)
             AWCore.notifyTunnelSettingsChanged()
         }
         .onChange(of: adBlockEnabled) { _, newValue in
@@ -152,7 +145,8 @@ struct SettingsView: View {
             }
             Task { await viewModel.syncRoutingConfigurationToNE() }
         }
-        .onChange(of: bypassCountryCode) { _, _ in
+        .onChange(of: bypassCountryCode) { _, newValue in
+            AWCore.setBypassCountryCode(newValue)
             Task {
                 await viewModel.syncRoutingConfigurationToNE()
                 AWCore.notifyTunnelSettingsChanged()
@@ -161,6 +155,7 @@ struct SettingsView: View {
         .alert("Allow Insecure", isPresented: $showInsecureAlert) {
             Button("Allow Anyway", role: .destructive) {
                 allowInsecure = true
+                AWCore.setAllowInsecure(true)
                 AWCore.notifyCertificatePolicyChanged()
             }
             Button("Cancel", role: .cancel) {}
