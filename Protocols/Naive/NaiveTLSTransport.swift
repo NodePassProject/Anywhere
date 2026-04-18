@@ -25,7 +25,7 @@ enum NaiveTLSError: Error, LocalizedError {
 
 // MARK: - NaiveTLSTransport
 
-/// TLS transport for NaiveProxy connections using ``RawTCPSocket`` + ``TLSHandler``.
+/// TLS transport for NaiveProxy connections using ``RawTCPSocket`` + ``TLSClient``.
 ///
 /// Reuses Anywhere's existing TLS infrastructure to establish a TLS 1.3 connection
 /// to the proxy server. The ALPN protocol list is configurable (e.g. `["h2"]` for
@@ -42,7 +42,7 @@ class NaiveTLSTransport {
     private let alpn: [String]
     private let tunnel: ProxyConnection?
 
-    private var tlsClient: TLSHandler?
+    private var tlsClient: TLSClient?
     private var tlsConnection: TLSRecordConnection?
 
     private(set) var isReady = false
@@ -70,7 +70,7 @@ class NaiveTLSTransport {
     /// Establishes a TLS connection to the proxy server.
     ///
     /// Uses ``RawTCPSocket`` for TCP (or tunnels through an existing ``ProxyConnection``)
-    /// and ``TLSHandler`` for the TLS 1.3 handshake. On success, stores the
+    /// and ``TLSClient`` for the TLS 1.3 handshake. On success, stores the
     /// ``TLSRecordConnection`` for subsequent I/O.
     ///
     /// - Parameter completion: Called with `nil` on success or an error on failure.
@@ -79,7 +79,7 @@ class NaiveTLSTransport {
             serverName: sni,
             alpn: alpn
         )
-        let client = TLSHandler(configuration: configuration)
+        let client = TLSClient(configuration: configuration)
         self.tlsClient = client
 
         let handleResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in

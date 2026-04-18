@@ -1289,13 +1289,7 @@ tcp_receive(struct tcp_pcb *pcb)
           TCP_WND_INC(pcb->bytes_acked, acked);
           if (pcb->bytes_acked >= pcb->cwnd) {
             pcb->bytes_acked = (tcpwnd_size_t)(pcb->bytes_acked - pcb->cwnd);
-/* --- BEGIN ANYWHERE PATCH: scalable CA increase (+8*MSS per RTT) -------- */
-#ifdef ANYWHERE_LWIP_AGGRESSIVE_CC
-            TCP_WND_INC(pcb->cwnd, (tcpwnd_size_t)(pcb->mss << 3));
-#else
             TCP_WND_INC(pcb->cwnd, pcb->mss);
-#endif
-/* --- END ANYWHERE PATCH ------------------------------------------------- */
           }
           LWIP_DEBUGF(TCP_CWND_DEBUG, ("tcp_receive: congestion avoidance cwnd %"TCPWNDSIZE_F"\n", pcb->cwnd));
         }

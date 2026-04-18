@@ -7,14 +7,14 @@
 
 import Foundation
 
-/// Proxy connection over a ``RealityRecordConnection`` transport.
+/// Proxy connection over a ``TLSRecordConnection`` transport.
 class RealityProxyConnection: ProxyConnection {
-    private let realityConnection: RealityRecordConnection
+    private let realityConnection: TLSRecordConnection
 
     /// Creates a new Reality-backed proxy connection.
     ///
     /// - Parameter realityConnection: The underlying TLS record connection.
-    init(realityConnection: RealityRecordConnection) {
+    init(realityConnection: TLSRecordConnection) {
         self.realityConnection = realityConnection
     }
 

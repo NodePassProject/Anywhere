@@ -29,9 +29,9 @@ class WebSocketConnection {
     private var upgraded = false
     private var heartbeatTimer: DispatchSourceTimer?
 
-    /// Maximum receive buffer size (4 MB). Protects against unbounded growth
+    /// Maximum receive buffer size (1 MB). Protects against unbounded growth
     /// from a misbehaving server sending large frames without consumption.
-    private static let maxReceiveBufferSize = 4_194_304
+    private static let maxReceiveBufferSize = 1_048_576
 
     static let chromeUserAgent = ProxyUserAgent.chrome
 

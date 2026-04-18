@@ -48,7 +48,7 @@ class SOCKS5Buffer {
             completion(result, nil)
             return
         }
-        transport.receive { [self] newData, _, error in
+        transport.receive(maximumLength: 65536) { [self] newData, _, error in
             if let error {
                 completion(nil, error)
                 return
@@ -95,13 +95,13 @@ class SOCKS5Transport: RawTransport {
         inner.send(data: data)
     }
 
-    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
+    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void) {
         if let data = initialData {
             initialData = nil
             completion(data, false, nil)
             return
         }
-        inner.receive(completion: completion)
+        inner.receive(maximumLength: maximumLength, completion: completion)
     }
 
     func forceCancel() {
@@ -451,7 +451,7 @@ class TLSRecordTransport: RawTransport {
         tlsConnection.send(data: data)
     }
 
-    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
+    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void) {
         tlsConnection.receive { data, error in
             if let error {
                 completion(nil, true, error)
@@ -477,7 +477,7 @@ class TLSRecordTransport: RawTransport {
 /// Also retains the TCP control connection to keep the UDP session alive.
 class SOCKS5UDPProxyConnection: ProxyConnection {
     private let tcpTransport: any RawTransport
-    private let tlsClient: TLSHandler?
+    private let tlsClient: TLSClient?
     private let tlsConnection: TLSRecordConnection?
     private let socket = RawUDPSocket()
     private let udpHeader: Data
@@ -492,7 +492,7 @@ class SOCKS5UDPProxyConnection: ProxyConnection {
 
     init(
         tcpTransport: any RawTransport,
-        tlsClient: TLSHandler?,
+        tlsClient: TLSClient?,
         tlsConnection: TLSRecordConnection?,
         destinationHost: String,
         destinationPort: UInt16

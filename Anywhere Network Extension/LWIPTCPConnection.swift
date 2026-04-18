@@ -661,8 +661,7 @@ class LWIPTCPConnection {
                 }
                 guard sndbuf > 0 else { break }
             }
-            // tcp_write's len is u16_t — cap at UInt16.max regardless of sndbuf/tcpMaxWriteSize.
-            let chunkSize = min(min(min(sndbuf, count - offset), TunnelConstants.tcpMaxWriteSize), Int(UInt16.max))
+            let chunkSize = min(min(sndbuf, count - offset), TunnelConstants.tcpMaxWriteSize)
             let err = lwip_bridge_tcp_write(pcb, base + offset, UInt16(chunkSize))
             if err != 0 {
                 if err == -1 { break }  // ERR_MEM: transient
@@ -696,6 +695,7 @@ class LWIPTCPConnection {
         guard !closed else { return }
 
         lwip_bridge_tcp_output(pcb)
+        LWIPStack.shared?.flushOutputInline()
 
         if written < data.count {
             // Save remainder — no more receives until this is drained.
@@ -735,6 +735,7 @@ class LWIPTCPConnection {
                 pendingWrite.removeSubrange(0..<offset)
             }
             lwip_bridge_tcp_output(pcb)
+            LWIPStack.shared?.flushOutputInline()
         } else if !pendingWrite.isEmpty {
             // Nothing drained (ERR_MEM) — schedule a delayed retry.
             logger.warning("[TCP] Drain stalled (\(self.pendingWrite.count) bytes pending), retrying in \(TunnelConstants.drainRetryDelayMs)ms: \(self.dstHost):\(self.dstPort)")

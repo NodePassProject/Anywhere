@@ -2,7 +2,7 @@
 //  TLS12KeyDerivation.swift
 //  Anywhere
 //
-//  Created by Argsment Limited on 3/1/26.
+//  TLS 1.2 key derivation matching utls/prf.go and utls/internal/tls12/tls12.go
 //
 
 import Foundation

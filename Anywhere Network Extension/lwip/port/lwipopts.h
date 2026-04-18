@@ -41,36 +41,34 @@
 #define LWIP_CALLBACK_API               1
 
 /* --- Memory configuration --- */
-#define MEM_SIZE                        (32 * 1024 * 1024)
+#define MEM_SIZE                        (16 * 1024 * 1024)
 #define MEM_ALIGNMENT                   8
 #define MEMP_OVERFLOW_CHECK             0
 #define MEMP_SANITY_CHECK               0
 
 /* --- Pool sizes --- */
-#define MEMP_NUM_TCP_PCB                128
+#define MEMP_NUM_TCP_PCB                256
 #define MEMP_NUM_TCP_PCB_LISTEN         2
 #define MEMP_NUM_UDP_PCB                8
-#define MEMP_NUM_TCP_SEG                32768
+#define MEMP_NUM_TCP_SEG                16384
 #define MEMP_NUM_PBUF                   64
 #define MEMP_NUM_NETBUF                 0
 #define MEMP_NUM_NETCONN                0
 
 /* --- Pbuf configuration --- */
-#define PBUF_POOL_SIZE                  2200
+#define PBUF_POOL_SIZE                  256
 #define PBUF_POOL_BUFSIZE               1400
 
 /* --- TCP configuration --- */
 #define TCP_MSS                         1360
-#define TCP_WND                         (2048 * TCP_MSS)
-#define TCP_SND_BUF                     (2048 * TCP_MSS)
+#define TCP_WND                         (128 * TCP_MSS)
+#define TCP_SND_BUF                     (128 * TCP_MSS)
 #define TCP_SND_QUEUELEN                (4 * TCP_SND_BUF / TCP_MSS)
-#define TCP_SNDLOWAT                    (32 * TCP_MSS)
+#define TCP_SNDLOWAT                    (TCP_SND_BUF / 4)
 #define TCP_QUEUE_OOSEQ                 1
 #define TCP_OVERSIZE                    TCP_MSS
 #define LWIP_TCP_TIMESTAMPS             0
 #define LWIP_TCP_SACK_OUT               1
-
-#define ANYWHERE_LWIP_AGGRESSIVE_CC
 #define LWIP_TCP_CALC_INITIAL_CWND(mss) ((tcpwnd_size_t)(10U * (mss)))
 
 #define TCP_LISTEN_BACKLOG              0
@@ -80,7 +78,6 @@
 #define TCP_RCV_SCALE                   7
 
 /* --- Checksum configuration --- */
-#define LWIP_CHKSUM_ALGORITHM           3
 /* Trust incoming packets from iOS TUN interface */
 #define CHECKSUM_CHECK_IP               0
 #define CHECKSUM_CHECK_TCP              0

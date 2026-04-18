@@ -81,11 +81,6 @@ extension LWIPStack {
         // Only intercept A (1) and AAAA (28) queries; let MX/SRV/etc. pass through
         guard qtype == 1 || qtype == 28 else { return false }
 
-        // Skip fake-IP for proxy server addresses — they must resolve to real IPs so
-        // the resulting connection can be bypassed around the tunnel; otherwise the
-        // app would dial a fake IP that loops back into the proxy.
-        if shouldBypass(host: domain) { return false }
-
         // Intercept ALL A/AAAA queries with fake IPs — including rejected domains.
         // Routing decisions (direct/reject/proxy) are all made at connection time
         // by checking domainRouter in resolveFakeIP(). This avoids NODATA responses
