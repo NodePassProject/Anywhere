@@ -349,14 +349,15 @@ class LWIPTCPConnection {
     /// Surfaces why lwIP tore this connection down. Without this log the
     /// connection simply vanishes from the user's perspective — no send/receive
     /// error fires because the PCB has already been freed by the time
-    /// `tcp_err` runs. Common cases: ERR_RST (peer sent RST), ERR_ABRT
-    /// (lwIP timer aborted us), ERR_CLSD (FIN exchange completed).
+    /// `tcp_err` runs.
     func handleError(err: Int32) {
         let reason = TransportErrorLogger.describeLwIPError(err)
         if err == -15 { // ERR_CLSD — orderly close, not a failure
             logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
         } else if let interruption = LWIPStack.shared?.recentTunnelInterruptionContext() {
             logger.warning("[TCP] lwIP aborted after \(interruption.summary): \(endpointDescription): \(reason)")
+        } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
+            logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
         } else {
             logger.warning("[TCP] lwIP aborted connection: \(endpointDescription): \(reason)")
         }

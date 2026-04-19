@@ -645,6 +645,7 @@ class QUICConnection {
                 let err = errno
                 if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
                 logger.error("[QUIC] recv errno=\(err)")
+                close(error: QUICError.connectionFailed("recv errno=\(err)"))
                 return
             }
             if n == 0 { return }

@@ -275,6 +275,7 @@ class QUICTLSHandler {
 
     private func processServerHello(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
         guard body.count >= 34 else {
+            logger.error("[QUIC-TLS] ServerHello truncated before random (\(body.count) bytes)")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
@@ -293,12 +294,18 @@ class QUICTLSHandler {
 
         // Parse session ID length and skip
         var offset = 34
-        guard offset < body.count else { return .error(NGTCP2_ERR_CALLBACK_FAILURE) }
+        guard offset < body.count else {
+            logger.error("[QUIC-TLS] ServerHello truncated before session_id")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
         let sessionIdLen = Int(body[offset])
         offset += 1 + sessionIdLen
 
         // Parse cipher suite
-        guard offset + 2 <= body.count else { return .error(NGTCP2_ERR_CALLBACK_FAILURE) }
+        guard offset + 2 <= body.count else {
+            logger.error("[QUIC-TLS] ServerHello truncated before cipher_suite")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
         cipherSuite = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
         offset += 2
 
@@ -306,7 +313,10 @@ class QUICTLSHandler {
         offset += 1
 
         // Parse extensions to find key_share
-        guard offset + 2 <= body.count else { return .error(NGTCP2_ERR_CALLBACK_FAILURE) }
+        guard offset + 2 <= body.count else {
+            logger.error("[QUIC-TLS] ServerHello truncated before extensions")
+            return .error(NGTCP2_ERR_CALLBACK_FAILURE)
+        }
         let extLen = (Int(body[offset]) << 8) | Int(body[offset + 1])
         offset += 2
 
@@ -354,6 +364,7 @@ class QUICTLSHandler {
         }
 
         guard let serverPublicKey else {
+            logger.error("[QUIC-TLS] ServerHello missing key_share public key")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
