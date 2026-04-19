@@ -64,7 +64,7 @@ enum TransportErrorLogger {
         case -11: return "ERR_CONN (not connected)"
         case -12: return "ERR_IF (low-level netif error)"
         case -13: return "ERR_ABRT (aborted locally)"
-        case -14: return "ERR_RST (reset by remote host)"
+        case -14: return "ERR_RST (reset by peer)"
         case -15: return "ERR_CLSD (connection closed)"
         case -16: return "ERR_ARG (illegal argument)"
         default:  return "lwIP err=\(err)"

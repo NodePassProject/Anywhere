@@ -42,6 +42,7 @@ class LWIPUDPFlow {
     private var forceBypass = false
     private var pendingData: [Data] = []  // always raw payloads (framing deferred to send time)
     private var pendingBufferSize = 0      // current total size of pendingData
+    private var didWarnPendingOverflow = false
     private var closed = false
 
 
@@ -145,6 +146,10 @@ class LWIPUDPFlow {
     private func bufferPayload(data: Data, payloadLength: Int) {
         // Drop datagram if buffer limit would be exceeded (DiscardOverflow)
         if pendingBufferSize + payloadLength > TunnelConstants.udpMaxBufferSize {
+            if !didWarnPendingOverflow {
+                didWarnPendingOverflow = true
+                logger.warning("[UDP] Pending buffer overflow for \(flowKey); dropping datagrams until proxy connects")
+            }
             return
         }
         pendingData.append(data.prefix(payloadLength))

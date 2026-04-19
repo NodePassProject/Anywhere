@@ -297,7 +297,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func sleep() async {
-        logger.warning("[VPN] Device going to sleep; active connections may pause")
+        logger.info("[VPN] Device going to sleep")
         sleepTimestamp = CFAbsoluteTimeGetCurrent()
         lwipStack.noteRecentTunnelInterruption(summary: "device sleep", level: .warning)
     }
@@ -346,7 +346,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         switch snapshot.status {
         case .satisfied:
             if previous?.status == .satisfied {
-                logger.warning("[VPN] Network path changed to \(snapshot.summary); restarting connections on new interface")
+                logger.info("[VPN] Network path changed to \(snapshot.summary); restarting connections on new interface")
                 lwipStack.handleNetworkPathChange(summary: "network interface change")
             } else {
                 logger.info("[VPN] Network path restored: \(snapshot.summary); restarting connections")
