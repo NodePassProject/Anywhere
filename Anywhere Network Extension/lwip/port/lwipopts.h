@@ -42,10 +42,10 @@
 
 /* --- Memory configuration --- */
 #define MEM_LIBC_MALLOC                 1
-#define MEM_SIZE                        (32 * 1024 * 1024)
 #define MEM_ALIGNMENT                   8
 #define MEMP_OVERFLOW_CHECK             0
 #define MEMP_SANITY_CHECK               0
+#define LWIP_CHECKSUM_ON_COPY           1
 
 /* --- Pool sizes --- */
 #define MEMP_NUM_TCP_PCB                256
@@ -57,19 +57,25 @@
 #define MEMP_NUM_NETCONN                0
 
 /* --- Pbuf configuration --- */
-#define PBUF_POOL_SIZE                  768
+#define PBUF_POOL_SIZE                  2048
 #define PBUF_POOL_BUFSIZE               1400
 
 /* --- TCP configuration --- */
 #define TCP_MSS                         1360
-#define TCP_WND                         (512 * TCP_MSS)
-#define TCP_SND_BUF                     (512 * TCP_MSS)
+#define TCP_WND                         (1024 * TCP_MSS)
+#define TCP_SND_BUF                     (1024 * TCP_MSS)
 #define TCP_SND_QUEUELEN                (4 * TCP_SND_BUF / TCP_MSS)
 #define TCP_SNDLOWAT                    ((2 * TCP_MSS) + 1)
 #define TCP_QUEUE_OOSEQ                 1
+#define TCP_OOSEQ_MAX_BYTES             (1024 * 1024)
+#define TCP_OOSEQ_MAX_PBUFS             1024
 #define TCP_OVERSIZE                    TCP_MSS
+#define TCP_WND_UPDATE_THRESHOLD        LWIP_MIN((TCP_WND / 4), (TCP_MSS * 8))
+#define TCP_MAXRTX                      8
+#define TCP_SYNMAXRTX                   3
 #define LWIP_TCP_TIMESTAMPS             0
 #define LWIP_TCP_SACK_OUT               1
+#define LWIP_TCP_MAX_SACK_NUM           8
 #define LWIP_TCP_CALC_INITIAL_CWND(mss) ((tcpwnd_size_t)(32U * (mss)))
 
 #define TCP_LISTEN_BACKLOG              0
@@ -101,6 +107,7 @@
 /* --- IP reassembly --- */
 #define IP_REASSEMBLY                   0
 #define IP_FRAG                         0
+#define IP_OPTIONS_ALLOWED              0
 
 /* --- Misc --- */
 #define LWIP_NETIF_TX_SINGLE_PBUF       1
