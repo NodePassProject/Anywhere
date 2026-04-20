@@ -62,6 +62,7 @@ extension LWIPStack {
                     case .direct:
                         forceBypass = true
                     case .reject:
+                        logger.debug("[TCP] IP rejected by routing rule: \(dstIPString):\(dstPort)")
                         return nil
                     case .proxy(_):
                         if var configuration = shared.domainRouter.resolveConfiguration(action: action) {
@@ -180,6 +181,7 @@ extension LWIPStack {
                     case .direct:
                         forceBypass = true
                     case .reject:
+                        logger.debug("[UDP] IP rejected by routing rule: \(dstIPString):\(dstPort)")
                         shared.sendICMPPortUnreachable(
                             srcIP: srcIP,
                             srcPort: srcPort,
@@ -263,6 +265,7 @@ extension LWIPStack {
         guard FakeIPPool.isFakeIP(ip) else { return .passthrough }
 
         guard let entry = fakeIPPool.lookup(ip: ip) else {
+            logger.warning("[\(proto)] Fake IP not in pool (stale): \(ip):\(dstPort)")
             return .unreachable
         }
 
@@ -271,6 +274,7 @@ extension LWIPStack {
             case .direct:
                 return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: true)
             case .reject:
+                logger.debug("[\(proto)] Domain rejected by routing rule: \(entry.domain) (\(ip):\(dstPort))")
                 return .drop
             case .proxy(_):
                 let configuration = domainRouter.resolveConfiguration(action: action)
