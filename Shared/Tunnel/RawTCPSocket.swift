@@ -28,7 +28,7 @@ protocol RawTransport: AnyObject {
     func send(data: Data)
 
     /// Receives up to `maximumLength` bytes from the transport.
-    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void)
+    func receive(completion: @escaping (Data?, Bool, Error?) -> Void)
 
     /// Closes the transport and cancels all pending operations.
     func forceCancel()
@@ -263,7 +263,7 @@ class RawTCPSocket: RawTransport {
 
     /// One receive may be in flight at a time; the contract is that callers
     /// call `receive` again only after the previous completion fires.
-    private var pendingReceive: (max: Int, completion: (Data?, Bool, Error?) -> Void)?
+    private var pendingReceiveCompletion: ((Data?, Bool, Error?) -> Void)?
 
     /// Latched when the remote half-closes; subsequent `receive` calls return
     /// EOF immediately without touching the socket.
@@ -372,7 +372,7 @@ class RawTCPSocket: RawTransport {
     /// - `(data, false, nil)` — data received successfully.
     /// - `(nil, true, nil)` — EOF (remote closed).
     /// - `(nil, true, error)` — a receive error occurred.
-    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void) {
+    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
         ioQueue.async { [self] in
             if receivedEOF {
                 completion(nil, true, nil)
@@ -389,13 +389,13 @@ class RawTCPSocket: RawTransport {
                 return
             }
             // Contract: callers issue receive serially.
-            if pendingReceive != nil {
+            if pendingReceiveCompletion != nil {
                 // Unexpected — prior callback hasn't fired. Don't clobber it;
                 // surface an error on this one.
                 completion(nil, true, SocketError.receiveFailed("Concurrent receive"))
                 return
             }
-            pendingReceive = (maximumLength, completion)
+            pendingReceiveCompletion = completion
             tryReceive()
         }
     }
@@ -422,9 +422,9 @@ class RawTCPSocket: RawTransport {
                 connectCompletion = nil
                 c(SocketError.connectionFailed("Cancelled"))
             }
-            if let req = pendingReceive {
-                pendingReceive = nil
-                req.completion(nil, true, SocketError.notConnected)
+            if let completion = pendingReceiveCompletion {
+                pendingReceiveCompletion = nil
+                completion(nil, true, SocketError.notConnected)
             }
             if !sendQueue.isEmpty {
                 failPendingSends(with: SocketError.sendFailed("Cancelled"))
@@ -661,10 +661,10 @@ class RawTCPSocket: RawTransport {
                 if case .ready = _state { _state = .failed(err) }
             }
             // Also fail any pending receive.
-            if let req = pendingReceive {
-                pendingReceive = nil
+            if let completion = pendingReceiveCompletion {
+                pendingReceiveCompletion = nil
                 disarmReadSource()
-                req.completion(nil, true, err)
+                completion(nil, true, err)
             }
             return
         }
@@ -704,13 +704,13 @@ class RawTCPSocket: RawTransport {
     /// Attempts one `recv(2)`. Arms the read source on `EAGAIN`. Must run on
     /// `ioQueue`.
     private func tryReceive() {
-        guard let req = pendingReceive else { return }
+        guard let completion = pendingReceiveCompletion else { return }
         guard socketFD >= 0 else {
-            pendingReceive = nil
-            req.completion(nil, true, SocketError.notConnected)
+            pendingReceiveCompletion = nil
+            completion(nil, true, SocketError.notConnected)
             return
         }
-        let cap = max(1, req.max)
+        let cap = 65535
         var buf = Data(count: cap)
         let fd = socketFD
         let n = buf.withUnsafeMutableBytes { raw -> Int in
@@ -719,22 +719,22 @@ class RawTCPSocket: RawTransport {
         }
         if n > 0 {
             buf.count = n
-            pendingReceive = nil
+            pendingReceiveCompletion = nil
             disarmReadSource()
-            req.completion(buf, false, nil)
+            completion(buf, false, nil)
         } else if n == 0 {
             receivedEOF = true
-            pendingReceive = nil
+            pendingReceiveCompletion = nil
             disarmReadSource()
-            req.completion(nil, true, nil)
+            completion(nil, true, nil)
         } else {
             let e = errno
             if e == EAGAIN || e == EWOULDBLOCK || e == EINTR {
                 armReadSource()
             } else {
-                pendingReceive = nil
+                pendingReceiveCompletion = nil
                 disarmReadSource()
-                req.completion(nil, true, SocketError.receiveFailed(String(cString: strerror(e))))
+                completion(nil, true, SocketError.receiveFailed(String(cString: strerror(e))))
             }
         }
     }

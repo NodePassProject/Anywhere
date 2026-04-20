@@ -269,7 +269,7 @@ class TLSClient {
             completion(.failure(TLSError.connectionFailed("Connection cancelled")))
             return
         }
-        connection.receive(maximumLength: 65536) { [weak self] data, _, error in
+        connection.receive() { [weak self] data, _, error in
             guard let self else { return }
 
             if let error {
@@ -300,7 +300,7 @@ class TLSClient {
                 completion(.failure(TLSError.connectionFailed("Connection cancelled")))
                 return
             }
-            connection.receive(maximumLength: 65536) { [weak self] moreData, isComplete, error in
+            connection.receive() { [weak self] moreData, isComplete, error in
                 guard let self else { return }
 
                 if let error {
@@ -717,7 +717,7 @@ class TLSClient {
                 completion(.failure(TLSError.connectionFailed("Connection cancelled")))
                 return
             }
-            connection.receive(maximumLength: 65536) { [weak self] moreData, isComplete, error in
+            connection.receive() { [weak self] moreData, isComplete, error in
                 guard let self else { return }
 
                 if let error {
@@ -906,7 +906,7 @@ class TLSClient {
             completion(.failure(TLSError.connectionFailed("Connection cancelled")))
             return
         }
-        connection.receive(maximumLength: 65536) { [weak self] moreData, isComplete, error in
+        connection.receive() { [weak self] moreData, isComplete, error in
             guard let self else { return }
 
             if let error {
@@ -1561,7 +1561,7 @@ class TLSClient {
             completion(.failure(TLSError.connectionFailed("Connection cancelled")))
             return
         }
-        connection.receive(maximumLength: 65536) { [weak self] moreData, isComplete, error in
+        connection.receive() { [weak self] moreData, isComplete, error in
             guard let self else { return }
 
             if let error {

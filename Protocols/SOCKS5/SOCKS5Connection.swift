@@ -48,7 +48,7 @@ class SOCKS5Buffer {
             completion(result, nil)
             return
         }
-        transport.receive(maximumLength: 65536) { [self] newData, _, error in
+        transport.receive() { [self] newData, _, error in
             if let error {
                 completion(nil, error)
                 return
@@ -95,13 +95,13 @@ class SOCKS5Transport: RawTransport {
         inner.send(data: data)
     }
 
-    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void) {
+    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
         if let data = initialData {
             initialData = nil
             completion(data, false, nil)
             return
         }
-        inner.receive(maximumLength: maximumLength, completion: completion)
+        inner.receive(completion: completion)
     }
 
     func forceCancel() {
@@ -451,7 +451,7 @@ class TLSRecordTransport: RawTransport {
         tlsConnection.send(data: data)
     }
 
-    func receive(maximumLength: Int, completion: @escaping (Data?, Bool, Error?) -> Void) {
+    func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
         tlsConnection.receive { data, error in
             if let error {
                 completion(nil, true, error)

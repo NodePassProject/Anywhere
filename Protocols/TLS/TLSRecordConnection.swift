@@ -247,7 +247,7 @@ class TLSRecordConnection {
             completion(nil, RealityError.connectionFailed("Connection cancelled"))
             return
         }
-        connection.receive(maximumLength: 65536) { [weak self] data, isComplete, error in
+        connection.receive() { [weak self] data, isComplete, error in
             if let error {
                 completion(nil, error)
                 return
@@ -347,7 +347,7 @@ class TLSRecordConnection {
             completion(nil, RealityError.connectionFailed("Connection cancelled"))
             return
         }
-        connection.receive(maximumLength: 65536) { [weak self] data, isComplete, error in
+        connection.receive() { [weak self] data, isComplete, error in
             guard let self else {
                 completion(nil, nil)
                 return

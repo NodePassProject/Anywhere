@@ -261,7 +261,7 @@ class RealityClient {
             completion(.failure(RealityError.connectionFailed("Connection cancelled")))
             return
         }
-        connection.receive(maximumLength: 65536) { [weak self] data, _, error in
+        connection.receive() { [weak self] data, _, error in
             guard let self else { return }
 
             if let error {
@@ -308,7 +308,7 @@ class RealityClient {
                 completion(.failure(RealityError.connectionFailed("Connection cancelled")))
                 return
             }
-            connection.receive(maximumLength: 65536) { [weak self] moreData, _, error in
+            connection.receive() { [weak self] moreData, _, error in
                 guard let self else { return }
 
                 if let error {
@@ -317,10 +317,14 @@ class RealityClient {
                     return
                 }
 
-                var newBuffer = buffer
-                if let moreData {
-                    newBuffer.append(moreData)
+                guard let moreData, !moreData.isEmpty else {
+                    logger.error("[Reality] Connection closed before ServerHello")
+                    completion(.failure(RealityError.handshakeFailed("Connection closed before ServerHello")))
+                    return
                 }
+
+                var newBuffer = buffer
+                newBuffer.append(moreData)
 
                 self.continueReceivingHandshake(buffer: newBuffer, completion: completion)
             }
@@ -629,17 +633,23 @@ class RealityClient {
                 completion(.failure(RealityError.connectionFailed("Connection cancelled")))
                 return
             }
-            connection.receive(maximumLength: 65536) { [weak self] moreData, _, error in
+            connection.receive() { [weak self] moreData, _, error in
                 guard let self else { return }
 
                 if let error {
-                    logger.warning("[Reality] Error receiving more handshake data: \(error.localizedDescription)")
+                    logger.error("[Reality] Error receiving more handshake data: \(error.localizedDescription)")
+                    completion(.failure(RealityError.handshakeFailed(error.localizedDescription)))
+                    return
+                }
+
+                guard let moreData, !moreData.isEmpty else {
+                    logger.error("[Reality] Connection closed before Server Finished")
+                    completion(.failure(RealityError.handshakeFailed("Connection closed before Server Finished")))
+                    return
                 }
 
                 var newBuffer = buffer
-                if let moreData {
-                    newBuffer.append(moreData)
-                }
+                newBuffer.append(moreData)
 
                 self.consumeRemainingHandshake(buffer: newBuffer, startOffset: processedOffset, completion: completion)
             }
