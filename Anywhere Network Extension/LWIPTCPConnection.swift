@@ -426,8 +426,8 @@ class LWIPTCPConnection {
         case .direct:
             bypass = true
         case .reject:
-            logger.info("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
-            abort()
+            logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
+            rejectGracefully()
         case .proxy:
             if var resolved = router.resolveConfiguration(action: action) {
                 // Preserve the ambient chain from the default configuration
@@ -780,6 +780,28 @@ class LWIPTCPConnection {
         lwip_bridge_tcp_close(pcb)
         releaseProxy()
         Unmanaged.passUnretained(self).release()
+    }
+
+    /// Tears the connection down with a clean FIN instead of a RST.
+    ///
+    /// `tcp_close` in lwIP downgrades to RST whenever the receive window is
+    /// below `TCP_WND_MAX` — i.e. when bytes were delivered via `tcp_recv_cb`
+    /// but never acknowledged via `tcp_recved`. The sniffed ClientHello in
+    /// `pendingData` is exactly that: received but unacknowledged because we
+    /// never forwarded it upstream. A mid-handshake RST is widely interpreted
+    /// by TLS stacks as a transient failure, which drives browsers and HTTP
+    /// clients to retry aggressively — defeating the point of the reject
+    /// rule. Advancing the window first lets `close()` send a real FIN, which
+    /// clients treat as a deliberate peer close and don't retry.
+    private func rejectGracefully() {
+        guard !closed else { return }
+        var remaining = pendingData.count
+        while remaining > 0 {
+            let chunk = UInt16(min(remaining, Int(UInt16.max)))
+            remaining -= Int(chunk)
+            lwip_bridge_tcp_recved(pcb, chunk)
+        }
+        close()
     }
 
     func abort() {
