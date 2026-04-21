@@ -76,12 +76,6 @@ enum TunnelConstants {
 
     // MARK: - Stack Lifecycle
 
-    /// Minimum sleep duration (seconds) before proactively restarting the stack on wake.
-    /// Short sleeps leave TCP connections intact — they likely survive.
-    /// Long sleeps almost certainly leave dead proxy connections behind,
-    /// so we restart immediately instead of waiting for keepalive timeouts.
-    static let wakeRestartThreshold: CFAbsoluteTime = 60
-
     /// Minimum interval between stack restarts (seconds).
     /// 2s absorbs bursts where a path update and a settings/routing notification arrive
     /// back-to-back (e.g., user toggling a setting while Wi-Fi is handing off).

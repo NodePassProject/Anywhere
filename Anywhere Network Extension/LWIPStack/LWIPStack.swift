@@ -268,7 +268,7 @@ class LWIPStack {
         }
     }
 
-    private static func shouldUseVisionMux(_ configuration: ProxyConfiguration) -> Bool {
+    static func shouldUseVisionMux(_ configuration: ProxyConfiguration) -> Bool {
         configuration.outboundProtocol == .vless &&
         configuration.muxEnabled &&
         (configuration.flow == "xtls-rprx-vision" || configuration.flow == "xtls-rprx-vision-udp443")
