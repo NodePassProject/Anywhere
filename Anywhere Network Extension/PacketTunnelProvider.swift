@@ -18,7 +18,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let pathMonitorQueue = DispatchQueue(label: AWCore.Identifier.pathMonitorQueue)
     private var pathMonitor: NWPathMonitor?
     private var lastPathSnapshot: PathSnapshot?
-    private var sleepTimestamp: CFAbsoluteTime = 0
 
     private struct PathSnapshot: Equatable {
         let status: Network.NWPath.Status
@@ -297,19 +296,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func sleep() async {
-        logger.info("[VPN] Device going to sleep")
-        sleepTimestamp = CFAbsoluteTimeGetCurrent()
-        lwipStack.noteRecentTunnelInterruption(summary: "device sleep", level: .warning)
+        logger.info("[VPN] Device going to sleep; closing connections")
+        lwipStack.handleSleep()
     }
 
     override func wake() {
-        let sleepDuration = CFAbsoluteTimeGetCurrent() - sleepTimestamp
-        logger.info("[VPN] Device woke up after \(Int(sleepDuration))s")
-
-        if sleepTimestamp > 0 && sleepDuration >= TunnelConstants.wakeRestartThreshold {
-            logger.warning("[VPN] Long sleep detected (\(Int(sleepDuration))s); restarting connections")
-            lwipStack.handleNetworkPathChange(summary: "device wake after \(Int(sleepDuration))s sleep")
-        }
+        logger.info("[VPN] Device woke up; restarting stack")
+        lwipStack.handleWake()
     }
 
     // MARK: - Path Monitoring
