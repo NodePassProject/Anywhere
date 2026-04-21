@@ -10,7 +10,9 @@ import SwiftUI
 struct RuleSetListView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
     
-    @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
+    private var experimentalEnabled: Bool {
+        AWCore.getExperimentalEnabled()
+    }
     
     private var standaloneConfigurations: [ProxyConfiguration] {
         viewModel.configurations.filter { $0.subscriptionId == nil }

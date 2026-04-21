@@ -15,10 +15,13 @@ struct AdvancedSettingsView: View {
     var body: some View {
         List {
             Section("App") {
-                Toggle("Experimental Features", isOn: $experimentalEnabled)
-                    .onChange(of: experimentalEnabled) { _, newValue in
+                Toggle("Experimental Features", isOn: Binding(
+                    get: { experimentalEnabled },
+                    set: { newValue in
+                        experimentalEnabled = newValue
                         AWCore.setExperimentalEnabled(newValue)
                     }
+                ))
             }
 
             Section("VPN") {
@@ -53,6 +56,10 @@ struct AdvancedSettingsView: View {
             }
         }
         .navigationTitle("Advanced Settings")
+        .onAppear {
+            experimentalEnabled = AWCore.getExperimentalEnabled()
+            hideVPNIcon = AWCore.getHideVPNIcon()
+        }
         .alert("Hide VPN Icon", isPresented: $showHideVPNIconAlert) {
             Button("Enable Anyway", role: .destructive) {
                 hideVPNIcon = true
