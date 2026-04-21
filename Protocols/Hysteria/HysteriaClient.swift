@@ -125,4 +125,29 @@ final class HysteriaClient {
             }
         }
     }
+
+    /// Drops the cached session so the next acquire reconnects. Unlike
+    /// waiting for `onClose`, this takes effect synchronously — racing
+    /// callers won't observe the stale session between now and when
+    /// `close()` finally runs on the session queue.
+    private func invalidateSession() {
+        lock.lock()
+        let current = session
+        session = nil
+        lock.unlock()
+        current?.close()
+    }
+
+    /// Invalidates every pooled session. Used on device wake to drop
+    /// QUIC connections whose underlying UDP socket the kernel tore down
+    /// during sleep — otherwise the first post-wake request reuses the
+    /// dead session and stalls until ngtcp2's idle timeout fires.
+    static func closeAll() {
+        registryLock.lock()
+        let clients = Array(registry.values)
+        registryLock.unlock()
+        for client in clients {
+            client.invalidateSession()
+        }
+    }
 }

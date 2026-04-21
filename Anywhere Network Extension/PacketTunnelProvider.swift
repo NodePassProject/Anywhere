@@ -296,7 +296,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func wake() {
-        logger.info("[VPN] Device woke up; invalidating outbound proxy state")
         lwipStack.handleWake()
     }
 
