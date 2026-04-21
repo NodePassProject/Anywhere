@@ -341,7 +341,7 @@ void lwip_bridge_init(void) {
     }
 }
 
-void lwip_bridge_shutdown(void) {
+void lwip_bridge_abort_all_tcp(void) {
     /* Abort all active TCP connections.
      * Keep callbacks intact so tcp_abort() fires the err callback, which
      * notifies the Swift LWIPTCPConnection (sets closed=true, cancels VLESS,
@@ -360,6 +360,10 @@ void lwip_bridge_shutdown(void) {
         tcp_pcb_remove(&tcp_tw_pcbs, pcb);
         tcp_free(pcb);
     }
+}
+
+void lwip_bridge_shutdown(void) {
+    lwip_bridge_abort_all_tcp();
 
     if (tcp_listen_pcb_v4) { tcp_close(tcp_listen_pcb_v4); tcp_listen_pcb_v4 = NULL; }
     if (tcp_listen_pcb_v6) { tcp_close(tcp_listen_pcb_v6); tcp_listen_pcb_v6 = NULL; }

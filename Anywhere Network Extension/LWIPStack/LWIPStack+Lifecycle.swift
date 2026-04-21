@@ -82,56 +82,39 @@ extension LWIPStack {
         }
     }
 
-    /// Closes all TCP/UDP connections and shuts down the lwIP bridge in
-    /// preparation for device sleep. The stack is re-initialized on wake
-    /// via ``handleWake()``. The `running` flag stays true so the packet
-    /// read loop survives the sleep/wake cycle — packets arriving between
-    /// shutdown and re-init are dropped at the lwIP layer because the
-    /// netif has been removed.
-    func handleSleep() {
-        lwipQueue.async { [self] in
-            guard running else { return }
-            logger.info("[VPN] Closing connections for device sleep")
-            noteRecentTunnelInterruption(summary: "device sleep", level: .warning)
-            deferredRestart?.cancel()
-            deferredRestart = nil
-            shutdownInternal()
-        }
-    }
-
-    /// Re-initializes the lwIP bridge after the device wakes from sleep.
-    /// Bypasses the normal restart throttle because the stack was fully torn
-    /// down in ``handleSleep()`` and must come back up immediately — any
-    /// throttled defer would leave the tunnel dark.
+    /// Invalidates outbound proxy state after the device wakes from sleep.
     ///
-    /// Deliberately does NOT call ``configureRuntime(for:shouldLoadProxyServerAddresses:)``.
-    /// The routing tries (domain suffix + IPv4/IPv6 CIDR) are expensive to rebuild
-    /// and cannot have changed while the NE was suspended — any genuine settings
-    /// or routing change queued during sleep is delivered via the Darwin
-    /// notification observers on wake, which trigger their own stack restart.
-    /// We only recreate the Vision mux session because ``handleSleep()`` tore it
-    /// down along with the lwIP bridge.
+    /// The lwIP netif, listeners, timers, and routing state all survive
+    /// suspension intact — they live in our own memory, not the kernel's.
+    /// What the kernel does tear down is outbound sockets: the Vision mux's
+    /// long-lived TCP, per-flow UDP proxy connections, and the transport
+    /// sockets held by each ``LWIPTCPConnection``. Those are what this
+    /// method invalidates, leaving the rest of the stack running so idle
+    /// flows and the FakeIP pool are preserved.
+    ///
+    /// TCP flows are aborted via ``lwip_bridge_abort_all_tcp`` so each PCB's
+    /// err callback releases its Swift side (which closes the now-dead proxy
+    /// socket). The netif and listener PCBs stay up, so new client activity
+    /// is served without waiting on a netif rebuild.
     func handleWake() {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
-            logger.info("[VPN] Restarting stack after device wake")
+            logger.info("[VPN] Device wake: invalidating outbound proxy state")
             noteRecentTunnelInterruption(summary: "device wake", level: .warning)
 
-            deferredRestart?.cancel()
-            deferredRestart = nil
-            lastRestartTime = CFAbsoluteTimeGetCurrent()
-
+            muxManager?.closeAll()
             if Self.shouldUseVisionMux(configuration) {
                 muxManager = MuxManager(configuration: configuration, lwipQueue: lwipQueue)
             } else {
                 muxManager = nil
             }
 
-            registerCallbacks()
-            lwip_bridge_init()
-            startTimeoutTimer()
-            startUDPCleanupTimer()
-            logger.debug("[LWIPStack] Restarted after wake, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), ipv6dns=\(ipv6DNSEnabled), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+            for (_, flow) in udpFlows {
+                flow.close()
+            }
+            udpFlows.removeAll()
+
+            lwip_bridge_abort_all_tcp()
         }
     }
 

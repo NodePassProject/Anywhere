@@ -42,6 +42,11 @@ void lwip_bridge_set_udp_recv_fn(lwip_udp_recv_fn fn);
 void lwip_bridge_init(void);
 void lwip_bridge_shutdown(void);
 
+/* Abort every active TCP PCB and clear TIME_WAIT, keeping the netif and
+ * listeners intact. Used on device wake to invalidate outbound proxy sockets
+ * the kernel killed during sleep without a full stack rebuild. */
+void lwip_bridge_abort_all_tcp(void);
+
 /* --- Packet input (from TUN) --- */
 void lwip_bridge_input(const void *data, int len);
 

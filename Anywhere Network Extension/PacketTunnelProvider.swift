@@ -295,13 +295,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler?(nil)
     }
 
-    override func sleep() async {
-        logger.info("[VPN] Device going to sleep; closing connections")
-        lwipStack.handleSleep()
-    }
-
     override func wake() {
-        logger.info("[VPN] Device woke up; restarting stack")
+        logger.info("[VPN] Device woke up; invalidating outbound proxy state")
         lwipStack.handleWake()
     }
 
