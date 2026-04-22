@@ -825,7 +825,14 @@ class VPNViewModel: ObservableObject {
         case .hysteria(let password, let uploadMbps, let sni):
             configurationDict["hysteriaPassword"] = password
             configurationDict["hysteriaUploadMbps"] = uploadMbps
-            if let sni { configurationDict["hysteriaSNI"] = sni }
+            configurationDict["hysteriaSNI"] = sni
+        case .trojan(let password, let tls):
+            configurationDict["trojanPassword"] = password
+            configurationDict["trojanSNI"] = tls.serverName
+            if let alpn = tls.alpn, !alpn.isEmpty {
+                configurationDict["trojanALPN"] = alpn.joined(separator: ",")
+            }
+            configurationDict["trojanFingerprint"] = tls.fingerprint.rawValue
         case .shadowsocks(let password, let method):
             configurationDict["ssPassword"] = password
             configurationDict["ssMethod"] = method

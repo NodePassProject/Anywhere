@@ -55,6 +55,9 @@ struct ProxyEditorView: View {
     @State private var hysteriaPassword = ""
     @State private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
 
+    // Trojan fields (TLS knobs reuse the VLESS tlsSNI/tlsALPN/fingerprint state).
+    @State private var trojanPassword = ""
+
     // Shadowsocks fields
     @State private var ssPassword = ""
     @State private var ssMethod = "aes-128-gcm"
@@ -69,6 +72,7 @@ struct ProxyEditorView: View {
 
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
+    private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isNaive: Bool { selectedProtocol.isNaive }
@@ -82,6 +86,9 @@ struct ProxyEditorView: View {
             guard let v = Int(hysteriaUploadMbpsText),
                   HysteriaUploadMbpsRange.contains(v) else { return false }
             return true
+        }
+        if isTrojan {
+            return !trojanPassword.isEmpty
         }
         if isShadowsocks {
             return !ssPassword.isEmpty
@@ -118,6 +125,7 @@ struct ProxyEditorView: View {
                     Picker(selection: $selectedProtocol) {
                         Text("VLESS").tag(OutboundProtocol.vless)
                         Text("Hysteria").tag(OutboundProtocol.hysteria)
+                        Text("Trojan").tag(OutboundProtocol.trojan)
                         Text("Shadowsocks").tag(OutboundProtocol.shadowsocks)
                         Text("SOCKS5").tag(OutboundProtocol.socks5)
                         Text("HTTPS").tag(OutboundProtocol.http11)
@@ -127,7 +135,7 @@ struct ProxyEditorView: View {
                         TextWithColorfulIcon(titleKey: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
                     .onChange(of: selectedProtocol) {
-                        if isShadowsocks || isSOCKS5 || isNaive {
+                        if isTrojan || isShadowsocks || isSOCKS5 || isNaive {
                             flow = ""
                             security = security == "reality" ? "none" : security
                         }
@@ -167,7 +175,16 @@ struct ProxyEditorView: View {
                        } label: {
                            TextWithColorfulIcon(titleKey: "Upload Speed", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
                        }
-                   } else if isShadowsocks {
+                   } else if isTrojan {
+                        LabeledContent {
+                            SecureField("Password", text: $trojanPassword)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                    } else if isShadowsocks {
                         LabeledContent {
                             SecureField("Password", text: $ssPassword)
                                 .autocorrectionDisabled()
@@ -352,16 +369,18 @@ struct ProxyEditorView: View {
                     }
                 }
 
-                if isVLESS {
+                if isVLESS || isTrojan {
                     Section("TLS") {
-                        Picker(selection: $security) {
-                            Text("None").tag("none")
-                            Text("TLS").tag("tls")
-                            Text("Reality").tag("reality")
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Security", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
+                        if isVLESS {
+                            Picker(selection: $security) {
+                                Text("None").tag("none")
+                                Text("TLS").tag("tls")
+                                Text("Reality").tag("reality")
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Security", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
+                            }
                         }
-                        if isTLS {
+                        if isTLS || isTrojan {
                             LabeledContent {
                                 TextField("SNI", text: $tlsSNI)
                                     .keyboardType(.URL)
@@ -507,6 +526,11 @@ struct ProxyEditorView: View {
         case .hysteria(let password, let uploadMbps, _):
             hysteriaPassword = password
             hysteriaUploadMbpsText = String(uploadMbps)
+        case .trojan(let password, let tls):
+            trojanPassword = password
+            tlsSNI = tls.serverName
+            tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
+            fingerprint = tls.fingerprint
         case .shadowsocks(let password, let method):
             ssPassword = password
             ssMethod = method
@@ -563,7 +587,7 @@ struct ProxyEditorView: View {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isHysteria || isShadowsocks || isSOCKS5 || isNaive {
+        if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isNaive {
             parsedUUID = self.configuration?.uuid ?? UUID()
         } else {
             guard let u = UUID(uuidString: uuid) else { return }
@@ -655,7 +679,14 @@ struct ProxyEditorView: View {
             outbound = .hysteria(
                 password: hysteriaPassword,
                 uploadMbps: mbps,
-                sni: self.configuration?.hysteriaSNI ?? nil
+                sni: self.configuration?.hysteriaSNI ?? bareAddress
+            )
+        case .trojan:
+            let sni = tlsSNI.isEmpty ? bareAddress : tlsSNI
+            let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
+            outbound = .trojan(
+                password: trojanPassword,
+                tls: TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
             )
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)

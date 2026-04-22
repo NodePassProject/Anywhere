@@ -12,7 +12,7 @@ import Foundation
 extension ProxyConfiguration {
 
     /// URL scheme prefixes that ``parse(url:)`` can handle.
-    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "ss://", "socks5://", "socks://", "https://", "quic://"]
+    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "trojan://", "ss://", "socks5://", "socks://", "https://", "quic://"]
 
     /// Whether the given string starts with a URL scheme that ``parse(url:)`` can handle.
     static func canParseURL(_ string: String) -> Bool {
@@ -24,9 +24,13 @@ extension ProxyConfiguration {
     /// SS format: ss://base64(method:password)@host:port#name
     /// SOCKS5 format: socks5://user:pass@host:port#name  or  socks5://host:port#name
     /// Naive format: https://user:pass@host:port#name  or  quic://user:pass@host:port#name
+    /// Trojan format: trojan://password@host:port?sni=...&alpn=h2%2Chttp%2F1.1#name
     static func parse(url: String, naiveProtocol: OutboundProtocol? = nil) throws -> ProxyConfiguration {
         if url.hasPrefix("hysteria2://") || url.hasPrefix("hy2://") {
             return try parseHysteria(url: url)
+        }
+        if url.hasPrefix("trojan://") {
+            return try parseTrojan(url: url)
         }
         if url.hasPrefix("ss://") {
             return try parseShadowsocks(url: url)
@@ -38,7 +42,7 @@ extension ProxyConfiguration {
             return try parseNaive(url: url, protocolOverride: naiveProtocol)
         }
         guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless://, ss://, socks5://, https://, or quic://")
+            throw ProxyError.invalidURL("URL must start with vless://, trojan://, ss://, socks5://, https://, or quic://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -181,7 +185,7 @@ extension ProxyConfiguration {
         let (host, port) = try parseHostPort(serverPart)
         let params = parseQueryParams(queryString)
         
-        let sni: String? = (params["sni"]?.isEmpty == false) ? params["sni"] : nil
+        let sni = (params["sni"]?.isEmpty == false) ? params["sni"]! : host
 
         // `upmbps` matches the Hysteria v2 share-link convention for the
         // client's declared upload bandwidth (Mbit/s). Clamped to 1...100.
@@ -196,6 +200,67 @@ extension ProxyConfiguration {
         )
     }
     
+    /// Parse a Trojan URL.
+    /// Format: `trojan://password@host:port?sni=...&alpn=h2%2Chttp%2F1.1&fp=chrome_133#name`
+    /// TLS is mandatory — there is no plaintext Trojan variant on the wire.
+    private static func parseTrojan(url: String) throws -> ProxyConfiguration {
+        var remaining = String(url.dropFirst("trojan://".count))
+
+        // 1) Strip fragment
+        var fragmentName: String?
+        if let hashIndex = remaining.lastIndex(of: "#") {
+            fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
+            remaining = String(remaining[..<hashIndex])
+        }
+        DeviceCensorship.deCensor(&fragmentName)
+
+        // 2) Strip query
+        var queryString: String?
+        if let questionIndex = remaining.firstIndex(of: "?") {
+            queryString = String(remaining[remaining.index(after: questionIndex)...])
+            remaining = String(remaining[..<questionIndex])
+        }
+
+        // 3) Require @
+        guard let atIndex = remaining.lastIndex(of: "@") else {
+            throw ProxyError.invalidURL("Missing @ separator in trojan URL")
+        }
+        let userInfo = String(remaining[..<atIndex])
+        var serverPart = String(remaining[remaining.index(after: atIndex)...])
+
+        if serverPart.hasSuffix("/") { serverPart.removeLast() }
+        if let slashIndex = serverPart.firstIndex(of: "/") {
+            serverPart = String(serverPart[..<slashIndex])
+        }
+
+        // Whole userinfo is the password (no user:pass split per trojan-gfw spec).
+        let password = userInfo.removingPercentEncoding ?? userInfo
+
+        let (host, port) = try parseHostPort(serverPart)
+        let params = parseQueryParams(queryString)
+
+        let sni = (params["sni"]?.isEmpty == false ? params["sni"] : nil)
+            ?? (params["peer"]?.isEmpty == false ? params["peer"] : nil)
+            ?? host
+
+        var alpn: [String]? = nil
+        if let alpnString = params["alpn"], !alpnString.isEmpty {
+            alpn = alpnString.split(separator: ",").map { String($0) }
+        }
+
+        let fpString = params["fp"] ?? "chrome_133"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+
+        let tls = TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
+
+        return ProxyConfiguration(
+            name: fragmentName ?? "Untitled",
+            serverAddress: host,
+            serverPort: port,
+            outbound: .trojan(password: password, tls: tls)
+        )
+    }
+
     /// Parse a Shadowsocks URL into configuration.
     /// Format: ss://base64(method:password)@host:port#name
     /// Also handles: ss://base64(method:password@host:port)#name (SIP002)

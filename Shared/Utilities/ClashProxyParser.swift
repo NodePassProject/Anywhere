@@ -100,6 +100,9 @@ struct ClashProxyParser {
         if proxyType == "ss" {
             return parseShadowsocksProxy(node)
         }
+        if proxyType == "trojan" {
+            return parseTrojanProxy(node)
+        }
         if proxyType == "socks5" {
             return parseSOCKS5Proxy(node)
         }
@@ -255,6 +258,49 @@ struct ClashProxyParser {
             serverAddress: server,
             serverPort: port,
             outbound: .shadowsocks(password: password, method: cipher)
+        )
+    }
+
+    // MARK: - Trojan proxy parsing
+
+    /// Parses a Clash `type: trojan` node into a `.trojan(password:tls:)`
+    /// outbound. Reality, ECH, gRPC, the Trojan-Go SS layer, and any
+    /// transport other than bare TCP are out of scope and cause the node to
+    /// be skipped — silently downgrading a WS or Reality node to plain
+    /// Trojan would route traffic over a different wire format than the
+    /// server expects.
+    private static func parseTrojanProxy(_ node: Node) -> ProxyConfiguration? {
+        guard
+            let name = getString(node, key: "name"),
+            let server = getString(node, key: "server"),
+            let password = getString(node, key: "password"),
+            let portInt = getInt(node, key: "port"),
+            portInt > 0, portInt <= Int(UInt16.max)
+        else { return nil }
+        let port = UInt16(portInt)
+
+        let network = getString(node, key: "network") ?? "tcp"
+        guard network == "tcp" else { return nil }
+
+        if node["reality-opts"].type == .map { return nil }
+        if node["ech-opts"].type == .map { return nil }
+        if node["grpc-opts"].type == .map { return nil }
+        let ssOpts = node["ss-opts"]
+        if ssOpts.type == .map, getBool(ssOpts, key: "enabled") == true { return nil }
+
+        let sni = getString(node, key: "sni")
+            ?? getString(node, key: "servername")
+            ?? server
+        let alpn = getStringSequence(node, key: "alpn")
+        let clientFP = getString(node, key: "client-fingerprint")
+        let fingerprint = TLSFingerprint(rawValue: mapFingerprint(clientFP)) ?? .chrome133
+        let tls = TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
+
+        return ProxyConfiguration(
+            name: name,
+            serverAddress: server,
+            serverPort: port,
+            outbound: .trojan(password: password, tls: tls)
         )
     }
 

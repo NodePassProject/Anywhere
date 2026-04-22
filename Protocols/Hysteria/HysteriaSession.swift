@@ -91,7 +91,7 @@ final class HysteriaSession {
         self.quic = QUICConnection(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
-            serverName: configuration.effectiveSNI,
+            serverName: configuration.sni,
             alpn: ["h3"],
             datagramsEnabled: true,
             tuning: .hysteria(uploadMbps: configuration.uploadMbps)

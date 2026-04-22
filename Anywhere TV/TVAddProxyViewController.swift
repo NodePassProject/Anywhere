@@ -259,12 +259,11 @@ class TVAddProxyViewController: UITableViewController {
 
     private func importFromString(_ string: String) {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isHTTP = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://")
 
-        if trimmed.hasPrefix("vless://") || trimmed.hasPrefix("ss://") ||
-            trimmed.hasPrefix("socks5://") || trimmed.hasPrefix("socks://") ||
-            trimmed.hasPrefix("quic://") ||
-            (isHTTP && linkType != .subscription) {
+        // `https://` is ambiguous — Naive HTTP proxy or subscription — so the
+        // user's `linkType` choice overrides the parser's.
+        let isHTTPSAsSubscription = trimmed.hasPrefix("https://") && linkType == .subscription
+        if ProxyConfiguration.canParseURL(trimmed) && !isHTTPSAsSubscription {
             let naiveProtocol: OutboundProtocol? = switch linkType {
             case .http11: .http11
             case .http2: .http2

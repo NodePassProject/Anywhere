@@ -35,7 +35,7 @@ final class HysteriaClient {
         let key = Key(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
-            sni: configuration.effectiveSNI,
+            sni: configuration.sni,
             password: configuration.password
         )
         registryLock.lock()

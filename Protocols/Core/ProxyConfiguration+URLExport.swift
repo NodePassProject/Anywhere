@@ -24,6 +24,8 @@ extension ProxyConfiguration {
             return toVLESSURL()
         case .hysteria:
             return toHysteriaURL()
+        case .trojan:
+            return toTrojanURL()
         case .shadowsocks:
             return toShadowsocksURL()
         case .socks5:
@@ -89,6 +91,8 @@ extension ProxyConfiguration {
         let password = (hysteriaPassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var params: [String] = []
+        // SNI is always populated; only emit when it differs from the server
+        // address to keep share links short.
         if let sni = hysteriaSNI, sni != serverAddress {
             params.append("sni=\(sni)")
         }
@@ -97,6 +101,26 @@ extension ProxyConfiguration {
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         return "hysteria2://\(password)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
+    }
+
+    private func toTrojanURL() -> String {
+        let password = (trojanPassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        var params: [String] = []
+        if let tls = trojanTLS {
+            if tls.serverName != serverAddress {
+                params.append("sni=\(tls.serverName)")
+            }
+            if let alpn = tls.alpn, !alpn.isEmpty {
+                let joined = alpn.joined(separator: ",")
+                params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
+            }
+            if tls.fingerprint != .chrome133 {
+                params.append("fp=\(tls.fingerprint.rawValue)")
+            }
+        }
+        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        return "trojan://\(password)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
     private func toShadowsocksURL() -> String {

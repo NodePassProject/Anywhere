@@ -63,14 +63,19 @@ extension ProxyConfiguration {
 
         case .hysteria:
             let rawMbps = (configurationDict["hysteriaUploadMbps"] as? Int) ?? HysteriaUploadMbpsDefault
-            // Fall back to legacy `tlsServerName` when `hysteriaSNI` is absent.
-            let sni = (configurationDict["hysteriaSNI"] as? String)
+            // Fall back to legacy `tlsServerName` when `hysteriaSNI` is absent,
+            // then fall back to `serverAddress` so SNI is always populated.
+            let explicitSNI = (configurationDict["hysteriaSNI"] as? String)
                 ?? (configurationDict["tlsServerName"] as? String)
             outbound = .hysteria(
                 password: (configurationDict["hysteriaPassword"] as? String) ?? "",
                 uploadMbps: clampHysteriaUploadMbps(rawMbps),
-                sni: (sni?.isEmpty == false) ? sni : nil
+                sni: (explicitSNI?.isEmpty == false) ? explicitSNI! : serverAddress
             )
+        case .trojan:
+            let password = (configurationDict["trojanPassword"] as? String) ?? ""
+            let tls = parseTrojanTLS(from: configurationDict, serverAddress: serverAddress)
+            outbound = .trojan(password: password, tls: tls)
         case .shadowsocks:
             let password = (configurationDict["ssPassword"] as? String) ?? ""
             let method = (configurationDict["ssMethod"] as? String) ?? ""
@@ -195,6 +200,23 @@ extension ProxyConfiguration {
         default:
             return .tcp
         }
+    }
+
+    /// Reconstructs the Trojan mandatory TLS configuration from serialized dict keys.
+    private static func parseTrojanTLS(
+        from dict: [String: Any],
+        serverAddress: String
+    ) -> TLSConfiguration {
+        let sni = (dict["trojanSNI"] as? String) ?? (dict["tlsServerName"] as? String) ?? serverAddress
+        var alpn: [String]? = nil
+        if let alpnString = (dict["trojanALPN"] as? String) ?? (dict["tlsAlpn"] as? String), !alpnString.isEmpty {
+            alpn = alpnString.split(separator: ",").map { String($0) }
+        }
+        let fpString = (dict["trojanFingerprint"] as? String)
+            ?? (dict["tlsFingerprint"] as? String)
+            ?? "chrome_133"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+        return TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
     }
 
     /// Parses comma-separated "key:value" header pairs from a string.

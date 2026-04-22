@@ -246,12 +246,10 @@ struct AddProxyView: View {
     // MARK: - Actions
 
     private func checkClipboard() {
-        if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines),
-           clip.hasPrefix("vless://") ||
-            clip.hasPrefix("hysteria2://") || clip.hasPrefix("hy2://") ||
-            clip.hasPrefix("ss://") ||
-            clip.hasPrefix("socks5://") || clip.hasPrefix("socks://") ||
-            clip.hasPrefix("http://") || clip.hasPrefix("https://") || clip.hasPrefix("quic://") {
+        guard let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
+        // Accept any single-proxy URL the parser knows, plus `http://` for
+        // subscription URLs (the only scheme that's never a single proxy).
+        if ProxyConfiguration.canParseURL(clip) || clip.hasPrefix("http://") {
             linkURL = clip
         }
     }
@@ -272,13 +270,11 @@ struct AddProxyView: View {
 
     private func importFromString(_ string: String) {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        if trimmed.hasPrefix("vless://") ||
-            trimmed.hasPrefix("hysteria2://") || trimmed.hasPrefix("hy2://") ||
-            trimmed.hasPrefix("ss://") ||
-            trimmed.hasPrefix("socks5://") || trimmed.hasPrefix("socks://") ||
-            (trimmed.hasPrefix("https://") && httpsLinkType != .subscription) || trimmed.hasPrefix("quic://") {
-            // Single proxy link (VLESS, Shadowsocks, SOCKS5, or NaiveProxy)
+
+        // `https://` is ambiguous — Naive HTTP proxy or subscription — so the
+        // user's `httpsLinkType` choice overrides the parser's.
+        let isHTTPSAsSubscription = trimmed.hasPrefix("https://") && httpsLinkType == .subscription
+        if ProxyConfiguration.canParseURL(trimmed) && !isHTTPSAsSubscription {
             let naiveProtocol: OutboundProtocol? = switch httpsLinkType {
             case .http11Proxy: .http11
             case .http2Proxy: .http2

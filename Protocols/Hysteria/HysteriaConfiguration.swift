@@ -13,8 +13,9 @@ struct HysteriaConfiguration {
     let proxyPort: UInt16
     /// Authentication password (sent in the `Hysteria-Auth` header).
     let password: String
-    /// TLS SNI override. Defaults to `proxyHost` when `nil`.
-    let sni: String?
+    /// TLS SNI sent on the wire. Always populated — callers default to
+    /// `proxyHost` when there is no explicit override.
+    let sni: String
     /// Client's receive bandwidth estimate in bytes/sec. Advertised to the
     /// server in the `Hysteria-CC-RX` request header so the server can cap
     /// its send rate. 0 means "please probe" / "I don't know".
@@ -31,5 +32,4 @@ struct HysteriaConfiguration {
         UInt64(uploadMbps) * 1_000_000 / 8
     }
 
-    var effectiveSNI: String { sni ?? proxyHost }
 }

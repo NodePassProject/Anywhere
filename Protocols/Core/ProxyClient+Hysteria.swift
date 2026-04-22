@@ -27,7 +27,7 @@ extension ProxyClient {
             proxyHost: configuration.serverAddress,
             proxyPort: configuration.serverPort,
             password: password,
-            sni: configuration.hysteriaSNI,
+            sni: configuration.hysteriaSNI ?? configuration.serverAddress,
             clientRxBytesPerSec: 0, // "please probe" — server picks CC on its side
             uploadMbps: configuration.hysteriaUploadMbps ?? HysteriaUploadMbpsDefault
         )
