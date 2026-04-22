@@ -99,7 +99,7 @@ struct ProxyEditorView: View {
         if isNaive {
             return !naiveUsername.isEmpty && !naivePassword.isEmpty
         }
-        return UUID(uuidString: uuid) != nil && (!isReality || (!sni.isEmpty && !publicKey.isEmpty))
+        return UUID(xrayString: uuid) != nil && (!isReality || (!sni.isEmpty && !publicKey.isEmpty))
     }
 
     init(configuration: ProxyConfiguration? = nil, onSave: @escaping (ProxyConfiguration) -> Void) {
@@ -590,7 +590,7 @@ struct ProxyEditorView: View {
         if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isNaive {
             parsedUUID = self.configuration?.uuid ?? UUID()
         } else {
-            guard let u = UUID(uuidString: uuid) else { return }
+            guard let u = UUID(xrayString: uuid) else { return }
             parsedUUID = u
         }
         
