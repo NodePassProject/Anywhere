@@ -262,8 +262,11 @@ extension ProxyConfiguration {
     }
 
     /// Parse a Shadowsocks URL into configuration.
-    /// Format: ss://base64(method:password)@host:port#name
-    /// Also handles: ss://base64(method:password@host:port)#name (SIP002)
+    /// SIP002 allows two userinfo encodings:
+    ///   `ss://method:password@host:port#name`            (plain, password percent-encoded)
+    ///   `ss://websafe-base64(method:password)@host:port#name`
+    /// and we also accept the legacy pre-SIP002 shape
+    ///   `ss://base64(method:password@host:port)#name`.
     private static func parseShadowsocks(url: String) throws -> ProxyConfiguration {
         var urlWithoutScheme = String(url.dropFirst("ss://".count))
 
@@ -279,37 +282,25 @@ extension ProxyConfiguration {
         let password: String
         let host: String
         let port: UInt16
-        var queryString: String?
 
-        if let atIndex = urlWithoutScheme.firstIndex(of: "@") {
-            // Standard format: base64(method:password)@host:port/?params
+        if let atIndex = urlWithoutScheme.lastIndex(of: "@") {
+            // SIP002 form: userinfo@host:port/?params
             let userInfo = String(urlWithoutScheme[..<atIndex])
             var serverPart = String(urlWithoutScheme[urlWithoutScheme.index(after: atIndex)...])
 
-            // Extract query string before stripping path
+            // Strip trailing path/query (we don't carry SS plugin params)
             if let questionIndex = serverPart.firstIndex(of: "?") {
-                queryString = String(serverPart[serverPart.index(after: questionIndex)...])
                 serverPart = String(serverPart[..<questionIndex])
             }
-            // Strip trailing path
             if let slashIndex = serverPart.firstIndex(of: "/") {
                 serverPart = String(serverPart[..<slashIndex])
             }
 
-            // Decode base64 user info
-            guard let decoded = Data(base64Encoded: padBase64(userInfo)),
-                  let decodedString = String(data: decoded, encoding: .utf8),
-                  let colonIndex = decodedString.firstIndex(of: ":") else {
-                throw ProxyError.invalidURL("Invalid SS user info encoding")
-            }
-            method = String(decodedString[..<colonIndex])
-            password = String(decodedString[decodedString.index(after: colonIndex)...])
-
-            // Parse host:port
+            (method, password) = try decodeShadowsocksUserInfo(userInfo)
             (host, port) = try parseHostPort(serverPart)
         } else {
-            // SIP002 format: base64(method:password@host:port)
-            guard let decoded = Data(base64Encoded: padBase64(urlWithoutScheme)),
+            // Legacy pre-SIP002 form: base64(method:password@host:port)
+            guard let decoded = Data(base64URLEncoded: urlWithoutScheme),
                   let decodedString = String(data: decoded, encoding: .utf8) else {
                 throw ProxyError.invalidURL("Invalid SS URL encoding")
             }
@@ -329,13 +320,33 @@ extension ProxyConfiguration {
         guard ShadowsocksCipher(method: method) != nil else {
             throw ProxyError.invalidURL("Unsupported SS method: \(method)")
         }
-        
+
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
             outbound: .shadowsocks(password: password, method: method)
         )
+    }
+
+    /// Decodes a SIP002 userinfo chunk into `(method, password)`.
+    /// A literal `:` in the userinfo means the plain form (method:password
+    /// with the password percent-encoded — used by SS2022 share links);
+    /// otherwise we treat the whole string as websafe-base64(method:password).
+    private static func decodeShadowsocksUserInfo(_ userInfo: String) throws -> (method: String, password: String) {
+        if let colonIndex = userInfo.firstIndex(of: ":") {
+            let method = String(userInfo[..<colonIndex])
+            let rawPassword = String(userInfo[userInfo.index(after: colonIndex)...])
+            return (method, rawPassword.removingPercentEncoding ?? rawPassword)
+        }
+        guard let decoded = Data(base64URLEncoded: userInfo),
+              let decodedString = String(data: decoded, encoding: .utf8),
+              let colonIndex = decodedString.firstIndex(of: ":") else {
+            throw ProxyError.invalidURL("Invalid SS user info encoding")
+        }
+        let method = String(decodedString[..<colonIndex])
+        let password = String(decodedString[decodedString.index(after: colonIndex)...])
+        return (method, password)
     }
     
     /// Parse a SOCKS5 URL into configuration.
