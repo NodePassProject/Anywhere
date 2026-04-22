@@ -46,7 +46,22 @@ class LWIPTCPConnection {
     /// buffer. Receives are issued whenever this drops below
     /// `TunnelConstants.drainLowWaterMark` and no receive is in flight, so
     /// the next chunk lands ready to push as lwIP's snd_buf frees up.
+    ///
+    /// Head-offset layout: bytes in `[0, pendingWriteOffset)` have been handed
+    /// to `tcp_write` and are no longer needed, bytes in
+    /// `[pendingWriteOffset, pendingWrite.count)` are still waiting. We advance
+    /// the offset instead of `removeSubrange(0..<offset)` on every partial
+    /// drain — that memmove is O(tail) per cycle and gets expensive when the
+    /// backlog is large. Compaction happens only when the dead prefix outgrows
+    /// the live suffix (see ``drainPendingWrite``), which keeps amortized cost
+    /// O(1) per byte with at most ~2× memory overhead.
     private var pendingWrite = Data()
+    private var pendingWriteOffset = 0
+
+    /// Bytes still waiting to be handed to lwIP.
+    private var pendingWriteCount: Int {
+        pendingWrite.count - pendingWriteOffset
+    }
 
     /// True from the moment `tryArmReceive` dispatches a proxy receive until
     /// its completion runs on `lwipQueue`. Guarantees at most one outstanding
@@ -143,13 +158,13 @@ class LWIPTCPConnection {
     /// Aborts the connection if the cap would be exceeded and returns `false`
     /// so callers can bail out early.
     @discardableResult
-    private func appendPendingData(_ data: Data) -> Bool {
-        if pendingData.count + data.count > TunnelConstants.tcpMaxPendingDataSize {
-            logger.warning("[TCP] pendingData cap exceeded for \(dstHost):\(dstPort) (\(pendingData.count) + \(data.count) > \(TunnelConstants.tcpMaxPendingDataSize)), aborting")
+    private func appendPendingData(bytes ptr: UnsafePointer<UInt8>, count: Int) -> Bool {
+        if pendingData.count + count > TunnelConstants.tcpMaxPendingDataSize {
+            logger.warning("[TCP] pendingData cap exceeded for \(dstHost):\(dstPort) (\(pendingData.count) + \(count) > \(TunnelConstants.tcpMaxPendingDataSize)), aborting")
             abort()
             return false
         }
-        pendingData.append(data)
+        pendingData.append(ptr, count: count)
         return true
     }
 
@@ -170,60 +185,66 @@ class LWIPTCPConnection {
     ///
     /// When a previous flush is still in-flight, falls back to per-segment
     /// sends to provide natural backpressure via `tcp_recved`.
-    func handleReceivedData(_ data: Data) {
-        guard !closed else { return }
+    func handleReceivedData(bytes ptr: UnsafeRawPointer, count: Int) {
+        guard !closed, count > 0 else { return }
         activityTimer?.update()
 
+        let bytePtr = ptr.assumingMemoryBound(to: UInt8.self)
+
         // SNI sniff phase: buffer bytes and feed the sniffer before dialing.
-        // Once a terminal state is reached we re-evaluate routing (if SNI
-        // was found) and then kick off the proxy/direct connect.
-        if let state = sniffer?.feed(data) {
-            guard appendPendingData(data) else { return }
-            switch state {
-            case .needMore:
-                return
-            case .found(let sni):
-                sniffer = nil
-                cancelSniffDeadline()
-                applySNI(sni)
-                guard !closed else { return }  // rule may have rejected
-                beginConnecting()
-                return
-            case .notTLS, .unavailable:
-                sniffer = nil
-                cancelSniffDeadline()
-                beginConnecting()
-                return
+        // The sniffer and appendPendingData both copy eagerly, so a bytesNoCopy
+        // wrapper is safe here — the Data never outlives this function.
+        if sniffer != nil {
+            let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: ptr), count: count, deallocator: .none)
+            if let state = sniffer?.feed(data) {
+                guard appendPendingData(bytes: bytePtr, count: count) else { return }
+                switch state {
+                case .needMore:
+                    return
+                case .found(let sni):
+                    sniffer = nil
+                    cancelSniffDeadline()
+                    applySNI(sni)
+                    guard !closed else { return }  // rule may have rejected
+                    beginConnecting()
+                    return
+                case .notTLS, .unavailable:
+                    sniffer = nil
+                    cancelSniffDeadline()
+                    beginConnecting()
+                    return
+                }
             }
         }
 
         if proxyConnecting {
-            _ = appendPendingData(data)
+            _ = appendPendingData(bytes: bytePtr, count: count)
             return
         }
 
         guard proxyConnection != nil else {
-            guard appendPendingData(data) else { return }
+            guard appendPendingData(bytes: bytePtr, count: count) else { return }
             beginConnecting()
             return
         }
 
         // Buffer would overflow — flush accumulated data first to
         // maintain stream ordering, then fall back to per-segment sends.
-        if uploadCoalesce.recvLen + data.count > TunnelConstants.tcpMaxCoalesceSize {
+        if uploadCoalesce.recvLen + count > TunnelConstants.tcpMaxCoalesceSize {
             if uploadCoalesce.recvLen > 0 && !uploadCoalesce.isFlushInFlight {
                 flushUploadBuffer()
             }
             if uploadCoalesce.recvLen == 0 {
                 // Buffer is empty (was empty or just flushed) — safe to
                 // send per-segment for backpressure without reordering.
-                sendSegmentDirect(data)
+                // The proxy retains the Data asynchronously, so copy here.
+                sendSegmentDirect(Data(bytes: ptr, count: count))
             } else {
                 // A flush is in-flight and the buffer has unsent data.
                 // Coalesce to preserve ordering; the chain-flush on
                 // completion will send it after the in-flight data.
-                uploadCoalesce.buffer.append(data)
-                uploadCoalesce.recvLen += data.count
+                uploadCoalesce.buffer.append(bytePtr, count: count)
+                uploadCoalesce.recvLen += count
             }
             return
         }
@@ -233,8 +254,8 @@ class LWIPTCPConnection {
         // scMinPostsIntervalMs sleep and is sent as one large POST.
         // Without this, each individual TCP segment (~1-2 KB) would become its
         // own POST request during the delay, causing massive HTTP overhead.
-        uploadCoalesce.buffer.append(data)
-        uploadCoalesce.recvLen += data.count
+        uploadCoalesce.buffer.append(bytePtr, count: count)
+        uploadCoalesce.recvLen += count
 
         // Schedule flush only when no send is in-flight (data accumulated
         // during an in-flight send will be flushed when it completes).
@@ -278,6 +299,9 @@ class LWIPTCPConnection {
         let recvLen = uploadCoalesce.recvLen
         uploadCoalesce.buffer = Data()
         uploadCoalesce.recvLen = 0
+        if recvLen > 0 {
+            uploadCoalesce.buffer.reserveCapacity(recvLen)
+        }
 
         guard !data.isEmpty else { return }
 
@@ -356,6 +380,11 @@ class LWIPTCPConnection {
             logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
         } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
             logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
+        } else if err == -13, LWIPStack.shared?.isTearingDown == true {
+            // ERR_ABRT during a deliberate stack teardown (shutdown/restart/wake).
+            // Outside teardown, ERR_ABRT indicates lwIP's own pressure aborts
+            // (tcp_kill_prio / tcp_kill_timewait) — those stay at warning below.
+            logger.debug("[TCP] lwIP aborted connection (tunnel teardown): \(endpointDescription): \(reason)")
         } else {
             logger.warning("[TCP] lwIP aborted connection: \(endpointDescription): \(reason)")
         }
@@ -623,7 +652,7 @@ class LWIPTCPConnection {
     private func tryArmReceive() {
         guard !closed,
               !receiveInFlight,
-              pendingWrite.count < TunnelConstants.drainLowWaterMark,
+              pendingWriteCount < TunnelConstants.drainLowWaterMark,
               let connection = proxyConnection else { return }
 
         receiveInFlight = true
@@ -706,28 +735,36 @@ class LWIPTCPConnection {
     private func drainPendingWrite() {
         guard !closed else { return }
 
-        if !pendingWrite.isEmpty {
-            let count = pendingWrite.count
-            let offset = pendingWrite.withUnsafeBytes { buffer -> Int in
+        let live = pendingWriteCount
+        if live > 0 {
+            let head = pendingWriteOffset
+            let written = pendingWrite.withUnsafeBytes { buffer -> Int in
                 guard let base = buffer.baseAddress else { return 0 }
-                let written = feedLWIP(base, count: count, retryOnEmpty: true)
-                if written == -1 {
+                let n = feedLWIP(base + head, count: live, retryOnEmpty: true)
+                if n == -1 {
                     let sndbuf = Int(lwip_bridge_tcp_sndbuf(self.pcb))
                     let queuelen = Int(lwip_bridge_tcp_snd_queuelen(self.pcb))
-                    logger.error("[TCP] tcp_write fatal: \(self.dstHost):\(self.dstPort) (pending=\(count), sndbuf=\(sndbuf), queuelen=\(queuelen))")
+                    logger.error("[TCP] tcp_write fatal: \(self.dstHost):\(self.dstPort) (pending=\(live), sndbuf=\(sndbuf), queuelen=\(queuelen))")
                     self.abort()
                     return 0
                 }
-                return written
+                return n
             }
 
             guard !closed else { return }
 
-            if offset > 0 {
-                if offset >= count {
+            if written > 0 {
+                pendingWriteOffset += written
+                if pendingWriteOffset >= pendingWrite.count {
+                    // Fully drained — reset to keep the backing allocation
+                    // and clear both ends in one O(1) step.
                     pendingWrite.removeAll(keepingCapacity: true)
-                } else {
-                    pendingWrite.removeSubrange(0..<offset)
+                    pendingWriteOffset = 0
+                } else if pendingWriteOffset > pendingWrite.count - pendingWriteOffset {
+                    // Dead prefix larger than live suffix: compact now so the
+                    // buffer never balloons past ~2× the live backlog.
+                    pendingWrite.removeSubrange(0..<pendingWriteOffset)
+                    pendingWriteOffset = 0
                 }
                 lwip_bridge_tcp_output(pcb)
                 LWIPStack.shared?.flushOutputInline()
@@ -736,9 +773,6 @@ class LWIPTCPConnection {
                 // retry. Skip `tryArmReceive` on purpose: piling more upstream
                 // bytes onto a stalled connection only grows `pendingWrite`.
                 // Once the retry makes progress, the tail call rearms.
-                let sndbuf = Int(lwip_bridge_tcp_sndbuf(pcb))
-                let queuelen = Int(lwip_bridge_tcp_snd_queuelen(pcb))
-                let outputBacklog = LWIPStack.shared?.outputPackets.count ?? -1
                 lwipQueue.asyncAfter(deadline: .now() + .milliseconds(TunnelConstants.drainRetryDelayMs)) { [weak self] in
                     guard let self, !self.closed else { return }
                     self.drainPendingWrite()
@@ -757,16 +791,16 @@ class LWIPTCPConnection {
     /// Best-effort flush of pending data into lwIP send buffer before close.
     /// Data written here will be delivered before the FIN segment.
     private func flushPendingToLWIP() {
-        guard !pendingWrite.isEmpty else { return }
+        let live = pendingWriteCount
+        guard live > 0 else { return }
 
-        let count = pendingWrite.count
-        let offset = pendingWrite.withUnsafeBytes { buffer -> Int in
+        let head = pendingWriteOffset
+        let written = pendingWrite.withUnsafeBytes { buffer -> Int in
             guard let base = buffer.baseAddress else { return 0 }
-            let written = feedLWIP(base, count: count)
-            return max(written, 0)  // treat fatal as 0 (best-effort)
+            return max(feedLWIP(base + head, count: live), 0)  // treat fatal as 0 (best-effort)
         }
 
-        if offset > 0 {
+        if written > 0 {
             lwip_bridge_tcp_output(pcb)
         }
     }
@@ -825,6 +859,7 @@ class LWIPTCPConnection {
         proxyConnecting = false
         pendingData = Data()
         pendingWrite = Data()
+        pendingWriteOffset = 0
         uploadCoalesce = UploadCoalesceState()
         connection?.cancel()
         client?.cancel()

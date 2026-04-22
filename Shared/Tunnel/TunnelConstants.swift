@@ -44,9 +44,10 @@ enum TunnelConstants {
     /// Low-water mark for the per-connection downlink backlog (`pendingWrite`).
     /// When the backlog drops below this we prefetch the next proxy receive in
     /// parallel with the ongoing drain — without this overlap, big chunks turn
-    /// the downlink into stop-and-wait and throughput collapses. Sized to match
-    /// TCP_SND_BUF in lwipopts.h so a prefetched chunk can be pushed into lwIP
-    /// the moment space frees up.
+    /// the downlink into stop-and-wait and throughput collapses. Sized at half
+    /// TCP_SND_BUF (lwipopts.h) so a prefetched chunk still fits in lwIP's send
+    /// buffer once space frees up, without letting the backlog balloon past a
+    /// full send-buffer worth of bytes.
     static let drainLowWaterMark = 512 * 1360
 
     // MARK: - UDP Settings

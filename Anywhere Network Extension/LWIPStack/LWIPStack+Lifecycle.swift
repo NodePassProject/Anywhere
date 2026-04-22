@@ -110,7 +110,9 @@ extension LWIPStack {
             }
             udpFlows.removeAll()
 
+            isTearingDown = true
             lwip_bridge_abort_all_tcp()
+            isTearingDown = false
 
             // QUIC-based protocols cache sessions in process-wide pools whose
             // UDP sockets the kernel tears down on sleep. Without an explicit
@@ -165,7 +167,9 @@ extension LWIPStack {
         }
         udpFlows.removeAll()
 
+        isTearingDown = true
         lwip_bridge_shutdown()
+        isTearingDown = false
         logger.debug("[LWIPStack] Shutdown complete, closed \(flowCount) UDP flows")
     }
 

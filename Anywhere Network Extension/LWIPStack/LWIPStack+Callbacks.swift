@@ -109,7 +109,7 @@ extension LWIPStack {
             }
             let tcpConnection = Unmanaged<LWIPTCPConnection>.fromOpaque(connection).takeUnretainedValue()
             if let data, len > 0 {
-                tcpConnection.handleReceivedData(Data(bytes: data, count: Int(len)))
+                tcpConnection.handleReceivedData(bytes: data, count: Int(len))
             } else {
                 tcpConnection.handleRemoteClose()
             }
