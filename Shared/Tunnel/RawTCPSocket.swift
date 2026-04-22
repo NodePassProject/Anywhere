@@ -293,6 +293,13 @@ class RawTCPSocket: RawTransport {
     /// EOF immediately without touching the socket.
     private var receivedEOF = false
 
+    /// Reusable scratch for `recv(2)`. Sized at the per-call cap so every
+    /// receive hands the kernel one contiguous buffer. Allocated lazily on
+    /// first receive to avoid paying the cost for sockets that never read
+    /// (e.g., connect-failed).
+    private static let recvScratchSize = 65535
+    private var recvScratch: UnsafeMutableRawPointer?
+
     // MARK: - Lifecycle
 
     init() {}
@@ -305,6 +312,8 @@ class RawTCPSocket: RawTransport {
             _ = Darwin.close(socketFD)
             socketFD = -1
         }
+        recvScratch?.deallocate()
+        recvScratch = nil
     }
 
     // MARK: - RawTransport
@@ -734,15 +743,20 @@ class RawTCPSocket: RawTransport {
             completion(nil, true, SocketError.notConnected)
             return
         }
-        let cap = 65535
-        var buf = Data(count: cap)
-        let fd = socketFD
-        let n = buf.withUnsafeMutableBytes { raw -> Int in
-            guard let base = raw.baseAddress else { return -1 }
-            return Darwin.recv(fd, base, cap, 0)
+        let scratch: UnsafeMutableRawPointer
+        if let existing = recvScratch {
+            scratch = existing
+        } else {
+            scratch = UnsafeMutableRawPointer.allocate(byteCount: Self.recvScratchSize, alignment: 1)
+            recvScratch = scratch
         }
+        let fd = socketFD
+        let n = Darwin.recv(fd, scratch, Self.recvScratchSize, 0)
         if n > 0 {
-            buf.count = n
+            // Copy exactly `n` bytes into the returned Data. The scratch is
+            // reused on the next recv, so the returned Data must own its
+            // bytes — can't hand out a `Data(bytesNoCopy:)` view.
+            let buf = Data(bytes: scratch, count: n)
             pendingReceiveCompletion = nil
             disarmReadSource()
             completion(buf, false, nil)

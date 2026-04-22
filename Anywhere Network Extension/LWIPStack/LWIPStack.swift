@@ -63,6 +63,13 @@ class LWIPStack {
     var proxyMode: ProxyMode = .rule
     var running = false
 
+    /// True while a deliberate TCP teardown is in progress (stack shutdown,
+    /// restart, or wake handling). Set around ``lwip_bridge_abort_all_tcp``
+    /// calls so ``LWIPTCPConnection.handleError`` can demote the resulting
+    /// ERR_ABRT flood to debug — while still surfacing lwIP's own internal
+    /// aborts (e.g., `tcp_kill_prio` under PCB pool exhaustion) as warnings.
+    var isTearingDown = false
+
     /// Timestamp of the last completed stack restart (used for throttling).
     var lastRestartTime: CFAbsoluteTime = 0
 

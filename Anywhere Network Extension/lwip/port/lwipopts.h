@@ -66,7 +66,7 @@
 #define TCP_SND_BUF                     (1024 * TCP_MSS)
 #define TCP_SND_QUEUELEN                (4 * TCP_SND_BUF / TCP_MSS)
 #define TCP_SNDLOWAT                    ((2 * TCP_MSS) + 1)
-#define TCP_QUEUE_OOSEQ                 0
+#define TCP_QUEUE_OOSEQ                 1
 #define TCP_OVERSIZE                    TCP_MSS
 #define TCP_WND_UPDATE_THRESHOLD        LWIP_MIN((TCP_WND / 4), (TCP_MSS * 8))
 #define TCP_MAXRTX                      8

@@ -243,7 +243,7 @@ class LWIPUDPFlow {
                     // Guard against race: closeAll() may have already closed the
                     // session (via receive-loop error) before this handler ran.
                     guard !session.closed else {
-                        self.releaseProxy()
+                        self.close()
                         LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                         return
                     }
@@ -266,7 +266,7 @@ class LWIPUDPFlow {
                     if case .dropped = error as? ProxyError {} else {
                         self.logTransportFailure("Connect", error: error, defaultLevel: .error)
                     }
-                    self.releaseProxy()
+                    self.close()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                 }
             }
@@ -309,7 +309,7 @@ class LWIPUDPFlow {
                     if case .dropped = error as? ProxyError {} else {
                         self.logTransportFailure("Connect", error: error, defaultLevel: .error)
                     }
-                    self.releaseProxy()
+                    self.close()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                 }
             }
