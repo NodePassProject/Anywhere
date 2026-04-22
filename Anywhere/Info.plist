@@ -28,26 +28,6 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>com.argsment.Anywhere.scheme.ss</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>ss</string>
-			</array>
-		</dict>
-		<dict>
-			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
-			<key>CFBundleURLName</key>
-			<string>com.argsment.Anywhere.scheme.quic</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>quic</string>
-			</array>
-		</dict>
-		<dict>
-			<key>CFBundleTypeRole</key>
-			<string>Editor</string>
-			<key>CFBundleURLName</key>
 			<string>com.argsment.Anywhere.scheme.hysteria2</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
@@ -62,6 +42,36 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>hy2</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.argsment.Anywhere.scheme.trojan</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>trojan</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.argsment.Anywhere.scheme.ss</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ss</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.argsment.Anywhere.scheme.quic</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>quic</string>
 			</array>
 		</dict>
 	</array>

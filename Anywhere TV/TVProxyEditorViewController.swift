@@ -44,6 +44,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var ssMethod = "aes-128-gcm"
     private var hysteriaPassword = ""
     private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
+    private var trojanPassword = ""
     private var socks5Username = ""
     private var socks5Password = ""
     private var naiveUsername = ""
@@ -51,6 +52,7 @@ class TVProxyEditorViewController: UITableViewController {
 
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
+    private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isNaive: Bool { selectedProtocol.isNaive }
@@ -73,6 +75,7 @@ class TVProxyEditorViewController: UITableViewController {
         case tlsSNI, tlsALPN, fingerprint
         case realitySNI, publicKey, shortId
         case hysteriaPassword, hysteriaUploadMbps
+        case trojanPassword
         case ssPassword, ssMethod
         case naiveUsername, naivePassword
         case socks5Username, socks5Password
@@ -88,7 +91,7 @@ class TVProxyEditorViewController: UITableViewController {
 
         // Protocol
         let protocolOptions: [(String, String)] = [
-            ("VLESS", "vless"), ("Hysteria", "hysteria"), ("Shadowsocks", "shadowsocks"), ("SOCKS5", "socks5"), ("HTTPS", "http11"), ("HTTP2", "http2"), ("QUIC", "http3"),
+            ("VLESS", "vless"), ("Hysteria", "hysteria"), ("Trojan", "trojan"), ("Shadowsocks", "shadowsocks"), ("SOCKS5", "socks5"), ("HTTPS", "http11"), ("HTTP2", "http2"), ("QUIC", "http3"),
         ]
         sections.append((String(localized: "Protocol"), [
             .selection(label: String(localized: "Protocol"), value: selectedProtocol.name, options: protocolOptions, key: .outboundProtocol),
@@ -102,6 +105,8 @@ class TVProxyEditorViewController: UITableViewController {
         if isHysteria {
             serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: "Password", key: .hysteriaPassword, secure: true))
             serverRows.append(.text(label: String(localized: "Upload Speed"), value: hysteriaUploadMbpsText, placeholder: "Mbps", key: .hysteriaUploadMbps))
+        } else if isTrojan {
+            serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: "Password", key: .trojanPassword, secure: true))
         } else if isShadowsocks {
             serverRows.append(.text(label: String(localized: "Password"), value: ssPassword, placeholder: "Password", key: .ssPassword, secure: true))
             let methods: [(String, String)] = [
@@ -156,15 +161,14 @@ class TVProxyEditorViewController: UITableViewController {
             sections.append((String(localized: "Transport"), transportRows))
         }
         
-        if isVLESS {
-            var tlsRows: [RowType] = [
-                .selection(label: String(localized: "Security"), value: security.uppercased(), options: {
-                    var opts: [(String, String)] = [("None", "none"), ("TLS", "tls")]
-                    opts.append(("Reality", "reality"))
-                    return opts
-                }(), key: .security),
-            ]
-            if isTLS {
+        if isVLESS || isTrojan {
+            var tlsRows: [RowType] = []
+            if isVLESS {
+                tlsRows.append(.selection(label: String(localized: "Security"), value: security.uppercased(), options: [
+                    ("None", "none"), ("TLS", "tls"), ("Reality", "reality"),
+                ], key: .security))
+            }
+            if isTLS || isTrojan {
                 tlsRows.append(.text(label: "SNI", value: tlsSNI, placeholder: "SNI", key: .tlsSNI))
                 tlsRows.append(.text(label: "ALPN", value: tlsALPN, placeholder: "h2,http/1.1", key: .tlsALPN))
                 tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: fingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .fingerprint))
@@ -197,6 +201,7 @@ class TVProxyEditorViewController: UITableViewController {
                   HysteriaUploadMbpsRange.contains(v) else { return false }
             return true
         }
+        if isTrojan { return !trojanPassword.isEmpty }
         if isShadowsocks { return !ssPassword.isEmpty }
         if isSOCKS5 { return true }
         if isNaive { return !naiveUsername.isEmpty && !naivePassword.isEmpty }
@@ -352,7 +357,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .outboundProtocol:
             if let proto = OutboundProtocol(rawValue: value) {
                 selectedProtocol = proto
-                if isHysteria || isShadowsocks || isSOCKS5 || isNaive {
+                if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isNaive {
                     flow = ""
                     if security == "reality" { security = "none" }
                 }
@@ -383,6 +388,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .shortId: shortId = value
         case .hysteriaPassword: hysteriaPassword = value
         case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
+        case .trojanPassword: trojanPassword = value
         case .ssPassword: ssPassword = value
         case .ssMethod: ssMethod = value
         case .socks5Username: socks5Username = value
@@ -439,6 +445,11 @@ class TVProxyEditorViewController: UITableViewController {
         case .hysteria(let password, let uploadMbps, _):
             hysteriaPassword = password
             hysteriaUploadMbpsText = String(uploadMbps)
+        case .trojan(let password, let tls):
+            trojanPassword = password
+            tlsSNI = tls.serverName
+            tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
+            fingerprint = tls.fingerprint
         case .shadowsocks(let password, let method):
             ssPassword = password
             ssMethod = method
@@ -507,7 +518,7 @@ class TVProxyEditorViewController: UITableViewController {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isShadowsocks || isSOCKS5 || isNaive {
+        if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isNaive {
             parsedUUID = existingConfiguration?.uuid ?? UUID()
         } else {
             guard let uuid = UUID(uuidString: uuid) else { return }
@@ -580,7 +591,14 @@ class TVProxyEditorViewController: UITableViewController {
             outbound = .hysteria(
                 password: hysteriaPassword,
                 uploadMbps: mbps,
-                sni: existingConfiguration?.hysteriaSNI ?? nil
+                sni: existingConfiguration?.hysteriaSNI ?? bareAddress
+            )
+        case .trojan:
+            let sniValue = tlsSNI.isEmpty ? bareAddress : tlsSNI
+            let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
+            outbound = .trojan(
+                password: trojanPassword,
+                tls: TLSConfiguration(serverName: sniValue, alpn: alpn, fingerprint: fingerprint)
             )
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)

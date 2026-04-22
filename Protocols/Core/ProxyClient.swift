@@ -22,8 +22,8 @@ class ProxyClient {
     var connection: RawTCPSocket?
     private var realityClient: RealityClient?
     private var realityConnection: TLSRecordConnection?
-    private var tlsClient: TLSClient?
-    private var tlsConnection: TLSRecordConnection?
+    var tlsClient: TLSClient?
+    var tlsConnection: TLSRecordConnection?
     private var webSocketConnection: WebSocketConnection?
     private var httpUpgradeConnection: HTTPUpgradeConnection?
     private var xhttpConnection: XHTTPConnection?
@@ -338,6 +338,17 @@ class ProxyClient {
                 command: command,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort,
+                completion: completion
+            )
+            return
+        }
+
+        if configuration.outboundProtocol == .trojan {
+            connectWithTrojan(
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                initialData: initialData,
                 completion: completion
             )
             return

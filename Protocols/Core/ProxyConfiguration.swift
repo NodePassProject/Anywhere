@@ -11,6 +11,7 @@ import Foundation
 enum OutboundProtocol: String, Codable {
     case vless
     case hysteria
+    case trojan
     case shadowsocks
     case socks5
     case http11
@@ -38,7 +39,7 @@ enum OutboundProtocol: String, Codable {
         switch self {
         case .vless:
             return true
-        case .hysteria, .shadowsocks, .socks5, .http11, .http2, .http3:
+        case .hysteria, .trojan, .shadowsocks, .socks5, .http11, .http2, .http3:
             return false
         }
     }
@@ -57,6 +58,8 @@ enum OutboundProtocol: String, Codable {
             "VLESS"
         case .hysteria:
             "Hysteria"
+        case .trojan:
+            "Trojan"
         case .shadowsocks:
             "Shadowsocks"
         case .socks5:
@@ -89,11 +92,14 @@ enum Outbound: Hashable {
         muxEnabled: Bool,
         xudpEnabled: Bool
     )
-    /// Hysteria2 runs over QUIC with its own internal TLS. It needs only an
-    /// optional SNI override (otherwise the server address is used) and the
-    /// client's declared upload bandwidth for Brutal congestion control.
-    /// `uploadMbps` is clamped to `HysteriaUploadMbpsRange`.
-    case hysteria(password: String, uploadMbps: Int, sni: String?)
+    /// Hysteria2 runs over QUIC with its own internal TLS. The SNI is always
+    /// populated — callers default it to the server address when there is no
+    /// explicit override. `uploadMbps` is clamped to `HysteriaUploadMbpsRange`.
+    case hysteria(password: String, uploadMbps: Int, sni: String)
+    /// Trojan runs as a thin SHA224(password)+CRLF+request header layered on
+    /// top of mandatory TLS. The TLS knobs (SNI/ALPN/fingerprint) live in the
+    /// associated `TLSConfiguration`; there is no plaintext variant.
+    case trojan(password: String, tls: TLSConfiguration)
     /// Shadowsocks runs over bare TCP with AEAD / 2022 wire encryption.
     case shadowsocks(password: String, method: String)
     /// SOCKS5 runs over bare TCP in the clear.
@@ -238,6 +244,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case security, tls, reality
         case muxEnabled, xudpEnabled
         case hysteriaPassword, hysteriaUploadMbps, hysteriaSNI
+        case trojanPassword, trojanTLS
         case ssPassword, ssMethod
         case socks5Username, socks5Password
         case http11Username, http11Password
@@ -300,19 +307,29 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
         case .hysteria:
             // Older builds stashed SNI inside a top-level TLSConfiguration
-            // blob; read from either the dedicated key or the legacy blob.
+            // blob; read from either the dedicated key or the legacy blob,
+            // and fall back to `serverAddress` so the SNI is always populated.
             let legacySNI: String? = {
                 guard let legacyTLS = try? container.decodeIfPresent(TLSConfiguration.self, forKey: .tls) else { return nil }
                 return legacyTLS.serverName
             }()
-            let sni = try container.decodeIfPresent(String.self, forKey: .hysteriaSNI) ?? legacySNI
+            let explicitSNI = try container.decodeIfPresent(String.self, forKey: .hysteriaSNI) ?? legacySNI
             let raw = try container.decodeIfPresent(Int.self, forKey: .hysteriaUploadMbps)
                 ?? HysteriaUploadMbpsDefault
             outbound = .hysteria(
                 password: try container.decodeIfPresent(String.self, forKey: .hysteriaPassword) ?? "",
                 uploadMbps: clampHysteriaUploadMbps(raw),
-                sni: sni
+                sni: (explicitSNI?.isEmpty == false ? explicitSNI! : serverAddress)
             )
+
+        case .trojan:
+            let password = try container.decodeIfPresent(String.self, forKey: .trojanPassword) ?? ""
+            // Trojan TLS is mandatory; fall back to an SNI=serverAddress default
+            // so legacy/partial configs still decode to a usable outbound.
+            let trojanTLS = try container.decodeIfPresent(TLSConfiguration.self, forKey: .trojanTLS)
+            let legacyTLS = try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)
+            let tls = trojanTLS ?? legacyTLS ?? TLSConfiguration(serverName: serverAddress)
+            outbound = .trojan(password: password, tls: tls)
 
         case .shadowsocks:
             outbound = .shadowsocks(
@@ -389,7 +406,12 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .hysteriaPassword)
             try container.encode(uploadMbps, forKey: .hysteriaUploadMbps)
-            try container.encodeIfPresent(sni, forKey: .hysteriaSNI)
+            try container.encode(sni, forKey: .hysteriaSNI)
+        case .trojan(let password, let tls):
+            try container.encode(id, forKey: .uuid)
+            try container.encode("none", forKey: .encryption)
+            try container.encode(password, forKey: .trojanPassword)
+            try container.encode(tls, forKey: .trojanTLS)
         case .shadowsocks(let password, let method):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
@@ -451,6 +473,7 @@ extension ProxyConfiguration {
         switch outbound {
         case .vless:        .vless
         case .hysteria:     .hysteria
+        case .trojan:       .trojan
         case .shadowsocks:  .shadowsocks
         case .socks5:       .socks5
         case .http11:       .http11
@@ -490,11 +513,23 @@ extension ProxyConfiguration {
         return nil
     }
 
-    /// Optional SNI override for Hysteria's internal TLS handshake.
-    /// `nil` for non-Hysteria (and for Hysteria configs that accept the
-    /// default, where the server address is used).
+    /// SNI sent on the wire for Hysteria's internal TLS handshake.
+    /// Always populated for Hysteria (defaults to `serverAddress`); `nil`
+    /// for non-Hysteria outbounds.
     var hysteriaSNI: String? {
         if case .hysteria(_, _, let sni) = outbound { return sni }
+        return nil
+    }
+
+    /// Trojan password. `nil` for non-Trojan.
+    var trojanPassword: String? {
+        if case .trojan(let password, _) = outbound { return password }
+        return nil
+    }
+
+    /// Trojan's mandatory TLS configuration. `nil` for non-Trojan.
+    var trojanTLS: TLSConfiguration? {
+        if case .trojan(_, let tls) = outbound { return tls }
         return nil
     }
 
