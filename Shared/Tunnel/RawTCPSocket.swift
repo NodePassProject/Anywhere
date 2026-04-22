@@ -44,6 +44,22 @@ enum SocketError: Error, LocalizedError {
     case notConnected
     case sendFailed(String)
     case receiveFailed(String)
+    /// POSIX I/O failure. Preserves the raw `errno` so callers can classify
+    /// by code (e.g. demote `ECONNRESET` logs) instead of comparing
+    /// `strerror` output.
+    case posixError(Operation, errno: Int32)
+
+    enum Operation {
+        case connect, send, receive
+
+        var failurePrefix: String {
+            switch self {
+            case .connect: return "Connection failed"
+            case .send:    return "Send failed"
+            case .receive: return "Receive failed"
+            }
+        }
+    }
 
     var errorDescription: String? {
         switch self {
@@ -53,7 +69,15 @@ enum SocketError: Error, LocalizedError {
         case .notConnected: return "Not connected"
         case .sendFailed(let msg): return "Send failed: \(msg)"
         case .receiveFailed(let msg): return "Receive failed: \(msg)"
+        case .posixError(let op, let errno):
+            return "\(op.failurePrefix): \(String(cString: strerror(errno)))"
         }
+    }
+
+    /// `errno` for POSIX-backed failures; `nil` for the string-only cases.
+    var posixErrno: Int32? {
+        if case .posixError(_, let errno) = self { return errno }
+        return nil
     }
 }
 
@@ -654,7 +678,7 @@ class RawTCPSocket: RawTransport {
                 return
             }
 
-            let err = SocketError.sendFailed(String(cString: strerror(e)))
+            let err = SocketError.posixError(.send, errno: e)
             failPendingSends(with: err)
             // Move state to failed so subsequent sends/receives fail fast.
             stateLock.withLock {
@@ -734,7 +758,7 @@ class RawTCPSocket: RawTransport {
             } else {
                 pendingReceiveCompletion = nil
                 disarmReadSource()
-                completion(nil, true, SocketError.receiveFailed(String(cString: strerror(e))))
+                completion(nil, true, SocketError.posixError(.receive, errno: e))
             }
         }
     }

@@ -115,8 +115,6 @@ class LWIPStack {
 
     private let logLock = NSLock()
     private var logEntries: [LogEntry] = []
-    private let recentTunnelInterruptionLock = NSLock()
-    private var recentTunnelInterruption: RecentTunnelInterruption?
 
     /// Appends a log message to the buffer. Thread-safe.
     func appendLog(_ message: String, level: LogLevel) {
@@ -147,33 +145,6 @@ class LWIPStack {
         if logEntries.count > TunnelConstants.logMaxEntries {
             logEntries.removeFirst(logEntries.count - TunnelConstants.logMaxEntries)
         }
-    }
-
-    /// Records a recent tunnel-level interruption so connection errors that follow
-    /// can be reclassified as VPN/path interruptions instead of generic failures.
-    func noteRecentTunnelInterruption(summary: String, level: LogLevel) {
-        recentTunnelInterruptionLock.lock()
-        recentTunnelInterruption = RecentTunnelInterruption(
-            timestamp: CFAbsoluteTimeGetCurrent(),
-            level: level,
-            summary: summary
-        )
-        recentTunnelInterruptionLock.unlock()
-    }
-
-    /// Returns the most recent tunnel interruption if it is still fresh enough
-    /// to explain follow-up socket failures.
-    func recentTunnelInterruptionContext() -> RecentTunnelInterruption? {
-        let now = CFAbsoluteTimeGetCurrent()
-        recentTunnelInterruptionLock.lock()
-        defer { recentTunnelInterruptionLock.unlock() }
-
-        guard let recentTunnelInterruption else { return nil }
-        guard now - recentTunnelInterruption.timestamp <= TunnelConstants.recentTunnelInterruptionWindow else {
-            self.recentTunnelInterruption = nil
-            return nil
-        }
-        return recentTunnelInterruption
     }
 
     /// Mux manager for multiplexing UDP flows (created when Vision flow is active).
@@ -235,12 +206,6 @@ class LWIPStack {
             }
         }
         return false
-    }
-
-    func clearRecentTunnelInterruption() {
-        recentTunnelInterruptionLock.lock()
-        recentTunnelInterruption = nil
-        recentTunnelInterruptionLock.unlock()
     }
 
     // MARK: - Runtime Configuration

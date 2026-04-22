@@ -66,16 +66,13 @@
 #define TCP_SND_BUF                     (1024 * TCP_MSS)
 #define TCP_SND_QUEUELEN                (4 * TCP_SND_BUF / TCP_MSS)
 #define TCP_SNDLOWAT                    ((2 * TCP_MSS) + 1)
-#define TCP_QUEUE_OOSEQ                 1
-#define TCP_OOSEQ_MAX_BYTES             (1024 * 1024)
-#define TCP_OOSEQ_MAX_PBUFS             1024
+#define TCP_QUEUE_OOSEQ                 0
 #define TCP_OVERSIZE                    TCP_MSS
 #define TCP_WND_UPDATE_THRESHOLD        LWIP_MIN((TCP_WND / 4), (TCP_MSS * 8))
 #define TCP_MAXRTX                      8
 #define TCP_SYNMAXRTX                   3
 #define LWIP_TCP_TIMESTAMPS             0
-#define LWIP_TCP_SACK_OUT               1
-#define LWIP_TCP_MAX_SACK_NUM           8
+#define LWIP_TCP_SACK_OUT               0
 #define LWIP_TCP_CALC_INITIAL_CWND(mss) ((tcpwnd_size_t)(32U * (mss)))
 
 #define TCP_LISTEN_BACKLOG              0

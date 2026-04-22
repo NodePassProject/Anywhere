@@ -236,7 +236,7 @@ final class RawUDPSocket {
                 self.readSource?.cancel()
                 self.readSource = nil
                 if let errorHandler {
-                    let socketError = SocketError.receiveFailed("errno=\(err)")
+                    let socketError = SocketError.posixError(.receive, errno: err)
                     if let handlerQueue {
                         handlerQueue.async { errorHandler(socketError) }
                     } else {
@@ -295,7 +295,7 @@ final class RawUDPSocket {
                 // Kernel TX buffer full; drop and let the upper layer retransmit.
                 return nil
             }
-            return SocketError.sendFailed("errno=\(err)")
+            return SocketError.posixError(.send, errno: err)
         }
         return nil
     }

@@ -347,103 +347,80 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case .requiresConnection:
             let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
             logger.warning("[VPN] Network path waiting for attachment\(reasonSuffix); active connections may pause")
-            lwipStack.noteRecentTunnelInterruption(summary: "network path waiting for attachment", level: .warning)
             reasserting = true
 
         case .unsatisfied:
             let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
             logger.warning("[VPN] Network path unavailable\(reasonSuffix); active connections interrupted")
-            lwipStack.noteRecentTunnelInterruption(summary: "network path unavailable", level: .warning)
             reasserting = true
 
         @unknown default:
             logger.warning("[VPN] Network path changed unexpectedly; active connections may reconnect")
-            lwipStack.noteRecentTunnelInterruption(summary: "unexpected network path change", level: .warning)
         }
     }
 
     private func logTunnelStop(reason: NEProviderStopReason) {
         let message: String
         let level: LWIPStack.LogLevel
-        let summary: String?
 
         switch reason {
         case .userInitiated:
             message = "[VPN] Tunnel stopped by user"
             level = .info
-            summary = nil
         case .providerFailed:
             message = "[VPN] Tunnel stopped because the provider failed"
             level = .error
-            summary = "provider failure"
         case .noNetworkAvailable:
             message = "[VPN] Tunnel stopped because the network became unavailable"
             level = .warning
-            summary = "network unavailable"
         case .unrecoverableNetworkChange:
             message = "[VPN] Tunnel stopped because the network path changed"
             level = .warning
-            summary = "network path change"
         case .providerDisabled:
             message = "[VPN] Tunnel stopped because the provider was disabled"
             level = .warning
-            summary = "provider disabled"
         case .authenticationCanceled:
             message = "[VPN] Tunnel stopped because authentication was canceled"
             level = .warning
-            summary = "authentication canceled"
         case .configurationFailed:
             message = "[VPN] Tunnel stopped because configuration failed"
             level = .error
-            summary = "configuration failure"
         case .idleTimeout:
             message = "[VPN] Tunnel stopped after being idle"
             level = .warning
-            summary = "idle timeout"
         case .configurationDisabled:
             message = "[VPN] Tunnel stopped because the configuration was disabled"
             level = .warning
-            summary = "configuration disabled"
         case .configurationRemoved:
             message = "[VPN] Tunnel stopped because the configuration was removed"
             level = .warning
-            summary = "configuration removed"
         case .superceded:
             message = "[VPN] Tunnel stopped because another VPN took over"
             level = .warning
-            summary = "superseded by another VPN"
         case .userLogout:
             message = "[VPN] Tunnel stopped because the user logged out"
             level = .warning
-            summary = "user logout"
         case .userSwitch:
             message = "[VPN] Tunnel stopped because the active user changed"
             level = .warning
-            summary = "user switch"
         case .connectionFailed:
             message = "[VPN] Tunnel stopped because the VPN connection failed"
             level = .warning
-            summary = "VPN connection failure"
         case .sleep:
             message = "[VPN] Tunnel stopped for device sleep"
             level = .warning
-            summary = "device sleep"
         case .appUpdate:
             message = "[VPN] Tunnel stopped for app update"
             level = .info
-            summary = nil
         case .internalError:
             message = "[VPN] Tunnel stopped because Network Extension hit an internal error"
             level = .error
-            summary = "Network Extension internal error"
         case .none:
             message = "[VPN] Tunnel stopped"
             level = .info
-            summary = nil
         @unknown default:
             message = "[VPN] Tunnel stopped for an unknown reason"
             level = .warning
-            summary = "unknown tunnel stop"
         }
 
         switch level {
@@ -453,10 +430,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             logger.warning(message)
         case .error:
             logger.error(message)
-        }
-
-        if let summary {
-            lwipStack.noteRecentTunnelInterruption(summary: summary, level: level)
         }
     }
 

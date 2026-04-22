@@ -32,25 +32,26 @@ Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere t
 ### Protocols & Security
 
 - **VLESS** with full Vision (XTLS-RPRX-Vision) flow control and adaptive padding
-- **Hysteria2** over QUIC with Brutal congestion control and salamander obfuscation
+- **Hysteria2** over QUIC with Brutal congestion control
+- **Trojan** over TLS with UDP-over-TCP relay
 - **Shadowsocks** (AEAD and Shadowsocks 2022)
 - **SOCKS5** with optional authentication
 - **Naive Proxy** (HTTP/1.1, HTTP/2, HTTP/3) with padding negotiation
 - **Reality** with X25519 key exchange and TLS 1.3 fingerprint spoofing
 - **TLS** with SNI, ALPN, custom trusted certificates, and optional insecure mode
-- **Transports:** TCP, WebSocket (with early data), HTTP Upgrade, XHTTP (stream-one & packet-up over HTTP/1.1 and HTTP/2)
+- **Transports:** TCP, WebSocket (with early data), HTTP Upgrade, XHTTP (stream-one, stream-up, and packet-up over HTTP/1.1 and HTTP/2)
 - **Mux** multiplexing with **XUDP** (GlobalID-based, BLAKE3 keyed hashing)
-- **Fingerprints:** Chrome, Firefox, Safari, Edge, iOS, Android, QQ, 360 (latest and legacy versions, plus `random`)
+- **Fingerprints:** Chrome, Firefox, Safari, iOS, Edge
 
 ### App
 
+- **ASR™ Smart Routing** — reduce latency while routing through proxy on demand
 - **One-tap connect** with animated status UI and real-time traffic stats
 - **Proxy chains** — cascade traffic through multiple outbounds
 - **Subscription import** with auto-detection, auto-refresh, and profile metadata
 - **Deep link support** for quick proxy/subscription import (see [Deep Links](#deep-links))
 - **QR code scanner** for instant config import
 - **Latency testing** per-configuration
-- **ASR™ Smart Routing** — reduce latency while routing through proxy on demand
 - **Custom routing rule sets** with domain/IP/GeoIP matching (MaxMind GeoLite2)
 - **Country bypass** — exclude traffic by destination country
 - **Built-in ad blocking** rule set
@@ -64,8 +65,8 @@ Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere t
 
 ### Architecture
 
-- **Zero third-party Swift/Obj-C dependencies** — Apple frameworks plus vendored C libraries (lwIP, ngtcp2, BLAKE3)
-- **Native Packet Tunnel** — system-wide VPN via `NEPacketTunnelProvider` with a userspace TCP/IP stack (TCP, UDP, ICMP)
+- **Minimal dependencies** — Apple frameworks, vendored C libraries (lwIP, ngtcp2), and Swift implementation of BLAKE3 and YAML
+- **Native Packet Tunnel** — system-wide VPN via `NEPacketTunnelProvider` with a userspace TCP/IP stack
 - **Native QUIC stack** — ngtcp2-powered client used for Hysteria2 and Naive HTTP/3
 - **Fake-IP DNS** — transparent domain-based routing for all apps
 
@@ -91,13 +92,13 @@ Anywhere registers several URL schemes so external apps and websites can trigger
 anywhere://add-proxy?link=<link>
 ```
 
-`<link>` can be any URL the app supports: a subscription URL, a `vless://` link, an `ss://` link, a `hysteria2://` link, etc.
+`<link>` can be any URL the app supports: a subscription URL, a `vless://` link, a `hysteria2://` link, an `ss://` link, etc.
 
 > **Note:** The `link` parameter is parsed by taking everything after `?link=` verbatim, so the inner URL does **not** need to be percent-encoded. For example, `anywhere://add-proxy?link=https://example.com/sub?token=abc&foo=bar` works as expected.
 
 ### Proxy URI Schemes
 
-Tapping a `vless://`, `ss://`, `hysteria2://`, `hy2://`, or `quic://` link on iOS will open Anywhere and pre-fill the full URI in the Add Proxy view for import.
+Tapping a `vless://`, `hysteria2://`, `hy2://`, `trojan://`, `ss://`, or `quic://` link on iOS will open Anywhere and pre-fill the full URI in the Add Proxy view for import.
 
 ### Integration Example
 

@@ -1263,7 +1263,20 @@ tcp_output(struct tcp_pcb *pcb)
     return ERR_OK;
   }
 
-  wnd = LWIP_MIN(pcb->snd_wnd, pcb->cwnd);
+  /* --- BEGIN Anywhere Patch: disable cwnd for TUN deployment ---
+   * Original: wnd = LWIP_MIN(pcb->snd_wnd, pcb->cwnd);
+   *
+   * The peer on this PCB is the local iOS kernel TCP stack reached via an
+   * in-memory NEPacketTunnelFlow, not a real network. That "link" never
+   * drops packets from congestion, so cwnd only introduces spurious
+   * throttles: the initial slow-start ramp, RTO collapse to 1 MSS on a
+   * spurious timeout, and fast-retransmit halving on dupacks. snd_wnd (the
+   * app's advertised receive window) alone provides correct flow control.
+   * Retransmissions still fire off pcb->unacked / TF_INFR, not cwnd.
+   * See lwip/ANYWHERE_PATCHES.md.
+   */
+  wnd = pcb->snd_wnd;
+  /* --- END Anywhere Patch --- */
 
   seg = pcb->unsent;
 

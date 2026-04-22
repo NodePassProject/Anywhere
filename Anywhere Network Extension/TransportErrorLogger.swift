@@ -37,10 +37,25 @@ enum TransportErrorLogger {
         return message
     }
 
-    /// Matches strerror outputs for errors that only occur after the peer has
-    /// already dropped — secondary to an earlier RST/EOF, no new information.
-    private static func isPeerGoneCascade(_ description: String) -> Bool {
-        description == "Broken pipe"
+    /// Classifies a ``SocketError``'s POSIX errno (if any) into a log demotion
+    /// bucket. Returns `nil` when the error doesn't carry an errno or its
+    /// errno isn't one we recognize as a peer-initiated close.
+    private static func peerCloseClass(for error: Error) -> PeerCloseClass? {
+        guard let errno = (error as? SocketError)?.posixErrno else { return nil }
+        switch errno {
+        case EPIPE:        return .cascade     // write after we've seen EOF/RST
+        case ECONNRESET:   return .reset       // remote sent RST
+        default:           return nil
+        }
+    }
+
+    private enum PeerCloseClass {
+        /// Secondary failure after the peer has already dropped — logging it
+        /// would double-report behind an earlier RST/EOF.
+        case cascade
+        /// Primary notification of a peer-initiated RST — expected
+        /// termination from the remote's side, not our failure.
+        case reset
     }
 
     // MARK: - lwIP Error Codes
@@ -79,11 +94,11 @@ enum TransportErrorLogger {
     /// 1. `HTTP2Error` is downgraded to `debug` — GOAWAY/stream-reset is normal
     ///    churn in a long-lived h2 tunnel and doesn't indicate a user-visible
     ///    problem.
-    /// 2. "Broken pipe" on send is demoted — by definition a cascade behind an
-    ///    earlier receive error or RST. Logging it would double-report.
-    /// 3. If a recent tunnel interruption is in the attribution window, the
-    ///    failure is logged at the interruption's level and clearly attributes
-    ///    cause ("after device sleep", "after network path change", …).
+    /// 2. `SocketError` carrying `EPIPE` is demoted to `debug` — by definition
+    ///    a cascade behind an earlier receive error or RST. Logging it would
+    ///    double-report.
+    /// 3. `SocketError` carrying `ECONNRESET` is demoted to `info` — expected
+    ///    termination from the remote's side, not our failure.
     /// 4. Otherwise the failure logs at `defaultLevel`.
     ///
     /// - Parameters:
@@ -108,18 +123,17 @@ enum TransportErrorLogger {
             return
         }
 
-        if isPeerGoneCascade(errorDescription) {
+        switch peerCloseClass(for: error) {
+        case .cascade:
             logger.debug("\(prefix) \(operation) after peer close: \(endpoint): \(errorDescription)")
             return
-        }
-
-        if let interruption = LWIPStack.shared?.recentTunnelInterruptionContext() {
-            if interruption.level == .info {
-                logger.debug("\(prefix) \(operation) ended after \(interruption.summary): \(endpoint): \(errorDescription)")
-            } else {
-                logger.warning("\(prefix) \(operation) interrupted after \(interruption.summary): \(endpoint) (\(errorDescription))")
-            }
+        case .reset:
+            // Peer-initiated RST: normal termination from their side, not a
+            // failure of ours — keep it visible but out of the error stream.
+            logger.info("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)")
             return
+        case .none:
+            break
         }
 
         switch defaultLevel {

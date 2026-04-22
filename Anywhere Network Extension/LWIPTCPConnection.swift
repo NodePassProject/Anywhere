@@ -354,8 +354,6 @@ class LWIPTCPConnection {
         let reason = TransportErrorLogger.describeLwIPError(err)
         if err == -15 { // ERR_CLSD — orderly close, not a failure
             logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
-        } else if let interruption = LWIPStack.shared?.recentTunnelInterruptionContext() {
-            logger.warning("[TCP] lwIP aborted after \(interruption.summary): \(endpointDescription): \(reason)")
         } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
             logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
         } else {

@@ -442,16 +442,22 @@ void tcp_segs_free(struct tcp_seg *seg);
 void tcp_seg_free(struct tcp_seg *seg);
 struct tcp_seg *tcp_seg_copy(struct tcp_seg *seg);
 
-#define tcp_ack(pcb)                               \
-  do {                                             \
-    if((pcb)->flags & TF_ACK_DELAY) {              \
-      tcp_clear_flags(pcb, TF_ACK_DELAY);          \
-      tcp_ack_now(pcb);                            \
-    }                                              \
-    else {                                         \
-      tcp_set_flags(pcb, TF_ACK_DELAY);            \
-    }                                              \
-  } while (0)
+/* --- BEGIN Anywhere Patch: disable delayed ACK for TUN deployment ---
+ * Original: stretch-ACK every other received segment; fall back to
+ * tcp_fasttmr (250 ms) for the tail segment of an odd-count burst.
+ *
+ *   if (flags & TF_ACK_DELAY) { clear; tcp_ack_now; } else { set DELAY; }
+ *
+ * The peer is the local iOS kernel TCP stack reached over an in-memory
+ * NEPacketTunnelFlow. Extra ACK packets on that path are essentially
+ * free, whereas the 250 ms delayed-ACK tail is a real latency tax on
+ * short request/response flows (HTTP GET headers, TLS handshake tail).
+ * Always ACK immediately; TF_ACK_DELAY still exists so the ERR_MEM
+ * retry path in tcp_send_empty_ack / tcp_fasttmr keeps working.
+ * See lwip/ANYWHERE_PATCHES.md.
+ */
+#define tcp_ack(pcb)  tcp_set_flags(pcb, TF_ACK_NOW)
+/* --- END Anywhere Patch --- */
 
 #define tcp_ack_now(pcb)                           \
   tcp_set_flags(pcb, TF_ACK_NOW)

@@ -37,7 +37,6 @@ extension LWIPStack {
             running = true
             totalBytesIn = 0
             totalBytesOut = 0
-            clearRecentTunnelInterruption()
 
             configureRuntime(for: configuration, shouldLoadProxyServerAddresses: true)
             registerCallbacks()
@@ -61,7 +60,6 @@ extension LWIPStack {
             deferredRestart = nil
             shutdownInternal()
             fakeIPPool.reset()
-            clearRecentTunnelInterruption()
         }
 
         AnywhereLogger.logSink = nil
@@ -77,7 +75,6 @@ extension LWIPStack {
     func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
         lwipQueue.async { [self] in
             logger.info("[VPN] Configuration switched; reconnecting active connections")
-            noteRecentTunnelInterruption(summary: "configuration switch", level: .info)
             restartStack(configuration: newConfiguration)
         }
     }
@@ -100,7 +97,6 @@ extension LWIPStack {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
             logger.info("[VPN] Device wake: invalidating outbound proxy state")
-            noteRecentTunnelInterruption(summary: "device wake", level: .info)
 
             muxManager?.closeAll()
             if Self.shouldUseVisionMux(configuration) {
@@ -134,7 +130,6 @@ extension LWIPStack {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
             logger.warning("[VPN] Restarting stack after \(summary)")
-            noteRecentTunnelInterruption(summary: summary, level: .warning)
             restartStack(configuration: configuration)
         }
     }
@@ -299,7 +294,6 @@ extension LWIPStack {
             }
             
             logger.info("[VPN] Settings changed, reconnecting active connections")
-            noteRecentTunnelInterruption(summary: "settings change", level: .info)
 
             // IPv6 connections toggle affects tunnel network settings (IPv6 routes + DNS servers).
             // Encrypted DNS changes also affect tunnel settings (NEDNSOverHTTPSSettings / NEDNSOverTLSSettings).
@@ -323,7 +317,6 @@ extension LWIPStack {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
             logger.info("[VPN] Routing changed; reconnecting active connections")
-            noteRecentTunnelInterruption(summary: "routing change", level: .info)
             restartStack(configuration: configuration)
         }
     }
