@@ -104,6 +104,10 @@ extension LWIPStack {
             } else {
                 muxManager = nil
             }
+            
+            purgeShadowsocksUDPSessions()
+            HysteriaClient.closeAll()
+            HTTP3SessionPool.shared.closeAll()
 
             for (_, flow) in udpFlows {
                 flow.close()
@@ -113,14 +117,6 @@ extension LWIPStack {
             isTearingDown = true
             lwip_bridge_abort_all_tcp()
             isTearingDown = false
-
-            // QUIC-based protocols cache sessions in process-wide pools whose
-            // UDP sockets the kernel tears down on sleep. Without an explicit
-            // nudge they stay "ready" from ngtcp2's POV until its idle timer
-            // finally fires, so the first post-wake request hangs. Drop them
-            // here alongside the mux/TCP invalidation above.
-            HysteriaClient.closeAll()
-            HTTP3SessionPool.shared.closeAll()
         }
     }
 
@@ -161,6 +157,10 @@ extension LWIPStack {
         muxManager?.closeAll()
         muxManager = nil
 
+        purgeShadowsocksUDPSessions()
+        HysteriaClient.closeAll()
+        HTTP3SessionPool.shared.closeAll()
+
         let flowCount = udpFlows.count
         for (_, flow) in udpFlows {
             flow.close()
@@ -170,7 +170,7 @@ extension LWIPStack {
         isTearingDown = true
         lwip_bridge_shutdown()
         isTearingDown = false
-        logger.debug("[LWIPStack] Shutdown complete, closed \(flowCount) UDP flows")
+        logger.debug("[LWIPStack] Shutdown complete")
     }
 
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.

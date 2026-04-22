@@ -173,6 +173,11 @@ class LWIPStack {
     var udpFlows: [UDPFlowKey: LWIPUDPFlow] = [:]
     var udpCleanupTimer: DispatchSourceTimer?
 
+    /// Shared Shadowsocks UDP sessions keyed by configuration id. One session
+    /// services every UDP flow for a given SS configuration, so all
+    /// destinations share a sessionID + upstream socket.
+    var ssUDPSessions: [UUID: ShadowsocksUDPSession] = [:]
+
     /// Domain-based DNS routing (loaded from App Group routing.json).
     let domainRouter = DomainRouter()
 
@@ -213,6 +218,65 @@ class LWIPStack {
             }
         }
         return false
+    }
+
+    // MARK: - Shadowsocks UDP Sessions
+
+    /// Returns the shared SS UDP session for `configuration`, creating one on
+    /// first use. Must be called on `lwipQueue`.
+    ///
+    /// The session lives across individual UDP flows so that one sessionID
+    /// and one upstream socket serve every destination — which is what
+    /// restores full-cone NAT and avoids per-flow session churn. A session
+    /// that has reached a terminal (failed/cancelled) state is evicted and
+    /// replaced transparently.
+    func shadowsocksUDPSession(for configuration: ProxyConfiguration) -> Result<ShadowsocksUDPSession, Error> {
+        if let existing = ssUDPSessions[configuration.id], existing.isUsable {
+            return .success(existing)
+        }
+        ssUDPSessions.removeValue(forKey: configuration.id)
+
+        guard let method = configuration.ssMethod,
+              let cipher = ShadowsocksCipher(method: method) else {
+            return .failure(ShadowsocksError.invalidMethod(configuration.ssMethod ?? "nil"))
+        }
+        guard let password = configuration.ssPassword else {
+            return .failure(ProxyError.protocolError("Shadowsocks password not set"))
+        }
+
+        let mode: ShadowsocksUDPSession.Mode
+        if cipher.isSS2022 {
+            guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
+                return .failure(ShadowsocksError.invalidPSK)
+            }
+            if cipher == .blake3chacha20poly1305 {
+                mode = .ss2022ChaCha(psk: pskList.last!)
+            } else {
+                mode = .ss2022AES(cipher: cipher, pskList: pskList)
+            }
+        } else {
+            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
+            mode = .legacy(cipher: cipher, masterKey: masterKey)
+        }
+
+        let session = ShadowsocksUDPSession(
+            mode: mode,
+            serverHost: configuration.serverAddress,
+            serverPort: configuration.serverPort,
+            delegateQueue: lwipQueue
+        )
+        ssUDPSessions[configuration.id] = session
+        return .success(session)
+    }
+
+    /// Cancels and forgets every SS UDP session. Must be called on `lwipQueue`.
+    /// Called on stack shutdown, configuration switch, and device wake (the
+    /// kernel tears down our UDP sockets during sleep).
+    func purgeShadowsocksUDPSessions() {
+        for (_, session) in ssUDPSessions {
+            session.cancel()
+        }
+        ssUDPSessions.removeAll()
     }
 
     // MARK: - Runtime Configuration

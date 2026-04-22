@@ -1,13 +1,13 @@
 {
   "fill" : {
-    "automatic-gradient" : "srgb:1.00000,0.25279,1.00000,1.00000"
+    "automatic-gradient" : "display-p3:0.33333,0.60000,1.00000,1.00000"
   },
   "groups" : [
     {
       "layers" : [
         {
           "fill" : {
-            "solid" : "display-p3:0.92921,0.78835,0.96783,1.00000"
+            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
           },
           "image-name" : "cloud.svg",
           "name" : "cloud",

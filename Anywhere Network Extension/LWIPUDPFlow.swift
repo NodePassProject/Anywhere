@@ -32,8 +32,11 @@ class LWIPUDPFlow {
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
 
-    // Shadowsocks direct UDP relay
-    private var ssUDPRelay: ShadowsocksUDPRelay?
+    // Shadowsocks shared UDP session + our registration token into it.
+    // The session is owned by LWIPStack and shared across every flow for
+    // this configuration; we only hold a borrowed reference until close().
+    private weak var ssUDPSession: ShadowsocksUDPSession?
+    private var ssUDPSessionToken: ShadowsocksUDPSession.Token?
 
     // Mux path
     private var muxSession: MuxSession?
@@ -104,9 +107,9 @@ class LWIPUDPFlow {
             return
         }
 
-        // Shadowsocks direct UDP relay
-        if let relay = ssUDPRelay {
-            relay.send(data: payload) { [weak self] error in
+        // Shadowsocks shared UDP session
+        if let session = ssUDPSession, let token = ssUDPSessionToken {
+            session.send(token: token, dstHost: dstHost, dstPort: dstPort, payload: payload) { [weak self] error in
                 if let error {
                     self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                 }
@@ -159,34 +162,34 @@ class LWIPUDPFlow {
     // MARK: - Proxy Connection
 
     private func connectProxy() {
-        guard !proxyConnecting && proxyConnection == nil && muxSession == nil && directSocket == nil && ssUDPRelay == nil && !closed else { return }
+        guard !proxyConnecting && proxyConnection == nil && muxSession == nil && directSocket == nil && ssUDPSession == nil && !closed else { return }
 
         if forceBypass || LWIPStack.shared?.shouldBypass(host: dstHost) == true {
             connectDirectUDP()
             return
         }
 
-        proxyConnecting = true
         let hasChain = configuration.chain != nil && !configuration.chain!.isEmpty
 
         // ── Direct fast paths (no chain only) ──────────────────────────────
         //
-        // Protocol-specific helpers (MuxManager, ShadowsocksUDPRelay) create
-        // their own network connections and bypass ProxyClient, so they do NOT
-        // go through connectThroughChainIfNeeded(). They must only be used
-        // when the configuration has no chain. When a chain IS configured,
-        // we always fall through to the ProxyClient path at the bottom, which
-        // builds the chain tunnel before connecting to the exit proxy.
+        // Protocol-specific helpers (MuxManager, ShadowsocksUDPSession) manage
+        // their own connections and bypass ProxyClient. They must only be
+        // used when the configuration has no chain. When a chain IS
+        // configured, we fall through to the ProxyClient path at the bottom,
+        // which builds the chain tunnel before connecting to the exit proxy.
 
         if !hasChain {
             // Mux: only for VLESS with the default configuration (mux is tied to the default proxy)
             let isDefaultConfiguration = (LWIPStack.shared?.configuration?.id == configuration.id)
             if configuration.outboundProtocol == .vless, isDefaultConfiguration, let muxManager = LWIPStack.shared?.muxManager {
+                proxyConnecting = true
                 connectViaMux(muxManager: muxManager)
                 return
             }
 
-            // Shadowsocks: direct UDP datagrams with per-packet encryption
+            // Shadowsocks: register with the shared per-configuration UDP
+            // session (synchronous — session handles its own connect).
             if configuration.outboundProtocol == .shadowsocks {
                 connectShadowsocksUDP()
                 return
@@ -206,6 +209,7 @@ class LWIPUDPFlow {
         // ProxyClient.connectUDP() calls connectThroughChainIfNeeded(), which
         // builds the chain tunnel when needed. This is the ONLY path used when
         // a chain is configured, ensuring intermediate proxies are never skipped.
+        proxyConnecting = true
         connectViaProxyClient()
     }
 
@@ -317,92 +321,102 @@ class LWIPUDPFlow {
     }
 
     private func connectShadowsocksUDP() {
-        guard ssUDPRelay == nil && !closed else { return }
+        guard ssUDPSession == nil && !closed else { return }
 
-        guard let method = configuration.ssMethod else {
-            logger.error("[UDP] Shadowsocks config missing `method` for \(flowKey)")
-            proxyConnecting = false
+        guard let stack = LWIPStack.shared else {
             close()
-            LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
-            return
-        }
-        guard let cipher = ShadowsocksCipher(method: method) else {
-            logger.error("[UDP] Unsupported Shadowsocks cipher `\(method)` for \(flowKey)")
-            proxyConnecting = false
-            close()
-            LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
-            return
-        }
-        guard let password = configuration.ssPassword else {
-            logger.error("[UDP] Shadowsocks config missing `password` for \(flowKey)")
-            proxyConnecting = false
-            close()
-            LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
             return
         }
 
-        let mode: ShadowsocksUDPRelay.Mode
-        if cipher.isSS2022 {
-            guard let psk = ShadowsocksKeyDerivation.decodePSK(password: password, keySize: cipher.keySize) else {
-                logger.error("[UDP] Invalid SS2022 PSK (expected base64 of \(cipher.keySize) bytes) for \(flowKey)")
-                proxyConnecting = false
-                close()
-                LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
-                return
-            }
-            if cipher == .blake3chacha20poly1305 {
-                mode = .ss2022ChaCha(psk: psk)
-            } else {
-                mode = .ss2022AES(cipher: cipher, psk: psk)
-            }
-        } else {
-            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
-            mode = .legacy(cipher: cipher, masterKey: masterKey)
+        let sessionResult = stack.shadowsocksUDPSession(for: configuration)
+        let session: ShadowsocksUDPSession
+        switch sessionResult {
+        case .success(let s):
+            session = s
+        case .failure(let error):
+            logger.error("[UDP] SS session unavailable for \(flowKey): \(error.localizedDescription)")
+            close()
+            stack.udpFlows.removeValue(forKey: flowKey)
+            return
         }
 
-        let relay = ShadowsocksUDPRelay(mode: mode, dstHost: dstHost, dstPort: dstPort)
-        self.ssUDPRelay = relay
+        // Register against the shared session. The shared session handles
+        // connect + pending-send buffering internally; no `proxyConnecting`
+        // dance needed here.
+        //
+        // Seed response-address hints with whatever's already in the DNS
+        // cache. Fresh resolutions aren't forced here because the cache
+        // lookup is synchronous and lwipQueue is performance-critical; the
+        // async prewarm below handles cache misses.
+        let cachedHints = ProxyDNSCache.shared.cachedIPs(for: dstHost) ?? []
 
-        relay.connect(serverHost: configuration.serverAddress, serverPort: configuration.serverPort, lwipQueue: lwipQueue) { [weak self] error in
-            guard let self else { return }
-
-            self.lwipQueue.async {
-                self.proxyConnecting = false
-                guard !self.closed else { return }
-
-                if let error {
-                    self.logTransportFailure("Connect", error: error, defaultLevel: .error)
+        let token = session.register(
+            dstHost: dstHost,
+            dstPort: dstPort,
+            responseHostHints: cachedHints,
+            handler: { [weak self] data in
+                self?.handleProxyData(data)
+            },
+            errorHandler: { [weak self] error in
+                guard let self else { return }
+                self.logTransportFailure("Receive", error: error, defaultLevel: .warning)
+                self.lwipQueue.async {
                     self.close()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
-                    return
                 }
+            }
+        )
 
-                // Send buffered payloads
-                for payload in self.pendingData {
-                    relay.send(data: payload) { [weak self] error in
-                        if let error {
-                            self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
-                        }
-                    }
-                }
-                self.pendingData.removeAll()
-                self.pendingBufferSize = 0
+        self.ssUDPSession = session
+        self.ssUDPSessionToken = token
 
-                // Start receiving responses — both encrypted-recv failures and
-                // the underlying UDP socket dying close the flow so the client
-                // re-resolves DNS instead of siliently stalling.
-                relay.startReceiving { [weak self] data in
-                    self?.handleProxyData(data)
-                } errorHandler: { [weak self] error in
-                    guard let self else { return }
-                    self.logTransportFailure("Receive", error: error, defaultLevel: .warning)
-                    self.lwipQueue.async {
-                        self.close()
-                        LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
-                    }
+        // Drain anything buffered while we were deciding how to connect.
+        // The session itself buffers again if its socket isn't ready yet.
+        let host = dstHost
+        let port = dstPort
+        for payload in pendingData {
+            session.send(token: token, dstHost: host, dstPort: port, payload: payload) { [weak self] error in
+                if let error {
+                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
                 }
             }
         }
+        pendingData.removeAll()
+        pendingBufferSize = 0
+
+        // If the destination is a domain that's not yet in the DNS cache,
+        // kick off an async resolve so subsequent replies can route by
+        // exact IP match instead of relying on the port-only fallback
+        // (which misroutes when multiple flows share a destination port —
+        // e.g. concurrent QUIC connections on 443).
+        if cachedHints.isEmpty, Self.isDomainName(host) {
+            let weakSession = session
+            let localQueue = lwipQueue
+            DispatchQueue.global(qos: .userInitiated).async {
+                let ips = ProxyDNSCache.shared.resolveAll(host)
+                guard !ips.isEmpty else { return }
+                localQueue.async { [weak weakSession] in
+                    weakSession?.addResponseHints(token: token, hints: ips)
+                }
+            }
+        }
+    }
+
+    /// True when `host` looks like a domain name (not an IPv4/IPv6 literal).
+    /// Used to decide whether an async DNS resolve is worth attempting for
+    /// response-address hinting.
+    private static func isDomainName(_ host: String) -> Bool {
+        let bare: String
+        if host.hasPrefix("[") && host.hasSuffix("]") {
+            bare = String(host.dropFirst().dropLast())
+        } else {
+            bare = host
+        }
+        var v4 = in_addr()
+        if inet_pton(AF_INET, bare, &v4) == 1 { return false }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, bare, &v6) == 1 { return false }
+        return !bare.isEmpty
     }
 
     private func connectDirectUDP() {
@@ -505,12 +519,14 @@ class LWIPUDPFlow {
 
     private func releaseProxy() {
         let socket = directSocket
-        let ssRelay = ssUDPRelay
+        let ssSession = ssUDPSession
+        let ssToken = ssUDPSessionToken
         let connection = proxyConnection
         let client = proxyClient
         let session = muxSession
         directSocket = nil
-        ssUDPRelay = nil
+        ssUDPSession = nil
+        ssUDPSessionToken = nil
         proxyConnection = nil
         proxyClient = nil
         muxSession = nil
@@ -518,7 +534,11 @@ class LWIPUDPFlow {
         pendingData.removeAll()
         pendingBufferSize = 0
         socket?.cancel()
-        ssRelay?.cancel()
+        // The SS session is owned by LWIPStack and shared across every flow
+        // for this configuration; unregister but never cancel the session.
+        if let ssSession, let ssToken {
+            ssSession.unregister(token: ssToken)
+        }
         connection?.cancel()
         client?.cancel()
         session?.close()
@@ -526,7 +546,9 @@ class LWIPUDPFlow {
 
     deinit {
         directSocket?.cancel()
-        ssUDPRelay?.cancel()
+        if let ssUDPSession, let ssUDPSessionToken {
+            ssUDPSession.unregister(token: ssUDPSessionToken)
+        }
         proxyConnection?.cancel()
         proxyClient?.cancel()
         muxSession?.close()
