@@ -1,7 +1,5 @@
 #include "SudokuCore.h"
 
-#if NETWORK_EXTENSION
-
 #include <ctype.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -914,8 +912,6 @@ size_t sudoku_encode_pure(
     }
     return out;
 }
-
-#endif
 
 void sudoku_decoder_init(sudoku_decoder_t *decoder) {
     memset(decoder, 0, sizeof(*decoder));

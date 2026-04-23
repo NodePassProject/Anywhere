@@ -6,8 +6,6 @@
 //  Created by saba on 4/23/26.
 //
 
-#if NETWORK_EXTENSION
-
 import Foundation
 
 extension ProxyClient {
@@ -105,5 +103,3 @@ extension ProxyClient {
         }
     }
 }
-
-#endif

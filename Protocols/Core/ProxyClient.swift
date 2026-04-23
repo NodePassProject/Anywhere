@@ -365,16 +365,12 @@ class ProxyClient {
         }
 
         if configuration.outboundProtocol == .sudoku {
-#if NETWORK_EXTENSION
             connectWithSudoku(
                 command: command,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort,
                 completion: completion
             )
-#else
-            completion(.failure(ProxyError.protocolError("Sudoku outbound is available only in the network extension target")))
-#endif
             return
         }
 

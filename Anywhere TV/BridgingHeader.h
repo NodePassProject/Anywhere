@@ -9,5 +9,6 @@
 #define BridgingHeader_h
 
 #include "../Shared/ngtcp2/ngtcp2_bridge.h"
+#include "../Protocols/Sudoku/SudokuSwiftBridge.h"
 
 #endif /* BridgingHeader_h */

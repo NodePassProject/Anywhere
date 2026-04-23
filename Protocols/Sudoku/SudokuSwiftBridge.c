@@ -20,8 +20,6 @@ with this application without prior consent.
 
 #include "SudokuSwiftBridge.h"
 
-#if NETWORK_EXTENSION
-
 int sudoku_swift_client_connect_tcp(
     const sudoku_outbound_config_t *cfg,
     const char *target_host,
@@ -101,5 +99,3 @@ void sudoku_swift_uot_close(sudoku_uot_handle_t handle) {
     if (!handle) return;
     sudoku_uot_client_close((sudoku_uot_client_t *)handle);
 }
-
-#endif

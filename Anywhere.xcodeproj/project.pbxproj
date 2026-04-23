@@ -802,7 +802,6 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
-					"NETWORK_EXTENSION=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
@@ -848,7 +847,6 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
-					"NETWORK_EXTENSION=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";

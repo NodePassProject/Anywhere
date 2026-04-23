@@ -1,7 +1,5 @@
 #include "SudokuOutbound.h"
 
-#if NETWORK_EXTENSION
-
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
@@ -2913,5 +2911,3 @@ void sudoku_mux_client_close(sudoku_mux_client_t *client) {
     pthread_mutex_destroy(&client->mu);
     free(client);
 }
-
-#endif

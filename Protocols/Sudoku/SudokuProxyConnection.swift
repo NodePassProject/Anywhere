@@ -6,8 +6,6 @@
 //  Created by saba on 4/23/26.
 //
 
-#if NETWORK_EXTENSION
-
 import Foundation
 import Darwin
 
@@ -725,5 +723,3 @@ final class SudokuUDPProxyConnection: ProxyConnection {
         return .connectionFailed(fallback)
     }
 }
-
-#endif
