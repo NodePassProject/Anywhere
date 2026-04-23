@@ -14,6 +14,7 @@ enum OutboundProtocol: String, Codable {
     case trojan
     case shadowsocks
     case socks5
+    case sudoku
     case http11
     case http2
     case http3
@@ -39,7 +40,7 @@ enum OutboundProtocol: String, Codable {
         switch self {
         case .vless:
             return true
-        case .hysteria, .trojan, .shadowsocks, .socks5, .http11, .http2, .http3:
+        case .hysteria, .trojan, .shadowsocks, .socks5, .sudoku, .http11, .http2, .http3:
             return false
         }
     }
@@ -64,6 +65,8 @@ enum OutboundProtocol: String, Codable {
             "Shadowsocks"
         case .socks5:
             "SOCKS5"
+        case .sudoku:
+            "Sudoku"
         case .http11:
             "HTTPS"
         case .http2:
@@ -104,6 +107,8 @@ enum Outbound: Hashable {
     case shadowsocks(password: String, method: String)
     /// SOCKS5 runs over bare TCP in the clear.
     case socks5(username: String?, password: String?)
+    /// Sudoku runs over TCP with protocol-native obfuscation, KIP, and optional HTTPMask tunneling.
+    case sudoku(SudokuConfiguration)
     /// Naive over HTTP/1.1-over-TLS. TLS is managed internally by the Naive stack.
     case http11(username: String, password: String)
     /// Naive over HTTP/2-over-TLS.
@@ -247,6 +252,10 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case trojanPassword, trojanTLS
         case ssPassword, ssMethod
         case socks5Username, socks5Password
+        case sudoku
+        case sudokuKey, sudokuAEADMethod, sudokuPaddingMin, sudokuPaddingMax
+        case sudokuASCIIMode, sudokuCustomTable, sudokuCustomTables
+        case sudokuEnablePureDownlink, sudokuHTTPMask
         case http11Username, http11Password
         case http2Username, http2Password
         case http3Username, http3Password
@@ -341,6 +350,36 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 username: try container.decodeIfPresent(String.self, forKey: .socks5Username),
                 password: try container.decodeIfPresent(String.self, forKey: .socks5Password)
             )
+        case .sudoku:
+            if let configuration = try container.decodeIfPresent(SudokuConfiguration.self, forKey: .sudoku) {
+                outbound = .sudoku(configuration)
+            } else {
+                let aead = SudokuAEADMethod(
+                    rawValue: try container.decodeIfPresent(String.self, forKey: .sudokuAEADMethod)
+                        ?? SudokuAEADMethod.chacha20Poly1305.rawValue
+                ) ?? .chacha20Poly1305
+                let asciiMode = SudokuASCIIMode(
+                    normalized: try container.decodeIfPresent(String.self, forKey: .sudokuASCIIMode)
+                        ?? SudokuASCIIMode.preferEntropy.rawValue
+                ) ?? .preferEntropy
+                let httpMask = try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .sudokuHTTPMask) ?? .init()
+                let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .sudokuCustomTable) ?? ""
+                var mergedCustomTables = try container.decodeIfPresent([String].self, forKey: .sudokuCustomTables) ?? []
+                let trimmedLegacyCustomTable = legacyCustomTable.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedLegacyCustomTable.isEmpty && !mergedCustomTables.contains(trimmedLegacyCustomTable) {
+                    mergedCustomTables.insert(trimmedLegacyCustomTable, at: 0)
+                }
+                outbound = .sudoku(SudokuConfiguration(
+                    key: try container.decodeIfPresent(String.self, forKey: .sudokuKey) ?? "",
+                    aeadMethod: aead,
+                    paddingMin: try container.decodeIfPresent(Int.self, forKey: .sudokuPaddingMin) ?? 5,
+                    paddingMax: try container.decodeIfPresent(Int.self, forKey: .sudokuPaddingMax) ?? 15,
+                    asciiMode: asciiMode,
+                    customTables: mergedCustomTables,
+                    enablePureDownlink: try container.decodeIfPresent(Bool.self, forKey: .sudokuEnablePureDownlink) ?? true,
+                    httpMask: httpMask
+                ))
+            }
         case .http11:
             outbound = .http11(
                 username: try container.decodeIfPresent(String.self, forKey: .http11Username) ?? "",
@@ -422,6 +461,18 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode("none", forKey: .encryption)
             try container.encodeIfPresent(username, forKey: .socks5Username)
             try container.encodeIfPresent(password, forKey: .socks5Password)
+        case .sudoku(let configuration):
+            try container.encode(id, forKey: .uuid)
+            try container.encode("none", forKey: .encryption)
+            try container.encode(configuration, forKey: .sudoku)
+            try container.encode(configuration.key, forKey: .sudokuKey)
+            try container.encode(configuration.aeadMethod.rawValue, forKey: .sudokuAEADMethod)
+            try container.encode(configuration.paddingMin, forKey: .sudokuPaddingMin)
+            try container.encode(configuration.paddingMax, forKey: .sudokuPaddingMax)
+            try container.encode(configuration.asciiMode.rawValue, forKey: .sudokuASCIIMode)
+            try container.encode(configuration.customTables, forKey: .sudokuCustomTables)
+            try container.encode(configuration.enablePureDownlink, forKey: .sudokuEnablePureDownlink)
+            try container.encode(configuration.httpMask, forKey: .sudokuHTTPMask)
         case .http11(let username, let password):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
@@ -476,6 +527,7 @@ extension ProxyConfiguration {
         case .trojan:       .trojan
         case .shadowsocks:  .shadowsocks
         case .socks5:       .socks5
+        case .sudoku:       .sudoku
         case .http11:       .http11
         case .http2:        .http2
         case .http3:        .http3
@@ -557,10 +609,17 @@ extension ProxyConfiguration {
         return nil
     }
 
+    /// Sudoku configuration. `nil` for non-Sudoku.
+    var sudoku: SudokuConfiguration? {
+        if case .sudoku(let configuration) = outbound { return configuration }
+        return nil
+    }
+
     /// Username for the active protocol, or `nil` if not applicable.
     var activeUsername: String? {
         switch outbound {
         case .socks5(let u, _): u
+        case .sudoku: nil
         case .http11(let u, _): u
         case .http2(let u, _):  u
         case .http3(let u, _):  u
@@ -572,6 +631,7 @@ extension ProxyConfiguration {
     var activePassword: String? {
         switch outbound {
         case .socks5(_, let p): p
+        case .sudoku: nil
         case .http11(_, let p): p
         case .http2(_, let p):  p
         case .http3(_, let p):  p

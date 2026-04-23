@@ -18,11 +18,12 @@ final class DeepLinkManager: ObservableObject {
     // anywhere://add-proxy?link=<link>
     // vless://<...>
     // ss://<...>
+    // sudoku://<...>
     func handle(url: URL) {
         switch url.scheme?.lowercased() {
         case "anywhere":
             handleAnywhereScheme(url)
-        case "vless", "ss":
+        case "vless", "ss", "sudoku":
             pendingAction = .addProxyManual(url: url.absoluteString)
         default:
             break

@@ -85,6 +85,47 @@ extension ProxyConfiguration {
                 username: configurationDict["socks5Username"] as? String,
                 password: configurationDict["socks5Password"] as? String
             )
+        case .sudoku:
+            let aead = SudokuAEADMethod(
+                rawValue: (configurationDict["sudokuAEADMethod"] as? String)
+                    ?? SudokuAEADMethod.chacha20Poly1305.rawValue
+            ) ?? .chacha20Poly1305
+            let ascii = SudokuASCIIMode(
+                normalized: (configurationDict["sudokuASCIIMode"] as? String)
+                    ?? SudokuASCIIMode.preferEntropy.rawValue
+            ) ?? .preferEntropy
+            let multiplex = SudokuHTTPMaskMultiplex(
+                rawValue: (configurationDict["sudokuHTTPMaskMultiplex"] as? String)
+                    ?? SudokuHTTPMaskMultiplex.off.rawValue
+            ) ?? .off
+            let mode = SudokuHTTPMaskMode(
+                rawValue: (configurationDict["sudokuHTTPMaskMode"] as? String)
+                    ?? SudokuHTTPMaskMode.legacy.rawValue
+            ) ?? .legacy
+            let legacyCustomTable = (configurationDict["sudokuCustomTable"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            var mergedCustomTables = (configurationDict["sudokuCustomTables"] as? [String]) ?? []
+            if !legacyCustomTable.isEmpty && !mergedCustomTables.contains(legacyCustomTable) {
+                mergedCustomTables.insert(legacyCustomTable, at: 0)
+            }
+            let httpMask = SudokuHTTPMaskConfiguration(
+                disable: (configurationDict["sudokuHTTPMaskDisable"] as? Bool) ?? false,
+                mode: mode,
+                tls: (configurationDict["sudokuHTTPMaskTLS"] as? Bool) ?? false,
+                host: (configurationDict["sudokuHTTPMaskHost"] as? String) ?? "",
+                pathRoot: (configurationDict["sudokuHTTPMaskPathRoot"] as? String) ?? "",
+                multiplex: multiplex
+            )
+            outbound = .sudoku(SudokuConfiguration(
+                key: (configurationDict["sudokuKey"] as? String) ?? "",
+                aeadMethod: aead,
+                paddingMin: (configurationDict["sudokuPaddingMin"] as? Int) ?? 5,
+                paddingMax: (configurationDict["sudokuPaddingMax"] as? Int) ?? 15,
+                asciiMode: ascii,
+                customTables: mergedCustomTables,
+                enablePureDownlink: (configurationDict["sudokuEnablePureDownlink"] as? Bool) ?? true,
+                httpMask: httpMask
+            ))
         case .http11:
             outbound = .http11(
                 username: (configurationDict["http11Username"] as? String) ?? "",

@@ -30,6 +30,8 @@ extension ProxyConfiguration {
             return toShadowsocksURL()
         case .socks5:
             return toSOCKS5URL()
+        case .sudoku:
+            return toSudokuURL()
         case .http11, .http2, .http3:
             return toNaiveURL()
         }
@@ -143,6 +145,30 @@ extension ProxyConfiguration {
             return "socks5://\(encodedUser):\(encodedPass)@\(bracketedServerAddress):\(serverPort)#\(fragment)"
         }
         return "socks5://\(bracketedServerAddress):\(serverPort)#\(fragment)"
+    }
+
+    private func toSudokuURL() -> String {
+        guard let sudoku else { return "sudoku://" }
+        var payload: [String: Any] = [
+            "h": serverAddress,
+            "p": Int(serverPort),
+            "k": sudoku.key,
+            "a": sudoku.asciiMode.shortLinkToken,
+            "e": sudoku.aeadMethod.rawValue,
+            "x": !sudoku.enablePureDownlink
+        ]
+        if !sudoku.customTables.isEmpty { payload["ts"] = sudoku.customTables }
+        if sudoku.httpMask.disable { payload["hd"] = true }
+        if sudoku.httpMask.mode != .legacy { payload["hm"] = sudoku.httpMask.mode.rawValue }
+        if sudoku.httpMask.tls { payload["ht"] = true }
+        if !sudoku.httpMask.host.isEmpty { payload["hh"] = sudoku.httpMask.host }
+        if sudoku.httpMask.multiplex != .off { payload["hx"] = sudoku.httpMask.multiplex.rawValue }
+        if !sudoku.httpMask.pathRoot.isEmpty { payload["hy"] = sudoku.httpMask.pathRoot }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            return "sudoku://"
+        }
+        return "sudoku://\(data.base64URLEncodedString())"
     }
 
     private func toNaiveURL() -> String {
