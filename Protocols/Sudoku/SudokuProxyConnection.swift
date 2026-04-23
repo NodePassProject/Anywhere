@@ -41,6 +41,7 @@ private enum SudokuBridgeConstants {
 }
 
 private final class SudokuSocketBridge {
+    private static let queueKey = DispatchSpecificKey<Bool>()
     private let ioQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.bridge.io", qos: .userInitiated)
     private let bridgeWriteQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.bridge.write", qos: .userInitiated)
     private let tunnel: ProxyConnection
@@ -69,6 +70,7 @@ private final class SudokuSocketBridge {
         self.onClose = onClose
         self.cRuntimeFD = fds[0]
         self.bridgeFD = fds[1]
+        ioQueue.setSpecific(key: Self.queueKey, value: true)
 
         let flags = fcntl(bridgeFD, F_GETFL, 0)
         if flags >= 0 {
@@ -93,28 +95,34 @@ private final class SudokuSocketBridge {
     }
 
     func close() {
-        ioQueue.async { [weak self] in
-            guard let self, !self.closed else { return }
-            self.closed = true
-            self.readSource?.cancel()
-            self.readSource = nil
-            if self.cRuntimeFD >= 0 {
-                Darwin.shutdown(self.cRuntimeFD, SHUT_RDWR)
-                Darwin.close(self.cRuntimeFD)
-                self.cRuntimeFD = -1
-            }
-            if self.bridgeFD >= 0 {
-                Darwin.shutdown(self.bridgeFD, SHUT_RDWR)
-                Darwin.close(self.bridgeFD)
-                self.bridgeFD = -1
-            }
-            self.tunnel.cancel()
-            for client in self.retainedClients {
-                client.cancel()
-            }
-            self.pendingSends.removeAll()
-            self.onClose?(self)
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            performClose()
+        } else {
+            ioQueue.sync { performClose() }
         }
+    }
+
+    private func performClose() {
+        guard !closed else { return }
+        closed = true
+        readSource?.cancel()
+        readSource = nil
+        if cRuntimeFD >= 0 {
+            Darwin.shutdown(cRuntimeFD, SHUT_RDWR)
+            Darwin.close(cRuntimeFD)
+            cRuntimeFD = -1
+        }
+        if bridgeFD >= 0 {
+            Darwin.shutdown(bridgeFD, SHUT_RDWR)
+            Darwin.close(bridgeFD)
+            bridgeFD = -1
+        }
+        tunnel.cancel()
+        for client in retainedClients {
+            client.cancel()
+        }
+        pendingSends.removeAll()
+        onClose?(self)
     }
 
     private func armReadSource() {

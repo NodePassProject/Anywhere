@@ -3,6 +3,7 @@
 #if NETWORK_EXTENSION
 
 #include <ctype.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -186,7 +187,7 @@ static const int64_t sudoku_go_rng_cooked[607] = {
 
 static sudoku_grid_t sudoku_all_grids[SUDOKU_GRID_COUNT];
 static uint8_t sudoku_hint_positions[SUDOKU_HINT_POSITION_COUNT][4];
-static int sudoku_tables_built = 0;
+static pthread_once_t sudoku_tables_once = PTHREAD_ONCE_INIT;
 
 static void sudoku_build_hint_positions(void) {
     size_t idx = 0;
@@ -247,13 +248,9 @@ static void sudoku_generate_grids_rec(sudoku_grid_t *cur, int idx, size_t *out_i
 static void sudoku_build_static_tables(void) {
     sudoku_grid_t g;
     size_t idx = 0;
-    if (sudoku_tables_built) {
-        return;
-    }
     memset(&g, 0, sizeof(g));
     sudoku_generate_grids_rec(&g, 0, &idx);
     sudoku_build_hint_positions();
-    sudoku_tables_built = 1;
 }
 
 static int32_t sudoku_seedrand(int32_t x) {
@@ -456,11 +453,39 @@ static int sudoku_decode_map_get(const sudoku_table_t *table, uint32_t key, uint
 }
 
 static void sudoku_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
+    SHA256(data, len, out);
+}
+
+static int sudoku_sha256_parts(
+    const uint8_t *part1, size_t part1_len,
+    const uint8_t *part2, size_t part2_len,
+    const uint8_t *part3, size_t part3_len,
+    const uint8_t *part4, size_t part4_len,
+    const uint8_t *part5, size_t part5_len,
+    const uint8_t *part6, size_t part6_len,
+    const uint8_t *part7, size_t part7_len,
+    const uint8_t *part8, size_t part8_len,
+    const uint8_t *part9, size_t part9_len,
+    uint8_t out[32]
+) {
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(ctx, data, len);
-    EVP_DigestFinal_ex(ctx, out, NULL);
+    if (!ctx) return -1;
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) goto fail;
+    if (part1_len && EVP_DigestUpdate(ctx, part1, part1_len) != 1) goto fail;
+    if (part2_len && EVP_DigestUpdate(ctx, part2, part2_len) != 1) goto fail;
+    if (part3_len && EVP_DigestUpdate(ctx, part3, part3_len) != 1) goto fail;
+    if (part4_len && EVP_DigestUpdate(ctx, part4, part4_len) != 1) goto fail;
+    if (part5_len && EVP_DigestUpdate(ctx, part5, part5_len) != 1) goto fail;
+    if (part6_len && EVP_DigestUpdate(ctx, part6, part6_len) != 1) goto fail;
+    if (part7_len && EVP_DigestUpdate(ctx, part7, part7_len) != 1) goto fail;
+    if (part8_len && EVP_DigestUpdate(ctx, part8, part8_len) != 1) goto fail;
+    if (part9_len && EVP_DigestUpdate(ctx, part9, part9_len) != 1) goto fail;
+    if (EVP_DigestFinal_ex(ctx, out, NULL) != 1) goto fail;
     EVP_MD_CTX_free(ctx);
+    return 0;
+fail:
+    EVP_MD_CTX_free(ctx);
+    return -1;
 }
 
 static uint32_t sudoku_table_hint_fingerprint(
@@ -470,20 +495,21 @@ static uint32_t sudoku_table_hint_fingerprint(
     const char *downlink_pattern
 ) {
     uint8_t sum[32];
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     uint32_t out;
-    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(ctx, "sudoku-table-hint", 17);
-    EVP_DigestUpdate(ctx, "\0", 1);
-    EVP_DigestUpdate(ctx, key, strlen(key));
-    EVP_DigestUpdate(ctx, "\0", 1);
-    EVP_DigestUpdate(ctx, mode, strlen(mode));
-    EVP_DigestUpdate(ctx, "\0", 1);
-    EVP_DigestUpdate(ctx, uplink_pattern, strlen(uplink_pattern));
-    EVP_DigestUpdate(ctx, "\0", 1);
-    EVP_DigestUpdate(ctx, downlink_pattern, strlen(downlink_pattern));
-    EVP_DigestFinal_ex(ctx, sum, NULL);
-    EVP_MD_CTX_free(ctx);
+    static const uint8_t zero_sep = 0;
+    if (sudoku_sha256_parts(
+            (const uint8_t *)"sudoku-table-hint", 17,
+            &zero_sep, 1,
+            (const uint8_t *)key, strlen(key),
+            &zero_sep, 1,
+            (const uint8_t *)mode, strlen(mode),
+            &zero_sep, 1,
+            (const uint8_t *)uplink_pattern, strlen(uplink_pattern),
+            &zero_sep, 1,
+            (const uint8_t *)downlink_pattern, strlen(downlink_pattern),
+            sum) != 0) {
+        memset(sum, 0, sizeof(sum));
+    }
     out = ((uint32_t)sum[0] << 24) | ((uint32_t)sum[1] << 16) | ((uint32_t)sum[2] << 8) | (uint32_t)sum[3];
     return out;
 }
@@ -720,7 +746,7 @@ static int sudoku_table_init_one(sudoku_table_t *table, const char *key, const c
     int byte_val;
     size_t total_entries = 0;
     memset(table, 0, sizeof(*table));
-    sudoku_build_static_tables();
+    pthread_once(&sudoku_tables_once, sudoku_build_static_tables);
     if (sudoku_layout_from_token(&table->layout, token, custom_pattern ? custom_pattern : "") != 0) {
         return -1;
     }
