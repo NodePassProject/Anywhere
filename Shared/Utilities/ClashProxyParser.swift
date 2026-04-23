@@ -72,6 +72,7 @@ struct ClashProxyParser {
         case "trojan":    return parseTrojanProxy(node)
         case "ss":        return parseShadowsocksProxy(node)
         case "socks5":    return parseSOCKS5Proxy(node)
+        case "sudoku":    return parseSudokuProxy(node)
         default:          return nil
         }
     }
@@ -301,6 +302,50 @@ struct ClashProxyParser {
         )
     }
 
+    // MARK: - Sudoku
+
+    private static func parseSudokuProxy(_ node: Node) -> ProxyConfiguration? {
+        guard
+            let basics = parseBasics(node),
+            let key = getString(node, key: "key")
+        else { return nil }
+
+        let aead = SudokuAEADMethod(
+            rawValue: getString(node, key: "aead-method") ?? SudokuAEADMethod.chacha20Poly1305.rawValue
+        ) ?? .chacha20Poly1305
+        let asciiMode = SudokuASCIIMode(
+            normalized: getString(node, key: "table-type") ?? SudokuASCIIMode.preferEntropy.rawValue
+        ) ?? .preferEntropy
+        let legacyCustomTable = (getString(node, key: "custom-table") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var customTables = getStringSequence(node, key: "custom-tables") ?? []
+        if !legacyCustomTable.isEmpty && !customTables.contains(legacyCustomTable) {
+            customTables.insert(legacyCustomTable, at: 0)
+        }
+        let paddingMin = getInt(node, key: "padding-min") ?? 5
+        let paddingMax = getInt(node, key: "padding-max") ?? max(paddingMin, 15)
+        let pureDownlink = getBool(node, key: "enable-pure-downlink") ?? true
+
+        let httpMaskNode = node["httpmask"]
+        let httpMask = parseSudokuHTTPMask(httpMaskNode)
+
+        return ProxyConfiguration(
+            name: basics.name,
+            serverAddress: basics.server,
+            serverPort: basics.port,
+            outbound: .sudoku(SudokuConfiguration(
+                key: key,
+                aeadMethod: aead,
+                paddingMin: paddingMin,
+                paddingMax: paddingMax,
+                asciiMode: asciiMode,
+                customTables: customTables,
+                enablePureDownlink: pureDownlink,
+                httpMask: httpMask
+            ))
+        )
+    }
+
     // MARK: - Shared option parsing
 
     /// Reads the SNI used by VLESS/Trojan/Hysteria — Clash spells it
@@ -373,6 +418,20 @@ struct ClashProxyParser {
                 earlyDataHeaderName: earlyDataHeaderName
             ))
         }
+    }
+
+    private static func parseSudokuHTTPMask(_ node: Node) -> SudokuHTTPMaskConfiguration {
+        guard node.type == .map else { return .init() }
+        return SudokuHTTPMaskConfiguration(
+            disable: getBool(node, key: "disable") ?? false,
+            mode: SudokuHTTPMaskMode(rawValue: getString(node, key: "mode") ?? SudokuHTTPMaskMode.legacy.rawValue) ?? .legacy,
+            tls: getBool(node, key: "tls") ?? false,
+            host: getString(node, key: "host") ?? "",
+            pathRoot: getString(node, key: "path-root") ?? getString(node, key: "path_root") ?? "",
+            multiplex: SudokuHTTPMaskMultiplex(
+                rawValue: getString(node, key: "multiplex") ?? SudokuHTTPMaskMultiplex.off.rawValue
+            ) ?? .off
+        )
     }
 
     /// Maps Clash `client-fingerprint` strings to `TLSFingerprint` raw values.

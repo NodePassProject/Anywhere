@@ -839,6 +839,20 @@ class VPNViewModel: ObservableObject {
         case .socks5(let username, let password):
             if let username { configurationDict["socks5Username"] = username }
             if let password { configurationDict["socks5Password"] = password }
+        case .sudoku(let sudoku):
+            configurationDict["sudokuKey"] = sudoku.key
+            configurationDict["sudokuAEADMethod"] = sudoku.aeadMethod.rawValue
+            configurationDict["sudokuPaddingMin"] = sudoku.paddingMin
+            configurationDict["sudokuPaddingMax"] = sudoku.paddingMax
+            configurationDict["sudokuASCIIMode"] = sudoku.asciiMode.rawValue
+            configurationDict["sudokuCustomTables"] = sudoku.customTables
+            configurationDict["sudokuEnablePureDownlink"] = sudoku.enablePureDownlink
+            configurationDict["sudokuHTTPMaskDisable"] = sudoku.httpMask.disable
+            configurationDict["sudokuHTTPMaskMode"] = sudoku.httpMask.mode.rawValue
+            configurationDict["sudokuHTTPMaskTLS"] = sudoku.httpMask.tls
+            configurationDict["sudokuHTTPMaskHost"] = sudoku.httpMask.host
+            configurationDict["sudokuHTTPMaskPathRoot"] = sudoku.httpMask.pathRoot
+            configurationDict["sudokuHTTPMaskMultiplex"] = sudoku.httpMask.multiplex.rawValue
         case .http11(let username, let password):
             configurationDict["http11Username"] = username
             configurationDict["http11Password"] = password
