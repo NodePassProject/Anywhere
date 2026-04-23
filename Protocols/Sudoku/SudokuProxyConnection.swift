@@ -8,6 +8,7 @@
 
 import Foundation
 import Darwin
+import CryptoKit
 
 private let sudokuLogger = AnywhereLogger(category: "Sudoku")
 
@@ -19,7 +20,21 @@ private func sudoku_swift_socket_factory_open(
 ) -> Int32 {
     guard let context, let host else { return -1 }
     let connector = Unmanaged<SudokuChainConnector>.fromOpaque(context).takeUnretainedValue()
-    return connector.openSocket(host: String(cString: host), port: port)
+    return connector.openSocket(host: String(cString: host), port: port, useTLS: false, serverName: nil)
+}
+
+@_cdecl("sudoku_swift_socket_factory_open_ex")
+private func sudoku_swift_socket_factory_open_ex(
+    _ context: UnsafeMutableRawPointer?,
+    _ host: UnsafePointer<CChar>?,
+    _ port: UInt16,
+    _ useTLS: Int32,
+    _ serverName: UnsafePointer<CChar>?
+) -> Int32 {
+    guard let context, let host else { return -1 }
+    let connector = Unmanaged<SudokuChainConnector>.fromOpaque(context).takeUnretainedValue()
+    let sni = serverName.flatMap { String(cString: $0) }
+    return connector.openSocket(host: String(cString: host), port: port, useTLS: useTLS != 0, serverName: sni)
 }
 
 private enum SudokuBridgeConstants {
@@ -36,6 +51,207 @@ private enum SudokuBridgeConstants {
     static let tcpReadBufferSize = 16 * 1024
     static let udpReadBufferSize = 64 * 1024
     static let udpHostBufferSize = 256
+}
+
+private enum SudokuCryptoBridge {
+    private static let lock = UnfairLock()
+    private static var callbacksRegistered = false
+
+    static func ensureRegistered() {
+        lock.withLock {
+            guard !callbacksRegistered else { return }
+            sudoku_swift_set_crypto_callbacks(
+                sudokuAEADEncrypt,
+                sudokuAEADDecrypt,
+                sudokuX25519Generate,
+                sudokuX25519Shared
+            )
+            callbacksRegistered = true
+        }
+    }
+}
+
+private let sudokuAEADEncrypt: @convention(c) (
+    UnsafeMutablePointer<UInt8>?,
+    UnsafePointer<UInt8>?,
+    Int,
+    UnsafePointer<UInt8>?,
+    Int,
+    UnsafePointer<UInt8>?,
+    Int,
+    UnsafePointer<UInt8>?,
+    Int,
+    Int32
+) -> Int32 = { dest, key, keyLen, nonce, nonceLen, plaintext, plaintextLen, aad, aadLen, aeadKind in
+    guard let dest, let key, let nonce else { return -1 }
+
+    let symmetricKey = SymmetricKey(data: UnsafeBufferPointer(start: key, count: keyLen))
+    let nonceData = Data(
+        bytesNoCopy: UnsafeMutableRawPointer(mutating: nonce),
+        count: nonceLen,
+        deallocator: .none
+    )
+    let plaintextData: Data = (plaintext != nil && plaintextLen > 0)
+        ? Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: plaintext!), count: plaintextLen, deallocator: .none)
+        : Data()
+    let aadData: Data = (aad != nil && aadLen > 0)
+        ? Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: aad!), count: aadLen, deallocator: .none)
+        : Data()
+
+    do {
+        switch aeadKind {
+        case SUDOKU_SWIFT_AEAD_AES128_GCM:
+            let cryptoNonce = try AES.GCM.Nonce(data: nonceData)
+            let sealed = try AES.GCM.seal(
+                plaintextData,
+                using: symmetricKey,
+                nonce: cryptoNonce,
+                authenticating: aadData
+            )
+            let ciphertextLength = sealed.ciphertext.count
+            sealed.ciphertext.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress, ciphertextLength > 0 {
+                    memcpy(dest, base, ciphertextLength)
+                }
+            }
+            sealed.tag.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress {
+                    memcpy(dest.advanced(by: ciphertextLength), base, bytes.count)
+                }
+            }
+            return 0
+        case SUDOKU_SWIFT_AEAD_CHACHA20_POLY1305:
+            let cryptoNonce = try ChaChaPoly.Nonce(data: nonceData)
+            let sealed = try ChaChaPoly.seal(
+                plaintextData,
+                using: symmetricKey,
+                nonce: cryptoNonce,
+                authenticating: aadData
+            )
+            let ciphertextLength = sealed.ciphertext.count
+            sealed.ciphertext.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress, ciphertextLength > 0 {
+                    memcpy(dest, base, ciphertextLength)
+                }
+            }
+            sealed.tag.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress {
+                    memcpy(dest.advanced(by: ciphertextLength), base, bytes.count)
+                }
+            }
+            return 0
+        default:
+            return -1
+        }
+    } catch {
+        return -1
+    }
+}
+
+private let sudokuAEADDecrypt: @convention(c) (
+    UnsafeMutablePointer<UInt8>?,
+    UnsafePointer<UInt8>?,
+    Int,
+    UnsafePointer<UInt8>?,
+    Int,
+    UnsafePointer<UInt8>?,
+    Int,
+    UnsafePointer<UInt8>?,
+    Int,
+    Int32
+) -> Int32 = { dest, key, keyLen, nonce, nonceLen, ciphertext, ciphertextLen, aad, aadLen, aeadKind in
+    guard let dest, let key, let nonce, let ciphertext, ciphertextLen >= 16 else { return -1 }
+
+    let symmetricKey = SymmetricKey(data: UnsafeBufferPointer(start: key, count: keyLen))
+    let nonceData = Data(
+        bytesNoCopy: UnsafeMutableRawPointer(mutating: nonce),
+        count: nonceLen,
+        deallocator: .none
+    )
+    let bodyLength = ciphertextLen - 16
+    let ciphertextData = Data(
+        bytesNoCopy: UnsafeMutableRawPointer(mutating: ciphertext),
+        count: bodyLength,
+        deallocator: .none
+    )
+    let tagData = Data(
+        bytesNoCopy: UnsafeMutableRawPointer(mutating: ciphertext.advanced(by: bodyLength)),
+        count: 16,
+        deallocator: .none
+    )
+    let aadData: Data = (aad != nil && aadLen > 0)
+        ? Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: aad!), count: aadLen, deallocator: .none)
+        : Data()
+
+    do {
+        let plaintext: Data
+        switch aeadKind {
+        case SUDOKU_SWIFT_AEAD_AES128_GCM:
+            let cryptoNonce = try AES.GCM.Nonce(data: nonceData)
+            let sealed = try AES.GCM.SealedBox(nonce: cryptoNonce, ciphertext: ciphertextData, tag: tagData)
+            plaintext = try AES.GCM.open(sealed, using: symmetricKey, authenticating: aadData)
+        case SUDOKU_SWIFT_AEAD_CHACHA20_POLY1305:
+            let cryptoNonce = try ChaChaPoly.Nonce(data: nonceData)
+            let sealed = try ChaChaPoly.SealedBox(nonce: cryptoNonce, ciphertext: ciphertextData, tag: tagData)
+            plaintext = try ChaChaPoly.open(sealed, using: symmetricKey, authenticating: aadData)
+        default:
+            return -1
+        }
+        plaintext.withUnsafeBytes { bytes in
+            if let base = bytes.baseAddress, bytes.count > 0 {
+                memcpy(dest, base, bytes.count)
+            }
+        }
+        return 0
+    } catch {
+        return -1
+    }
+}
+
+private let sudokuX25519Generate: @convention(c) (
+    UnsafeMutablePointer<UInt8>?,
+    UnsafeMutablePointer<UInt8>?
+) -> Int32 = { privateKey, publicKey in
+    guard let privateKey, let publicKey else { return -1 }
+    let key = Curve25519.KeyAgreement.PrivateKey()
+    key.rawRepresentation.withUnsafeBytes { bytes in
+        if let base = bytes.baseAddress {
+            memcpy(privateKey, base, bytes.count)
+        }
+    }
+    key.publicKey.rawRepresentation.withUnsafeBytes { bytes in
+        if let base = bytes.baseAddress {
+            memcpy(publicKey, base, bytes.count)
+        }
+    }
+    return 0
+}
+
+private let sudokuX25519Shared: @convention(c) (
+    UnsafePointer<UInt8>?,
+    UnsafePointer<UInt8>?,
+    UnsafeMutablePointer<UInt8>?
+) -> Int32 = { privateKey, peerPublicKey, sharedKey in
+    guard let privateKey, let peerPublicKey, let sharedKey else { return -1 }
+    do {
+        let local = try Curve25519.KeyAgreement.PrivateKey(
+            rawRepresentation: Data(bytes: privateKey, count: 32)
+        )
+        let remote = try Curve25519.KeyAgreement.PublicKey(
+            rawRepresentation: Data(bytes: peerPublicKey, count: 32)
+        )
+        let sharedSecret = try local.sharedSecretFromKeyAgreement(with: remote)
+        let sharedData = sharedSecret.withUnsafeBytes { Data($0) }
+        guard sharedData.count == 32 else { return -1 }
+        sharedData.withUnsafeBytes { bytes in
+            if let base = bytes.baseAddress {
+                memcpy(sharedKey, base, bytes.count)
+            }
+        }
+        return 0
+    } catch {
+        return -1
+    }
 }
 
 private final class SudokuSocketBridge {
@@ -251,7 +467,7 @@ final class SudokuChainConnector {
         UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
     }
 
-    func openSocket(host: String, port: UInt16) -> Int32 {
+    func openSocket(host: String, port: UInt16, useTLS: Bool, serverName: String?) -> Int32 {
         if stateLock.withLock({ closed }) {
             return -1
         }
@@ -259,7 +475,7 @@ final class SudokuChainConnector {
         let semaphore = DispatchSemaphore(value: 0)
         var resultFD: Int32 = -1
 
-        openTunnel(to: host, port: port) { [weak self] result in
+        openTunnel(to: host, port: port, useTLS: useTLS, serverName: serverName) { [weak self] result in
             defer { semaphore.signal() }
             guard let self else { return }
             switch result {
@@ -274,13 +490,17 @@ final class SudokuChainConnector {
                     for client in payload.retainedClients { client.cancel() }
                     return
                 }
+                var shouldCloseBridge = false
                 self.stateLock.withLock {
                     if self.closed {
-                        bridge.close()
+                        shouldCloseBridge = true
                         return
                     }
                     self.bridges.append(bridge)
                     resultFD = bridge.takeCRuntimeFD()
+                }
+                if shouldCloseBridge {
+                    bridge.close()
                 }
             case .failure:
                 break
@@ -325,6 +545,8 @@ final class SudokuChainConnector {
     private func openTunnel(
         to host: String,
         port: UInt16,
+        useTLS: Bool,
+        serverName: String?,
         completion: @escaping (Result<(connection: ProxyConnection, retainedClients: [ProxyClient]), Error>) -> Void
     ) {
         if let tunnel = stateLock.withLock({ () -> ProxyConnection? in
@@ -337,7 +559,7 @@ final class SudokuChainConnector {
         }
 
         guard let chain = configuration.chain, !chain.isEmpty else {
-            completion(.failure(ProxyError.protocolError("Sudoku chain connector has no tunnel or chain")))
+            openDirectTunnel(to: host, port: port, useTLS: useTLS, serverName: serverName, completion: completion)
             return
         }
 
@@ -350,6 +572,40 @@ final class SudokuChainConnector {
             retainedClients: [],
             completion: completion
         )
+    }
+
+    private func openDirectTunnel(
+        to host: String,
+        port: UInt16,
+        useTLS: Bool,
+        serverName: String?,
+        completion: @escaping (Result<(connection: ProxyConnection, retainedClients: [ProxyClient]), Error>) -> Void
+    ) {
+        if useTLS {
+            let tlsClient = TLSClient(
+                configuration: TLSConfiguration(serverName: serverName ?? host)
+            )
+            tlsClient.connect(host: host, port: port) { result in
+                switch result {
+                case .success(let connection):
+                    completion(.success((TLSProxyConnection(tlsConnection: connection), [])))
+                case .failure(let error):
+                    tlsClient.cancel()
+                    completion(.failure(error))
+                }
+            }
+            return
+        }
+
+        let transport = RawTCPSocket()
+        transport.connect(host: host, port: port) { error in
+            if let error {
+                transport.forceCancel()
+                completion(.failure(error))
+            } else {
+                completion(.success((DirectProxyConnection(connection: transport), [])))
+            }
+        }
     }
 
     private func buildChainTunnel(
@@ -410,6 +666,8 @@ struct SudokuOutboundConfigBridge {
         guard let sudoku = configuration.sudoku else {
             throw ProxyError.protocolError("Sudoku configuration is missing")
         }
+
+        SudokuCryptoBridge.ensureRegistered()
 
         var cfg = sudoku_outbound_config_t()
         sudoku_outbound_config_init(&cfg)
@@ -584,6 +842,125 @@ final class SudokuTCPProxyConnection: ProxyConnection {
         }
         if let handle {
             sudoku_swift_client_close(handle)
+        }
+    }
+
+    private static func lastError(_ fallback: String) -> ProxyError {
+        let code = errno
+        if code != 0 {
+            return .connectionFailed("\(fallback): \(String(cString: strerror(code)))")
+        }
+        return .connectionFailed(fallback)
+    }
+}
+
+final class SudokuMuxTCPProxyConnection: ProxyConnection {
+    private let readQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.mux.tcp.read", qos: .userInitiated)
+    private let writeQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.mux.tcp.write", qos: .userInitiated)
+    private var muxHandle: sudoku_mux_handle_t?
+    private var streamHandle: sudoku_mux_stream_handle_t?
+    private let chainConnector: SudokuChainConnector?
+
+    init(
+        muxHandle: sudoku_mux_handle_t,
+        streamHandle: sudoku_mux_stream_handle_t,
+        chainConnector: SudokuChainConnector? = nil
+    ) {
+        self.muxHandle = muxHandle
+        self.streamHandle = streamHandle
+        self.chainConnector = chainConnector
+        super.init()
+    }
+
+    deinit {
+        closeHandle()
+    }
+
+    var isClosed: Bool {
+        lock.withLock { streamHandle == nil && muxHandle == nil }
+    }
+
+    override var isConnected: Bool {
+        !isClosed
+    }
+
+    override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
+        guard !data.isEmpty else {
+            completion(nil)
+            return
+        }
+        writeQueue.async { [weak self] in
+            guard let self else {
+                completion(ProxyError.connectionFailed("Sudoku mux TCP connection deallocated"))
+                return
+            }
+            guard let stream = self.lock.withLock({ self.streamHandle }) else {
+                completion(ProxyError.connectionFailed("Sudoku mux TCP stream is closed"))
+                return
+            }
+            let result = data.withUnsafeBytes { bytes -> ssize_t in
+                sudoku_swift_mux_stream_send(stream, bytes.baseAddress, bytes.count)
+            }
+            if result == data.count {
+                completion(nil)
+            } else if self.isClosed {
+                completion(nil)
+            } else {
+                completion(Self.lastError("Sudoku mux TCP send failed"))
+            }
+        }
+    }
+
+    override func sendRaw(data: Data) {
+        sendRaw(data: data) { error in
+            if let error {
+                sudokuLogger.error("[Sudoku-MuxTCP] Send error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
+        readQueue.async { [weak self] in
+            guard let self else {
+                completion(nil, ProxyError.connectionFailed("Sudoku mux TCP connection deallocated"))
+                return
+            }
+            guard let stream = self.lock.withLock({ self.streamHandle }) else {
+                completion(nil, nil)
+                return
+            }
+            var buffer = [UInt8](repeating: 0, count: SudokuBridgeConstants.tcpReadBufferSize)
+            let count = buffer.withUnsafeMutableBytes { bytes -> ssize_t in
+                sudoku_swift_mux_stream_recv(stream, bytes.baseAddress, bytes.count)
+            }
+            if count > 0 {
+                completion(Data(buffer.prefix(Int(count))), nil)
+            } else if count == 0 || self.isClosed {
+                completion(nil, nil)
+            } else {
+                completion(nil, Self.lastError("Sudoku mux TCP receive failed"))
+            }
+        }
+    }
+
+    override func cancel() {
+        closeHandle()
+        chainConnector?.closeAll()
+    }
+
+    func closeHandle() {
+        let handles = lock.withLock { () -> (sudoku_mux_stream_handle_t?, sudoku_mux_handle_t?) in
+            let stream = self.streamHandle
+            let mux = self.muxHandle
+            self.streamHandle = nil
+            self.muxHandle = nil
+            return (stream, mux)
+        }
+        if let stream = handles.0 {
+            sudoku_swift_mux_stream_close(stream)
+        }
+        if let mux = handles.1 {
+            sudoku_swift_mux_client_close(mux)
         }
     }
 

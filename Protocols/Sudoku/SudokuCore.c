@@ -6,8 +6,25 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <openssl/evp.h>
-#include <openssl/sha.h>
+#if defined(__APPLE__) && !defined(SUDOKU_LOCAL_OPENSSL_BACKEND)
+#  define SUDOKU_CORE_USE_OPENSSL 0
+#else
+#  if defined(__has_include)
+#    if __has_include(<openssl/evp.h>) && __has_include(<openssl/sha.h>)
+#      define SUDOKU_CORE_USE_OPENSSL 1
+#    endif
+#  endif
+#  ifndef SUDOKU_CORE_USE_OPENSSL
+#    define SUDOKU_CORE_USE_OPENSSL 0
+#  endif
+#endif
+
+#if SUDOKU_CORE_USE_OPENSSL
+#  include <openssl/evp.h>
+#  include <openssl/sha.h>
+#else
+#  include <CommonCrypto/CommonDigest.h>
+#endif
 
 #define SUDOKU_GRID_COUNT 288
 #define SUDOKU_HINT_POSITION_COUNT 1820
@@ -451,7 +468,11 @@ static int sudoku_decode_map_get(const sudoku_table_t *table, uint32_t key, uint
 }
 
 static void sudoku_sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
+#if SUDOKU_CORE_USE_OPENSSL
     SHA256(data, len, out);
+#else
+    CC_SHA256(data, (CC_LONG)len, out);
+#endif
 }
 
 static int sudoku_sha256_parts(
@@ -466,6 +487,7 @@ static int sudoku_sha256_parts(
     const uint8_t *part9, size_t part9_len,
     uint8_t out[32]
 ) {
+#if SUDOKU_CORE_USE_OPENSSL
     EVP_MD_CTX *ctx = EVP_MD_CTX_new();
     if (!ctx) return -1;
     if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) goto fail;
@@ -484,6 +506,21 @@ static int sudoku_sha256_parts(
 fail:
     EVP_MD_CTX_free(ctx);
     return -1;
+#else
+    CC_SHA256_CTX ctx;
+    CC_SHA256_Init(&ctx);
+    if (part1_len) CC_SHA256_Update(&ctx, part1, (CC_LONG)part1_len);
+    if (part2_len) CC_SHA256_Update(&ctx, part2, (CC_LONG)part2_len);
+    if (part3_len) CC_SHA256_Update(&ctx, part3, (CC_LONG)part3_len);
+    if (part4_len) CC_SHA256_Update(&ctx, part4, (CC_LONG)part4_len);
+    if (part5_len) CC_SHA256_Update(&ctx, part5, (CC_LONG)part5_len);
+    if (part6_len) CC_SHA256_Update(&ctx, part6, (CC_LONG)part6_len);
+    if (part7_len) CC_SHA256_Update(&ctx, part7, (CC_LONG)part7_len);
+    if (part8_len) CC_SHA256_Update(&ctx, part8, (CC_LONG)part8_len);
+    if (part9_len) CC_SHA256_Update(&ctx, part9, (CC_LONG)part9_len);
+    CC_SHA256_Final(out, &ctx);
+    return 0;
+#endif
 }
 
 static uint32_t sudoku_table_hint_fingerprint(
