@@ -26,6 +26,7 @@ class ProxyClient {
     var tlsConnection: TLSRecordConnection?
     private var webSocketConnection: WebSocketConnection?
     private var httpUpgradeConnection: HTTPUpgradeConnection?
+    private var grpcConnection: GRPCConnection?
     private var xhttpConnection: XHTTPConnection?
 
     /// Proxy tunnel from a previous chain link (for proxy chaining).
@@ -213,12 +214,14 @@ class ProxyClient {
 
     /// Cancels the connection and releases all resources.
     func cancel() {
-        xhttpConnection?.cancel()
-        xhttpConnection = nil
-        httpUpgradeConnection?.cancel()
-        httpUpgradeConnection = nil
         webSocketConnection?.cancel()
         webSocketConnection = nil
+        httpUpgradeConnection?.cancel()
+        httpUpgradeConnection = nil
+        grpcConnection?.cancel()
+        grpcConnection = nil
+        xhttpConnection?.cancel()
+        xhttpConnection = nil
         connection?.forceCancel()
         connection = nil
         realityConnection?.cancel()
@@ -387,6 +390,12 @@ class ProxyClient {
                 return
             }
             connectWithHTTPUpgrade(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+        case .grpc:
+            if isVisionFlow {
+                completion(.failure(ProxyError.protocolError("Vision flow is not supported over gRPC transport")))
+                return
+            }
+            connectWithGRPC(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         case .xhttp:
             if isVisionFlow {
                 completion(.failure(ProxyError.protocolError("Vision flow is not supported over XHTTP transport")))
@@ -730,6 +739,174 @@ class ProxyClient {
             let httpUpgradeProxyConnection = HTTPUpgradeProxyConnection(huConnection: huConnection)
             self.sendProtocolHandshake(
                 over: httpUpgradeProxyConnection, command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData,
+                supportsVision: false, completion: completion
+            )
+        }
+    }
+
+    // MARK: - gRPC Connection
+
+    /// Returns the TLS configuration to use for gRPC. ALPN is forced to `h2` because
+    /// gRPC requires HTTP/2.
+    private func sanitizedGRPCTLSConfiguration(from base: TLSConfiguration) -> TLSConfiguration {
+        TLSConfiguration(
+            serverName: base.serverName,
+            alpn: ["h2"],
+            fingerprint: base.fingerprint
+        )
+    }
+
+    /// Connects using gRPC transport, opening a single bidirectional gRPC stream over
+    /// HTTP/2. Routes through Reality, TLS, or plain TCP based on configuration.
+    private func connectWithGRPC(
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        guard let grpcConfig = configuration.grpc else {
+            completion(.failure(ProxyError.connectionFailed("gRPC transport specified but no gRPC configuration")))
+            return
+        }
+
+        // Resolve the :authority to send over HTTP/2 from the TLS / Reality SNI when
+        // no explicit override is configured.
+        let tlsServerName: String?
+        if case .tls(let tls) = configuration.securityLayer { tlsServerName = tls.serverName }
+        else { tlsServerName = nil }
+        let realityServerName: String?
+        if case .reality(let reality) = configuration.securityLayer { realityServerName = reality.serverName }
+        else { realityServerName = nil }
+        let authority = grpcConfig.resolvedAuthority(
+            tlsServerName: tlsServerName,
+            realityServerName: realityServerName,
+            serverAddress: configuration.serverAddress
+        )
+
+        if let realityConfig = configuration.reality {
+            // Reality + gRPC: Reality handles its own ALPN internally; layer gRPC on top.
+            let realityClient = RealityClient(configuration: realityConfig)
+
+            let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, realityClient] result in
+                guard let self else {
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                    return
+                }
+                switch result {
+                case .success(let realityConnection):
+                    self.realityClient = realityClient
+                    self.realityConnection = realityConnection
+                    let grpcConnection = GRPCConnection(
+                        tlsConnection: realityConnection,
+                        configuration: grpcConfig,
+                        authority: authority
+                    )
+                    self.performGRPCSetup(
+                        grpcConnection: grpcConnection, command: command, destinationHost: destinationHost,
+                        destinationPort: destinationPort, initialData: initialData, completion: completion
+                    )
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+
+            if let tunnel = self.tunnel {
+                realityClient.connect(overTunnel: tunnel, completion: handleRealityResult)
+            } else {
+                realityClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleRealityResult)
+            }
+            return
+        }
+
+        if let baseTLSConfig = configuration.tls {
+            // gRPC over TLS: force ALPN `h2`, handshake, then open the HTTP/2 stream.
+            let grpcTLSConfig = sanitizedGRPCTLSConfiguration(from: baseTLSConfig)
+            let tlsClient = TLSClient(configuration: grpcTLSConfig)
+
+            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
+                guard let self else {
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                    return
+                }
+                switch result {
+                case .success(let tlsConnection):
+                    self.tlsClient = tlsClient
+                    self.tlsConnection = tlsConnection
+                    let grpcConnection = GRPCConnection(
+                        tlsConnection: tlsConnection,
+                        configuration: grpcConfig,
+                        authority: authority
+                    )
+                    self.performGRPCSetup(
+                        grpcConnection: grpcConnection, command: command, destinationHost: destinationHost,
+                        destinationPort: destinationPort, initialData: initialData, completion: completion
+                    )
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+
+            if let tunnel = self.tunnel {
+                tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
+            } else {
+                tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
+            }
+            return
+        }
+
+        // Plain gRPC (no TLS).
+        if let tunnel = self.tunnel {
+            let grpcConnection = GRPCConnection(tunnel: tunnel, configuration: grpcConfig, authority: authority)
+            performGRPCSetup(
+                grpcConnection: grpcConnection, command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
+        } else {
+            let transport = RawTCPSocket()
+            self.connection = transport
+            transport.connect(host: directDialHost, port: configuration.serverPort) { [weak self] error in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                guard let self else {
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                    return
+                }
+                let grpcConnection = GRPCConnection(transport: transport, configuration: grpcConfig, authority: authority)
+                self.performGRPCSetup(
+                    grpcConnection: grpcConnection, command: command, destinationHost: destinationHost,
+                    destinationPort: destinationPort, initialData: initialData, completion: completion
+                )
+            }
+        }
+    }
+
+    /// Performs the gRPC HTTP/2 setup then sends the VLESS protocol handshake.
+    private func performGRPCSetup(
+        grpcConnection: GRPCConnection,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        self.grpcConnection = grpcConnection
+
+        grpcConnection.performSetup { [weak self] error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            guard let self else {
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                return
+            }
+            let grpcProxyConnection = GRPCProxyConnection(grpcConnection: grpcConnection)
+            self.sendProtocolHandshake(
+                over: grpcProxyConnection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
                 supportsVision: false, completion: completion
             )
