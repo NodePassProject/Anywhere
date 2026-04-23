@@ -180,6 +180,25 @@ extension ProxyConfiguration {
             return .httpUpgrade(HTTPUpgradeConfiguration(
                 host: huHost, path: huPath, headers: huHeaders
             ))
+        case "grpc":
+            let serviceName = (configurationDict["grpcServiceName"] as? String) ?? ""
+            let authority = (configurationDict["grpcAuthority"] as? String) ?? ""
+            let multiMode = (configurationDict["grpcMultiMode"] as? Bool) ?? false
+            let userAgent = (configurationDict["grpcUserAgent"] as? String) ?? ""
+            let initialWindowsSize = (configurationDict["grpcInitialWindowsSize"] as? Int) ?? 0
+            let idleTimeout = (configurationDict["grpcIdleTimeout"] as? Int) ?? 0
+            let healthCheckTimeout = (configurationDict["grpcHealthCheckTimeout"] as? Int) ?? 0
+            let permitWithoutStream = (configurationDict["grpcPermitWithoutStream"] as? Bool) ?? false
+            return .grpc(GRPCConfiguration(
+                serviceName: serviceName,
+                authority: authority,
+                multiMode: multiMode,
+                userAgent: userAgent,
+                initialWindowsSize: initialWindowsSize,
+                idleTimeout: idleTimeout,
+                healthCheckTimeout: healthCheckTimeout,
+                permitWithoutStream: permitWithoutStream
+            ))
         case "xhttp":
             let tlsServerName: String?
             if case .tls(let tls) = securityLayer { tlsServerName = tls.serverName }
