@@ -886,6 +886,17 @@ class VPNViewModel: ObservableObject {
                     configurationDict["huHeaders"] = hu.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
                 }
             }
+            
+            if let grpc = configuration.grpc {
+                configurationDict["grpcServiceName"] = grpc.serviceName
+                configurationDict["grpcAuthority"] = grpc.authority
+                configurationDict["grpcMultiMode"] = grpc.multiMode
+                configurationDict["grpcUserAgent"] = grpc.userAgent
+                configurationDict["grpcInitialWindowsSize"] = grpc.initialWindowsSize
+                configurationDict["grpcIdleTimeout"] = grpc.idleTimeout
+                configurationDict["grpcHealthCheckTimeout"] = grpc.healthCheckTimeout
+                configurationDict["grpcPermitWithoutStream"] = grpc.permitWithoutStream
+            }
 
             if let xhttp = configuration.xhttp {
                 configurationDict["xhttpHost"] = xhttp.host
