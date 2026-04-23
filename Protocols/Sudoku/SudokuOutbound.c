@@ -21,6 +21,7 @@
 #include <openssl/kdf.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
+#include <openssl/sha.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
@@ -223,25 +224,6 @@ static void sudoku_httpmask_mark_closed(sudoku_httpmask_state_t *state, int fata
 static void sudoku_httpmask_interrupt_active(sudoku_httpmask_state_t *state);
 static int sudoku_httpmask_best_effort_post(sudoku_httpmask_state_t *state, const char *path);
 
-static int sudoku_hex_decode(const char *hex, uint8_t *out, size_t out_cap, size_t *out_len) {
-    size_t len = strlen(hex);
-    size_t i;
-    if ((len & 1u) != 0 || out_cap < len / 2) {
-        return -1;
-    }
-    for (i = 0; i < len; i += 2) {
-        unsigned int v = 0;
-        if (sscanf(hex + i, "%2x", &v) != 1) {
-            return -1;
-        }
-        out[i / 2] = (uint8_t)v;
-    }
-    if (out_len) {
-        *out_len = len / 2;
-    }
-    return 0;
-}
-
 static void sudoku_hex_encode(const uint8_t *src, size_t len, char *out) {
     static const char *hex = "0123456789abcdef";
     size_t i;
@@ -253,15 +235,87 @@ static void sudoku_hex_encode(const uint8_t *src, size_t len, char *out) {
 }
 
 static void sudoku_sha256_bytes(const uint8_t *data, size_t len, uint8_t out[32]) {
-    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
-    EVP_DigestInit_ex(ctx, EVP_sha256(), NULL);
-    EVP_DigestUpdate(ctx, data, len);
-    EVP_DigestFinal_ex(ctx, out, NULL);
-    EVP_MD_CTX_free(ctx);
+    SHA256(data, len, out);
 }
 
 static void sudoku_sha256_string(const char *s, uint8_t out[32]) {
     sudoku_sha256_bytes((const uint8_t *)s, strlen(s), out);
+}
+
+static int sudoku_hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int sudoku_hex_decode(const char *hex, uint8_t *out, size_t out_cap, size_t *out_len) {
+    size_t len = strlen(hex);
+    size_t i;
+    if ((len & 1u) != 0 || out_cap < len / 2) {
+        return -1;
+    }
+    for (i = 0; i < len; i += 2) {
+        int hi = sudoku_hex_nibble(hex[i]);
+        int lo = sudoku_hex_nibble(hex[i + 1]);
+        if (hi < 0 || lo < 0) {
+            return -1;
+        }
+        out[i / 2] = (uint8_t)((hi << 4) | lo);
+    }
+    if (out_len) {
+        *out_len = len / 2;
+    }
+    return 0;
+}
+
+typedef struct {
+    const uint8_t *data;
+    size_t len;
+} sudoku_bytespan_t;
+
+static int sudoku_hmac_sha256_parts(
+    const uint8_t *key,
+    size_t key_len,
+    const sudoku_bytespan_t *parts,
+    size_t part_count,
+    uint8_t out[32]
+) {
+    unsigned int mac_len = 0;
+    uint8_t stack_buf[256];
+    uint8_t *msg = stack_buf;
+    size_t total = 0;
+    size_t off = 0;
+    size_t i;
+
+    for (i = 0; i < part_count; ++i) {
+        total += parts[i].len;
+    }
+
+    if (total > sizeof(stack_buf)) {
+        msg = (uint8_t *)malloc(total);
+        if (!msg) return -1;
+    }
+
+    for (i = 0; i < part_count; ++i) {
+        if (!parts[i].data || parts[i].len == 0) continue;
+        memcpy(msg + off, parts[i].data, parts[i].len);
+        off += parts[i].len;
+    }
+
+    if (!HMAC(EVP_sha256(), key, (int)key_len, msg, total, out, &mac_len) || mac_len != 32) {
+        if (msg != stack_buf) free(msg);
+        return -1;
+    }
+    if (msg != stack_buf) free(msg);
+    return 0;
+}
+
+static int sudoku_set_socket_common_opts(int fd) {
+    int one = 1;
+    if (fd < 0) return -1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+    return 0;
 }
 
 static int sudoku_public_key_from_private(
@@ -403,7 +457,7 @@ static int sudoku_pick_client_tables(
         patterns[pattern_count++] = "";
     }
 
-    if (pattern_count > 1 && strcmp(uplink_token, "entropy") != 0) {
+    if (pattern_count > 1 && strcmp(uplink_token, "entropy") != 0 && strcmp(downlink_token, "entropy") != 0) {
         pattern_count = 1;
     }
     if (pattern_count > 1 && sudoku_random_index(pattern_count, &selected) != 0) {
@@ -443,6 +497,7 @@ static ssize_t sudoku_socket_send(sudoku_transport_t *tr, const void *buf, size_
         if (tr->ssl) n = SSL_write(tr->ssl, (const uint8_t *)buf + sent, (int)(len - sent));
         else n = send(tr->fd, (const uint8_t *)buf + sent, len - sent, 0);
         pthread_mutex_unlock(&tr->write_mu);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return -1;
         sent += (size_t)n;
     }
@@ -456,7 +511,10 @@ static ssize_t sudoku_socket_recv_some(sudoku_transport_t *tr, void *buf, size_t
         pthread_mutex_unlock(&tr->read_mu);
         return n;
     } else {
-        ssize_t n = recv(tr->fd, buf, len, 0);
+        ssize_t n;
+        do {
+            n = recv(tr->fd, buf, len, 0);
+        } while (n < 0 && errno == EINTR);
         pthread_mutex_unlock(&tr->read_mu);
         return n;
     }
@@ -530,16 +588,22 @@ static void sudoku_httpmask_auth_token(
     uint8_t full[32];
     uint8_t ts_sig[24];
     uint64_t ts = (uint64_t)time(NULL);
-    unsigned int mac_len = 0;
-    HMAC_CTX *hctx;
+    static const uint8_t zero_sep = 0;
+    sudoku_bytespan_t mac_parts[7];
 
     {
         EVP_MD_CTX *md = EVP_MD_CTX_new();
-        EVP_DigestInit_ex(md, EVP_sha256(), NULL);
-        EVP_DigestUpdate(md, "sudoku-httpmask-auth-v1:", 24);
-        EVP_DigestUpdate(md, auth_key, strlen(auth_key));
-        EVP_DigestFinal_ex(md, key, NULL);
-        EVP_MD_CTX_free(md);
+        if (!md) {
+            memset(key, 0, sizeof(key));
+        } else {
+            if (EVP_DigestInit_ex(md, EVP_sha256(), NULL) != 1 ||
+                EVP_DigestUpdate(md, "sudoku-httpmask-auth-v1:", 24) != 1 ||
+                EVP_DigestUpdate(md, auth_key, strlen(auth_key)) != 1 ||
+                EVP_DigestFinal_ex(md, key, NULL) != 1) {
+                memset(key, 0, sizeof(key));
+            }
+            EVP_MD_CTX_free(md);
+        }
     }
 
     ts_sig[0] = (uint8_t)(ts >> 56);
@@ -551,17 +615,23 @@ static void sudoku_httpmask_auth_token(
     ts_sig[6] = (uint8_t)(ts >> 8);
     ts_sig[7] = (uint8_t)ts;
 
-    hctx = HMAC_CTX_new();
-    HMAC_Init_ex(hctx, key, 32, EVP_sha256(), NULL);
-    HMAC_Update(hctx, (const unsigned char *)mode, strlen(mode));
-    HMAC_Update(hctx, (const unsigned char *)"\0", 1);
-    HMAC_Update(hctx, (const unsigned char *)method, strlen(method));
-    HMAC_Update(hctx, (const unsigned char *)"\0", 1);
-    HMAC_Update(hctx, (const unsigned char *)path, strlen(path));
-    HMAC_Update(hctx, (const unsigned char *)"\0", 1);
-    HMAC_Update(hctx, ts_sig, 8);
-    HMAC_Final(hctx, full, &mac_len);
-    HMAC_CTX_free(hctx);
+    mac_parts[0].data = (const uint8_t *)mode;
+    mac_parts[0].len = strlen(mode);
+    mac_parts[1].data = &zero_sep;
+    mac_parts[1].len = 1;
+    mac_parts[2].data = (const uint8_t *)method;
+    mac_parts[2].len = strlen(method);
+    mac_parts[3].data = &zero_sep;
+    mac_parts[3].len = 1;
+    mac_parts[4].data = (const uint8_t *)path;
+    mac_parts[4].len = strlen(path);
+    mac_parts[5].data = &zero_sep;
+    mac_parts[5].len = 1;
+    mac_parts[6].data = ts_sig;
+    mac_parts[6].len = 8;
+    if (sudoku_hmac_sha256_parts(key, sizeof(key), mac_parts, 7, full) != 0) {
+        memset(full, 0, sizeof(full));
+    }
 
     memcpy(ts_sig + 8, full, 16);
     sudoku_base64url_encode(ts_sig, sizeof(ts_sig), out, 128);
@@ -588,6 +658,7 @@ static int sudoku_tcp_connect(const sudoku_outbound_config_t *cfg, const char *h
     for (rp = res; rp; rp = rp->ai_next) {
         fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (fd < 0) continue;
+        sudoku_set_socket_common_opts(fd);
         if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
         close(fd);
         fd = -1;
@@ -598,6 +669,7 @@ static int sudoku_tcp_connect(const sudoku_outbound_config_t *cfg, const char *h
 
 static sudoku_transport_t *sudoku_transport_new(int fd) {
     sudoku_transport_t *tr = (sudoku_transport_t *)calloc(1, sizeof(*tr));
+    if (!tr) return NULL;
     tr->fd = fd;
     tr->kind = SUDOKU_TRANSPORT_RAW;
     pthread_mutex_init(&tr->read_mu, NULL);
@@ -749,6 +821,7 @@ static int sudoku_http_conn_open(const sudoku_outbound_config_t *cfg, sudoku_htt
     memset(conn, 0, sizeof(*conn));
     conn->fd = sudoku_tcp_connect(cfg, cfg->server_host, cfg->server_port);
     if (conn->fd < 0) return -1;
+    sudoku_set_socket_common_opts(conn->fd);
     tv.tv_sec = 70;
     tv.tv_usec = 0;
     setsockopt(conn->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -786,6 +859,7 @@ static ssize_t sudoku_http_conn_send_all(sudoku_http_conn_t *conn, const void *b
         ssize_t n;
         if (conn->ssl) n = SSL_write(conn->ssl, (const uint8_t *)buf + sent, (int)(len - sent));
         else n = send(conn->fd, (const uint8_t *)buf + sent, len - sent, 0);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return -1;
         sent += (size_t)n;
     }
@@ -793,8 +867,13 @@ static ssize_t sudoku_http_conn_send_all(sudoku_http_conn_t *conn, const void *b
 }
 
 static ssize_t sudoku_http_conn_recv_some(sudoku_http_conn_t *conn, void *buf, size_t len) {
-    if (conn->ssl) return SSL_read(conn->ssl, buf, (int)len);
-    return recv(conn->fd, buf, len, 0);
+    for (;;) {
+        ssize_t n;
+        if (conn->ssl) n = SSL_read(conn->ssl, buf, (int)len);
+        else n = recv(conn->fd, buf, len, 0);
+        if (n < 0 && errno == EINTR) continue;
+        return n;
+    }
 }
 
 static ssize_t sudoku_http_conn_read_some_buffered(sudoku_http_conn_t *conn, void *buf, size_t len) {
@@ -1002,10 +1081,12 @@ static int sudoku_base64_decode(const char *src, uint8_t *out, size_t out_cap, s
     }
     if (src[src_len - 1] == '=') pad++;
     if (src_len > 1 && src[src_len - 2] == '=') pad++;
+    if (((src_len / 4) * 3) < pad) return -1;
+    if (((src_len / 4) * 3) - pad > out_cap) return -1;
     n = EVP_DecodeBlock(out, (const unsigned char *)src, (int)src_len);
     if (n < 0 || (size_t)n < pad) return -1;
     *out_len = (size_t)n - pad;
-    return *out_len <= out_cap ? 0 : -1;
+    return 0;
 }
 
 static int sudoku_http_request_open(
@@ -1531,7 +1612,7 @@ static int sudoku_ws_handshake(sudoku_transport_t *tr, const sudoku_outbound_con
 static int sudoku_write_masked_ws_frame(sudoku_transport_t *tr, const uint8_t *payload, size_t len) {
     uint8_t header[14];
     uint8_t mask[4];
-    uint8_t *buf;
+    uint8_t scratch[4096];
     size_t hdr_len = 0;
     size_t i;
     header[hdr_len++] = 0x82;
@@ -1550,16 +1631,17 @@ static int sudoku_write_masked_ws_frame(sudoku_transport_t *tr, const uint8_t *p
     if (RAND_bytes(mask, sizeof(mask)) != 1) return -1;
     memcpy(header + hdr_len, mask, 4);
     hdr_len += 4;
-    buf = (uint8_t *)malloc(hdr_len + len);
-    memcpy(buf, header, hdr_len);
-    for (i = 0; i < len; ++i) {
-        buf[hdr_len + i] = payload[i] ^ mask[i & 3];
+    if (sudoku_socket_send(tr, header, hdr_len) < 0) return -1;
+    for (i = 0; i < len; ) {
+        size_t chunk = len - i;
+        size_t j;
+        if (chunk > sizeof(scratch)) chunk = sizeof(scratch);
+        for (j = 0; j < chunk; ++j) {
+            scratch[j] = payload[i + j] ^ mask[(i + j) & 3];
+        }
+        if (sudoku_socket_send(tr, scratch, chunk) < 0) return -1;
+        i += chunk;
     }
-    if (sudoku_socket_send(tr, buf, hdr_len + len) < 0) {
-        free(buf);
-        return -1;
-    }
-    free(buf);
     return 0;
 }
 
@@ -1632,17 +1714,6 @@ static ssize_t sudoku_transport_recv_wire(sudoku_transport_t *tr, uint8_t *buf, 
         return sudoku_httpmask_recv_wire(tr->httpmask, buf, len);
     }
     return sudoku_socket_recv_some(tr, buf, len);
-}
-
-static int sudoku_transport_read_exact_wire(sudoku_transport_t *tr, void *buf, size_t len) {
-    uint8_t *p = (uint8_t *)buf;
-    size_t got = 0;
-    while (got < len) {
-        ssize_t n = sudoku_transport_recv_wire(tr, p + got, len - got);
-        if (n <= 0) return -1;
-        got += (size_t)n;
-    }
-    return 0;
 }
 
 static int sudoku_transport_send(sudoku_transport_t *tr, const uint8_t *buf, size_t len) {
@@ -1767,30 +1838,32 @@ static int sudoku_hkdf_expand(
     uint8_t *out, size_t out_len
 ) {
     uint8_t t[EVP_MAX_MD_SIZE];
-    unsigned int t_len = 0;
+    size_t t_len = 0;
     size_t info_len = strlen(info);
     size_t produced = 0;
     uint8_t counter = 1;
+    sudoku_bytespan_t parts[3];
 
     while (produced < out_len) {
-        HMAC_CTX *ctx = HMAC_CTX_new();
-        unsigned int block_len = 0;
         size_t chunk;
-        if (!ctx) return -1;
-        HMAC_Init_ex(ctx, prk, (int)prk_len, EVP_sha256(), NULL);
+        size_t part_count = 0;
+
         if (t_len > 0) {
-            HMAC_Update(ctx, t, t_len);
+            parts[part_count].data = t;
+            parts[part_count].len = t_len;
+            part_count++;
         }
         if (info_len > 0) {
-            HMAC_Update(ctx, (const unsigned char *)info, info_len);
+            parts[part_count].data = (const uint8_t *)info;
+            parts[part_count].len = info_len;
+            part_count++;
         }
-        HMAC_Update(ctx, &counter, 1);
-        HMAC_Final(ctx, t, &block_len);
-        HMAC_CTX_free(ctx);
-        if (block_len == 0) {
-            return -1;
-        }
-        t_len = block_len;
+        parts[part_count].data = &counter;
+        parts[part_count].len = 1;
+        part_count++;
+
+        if (sudoku_hmac_sha256_parts(prk, prk_len, parts, part_count, t) != 0) return -1;
+        t_len = 32;
         chunk = out_len - produced;
         if (chunk > t_len) chunk = t_len;
         memcpy(out + produced, t, chunk);
@@ -1842,21 +1915,20 @@ static int sudoku_record_epoch_key(
     uint32_t epoch,
     uint8_t out[32]
 ) {
-    unsigned int mac_len = 0;
-    HMAC_CTX *ctx = HMAC_CTX_new();
     uint8_t epoch_be[4];
     const char *method_name = method == SUDOKU_AEAD_AES128GCM ? "aes-128-gcm" : "chacha20-poly1305";
+    sudoku_bytespan_t parts[3];
     epoch_be[0] = (uint8_t)(epoch >> 24);
     epoch_be[1] = (uint8_t)(epoch >> 16);
     epoch_be[2] = (uint8_t)(epoch >> 8);
     epoch_be[3] = (uint8_t)epoch;
-    HMAC_Init_ex(ctx, base, 32, EVP_sha256(), NULL);
-    HMAC_Update(ctx, (const unsigned char *)"sudoku-record:", 14);
-    HMAC_Update(ctx, (const unsigned char *)method_name, strlen(method_name));
-    HMAC_Update(ctx, epoch_be, 4);
-    HMAC_Final(ctx, out, &mac_len);
-    HMAC_CTX_free(ctx);
-    return mac_len == 32 ? 0 : -1;
+    parts[0].data = (const uint8_t *)"sudoku-record:";
+    parts[0].len = 14;
+    parts[1].data = (const uint8_t *)method_name;
+    parts[1].len = strlen(method_name);
+    parts[2].data = epoch_be;
+    parts[2].len = sizeof(epoch_be);
+    return sudoku_hmac_sha256_parts(base, 32, parts, 3, out);
 }
 
 static int sudoku_record_cipher_init(EVP_CIPHER_CTX **ctxp, sudoku_aead_kind_t method, const uint8_t key[32], int enc) {
@@ -1906,6 +1978,7 @@ static sudoku_record_conn_t *sudoku_record_conn_new(
     const uint8_t base_recv[32]
 ) {
     sudoku_record_conn_t *rc = (sudoku_record_conn_t *)calloc(1, sizeof(*rc));
+    if (!rc) return NULL;
     rc->transport = tr;
     rc->method = method;
     memcpy(rc->keys.base_send, base_send, 32);
@@ -1913,6 +1986,8 @@ static sudoku_record_conn_t *sudoku_record_conn_new(
     pthread_mutex_init(&rc->write_mu, NULL);
     pthread_mutex_init(&rc->read_mu, NULL);
     if (sudoku_random_nonzero_u32(&rc->send_epoch) != 0 || sudoku_random_nonzero_u64(&rc->send_seq) != 0) {
+        pthread_mutex_destroy(&rc->write_mu);
+        pthread_mutex_destroy(&rc->read_mu);
         free(rc);
         return NULL;
     }
