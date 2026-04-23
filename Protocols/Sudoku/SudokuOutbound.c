@@ -242,8 +242,6 @@ struct sudoku_mux_stream {
     uint32_t id;
     int closed;
     int removed;
-    int close_code;
-    char close_msg[128];
     sudoku_mux_chunk_t *head;
     sudoku_mux_chunk_t *tail;
     pthread_mutex_t mu;
@@ -261,13 +259,11 @@ struct sudoku_mux_client {
 
     pthread_mutex_t mu;
     pthread_mutex_t write_mu;
-    pthread_cond_t cond;
 
     struct sudoku_mux_stream *streams;
+    struct sudoku_mux_stream *retired_streams;
     uint32_t next_stream_id;
     int closed;
-    int close_code;
-    char close_msg[128];
 };
 
 static const uint32_t SUDOKU_KEY_UPDATE_AFTER_BYTES = 32u << 20;
@@ -1080,10 +1076,6 @@ static void sudoku_httpmask_auth_token(
 
     memcpy(ts_sig + 8, full, 16);
     sudoku_base64url_encode(ts_sig, sizeof(ts_sig), out, 128);
-}
-
-static int sudoku_tcp_connect(const sudoku_outbound_config_t *cfg, const char *host, uint16_t port) {
-    return sudoku_tcp_connect_ex(cfg, host, port, 0, NULL);
 }
 
 static int sudoku_tcp_connect_ex(
@@ -3245,59 +3237,58 @@ static void sudoku_mux_chunk_free_all(sudoku_mux_chunk_t *chunk) {
     }
 }
 
-static struct sudoku_mux_stream *sudoku_mux_find_stream_locked(
-    sudoku_mux_client_t *client,
-    uint32_t id,
-    struct sudoku_mux_stream ***prev_next
-) {
-    struct sudoku_mux_stream **link = NULL;
+static struct sudoku_mux_stream *sudoku_mux_find_stream_locked(sudoku_mux_client_t *client, uint32_t id) {
     struct sudoku_mux_stream *cur = NULL;
     if (!client) return NULL;
-    link = &client->streams;
     cur = client->streams;
     while (cur) {
         if (cur->id == id) {
-            if (prev_next) *prev_next = link;
             return cur;
         }
-        link = &cur->next;
         cur = cur->next;
     }
     return NULL;
 }
 
-static void sudoku_mux_stream_mark_closed(struct sudoku_mux_stream *stream, int code, const char *msg) {
+static void sudoku_mux_retire_stream_locked(sudoku_mux_client_t *client, struct sudoku_mux_stream *stream) {
+    struct sudoku_mux_stream **link;
+    if (!client || !stream || stream->removed) return;
+    link = &client->streams;
+    while (*link) {
+        if (*link == stream) {
+            *link = stream->next;
+            stream->next = client->retired_streams;
+            client->retired_streams = stream;
+            stream->removed = 1;
+            return;
+        }
+        link = &(*link)->next;
+    }
+    stream->removed = 1;
+}
+
+static void sudoku_mux_stream_mark_closed(struct sudoku_mux_stream *stream) {
     if (!stream) return;
     pthread_mutex_lock(&stream->mu);
     if (!stream->closed) {
         stream->closed = 1;
-        stream->close_code = code;
-        if (msg && *msg) {
-            snprintf(stream->close_msg, sizeof(stream->close_msg), "%s", msg);
-        } else {
-            stream->close_msg[0] = '\0';
-        }
     }
     pthread_cond_broadcast(&stream->cond);
     pthread_mutex_unlock(&stream->mu);
 }
 
-static void sudoku_mux_client_mark_closed(sudoku_mux_client_t *client, int code, const char *msg) {
+static void sudoku_mux_client_mark_closed(sudoku_mux_client_t *client) {
     struct sudoku_mux_stream *cur;
     if (!client) return;
     pthread_mutex_lock(&client->mu);
     if (!client->closed) {
         client->closed = 1;
-        client->close_code = code;
-        if (msg && *msg) snprintf(client->close_msg, sizeof(client->close_msg), "%s", msg);
-        else client->close_msg[0] = '\0';
     }
     cur = client->streams;
     while (cur) {
-        sudoku_mux_stream_mark_closed(cur, code, msg);
+        sudoku_mux_stream_mark_closed(cur);
         cur = cur->next;
     }
-    pthread_cond_broadcast(&client->cond);
     pthread_mutex_unlock(&client->mu);
 }
 
@@ -3369,61 +3360,56 @@ static void *sudoku_mux_reader_main(void *opaque) {
         uint32_t stream_id;
         uint32_t payload_len;
         struct sudoku_mux_stream *stream = NULL;
-        struct sudoku_mux_stream **prev_next = NULL;
         if (sudoku_read_exact_record(client->record, hdr, sizeof(hdr)) != 0) {
-            sudoku_mux_client_mark_closed(client, -1, "mux read failed");
+            sudoku_mux_client_mark_closed(client);
             return NULL;
         }
         frame_type = hdr[0];
         stream_id = ((uint32_t)hdr[1] << 24) | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 8) | (uint32_t)hdr[4];
         payload_len = ((uint32_t)hdr[5] << 24) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 8) | (uint32_t)hdr[8];
         if (payload_len > SUDOKU_MUX_MAX_FRAME_SIZE) {
-            sudoku_mux_client_mark_closed(client, -1, "invalid mux frame");
+            sudoku_mux_client_mark_closed(client);
             return NULL;
         }
         if (payload_len > 0) {
             payload = (uint8_t *)malloc(payload_len);
             if (!payload) {
-                sudoku_mux_client_mark_closed(client, -1, "mux alloc failed");
+                sudoku_mux_client_mark_closed(client);
                 return NULL;
             }
             if (sudoku_read_exact_record(client->record, payload, payload_len) != 0) {
                 free(payload);
-                sudoku_mux_client_mark_closed(client, -1, "mux payload read failed");
+                sudoku_mux_client_mark_closed(client);
                 return NULL;
             }
         }
 
         pthread_mutex_lock(&client->mu);
-        stream = sudoku_mux_find_stream_locked(client, stream_id, &prev_next);
+        stream = sudoku_mux_find_stream_locked(client, stream_id);
+        if (stream && (frame_type == 0x03 || frame_type == 0x04)) {
+            sudoku_mux_retire_stream_locked(client, stream);
+        }
         pthread_mutex_unlock(&client->mu);
 
         if (frame_type == 0x02) {
-            if (stream && !stream->removed) {
+            if (stream) {
                 if (sudoku_mux_stream_enqueue(stream, payload, payload_len) != 0) {
                     free(payload);
-                    sudoku_mux_client_mark_closed(client, -1, "mux enqueue failed");
+                    sudoku_mux_client_mark_closed(client);
                     return NULL;
                 }
             }
         } else if (frame_type == 0x03) {
             if (stream) {
-                stream->removed = 1;
-                sudoku_mux_stream_mark_closed(stream, 0, "");
+                sudoku_mux_stream_mark_closed(stream);
             }
         } else if (frame_type == 0x04) {
-            char msg[128];
-            size_t copy_len = payload_len;
-            if (copy_len >= sizeof(msg)) copy_len = sizeof(msg) - 1;
-            if (copy_len) memcpy(msg, payload, copy_len);
-            msg[copy_len] = '\0';
             if (stream) {
-                stream->removed = 1;
-                sudoku_mux_stream_mark_closed(stream, -1, msg[0] ? msg : "reset");
+                sudoku_mux_stream_mark_closed(stream);
             }
         } else {
             free(payload);
-            sudoku_mux_client_mark_closed(client, -1, "unexpected mux frame");
+            sudoku_mux_client_mark_closed(client);
             return NULL;
         }
         free(payload);
@@ -3440,7 +3426,6 @@ int sudoku_mux_client_open(
     if (!client) return -1;
     pthread_mutex_init(&client->mu, NULL);
     pthread_mutex_init(&client->write_mu, NULL);
-    pthread_cond_init(&client->cond, NULL);
     if (sudoku_connect_base(cfg, &client->transport, &client->record, &client->tables) != 0) {
         sudoku_mux_client_close(client);
         return -1;
@@ -3549,17 +3534,21 @@ ssize_t sudoku_mux_stream_recv(sudoku_mux_stream_t *stream, void *buf, size_t le
 void sudoku_mux_stream_close(sudoku_mux_stream_t *stream) {
     sudoku_mux_client_t *client;
     sudoku_mux_chunk_t *chunks = NULL;
+    int should_send_fin = 0;
     if (!stream) return;
     client = stream->client;
     if (client) {
         pthread_mutex_lock(&client->mu);
-        stream->removed = 1;
+        if (!stream->removed) {
+            sudoku_mux_retire_stream_locked(client, stream);
+            should_send_fin = !client->closed;
+        }
         pthread_mutex_unlock(&client->mu);
-        if (!client->closed) {
+        if (should_send_fin) {
             (void)sudoku_mux_send_frame(client, 0x03, stream->id, NULL, 0);
         }
     }
-    sudoku_mux_stream_mark_closed(stream, 0, "");
+    sudoku_mux_stream_mark_closed(stream);
     pthread_mutex_lock(&stream->mu);
     chunks = stream->head;
     stream->head = NULL;
@@ -3572,7 +3561,7 @@ void sudoku_mux_client_close(sudoku_mux_client_t *client) {
     struct sudoku_mux_stream *stream;
     struct sudoku_mux_stream *next;
     if (!client) return;
-    sudoku_mux_client_mark_closed(client, 0, "");
+    sudoku_mux_client_mark_closed(client);
     if (client->transport) sudoku_transport_interrupt(client->transport);
     if (client->reader_started) {
         pthread_join(client->reader_thread, NULL);
@@ -3595,8 +3584,16 @@ void sudoku_mux_client_close(sudoku_mux_client_t *client) {
         free(stream);
         stream = next;
     }
+    stream = client->retired_streams;
+    while (stream) {
+        next = stream->next;
+        sudoku_mux_chunk_free_all(stream->head);
+        pthread_cond_destroy(&stream->cond);
+        pthread_mutex_destroy(&stream->mu);
+        free(stream);
+        stream = next;
+    }
     sudoku_table_pair_free(&client->tables);
-    pthread_cond_destroy(&client->cond);
     pthread_mutex_destroy(&client->write_mu);
     pthread_mutex_destroy(&client->mu);
     free(client);
