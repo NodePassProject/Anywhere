@@ -96,6 +96,7 @@
 				"Core/ProxyClient+Hysteria.swift",
 				"Core/ProxyClient+Naive.swift",
 				"Core/ProxyClient+SOCKS5.swift",
+				"Core/ProxyClient+Sudoku.swift",
 				"Core/ProxyClient+Trojan.swift",
 				Core/ProxyConfiguration.swift,
 				"Core/ProxyConfiguration+DictParsing.swift",
@@ -151,6 +152,14 @@
 				Shadowsocks/ShadowsocksProtocol.swift,
 				Shadowsocks/ShadowsocksUDPSession.swift,
 				SOCKS5/SOCKS5Connection.swift,
+				Sudoku/SudokuConfiguration.swift,
+				Sudoku/SudokuCore.c,
+				Sudoku/SudokuCore.h,
+				Sudoku/SudokuOutbound.c,
+				Sudoku/SudokuOutbound.h,
+				Sudoku/SudokuProxyConnection.swift,
+				Sudoku/SudokuSwiftBridge.c,
+				Sudoku/SudokuSwiftBridge.h,
 				TLS/TLS12KeyDerivation.swift,
 				TLS/TLS13KeyDerivation.swift,
 				TLS/TLSClient.swift,
@@ -793,6 +802,7 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"NETWORK_EXTENSION=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
@@ -838,6 +848,7 @@
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
 					"HAVE_CONFIG_H=1",
+					"NETWORK_EXTENSION=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
