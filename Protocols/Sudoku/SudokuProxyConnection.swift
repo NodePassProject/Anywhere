@@ -282,6 +282,7 @@ final class SudokuChainConnector {
         }
 
         if semaphore.wait(timeout: .now() + 30) == .timedOut {
+            closeAll()
             return -1
         }
         return resultFD
