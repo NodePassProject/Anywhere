@@ -1693,6 +1693,9 @@
         }
       }
     },
+    "Authority" : {
+      "shouldTranslate" : false
+    },
     "Auto" : {
       "localizations" : {
         "ar" : {
@@ -4331,6 +4334,12 @@
         }
       }
     },
+    "gRPC" : {
+      "shouldTranslate" : false
+    },
+    "Gun" : {
+      "shouldTranslate" : false
+    },
     "h2,http/1.1" : {
       "shouldTranslate" : false
     },
@@ -5975,6 +5984,9 @@
           }
         }
       }
+    },
+    "Multi" : {
+      "shouldTranslate" : false
     },
     "Mux" : {
       "shouldTranslate" : false
@@ -8889,6 +8901,9 @@
         }
       }
     },
+    "Service Name" : {
+      "shouldTranslate" : false
+    },
     "Settings" : {
       "localizations" : {
         "ar" : {
@@ -10191,6 +10206,9 @@
           }
         }
       }
+    },
+    "User Agent" : {
+      "shouldTranslate" : false
     },
     "Username" : {
       "localizations" : {
