@@ -37,27 +37,29 @@ final class AWCore {
     // MARK: - UserDefaults Keys
 
     private enum UserDefaultsKey {
-        static let lastConfigurationData = "lastConfigurationData"
-        static let ipv6DNSEnabled = "ipv6DNSEnabled"
+        static let allowInsecure = "allowInsecure"
+        static let alwaysOnEnabled = "alwaysOnEnabled"
+        static let bypassCountryCode = "bypassCountryCode"
+        static let chains = "store.chains"
+        static let customRuleSets = "customRuleSets"
         static let encryptedDNSEnabled = "encryptedDNSEnabled"
         static let encryptedDNSProtocol = "encryptedDNSProtocol"
         static let encryptedDNSServer = "encryptedDNSServer"
-        static let bypassCountryCode = "bypassCountryCode"
+        static let experimentalEnabled = "experimentalEnabled"
+        static let hideVPNIcon = "hideVPNIcon"
+        static let lastConfigurationData = "lastConfigurationData"
+        static let identifier = "identifier"
+        static let ipv6DNSEnabled = "ipv6DNSEnabled"
+        static let onboardingCompleted = "onboardingCompleted"
         static let proxyMode = "proxyMode"
         static let proxyServerAddresses = "proxyServerAddresses"
+        static let remnawaveHWIDEnabled = "remnawaveHWIDEnabled"
         static let routingData = "routingData"
-        static let alwaysOnEnabled = "alwaysOnEnabled"
-        static let allowInsecure = "allowInsecure"
-        static let hideVPNIcon = "hideVPNIcon"
-        static let experimentalEnabled = "experimentalEnabled"
-        static let onboardingCompleted = "onboardingCompleted"
-        static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
+        static let ruleSetAssignments = "ruleSetAssignments"
         static let selectedConfigurationId = "selectedConfigurationId"
         static let selectedChainId = "selectedChainId"
-        static let ruleSetAssignments = "ruleSetAssignments"
-        static let customRuleSets = "customRuleSets"
-        static let chains = "store.chains"
         static let subscriptions = "store.subscriptions"
+        static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
     }
 
     /// One-time migration of a JSON file from the per-app documents directory
@@ -76,87 +78,18 @@ final class AWCore {
     }
 
     // MARK: - Typed UserDefaults Accessors
-
-    static func getProxyMode() -> ProxyMode {
-        userDefaults.string(forKey: UserDefaultsKey.proxyMode).flatMap(ProxyMode.init) ?? .rule
+    
+    // App
+    static func getIdentifier() -> String {
+        if let identifier = userDefaults.string(forKey: UserDefaultsKey.identifier) {
+            return identifier
+        } else {
+            let newIdentifier = UUID().uuidString
+            userDefaults.set(newIdentifier, forKey: UserDefaultsKey.identifier)
+            return newIdentifier
+        }
     }
-
-    static func setProxyMode(_ proxyMode: ProxyMode) {
-        userDefaults.set(proxyMode.rawValue, forKey: UserDefaultsKey.proxyMode)
-    }
-
-    static func getIPv6DNSEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.ipv6DNSEnabled)
-    }
-
-    static func setIPv6DNSEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.ipv6DNSEnabled)
-    }
-
-    static func getEncryptedDNSEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.encryptedDNSEnabled)
-    }
-
-    static func setEncryptedDNSEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.encryptedDNSEnabled)
-    }
-
-    static func getEncryptedDNSProtocol() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSProtocol) ?? "doh"
-    }
-
-    static func setEncryptedDNSProtocol(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.encryptedDNSProtocol)
-    }
-
-    static func getEncryptedDNSServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSServer) ?? ""
-    }
-
-    static func setEncryptedDNSServer(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.encryptedDNSServer)
-    }
-
-    static func getBypassCountryCode() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.bypassCountryCode) ?? ""
-    }
-
-    static func setBypassCountryCode(_ value: String) {
-        userDefaults.set(value, forKey: UserDefaultsKey.bypassCountryCode)
-    }
-
-    static func getAlwaysOnEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.alwaysOnEnabled)
-    }
-
-    static func setAlwaysOnEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.alwaysOnEnabled)
-    }
-
-    static func getAllowInsecure() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.allowInsecure)
-    }
-
-    static func setAllowInsecure(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.allowInsecure)
-    }
-
-    static func getHideVPNIcon() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.hideVPNIcon)
-    }
-
-    static func setHideVPNIcon(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.hideVPNIcon)
-    }
-
-    static func getExperimentalEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.experimentalEnabled)
-    }
-
-    static func setExperimentalEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.experimentalEnabled)
-    }
-
+    
     static func getOnboardingCompleted() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.onboardingCompleted)
     }
@@ -164,11 +97,37 @@ final class AWCore {
     static func setOnboardingCompleted(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.onboardingCompleted)
     }
+    
+    // tvOS
+    static func getSubscriptionsData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.subscriptions)
+    }
 
+    static func setSubscriptionsData(_ data: Data) {
+        userDefaults.set(data, forKey: UserDefaultsKey.subscriptions)
+    }
+
+    static func getChainsData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.chains)
+    }
+
+    static func setChainsData(_ data: Data) {
+        userDefaults.set(data, forKey: UserDefaultsKey.chains)
+    }
+    
+    // Tunnel
+    static func getLastConfigurationData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.lastConfigurationData)
+    }
+
+    static func setLastConfigurationData(_ data: Data) {
+        userDefaults.set(data, forKey: UserDefaultsKey.lastConfigurationData)
+    }
+    
     static func getSelectedConfigurationId() -> UUID? {
         userDefaults.string(forKey: UserDefaultsKey.selectedConfigurationId).flatMap(UUID.init(uuidString:))
     }
-
+    
     static func setSelectedConfigurationId(_ id: UUID?) {
         if let id {
             userDefaults.set(id.uuidString, forKey: UserDefaultsKey.selectedConfigurationId)
@@ -180,7 +139,7 @@ final class AWCore {
     static func getSelectedChainId() -> UUID? {
         userDefaults.string(forKey: UserDefaultsKey.selectedChainId).flatMap(UUID.init(uuidString:))
     }
-
+    
     static func setSelectedChainId(_ id: UUID?) {
         if let id {
             userDefaults.set(id.uuidString, forKey: UserDefaultsKey.selectedChainId)
@@ -188,15 +147,7 @@ final class AWCore {
             userDefaults.removeObject(forKey: UserDefaultsKey.selectedChainId)
         }
     }
-
-    static func getLastConfigurationData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.lastConfigurationData)
-    }
-
-    static func setLastConfigurationData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.lastConfigurationData)
-    }
-
+    
     static func getProxyServerAddressesData() -> Data? {
         userDefaults.data(forKey: UserDefaultsKey.proxyServerAddresses)
     }
@@ -204,7 +155,7 @@ final class AWCore {
     static func setProxyServerAddressesData(_ data: Data) {
         userDefaults.set(data, forKey: UserDefaultsKey.proxyServerAddresses)
     }
-
+    
     static func getRoutingData() -> Data? {
         userDefaults.data(forKey: UserDefaultsKey.routingData)
     }
@@ -213,14 +164,31 @@ final class AWCore {
         userDefaults.set(data, forKey: UserDefaultsKey.routingData)
     }
 
-    static func getTrustedCertificateFingerprints() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.trustedCertificateSHA256s) ?? []
+    // Settings
+    static func getAlwaysOnEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.alwaysOnEnabled)
     }
 
-    static func setTrustedCertificateFingerprints(_ fingerprints: [String]) {
-        userDefaults.set(fingerprints, forKey: UserDefaultsKey.trustedCertificateSHA256s)
+    static func setAlwaysOnEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.alwaysOnEnabled)
+    }
+    
+    static func getProxyMode() -> ProxyMode {
+        userDefaults.string(forKey: UserDefaultsKey.proxyMode).flatMap(ProxyMode.init) ?? .rule
+    }
+    
+    static func setProxyMode(_ proxyMode: ProxyMode) {
+        userDefaults.set(proxyMode.rawValue, forKey: UserDefaultsKey.proxyMode)
     }
 
+    static func getBypassCountryCode() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.bypassCountryCode) ?? ""
+    }
+
+    static func setBypassCountryCode(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.bypassCountryCode)
+    }
+    
     static func getRuleSetAssignments() -> [String: String] {
         userDefaults.dictionary(forKey: UserDefaultsKey.ruleSetAssignments) as? [String: String] ?? [:]
     }
@@ -237,20 +205,76 @@ final class AWCore {
         userDefaults.set(data, forKey: UserDefaultsKey.customRuleSets)
     }
 
-    static func getChainsData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.chains)
+    static func getAllowInsecure() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.allowInsecure)
     }
 
-    static func setChainsData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.chains)
+    static func setAllowInsecure(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.allowInsecure)
     }
 
-    static func getSubscriptionsData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.subscriptions)
+    static func getTrustedCertificateFingerprints() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.trustedCertificateSHA256s) ?? []
     }
 
-    static func setSubscriptionsData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.subscriptions)
+    static func setTrustedCertificateFingerprints(_ fingerprints: [String]) {
+        userDefaults.set(fingerprints, forKey: UserDefaultsKey.trustedCertificateSHA256s)
+    }
+    
+    static func getExperimentalEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.experimentalEnabled)
+    }
+
+    static func setExperimentalEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.experimentalEnabled)
+    }
+
+    static func getHideVPNIcon() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.hideVPNIcon)
+    }
+
+    static func setHideVPNIcon(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.hideVPNIcon)
+    }
+    
+    static func getIPv6DNSEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.ipv6DNSEnabled)
+    }
+
+    static func setIPv6DNSEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.ipv6DNSEnabled)
+    }
+
+    static func getEncryptedDNSEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.encryptedDNSEnabled)
+    }
+    
+    static func setEncryptedDNSEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.encryptedDNSEnabled)
+    }
+    
+    static func getEncryptedDNSProtocol() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSProtocol) ?? "doh"
+    }
+    
+    static func setEncryptedDNSProtocol(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.encryptedDNSProtocol)
+    }
+    
+    static func getEncryptedDNSServer() -> String {
+        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSServer) ?? "https://cloudflare-dns.com/dns-query"
+    }
+    
+    static func setEncryptedDNSServer(_ value: String) {
+        userDefaults.set(value, forKey: UserDefaultsKey.encryptedDNSServer)
+    }
+    
+    static func getRemnawaveHWIDEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.remnawaveHWIDEnabled)
+    }
+    
+    static func setRemnawaveHWIDEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.remnawaveHWIDEnabled)
     }
     
     // MARK: - Darwin Notification Names

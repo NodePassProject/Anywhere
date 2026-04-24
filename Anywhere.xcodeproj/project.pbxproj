@@ -250,6 +250,7 @@
 				Utilities/AnywhereLogger.swift,
 				"Utilities/Data+init.swift",
 				Utilities/DeviceCensorship.swift,
+				Utilities/SubscriptionDomainHelper.swift,
 				Utilities/UnfairLock.swift,
 				"Utilities/UUID+xrayString.swift",
 			);

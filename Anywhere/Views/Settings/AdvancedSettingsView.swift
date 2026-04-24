@@ -11,6 +11,7 @@ struct AdvancedSettingsView: View {
     @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
     @State private var hideVPNIcon = AWCore.getHideVPNIcon()
     @State private var showHideVPNIconAlert = false
+    @State private var remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
 
     var body: some View {
         List {
@@ -47,6 +48,17 @@ struct AdvancedSettingsView: View {
                 NavigationLink("Encrypted DNS") {
                     EncryptedDNSSettingsView()
                 }
+            }
+            
+            Section("Other") {
+                // Remnawave is a self-hosting proxy panel
+                Toggle("Remnawave HWID", isOn: Binding(
+                    get: { remnawaveHWIDEnabled },
+                    set: { newValue in
+                        remnawaveHWIDEnabled = newValue
+                        AWCore.setRemnawaveHWIDEnabled(newValue)
+                    }
+                ))
             }
 
             Section("Diagnostics") {
