@@ -30,6 +30,12 @@ struct ProxyEditorView: View {
     // HTTPUpgrade fields
     @State private var huHost = ""
     @State private var huPath = "/"
+    
+    // gRPC fields
+    @State private var grpcServiceName = ""
+    @State private var grpcAuthority = ""
+    @State private var grpcMode = "gun"
+    @State private var grpcUserAgent = ""
 
     // XHTTP fields
     @State private var xhttpHost = ""
@@ -377,6 +383,7 @@ struct ProxyEditorView: View {
                             Text("TCP").tag("tcp")
                             Text("WebSocket").tag("ws")
                             Text("HTTPUpgrade").tag("httpupgrade")
+                            Text("gRPC").tag("grpc")
                             Text("XHTTP").tag("xhttp")
                         } label: {
                             TextWithColorfulIcon(titleKey: "Transport", systemName: "arrow.triangle.swap", foregroundColor: .white, backgroundColor: .purple)
@@ -446,6 +453,39 @@ struct ProxyEditorView: View {
                                 TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
                             }
                         }
+                        if transport == "grpc" {
+                            LabeledContent {
+                                TextField("Service Name", text: $grpcServiceName)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Service Name", systemName: "realtimetext", foregroundColor: .white, backgroundColor: .mint)
+                            }
+                            LabeledContent {
+                                TextField("Authority", text: $grpcAuthority)
+                                    .keyboardType(.URL)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Authority", systemName: "person.fill", foregroundColor: .white, backgroundColor: .green)
+                            }
+                            Picker(selection: $grpcMode) {
+                                Text("Gun").tag("gun")
+                                Text("Multi").tag("multi")
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Mode", systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .gray)
+                            }
+                            LabeledContent {
+                                TextField("User Agent", text: $grpcUserAgent)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "User Agent", systemName: "laptopcomputer", foregroundColor: .white, backgroundColor: .orange)
+                            }
+                        }
                         if transport == "xhttp" {
                             LabeledContent {
                                 TextField("Host", text: $xhttpHost)
@@ -470,16 +510,7 @@ struct ProxyEditorView: View {
                                 Text("Stream Up").tag("stream-up")
                                 Text("Stream One").tag("stream-one")
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Mode", systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .purple)
-                            }
-                            LabeledContent {
-                                TextEditor(text: $xhttpExtra)
-                                    .autocorrectionDisabled()
-                                    .textInputAutocapitalization(.never)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .lineLimit(1...5)
-                            } label: {
-                                TextWithColorfulIcon(titleKey: "Extra", systemName: "ellipsis.rectangle", foregroundColor: .white, backgroundColor: .gray)
+                                TextWithColorfulIcon(titleKey: "Mode", systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .gray)
                             }
                         }
                     }
@@ -618,6 +649,13 @@ struct ProxyEditorView: View {
             xhttpPath = xhttp.path
             xhttpMode = xhttp.mode.rawValue
             xhttpExtra = Self.encodeExtra(from: xhttp)
+        }
+
+        if let grpc = configuration.grpc {
+            grpcServiceName = grpc.serviceName
+            grpcAuthority = grpc.authority
+            grpcMode = grpc.multiMode ? "multi" : "gun"
+            grpcUserAgent = grpc.userAgent
         }
 
         muxEnabled = configuration.muxEnabled
@@ -776,6 +814,16 @@ struct ProxyEditorView: View {
             xhttpConfiguration = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress)
         }
 
+        var grpcConfiguration: GRPCConfiguration?
+        if transport == "grpc" {
+            grpcConfiguration = GRPCConfiguration(
+                serviceName: grpcServiceName,
+                authority: grpcAuthority,
+                multiMode: grpcMode == "multi",
+                userAgent: grpcUserAgent
+            )
+        }
+
         // Strip brackets from IPv6 addresses (e.g. "[::1]" → "::1")
         let bareAddress = serverAddress.hasPrefix("[") && serverAddress.hasSuffix("]")
             ? String(serverAddress.dropFirst().dropLast())
@@ -788,6 +836,7 @@ struct ProxyEditorView: View {
             if let websocketConfiguration { transportLayer = .ws(websocketConfiguration) }
             else if let httpUpgradeConfiguration { transportLayer = .httpUpgrade(httpUpgradeConfiguration) }
             else if let xhttpConfiguration { transportLayer = .xhttp(xhttpConfiguration) }
+            else if let grpcConfiguration { transportLayer = .grpc(grpcConfiguration) }
             else { transportLayer = .tcp }
 
             let securityLayer: SecurityLayer

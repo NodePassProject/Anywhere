@@ -41,11 +41,13 @@ struct ProxyListView: View {
                     }
                 }
             }
-            ForEach(subscribedGroups, id: \.0.id) { subscription, configurations in
+            ForEach(viewModel.subscriptions) { subscription in
+                let configurations = viewModel.configurations(for: subscription)
+                let editingDisabled = SubscriptionDomainHelper.shouldDisableProxyEditing(for: subscription.url)
                 Section {
                     if !collapsedSubscriptions.contains(subscription.id) {
                         ForEach(configurations) { configuration in
-                            configurationRow(configuration)
+                            configurationRow(configuration, editingDisabled: editingDisabled)
                         }
                     }
                 } header: {
@@ -197,7 +199,7 @@ struct ProxyListView: View {
     // MARK: - Config Row
     
     @ViewBuilder
-    private func configurationRow(_ configuration: ProxyConfiguration) -> some View {
+    private func configurationRow(_ configuration: ProxyConfiguration, editingDisabled: Bool = false) -> some View {
         let latency = viewModel.latencyResults[configuration.id]
 
         Button {
@@ -207,16 +209,13 @@ struct ProxyListView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
                         Text(configuration.name)
+                            .font(.body.weight(.medium))
                         if viewModel.selectedConfiguration?.id == configuration.id {
                             Image(systemName: "checkmark")
                                 .font(.caption.bold())
                                 .foregroundStyle(.tint)
                         }
                     }
-                    Text("\(configuration.serverAddress):\(configuration.serverPort, format: .number.grouping(.never))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
                     HStack(spacing: 4) {
                         Text(configuration.outboundProtocol.name)
                         if configuration.outboundProtocol == .vless {
@@ -233,8 +232,8 @@ struct ProxyListView: View {
                             Text("Vision")
                         }
                     }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 
                 Spacer()
@@ -253,37 +252,42 @@ struct ProxyListView: View {
             } label: {
                 Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
             }
-
-            Button {
-                UIPasteboard.general.string = configuration.toURL()
-            } label: {
-                Label("Copy Link", systemImage: "doc.on.doc")
-            }
-
-            Button {
-                configurationToEdit = configuration
-            } label: {
-                Label("Edit", systemImage: "pencil")
-            }
-
-            Button(role: .destructive) {
-                viewModel.deleteConfiguration(configuration)
-            } label: {
-                Label("Delete", systemImage: "trash")
+            
+            if !editingDisabled {
+                Button {
+                    UIPasteboard.general.string = configuration.toURL()
+                } label: {
+                    Label("Copy Link", systemImage: "doc.on.doc")
+                }
+                
+                Button {
+                    configurationToEdit = configuration
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                
+                Button(role: .destructive) {
+                    viewModel.deleteConfiguration(configuration)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
             }
         }
         .swipeActions(edge: .trailing) {
-            Button(role: .destructive) {
-                viewModel.deleteConfiguration(configuration)
-            } label: {
-                Label("Delete", systemImage: "trash")
+            if !editingDisabled {
+                Button(role: .destructive) {
+                    viewModel.deleteConfiguration(configuration)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                
+                Button {
+                    configurationToEdit = configuration
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                }
+                .tint(.orange)
             }
-            Button {
-                configurationToEdit = configuration
-            } label: {
-                Label("Edit", systemImage: "pencil")
-            }
-            .tint(.orange)
         }
     }
 

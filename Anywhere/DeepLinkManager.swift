@@ -2,17 +2,14 @@
 //  DeepLinkManager.swift
 //  Anywhere
 //
+//  Created by Argsment Limited on 4/24/26.
+//
 
 import Foundation
 import Combine
 
-enum DeepLinkAction: Equatable {
-    case addProxyWithLink(url: String)
-    case addProxyManual(url: String)
-}
-
 final class DeepLinkManager: ObservableObject {
-    @Published var pendingAction: DeepLinkAction?
+    @Published var url: String?
 
     // Supported deep link schemes:
     // anywhere://add-proxy?link=<link>
@@ -23,8 +20,8 @@ final class DeepLinkManager: ObservableObject {
         switch url.scheme?.lowercased() {
         case "anywhere":
             handleAnywhereScheme(url)
-        case "vless", "ss", "sudoku":
-            pendingAction = .addProxyManual(url: url.absoluteString)
+        case "vless", "hysteria2", "hy2", "trojan", "ss", "quic", "sudoku":
+            self.url = url.absoluteString
         default:
             break
         }
@@ -37,6 +34,6 @@ final class DeepLinkManager: ObservableObject {
         guard let range = string.range(of: "?link=") else { return }
         let rawLink = String(string[range.upperBound...])
         guard !rawLink.isEmpty else { return }
-        pendingAction = .addProxyWithLink(url: rawLink.removingPercentEncoding ?? rawLink)
+        self.url = rawLink.removingPercentEncoding ?? rawLink
     }
 }

@@ -81,7 +81,7 @@ struct ChainListView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(chain.name)
-                            .font(.body)
+                            .font(.body.weight(.medium))
                         if isSelected {
                             Image(systemName: "checkmark")
                                 .font(.caption.bold())
