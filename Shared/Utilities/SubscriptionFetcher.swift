@@ -34,13 +34,16 @@ struct SubscriptionFetcher {
         }
     }
 
-    static func fetch(url urlString: String) async throws -> Result {
+    static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
         guard let url = URL(string: urlString) else {
             throw FetchError.invalidURL
         }
 
         var request = URLRequest(url: url)
         request.setValue("Anywhere", forHTTPHeaderField: "User-Agent")
+        if withRemnawaveHWID {
+            request.setValue(AWCore.getIdentifier(), forHTTPHeaderField: "x-hwid")
+        }
 
         let allowInsecure = AWCore.getAllowInsecure()
         let delegate: InsecureSessionDelegate? = allowInsecure ? InsecureSessionDelegate() : nil
