@@ -127,10 +127,6 @@ struct SudokuHTTPMaskConfiguration: Codable, Hashable {
         self.multiplex = disable ? .off : multiplex
     }
 
-    var tunnelEnabled: Bool {
-        !disable && mode != .legacy
-    }
-
     static func normalizePathRoot(_ raw: String) -> String {
         raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -165,10 +161,6 @@ struct SudokuConfiguration: Codable, Hashable {
         self.customTables = Self.normalizeCustomTables(customTables)
         self.enablePureDownlink = enablePureDownlink
         self.httpMask = httpMask
-    }
-
-    var hasCustomLayout: Bool {
-        !customTables.isEmpty
     }
 
     private enum CodingKeys: String, CodingKey {
