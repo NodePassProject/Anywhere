@@ -367,6 +367,16 @@ class ProxyClient {
             return
         }
 
+        if configuration.outboundProtocol == .sudoku {
+            connectWithSudoku(
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                completion: completion
+            )
+            return
+        }
+
         if configuration.outboundProtocol.isNaive {
             if command != .tcp {
                 completion(.failure(ProxyError.dropped))

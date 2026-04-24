@@ -12,7 +12,7 @@ import Foundation
 extension ProxyConfiguration {
 
     /// URL scheme prefixes that ``parse(url:)`` can handle.
-    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "trojan://", "ss://", "socks5://", "socks://", "https://", "quic://"]
+    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "trojan://", "ss://", "socks5://", "socks://", "sudoku://", "https://", "quic://"]
 
     /// Whether the given string starts with a URL scheme that ``parse(url:)`` can handle.
     static func canParseURL(_ string: String) -> Bool {
@@ -38,11 +38,14 @@ extension ProxyConfiguration {
         if url.hasPrefix("socks5://") || url.hasPrefix("socks://") {
             return try parseSOCKS5(url: url)
         }
+        if url.hasPrefix("sudoku://") {
+            return try parseSudoku(url: url)
+        }
         if url.hasPrefix("https://") || url.hasPrefix("quic://") {
             return try parseNaive(url: url, protocolOverride: naiveProtocol)
         }
         guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless://, trojan://, ss://, socks5://, https://, or quic://")
+            throw ProxyError.invalidURL("URL must start with vless://, trojan://, ss://, socks5://, sudoku://, https://, or quic://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -405,6 +408,71 @@ extension ProxyConfiguration {
             serverAddress: host,
             serverPort: port,
             outbound: .socks5(username: username, password: password)
+        )
+    }
+
+    /// Parse a `sudoku://` short link into configuration.
+    private static func parseSudoku(url: String) throws -> ProxyConfiguration {
+        let encoded = String(url.dropFirst("sudoku://".count))
+        guard let payload = Data(base64URLEncoded: encoded),
+              let json = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            throw ProxyError.invalidURL("Invalid Sudoku short link payload")
+        }
+
+        guard let host = json["h"] as? String,
+              let portValue = json["p"],
+              let key = json["k"] as? String,
+              !host.isEmpty,
+              !key.isEmpty else {
+            throw ProxyError.invalidURL("Sudoku short link is missing required fields")
+        }
+
+        let portInt: Int
+        if let number = portValue as? NSNumber {
+            portInt = number.intValue
+        } else {
+            portInt = Int("\(portValue)") ?? 0
+        }
+        guard let port = UInt16(exactly: portInt), port > 0 else {
+            throw ProxyError.invalidURL("Invalid Sudoku short link port")
+        }
+
+        let aead = SudokuAEADMethod(rawValue: (json["e"] as? String) ?? SudokuAEADMethod.none.rawValue) ?? .none
+        let asciiMode = SudokuASCIIMode(normalized: (json["a"] as? String) ?? SudokuASCIIMode.preferEntropy.shortLinkToken) ?? .preferEntropy
+        let mixPortValue = json["m"] as? NSNumber
+        let name = (json["n"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let legacyCustomTable = ((json["t"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        var customTables = (json["ts"] as? [String]) ?? []
+        if !legacyCustomTable.isEmpty && !customTables.contains(legacyCustomTable) {
+            customTables.insert(legacyCustomTable, at: 0)
+        }
+        let enablePureDownlink = !((json["x"] as? Bool) ?? false)
+        let httpMask = SudokuHTTPMaskConfiguration(
+            disable: (json["hd"] as? Bool) ?? false,
+            mode: SudokuHTTPMaskMode(rawValue: (json["hm"] as? String) ?? SudokuHTTPMaskMode.legacy.rawValue) ?? .legacy,
+            tls: (json["ht"] as? Bool) ?? false,
+            host: (json["hh"] as? String) ?? "",
+            pathRoot: (json["hy"] as? String) ?? "",
+            multiplex: SudokuHTTPMaskMultiplex(rawValue: (json["hx"] as? String) ?? SudokuHTTPMaskMultiplex.off.rawValue) ?? .off
+        )
+
+        let config = SudokuConfiguration(
+            key: key,
+            aeadMethod: aead,
+            paddingMin: 5,
+            paddingMax: 15,
+            asciiMode: asciiMode,
+            customTables: customTables,
+            enablePureDownlink: enablePureDownlink,
+            httpMask: httpMask
+        )
+
+        let defaultName = mixPortValue == nil ? "Sudoku" : "Sudoku \(mixPortValue!.intValue)"
+        return ProxyConfiguration(
+            name: (name?.isEmpty == false) ? name! : defaultName,
+            serverAddress: host,
+            serverPort: port,
+            outbound: .sudoku(config)
         )
     }
 
