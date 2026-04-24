@@ -40,7 +40,7 @@ enum TunnelConstants {
     /// (~696 KB) since we defer `tcp_recved` until the route is committed;
     /// this cap defends against pathological states where the window bookkeeping
     /// drifts. Set to 2 × TCP_WND so it only fires on runaway growth.
-    static let tcpMaxPendingDataSize = 2 * 512 * 1360
+    static let tcpMaxPendingDataSize = 2 * 1024 * 1360
     /// Low-water mark for the per-connection downlink backlog (`pendingWrite`).
     /// When the backlog drops below this we prefetch the next proxy receive in
     /// parallel with the ongoing drain — without this overlap, big chunks turn
