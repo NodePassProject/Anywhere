@@ -160,8 +160,7 @@ extension LWIPStack {
         purgeShadowsocksUDPSessions()
         HysteriaClient.closeAll()
         HTTP3SessionPool.shared.closeAll()
-
-        let flowCount = udpFlows.count
+        
         for (_, flow) in udpFlows {
             flow.close()
         }
