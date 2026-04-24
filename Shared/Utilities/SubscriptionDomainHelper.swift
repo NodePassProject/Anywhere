@@ -11,7 +11,7 @@ class SubscriptionDomainHelper {
     
     static func shouldDisableProxyEditing(for url: String) -> Bool {
         for domain in domainsShouldDisableProxyEditing {
-            if url.starts(with: "https://\(domain)") {
+            if url.starts(with: "https://\(domain)/") {
                 return true
             }
         }
@@ -20,7 +20,7 @@ class SubscriptionDomainHelper {
     
     static func shouldRequireRemnawaveHWID(for url: String) -> Bool {
         for domain in domainsRequireRemnawaveHWID {
-            if url.starts(with: "https://\(domain)") {
+            if url.starts(with: "https://\(domain)/") {
                 return true
             }
         }
