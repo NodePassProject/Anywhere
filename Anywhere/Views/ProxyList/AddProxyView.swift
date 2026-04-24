@@ -41,7 +41,7 @@ struct AddProxyView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
     @Environment(\.dismiss) var dismiss
     @Binding var showingManualAddSheet: Bool
-    var deepLinkAction: DeepLinkAction?
+    var deepLinkURL: String?
 
     @State private var selectedMethod: Method?
     @State private var showingQRScanner = false
@@ -53,18 +53,11 @@ struct AddProxyView: View {
     @State private var showingRemnawaveHWIDAlert = false
     @State private var pendingSubscriptionURL = ""
 
-    init(showingManualAddSheet: Binding<Bool>, deepLinkAction: DeepLinkAction? = nil) {
+    init(showingManualAddSheet: Binding<Bool>, deepLinkURL: String? = nil) {
         _showingManualAddSheet = showingManualAddSheet
-        self.deepLinkAction = deepLinkAction
-        switch deepLinkAction {
-        case .addProxyWithLink(let url):
+        if let deepLinkURL {
             _selectedMethod = State(initialValue: .link)
-            _linkURL = State(initialValue: url)
-        case .addProxyManual(let url):
-            _selectedMethod = State(initialValue: .link)
-            _linkURL = State(initialValue: url)
-        case nil:
-            break
+            _linkURL = State(initialValue: deepLinkURL)
         }
     }
 
