@@ -50,6 +50,8 @@ struct AddProxyView: View {
     @State private var isLoading = false
     @State private var showingError = false
     @State private var errorMessage = ""
+    @State private var showingRemnawaveHWIDAlert = false
+    @State private var pendingSubscriptionURL = ""
 
     init(showingManualAddSheet: Binding<Bool>, deepLinkAction: DeepLinkAction? = nil) {
         _showingManualAddSheet = showingManualAddSheet
@@ -101,6 +103,14 @@ struct AddProxyView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(errorMessage)
+        }
+        .alert("Remnawave HWID", isPresented: $showingRemnawaveHWIDAlert) {
+            Button("Continue") {
+                fetchSubscription(url: pendingSubscriptionURL, withRemnawaveHWID: true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Remnawave HWID is required to continue.")
         }
     }
 
@@ -269,19 +279,19 @@ struct AddProxyView: View {
     }
 
     private func importFromString(_ string: String) {
-        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedURL = string.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // `https://` is ambiguous — Naive HTTP proxy or subscription — so the
         // user's `httpsLinkType` choice overrides the parser's.
-        let isHTTPSAsSubscription = trimmed.hasPrefix("https://") && httpsLinkType == .subscription
-        if ProxyConfiguration.canParseURL(trimmed) && !isHTTPSAsSubscription {
+        let isHTTPSAsSubscription = trimmedURL.hasPrefix("https://") && httpsLinkType == .subscription
+        if ProxyConfiguration.canParseURL(trimmedURL) && !isHTTPSAsSubscription {
             let naiveProtocol: OutboundProtocol? = switch httpsLinkType {
             case .http11Proxy: .http11
             case .http2Proxy: .http2
             case .subscription: nil
             }
             do {
-                let configuration = try ProxyConfiguration.parse(url: trimmed, naiveProtocol: naiveProtocol)
+                let configuration = try ProxyConfiguration.parse(url: trimmedURL, naiveProtocol: naiveProtocol)
                 viewModel.addConfiguration(configuration)
                 dismiss()
             } catch {
@@ -290,27 +300,37 @@ struct AddProxyView: View {
             }
         } else {
             // Treat as subscription URL
-            isLoading = true
-            Task {
-                do {
-                    let result = try await SubscriptionFetcher.fetch(url: trimmed)
-                    let subscription = Subscription(
-                        name: result.name ?? URL(string: trimmed)?.host ?? String(localized: "Subscription"),
-                        url: trimmed,
-                        lastUpdate: Date(),
-                        upload: result.upload,
-                        download: result.download,
-                        total: result.total,
-                        expire: result.expire
-                    )
-                    viewModel.addSubscription(configurations: result.configurations, subscription: subscription)
-                    dismiss()
-                } catch {
-                    errorMessage = error.localizedDescription
-                    showingError = true
-                }
-                isLoading = false
+            let requiresRemnawaveHWID = SubscriptionDomainHelper.shouldRequireRemnawaveHWID(for: trimmedURL)
+            if requiresRemnawaveHWID && !AWCore.getRemnawaveHWIDEnabled() {
+                pendingSubscriptionURL = trimmedURL
+                showingRemnawaveHWIDAlert = true
+                return
             }
+            fetchSubscription(url: trimmedURL, withRemnawaveHWID: requiresRemnawaveHWID)
+        }
+    }
+
+    private func fetchSubscription(url: String, withRemnawaveHWID: Bool) {
+        isLoading = true
+        Task {
+            do {
+                let result = try await SubscriptionFetcher.fetch(url: url, withRemnawaveHWID: withRemnawaveHWID)
+                let subscription = Subscription(
+                    name: result.name ?? URL(string: url)?.host ?? String(localized: "Subscription"),
+                    url: url,
+                    lastUpdate: Date(),
+                    upload: result.upload,
+                    download: result.download,
+                    total: result.total,
+                    expire: result.expire
+                )
+                viewModel.addSubscription(configurations: result.configurations, subscription: subscription)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+                showingError = true
+            }
+            isLoading = false
         }
     }
 }
