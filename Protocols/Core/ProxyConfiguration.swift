@@ -134,6 +134,7 @@ enum TransportLayer: Hashable {
     case tcp
     case ws(WebSocketConfiguration)
     case httpUpgrade(HTTPUpgradeConfiguration)
+    case grpc(GRPCConfiguration)
     case xhttp(XHTTPConfiguration)
 }
 
@@ -245,7 +246,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     private enum CodingKeys: String, CodingKey {
         case id, name, serverAddress, serverPort, resolvedIP, subscriptionId
         case outboundProtocol, uuid, encryption, flow
-        case transport, websocket, httpUpgrade, xhttp
+        case transport, websocket, httpUpgrade, grpc, xhttp
         case security, tls, reality
         case muxEnabled, xudpEnabled
         case hysteriaPassword, hysteriaUploadMbps, hysteriaSNI
@@ -288,6 +289,8 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 transport = (try container.decodeIfPresent(WebSocketConfiguration.self, forKey: .websocket)).map { .ws($0) } ?? .tcp
             case "httpupgrade":
                 transport = (try container.decodeIfPresent(HTTPUpgradeConfiguration.self, forKey: .httpUpgrade)).map { .httpUpgrade($0) } ?? .tcp
+            case "grpc":
+                transport = (try container.decodeIfPresent(GRPCConfiguration.self, forKey: .grpc)).map { .grpc($0) } ?? .tcp
             case "xhttp":
                 transport = (try container.decodeIfPresent(XHTTPConfiguration.self, forKey: .xhttp)).map { .xhttp($0) } ?? .tcp
             default:
@@ -427,6 +430,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             case .tcp: break
             case .ws(let config): try container.encode(config, forKey: .websocket)
             case .httpUpgrade(let config): try container.encode(config, forKey: .httpUpgrade)
+            case .grpc(let config): try container.encode(config, forKey: .grpc)
             case .xhttp(let config): try container.encode(config, forKey: .xhttp)
             }
 
@@ -500,6 +504,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case .tcp:          "tcp"
         case .ws:           "ws"
         case .httpUpgrade:  "httpupgrade"
+        case .grpc:         "grpc"
         case .xhttp:        "xhttp"
         }
     }
@@ -645,6 +650,7 @@ extension ProxyConfiguration {
         case .tcp:          "tcp"
         case .ws:           "ws"
         case .httpUpgrade:  "httpupgrade"
+        case .grpc:         "grpc"
         case .xhttp:        "xhttp"
         }
     }
@@ -679,6 +685,12 @@ extension ProxyConfiguration {
     /// HTTP upgrade configuration, if active.
     var httpUpgrade: HTTPUpgradeConfiguration? {
         if case .httpUpgrade(let config) = transportLayer { return config }
+        return nil
+    }
+    
+    /// gRPC configuration, if active.
+    var grpc: GRPCConfiguration? {
+        if case .grpc(let config) = transportLayer { return config }
         return nil
     }
 

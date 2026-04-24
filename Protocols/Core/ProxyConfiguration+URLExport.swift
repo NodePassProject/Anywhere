@@ -199,6 +199,19 @@ extension ProxyConfiguration {
                 params.append("path=\(hu.path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? hu.path)")
             }
         }
+        if let grpc, transport == "grpc" {
+            if !grpc.serviceName.isEmpty {
+                let encoded = grpc.serviceName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? grpc.serviceName
+                params.append("serviceName=\(encoded)")
+            }
+            if !grpc.authority.isEmpty {
+                let encoded = grpc.authority.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? grpc.authority
+                params.append("authority=\(encoded)")
+            }
+            if grpc.multiMode {
+                params.append("mode=multi")
+            }
+        }
         if let xhttp, transport == "xhttp" {
             if xhttp.host != serverAddress {
                 params.append("host=\(xhttp.host)")

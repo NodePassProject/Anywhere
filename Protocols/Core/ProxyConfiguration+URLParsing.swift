@@ -584,6 +584,11 @@ extension ProxyConfiguration {
                 return .httpUpgrade(configuration)
             }
             return .tcp
+        case "grpc":
+            if let configuration = GRPCConfiguration.parse(from: params) {
+                return .grpc(configuration)
+            }
+            return .tcp
         case "xhttp":
             let tlsServerName: String?
             if case .tls(let tls) = securityLayer { tlsServerName = tls.serverName }

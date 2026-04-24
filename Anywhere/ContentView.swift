@@ -13,7 +13,7 @@ struct ContentView: View {
     @State private var selectedTab: AppTab = .home
     @State private var showingDeepLinkAddSheet = false
     @State private var showingManualAddSheet = false
-    @State private var pendingDeepLinkAction: DeepLinkAction?
+    @State private var pendingDeepLinkURL: String?
 
     private var showOrphanedAlert: Binding<Bool> {
         Binding(
@@ -79,17 +79,17 @@ struct ContentView: View {
                 }
             }
         }
-        .onChange(of: deepLinkManager.pendingAction) { _, action in
-            if let action {
+        .onChange(of: deepLinkManager.url) { _, newValue in
+            if let url = newValue {
                 selectedTab = .proxies
-                pendingDeepLinkAction = action
-                deepLinkManager.pendingAction = nil
+                pendingDeepLinkURL = url
+                deepLinkManager.url = nil
                 showingDeepLinkAddSheet = true
             }
         }
-        .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkAction = nil }) {
+        .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkAction: pendingDeepLinkAction)
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {

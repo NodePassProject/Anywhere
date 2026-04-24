@@ -1693,6 +1693,9 @@
         }
       }
     },
+    "Authority" : {
+      "shouldTranslate" : false
+    },
     "Auto" : {
       "localizations" : {
         "ar" : {
@@ -3510,6 +3513,122 @@
         }
       }
     },
+    "Enable" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تفعيل"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enable"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activar"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "فعال‌سازی"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включить"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Işjeňleşdir"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Etkinleştir"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bật"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用"
+          }
+        }
+      }
+    },
+    "Enable %@ to continue." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "قم بتفعيل %@ للمتابعة."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enable %@ to continue."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Activa %@ para continuar."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "برای ادامه، %@ را فعال کنید."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Включите %@ для продолжения."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dowam etmek üçin %@ işjeňleşdiriň."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Devam etmek için %@ etkinleştirin."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bật %@ để tiếp tục."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "启用 %@ 以继续。"
+          }
+        }
+      }
+    },
     "Enable AD Blocking" : {
       "localizations" : {
         "ar" : {
@@ -4090,9 +4209,6 @@
         }
       }
     },
-    "Extra" : {
-      "shouldTranslate" : false
-    },
     "Fingerprint" : {
       "shouldTranslate" : false
     },
@@ -4330,6 +4446,12 @@
           }
         }
       }
+    },
+    "gRPC" : {
+      "shouldTranslate" : false
+    },
+    "Gun" : {
+      "shouldTranslate" : false
     },
     "h2,http/1.1" : {
       "shouldTranslate" : false
@@ -5976,6 +6098,9 @@
         }
       }
     },
+    "Multi" : {
+      "shouldTranslate" : false
+    },
     "Mux" : {
       "shouldTranslate" : false
     },
@@ -7081,6 +7206,64 @@
         }
       }
     },
+    "Other" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "أخرى"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Other"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Otros"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "سایر"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Другое"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Beýleki"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Diğer"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Khác"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其他"
+          }
+        }
+      }
+    },
     "Packet Up" : {
       "shouldTranslate" : false
     },
@@ -7786,6 +7969,9 @@
           }
         }
       }
+    },
+    "Remnawave HWID" : {
+      "shouldTranslate" : false
     },
     "Remove" : {
       "localizations" : {
@@ -8888,6 +9074,9 @@
           }
         }
       }
+    },
+    "Service Name" : {
+      "shouldTranslate" : false
     },
     "Settings" : {
       "localizations" : {
@@ -10191,6 +10380,9 @@
           }
         }
       }
+    },
+    "User Agent" : {
+      "shouldTranslate" : false
     },
     "Username" : {
       "localizations" : {
