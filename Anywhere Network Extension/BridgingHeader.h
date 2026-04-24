@@ -10,7 +10,5 @@
 
 #include "./lwip/lwip_bridge.h"
 #include "../Shared/ngtcp2/ngtcp2_bridge.h"
-#include "../Protocols/Sudoku/SudokuCore.h"
-#include "../Protocols/Sudoku/SudokuKey.h"
 
 #endif /* BridgingHeader_h */

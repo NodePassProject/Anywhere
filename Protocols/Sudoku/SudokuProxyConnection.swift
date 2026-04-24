@@ -2,9 +2,9 @@
 //  SudokuProxyConnection.swift
 //  Anywhere
 //
-//  Native Swift Sudoku outbound. The Sudoku table encoder/decoder remains in
-//  SudokuCore.c for now; transport, HTTPMask, KIP, record AEAD, UoT, and mux
-//  are implemented here with platform crypto and the existing Anywhere TLS stack.
+//  Native Swift Sudoku outbound. Transport, HTTPMask, KIP, record AEAD, UoT,
+//  mux, table codecs, and key recovery are implemented with platform crypto
+//  and the existing Anywhere TLS stack.
 //
 
 import Foundation
@@ -14,7 +14,7 @@ import Security
 
 private let sudokuLogger = AnywhereLogger(category: "Sudoku")
 
-private enum SudokuNativeError: Error, LocalizedError {
+enum SudokuNativeError: Error, LocalizedError {
     case invalidConfiguration(String)
     case connectionFailed(String)
     case protocolError(String)
@@ -210,12 +210,7 @@ final class SudokuNativeConfig {
         } else {
             self.privateKey = nil
         }
-        var recovered = [CChar](repeating: 0, count: 65)
-        if sudoku.key.withCString({ sudoku_recover_public_key_hex($0, &recovered) }) == 0 {
-            self.key = String(cString: recovered)
-        } else {
-            self.key = sudoku.key
-        }
+        self.key = SudokuKeyRecovery.recoverPublicKeyHex(sudoku.key) ?? sudoku.key
     }
 
     var nativeMuxEnabled: Bool {
@@ -224,30 +219,26 @@ final class SudokuNativeConfig {
 }
 
 final class SudokuTables {
-    private var pair = sudoku_table_pair_t()
+    private let pair: SudokuTablePair
     private let lock = UnfairLock()
     let sendsTableHint: Bool
 
     init(config: SudokuNativeConfig) throws {
         sendsTableHint = config.sendsTableHint
-        let result = config.key.withCString { keyPtr in
-            config.asciiMode.withCString { modePtr in
-                config.selectedCustomTable.withCString { customPtr in
-                    sudoku_table_pair_init(&pair, keyPtr, modePtr, customPtr, customPtr)
-                }
-            }
-        }
-        guard result == 0 else { throw SudokuNativeError.invalidConfiguration("failed to build Sudoku table") }
+        pair = try SudokuTablePair(
+            key: config.key,
+            asciiMode: config.asciiMode,
+            customUplink: config.selectedCustomTable,
+            customDownlink: config.selectedCustomTable
+        )
     }
 
-    deinit { sudoku_table_pair_free(&pair) }
-
-    func withUplink<T>(_ body: (UnsafePointer<sudoku_table_t>) throws -> T) rethrows -> T {
-        try lock.withLock { try withUnsafePointer(to: &pair.uplink, body) }
+    func withUplink<T>(_ body: (SudokuTable) throws -> T) rethrows -> T {
+        try lock.withLock { try body(pair.uplink) }
     }
 
-    func withDownlink<T>(_ body: (UnsafePointer<sudoku_table_t>) throws -> T) rethrows -> T {
-        try lock.withLock { try withUnsafePointer(to: &pair.downlink, body) }
+    func withDownlink<T>(_ body: (SudokuTable) throws -> T) rethrows -> T {
+        try lock.withLock { try body(pair.downlink) }
     }
 
     var hint: UInt32 { lock.withLock { pair.uplink.hint } }
@@ -805,10 +796,10 @@ final class SudokuObfsTransport {
 
     private let wire: Wire
     private let tables: SudokuTables
-    private var rng = sudoku_splitmix64_t()
+    private var rng: SudokuSplitMix64
     private var threshold: UInt64 = 0
-    private var pureDecoder = sudoku_decoder_t()
-    private var packedDecoder = sudoku_packed_decoder_t()
+    private var pureDecoder = SudokuPureDecoder()
+    private var packedDecoder: SudokuPackedDecoder
     private let pureDownlink: Bool
     private var plainBuffer = Data()
     private let readLock = UnfairLock()
@@ -820,10 +811,10 @@ final class SudokuObfsTransport {
         self.pureDownlink = config.pureDownlink
         let seedBytes = [UInt8](try SudokuNativeCrypto.randomData(count: 8))
         let seed = Int64(bitPattern: seedBytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) })
-        sudoku_splitmix64_seed(&rng, seed)
-        threshold = sudoku_pick_padding_threshold(&rng, config.paddingMin, config.paddingMax)
-        sudoku_decoder_init(&pureDecoder)
-        tables.withDownlink { sudoku_packed_decoder_init(&packedDecoder, $0) }
+        var seeded = SudokuSplitMix64(seed: seed)
+        threshold = seeded.pickPaddingThreshold(min: config.paddingMin, max: config.paddingMax)
+        rng = seeded
+        packedDecoder = tables.withDownlink { SudokuPackedDecoder(table: $0) }
     }
 
     func send(_ data: Data) throws {
@@ -832,17 +823,7 @@ final class SudokuObfsTransport {
             while offset < data.count {
                 let count = min(8192, data.count - offset)
                 let chunk = data.subdata(in: offset..<(offset + count))
-                var encoded = Data(count: count * 6 + 8)
-                let encodedCapacity = encoded.count
-                let written = tables.withUplink { tablePtr in
-                    encoded.withUnsafeMutableBytes { dst in
-                        chunk.withUnsafeBytes { src -> Int in
-                            guard let dstBase = dst.baseAddress?.assumingMemoryBound(to: UInt8.self), let srcBase = src.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
-                            return sudoku_encode_pure(dstBase, encodedCapacity, tablePtr, &rng, threshold, srcBase, count)
-                        }
-                    }
-                }
-                encoded.removeSubrange(written..<encoded.count)
+                let encoded = tables.withUplink { $0.encode(chunk, rng: &rng, paddingThreshold: threshold) }
                 try sendWire(encoded)
                 offset += count
             }
@@ -859,23 +840,13 @@ final class SudokuObfsTransport {
             }
             while true {
                 let wireData = try receiveWire(max: 8192)
-                var out = Data(count: 65536)
-                let outCapacity = out.count
-                var err: Int32 = 0
-                let decoded = tables.withDownlink { tablePtr in
-                    out.withUnsafeMutableBytes { dst in
-                        wireData.withUnsafeBytes { src -> Int in
-                            guard let dstBase = dst.baseAddress?.assumingMemoryBound(to: UInt8.self), let srcBase = src.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
-                            if pureDownlink {
-                                return sudoku_decode_pure(&pureDecoder, tablePtr, srcBase, wireData.count, dstBase, outCapacity, &err)
-                            }
-                            return sudoku_decode_packed(&packedDecoder, tablePtr, srcBase, wireData.count, dstBase, outCapacity, &err)
-                        }
+                let out = try tables.withDownlink { table -> Data in
+                    if pureDownlink {
+                        return try pureDecoder.decode(wireData, table: table, limit: 65536)
                     }
+                    return try packedDecoder.decode(wireData, table: table, limit: 65536)
                 }
-                if err != 0 { throw SudokuNativeError.protocolError("Sudoku decode failed") }
-                if decoded == 0 { continue }
-                out.removeSubrange(decoded..<out.count)
+                if out.isEmpty { continue }
                 if out.count > max {
                     plainBuffer.append(out.dropFirst(max))
                     return Data(out.prefix(max))
