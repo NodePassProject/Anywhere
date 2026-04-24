@@ -72,6 +72,21 @@ struct ProxyEditorView: View {
     @State private var socks5Username = ""
     @State private var socks5Password = ""
 
+    // Sudoku fields
+    @State private var sudokuKey = ""
+    @State private var sudokuAEADMethod: SudokuAEADMethod = .chacha20Poly1305
+    @State private var sudokuPaddingMinText = "5"
+    @State private var sudokuPaddingMaxText = "15"
+    @State private var sudokuASCIIMode: SudokuASCIIMode = .preferEntropy
+    @State private var sudokuCustomTablesText = ""
+    @State private var sudokuEnablePureDownlink = true
+    @State private var sudokuHTTPMaskDisable = false
+    @State private var sudokuHTTPMaskMode: SudokuHTTPMaskMode = .legacy
+    @State private var sudokuHTTPMaskTLS = false
+    @State private var sudokuHTTPMaskHost = ""
+    @State private var sudokuHTTPMaskPathRoot = ""
+    @State private var sudokuHTTPMaskMultiplex: SudokuHTTPMaskMultiplex = .off
+
     // Shared credential fields for HTTPS/HTTP2/QUIC (persisted per-protocol at save time)
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
@@ -81,6 +96,7 @@ struct ProxyEditorView: View {
     private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
+    private var isSudoku: Bool { selectedProtocol == .sudoku }
     private var isNaive: Bool { selectedProtocol.isNaive }
     private var isReality: Bool { security == "reality" }
     private var isTLS: Bool { security == "tls" }
@@ -101,6 +117,11 @@ struct ProxyEditorView: View {
         }
         if isSOCKS5 {
             return true // username/password optional for SOCKS5
+        }
+        if isSudoku {
+            guard !sudokuKey.isEmpty else { return false }
+            guard let min = Int(sudokuPaddingMinText), let max = Int(sudokuPaddingMaxText) else { return false }
+            return (0...100).contains(min) && min <= max && max <= 100
         }
         if isNaive {
             return !naiveUsername.isEmpty && !naivePassword.isEmpty
@@ -134,6 +155,7 @@ struct ProxyEditorView: View {
                         Text("Trojan").tag(OutboundProtocol.trojan)
                         Text("Shadowsocks").tag(OutboundProtocol.shadowsocks)
                         Text("SOCKS5").tag(OutboundProtocol.socks5)
+                        Text("Sudoku").tag(OutboundProtocol.sudoku)
                         Text("HTTPS").tag(OutboundProtocol.http11)
                         Text("HTTP2").tag(OutboundProtocol.http2)
                         Text("QUIC").tag(OutboundProtocol.http3)
@@ -141,7 +163,7 @@ struct ProxyEditorView: View {
                         TextWithColorfulIcon(titleKey: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
                     .onChange(of: selectedProtocol) {
-                        if isTrojan || isShadowsocks || isSOCKS5 || isNaive {
+                        if isTrojan || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
                             flow = ""
                             security = security == "reality" ? "none" : security
                         }
@@ -227,6 +249,15 @@ struct ProxyEditorView: View {
                         } label: {
                             TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                         }
+                    } else if isSudoku {
+                        LabeledContent {
+                            SecureField("Key", text: $sudokuKey)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Key", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
                     } else if isNaive {
                         LabeledContent {
                             TextField("Username", text: $naiveUsername)
@@ -260,7 +291,92 @@ struct ProxyEditorView: View {
                         }
                     }
                 }
-                
+
+                if isSudoku {
+                    Section("Sudoku") {
+                        Picker(selection: $sudokuAEADMethod) {
+                            ForEach(SudokuAEADMethod.allCases, id: \.self) { method in
+                                Text(method.displayName).tag(method)
+                            }
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "AEAD", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                        }
+                        LabeledContent {
+                            TextField("0-100", text: $sudokuPaddingMinText)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Padding Min", systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .orange)
+                        }
+                        LabeledContent {
+                            TextField("0-100", text: $sudokuPaddingMaxText)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Padding Max", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .orange)
+                        }
+                        Picker(selection: $sudokuASCIIMode) {
+                            ForEach(SudokuASCIIMode.allCases, id: \.self) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "ASCII", systemName: "textformat.alt", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                        LabeledContent {
+                            TextField("comma,separated,tables", text: $sudokuCustomTablesText)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(titleKey: "Custom Tables", systemName: "square.stack.3d.up.fill", foregroundColor: .white, backgroundColor: .indigo)
+                        }
+                        Toggle(isOn: $sudokuEnablePureDownlink) {
+                            TextWithColorfulIcon(titleKey: "Pure Downlink", systemName: "arrow.down.to.line.compact", foregroundColor: .white, backgroundColor: .teal)
+                        }
+                    }
+
+                    Section("HTTPMask") {
+                        Toggle(isOn: $sudokuHTTPMaskDisable) {
+                            TextWithColorfulIcon(titleKey: "Disable", systemName: "xmark.circle.fill", foregroundColor: .white, backgroundColor: .gray)
+                        }
+                        if !sudokuHTTPMaskDisable {
+                            Picker(selection: $sudokuHTTPMaskMode) {
+                                ForEach(SudokuHTTPMaskMode.allCases, id: \.self) { mode in
+                                    Text(mode.displayName).tag(mode)
+                                }
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Mode", systemName: "network.badge.shield.half.filled", foregroundColor: .white, backgroundColor: .purple)
+                            }
+                            Toggle(isOn: $sudokuHTTPMaskTLS) {
+                                TextWithColorfulIcon(titleKey: "TLS", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            LabeledContent {
+                                TextField("Host", text: $sudokuHTTPMaskHost)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            LabeledContent {
+                                TextField("path-root", text: $sudokuHTTPMaskPathRoot)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Path Root", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            Picker(selection: $sudokuHTTPMaskMultiplex) {
+                                ForEach(SudokuHTTPMaskMultiplex.allCases, id: \.self) { mode in
+                                    Text(mode.displayName).tag(mode)
+                                }
+                            } label: {
+                                TextWithColorfulIcon(titleKey: "Multiplex", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
+                            }
+                        }
+                    }
+                }
+
                 if isVLESS {
                     Section("Transport") {
                         Picker(selection: $transport) {
@@ -575,6 +691,20 @@ struct ProxyEditorView: View {
         case .socks5(let user, let pass):
             socks5Username = user ?? ""
             socks5Password = pass ?? ""
+        case .sudoku(let sudoku):
+            sudokuKey = sudoku.key
+            sudokuAEADMethod = sudoku.aeadMethod
+            sudokuPaddingMinText = String(sudoku.paddingMin)
+            sudokuPaddingMaxText = String(sudoku.paddingMax)
+            sudokuASCIIMode = sudoku.asciiMode
+            sudokuCustomTablesText = sudoku.customTables.joined(separator: ",")
+            sudokuEnablePureDownlink = sudoku.enablePureDownlink
+            sudokuHTTPMaskDisable = sudoku.httpMask.disable
+            sudokuHTTPMaskMode = sudoku.httpMask.mode
+            sudokuHTTPMaskTLS = sudoku.httpMask.tls
+            sudokuHTTPMaskHost = sudoku.httpMask.host
+            sudokuHTTPMaskPathRoot = sudoku.httpMask.pathRoot
+            sudokuHTTPMaskMultiplex = sudoku.httpMask.multiplex
         case .http11(let user, let pass), .http2(let user, let pass), .http3(let user, let pass):
             naiveUsername = user
             naivePassword = pass
@@ -744,6 +874,27 @@ struct ProxyEditorView: View {
                 username: socks5Username.isEmpty ? nil : socks5Username,
                 password: socks5Password.isEmpty ? nil : socks5Password
             )
+        case .sudoku:
+            outbound = .sudoku(SudokuConfiguration(
+                key: sudokuKey,
+                aeadMethod: sudokuAEADMethod,
+                paddingMin: Int(sudokuPaddingMinText) ?? 5,
+                paddingMax: Int(sudokuPaddingMaxText) ?? 15,
+                asciiMode: sudokuASCIIMode,
+                customTables: sudokuCustomTablesText
+                    .split(separator: ",")
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty },
+                enablePureDownlink: sudokuEnablePureDownlink,
+                httpMask: SudokuHTTPMaskConfiguration(
+                    disable: sudokuHTTPMaskDisable,
+                    mode: sudokuHTTPMaskMode,
+                    tls: sudokuHTTPMaskTLS,
+                    host: sudokuHTTPMaskHost,
+                    pathRoot: sudokuHTTPMaskPathRoot,
+                    multiplex: sudokuHTTPMaskMultiplex
+                )
+            ))
         case .http11:
             outbound = .http11(username: naiveUsername, password: naivePassword)
         case .http2:

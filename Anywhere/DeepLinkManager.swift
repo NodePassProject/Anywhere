@@ -15,11 +15,12 @@ final class DeepLinkManager: ObservableObject {
     // anywhere://add-proxy?link=<link>
     // vless://<...>
     // ss://<...>
+    // sudoku://<...>
     func handle(url: URL) {
         switch url.scheme?.lowercased() {
         case "anywhere":
             handleAnywhereScheme(url)
-        case "vless", "hysteria2", "hy2", "trojan", "ss", "quic":
+        case "vless", "hysteria2", "hy2", "trojan", "ss", "quic", "sudoku":
             self.url = url.absoluteString
         default:
             break
@@ -33,6 +34,6 @@ final class DeepLinkManager: ObservableObject {
         guard let range = string.range(of: "?link=") else { return }
         let rawLink = String(string[range.upperBound...])
         guard !rawLink.isEmpty else { return }
-        self.url = rawLink.removingPercentEncoding
+        self.url = rawLink.removingPercentEncoding ?? rawLink
     }
 }
