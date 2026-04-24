@@ -464,15 +464,15 @@ class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let tlsClient = TLSClient(configuration: tlsConfig)
+        self.tlsClient = tlsClient
 
-        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
+        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
             switch result {
             case .success(let tlsConnection):
-                self.tlsClient = tlsClient
                 self.tlsConnection = tlsConnection
                 let tlsProxyConnection = TLSProxyConnection(tlsConnection: tlsConnection)
                 self.sendProtocolHandshake(
@@ -503,15 +503,15 @@ class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let realityClient = RealityClient(configuration: realityConfig)
+        self.realityClient = realityClient
 
-        let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, realityClient] result in
+        let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
             switch result {
             case .success(let realityConnection):
-                self.realityClient = realityClient
                 self.realityConnection = realityConnection
                 let realityProxyConnection = RealityProxyConnection(realityConnection: realityConnection)
                 self.sendProtocolHandshake(
@@ -555,15 +555,15 @@ class ProxyClient {
                 fingerprint: baseTLSConfig.fingerprint
             )
             let tlsClient = TLSClient(configuration: wsTlsConfig)
+            self.tlsClient = tlsClient
 
-            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
+            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
                 guard let self else {
                     completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
                 switch result {
                 case .success(let tlsConnection):
-                    self.tlsClient = tlsClient
                     self.tlsConnection = tlsConnection
                     let wsConnection = WebSocketConnection(tlsConnection: tlsConnection, configuration: wsConfig)
                     self.performWebSocketUpgrade(
@@ -659,15 +659,15 @@ class ProxyClient {
         if let tlsConfiguration = configuration.tls {
             // HTTPS Upgrade: TCP → TLS → HTTP Upgrade → raw TCP over TLS → VLESS
             let tlsClient = TLSClient(configuration: tlsConfiguration)
+            self.tlsClient = tlsClient
 
-            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
+            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
                 guard let self else {
                     completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
                 switch result {
                 case .success(let tlsConnection):
-                    self.tlsClient = tlsClient
                     self.tlsConnection = tlsConnection
                     let huConnection = HTTPUpgradeConnection(tlsConnection: tlsConnection, configuration: huConfig)
                     self.performHTTPUpgrade(
@@ -788,15 +788,15 @@ class ProxyClient {
         if let realityConfig = configuration.reality {
             // Reality + gRPC: Reality handles its own ALPN internally; layer gRPC on top.
             let realityClient = RealityClient(configuration: realityConfig)
+            self.realityClient = realityClient
 
-            let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, realityClient] result in
+            let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
                 guard let self else {
                     completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
                 switch result {
                 case .success(let realityConnection):
-                    self.realityClient = realityClient
                     self.realityConnection = realityConnection
                     let grpcConnection = GRPCConnection(
                         tlsConnection: realityConnection,
@@ -824,15 +824,15 @@ class ProxyClient {
             // gRPC over TLS: force ALPN `h2`, handshake, then open the HTTP/2 stream.
             let grpcTLSConfig = sanitizedGRPCTLSConfiguration(from: baseTLSConfig)
             let tlsClient = TLSClient(configuration: grpcTLSConfig)
+            self.tlsClient = tlsClient
 
-            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
+            let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
                 guard let self else {
                     completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                     return
                 }
                 switch result {
                 case .success(let tlsConnection):
-                    self.tlsClient = tlsClient
                     self.tlsConnection = tlsConnection
                     let grpcConnection = GRPCConnection(
                         tlsConnection: tlsConnection,
@@ -1169,15 +1169,15 @@ class ProxyClient {
         // Keep the original fingerprint/SNI, but do not advertise h3 on the TCP path.
         let tlsConfiguration = sanitizedXHTTPTLSConfiguration(from: baseTLSConfig, httpVersion: httpVersion)
         let tlsClient = TLSClient(configuration: tlsConfiguration)
+        self.tlsClient = tlsClient
 
-        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, tlsClient] result in
+        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
             switch result {
             case .success(let tlsConnection):
-                self.tlsClient = tlsClient
                 self.tlsConnection = tlsConnection
 
                 if httpVersion == .http2 {
@@ -1265,15 +1265,15 @@ class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let realityClient = RealityClient(configuration: realityConfig)
+        self.realityClient = realityClient
 
-        let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self, realityClient] result in
+        let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
             switch result {
             case .success(let realityConnection):
-                self.realityClient = realityClient
                 self.realityConnection = realityConnection
 
                 // Reality + XHTTP uses HTTP/2 (Xray-core dialer.go:80-82)
