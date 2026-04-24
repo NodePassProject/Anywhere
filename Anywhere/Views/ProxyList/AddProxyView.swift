@@ -105,12 +105,12 @@ struct AddProxyView: View {
             Text(errorMessage)
         }
         .alert("Remnawave HWID", isPresented: $showingRemnawaveHWIDAlert) {
-            Button("Continue") {
+            Button("Enable") {
                 fetchSubscription(url: pendingSubscriptionURL, withRemnawaveHWID: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Remnawave HWID is required to continue.")
+            Text("Enable \("Remnawave HWID") to continue.")
         }
     }
 
