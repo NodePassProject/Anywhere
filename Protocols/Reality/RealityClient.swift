@@ -30,7 +30,7 @@ class RealityClient {
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var authKey: Data?
     private var storedClientHello: Data?
-    private var mlkemPrivateKeyStorage: Any? // MLKEM768.PrivateKey on iOS 26+
+    private var mlkemPrivateKeyStorage: Any? // MLKEM768.PrivateKey when the SDK provides it.
 
     /// TLS 1.3 session state (cleared after handshake by reassigning a
     /// fresh ``TLS13HandshakeState``).
@@ -209,12 +209,14 @@ class RealityClient {
 
         // Generate ML-KEM-768 key pair for PQ hybrid key share (iOS 26+)
         var mlkemEncapsulationKey: Data?
+        #if compiler(>=6.2)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
             if let mlkemPK = try? CryptoKit.MLKEM768.PrivateKey() {
                 mlkemPrivateKeyStorage = mlkemPK
                 mlkemEncapsulationKey = Data(mlkemPK.publicKey.rawRepresentation)
             }
         }
+        #endif
 
         // Build ClientHello with zero SessionId for AAD (matching Xray-core)
         let zeroSessionId = Data(count: 32)
@@ -860,6 +862,7 @@ class RealityClient {
 
     /// Decapsulates an ML-KEM-768 ciphertext using the stored private key.
     private func decapsulateMLKEM(ciphertext: Data) throws -> Data {
+        #if compiler(>=6.2)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
             guard let pk = mlkemPrivateKeyStorage as? CryptoKit.MLKEM768.PrivateKey else {
                 throw RealityError.handshakeFailed("ML-KEM private key not available")
@@ -867,6 +870,7 @@ class RealityClient {
             let sharedSecret = try pk.decapsulate(ciphertext)
             return sharedSecret.withUnsafeBytes { Data($0) }
         }
+        #endif
         throw RealityError.handshakeFailed("ML-KEM not supported on this platform")
     }
 
