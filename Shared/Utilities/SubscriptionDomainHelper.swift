@@ -6,8 +6,8 @@
 //
 
 class SubscriptionDomainHelper {
-    static let domainsShouldDisableProxyEditing: [String] = ["sub.example.com"]
-    static let domainsRequireRemnawaveHWID: [String] = ["sub.example.com"]
+    static let domainsShouldDisableProxyEditing: [String] = ["sub.example.com", "sub.cdnjst.org"]
+    static let domainsRequireRemnawaveHWID: [String] = ["sub.example.com", "sub.cdnjst.org"]
     
     static func shouldDisableProxyEditing(for url: String) -> Bool {
         for domain in domainsShouldDisableProxyEditing {
