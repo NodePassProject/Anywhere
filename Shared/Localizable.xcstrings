@@ -524,6 +524,9 @@
         }
       }
     },
+    "0-100" : {
+      "shouldTranslate" : false
+    },
     "A proxy chain needs at least 2 proxies." : {
       "localizations" : {
         "ar" : {
@@ -1278,6 +1281,10 @@
         }
       }
     },
+    "AEAD" : {
+      "comment" : "AEAD for Sudoku protocol",
+      "shouldTranslate" : false
+    },
     "AES-128-GCM" : {
       "shouldTranslate" : false
     },
@@ -1693,7 +1700,11 @@
         }
       }
     },
+    "ASCII" : {
+      "shouldTranslate" : false
+    },
     "Authority" : {
+      "comment" : "Authority for VLESS protocol gRPC transport",
       "shouldTranslate" : false
     },
     "Auto" : {
@@ -1876,9 +1887,6 @@
     "BLAKE3-AES-256-GCM" : {
       "shouldTranslate" : false
     },
-    "BLAKE3-ChaCha20-Poly1305" : {
-      "shouldTranslate" : false
-    },
     "Block ads and trackers at the network level for a cleaner browsing experience." : {
       "localizations" : {
         "ar" : {
@@ -2052,6 +2060,64 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "链式代理"
+          }
+        }
+      }
+    },
+    "Comma Separated" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مفصولة بفواصل"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Comma Separated"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Separados por comas"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جدا شده با کاما"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Разделённые запятыми"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Otur bilen aýrylan"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Virgülle Ayrılmış"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Phân tách bằng dấu phẩy"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "逗号分隔"
           }
         }
       }
@@ -2578,6 +2644,10 @@
         }
       }
     },
+    "Custom Tables" : {
+      "comment" : "Custom Tables for Sudoku protocol",
+      "shouldTranslate" : false
+    },
     "Default" : {
       "localizations" : {
         "ar" : {
@@ -2867,6 +2937,10 @@
           }
         }
       }
+    },
+    "Disable HTTP Mask" : {
+      "comment" : "Disable HTTP Mask for Sudoku protocol",
+      "shouldTranslate" : false
     },
     "Disconnected" : {
       "localizations" : {
@@ -3920,6 +3994,7 @@
       }
     },
     "Encryption" : {
+      "comment" : "Encryption for VLESS protocol",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -4213,6 +4288,7 @@
       "shouldTranslate" : false
     },
     "Flow" : {
+      "comment" : "Flow for VLESS protocol TCP transport",
       "shouldTranslate" : false
     },
     "Get Started" : {
@@ -4629,6 +4705,10 @@
           }
         }
       }
+    },
+    "HTTP Mask" : {
+      "comment" : "HTTP Mask for Sudoku protocol",
+      "shouldTranslate" : false
     },
     "HTTP/2 Proxy" : {
       "localizations" : {
@@ -5515,6 +5595,10 @@
         }
       }
     },
+    "Key" : {
+      "comment" : "Key for Sudoku protocol",
+      "shouldTranslate" : false
+    },
     "Leave empty to automatically discover and upgrade to encrypted DNS servers." : {
       "localizations" : {
         "ar" : {
@@ -5809,6 +5893,7 @@
       "shouldTranslate" : false
     },
     "Method" : {
+      "comment" : "Method for Shadowsocks protocol",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -6101,7 +6186,12 @@
     "Multi" : {
       "shouldTranslate" : false
     },
+    "Multiplex" : {
+      "comment" : "Multiplex for Sudoku protocol HTTP Mask feature",
+      "shouldTranslate" : false
+    },
     "Mux" : {
+      "comment" : "Mux for VLESS protocol TCP transport",
       "shouldTranslate" : false
     },
     "Name" : {
@@ -7267,6 +7357,14 @@
     "Packet Up" : {
       "shouldTranslate" : false
     },
+    "Padding Max" : {
+      "comment" : "Padding Max for Sudoku protocol",
+      "shouldTranslate" : false
+    },
+    "Padding Min" : {
+      "comment" : "Padding Min for Sudoku protocol",
+      "shouldTranslate" : false
+    },
     "Password" : {
       "localizations" : {
         "ar" : {
@@ -7382,6 +7480,10 @@
           }
         }
       }
+    },
+    "Path Root" : {
+      "comment" : "Path Root for Sudoku protocol HTTP Mask feature",
+      "shouldTranslate" : false
     },
     "Permission denied" : {
       "localizations" : {
@@ -7733,6 +7835,7 @@
       }
     },
     "Public Key" : {
+      "comment" : "Public Key for Reality security layer",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -7789,6 +7892,10 @@
           }
         }
       }
+    },
+    "Pure Downlink" : {
+      "comment" : "Pure Downlink for Sudoku protocol",
+      "shouldTranslate" : false
     },
     "QR Code" : {
       "localizations" : {
@@ -8844,6 +8951,7 @@
       }
     },
     "Security" : {
+      "comment" : "Security for VLESS protocol",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -9076,6 +9184,7 @@
       }
     },
     "Service Name" : {
+      "comment" : "Service Name for VLESS protocol gRPC transport",
       "shouldTranslate" : false
     },
     "Settings" : {
@@ -9198,6 +9307,7 @@
       "shouldTranslate" : false
     },
     "Short ID" : {
+      "comment" : "Short ID for Reality security layer",
       "shouldTranslate" : false
     },
     "SNI" : {
@@ -9269,6 +9379,9 @@
           }
         }
       }
+    },
+    "Sudoku" : {
+      "shouldTranslate" : false
     },
     "Supports proxy, subscription and Clash links" : {
       "localizations" : {
@@ -9857,6 +9970,7 @@
       }
     },
     "Transport" : {
+      "comment" : "Transport for VLESS protocol",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -10324,6 +10438,7 @@
       }
     },
     "Upload Speed" : {
+      "comment" : "Upload Speed for Hysteria protocol",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -10443,12 +10558,10 @@
       }
     },
     "UUID" : {
+      "comment" : "UUID for VLESS protocol",
       "shouldTranslate" : false
     },
     "Vision" : {
-      "shouldTranslate" : false
-    },
-    "Vision with UDP 443" : {
       "shouldTranslate" : false
     },
     "VLESS" : {
@@ -10635,6 +10748,7 @@
       "shouldTranslate" : false
     },
     "XUDP" : {
+      "comment" : "XUDP for VLESS protocol TCP transport",
       "shouldTranslate" : false
     },
     "You" : {

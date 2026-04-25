@@ -28,6 +28,10 @@ class TVProxyEditorViewController: UITableViewController {
     private var wsPath = "/"
     private var huHost = ""
     private var huPath = "/"
+    private var grpcServiceName = ""
+    private var grpcAuthority = ""
+    private var grpcMode = "gun"
+    private var grpcUserAgent = ""
     private var xhttpHost = ""
     private var xhttpPath = "/"
     private var xhttpMode = "auto"
@@ -85,7 +89,10 @@ class TVProxyEditorViewController: UITableViewController {
         case name, address, port, uuid
         case outboundProtocol, encryption, transport, flow, security
         case mux, xudp
-        case wsHost, wsPath, huHost, huPath, xhttpHost, xhttpPath, xhttpMode
+        case wsHost, wsPath
+        case huHost, huPath
+        case grpcServiceName, grpcAuthority, grpcMode, grpcUserAgent
+        case xhttpHost, xhttpPath, xhttpMode
         case tlsSNI, tlsALPN, fingerprint
         case realitySNI, publicKey, shortId
         case hysteriaPassword, hysteriaUploadMbps
@@ -110,7 +117,15 @@ class TVProxyEditorViewController: UITableViewController {
 
         // Protocol
         let protocolOptions: [(String, String)] = [
-            ("VLESS", "vless"), ("Hysteria", "hysteria"), ("Trojan", "trojan"), ("Shadowsocks", "shadowsocks"), ("SOCKS5", "socks5"), ("Sudoku", "sudoku"), ("HTTPS", "http11"), ("HTTP2", "http2"), ("QUIC", "http3"),
+            ("VLESS", "vless"),
+            ("Hysteria", "hysteria"),
+            ("Trojan", "trojan"),
+            ("Shadowsocks", "shadowsocks"),
+            ("SOCKS5", "socks5"),
+            ("Sudoku", "sudoku"),
+            ("HTTPS", "http11"),
+            ("HTTP2", "http2"),
+            ("QUIC", "http3"),
         ]
         sections.append((String(localized: "Protocol"), [
             .selection(label: String(localized: "Protocol"), value: selectedProtocol.name, options: protocolOptions, key: .outboundProtocol),
@@ -118,88 +133,88 @@ class TVProxyEditorViewController: UITableViewController {
 
         // Server
         var serverRows: [RowType] = [
-            .text(label: String(localized: "Address"), value: serverAddress, placeholder: "Address", key: .address),
+            .text(label: String(localized: "Address"), value: serverAddress, placeholder: String(localized: "Address"), key: .address),
             .text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port),
         ]
-        if isHysteria {
-            serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: "Password", key: .hysteriaPassword, secure: true))
-            serverRows.append(.text(label: String(localized: "Upload Speed"), value: hysteriaUploadMbpsText, placeholder: "Mbps", key: .hysteriaUploadMbps))
+        if isVLESS {
+            serverRows.append(.text(label: String(localized: "UUID", comment: "UUID for VLESS protocol"), value: uuid, placeholder: String(localized: "UUID", comment: "UUID for VLESS protocol"), key: .uuid))
+            serverRows.append(.selection(label: String(localized: "Encryption", comment: "Encryption for VLESS protocol"), value: encryptionDisplayValue, options: [("None", "none")], key: .encryption))
+        } else if isHysteria {
+            serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: String(localized: "Password"), key: .hysteriaPassword, secure: true))
+            serverRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
         } else if isTrojan {
-            serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: "Password", key: .trojanPassword, secure: true))
+            serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword, secure: true))
         } else if isShadowsocks {
-            serverRows.append(.text(label: String(localized: "Password"), value: ssPassword, placeholder: "Password", key: .ssPassword, secure: true))
+            serverRows.append(.text(label: String(localized: "Password"), value: ssPassword, placeholder: String(localized: "Password"), key: .ssPassword, secure: true))
             let methods: [(String, String)] = [
-                ("None", "none"), ("AES-128-GCM", "aes-128-gcm"), ("AES-256-GCM", "aes-256-gcm"),
+                (String(localized: "None"), "none"),
+                ("AES-128-GCM", "aes-128-gcm"),
+                ("AES-256-GCM", "aes-256-gcm"),
                 ("ChaCha20-Poly1305", "chacha20-ietf-poly1305"),
-                ("BLAKE3-AES-128-GCM", "2022-blake3-aes-128-gcm"), ("BLAKE3-AES-256-GCM", "2022-blake3-aes-256-gcm"),
+                ("BLAKE3-AES-128-GCM", "2022-blake3-aes-128-gcm"),
+                ("BLAKE3-AES-256-GCM", "2022-blake3-aes-256-gcm"),
                 ("BLAKE3-ChaCha20", "2022-blake3-chacha20-poly1305"),
             ]
-            serverRows.append(.selection(label: String(localized: "Method"), value: ssMethod, options: methods, key: .ssMethod))
+            serverRows.append(.selection(label: String(localized: "Method", comment: "Method for Shadowsocks protocol"), value: ssMethodDisplayValue, options: methods, key: .ssMethod))
         } else if isSOCKS5 {
-            serverRows.append(.text(label: String(localized: "Username"), value: socks5Username, placeholder: "Username", key: .socks5Username))
-            serverRows.append(.text(label: String(localized: "Password"), value: socks5Password, placeholder: "Password", key: .socks5Password, secure: true))
+            serverRows.append(.text(label: String(localized: "Username"), value: socks5Username, placeholder: String(localized: "Username"), key: .socks5Username))
+            serverRows.append(.text(label: String(localized: "Password"), value: socks5Password, placeholder: String(localized: "Password"), key: .socks5Password, secure: true))
         } else if isSudoku {
-            serverRows.append(.text(label: String(localized: "Key"), value: sudokuKey, placeholder: "Key", key: .sudokuKey, secure: true))
+            serverRows.append(.text(label: String(localized: "Key", comment: "Key for Sudoku protocol"), value: sudokuKey, placeholder: String(localized: "Key", comment: "Key for Sudoku protocol"), key: .sudokuKey, secure: true))
+            serverRows.append(.selection(label: String(localized: "AEAD", comment: "AEAD for Sudoku protocol"), value: sudokuAEADMethod.displayName, options: SudokuAEADMethod.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuAEADMethod))
+            serverRows.append(.text(label: String(localized: "Padding Min", comment: "Padding Min for Sudoku protocol"), value: sudokuPaddingMinText, placeholder: "0-100", key: .sudokuPaddingMin))
+            serverRows.append(.text(label: String(localized: "Padding Max", comment: "Padding Max for Sudoku protocol"), value: sudokuPaddingMaxText, placeholder: "0-100", key: .sudokuPaddingMax))
+            serverRows.append(.selection(label: String(localized: "ASCII"), value: sudokuASCIIMode.displayName, options: SudokuASCIIMode.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuASCIIMode))
+            serverRows.append(.text(label: String(localized: "Custom Tables", comment: "Custom Tables for Sudoku protocol"), value: sudokuCustomTablesText, placeholder: "comma,separated", key: .sudokuCustomTables))
+            serverRows.append(.toggle(label: String(localized: "Pure Downlink", comment: "Pure Downlink for Sudoku protocol"), isOn: sudokuEnablePureDownlink, key: .sudokuPureDownlink))
         } else if isNaive {
-            serverRows.append(.text(label: String(localized: "Username"), value: naiveUsername, placeholder: "Username", key: .naiveUsername))
-            serverRows.append(.text(label: String(localized: "Password"), value: naivePassword, placeholder: "Password", key: .naivePassword, secure: true))
-        } else {
-            serverRows.append(.text(label: "UUID", value: uuid, placeholder: "UUID", key: .uuid))
-            serverRows.append(.selection(label: String(localized: "Encryption"), value: encryption, options: [("None", "none")], key: .encryption))
+            serverRows.append(.text(label: String(localized: "Username"), value: naiveUsername, placeholder: String(localized: "Username"), key: .naiveUsername))
+            serverRows.append(.text(label: String(localized: "Password"), value: naivePassword, placeholder: String(localized: "Password"), key: .naivePassword, secure: true))
         }
         sections.append((String(localized: "Server"), serverRows))
-
-        if isSudoku {
-            sections.append((String(localized: "Sudoku"), [
-                .selection(label: "AEAD", value: sudokuAEADMethod.displayName, options: SudokuAEADMethod.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuAEADMethod),
-                .text(label: String(localized: "Padding Min"), value: sudokuPaddingMinText, placeholder: "5", key: .sudokuPaddingMin),
-                .text(label: String(localized: "Padding Max"), value: sudokuPaddingMaxText, placeholder: "15", key: .sudokuPaddingMax),
-                .selection(label: "ASCII", value: sudokuASCIIMode.displayName, options: SudokuASCIIMode.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuASCIIMode),
-                .text(label: String(localized: "Custom Tables"), value: sudokuCustomTablesText, placeholder: "comma,separated", key: .sudokuCustomTables),
-                .toggle(label: String(localized: "Pure Downlink"), isOn: sudokuEnablePureDownlink, key: .sudokuPureDownlink),
-            ]))
-
-            var httpMaskRows: [RowType] = [
-                .toggle(label: String(localized: "Disable"), isOn: sudokuHTTPMaskDisable, key: .sudokuHTTPMaskDisable),
-            ]
-            if !sudokuHTTPMaskDisable {
-                httpMaskRows.append(.selection(label: String(localized: "Mode"), value: sudokuHTTPMaskMode.displayName, options: SudokuHTTPMaskMode.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuHTTPMaskMode))
-                httpMaskRows.append(.toggle(label: "TLS", isOn: sudokuHTTPMaskTLS, key: .sudokuHTTPMaskTLS))
-                httpMaskRows.append(.text(label: String(localized: "Host"), value: sudokuHTTPMaskHost, placeholder: "Host", key: .sudokuHTTPMaskHost))
-                httpMaskRows.append(.text(label: String(localized: "Path Root"), value: sudokuHTTPMaskPathRoot, placeholder: "path-root", key: .sudokuHTTPMaskPathRoot))
-                httpMaskRows.append(.selection(label: String(localized: "Multiplex"), value: sudokuHTTPMaskMultiplex.displayName, options: SudokuHTTPMaskMultiplex.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuHTTPMaskMultiplex))
-            }
-            sections.append((String(localized: "HTTPMask"), httpMaskRows))
-        }
         
         if isVLESS {
             var transportRows: [RowType] = [
-                .selection(label: String(localized: "Transport"), value: transport.uppercased(), options: [
-                    ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("XHTTP", "xhttp"),
+                .selection(label: String(localized: "Transport", comment: "Transport for VLESS protocol"), value: transportDisplayValue, options: [
+                    ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("gRPC", "grpc"), ("XHTTP", "xhttp"),
                 ], key: .transport),
             ]
             if transport == "tcp" {
-                transportRows.append(.selection(label: String(localized: "Flow"), value: flowDisplayValue, options: [
-                    ("None", ""), ("Vision", "xtls-rprx-vision"), ("Vision + UDP 443", "xtls-rprx-vision-udp443"),
+                transportRows.append(.selection(label: String(localized: "Flow", comment: "Flow for VLESS protocol TCP transport"), value: flowDisplayValue, options: [
+                    (String(localized: "None"), ""),
+                    ("Vision", "xtls-rprx-vision"),
+                    ("Vision + UDP 443", "xtls-rprx-vision-udp443"),
                 ], key: .flow))
-                transportRows.append(.toggle(label: String(localized: "Mux"), isOn: muxEnabled, key: .mux))
+                transportRows.append(.toggle(label: String(localized: "Mux", comment: "Mux for VLESS protocol TCP transport"), isOn: muxEnabled, key: .mux))
                 if muxEnabled {
-                    transportRows.append(.toggle(label: "XUDP", isOn: xudpEnabled, key: .xudp))
+                    transportRows.append(.toggle(label: String(localized: "XUDP", comment: "XUDP for VLESS protocol TCP transport"), isOn: xudpEnabled, key: .xudp))
                 }
             }
             if transport == "ws" {
-                transportRows.append(.text(label: String(localized: "Host"), value: wsHost, placeholder: "Host", key: .wsHost))
-                transportRows.append(.text(label: String(localized: "Path"), value: wsPath, placeholder: "/", key: .wsPath))
+                transportRows.append(.text(label: String(localized: "Host"), value: wsHost, placeholder: String(localized: "Host"), key: .wsHost))
+                transportRows.append(.text(label: String(localized: "Path"), value: wsPath, placeholder: String(localized: "Path"), key: .wsPath))
             }
             if transport == "httpupgrade" {
-                transportRows.append(.text(label: String(localized: "Host"), value: huHost, placeholder: "Host", key: .huHost))
-                transportRows.append(.text(label: String(localized: "Path"), value: huPath, placeholder: "/", key: .huPath))
+                transportRows.append(.text(label: String(localized: "Host"), value: huHost, placeholder: String(localized: "Host"), key: .huHost))
+                transportRows.append(.text(label: String(localized: "Path"), value: huPath, placeholder: String(localized: "Path"), key: .huPath))
+            }
+            if transport == "grpc" {
+                transportRows.append(.text(label: String(localized: "Service Name", comment: "Service Name for VLESS protocol gRPC transport"), value: grpcServiceName, placeholder: String(localized: "Service Name", comment: "Service Name for VLESS protocol gRPC transport"), key: .grpcServiceName))
+                transportRows.append(.text(label: String(localized: "Authority", comment: "Authority for VLESS protocol gRPC transport"), value: grpcAuthority, placeholder: String(localized: "Authority", comment: "Authority for VLESS protocol gRPC transport"), key: .grpcAuthority))
+                transportRows.append(.selection(label: String(localized: "Mode"), value: grpcModeDisplayValue, options: [
+                    ("Gun", "gun"),
+                    ("Multi", "multi"),
+                ], key: .grpcMode))
+                transportRows.append(.text(label: String(localized: "User Agent"), value: grpcUserAgent, placeholder: String(localized: "User Agent"), key: .grpcUserAgent))
             }
             if transport == "xhttp" {
-                transportRows.append(.text(label: String(localized: "Host"), value: xhttpHost, placeholder: "Host", key: .xhttpHost))
-                transportRows.append(.text(label: String(localized: "Path"), value: xhttpPath, placeholder: "/", key: .xhttpPath))
-                transportRows.append(.selection(label: String(localized: "Mode"), value: xhttpMode, options: [
-                    ("Auto", "auto"), ("Packet Up", "packet-up"), ("Stream Up", "stream-up"), ("Stream One", "stream-one"),
+                transportRows.append(.text(label: String(localized: "Host"), value: xhttpHost, placeholder: String(localized: "Host"), key: .xhttpHost))
+                transportRows.append(.text(label: String(localized: "Path"), value: xhttpPath, placeholder: String(localized: "Path"), key: .xhttpPath))
+                transportRows.append(.selection(label: String(localized: "Mode"), value: xhttpModeDisplayValue, options: [
+                    (String(localized: "Auto"), "auto"),
+                    ("Packet Up", "packet-up"),
+                    ("Stream Up", "stream-up"),
+                    ("Stream One", "stream-one"),
                 ], key: .xhttpMode))
             }
             sections.append((String(localized: "Transport"), transportRows))
@@ -208,32 +223,105 @@ class TVProxyEditorViewController: UITableViewController {
         if isVLESS || isTrojan {
             var tlsRows: [RowType] = []
             if isVLESS {
-                tlsRows.append(.selection(label: String(localized: "Security"), value: security.uppercased(), options: [
-                    ("None", "none"), ("TLS", "tls"), ("Reality", "reality"),
+                tlsRows.append(.selection(label: String(localized: "Security", comment: "Security for VLESS protocol"), value: securityDisplayValue, options: [
+                    (String("None"), "none"),
+                    ("TLS", "tls"),
+                    ("Reality", "reality"),
                 ], key: .security))
             }
             if isTLS || isTrojan {
-                tlsRows.append(.text(label: "SNI", value: tlsSNI, placeholder: "SNI", key: .tlsSNI))
-                tlsRows.append(.text(label: "ALPN", value: tlsALPN, placeholder: "h2,http/1.1", key: .tlsALPN))
+                tlsRows.append(.text(label: String(localized: "SNI"), value: tlsSNI, placeholder: String(localized: "SNI"), key: .tlsSNI))
+                tlsRows.append(.text(label: String(localized: "ALPN"), value: tlsALPN, placeholder: String(localized: "h2,http/1.1"), key: .tlsALPN))
                 tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: fingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .fingerprint))
             }
             if isReality {
-                tlsRows.append(.text(label: "SNI", value: sni, placeholder: "SNI", key: .realitySNI))
-                tlsRows.append(.text(label: String(localized: "Public Key"), value: publicKey, placeholder: "Public Key", key: .publicKey))
-                tlsRows.append(.text(label: String(localized: "Short ID"), value: shortId, placeholder: "Short ID", key: .shortId))
+                tlsRows.append(.text(label: String(localized: "SNI"), value: sni, placeholder: String(localized: "SNI"), key: .realitySNI))
+                tlsRows.append(.text(label: String(localized: "Public Key", comment: "Public Key for Reality security layer"), value: publicKey, placeholder: String(localized: "Public Key", comment: "Public Key for Reality security layer"), key: .publicKey))
+                tlsRows.append(.text(label: String(localized: "Short ID", comment: "Short ID for Reality security layer"), value: shortId, placeholder: String(localized: "Short ID", comment: "Short ID for Reality security layer"), key: .shortId))
                 tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: fingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .fingerprint))
             }
-            sections.append(("TLS", tlsRows))
+            sections.append((String(localized: "TLS"), tlsRows))
+        }
+        
+        if isSudoku {
+            var httpMaskRows: [RowType] = [
+                .toggle(label: String(localized: "Disable HTTP Mask", comment: "Disable HTTP Mask for Sudoku protocol"), isOn: sudokuHTTPMaskDisable, key: .sudokuHTTPMaskDisable),
+            ]
+            if !sudokuHTTPMaskDisable {
+                httpMaskRows.append(.selection(label: String(localized: "Mode"), value: sudokuHTTPMaskMode.displayName, options: SudokuHTTPMaskMode.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuHTTPMaskMode))
+                httpMaskRows.append(.toggle(label: String(localized: "TLS"), isOn: sudokuHTTPMaskTLS, key: .sudokuHTTPMaskTLS))
+                httpMaskRows.append(.text(label: String(localized: "Host"), value: sudokuHTTPMaskHost, placeholder: String(localized: "Host"), key: .sudokuHTTPMaskHost))
+                httpMaskRows.append(.text(label: String(localized: "Path Root", comment: "Path Root for Sudoku protocol HTTP Mask feature"), value: sudokuHTTPMaskPathRoot, placeholder: String(localized: "Path Root", comment: "Path Root for Sudoku protocol HTTP Mask feature"), key: .sudokuHTTPMaskPathRoot))
+                httpMaskRows.append(.selection(label: String(localized: "Multiplex", comment: "Multiplex for Sudoku protocol HTTP Mask feature"), value: sudokuHTTPMaskMultiplex.displayName, options: SudokuHTTPMaskMultiplex.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuHTTPMaskMultiplex))
+            }
+            sections.append((String(localized: "HTTP Mask", comment: "HTTP Mask for Sudoku protocol"), httpMaskRows))
         }
 
         return sections
+    }
+    
+    private var encryptionDisplayValue: String {
+        switch encryption {
+        case "none": String(localized: "None")
+        default: encryption
+        }
+    }
+
+    private var ssMethodDisplayValue: String {
+        switch ssMethod {
+        case "none": String(localized: "None")
+        case "aes-128-gcm": "AES-128-GCM"
+        case "aes-256-gcm": "AES-256-GCM"
+        case "chacha20-ietf-poly1305": "ChaCha20-Poly1305"
+        case "2022-blake3-aes-128-gcm": "BLAKE3-AES-128-GCM"
+        case "2022-blake3-aes-256-gcm": "BLAKE3-AES-256-GCM"
+        case "2022-blake3-chacha20-poly1305": "BLAKE3-ChaCha20"
+        default: ssMethod
+        }
+    }
+
+    private var transportDisplayValue: String {
+        switch transport {
+        case "tcp": "TCP"
+        case "ws": "WebSocket"
+        case "httpupgrade": "HTTPUpgrade"
+        case "grpc": "gRPC"
+        case "xhttp": "XHTTP"
+        default: transport
+        }
+    }
+
+    private var grpcModeDisplayValue: String {
+        switch grpcMode {
+        case "gun": "Gun"
+        case "multi": "Multi"
+        default: grpcMode
+        }
     }
 
     private var flowDisplayValue: String {
         switch flow {
         case "xtls-rprx-vision": "Vision"
         case "xtls-rprx-vision-udp443": "Vision + UDP 443"
-        default: "None"
+        default: String(localized: "None")
+        }
+    }
+
+    private var xhttpModeDisplayValue: String {
+        switch xhttpMode {
+        case "auto": String(localized: "Auto")
+        case "packet-up": "Packet Up"
+        case "stream-up": "Stream Up"
+        case "stream-one": "Stream One"
+        default: xhttpMode
+        }
+    }
+    private var securityDisplayValue: String {
+        switch security {
+        case "none": String(localized: "None")
+        case "tls": "TLS"
+        case "reality": "Reality"
+        default: security
         }
     }
 
@@ -425,6 +513,10 @@ class TVProxyEditorViewController: UITableViewController {
         case .wsPath: wsPath = value
         case .huHost: huHost = value
         case .huPath: huPath = value
+        case .grpcServiceName: grpcServiceName = value
+        case .grpcAuthority: grpcAuthority = value
+        case .grpcMode: grpcMode = value
+        case .grpcUserAgent: grpcUserAgent = value
         case .xhttpHost: xhttpHost = value
         case .xhttpPath: xhttpPath = value
         case .xhttpMode: xhttpMode = value
@@ -486,6 +578,12 @@ class TVProxyEditorViewController: UITableViewController {
         if let hu = configuration.httpUpgrade {
             huHost = hu.host
             huPath = hu.path
+        }
+        if let grpc = configuration.grpc {
+            grpcServiceName = grpc.serviceName
+            grpcAuthority = grpc.authority
+            grpcMode = grpc.multiMode ? "multi" : "gun"
+            grpcUserAgent = grpc.userAgent
         }
         if let xhttp = configuration.xhttp {
             xhttpHost = xhttp.host
@@ -628,6 +726,16 @@ class TVProxyEditorViewController: UITableViewController {
         if transport == "httpupgrade" {
             huConfig = HTTPUpgradeConfiguration(host: huHost.isEmpty ? serverAddress : huHost, path: huPath.isEmpty ? "/" : huPath)
         }
+        
+        var grpcConfig: GRPCConfiguration?
+        if transport == "grpc" {
+            grpcConfig = GRPCConfiguration(
+                serviceName: grpcServiceName,
+                authority: grpcAuthority,
+                multiMode: grpcMode == "multi",
+                userAgent: grpcUserAgent
+            )
+        }
 
         var xhttpConfig: XHTTPConfiguration?
         if transport == "xhttp" {
@@ -649,6 +757,7 @@ class TVProxyEditorViewController: UITableViewController {
             let transportLayer: TransportLayer
             if let wsConfig { transportLayer = .ws(wsConfig) }
             else if let huConfig { transportLayer = .httpUpgrade(huConfig) }
+            else if let grpcConfig { transportLayer = .grpc(grpcConfig) }
             else if let xhttpConfig { transportLayer = .xhttp(xhttpConfig) }
             else { transportLayer = .tcp }
 

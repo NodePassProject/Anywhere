@@ -8,7 +8,8 @@
 import SwiftUI
 
 struct TextWithColorfulIcon: View {
-    let titleKey: LocalizedStringKey
+    let title: String.LocalizationValue
+    let comment: StaticString?
     let systemName: String
     let foregroundColor: Color
     let backgroundColor: Color
@@ -56,7 +57,7 @@ struct TextWithColorfulIcon: View {
                                 lineWidth: 0.5
                             )
                     )
-                Text(titleKey)
+                Text(String(localized: title, comment: comment))
             }
         } else {
             HStack {
@@ -68,14 +69,15 @@ struct TextWithColorfulIcon: View {
                     .padding(5)
                     .background(backgroundColor.gradient)
                     .cornerRadius(7)
-                Text(titleKey)
+                Text(String(localized: title, comment: comment))
             }
         }
     }
 }
 
 struct TextWithColorfulIconAndCustomImage: View {
-    let titleKey: LocalizedStringKey
+    let title: String.LocalizationValue
+    let comment: StaticString?
     let imageName: String
     let foregroundColor: Color
     let backgroundColor: Color
@@ -125,7 +127,7 @@ struct TextWithColorfulIconAndCustomImage: View {
                                 lineWidth: 0.5
                             )
                     )
-                Text(titleKey)
+                Text(String(localized: title, comment: comment))
             }
         } else {
             HStack {
@@ -139,7 +141,7 @@ struct TextWithColorfulIconAndCustomImage: View {
                     .padding(5)
                     .background(backgroundColor.gradient)
                     .cornerRadius(7)
-                Text(titleKey)
+                Text(String(localized: title, comment: comment))
             }
         }
     }

@@ -33,7 +33,7 @@ struct SettingsView: View {
         Form {
             Section("VPN") {
                 Toggle(isOn: $alwaysOnEnabled) {
-                    TextWithColorfulIcon(titleKey: "Always On", systemName: "bolt.circle.fill", foregroundColor: .white, backgroundColor: .green)
+                    TextWithColorfulIcon(title: "Always On", comment: nil, systemName: "bolt.circle.fill", foregroundColor: .white, backgroundColor: .green)
                 }
                 .disabled(viewModel.pendingReconnect)
             }
@@ -44,11 +44,11 @@ struct SettingsView: View {
                 }, set: { newValue in
                     if newValue { proxyMode = .global } else { proxyMode = .rule }
                 })) {
-                    TextWithColorfulIcon(titleKey: "Global Mode", systemName: "arrow.merge", foregroundColor: .white, backgroundColor: .orange)
+                    TextWithColorfulIcon(title: "Global Mode", comment: nil, systemName: "arrow.merge", foregroundColor: .white, backgroundColor: .orange)
                 }
                 if proxyMode != .global {
                     Toggle(isOn: $adBlockEnabled) {
-                        TextWithColorfulIcon(titleKey: "AD Blocking", systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
+                        TextWithColorfulIcon(title: "AD Blocking", comment: nil, systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
                     }
                     Picker(selection: $bypassCountryCode) {
                         Text("Disable").tag("")
@@ -56,12 +56,12 @@ struct SettingsView: View {
                             Text("\(flag(for: code)) \(Locale.current.localizedString(forRegionCode: code) ?? code)").tag(code)
                         }
                     } label: {
-                        TextWithColorfulIcon(titleKey: "Country Bypass", systemName: "globe.americas.fill", foregroundColor: .white, backgroundColor: .blue)
+                        TextWithColorfulIcon(title: "Country Bypass", comment: nil, systemName: "globe.americas.fill", foregroundColor: .white, backgroundColor: .blue)
                     }
                     NavigationLink {
                         RuleSetListView()
                     } label: {
-                        TextWithColorfulIcon(titleKey: "Routing Rules", systemName: "arrow.triangle.branch", foregroundColor: .white, backgroundColor: .purple)
+                        TextWithColorfulIcon(title: "Routing Rules", comment: nil, systemName: "arrow.triangle.branch", foregroundColor: .white, backgroundColor: .purple)
                     }
                 }
             }
@@ -79,20 +79,20 @@ struct SettingsView: View {
                         }
                     }
                 )) {
-                    TextWithColorfulIcon(titleKey: "Allow Insecure", systemName: "exclamationmark.shield.fill", foregroundColor: .white, backgroundColor: .red)
+                    TextWithColorfulIcon(title: "Allow Insecure", comment: nil, systemName: "exclamationmark.shield.fill", foregroundColor: .white, backgroundColor: .red)
                 }
                 .tint(.red)
                 NavigationLink {
                     TrustedCertificatesView()
                 } label: {
-                    TextWithColorfulIcon(titleKey: "Trusted Certificates", systemName: "checkmark.seal.fill", foregroundColor: .white, backgroundColor: .green)
+                    TextWithColorfulIcon(title: "Trusted Certificates", comment: nil, systemName: "checkmark.seal.fill", foregroundColor: .white, backgroundColor: .green)
                 }
             }
 
             Section {
                 Link(destination: URL(string: "https://t.me/anywhere_official_group")!) {
                     HStack {
-                        TextWithColorfulIconAndCustomImage(titleKey: "Join Telegram Group", imageName: "TelegramSymbol", foregroundColor: .white, backgroundColor: .blue)
+                        TextWithColorfulIconAndCustomImage(title: "Join Telegram Group", comment: nil, imageName: "TelegramSymbol", foregroundColor: .white, backgroundColor: .blue)
                         Spacer()
                         Image(systemName: "arrow.up.right")
                             .font(.footnote.bold())
@@ -102,7 +102,7 @@ struct SettingsView: View {
                 NavigationLink {
                     AcknowledgementsView()
                 } label: {
-                    TextWithColorfulIcon(titleKey: "Acknowledgements", systemName: "doc.text.fill", foregroundColor: .white, backgroundColor: .gray)
+                    TextWithColorfulIcon(title: "Acknowledgements", comment: nil, systemName: "doc.text.fill", foregroundColor: .white, backgroundColor: .gray)
                 }
             } header: {
                 Text("About")

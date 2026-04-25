@@ -144,23 +144,23 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(titleKey: "Name", systemName: "tag.fill", foregroundColor: .white, backgroundColor: .gray)
+                        TextWithColorfulIcon(title: "Name", comment: nil, systemName: "tag.fill", foregroundColor: .white, backgroundColor: .gray)
                     }
                 }
                 
                 Section {
                     Picker(selection: $selectedProtocol) {
-                        Text("VLESS").tag(OutboundProtocol.vless)
-                        Text("Hysteria").tag(OutboundProtocol.hysteria)
-                        Text("Trojan").tag(OutboundProtocol.trojan)
-                        Text("Shadowsocks").tag(OutboundProtocol.shadowsocks)
-                        Text("SOCKS5").tag(OutboundProtocol.socks5)
-                        Text("Sudoku").tag(OutboundProtocol.sudoku)
-                        Text("HTTPS").tag(OutboundProtocol.http11)
-                        Text("HTTP2").tag(OutboundProtocol.http2)
-                        Text("QUIC").tag(OutboundProtocol.http3)
+                        Text(String("VLESS")).tag(OutboundProtocol.vless)
+                        Text(String("Hysteria")).tag(OutboundProtocol.hysteria)
+                        Text(String("Trojan")).tag(OutboundProtocol.trojan)
+                        Text(String("Shadowsocks")).tag(OutboundProtocol.shadowsocks)
+                        Text(String("SOCKS5")).tag(OutboundProtocol.socks5)
+                        Text(String("Sudoku")).tag(OutboundProtocol.sudoku)
+                        Text(String("HTTPS")).tag(OutboundProtocol.http11)
+                        Text(String("HTTP2")).tag(OutboundProtocol.http2)
+                        Text(String("QUIC")).tag(OutboundProtocol.http3)
                     } label: {
-                        TextWithColorfulIcon(titleKey: "Protocol", systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
+                        TextWithColorfulIcon(title: "Protocol", comment: nil, systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
                     .onChange(of: selectedProtocol) {
                         if isTrojan || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
@@ -178,30 +178,44 @@ struct ProxyEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(titleKey: "Address", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                        TextWithColorfulIcon(title: "Address", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                     }
                     LabeledContent {
-                        TextField("Port", text: $serverPort)
+                        TextField(String("443"), text: $serverPort)
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(titleKey: "Port", systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
+                        TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
                     }
-                    if isHysteria {
+                    if isVLESS {
+                        LabeledContent {
+                            TextField(String(localized: "UUID", comment: "UUID for VLESS protocol"), text: $uuid)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "UUID", comment: "UUID for VLESS protocol", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                        Picker(selection: $encryption) {
+                            Text("None").tag("none")
+                        } label: {
+                            TextWithColorfulIcon(title: "Encryption", comment: "Encryption for VLESS protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                        }
+                    } else if isHysteria {
                        LabeledContent {
                            SecureField("Password", text: $hysteriaPassword)
                                .autocorrectionDisabled()
                                .textInputAutocapitalization(.never)
                                .multilineTextAlignment(.trailing)
                        } label: {
-                           TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                           TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                        }
                        LabeledContent {
                            TextField("Mbps", text: $hysteriaUploadMbpsText)
                                .keyboardType(.numberPad)
                                .multilineTextAlignment(.trailing)
                        } label: {
-                           TextWithColorfulIcon(titleKey: "Upload Speed", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                           TextWithColorfulIcon(title: "Upload Speed", comment: "Upload Speed for Hysteria protocol", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
                        }
                    } else if isTrojan {
                         LabeledContent {
@@ -210,7 +224,7 @@ struct ProxyEditorView: View {
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                            TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                         }
                     } else if isShadowsocks {
                         LabeledContent {
@@ -219,18 +233,18 @@ struct ProxyEditorView: View {
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                            TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                         }
                         Picker(selection: $ssMethod) {
                             Text("None").tag("none")
-                            Text("AES-128-GCM").tag("aes-128-gcm")
-                            Text("AES-256-GCM").tag("aes-256-gcm")
-                            Text("ChaCha20-Poly1305").tag("chacha20-ietf-poly1305")
-                            Text("BLAKE3-AES-128-GCM").tag("2022-blake3-aes-128-gcm")
-                            Text("BLAKE3-AES-256-GCM").tag("2022-blake3-aes-256-gcm")
-                            Text("BLAKE3-ChaCha20-Poly1305").tag("2022-blake3-chacha20-poly1305")
+                            Text(String("AES-128-GCM")).tag("aes-128-gcm")
+                            Text(String("AES-256-GCM")).tag("aes-256-gcm")
+                            Text(String("ChaCha20-Poly1305")).tag("chacha20-ietf-poly1305")
+                            Text(String("BLAKE3-AES-128-GCM")).tag("2022-blake3-aes-128-gcm")
+                            Text(String("BLAKE3-AES-256-GCM")).tag("2022-blake3-aes-256-gcm")
+                            Text(String("BLAKE3-ChaCha20-Poly1305")).tag("2022-blake3-chacha20-poly1305")
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Method", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                            TextWithColorfulIcon(title: "Method", comment: "Method for Shadowsocks protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
                         }
                     } else if isSOCKS5 {
                         LabeledContent {
@@ -239,7 +253,7 @@ struct ProxyEditorView: View {
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Username", systemName: "person.fill", foregroundColor: .white, backgroundColor: .green)
+                            TextWithColorfulIcon(title: "Username", comment: nil, systemName: "person.fill", foregroundColor: .white, backgroundColor: .green)
                         }
                         LabeledContent {
                             SecureField("Password", text: $socks5Password)
@@ -247,16 +261,55 @@ struct ProxyEditorView: View {
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                            TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                         }
                     } else if isSudoku {
                         LabeledContent {
-                            SecureField("Key", text: $sudokuKey)
+                            SecureField(String(localized: "Key", comment: "Key for Sudoku protocol"), text: $sudokuKey)
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Key", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                            TextWithColorfulIcon(title: "Key", comment: "Key for Sudoku protocol", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                        Picker(selection: $sudokuAEADMethod) {
+                            ForEach(SudokuAEADMethod.allCases, id: \.self) { method in
+                                Text(method.displayName).tag(method)
+                            }
+                        } label: {
+                            TextWithColorfulIcon(title: "AEAD", comment: "AEAD for Sudoku protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                        }
+                        LabeledContent {
+                            TextField(String("0-100"), text: $sudokuPaddingMinText)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Padding Min", comment: "Padding Min for Sudoku protocol", systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .orange)
+                        }
+                        LabeledContent {
+                            TextField(String("0-100"), text: $sudokuPaddingMaxText)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Padding Max", comment: "Padding Max for Sudoku protocol", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .orange)
+                        }
+                        Picker(selection: $sudokuASCIIMode) {
+                            ForEach(SudokuASCIIMode.allCases, id: \.self) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        } label: {
+                            TextWithColorfulIcon(title: "ASCII", comment: nil, systemName: "textformat.alt", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                        LabeledContent {
+                            TextField("Comma Separated", text: $sudokuCustomTablesText)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Custom Tables", comment: "Custom Tables for Sudoku protocol", systemName: "square.stack.3d.up.fill", foregroundColor: .white, backgroundColor: .indigo)
+                        }
+                        Toggle(isOn: $sudokuEnablePureDownlink) {
+                            TextWithColorfulIcon(title: "Pure Downlink", comment: "Pure Downlink for Sudoku protocol", systemName: "arrow.down.to.line.compact", foregroundColor: .white, backgroundColor: .teal)
                         }
                     } else if isNaive {
                         LabeledContent {
@@ -265,7 +318,7 @@ struct ProxyEditorView: View {
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Username", systemName: "person.fill", foregroundColor: .white, backgroundColor: .green)
+                            TextWithColorfulIcon(title: "Username", comment: nil, systemName: "person.fill", foregroundColor: .white, backgroundColor: .green)
                         }
                         LabeledContent {
                             SecureField("Password", text: $naivePassword)
@@ -273,106 +326,7 @@ struct ProxyEditorView: View {
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Password", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
-                        }
-                    } else {
-                        LabeledContent {
-                            TextField("UUID", text: $uuid)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "UUID", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
-                        }
-                        Picker(selection: $encryption) {
-                            Text("None").tag("none")
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Encryption", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
-                        }
-                    }
-                }
-
-                if isSudoku {
-                    Section("Sudoku") {
-                        Picker(selection: $sudokuAEADMethod) {
-                            ForEach(SudokuAEADMethod.allCases, id: \.self) { method in
-                                Text(method.displayName).tag(method)
-                            }
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "AEAD", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
-                        }
-                        LabeledContent {
-                            TextField("0-100", text: $sudokuPaddingMinText)
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Padding Min", systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .orange)
-                        }
-                        LabeledContent {
-                            TextField("0-100", text: $sudokuPaddingMaxText)
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Padding Max", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .orange)
-                        }
-                        Picker(selection: $sudokuASCIIMode) {
-                            ForEach(SudokuASCIIMode.allCases, id: \.self) { mode in
-                                Text(mode.displayName).tag(mode)
-                            }
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "ASCII", systemName: "textformat.alt", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                        LabeledContent {
-                            TextField("comma,separated,tables", text: $sudokuCustomTablesText)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(titleKey: "Custom Tables", systemName: "square.stack.3d.up.fill", foregroundColor: .white, backgroundColor: .indigo)
-                        }
-                        Toggle(isOn: $sudokuEnablePureDownlink) {
-                            TextWithColorfulIcon(titleKey: "Pure Downlink", systemName: "arrow.down.to.line.compact", foregroundColor: .white, backgroundColor: .teal)
-                        }
-                    }
-
-                    Section("HTTPMask") {
-                        Toggle(isOn: $sudokuHTTPMaskDisable) {
-                            TextWithColorfulIcon(titleKey: "Disable", systemName: "xmark.circle.fill", foregroundColor: .white, backgroundColor: .gray)
-                        }
-                        if !sudokuHTTPMaskDisable {
-                            Picker(selection: $sudokuHTTPMaskMode) {
-                                ForEach(SudokuHTTPMaskMode.allCases, id: \.self) { mode in
-                                    Text(mode.displayName).tag(mode)
-                                }
-                            } label: {
-                                TextWithColorfulIcon(titleKey: "Mode", systemName: "network.badge.shield.half.filled", foregroundColor: .white, backgroundColor: .purple)
-                            }
-                            Toggle(isOn: $sudokuHTTPMaskTLS) {
-                                TextWithColorfulIcon(titleKey: "TLS", systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .blue)
-                            }
-                            LabeledContent {
-                                TextField("Host", text: $sudokuHTTPMaskHost)
-                                    .autocorrectionDisabled()
-                                    .textInputAutocapitalization(.never)
-                                    .multilineTextAlignment(.trailing)
-                            } label: {
-                                TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                            }
-                            LabeledContent {
-                                TextField("path-root", text: $sudokuHTTPMaskPathRoot)
-                                    .autocorrectionDisabled()
-                                    .textInputAutocapitalization(.never)
-                                    .multilineTextAlignment(.trailing)
-                            } label: {
-                                TextWithColorfulIcon(titleKey: "Path Root", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
-                            }
-                            Picker(selection: $sudokuHTTPMaskMultiplex) {
-                                ForEach(SudokuHTTPMaskMultiplex.allCases, id: \.self) { mode in
-                                    Text(mode.displayName).tag(mode)
-                                }
-                            } label: {
-                                TextWithColorfulIcon(titleKey: "Multiplex", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
-                            }
+                            TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                         }
                     }
                 }
@@ -386,7 +340,7 @@ struct ProxyEditorView: View {
                             Text("gRPC").tag("grpc")
                             Text("XHTTP").tag("xhttp")
                         } label: {
-                            TextWithColorfulIcon(titleKey: "Transport", systemName: "arrow.triangle.swap", foregroundColor: .white, backgroundColor: .purple)
+                            TextWithColorfulIcon(title: "Transport", comment: "Transport for VLESS protocol", systemName: "arrow.triangle.swap", foregroundColor: .white, backgroundColor: .purple)
                         }
                         .onChange(of: transport) {
                             if flow != "" && transport != "tcp" {
@@ -395,14 +349,14 @@ struct ProxyEditorView: View {
                         }
                         if transport == "tcp" {
                             Picker(selection: $flow) {
-                                Text("None").tag("")
-                                Text("Vision").tag("xtls-rprx-vision")
-                                Text("Vision with UDP 443").tag("xtls-rprx-vision-udp443")
+                                Text(String(localized: "None")).tag("")
+                                Text(String("Vision")).tag("xtls-rprx-vision")
+                                Text(String("Vision with UDP 443")).tag("xtls-rprx-vision-udp443")
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Flow", systemName: "arrow.left.arrow.right", foregroundColor: .white, backgroundColor: .indigo)
+                                TextWithColorfulIcon(title: "Flow", comment: "Flow for VLESS protocol TCP transport", systemName: "arrow.left.arrow.right", foregroundColor: .white, backgroundColor: .indigo)
                             }
                             Toggle(isOn: $muxEnabled) {
-                                TextWithColorfulIcon(titleKey: "Mux", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
+                                TextWithColorfulIcon(title: "Mux", comment: "Mux for VLESS protocol TCP transport", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
                             }
                             .onChange(of: muxEnabled) {
                                 if muxEnabled == false {
@@ -411,7 +365,7 @@ struct ProxyEditorView: View {
                             }
                             if muxEnabled {
                                 Toggle(isOn: $xudpEnabled) {
-                                    TextWithColorfulIcon(titleKey: "XUDP", systemName: "arrow.up.arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .cyan)
+                                    TextWithColorfulIcon(title: "XUDP", comment: "XUDP for VLESS protocol TCP transport", systemName: "arrow.up.arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .cyan)
                                 }
                             }
                         }
@@ -423,7 +377,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                             }
                             LabeledContent {
                                 TextField("/", text: $wsPath)
@@ -431,7 +385,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "Path", comment: nil, systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
                             }
                         }
                         if transport == "httpupgrade" {
@@ -442,7 +396,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                             }
                             LabeledContent {
                                 TextField("/", text: $huPath)
@@ -450,7 +404,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "Path", comment: nil, systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
                             }
                         }
                         if transport == "grpc" {
@@ -460,7 +414,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Service Name", systemName: "realtimetext", foregroundColor: .white, backgroundColor: .mint)
+                                TextWithColorfulIcon(title: "Service Name", comment: "Service Name for VLESS protocol gRPC transport", systemName: "realtimetext", foregroundColor: .white, backgroundColor: .mint)
                             }
                             LabeledContent {
                                 TextField("Authority", text: $grpcAuthority)
@@ -469,13 +423,13 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Authority", systemName: "person.fill", foregroundColor: .white, backgroundColor: .green)
+                                TextWithColorfulIcon(title: "Authority", comment: "Authority for VLESS protocol gRPC transport", systemName: "person.fill", foregroundColor: .white, backgroundColor: .green)
                             }
                             Picker(selection: $grpcMode) {
                                 Text("Gun").tag("gun")
                                 Text("Multi").tag("multi")
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Mode", systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .gray)
+                                TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .gray)
                             }
                             LabeledContent {
                                 TextField("User Agent", text: $grpcUserAgent)
@@ -483,7 +437,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "User Agent", systemName: "laptopcomputer", foregroundColor: .white, backgroundColor: .orange)
+                                TextWithColorfulIcon(title: "User Agent", comment: nil, systemName: "laptopcomputer", foregroundColor: .white, backgroundColor: .orange)
                             }
                         }
                         if transport == "xhttp" {
@@ -494,7 +448,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Host", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                             }
                             LabeledContent {
                                 TextField("/", text: $xhttpPath)
@@ -502,15 +456,15 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Path", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "Path", comment: nil, systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
                             }
                             Picker(selection: $xhttpMode) {
                                 Text("Auto").tag("auto")
-                                Text("Packet Up").tag("packet-up")
-                                Text("Stream Up").tag("stream-up")
-                                Text("Stream One").tag("stream-one")
+                                Text(String("Packet Up")).tag("packet-up")
+                                Text(String("Stream Up")).tag("stream-up")
+                                Text(String("Stream One")).tag("stream-one")
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Mode", systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .gray)
+                                TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .gray)
                             }
                         }
                     }
@@ -520,11 +474,11 @@ struct ProxyEditorView: View {
                     Section("TLS") {
                         if isVLESS {
                             Picker(selection: $security) {
-                                Text("None").tag("none")
+                                Text(String("None")).tag("none")
                                 Text("TLS").tag("tls")
                                 Text("Reality").tag("reality")
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Security", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "Security", comment: "Security for VLESS protocol", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
                             }
                         }
                         if isTLS || isTrojan {
@@ -535,7 +489,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "SNI", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                             }
                             LabeledContent {
                                 TextField("h2,http/1.1", text: $tlsALPN)
@@ -543,14 +497,14 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "ALPN", systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
                             }
                             Picker(selection: $fingerprint) {
                                 ForEach(TLSFingerprint.allCases, id: \.self) { fp in
                                     Text(fp.displayName).tag(fp)
                                 }
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
+                                TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
                             }
                         }
                         if isReality {
@@ -561,7 +515,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "SNI", systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                                TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                             }
                             LabeledContent {
                                 TextField("Public Key", text: $publicKey)
@@ -569,7 +523,7 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Public Key", systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .green)
+                                TextWithColorfulIcon(title: "Public Key", comment: "Public Key for Reality security layer", systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .green)
                             }
                             LabeledContent {
                                 TextField("Short ID", text: $shortId)
@@ -577,14 +531,57 @@ struct ProxyEditorView: View {
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Short ID", systemName: "person.crop.square.filled.and.at.rectangle.fill", foregroundColor: .white, backgroundColor: .green)
+                                TextWithColorfulIcon(title: "Short ID", comment: "Short ID for Reality security layer", systemName: "person.crop.square.filled.and.at.rectangle.fill", foregroundColor: .white, backgroundColor: .green)
                             }
                             Picker(selection: $fingerprint) {
                                 ForEach(TLSFingerprint.allCases, id: \.self) { fp in
                                     Text(fp.displayName).tag(fp)
                                 }
                             } label: {
-                                TextWithColorfulIcon(titleKey: "Fingerprint", systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
+                                TextWithColorfulIcon(title: "Fingerprint", comment: nil, systemName: "hand.raised.fingers.spread.fill", foregroundColor: .white, backgroundColor: .orange)
+                            }
+                        }
+                    }
+                }
+
+                if isSudoku {
+                    Section(String(localized: "HTTP Mask", comment: "HTTP Mask for Sudoku protocol")) {
+                        Toggle(isOn: $sudokuHTTPMaskDisable) {
+                            TextWithColorfulIcon(title: "Disable HTTP Mask", comment: "Disable HTTP Mask for Sudoku protocol", systemName: "xmark.circle.fill", foregroundColor: .white, backgroundColor: .gray)
+                        }
+                        if !sudokuHTTPMaskDisable {
+                            Picker(selection: $sudokuHTTPMaskMode) {
+                                ForEach(SudokuHTTPMaskMode.allCases, id: \.self) { mode in
+                                    Text(mode.displayName).tag(mode)
+                                }
+                            } label: {
+                                TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "network.badge.shield.half.filled", foregroundColor: .white, backgroundColor: .purple)
+                            }
+                            Toggle(isOn: $sudokuHTTPMaskTLS) {
+                                TextWithColorfulIcon(title: "TLS", comment: nil, systemName: "lock.shield.fill", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            LabeledContent {
+                                TextField("Host", text: $sudokuHTTPMaskHost)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            LabeledContent {
+                                TextField("Path Root", text: $sudokuHTTPMaskPathRoot)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(title: "Path Root", comment: "Path Root for Sudoku protocol HTTP Mask feature", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            Picker(selection: $sudokuHTTPMaskMultiplex) {
+                                ForEach(SudokuHTTPMaskMultiplex.allCases, id: \.self) { mode in
+                                    Text(mode.displayName).tag(mode)
+                                }
+                            } label: {
+                                TextWithColorfulIcon(title: "Multiplex", comment: "Multiplex for Sudoku protocol HTTP Mask feature", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
                             }
                         }
                     }
