@@ -113,15 +113,20 @@ struct SubscriptionFetcher {
 
     private static func parseProfileTitle(from response: HTTPURLResponse?) -> String? {
         guard let value = response?.value(forHTTPHeaderField: "profile-title") else { return nil }
-        // Supports base64: prefix
+        let decoded: String
         if value.hasPrefix("base64:") {
             let encoded = String(value.dropFirst("base64:".count))
             if let data = Data(base64Encoded: encoded),
-               let decoded = String(data: data, encoding: .utf8) {
-                return decoded
+               let utf8 = String(data: data, encoding: .utf8) {
+                decoded = utf8
+            } else {
+                decoded = value
             }
+        } else {
+            decoded = value
         }
-        return value
+        let trimmed = decoded.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? nil : decoded
     }
 
     private static func parseSubscriptionUserInfo(from response: HTTPURLResponse?) -> (upload: Int64?, download: Int64?, total: Int64?, expire: Date?) {
