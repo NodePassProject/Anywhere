@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Compression
 import CryptoKit
 import Security
 
@@ -256,9 +257,34 @@ class RealityClient {
     // MARK: - Server Response Processing
 
     /// Receives and processes the server's TLS response.
+    ///
+    /// `RawTCPSocket.receive()` is built on `Darwin.recv()` which returns any
+    /// number of bytes from 1 up to the scratch size; through tunnels and
+    /// proxy chains a partial first chunk of <5 bytes (smaller than a TLS
+    /// record header) is plausible. Buffer until at least the record header
+    /// is available before dispatching on `contentType`.
     private func receiveServerResponse(
+        buffer: Data = Data(),
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
+        if buffer.count >= 5 {
+            let contentType = buffer[0]
+
+            if contentType == 0x16 { // Handshake
+                self.continueReceivingHandshake(buffer: buffer, completion: completion)
+            } else if contentType == 0x15 { // Alert
+                let alertLevel = buffer.count > 5 ? buffer[5] : 0
+                let alertDesc = buffer.count > 6 ? buffer[6] : 0
+                logger.error("[Reality] TLS Alert: level=\(alertLevel), desc=\(alertDesc)")
+                completion(.failure(RealityError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")))
+            } else {
+                let hex = buffer.prefix(32).map { String(format: "%02x", $0) }.joined(separator: " ")
+                logger.error("[Reality] Unexpected content type: 0x\(String(format: "%02x", contentType)), first 32 bytes: \(hex)")
+                completion(.failure(RealityError.handshakeFailed("Unexpected content type: \(contentType)")))
+            }
+            return
+        }
+
         guard let connection else {
             completion(.failure(RealityError.connectionFailed("Connection cancelled")))
             return
@@ -272,28 +298,17 @@ class RealityClient {
                 return
             }
 
-            guard let data, data.count >= 5 else {
-                let len = data?.count ?? 0
-                let hex = data.map { $0.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ") } ?? "nil"
-                logger.error("[Reality] No server response or too short (len=\(len), data=\(hex))")
+            guard let data, !data.isEmpty else {
+                let len = buffer.count
+                let hex = buffer.isEmpty ? "nil" : buffer.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
+                logger.error("[Reality] No server response (connection closed) (len=\(len), data=\(hex))")
                 completion(.failure(RealityError.handshakeFailed("No server response")))
                 return
             }
 
-            let contentType = data[0]
-
-            if contentType == 0x16 { // Handshake
-                self.continueReceivingHandshake(buffer: data, completion: completion)
-            } else if contentType == 0x15 { // Alert
-                let alertLevel = data.count > 5 ? data[5] : 0
-                let alertDesc = data.count > 6 ? data[6] : 0
-                logger.error("[Reality] TLS Alert: level=\(alertLevel), desc=\(alertDesc)")
-                completion(.failure(RealityError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")))
-            } else {
-                let hex = data.prefix(32).map { String(format: "%02x", $0) }.joined(separator: " ")
-                logger.error("[Reality] Unexpected content type: 0x\(String(format: "%02x", contentType)), first 32 bytes: \(hex)")
-                completion(.failure(RealityError.handshakeFailed("Unexpected content type: \(contentType)")))
-            }
+            var newBuffer = buffer
+            newBuffer.append(data)
+            self.receiveServerResponse(buffer: newBuffer, completion: completion)
         }
     }
 
@@ -473,6 +488,7 @@ class RealityClient {
                 let extType = Int(data[shOffset]) << 8 | Int(data[shOffset + 1])
                 let extDataLen = Int(data[shOffset + 2]) << 8 | Int(data[shOffset + 3])
                 shOffset += 4
+                let extDataStart = shOffset
 
                 if extType == 0x0033 {
                     guard shOffset + 4 <= data.count else { return nil }
@@ -491,7 +507,11 @@ class RealityClient {
                     }
                 }
 
-                shOffset += extDataLen
+                // Advance to the next extension header. Anchor on extDataStart
+                // because the 0x0033 branch above may have consumed group+keyLen
+                // (4 bytes) without returning, leaving shOffset advanced past
+                // the start of extData.
+                shOffset = extDataStart + extDataLen
             }
 
             break
@@ -560,6 +580,13 @@ class RealityClient {
                         if hsType == 0x0B { // Certificate
                             let certBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
                             serverCertVerified = verifyRealityCertificate(certBody: certBody)
+                        } else if hsType == 0x19 { // CompressedCertificate (RFC 8879)
+                            let certBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
+                            if let decompressed = decompressCertificate(certBody) {
+                                serverCertVerified = verifyRealityCertificate(certBody: decompressed)
+                            } else {
+                                logger.warning("[Reality] Failed to decompress CompressedCertificate")
+                            }
                         }
 
                         if hsType == 0x14 { // Finished
@@ -747,7 +774,7 @@ class RealityClient {
 
         // Verify: signature == HMAC-SHA512(AuthKey, publicKey)
         let hmac = HMAC<SHA512>.authenticationCode(for: publicKey, using: SymmetricKey(data: authKey))
-        return Data(hmac) == signature
+        return Self.constantTimeEqual(Data(hmac), signature)
     }
 
     /// Extracts the first DER certificate from a TLS 1.3 Certificate message body.
@@ -848,7 +875,62 @@ class RealityClient {
         return length
     }
 
+    // MARK: - CompressedCertificate (RFC 8879)
+
+    /// Decompresses a CompressedCertificate message body.
+    ///
+    /// RFC 8879 layout: algorithm (2) + uncompressed_length (3) + compressed_length (3) + data.
+    /// Supports zlib (0x0001) and brotli (0x0002) via the system Compression framework.
+    private func decompressCertificate(_ body: Data) -> Data? {
+        guard body.count >= 8 else { return nil }
+
+        let algorithm = UInt16(body[0]) << 8 | UInt16(body[1])
+        let uncompressedLength = Int(body[2]) << 16 | Int(body[3]) << 8 | Int(body[4])
+        let compressedLength = Int(body[5]) << 16 | Int(body[6]) << 8 | Int(body[7])
+        guard 8 + compressedLength <= body.count else { return nil }
+        guard uncompressedLength > 0 && uncompressedLength <= 1 << 24 else { return nil }
+        let compressed = body.subdata(in: 8..<(8 + compressedLength))
+
+        let compressionAlgorithm: compression_algorithm
+        switch algorithm {
+        case 0x0001: compressionAlgorithm = COMPRESSION_ZLIB
+        case 0x0002: compressionAlgorithm = COMPRESSION_BROTLI
+        default:
+            logger.warning("[Reality] Unknown certificate compression algorithm: 0x\(String(format: "%04x", algorithm))")
+            return nil
+        }
+
+        var decompressed = Data(count: uncompressedLength)
+        let decodedSize = decompressed.withUnsafeMutableBytes { destPtr in
+            compressed.withUnsafeBytes { srcPtr in
+                compression_decode_buffer(
+                    destPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    uncompressedLength,
+                    srcPtr.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                    compressed.count,
+                    nil,
+                    compressionAlgorithm
+                )
+            }
+        }
+        guard decodedSize > 0 else {
+            logger.warning("[Reality] Certificate decompression failed (algorithm: 0x\(String(format: "%04x", algorithm)))")
+            return nil
+        }
+        return Data(decompressed.prefix(decodedSize))
+    }
+
     // MARK: - Helpers
+
+    /// Constant-time comparison of two Data values to prevent timing side-channel attacks.
+    private static func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count else { return false }
+        var result: UInt8 = 0
+        for i in 0..<a.count {
+            result |= a[a.startIndex + i] ^ b[b.startIndex + i]
+        }
+        return result == 0
+    }
 
     /// Frees handshake-only state to reduce memory after the connection is established.
     private func clearHandshakeState() {
