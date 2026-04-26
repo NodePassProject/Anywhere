@@ -275,24 +275,26 @@ extension LWIPStack {
     private func handleSettingsChanged() {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
-
-            let ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
+            
+            let proxyMode = AWCore.getProxyMode()
             let bypassCountryCode = AWCore.getBypassCountryCode()
+            let hideVPNIcon = AWCore.getHideVPNIcon()
+            let blockQUICEnabled = AWCore.getBlockQUICEnabled()
+            let ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
             let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
             let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
             let encryptedDNSServer = AWCore.getEncryptedDNSServer()
-            let proxyMode = AWCore.getProxyMode()
-            let hideVPNIcon = AWCore.getHideVPNIcon()
 
-            let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
+            let proxyModeChanged = proxyMode != self.proxyMode
             let bypassCountryChanged = bypassCountryCode != self.bypassCountryCode
+            let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
+            let blockQUICEnabledChanged = blockQUICEnabled != self.blockQUICEnabled
+            let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
             let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
             let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
             let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer
-            let proxyModeChanged = proxyMode != self.proxyMode
-            let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
 
-            guard ipv6DNSEnabledChanged || bypassCountryChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || proxyModeChanged || hideVPNIconChanged else {
+            guard proxyModeChanged || bypassCountryChanged || hideVPNIconChanged || blockQUICEnabledChanged || ipv6DNSEnabledChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else {
                 return
             }
             

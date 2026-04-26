@@ -10,8 +10,10 @@ import SwiftUI
 struct AdvancedSettingsView: View {
     @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
     @State private var hideVPNIcon = AWCore.getHideVPNIcon()
-    @State private var showHideVPNIconAlert = false
+    @State private var blockQUICEnabled = AWCore.getBlockQUICEnabled()
     @State private var remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
+    
+    @State private var showHideVPNIconAlert = false
 
     var body: some View {
         List {
@@ -42,6 +44,14 @@ struct AdvancedSettingsView: View {
             }
 
             Section("Network") {
+                Toggle("Block QUIC", isOn: Binding(
+                    get: { blockQUICEnabled },
+                    set: { newValue in
+                        blockQUICEnabled = newValue
+                        AWCore.setBlockQUICEnabled(newValue)
+                        AWCore.notifyTunnelSettingsChanged()
+                    }
+                ))
                 NavigationLink("IPv6") {
                     IPv6SettingsView()
                 }
@@ -71,6 +81,7 @@ struct AdvancedSettingsView: View {
         .onAppear {
             experimentalEnabled = AWCore.getExperimentalEnabled()
             hideVPNIcon = AWCore.getHideVPNIcon()
+            blockQUICEnabled = AWCore.getBlockQUICEnabled()
         }
         .alert("Hide VPN Icon", isPresented: $showHideVPNIconAlert) {
             Button("Enable Anyway", role: .destructive) {

@@ -39,6 +39,7 @@ final class AWCore {
     private enum UserDefaultsKey {
         static let allowInsecure = "allowInsecure"
         static let alwaysOnEnabled = "alwaysOnEnabled"
+        static let blockQUICEnabled = "blockQUICEnabled"
         static let bypassCountryCode = "bypassCountryCode"
         static let chains = "store.chains"
         static let customRuleSets = "customRuleSets"
@@ -237,6 +238,14 @@ final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.hideVPNIcon)
     }
     
+    static func getBlockQUICEnabled() -> Bool {
+        userDefaults.object(forKey: UserDefaultsKey.blockQUICEnabled) as? Bool ?? true
+    }
+
+    static func setBlockQUICEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.blockQUICEnabled)
+    }
+    
     static func getIPv6DNSEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.ipv6DNSEnabled)
     }
@@ -272,7 +281,7 @@ final class AWCore {
     static func getRemnawaveHWIDEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.remnawaveHWIDEnabled)
     }
-    
+
     static func setRemnawaveHWIDEnabled(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.remnawaveHWIDEnabled)
     }

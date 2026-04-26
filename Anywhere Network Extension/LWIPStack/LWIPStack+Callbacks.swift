@@ -154,6 +154,20 @@ extension LWIPStack {
                 // Non-A/AAAA query — fall through, create normal UDP flow to proxy DNS
             }
 
+            // QUIC blocking: drop UDP/443 with ICMP port-unreachable so HTTP/3
+            // clients fail fast on the first datagram and fall back to HTTP/2.
+            if shared.blockQUICEnabled && dstPort == 443 {
+                shared.sendICMPPortUnreachable(
+                    srcIP: srcIP,
+                    srcPort: srcPort,
+                    dstIP: dstIP,
+                    dstPort: dstPort,
+                    isIPv6: isIPv6 != 0,
+                    udpPayloadLength: Int(len)
+                )
+                return
+            }
+
             let srcHost = LWIPStack.ipAddrToString(srcIP, isIPv6: isIPv6 != 0)
             let dstIPString = LWIPStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
 

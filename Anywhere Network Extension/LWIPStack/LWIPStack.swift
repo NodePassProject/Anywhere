@@ -47,20 +47,21 @@ class LWIPStack {
     //
     // Setting                 │ Where it takes effect               │ On change
     // ────────────────────────┼─────────────────────────────────────┼──────────────────────────────
+    // bypassCountryEnabled    │ DomainRouter bypass rules gate      │ Stack restart
     // ipv6DNSEnabled          │ lwIP DNS interception (AAAA fake IP)│ Stack restart
     // encryptedDNSEnabled     │ lwIP DNS interception (DDR block),  │ Reapply tunnel settings +
     //                         │ tunnel DNS settings (DoH/DoT)       │ stack restart
-    // bypassCountryEnabled     │ DomainRouter bypass rules gate      │ Stack restart
     // routingRules            │ DomainRouter (connection-time)      │ Stack restart (closes connections
     //                         │                                     │ using outdated proxy configurations;
     //                         │                                     │ FakeIPPool preserved)
-
+    var proxyMode: ProxyMode = .rule
+    var hideVPNIcon: Bool = false
+    var blockQUICEnabled: Bool = true
     var ipv6DNSEnabled: Bool = false
     var encryptedDNSEnabled: Bool = false
     var encryptedDNSProtocol: String = "doh"
     var encryptedDNSServer: String = ""
-    var hideVPNIcon: Bool = false
-    var proxyMode: ProxyMode = .rule
+    
     var running = false
 
     /// True while a deliberate TCP teardown is in progress (stack shutdown,
@@ -76,7 +77,7 @@ class LWIPStack {
     /// Pending deferred restart when throttled. Cancelled and replaced on each new request.
     var deferredRestart: DispatchWorkItem?
 
-    // lwIP periodic timeout timer
+    /// lwIP periodic timeout timer
     var timeoutTimer: DispatchSourceTimer?
 
     /// Active bypass country code (empty = disabled).
@@ -287,6 +288,7 @@ class LWIPStack {
         loadEncryptedDNSSetting()
         loadProxyModeSetting()
         loadHideVPNIconSetting()
+        loadBlockQUICSetting()
         if shouldLoadProxyServerAddresses {
             loadProxyServerAddresses()
         }
@@ -416,6 +418,10 @@ class LWIPStack {
 
     private func loadHideVPNIconSetting() {
         hideVPNIcon = AWCore.getHideVPNIcon()
+    }
+
+    private func loadBlockQUICSetting() {
+        blockQUICEnabled = AWCore.getBlockQUICEnabled()
     }
 
     // MARK: - IP Address Helpers
