@@ -17,6 +17,9 @@ struct IPv6SettingsView: View {
             }
         }
         .navigationTitle("IPv6")
+        .onAppear {
+            ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
+        }
         .onChange(of: ipv6DNSEnabled) { _, newValue in
             AWCore.setIPv6DNSEnabled(newValue)
             AWCore.notifyTunnelSettingsChanged()
