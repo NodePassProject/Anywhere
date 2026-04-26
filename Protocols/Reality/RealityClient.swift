@@ -179,9 +179,9 @@ class RealityClient {
 
         // Build SessionId with Reality metadata in first 16 bytes
         var sessionId = Data(count: 32)
-        sessionId[0] = 26  // Xray-core version 26.1.18
-        sessionId[1] = 1
-        sessionId[2] = 18
+        sessionId[0] = 26  // Xray-core version 26.4.25
+        sessionId[1] = 4
+        sessionId[2] = 25
         sessionId[3] = 0
 
         let timestamp = UInt32(Date().timeIntervalSince1970)
