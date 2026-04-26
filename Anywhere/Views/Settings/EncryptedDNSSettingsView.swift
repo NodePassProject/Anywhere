@@ -9,10 +9,9 @@ import SwiftUI
 
 struct EncryptedDNSSettingsView: View {
     @State private var enabled = AWCore.getEncryptedDNSEnabled()
-    @State private var dnsProtocol = AWCore.getEncryptedDNSProtocol()
-    @State private var storedServer = AWCore.getEncryptedDNSServer()
-
-    @State private var editingServer = ""
+    @State private var `protocol` = AWCore.getEncryptedDNSProtocol()
+    @State private var server = AWCore.getEncryptedDNSServer()
+    
     @State private var showEnableAlert = false
 
     var body: some View {
@@ -36,14 +35,14 @@ struct EncryptedDNSSettingsView: View {
 
             if enabled {
                 Section {
-                    Picker("Protocol", selection: $dnsProtocol) {
+                    Picker("Protocol", selection: $protocol) {
                         Text("DNS over HTTPS").tag("doh")
                         Text("DNS over TLS").tag("dot")
                     }
                 }
 
                 Section {
-                    TextField("DNS Server", text: $editingServer)
+                    TextField("DNS Server", text: $server)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
@@ -54,11 +53,14 @@ struct EncryptedDNSSettingsView: View {
             }
         }
         .navigationTitle("Encrypted DNS")
-        .onAppear { editingServer = storedServer }
+        .onAppear {
+            enabled = AWCore.getEncryptedDNSEnabled()
+            `protocol` = AWCore.getEncryptedDNSProtocol()
+            server = AWCore.getEncryptedDNSServer()
+        }
         .onDisappear { commitServer() }
-        .onChange(of: dnsProtocol) { _, newValue in
+        .onChange(of: `protocol`) { _, newValue in
             AWCore.setEncryptedDNSProtocol(newValue)
-            commitServer()
             AWCore.notifyTunnelSettingsChanged()
         }
         .alert("Encrypted DNS", isPresented: $showEnableAlert) {
@@ -74,10 +76,7 @@ struct EncryptedDNSSettingsView: View {
     }
 
     private func commitServer() {
-        let trimmed = editingServer.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed != storedServer else { return }
-        storedServer = trimmed
-        AWCore.setEncryptedDNSServer(trimmed)
+        AWCore.setEncryptedDNSServer(server.trimmingCharacters(in: .whitespacesAndNewlines))
         AWCore.notifyTunnelSettingsChanged()
     }
 }
