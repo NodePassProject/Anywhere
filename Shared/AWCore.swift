@@ -32,7 +32,31 @@ final class AWCore {
 
     /// App Group `UserDefaults` shared between the app and Network Extension.
     /// Prefer the typed `getX` / `setX` accessors below over direct access.
-    private static let userDefaults = UserDefaults(suiteName: Identifier.appGroupSuite)!
+    ///
+    /// Lazily initialized: the first access registers the values in
+    /// ``registeredDefaults``. `register(defaults:)` only affects keys that
+    /// have not been explicitly written, so user-set values always win.
+    /// Swift's `static let` semantics make this thread-safe and run-once.
+    private static let userDefaults: UserDefaults = {
+        let defaults = UserDefaults(suiteName: Identifier.appGroupSuite)!
+        defaults.register(defaults: registeredDefaults)
+        return defaults
+    }()
+
+    /// Defaults applied to App Group `UserDefaults` on first access.
+    /// The single source of truth for any setting whose unset value isn't
+    /// the type's natural zero (`false`/`""`/`nil`/empty collection). Bool
+    /// settings that default to `false` are omitted because `bool(forKey:)`
+    /// already returns `false` for unset keys.
+    private static let registeredDefaults: [String: Any] = [
+        UserDefaultsKey.identifier: UUID().uuidString,
+        UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
+        UserDefaultsKey.bypassCountryCode: "",
+        UserDefaultsKey.trustedCertificateSHA256s: [],
+        UserDefaultsKey.blockQUICEnabled: true,
+        UserDefaultsKey.encryptedDNSProtocol: "doh",
+        UserDefaultsKey.encryptedDNSServer: "https://cloudflare-dns.com/dns-query",
+    ]
 
     // MARK: - UserDefaults Keys
 
@@ -82,13 +106,7 @@ final class AWCore {
     
     // App
     static func getIdentifier() -> String {
-        if let identifier = userDefaults.string(forKey: UserDefaultsKey.identifier) {
-            return identifier
-        } else {
-            let newIdentifier = UUID().uuidString
-            userDefaults.set(newIdentifier, forKey: UserDefaultsKey.identifier)
-            return newIdentifier
-        }
+        userDefaults.string(forKey: UserDefaultsKey.identifier)!
     }
     
     static func getOnboardingCompleted() -> Bool {
@@ -175,7 +193,7 @@ final class AWCore {
     }
     
     static func getProxyMode() -> ProxyMode {
-        userDefaults.string(forKey: UserDefaultsKey.proxyMode).flatMap(ProxyMode.init) ?? .rule
+        ProxyMode(rawValue: userDefaults.string(forKey: UserDefaultsKey.proxyMode)!) ?? .rule
     }
     
     static func setProxyMode(_ proxyMode: ProxyMode) {
@@ -183,7 +201,7 @@ final class AWCore {
     }
 
     static func getBypassCountryCode() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.bypassCountryCode) ?? ""
+        userDefaults.string(forKey: UserDefaultsKey.bypassCountryCode)!
     }
 
     static func setBypassCountryCode(_ value: String) {
@@ -215,7 +233,7 @@ final class AWCore {
     }
 
     static func getTrustedCertificateFingerprints() -> [String] {
-        userDefaults.stringArray(forKey: UserDefaultsKey.trustedCertificateSHA256s) ?? []
+        userDefaults.stringArray(forKey: UserDefaultsKey.trustedCertificateSHA256s)!
     }
 
     static func setTrustedCertificateFingerprints(_ fingerprints: [String]) {
@@ -239,7 +257,7 @@ final class AWCore {
     }
     
     static func getBlockQUICEnabled() -> Bool {
-        userDefaults.object(forKey: UserDefaultsKey.blockQUICEnabled) as? Bool ?? true
+        userDefaults.bool(forKey: UserDefaultsKey.blockQUICEnabled)
     }
 
     static func setBlockQUICEnabled(_ value: Bool) {
@@ -263,7 +281,7 @@ final class AWCore {
     }
     
     static func getEncryptedDNSProtocol() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSProtocol) ?? "doh"
+        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSProtocol)!
     }
     
     static func setEncryptedDNSProtocol(_ value: String) {
@@ -271,7 +289,7 @@ final class AWCore {
     }
     
     static func getEncryptedDNSServer() -> String {
-        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSServer) ?? "https://cloudflare-dns.com/dns-query"
+        userDefaults.string(forKey: UserDefaultsKey.encryptedDNSServer)!
     }
     
     static func setEncryptedDNSServer(_ value: String) {
