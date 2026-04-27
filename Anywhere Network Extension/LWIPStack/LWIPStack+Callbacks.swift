@@ -20,11 +20,37 @@ extension LWIPStack {
         // then flushes them all in a single writePackets call. This reduces kernel
         // crossings from N per batch to 1, speeding up ACK delivery to the OS TCP
         // stack and improving upload throughput.
-        lwip_bridge_set_output_fn { data, len, isIPv6 in
-            guard let shared = LWIPStack.shared, let data else { return }
+        //
+        // The bridge hands us either a pbuf payload (zero-copy single-pbuf path,
+        // released via pbuf_free) or a heap buffer holding the flattened chain
+        // (released via mem_free). We wrap the pointer with `Data(bytesNoCopy:...)`
+        // so writePackets reads directly from lwIP's memory — saving one
+        // payload-sized memcpy per packet vs. the previous `Data(bytes:count:)`.
+        //
+        // The deallocator MUST run the release fn on lwipQueue because
+        // `pbuf_free` ends in `memp_free`, which mutates a per-pool freelist
+        // with no locking under NO_SYS=1 + SYS_LIGHTWEIGHT_PROT=0. The Data is
+        // commonly dropped on outputQueue after writePackets returns (and
+        // could in principle drop on any queue), so we capture lwipQueue at
+        // construction time and dispatch through it. The DispatchQueue's
+        // strong reference lives in the deallocator's environment, so even
+        // if `LWIPStack.shared` is nilled (stop, restart) before the
+        // deallocator fires, the original queue stays alive long enough to
+        // serialize the release with any other lwIP work that's still
+        // draining on it. We never call the release fn directly off-queue.
+        lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
+            guard let shared = LWIPStack.shared, let data, let release else { return }
             let byteCount = Int(len)
             shared.totalBytesIn += Int64(byteCount)
-            shared.outputPackets.append(Data(bytes: data, count: byteCount))
+
+            let mutableData = UnsafeMutableRawPointer(mutating: data)
+            let capturedCtx = releaseCtx
+            let capturedRelease = release
+            let capturedQueue = shared.lwipQueue
+            let packet = Data(bytesNoCopy: mutableData, count: byteCount, deallocator: .custom({ _, _ in
+                capturedQueue.async { capturedRelease(capturedCtx) }
+            }))
+            shared.outputPackets.append(packet)
             shared.outputProtocols.append(isIPv6 != 0 ? LWIPStack.ipv6Proto : LWIPStack.ipv4Proto)
             if !shared.outputFlushScheduled {
                 shared.outputFlushScheduled = true

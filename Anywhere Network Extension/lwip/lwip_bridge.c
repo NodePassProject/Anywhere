@@ -55,22 +55,41 @@ static ip_addr_t s_current_udp_dst_ip;
  *  Netif output callback
  * ======================================================================== */
 
+/* Release helpers handed to Swift via the output callback. Both run on
+ * lwipQueue (Swift's deallocator hops there before invoking) because pbuf_free
+ * and mem_free are not thread-safe under NO_SYS=1. */
+static void lwip_bridge_release_pbuf(void *ctx) { pbuf_free((struct pbuf *)ctx); }
+static void lwip_bridge_release_buf(void *ctx)  { mem_free(ctx); }
+
+/* Hand a single-pbuf payload to Swift without copying. `pbuf_ref` keeps the
+ * pbuf alive past lwIP's own `pbuf_free` after the netif output returns, so
+ * the data stays valid until Swift's Data deallocator drops our extra ref. */
+static void output_single_pbuf(struct pbuf *p, int is_ipv6) {
+    pbuf_ref(p);
+    s_output_fn(p->payload, p->tot_len, is_ipv6, p, lwip_bridge_release_pbuf);
+}
+
+/* Flatten a chained pbuf into a heap buffer Swift owns. Saves the second
+ * Data(bytes:count:) memcpy that the previous bridge required by handing
+ * Swift a buffer it can wrap with `bytesNoCopy`. */
+static void output_chained_pbuf(struct pbuf *p, int is_ipv6, const char *tag) {
+    void *buf = mem_malloc(p->tot_len);
+    if (!buf) {
+        os_log_error(s_log, "[Bridge] %s: mem_malloc failed for %u bytes", tag, p->tot_len);
+        return;
+    }
+    pbuf_copy_partial(p, buf, p->tot_len, 0);
+    s_output_fn(buf, p->tot_len, is_ipv6, buf, lwip_bridge_release_buf);
+}
+
 static err_t netif_output_ip4(struct netif *netif, struct pbuf *p,
                                const ip4_addr_t *ipaddr) {
     (void)netif; (void)ipaddr;
-    if (s_output_fn && p) {
-        if (p->next != NULL) {
-            void *buf = mem_malloc(p->tot_len);
-            if (buf) {
-                pbuf_copy_partial(p, buf, p->tot_len, 0);
-                s_output_fn(buf, p->tot_len, 0);
-                mem_free(buf);
-            } else {
-                os_log_error(s_log, "[Bridge] netif_output_ip4: mem_malloc failed for %u bytes", p->tot_len);
-            }
-        } else {
-            s_output_fn(p->payload, p->tot_len, 0);
-        }
+    if (!s_output_fn || !p) return ERR_OK;
+    if (p->next == NULL) {
+        output_single_pbuf(p, 0);
+    } else {
+        output_chained_pbuf(p, 0, "netif_output_ip4");
     }
     return ERR_OK;
 }
@@ -78,19 +97,11 @@ static err_t netif_output_ip4(struct netif *netif, struct pbuf *p,
 static err_t netif_output_ip6(struct netif *netif, struct pbuf *p,
                                const ip6_addr_t *ipaddr) {
     (void)netif; (void)ipaddr;
-    if (s_output_fn && p) {
-        if (p->next != NULL) {
-            void *buf = mem_malloc(p->tot_len);
-            if (buf) {
-                pbuf_copy_partial(p, buf, p->tot_len, 0);
-                s_output_fn(buf, p->tot_len, 1);
-                mem_free(buf);
-            } else {
-                os_log_error(s_log, "[Bridge] netif_output_ip6: mem_malloc failed for %u bytes", p->tot_len);
-            }
-        } else {
-            s_output_fn(p->payload, p->tot_len, 1);
-        }
+    if (!s_output_fn || !p) return ERR_OK;
+    if (p->next == NULL) {
+        output_single_pbuf(p, 1);
+    } else {
+        output_chained_pbuf(p, 1, "netif_output_ip6");
     }
     return ERR_OK;
 }
@@ -407,13 +418,26 @@ void lwip_bridge_input(const void *data, int len) {
         return;
     }
 
-    struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)len, PBUF_POOL);
+    /* Zero-copy input: PBUF_REF references the caller's buffer directly
+     * instead of allocating a PBUF_POOL chain and pbuf_take'ing into it.
+     * Safe because:
+     *   - The caller (LWIPStack+IO.swift) invokes us inside `withUnsafeBytes`,
+     *     so `data` is valid for the entire synchronous call chain
+     *     (ip_input → tcp_input → tcp_recv_cb → s_tcp_recv_fn → return).
+     *   - tcp_recv_cb (below) only returns ERR_MEM on a chained-pbuf flatten;
+     *     a single PBUF_REF input never produces a chain there.
+     *   - IP_REASSEMBLY=0, LWIP_IPV6_REASS=0, and TCP_QUEUE_OOSEQ=0 in
+     *     port/lwipopts.h, so lwIP has no internal queue that could outlive
+     *     this call. Re-enabling any of those would require reverting to
+     *     PBUF_POOL+pbuf_take.
+     * Cast away const: lwIP's PBUF_REF API takes void*, but with the
+     * checksum-check / NAT / fragmentation knobs above all disabled, no input
+     * path actually mutates the payload. */
+    struct pbuf *p = pbuf_alloc_reference((void *)data, (u16_t)len, PBUF_REF);
     if (!p) {
-        os_log_error(s_log, "[Bridge] input: pbuf_alloc failed for %d bytes", len);
+        os_log_error(s_log, "[Bridge] input: pbuf_alloc_reference failed for %d bytes", len);
         return;
     }
-
-    pbuf_take(p, data, (u16_t)len);
 
     err_t input_err = tun_netif.input(p, &tun_netif);
     if (input_err != ERR_OK) {

@@ -6,8 +6,23 @@
 
 /* --- Callback types (implemented in Swift with @convention(c)) --- */
 
-/* Netif output: lwIP wants to send an IP packet back to the TUN interface */
-typedef void (*lwip_output_fn)(const void *data, int len, int is_ipv6);
+/* Release callback: called by Swift after the output packet's `Data` is
+ * released. `release_ctx` is whatever the bridge passed in `lwip_output_fn`'s
+ * `release_ctx` argument — either the underlying `pbuf*` (zero-copy single-pbuf
+ * path, freed via `pbuf_free`) or a `mem_malloc`'d buffer (chained-pbuf flatten
+ * path, freed via `mem_free`). MUST be invoked on `lwipQueue` since both
+ * `pbuf_free` and `mem_free` are not thread-safe under NO_SYS=1. */
+typedef void (*lwip_release_fn)(void *release_ctx);
+
+/* Netif output: lwIP wants to send an IP packet back to the TUN interface.
+ *
+ * Swift constructs `Data(bytesNoCopy: data, count: len, deallocator: ...)` and
+ * the deallocator hops to `lwipQueue` to call `release(release_ctx)`. This
+ * lets `NEPacketTunnelFlow.writePackets` consume the bytes directly out of
+ * lwIP's pbuf payload (or a flattened chain copy) without an extra
+ * `Data(bytes:count:)` memcpy. */
+typedef void (*lwip_output_fn)(const void *data, int len, int is_ipv6,
+                                void *release_ctx, lwip_release_fn release);
 
 /* TCP accept: new TCP connection accepted (returns opaque pointer stored as PCB arg)
  * IP addresses are raw bytes: 4 bytes for IPv4, 16 bytes for IPv6 */

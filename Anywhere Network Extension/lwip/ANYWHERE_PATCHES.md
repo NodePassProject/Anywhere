@@ -148,33 +148,3 @@ hundred extra ~40-byte ACK packets per second at 1 MB/s upload.
 
 **Upgrade notes:** When bumping lwIP, re-apply. Search for
 `#define tcp_ack(pcb)` in `src/include/lwip/priv/tcp_priv.h`.
-
----
-
-## Non-patch customizations
-
-The lwIP build is additionally tuned via `port/lwipopts.h`, using only
-standard lwIP options (no source edits). Notable entries relevant to
-the TUN deployment:
-
-- `LWIP_TCP_CALC_INITIAL_CWND(mss) = 32 · mss` — a large initial cwnd.
-  Redundant given the cwnd patch above, but harmless to keep as belt
-  and suspenders.
-- `TCP_WND`, `TCP_SND_BUF = 1024 · TCP_MSS` with `LWIP_WND_SCALE = 1`,
-  `TCP_RCV_SCALE = 7` — high-throughput windowing.
-- `CHECKSUM_CHECK_IP/TCP/UDP/ICMP/ICMP6 = 0` on input — we trust the
-  packets the iOS TUN interface hands us.
-- `TCP_QUEUE_OOSEQ = 0`, `LWIP_TCP_SACK_OUT = 0` — out-of-order
-  receive and SACK output are dead code on an in-memory flow. Disabled
-  together since `init.c` requires it; also drops the
-  `TCP_OOSEQ_MAX_BYTES`, `TCP_OOSEQ_MAX_PBUFS`, and
-  `LWIP_TCP_MAX_SACK_NUM` options.
-- `NO_SYS = 1`, `LWIP_CALLBACK_API = 1`, `LWIP_SINGLE_NETIF = 1` —
-  single-netif, callback-driven, no OS threading layer.
-- **Nagle is disabled per-PCB** in `lwip_bridge.c` via
-  `tcp_nagle_disable(newpcb)` on every `tcp_accept`, for the same
-  reason as the delayed-ACK patch above (small writes on an in-memory
-  flow don't benefit from coalescing).
-
-These knobs live entirely in `port/lwipopts.h` / `lwip_bridge.c`; no
-edit to the vendored lwIP source is required to tune them.
