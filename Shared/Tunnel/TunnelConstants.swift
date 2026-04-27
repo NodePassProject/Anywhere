@@ -32,9 +32,14 @@ enum TunnelConstants {
     /// With MEMP_NUM_TCP_SEG=32768, this lets many connections make progress without
     /// exhausting the segment pool. Must stay in sync with lwipopts.h.
     static let tcpMaxWriteSize = 16 * 1024
-    /// Maximum upload coalesce buffer size, capped at UInt16.max because downstream
-    /// protocols (Vision padding) use 2-byte content length fields.
-    static let tcpMaxCoalesceSize = Int(UInt16.max)
+    /// Maximum bytes per upload `proxyConnection.send` call. Caps the slice
+    /// size when the upload pipeline drains a backlog so the initial
+    /// pendingData burst (commonly 1+ MB on TLS uploads) ships as a sequence
+    /// of bounded chunks rather than as one giant send whose completion
+    /// gates every subsequent ack. Sized at UInt16.max to stay safe for
+    /// downstream protocols whose framing uses 2-byte content-length fields
+    /// (e.g. Vision padding).
+    static let uploadChunkSize = Int(UInt16.max)
     /// Safety cap on per-connection `pendingData` (bytes accumulated while the
     /// sniff phase runs or the proxy is dialing). Bounded naturally by TCP_WND
     /// (~696 KB) since we defer `tcp_recved` until the route is committed;

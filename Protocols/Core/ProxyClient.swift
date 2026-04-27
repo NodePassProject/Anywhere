@@ -300,12 +300,26 @@ class ProxyClient {
                     return
                 }
                 let vision = self.wrapWithVision(proxyConnection)
-                if let initialData {
-                    vision.send(data: initialData)
-                } else {
-                    vision.sendEmptyPadding()
+                // Wait for the introductory Vision-padded send (initial
+                // payload or empty padding) to be accepted by the inner
+                // transport before declaring the connect successful.
+                // Otherwise fire-and-forget here would race with the
+                // upload pipeline's first `send` issued from the caller's
+                // success callback — the pump's bytes could reach the
+                // framing layer before the padded intro and corrupt the
+                // proxy-side byte stream.
+                let introCompletion: (Error?) -> Void = { error in
+                    if let error {
+                        completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
+                    } else {
+                        completion(.success(vision))
+                    }
                 }
-                completion(.success(vision))
+                if let initialData {
+                    vision.sendRaw(data: initialData, completion: introCompletion)
+                } else {
+                    vision.sendEmptyPadding(completion: introCompletion)
+                }
             } else {
                 completion(.success(proxyConnection))
             }

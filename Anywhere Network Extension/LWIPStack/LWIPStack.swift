@@ -42,6 +42,16 @@ class LWIPStack {
     /// Prevents piling up multiple writes that overwhelm the TUN device buffer.
     var outputWriteInFlight = false
 
+    /// Coalescing signal that runs the post-`writePackets` re-flush check on
+    /// `lwipQueue`. Replaces a per-write `lwipQueue.async` back-hop with a
+    /// `DispatchSource` whose handler invocation count is naturally bounded
+    /// by `lwipQueue` availability — under sustained upload (an ACK
+    /// `writePackets` per send completion × N connections), several signals
+    /// land while `lwipQueue` is busy on input/completion/timer work and
+    /// collapse into one handler call. Created in ``start`` /
+    /// ``restartStackNow`` and cancelled in ``shutdownInternal``.
+    var outputDrainSource: DispatchSourceUserDataAdd?
+
     // --- Settings (read from App Group UserDefaults) ---
     // These are loaded at start/restart and live-reloaded via Darwin notification.
     //

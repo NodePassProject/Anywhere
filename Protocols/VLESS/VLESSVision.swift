@@ -392,11 +392,19 @@ class VLESSVisionConnection: ProxyConnection {
     /// Send an empty padding frame to camouflage the VLESS header.
     /// Called when no initial data is available, so the header isn't sent alone.
     /// Matches Xray-core `outbound.go` lines 331-337.
-    func sendEmptyPadding() {
+    ///
+    /// `completion` fires once the inner transport has accepted the padding
+    /// frame (kernel send buffer for raw TCP, framing layer for WS/HTTP/2).
+    /// Callers that depend on byte-stream ordering with subsequent sends
+    /// (e.g. the upload pipeline issuing its first `send` after the
+    /// handshake) must wait on this completion before the next call —
+    /// fire-and-forget would let the next send race with the padding at
+    /// the framing layer.
+    func sendEmptyPadding(completion: @escaping (Error?) -> Void) {
         lock.lock()
         let padded = visionPadding(data: nil, command: .paddingContinue, state: trafficState, longPadding: true)
         lock.unlock()
-        innerConnection.send(data: padded)
+        innerConnection.send(data: padded, completion: completion)
     }
     
     override var isConnected: Bool {

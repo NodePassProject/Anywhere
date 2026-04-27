@@ -39,6 +39,13 @@ extension LWIPStack {
     /// the previous write completes. The per-flush cap plus the queue-hop
     /// between successive batches gives utun room to drain and prevents
     /// ENOSPC drops under heavy downlink load.
+    ///
+    /// Re-flushing after a write completes is signalled via ``outputDrainSource``
+    /// instead of a per-write `lwipQueue.async` from the output queue. The
+    /// source coalesces tightly-spaced signals (every TCP-recv ACK on a busy
+    /// upload path triggers a writePackets, easily 300+/s across multiple
+    /// connections) into a single `lwipQueue` handler invocation when the
+    /// queue is busy with input/completion work.
     func flushOutputPackets() {
         outputFlushScheduled = false
         guard !outputPackets.isEmpty, !outputWriteInFlight else { return }
@@ -59,16 +66,34 @@ extension LWIPStack {
             outputProtocols.removeFirst(maxPacketCount)
         }
         outputWriteInFlight = true
+        let drainSource = outputDrainSource
         outputQueue.async { [weak self] in
             self?.packetFlow?.writePackets(packets, withProtocols: protocols)
-            self?.lwipQueue.async {
-                guard let self else { return }
-                self.outputWriteInFlight = false
-                if !self.outputPackets.isEmpty {
-                    self.flushOutputPackets()
-                }
+            // Cheaper than `lwipQueue.async`: multiple post-write signals
+            // arriving while lwipQueue is busy collapse into one handler
+            // invocation that drains them all together.
+            drainSource?.add(data: 1)
+        }
+    }
+
+    /// Creates the coalescing drain source bound to ``lwipQueue``. Each call
+    /// to ``DispatchSource/add(data:)`` from outputQueue (after `writePackets`
+    /// completes) signals the source; the handler fires once on lwipQueue
+    /// per "free moment", clears ``outputWriteInFlight``, and re-flushes if
+    /// more output has accumulated. Idempotent within a single handler call:
+    /// `data` (the accumulated count) isn't read because the work to do is
+    /// the same regardless of how many writes signalled.
+    func startOutputDrainSource() {
+        let source = DispatchSource.makeUserDataAddSource(queue: lwipQueue)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.outputWriteInFlight = false
+            if !self.outputPackets.isEmpty {
+                self.flushOutputPackets()
             }
         }
+        source.activate()
+        outputDrainSource = source
     }
 
     // MARK: - Packet Reading
