@@ -432,7 +432,7 @@ class VPNViewModel: ObservableObject {
             latencyResults[config.id] = .testing
         }
         latencyTask = Task.detached { [weak self] in
-            let resolvedConfigurations = configs.map(LatencyTester.resolvedConfiguration)
+            let resolvedConfigurations = await LatencyTester.resolvedConfigurations(configs)
             await MainActor.run { self?.syncProxyServerAddresses(for: resolvedConfigurations) }
             for await (id, result) in LatencyTester.testAll(resolvedConfigurations) {
                 await MainActor.run { [weak self] in
@@ -469,11 +469,10 @@ class VPNViewModel: ObservableObject {
             }
         }
         chainLatencyTask = Task.detached { [weak self] in
-            let resolvedChains = chainData.map { ($0.0, LatencyTester.resolvedConfiguration($0.1)) }
-            await MainActor.run { self?.syncProxyServerAddresses(for: resolvedChains.map(\.1)) }
-            let configs = resolvedChains.map { $0.1 }
-            let idMap = Dictionary(uniqueKeysWithValues: zip(configs.map(\.id), resolvedChains.map(\.0)))
-            for await (configId, result) in LatencyTester.testAll(configs) {
+            let resolvedConfigs = await LatencyTester.resolvedConfigurations(chainData.map(\.1))
+            await MainActor.run { self?.syncProxyServerAddresses(for: resolvedConfigs) }
+            let idMap = Dictionary(uniqueKeysWithValues: zip(resolvedConfigs.map(\.id), chainData.map(\.0)))
+            for await (configId, result) in LatencyTester.testAll(resolvedConfigs) {
                 if let chainId = idMap[configId] {
                     await MainActor.run { [weak self] in
                         self?.chainLatencyResults[chainId] = result
