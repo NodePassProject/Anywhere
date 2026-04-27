@@ -218,7 +218,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         } else {
             settings.dnsSettings = NEDNSSettings(servers: dnsServers)
         }
-        settings.mtu = 1400
+        settings.mtu = 1500
 
         return settings
     }
