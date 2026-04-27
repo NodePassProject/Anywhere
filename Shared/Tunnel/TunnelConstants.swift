@@ -69,7 +69,11 @@ enum TunnelConstants {
     // MARK: - Timer Intervals
 
     /// lwIP periodic timeout interval (milliseconds).
-    static let lwipTimeoutIntervalMs = 250
+    /// MUST equal `TCP_TMR_INTERVAL` in `port/lwipopts.h` — `sys_check_timeouts`
+    /// only fires `tcp_tmr` every `TCP_TMR_INTERVAL` internally, so the dispatch
+    /// source has to wake at least that often or RTO/persist/MSL granularity
+    /// regresses to whichever is coarser.
+    static let lwipTimeoutIntervalMs = 100
     /// UDP flow cleanup timer interval (seconds).
     static let udpCleanupIntervalSec = 1
     /// Retry delay when TCP overflow drain makes no progress (milliseconds).
