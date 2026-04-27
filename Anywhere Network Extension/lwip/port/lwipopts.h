@@ -58,10 +58,10 @@
 
 /* --- Pbuf configuration --- */
 #define PBUF_POOL_SIZE                  2048
-#define PBUF_POOL_BUFSIZE               1400
+#define PBUF_POOL_BUFSIZE               1500
 
 /* --- TCP configuration --- */
-#define TCP_MSS                         1360
+#define TCP_MSS                         1460
 #define TCP_WND                         (1024 * TCP_MSS)
 #define TCP_SND_BUF                     (1024 * TCP_MSS)
 #define TCP_SND_QUEUELEN                (4 * TCP_SND_BUF / TCP_MSS)

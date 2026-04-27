@@ -109,7 +109,7 @@ static err_t netif_output_ip6(struct netif *netif, struct pbuf *p,
 static err_t tun_netif_init_fn(struct netif *netif) {
     netif->name[0] = 't';
     netif->name[1] = 'n';
-    netif->mtu = 1400;
+    netif->mtu = 1500;
     netif->output = netif_output_ip4;
     netif->output_ip6 = netif_output_ip6;
     netif->flags = NETIF_FLAG_UP | NETIF_FLAG_LINK_UP;
