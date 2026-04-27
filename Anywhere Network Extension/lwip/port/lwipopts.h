@@ -66,20 +66,16 @@
 #define TCP_SND_BUF                     (1024 * TCP_MSS)
 #define TCP_SND_QUEUELEN                (4 * TCP_SND_BUF / TCP_MSS)
 #define TCP_SNDLOWAT                    ((2 * TCP_MSS) + 1)
-/* Out-of-order TCP segments are not expected on the in-memory TUN flow
- * (NEPacketTunnelFlow.readPackets delivers in order from the kernel TCP
- * stack). Disabled to prevent lwIP from internally queueing input pbufs;
- * the input path (lwip_bridge.c) uses PBUF_REF zero-copy that requires
- * the pbuf never outlive the synchronous call chain. */
 #define TCP_QUEUE_OOSEQ                 0
-#define TCP_OVERSIZE                    TCP_MSS
+#define TCP_OVERSIZE                    (4 * TCP_MSS)
 #define TCP_WND_UPDATE_THRESHOLD        LWIP_MIN((TCP_WND / 4), (TCP_MSS * 8))
 #define TCP_MAXRTX                      8
 #define TCP_SYNMAXRTX                   3
 #define LWIP_TCP_TIMESTAMPS             0
 #define LWIP_TCP_SACK_OUT               0
 #define LWIP_TCP_CALC_INITIAL_CWND(mss) ((tcpwnd_size_t)(32U * (mss)))
-
+#define LWIP_TCP_RTO_TIME               1000
+#define TCP_TMR_INTERVAL                100
 #define TCP_LISTEN_BACKLOG              0
 
 /* --- TCP window scaling (RFC 1323) --- */
