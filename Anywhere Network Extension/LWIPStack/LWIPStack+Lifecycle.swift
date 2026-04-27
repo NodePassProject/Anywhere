@@ -41,6 +41,7 @@ extension LWIPStack {
             configureRuntime(for: configuration, shouldLoadProxyServerAddresses: true)
             registerCallbacks()
             lwip_bridge_init()
+            startOutputDrainSource()
             startTimeoutTimer()
             startUDPCleanupTimer()
             startReadingPackets()
@@ -148,6 +149,8 @@ extension LWIPStack {
         timeoutTimer = nil
         udpCleanupTimer?.cancel()
         udpCleanupTimer = nil
+        outputDrainSource?.cancel()
+        outputDrainSource = nil
 
         outputPackets.removeAll(keepingCapacity: true)
         outputProtocols.removeAll(keepingCapacity: true)
@@ -214,6 +217,7 @@ extension LWIPStack {
         configureRuntime(for: configuration, shouldLoadProxyServerAddresses: false)
         registerCallbacks()
         lwip_bridge_init()
+        startOutputDrainSource()
         startTimeoutTimer()
         startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop

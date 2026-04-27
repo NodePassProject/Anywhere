@@ -68,25 +68,45 @@ class LWIPTCPConnection {
     /// receive at a time (the proxy transports require serial receives).
     private var receiveInFlight = false
 
-    // MARK: Upload Coalescing
-
-    /// Segments from lwIP callbacks within one `lwip_bridge_input` batch,
-    /// accumulated and flushed as a single encrypted chunk via `lwipQueue.async`.
-    /// Reduces AES-GCM operations from 2×N (per-segment) to 2×ceil(total/16383).
-    ///
-    /// Invariants:
-    /// - `recvLen == buffer.count` at all times outside `flushUploadBuffer`.
-    /// - `isScheduled` implies an async flush is queued; cleared at the start of `flushUploadBuffer`.
-    /// - `isFlushInFlight` is true from the `proxyConnection.send` call until its completion runs.
-    /// - New scheduled flushes are only enqueued when neither flag is set; the in-flight completion
-    ///   chains a follow-up flush to preserve order.
-    private struct UploadCoalesceState {
+    // MARK: Upload Pipeline
+    //
+    // FIFO buffer of bytes received from lwIP, drained by ``pumpUploadSends``
+    // through `proxyConnection.send` one chunk at a time.
+    //
+    // Single-flight is mandatory: several proxy transports (Vision over
+    // HTTP/2, gRPC, others) can split one logical `send` internally when a
+    // flow-control window is exhausted, then resume the remainder later
+    // when a window update arrives. With two LWIP chunks in flight, the
+    // later chunk's bytes can interleave with the earlier chunk's
+    // remainder, corrupting the byte stream the proxy sees. Even
+    // transports that look like a plain TCP stream (NWConnection.send
+    // preserves enqueue order) sit under framing layers that may reorder
+    // around backpressure. Until every transport guarantees strict
+    // serialisation of overlapping `send` calls, we serialise here.
+    //
+    // Ordering invariants:
+    // - Bytes are appended at the tail by ``handleReceivedData`` and consumed
+    //   at the head by ``pumpUploadSends`` in order. ``bufferOffset`` is the
+    //   live-data head; ``buffer[bufferOffset..<buffer.count]`` is the unsent
+    //   suffix. The dead prefix is compacted lazily when it grows past the
+    //   live suffix (matches the downlink's ``pendingWrite`` strategy).
+    // - At most one `proxyConnection.send` call is outstanding at a time.
+    //   The next chunk is issued only after the previous completion runs.
+    //
+    // Backpressure: ``lwip_bridge_tcp_recved`` runs only on send completion
+    // (one ack per send for that send's bytes), so the local TCP receive
+    // window naturally caps total bytes in the pipeline at lwIP's TCP_WND.
+    private struct UploadPipeline {
         var buffer = Data()
-        var recvLen: Int = 0
-        var isScheduled = false
-        var isFlushInFlight = false
+        var bufferOffset = 0
+        var sendInFlight = false
+        var isPumpScheduled = false
     }
-    private var uploadCoalesce = UploadCoalesceState()
+    private var uploadPipeline = UploadPipeline()
+
+    private var uploadBufferCount: Int {
+        uploadPipeline.buffer.count - uploadPipeline.bufferOffset
+    }
 
     private var activityTimer: ActivityTimer?
     private var handshakeTimer: DispatchWorkItem?
@@ -178,13 +198,13 @@ class LWIPTCPConnection {
 
     /// Handles data received from the local app via lwIP (upload path).
     ///
-    /// Coalesces segments within a single lwIP processing batch (all the
-    /// `lwip_bridge_input` calls from one `readPackets` batch run synchronously
-    /// on lwipQueue). A deferred flush encrypts and sends the accumulated data
-    /// as one chunk, reducing per-segment crypto and dispatch overhead.
-    ///
-    /// When a previous flush is still in-flight, falls back to per-segment
-    /// sends to provide natural backpressure via `tcp_recved`.
+    /// Appends the segment to the upload pipeline buffer and schedules a pump
+    /// (deferred via `lwipQueue.async` so all segments from one
+    /// `lwip_bridge_input` batch coalesce into the next pump invocation).
+    /// The pump ships a single chunk per `proxyConnection.send` call and
+    /// waits for its completion before issuing the next; bytes that arrive
+    /// during that window pile up in the buffer and ride out as the next
+    /// chunk, preserving the proxy-level byte stream order.
     func handleReceivedData(bytes ptr: UnsafeRawPointer, count: Int) {
         guard !closed, count > 0 else { return }
         activityTimer?.update()
@@ -228,113 +248,127 @@ class LWIPTCPConnection {
             return
         }
 
-        // Buffer would overflow — flush accumulated data first to
-        // maintain stream ordering, then fall back to per-segment sends.
-        if uploadCoalesce.recvLen + count > TunnelConstants.tcpMaxCoalesceSize {
-            if uploadCoalesce.recvLen > 0 && !uploadCoalesce.isFlushInFlight {
-                flushUploadBuffer()
+        uploadPipeline.buffer.append(bytePtr, count: count)
+        schedulePumpIfNeeded()
+    }
+
+    /// Schedules a pump on `lwipQueue.async` if one isn't already pending and
+    /// the pipeline is idle. The async hop deliberately defers the pump
+    /// until after the current synchronous batch of `lwip_bridge_input`
+    /// callbacks finishes — this coalesces a burst of TCP segments into
+    /// one large send.
+    ///
+    /// While a send is in flight, scheduling a new pump is a no-op: bytes
+    /// keep accumulating in the buffer and the completion's tail call to
+    /// ``pumpUploadSends`` ships them as the next chunk. This is what
+    /// keeps steady-state sends fat (the buffer fills during the network
+    /// round-trip) and avoids fragmenting the stream into per-segment
+    /// sends.
+    private func schedulePumpIfNeeded() {
+        guard !uploadPipeline.isPumpScheduled,
+              !uploadPipeline.sendInFlight,
+              uploadBufferCount > 0 else { return }
+        uploadPipeline.isPumpScheduled = true
+        lwipQueue.async { [weak self] in
+            self?.pumpUploadSends(fromSchedule: true)
+        }
+    }
+
+    /// Issues a single `proxyConnection.send` call carrying the head slice
+    /// of the pipeline buffer (up to ``TunnelConstants/uploadChunkSize``
+    /// bytes), if no send is already in flight. Called from the deferred
+    /// async after a batch of incoming bytes (``schedulePumpIfNeeded``)
+    /// and synchronously from each completion to drain whatever
+    /// accumulated meanwhile.
+    ///
+    /// Strict single-flight: several proxy transports (Vision over HTTP/2,
+    /// gRPC, …) can split one logical `send` internally on flow-control
+    /// exhaustion and resume the remainder later. Issuing a second send
+    /// while the first's remainder is still pending would let the second
+    /// chunk's bytes interleave with the first's tail at the proxy.
+    private func pumpUploadSends(fromSchedule: Bool = false) {
+        if fromSchedule {
+            uploadPipeline.isPumpScheduled = false
+        }
+
+        guard !closed, !uploadPipeline.sendInFlight, uploadBufferCount > 0,
+              let proxyConnection else { return }
+
+        let take = min(uploadBufferCount, TunnelConstants.uploadChunkSize)
+        let chunk = sliceUploadBuffer(take)
+
+        uploadPipeline.sendInFlight = true
+        let chunkSize = take
+
+        let completion: (Error?) -> Void = { [weak self] error in
+            guard let self else { return }
+            self.lwipQueue.async {
+                self.uploadPipeline.sendInFlight = false
+                guard !self.closed else { return }
+                if let error {
+                    self.logTransportFailure("Send", error: error)
+                    self.abort()
+                    return
+                }
+                // Acknowledge this chunk to lwIP and flush any resulting
+                // window update so the local TCP peer can feed us the next
+                // batch without an extra output-queue hop.
+                self.acknowledgeReceivedBytes(chunkSize)
+                // Drain the next chunk synchronously: bytes accumulated
+                // during the in-flight window can ship without another
+                // async hop, recovering the chained-flush behaviour that
+                // keeps per-send chunks fat.
+                self.pumpUploadSends()
             }
-            if uploadCoalesce.recvLen == 0 {
-                // Buffer is empty (was empty or just flushed) — safe to
-                // send per-segment for backpressure without reordering.
-                // The proxy retains the Data asynchronously, so copy here.
-                sendSegmentDirect(Data(bytes: ptr, count: count))
+        }
+
+        proxyConnection.send(data: chunk, completion: completion)
+    }
+
+    /// Acknowledges local-app bytes to lwIP once they have been accepted by
+    /// the proxy transport. Also flushes the resulting window update packet so
+    /// the local TCP peer can resume sending without waiting for the deferred
+    /// output callback.
+    private func acknowledgeReceivedBytes(_ byteCount: Int) {
+        guard byteCount > 0 else { return }
+        var remaining = byteCount
+        while remaining > 0 {
+            let part = UInt16(min(remaining, Int(UInt16.max)))
+            remaining -= Int(part)
+            lwip_bridge_tcp_recved(pcb, part)
+        }
+        lwip_bridge_tcp_output(pcb)
+        LWIPStack.shared?.flushOutputInline()
+    }
+
+    /// Removes and returns a `take`-byte head slice of the pipeline buffer.
+    /// Advances ``UploadPipeline/bufferOffset`` for partial slices and lazily
+    /// compacts when the dead prefix outgrows the live suffix, matching the
+    /// downlink ``pendingWrite`` strategy. Whole-buffer consumption hands off
+    /// the existing storage and replaces the buffer with a fresh `Data`, so
+    /// the in-flight chunk's backing isn't mutated under it.
+    private func sliceUploadBuffer(_ take: Int) -> Data {
+        if take == uploadBufferCount {
+            let chunk: Data
+            if uploadPipeline.bufferOffset == 0 {
+                chunk = uploadPipeline.buffer
             } else {
-                // A flush is in-flight and the buffer has unsent data.
-                // Coalesce to preserve ordering; the chain-flush on
-                // completion will send it after the in-flight data.
-                uploadCoalesce.buffer.append(bytePtr, count: count)
-                uploadCoalesce.recvLen += count
+                chunk = uploadPipeline.buffer.subdata(in: uploadPipeline.bufferOffset..<uploadPipeline.buffer.count)
             }
-            return
+            uploadPipeline.buffer = Data()
+            uploadPipeline.bufferOffset = 0
+            return chunk
         }
 
-        // Always coalesce — even while a flush is in-flight. This matches
-        // Xray-core's buffered-pipe design where data accumulates during the
-        // scMinPostsIntervalMs sleep and is sent as one large POST.
-        // Without this, each individual TCP segment (~1-2 KB) would become its
-        // own POST request during the delay, causing massive HTTP overhead.
-        uploadCoalesce.buffer.append(bytePtr, count: count)
-        uploadCoalesce.recvLen += count
-
-        // Schedule flush only when no send is in-flight (data accumulated
-        // during an in-flight send will be flushed when it completes).
-        if !uploadCoalesce.isFlushInFlight && !uploadCoalesce.isScheduled {
-            uploadCoalesce.isScheduled = true
-            lwipQueue.async { [weak self] in
-                self?.flushUploadBuffer()
-            }
+        let start = uploadPipeline.bufferOffset
+        let end = start + take
+        let chunk = uploadPipeline.buffer.subdata(in: start..<end)
+        uploadPipeline.bufferOffset = end
+        if uploadPipeline.bufferOffset > uploadPipeline.buffer.count - uploadPipeline.bufferOffset {
+            uploadPipeline.buffer.removeSubrange(0..<uploadPipeline.bufferOffset)
+            uploadPipeline.bufferOffset = 0
         }
-    }
-
-    /// Sends a single segment directly (no coalescing), with tcp_recved in the completion.
-    private func sendSegmentDirect(_ data: Data) {
-        let recvLen = UInt16(data.count)
-        let completion: (Error?) -> Void = { [weak self] error in
-            guard let self else { return }
-            self.lwipQueue.async {
-                guard !self.closed else { return }
-                if let error {
-                    self.logTransportFailure("Send", error: error)
-                    self.abort()
-                    return
-                }
-                lwip_bridge_tcp_recved(self.pcb, recvLen)
-            }
-        }
-        proxyConnection?.send(data: data, completion: completion)
-    }
-
-    /// Flushes the coalesced upload buffer — encrypts and sends all accumulated
-    /// segments as a single chunk, then acknowledges to lwIP on completion.
-    private func flushUploadBuffer() {
-        uploadCoalesce.isScheduled = false
-        guard !closed else {
-            uploadCoalesce.buffer.removeAll()
-            uploadCoalesce.recvLen = 0
-            return
-        }
-
-        let data = uploadCoalesce.buffer
-        let recvLen = uploadCoalesce.recvLen
-        uploadCoalesce.buffer = Data()
-        uploadCoalesce.recvLen = 0
-        if recvLen > 0 {
-            uploadCoalesce.buffer.reserveCapacity(recvLen)
-        }
-
-        guard !data.isEmpty else { return }
-
-        uploadCoalesce.isFlushInFlight = true
-
-        let completion: (Error?) -> Void = { [weak self] error in
-            guard let self else { return }
-            self.lwipQueue.async {
-                self.uploadCoalesce.isFlushInFlight = false
-                guard !self.closed else { return }
-                if let error {
-                    self.logTransportFailure("Send", error: error)
-                    self.abort()
-                    return
-                }
-                // Acknowledge all coalesced bytes to lwIP (uint16_t chunks)
-                var remaining = recvLen
-                while remaining > 0 {
-                    let chunk = UInt16(min(remaining, Int(UInt16.max)))
-                    remaining -= Int(chunk)
-                    lwip_bridge_tcp_recved(self.pcb, chunk)
-                }
-                // Immediately flush data that accumulated during the in-flight send.
-                // This is the key to matching Xray-core's batched upload behavior:
-                // data coalesces while the previous POST + delay runs, then flushes
-                // as one large POST instead of many small per-segment POSTs.
-                if self.uploadCoalesce.recvLen > 0 {
-                    self.flushUploadBuffer()
-                }
-            }
-        }
-
-        proxyConnection?.send(data: data, completion: completion)
+        return chunk
     }
 
     /// Called when the local app acknowledges receipt of data sent via lwIP.
@@ -509,49 +543,13 @@ class LWIPTCPConnection {
                 }
 
                 if let initialData {
-                    let totalReceiveLength = initialData.count
-                    connection.send(data: initialData) { [weak self] error in
-                        guard let self else { return }
-                        if let error {
-                            self.logTransportFailure("Send", error: error)
-                            self.lwipQueue.async { self.abort() }
-                        } else {
-                            self.lwipQueue.async {
-                                guard !self.closed else { return }
-                                var remaining = totalReceiveLength
-                                while remaining > 0 {
-                                    let chunk = UInt16(min(remaining, Int(UInt16.max)))
-                                    remaining -= Int(chunk)
-                                    lwip_bridge_tcp_recved(self.pcb, chunk)
-                                }
-                            }
-                        }
-                    }
+                    self.uploadPipeline.buffer.append(initialData)
                 }
-
                 if !self.pendingData.isEmpty {
-                    let dataToSend = self.pendingData
+                    self.uploadPipeline.buffer.append(self.pendingData)
                     self.pendingData.removeAll(keepingCapacity: true)
-                    let totalReceiveLength = dataToSend.count
-                    connection.send(data: dataToSend) { [weak self] error in
-                        guard let self else { return }
-                        if let error {
-                            self.logTransportFailure("Send", error: error)
-                            self.lwipQueue.async { self.abort() }
-                        } else {
-                            self.lwipQueue.async {
-                                guard !self.closed else { return }
-                                var remaining = totalReceiveLength
-                                while remaining > 0 {
-                                    let chunk = UInt16(min(remaining, Int(UInt16.max)))
-                                    remaining -= Int(chunk)
-                                    lwip_bridge_tcp_recved(self.pcb, chunk)
-                                }
-                            }
-                        }
-                    }
                 }
-
+                self.pumpUploadSends()
                 self.tryArmReceive()
             }
         }
@@ -601,29 +599,16 @@ class LWIPTCPConnection {
                         self.close()
                     }
 
-                    if !self.pendingData.isEmpty {
-                        let dataToSend = self.pendingData
-                        self.pendingData.removeAll(keepingCapacity: true)
-                        let totalReceiveLength = dataToSend.count
-                        proxyConnection.send(data: dataToSend) { [weak self] error in
-                            guard let self else { return }
-                            if let error {
-                                self.logTransportFailure("Send", error: error)
-                                self.lwipQueue.async { self.abort() }
-                            } else {
-                                self.lwipQueue.async {
-                                    guard !self.closed else { return }
-                                    var remaining = totalReceiveLength
-                                    while remaining > 0 {
-                                        let chunk = UInt16(min(remaining, Int(UInt16.max)))
-                                        remaining -= Int(chunk)
-                                        lwip_bridge_tcp_recved(self.pcb, chunk)
-                                    }
-                                }
-                            }
-                        }
+                    if let initialData {
+                        // ProxyClient reports success only after VLESS
+                        // handshake-carried initialData has been accepted.
+                        self.acknowledgeReceivedBytes(initialData.count)
                     }
-
+                    if !self.pendingData.isEmpty {
+                        self.uploadPipeline.buffer.append(self.pendingData)
+                        self.pendingData.removeAll(keepingCapacity: true)
+                    }
+                    self.pumpUploadSends()
                     self.tryArmReceive()
 
                 case .failure(let error):
@@ -860,7 +845,7 @@ class LWIPTCPConnection {
         pendingData = Data()
         pendingWrite = Data()
         pendingWriteOffset = 0
-        uploadCoalesce = UploadCoalesceState()
+        uploadPipeline = UploadPipeline()
         connection?.cancel()
         client?.cancel()
     }
