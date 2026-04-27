@@ -29,22 +29,35 @@ extension LWIPStack {
         flushOutputPackets()
     }
 
-    /// Flushes accumulated output packets to the TUN device in a single writePackets call.
-    /// Called via deferred lwipQueue.async after the current batch of lwip_bridge_input
-    /// calls completes. Reduces kernel crossings from N to 1 per processing cycle.
+    /// Flushes accumulated output packets to the TUN device, capping each
+    /// writePackets call to ``TunnelConstants/tunnelMaxPacketsPerWrite``.
+    /// Called via deferred lwipQueue.async after the current batch of
+    /// lwip_bridge_input calls completes.
     ///
-    /// Only one writePackets call is in flight at a time. While a write is executing,
-    /// new packets accumulate and are flushed when the previous write completes.
-    /// This prevents overwhelming the kernel's utun buffer (ENOSPC).
+    /// Only one writePackets call is in flight at a time. While a write is
+    /// executing, new packets accumulate and the next batch is flushed when
+    /// the previous write completes. The per-flush cap plus the queue-hop
+    /// between successive batches gives utun room to drain and prevents
+    /// ENOSPC drops under heavy downlink load.
     func flushOutputPackets() {
         outputFlushScheduled = false
         guard !outputPackets.isEmpty, !outputWriteInFlight else { return }
+        let maxPacketCount = TunnelConstants.tunnelMaxPacketsPerWrite
         let packets: [Data]
         let protocols: [NSNumber]
-        packets = outputPackets
-        protocols = outputProtocols
-        outputPackets.removeAll(keepingCapacity: true)
-        outputProtocols.removeAll(keepingCapacity: true)
+        if outputPackets.count <= maxPacketCount {
+            packets = outputPackets
+            protocols = outputProtocols
+            outputPackets = []
+            outputProtocols = []
+            outputPackets.reserveCapacity(maxPacketCount)
+            outputProtocols.reserveCapacity(maxPacketCount)
+        } else {
+            packets = Array(outputPackets.prefix(maxPacketCount))
+            protocols = Array(outputProtocols.prefix(maxPacketCount))
+            outputPackets.removeFirst(maxPacketCount)
+            outputProtocols.removeFirst(maxPacketCount)
+        }
         outputWriteInFlight = true
         outputQueue.async { [weak self] in
             self?.packetFlow?.writePackets(packets, withProtocols: protocols)
