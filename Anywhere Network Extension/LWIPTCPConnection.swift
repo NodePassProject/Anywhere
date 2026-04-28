@@ -561,8 +561,9 @@ class LWIPTCPConnection {
         guard !proxyConnecting && proxyConnection == nil && !closed else { return }
         proxyConnecting = true
 
-        // If the protocol can embed the caller's first bytes in its handshake
-        // (VLESS + its transports), extract pendingData into initialData here.
+        // If the protocol can accept the caller's first bytes before connect
+        // completion (VLESS handshake payload, Sudoku early send), extract
+        // pendingData into initialData here.
         // Otherwise leave pendingData intact so the post-connect send path
         // below forwards it — ``ProxyClient.connectWithCommand`` drops the
         // `initialData` argument for those protocols.

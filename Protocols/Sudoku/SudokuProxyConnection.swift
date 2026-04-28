@@ -13,6 +13,84 @@ import CryptoKit
 import Security
 
 private let sudokuLogger = AnywhereLogger(category: "Sudoku")
+private let sudokuObfsReadChunkSize = 128 * 1024
+private let sudokuTCPReceiveChunkSize = 64 * 1024
+private let sudokuHTTPMaskMaxQueueBytes = 4 * 1024 * 1024
+private let sudokuHTTPMaskMaxPollLineBytes = 256 * 1024
+private let sudokuMuxMaxQueueBytes = 4 * 1024 * 1024
+
+private enum SudokuHTTPMaskAuth {
+    static func token(key: String, mode: String, method: String, path: String) -> String {
+        var keyMaterial = Data("sudoku-httpmask-auth-v1:".utf8)
+        keyMaterial.append(Data(key.utf8))
+        let authKey = SudokuNativeCrypto.sha256(keyMaterial)
+        var ts = UInt64(Date().timeIntervalSince1970).bigEndian
+        let tsData = Data(bytes: &ts, count: 8)
+        let zero = Data([0])
+        let mac = SudokuNativeCrypto.hmacSHA256(
+            key: authKey,
+            parts: [Data(mode.utf8), zero, Data(method.utf8), zero, Data(path.utf8), zero, tsData]
+        )
+        var payload = tsData
+        payload.append(mac.prefix(16))
+        return payload.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+private struct SudokuDataQueue {
+    private var storage = Data()
+    private var offset = 0
+
+    var count: Int { storage.count - offset }
+    var isEmpty: Bool { count == 0 }
+
+    mutating func append(_ data: Data) {
+        guard !data.isEmpty else { return }
+        compactBeforeAppend(additionalCount: data.count)
+        storage.append(data)
+    }
+
+    mutating func read(max: Int) -> Data {
+        let n = min(max, count)
+        guard n > 0 else { return Data() }
+        let start = offset
+        offset += n
+        let out = storage.subdata(in: start..<(start + n))
+        compactAfterRead()
+        return out
+    }
+
+    mutating func removeAll(keepingCapacity: Bool = false) {
+        storage.removeAll(keepingCapacity: keepingCapacity)
+        offset = 0
+    }
+
+    private mutating func compactBeforeAppend(additionalCount: Int) {
+        if offset == 0 { return }
+        if offset == storage.count {
+            storage.removeAll(keepingCapacity: true)
+            offset = 0
+            return
+        }
+        if offset > 256 * 1024 || offset + additionalCount > storage.count {
+            storage.removeSubrange(0..<offset)
+            offset = 0
+        }
+    }
+
+    private mutating func compactAfterRead() {
+        if offset == storage.count {
+            storage.removeAll(keepingCapacity: true)
+            offset = 0
+        } else if offset > 512 * 1024 && offset * 2 > storage.count {
+            storage.removeSubrange(0..<offset)
+            offset = 0
+        }
+    }
+}
 
 enum SudokuNativeError: Error, LocalizedError {
     case invalidConfiguration(String)
@@ -246,9 +324,10 @@ final class SudokuTables {
 
 final class BlockingProxyStream {
     private let connection: ProxyConnection
+    private let stateLock = UnfairLock()
     private let readLock = UnfairLock()
     private let writeLock = UnfairLock()
-    private var pending = Data()
+    private var pending = SudokuDataQueue()
     private var closed = false
 
     init(connection: ProxyConnection) { self.connection = connection }
@@ -256,7 +335,7 @@ final class BlockingProxyStream {
     func sendAll(_ data: Data) throws {
         if data.isEmpty { return }
         try writeLock.withLock {
-            if closed { throw SudokuNativeError.closed }
+            if isClosed { throw SudokuNativeError.closed }
             let sema = DispatchSemaphore(value: 0)
             var sentError: Error?
             connection.sendRaw(data: data) { error in
@@ -271,12 +350,9 @@ final class BlockingProxyStream {
     func readSome(max: Int) throws -> Data {
         try readLock.withLock {
             if !pending.isEmpty {
-                let n = min(max, pending.count)
-                let out = pending.prefix(n)
-                pending.removeFirst(n)
-                return Data(out)
+                return pending.read(max: max)
             }
-            if closed { throw SudokuNativeError.closed }
+            if isClosed { throw SudokuNativeError.closed }
             let sema = DispatchSemaphore(value: 0)
             var resultData: Data?
             var resultError: Error?
@@ -288,7 +364,7 @@ final class BlockingProxyStream {
             sema.wait()
             if let resultError { throw resultError }
             guard let data = resultData, !data.isEmpty else {
-                closed = true
+                markClosed()
                 throw SudokuNativeError.closed
             }
             if data.count > max {
@@ -308,8 +384,16 @@ final class BlockingProxyStream {
     }
 
     func cancel() {
-        closed = true
+        markClosed()
         connection.cancel()
+    }
+
+    private var isClosed: Bool {
+        stateLock.withLock { closed }
+    }
+
+    private func markClosed() {
+        stateLock.withLock { closed = true }
     }
 }
 
@@ -319,6 +403,8 @@ final class SudokuConnectionFactory {
     private let stateLock = UnfairLock()
     private var initialTunnel: ProxyConnection?
     private var retainedClients: [ProxyClient] = []
+    private var retainedTLSClients: [TLSClient] = []
+    private var retainedRawSockets: [RawTCPSocket] = []
     private var connections: [ProxyConnection] = []
     private var closed = false
 
@@ -340,7 +426,10 @@ final class SudokuConnectionFactory {
             throw SudokuNativeError.connectionFailed("timeout opening transport")
         }
         let connection = try result.get()
-        stateLock.withLock { connections.append(connection) }
+        guard retainConnection(connection) else {
+            connection.cancel()
+            throw SudokuNativeError.closed
+        }
         return BlockingProxyStream(connection: connection)
     }
 
@@ -364,6 +453,10 @@ final class SudokuConnectionFactory {
             throw SudokuNativeError.connectionFailed("timeout opening WebSocket transport")
         }
         let base = try result.get()
+        guard retainConnection(base) else {
+            base.cancel()
+            throw SudokuNativeError.closed
+        }
         let ws = WebSocketConnection(
             tunnel: base,
             configuration: WebSocketConfiguration(
@@ -380,21 +473,28 @@ final class SudokuConnectionFactory {
             upgrade.signal()
         }
         if upgrade.wait(timeout: .now() + 30) == .timedOut {
+            releaseConnection(base)
             base.cancel()
             throw SudokuNativeError.connectionFailed("timeout upgrading WebSocket transport")
         }
         if let upgradeError {
+            releaseConnection(base)
             base.cancel()
             throw upgradeError
         }
         let connection = WebSocketProxyConnection(wsConnection: ws)
-        stateLock.withLock { connections.append(connection) }
+        guard replaceConnection(base, with: connection) else {
+            connection.cancel()
+            throw SudokuNativeError.closed
+        }
         return BlockingProxyStream(connection: connection)
     }
 
     func closeAll() {
         let toClose: [ProxyConnection]
         let clients: [ProxyClient]
+        let tlsClients: [TLSClient]
+        let rawSockets: [RawTCPSocket]
         stateLock.lock()
         if closed {
             stateLock.unlock()
@@ -403,12 +503,18 @@ final class SudokuConnectionFactory {
         closed = true
         toClose = connections + (initialTunnel.map { [$0] } ?? [])
         clients = retainedClients
+        tlsClients = retainedTLSClients
+        rawSockets = retainedRawSockets
         connections.removeAll()
         retainedClients.removeAll()
+        retainedTLSClients.removeAll()
+        retainedRawSockets.removeAll()
         initialTunnel = nil
         stateLock.unlock()
         for connection in toClose { connection.cancel() }
         for client in clients { client.cancel() }
+        for client in tlsClients { client.cancel() }
+        for socket in rawSockets { socket.forceCancel() }
     }
 
     private func openProxyConnection(
@@ -433,8 +539,13 @@ final class SudokuConnectionFactory {
         }
 
         if useTLS {
-            let tls = TLSClient(configuration: TLSConfiguration(serverName: serverName ?? host))
-            tls.connect(host: directDialHost, port: configuration.serverPort) { result in
+            let tls = TLSClient(configuration: TLSConfiguration(serverName: serverName ?? host, alpn: ["http/1.1"]))
+            guard retainTLSClient(tls) else {
+                completion(.failure(SudokuNativeError.closed))
+                return
+            }
+            tls.connect(host: directDialHost, port: port) { result in
+                self.releaseTLSClient(tls)
                 switch result {
                 case .success(let conn): completion(.success(TLSProxyConnection(tlsConnection: conn)))
                 case .failure(let error): completion(.failure(error))
@@ -444,7 +555,12 @@ final class SudokuConnectionFactory {
         }
 
         let socket = RawTCPSocket()
-        socket.connect(host: directDialHost, port: configuration.serverPort) { error in
+        guard retainRawSocket(socket) else {
+            completion(.failure(SudokuNativeError.closed))
+            return
+        }
+        socket.connect(host: directDialHost, port: port) { error in
+            self.releaseRawSocket(socket)
             if let error { completion(.failure(error)) }
             else { completion(.success(DirectProxyConnection(connection: socket))) }
         }
@@ -470,7 +586,11 @@ final class SudokuConnectionFactory {
         }
 
         let client = ProxyClient(configuration: chainConfig, tunnel: currentTunnel)
-        stateLock.withLock { retainedClients.append(client) }
+        guard retainClient(client) else {
+            currentTunnel?.cancel()
+            completion(.failure(SudokuNativeError.closed))
+            return
+        }
         client.connect(to: nextHost, port: nextPort) { [weak self] result in
             switch result {
             case .success(let connection):
@@ -482,6 +602,65 @@ final class SudokuConnectionFactory {
             case .failure(let error):
                 completion(.failure(error))
             }
+        }
+    }
+
+    private func retainClient(_ client: ProxyClient) -> Bool {
+        stateLock.withLock {
+            guard !closed else { return false }
+            retainedClients.append(client)
+            return true
+        }
+    }
+
+    private func retainTLSClient(_ client: TLSClient) -> Bool {
+        stateLock.withLock {
+            guard !closed else { return false }
+            retainedTLSClients.append(client)
+            return true
+        }
+    }
+
+    private func releaseTLSClient(_ client: TLSClient) {
+        stateLock.withLock {
+            retainedTLSClients.removeAll { $0 === client }
+        }
+    }
+
+    private func retainRawSocket(_ socket: RawTCPSocket) -> Bool {
+        stateLock.withLock {
+            guard !closed else { return false }
+            retainedRawSockets.append(socket)
+            return true
+        }
+    }
+
+    private func releaseRawSocket(_ socket: RawTCPSocket) {
+        stateLock.withLock {
+            retainedRawSockets.removeAll { $0 === socket }
+        }
+    }
+
+    private func retainConnection(_ connection: ProxyConnection) -> Bool {
+        stateLock.withLock {
+            guard !closed else { return false }
+            connections.append(connection)
+            return true
+        }
+    }
+
+    private func replaceConnection(_ old: ProxyConnection, with new: ProxyConnection) -> Bool {
+        stateLock.withLock {
+            connections.removeAll { $0 === old }
+            guard !closed else { return false }
+            connections.append(new)
+            return true
+        }
+    }
+
+    private func releaseConnection(_ connection: ProxyConnection) {
+        stateLock.withLock {
+            connections.removeAll { $0 === connection }
         }
     }
 }
@@ -567,19 +746,22 @@ final class SudokuHTTPMaskTransport {
     private let factory: SudokuConnectionFactory
     private let mode: SudokuHTTPMaskMode
     private let condition = NSCondition()
-    private var rxQueue = Data()
-    private var txQueue = Data()
+    private var rxQueue = SudokuDataQueue()
+    private var txQueue = SudokuDataQueue()
     private var closed = false
     private var fatal = false
     private var token = ""
     private var pullPath = ""
     private var pushPath = ""
     private var closePath = ""
+    private let earlyRequestPayload: Data?
+    private(set) var earlyResponsePayload = Data()
 
-    init(config: SudokuNativeConfig, factory: SudokuConnectionFactory, mode: SudokuHTTPMaskMode) throws {
+    init(config: SudokuNativeConfig, factory: SudokuConnectionFactory, mode: SudokuHTTPMaskMode, earlyRequestPayload: Data? = nil) throws {
         self.config = config
         self.factory = factory
         self.mode = mode
+        self.earlyRequestPayload = earlyRequestPayload?.isEmpty == false ? earlyRequestPayload : nil
         try authorize()
         DispatchQueue.global(qos: .userInitiated).async { self.pullLoop() }
         DispatchQueue.global(qos: .userInitiated).async { self.pushLoop() }
@@ -588,6 +770,11 @@ final class SudokuHTTPMaskTransport {
     func send(_ data: Data) throws {
         condition.lock()
         defer { condition.unlock() }
+        if closed { throw SudokuNativeError.closed }
+        let queueLimit = max(sudokuHTTPMaskMaxQueueBytes, data.count)
+        while txQueue.count + data.count > queueLimit && !closed {
+            condition.wait()
+        }
         if closed { throw SudokuNativeError.closed }
         txQueue.append(data)
         condition.signal()
@@ -598,9 +785,9 @@ final class SudokuHTTPMaskTransport {
         defer { condition.unlock() }
         while rxQueue.isEmpty && !closed { condition.wait() }
         if rxQueue.isEmpty && closed { throw fatal ? SudokuNativeError.connectionFailed("HTTPMask closed") : SudokuNativeError.closed }
-        let n = min(max, rxQueue.count)
-        let out = Data(rxQueue.prefix(n))
-        rxQueue.removeFirst(n)
+        let out = rxQueue.read(max: max)
+        if rxQueue.isEmpty { rxQueue.removeAll(keepingCapacity: false) }
+        condition.signal()
         return out
     }
 
@@ -623,20 +810,17 @@ final class SudokuHTTPMaskTransport {
     }
 
     private func authToken(mode: String, method: String, path: String) -> String {
-        var keyMaterial = Data("sudoku-httpmask-auth-v1:".utf8)
-        keyMaterial.append(Data(config.key.utf8))
-        let key = SudokuNativeCrypto.sha256(keyMaterial)
-        var ts = UInt64(Date().timeIntervalSince1970).bigEndian
-        let tsData = Data(bytes: &ts, count: 8)
-        let zero = Data([0])
-        let mac = SudokuNativeCrypto.hmacSHA256(key: key, parts: [Data(mode.utf8), zero, Data(method.utf8), zero, Data(path.utf8), zero, tsData])
-        var payload = tsData
-        payload.append(mac.prefix(16))
-        return payload.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        SudokuHTTPMaskAuth.token(key: config.key, mode: mode, method: method, path: path)
     }
 
     private func appendAuth(_ path: String, token: String) -> String {
         path + (path.contains("?") ? "&" : "?") + "auth=\(token)"
+    }
+
+    private func appendEarlyData(_ path: String, payload: Data?) -> String {
+        guard let payload, !payload.isEmpty else { return path }
+        let encoded = payload.base64URLEncodedString()
+        return path + (path.contains("?") ? "&" : "?") + "ed=\(encoded)"
     }
 
     private func request(method: String, requestPath: String, authPath: String, contentType: String? = nil, body: Data) throws -> (stream: BlockingProxyStream, body: SudokuHTTPBodyReader) {
@@ -644,7 +828,7 @@ final class SudokuHTTPMaskTransport {
         let modeName = mode == .poll ? "poll" : "stream"
         let auth = authToken(mode: modeName, method: method, path: authPath)
         let path = appendAuth(requestPath, token: auth)
-        var req = "\(method) \(path) HTTP/1.1\r\nHost: \(hostHeader)\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nX-Sudoku-Tunnel: \(modeName)\r\nAuthorization: Bearer \(auth)\r\n"
+        var req = "\(method) \(path) HTTP/1.1\r\nHost: \(hostHeader)\r\nUser-Agent: \(ProxyUserAgent.chrome)\r\nAccept: */*\r\nCache-Control: no-cache\r\nPragma: no-cache\r\nConnection: close\r\nX-Sudoku-Tunnel: \(modeName)\r\nAuthorization: Bearer \(auth)\r\n"
         if let contentType { req += "Content-Type: \(contentType)\r\n" }
         req += "Content-Length: \(body.count)\r\n\r\n"
         var data = Data(req.utf8)
@@ -681,7 +865,7 @@ final class SudokuHTTPMaskTransport {
 
     private func authorize() throws {
         let sessionPath = applyPathRoot("/session")
-        let opened = try request(method: "GET", requestPath: sessionPath, authPath: "/session", body: Data())
+        let opened = try request(method: "GET", requestPath: appendEarlyData(sessionPath, payload: earlyRequestPayload), authPath: "/session", body: Data())
         guard opened.body.status == 200 else { throw SudokuNativeError.connectionFailed("HTTPMask authorize status \(opened.body.status)") }
         let body = try opened.body.readAll(limit: 4096)
         guard let text = String(data: body, encoding: .utf8), let range = text.range(of: "token=") else {
@@ -690,6 +874,15 @@ final class SudokuHTTPMaskTransport {
         let tail = text[range.upperBound...]
         token = String(tail.prefix { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" })
         guard !token.isEmpty else { throw SudokuNativeError.connectionFailed("HTTPMask empty token") }
+        for line in text.split(whereSeparator: \.isNewline) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("ed=") else { continue }
+            let encoded = String(trimmed.dropFirst(3))
+            if let decoded = Data(base64URLEncoded: encoded) {
+                earlyResponsePayload = decoded
+            }
+            break
+        }
         let streamPath = applyPathRoot("/stream")
         let uploadPath = applyPathRoot("/api/v1/upload")
         pullPath = "\(streamPath)?token=\(token)"
@@ -727,6 +920,9 @@ final class SudokuHTTPMaskTransport {
                                 }
                             } else {
                                 pollLine.append(byte)
+                                if pollLine.count > sudokuHTTPMaskMaxPollLineBytes {
+                                    throw SudokuNativeError.protocolError("HTTPMask poll line too long")
+                                }
                             }
                         }
                     } else {
@@ -743,6 +939,10 @@ final class SudokuHTTPMaskTransport {
 
     private func enqueueRX(_ data: Data) {
         condition.lock()
+        let queueLimit = max(sudokuHTTPMaskMaxQueueBytes, data.count)
+        while rxQueue.count + data.count > queueLimit && !closed {
+            condition.wait()
+        }
         if !closed {
             rxQueue.append(data)
             condition.signal()
@@ -761,8 +961,9 @@ final class SudokuHTTPMaskTransport {
             }
             if txQueue.isEmpty && closed { condition.unlock(); return }
             let n = min(cap, txQueue.count)
-            batch = Data(txQueue.prefix(n))
-            txQueue.removeFirst(n)
+            batch = txQueue.read(max: n)
+            if txQueue.isEmpty { txQueue.removeAll(keepingCapacity: false) }
+            condition.signal()
             condition.unlock()
 
             do {
@@ -801,7 +1002,7 @@ final class SudokuObfsTransport {
     private var pureDecoder = SudokuPureDecoder()
     private var packedDecoder: SudokuPackedDecoder
     private let pureDownlink: Bool
-    private var plainBuffer = Data()
+    private var plainBuffer = SudokuDataQueue()
     private let readLock = UnfairLock()
     private let writeLock = UnfairLock()
 
@@ -819,27 +1020,18 @@ final class SudokuObfsTransport {
 
     func send(_ data: Data) throws {
         try writeLock.withLock {
-            var offset = 0
-            while offset < data.count {
-                let count = min(8192, data.count - offset)
-                let chunk = data.subdata(in: offset..<(offset + count))
-                let encoded = tables.withUplink { $0.encode(chunk, rng: &rng, paddingThreshold: threshold) }
-                try sendWire(encoded)
-                offset += count
-            }
+            let encoded = tables.withUplink { $0.encode(data, rng: &rng, paddingThreshold: threshold) }
+            try sendWire(encoded)
         }
     }
 
     func receive(max: Int) throws -> Data {
         try readLock.withLock {
             if !plainBuffer.isEmpty {
-                let n = min(max, plainBuffer.count)
-                let out = Data(plainBuffer.prefix(n))
-                plainBuffer.removeFirst(n)
-                return out
+                return plainBuffer.read(max: max)
             }
             while true {
-                let wireData = try receiveWire(max: 8192)
+                let wireData = try receiveWire(max: sudokuObfsReadChunkSize)
                 let out = try tables.withDownlink { table -> Data in
                     if pureDownlink {
                         return try pureDecoder.decode(wireData, table: table, limit: 65536)
@@ -896,7 +1088,7 @@ final class SudokuRecordStream {
     private var recvEpoch: UInt32 = 0
     private var recvSeq: UInt64 = 0
     private var recvInitialized = false
-    private var readBuffer = Data()
+    private var readBuffer = SudokuDataQueue()
     private let readLock = UnfairLock()
     private let writeLock = UnfairLock()
 
@@ -960,10 +1152,7 @@ final class SudokuRecordStream {
     func receive(max: Int) throws -> Data {
         try readLock.withLock {
             if !readBuffer.isEmpty {
-                let n = min(max, readBuffer.count)
-                let out = Data(readBuffer.prefix(n))
-                readBuffer.removeFirst(n)
-                return out
+                return readBuffer.read(max: max)
             }
             if method == .none { return try transport.receive(max: max) }
             while true {
@@ -1014,6 +1203,11 @@ final class SudokuRecordStream {
     }
 }
 
+private struct SudokuKIPClientState {
+    let privateKey: Curve25519.KeyAgreement.PrivateKey
+    let nonce: Data
+}
+
 final class SudokuNativeClient {
     private let config: SudokuNativeConfig
     private let factory: SudokuConnectionFactory
@@ -1050,14 +1244,29 @@ final class SudokuNativeClient {
         if !config.httpMask.disable && config.httpMask.mode == .ws {
             wire = .stream(try openHTTPMaskWebSocket())
         } else if !config.httpMask.disable && [SudokuHTTPMaskMode.stream, .poll, .auto].contains(config.httpMask.mode) {
+            let early = try buildEarlyHandshakePayload()
+            let mask: SudokuHTTPMaskTransport
             if config.httpMask.mode == .poll {
-                wire = .httpMask(try SudokuHTTPMaskTransport(config: config, factory: factory, mode: .poll))
+                mask = try SudokuHTTPMaskTransport(config: config, factory: factory, mode: .poll, earlyRequestPayload: early.request)
             } else if config.httpMask.mode == .stream {
-                wire = .httpMask(try SudokuHTTPMaskTransport(config: config, factory: factory, mode: .stream))
+                mask = try SudokuHTTPMaskTransport(config: config, factory: factory, mode: .stream, earlyRequestPayload: early.request)
             } else {
-                do { wire = .httpMask(try SudokuHTTPMaskTransport(config: config, factory: factory, mode: .stream)) }
-                catch { wire = .httpMask(try SudokuHTTPMaskTransport(config: config, factory: factory, mode: .poll)) }
+                do {
+                    mask = try SudokuHTTPMaskTransport(config: config, factory: factory, mode: .stream, earlyRequestPayload: early.request)
+                } catch {
+                    mask = try SudokuHTTPMaskTransport(config: config, factory: factory, mode: .poll, earlyRequestPayload: early.request)
+                }
             }
+            wire = .httpMask(mask)
+            let transport = try SudokuObfsTransport(wire: wire, tables: tables, config: config)
+            if !mask.earlyResponsePayload.isEmpty {
+                let session = try completeEarlyHandshake(state: early.state, response: mask.earlyResponsePayload)
+                return try SudokuRecordStream(transport: transport, method: config.aeadMethod, baseSend: session.c2s, baseRecv: session.s2c)
+            }
+            let bases = SudokuNativeCrypto.pskBases(config.key)
+            let record = try SudokuRecordStream(transport: transport, method: config.aeadMethod, baseSend: bases.c2s, baseRecv: bases.s2c)
+            try performKIP(record: record)
+            return record
         } else {
             let stream = try factory.open(host: config.serverHost, port: config.serverPort, useTLS: false, serverName: nil)
             if !config.httpMask.disable && config.httpMask.mode == .legacy {
@@ -1074,6 +1283,84 @@ final class SudokuNativeClient {
         let record = try SudokuRecordStream(transport: transport, method: config.aeadMethod, baseSend: bases.c2s, baseRecv: bases.s2c)
         try performKIP(record: record)
         return record
+    }
+
+    private func buildEarlyHandshakePayload() throws -> (request: Data, state: SudokuKIPClientState) {
+        let (state, payload) = try makeKIPClientHelloPayload()
+        let kipFrame = encodeKIP(type: 0x01, payload: payload)
+        let bases = SudokuNativeCrypto.pskBases(config.key)
+        let recordFrame = try encodeEarlyRecord(plaintext: kipFrame, base: bases.c2s)
+        return (try encodeEarlyObfs(recordFrame), state)
+    }
+
+    private func completeEarlyHandshake(state: SudokuKIPClientState, response: Data) throws -> (c2s: Data, s2c: Data) {
+        let recordData = try decodeEarlyObfs(response)
+        let plain = try decodeEarlyRecord(recordData, base: SudokuNativeCrypto.pskBases(config.key).s2c)
+        let msg = try parseKIP(plain)
+        guard msg.type == 0x02 else { throw SudokuNativeError.protocolError("bad early KIP server hello") }
+        return try finishKIP(state: state, message: msg)
+    }
+
+    private func encodeEarlyObfs(_ data: Data) throws -> Data {
+        let seedBytes = [UInt8](try SudokuNativeCrypto.randomData(count: 8))
+        let seed = Int64(bitPattern: seedBytes.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) })
+        var rng = SudokuSplitMix64(seed: seed)
+        let threshold = rng.pickPaddingThreshold(min: config.paddingMin, max: config.paddingMax)
+        return tables.withUplink { $0.encode(data, rng: &rng, paddingThreshold: threshold) }
+    }
+
+    private func decodeEarlyObfs(_ data: Data) throws -> Data {
+        try tables.withDownlink { table in
+            if config.pureDownlink {
+                var decoder = SudokuPureDecoder()
+                return try decoder.decode(data, table: table, limit: 65536)
+            }
+            var decoder = SudokuPackedDecoder(table: table)
+            return try decoder.decode(data, table: table, limit: 65536)
+        }
+    }
+
+    private func encodeEarlyRecord(plaintext: Data, base: Data) throws -> Data {
+        guard config.aeadMethod != .none else { return plaintext }
+        var header = Data()
+        var epoch = try SudokuNativeCrypto.randomNonZeroUInt32().bigEndian
+        var seq = try SudokuNativeCrypto.randomNonZeroUInt64().bigEndian
+        header.append(Data(bytes: &epoch, count: 4))
+        header.append(Data(bytes: &seq, count: 8))
+        let epochValue = UInt32(bigEndian: epoch)
+        let key = SudokuNativeCrypto.recordEpochKey(base: base, method: config.aeadMethod, epoch: epochValue)
+        let cipher = try SudokuNativeCrypto.seal(method: config.aeadMethod, key: key, nonce: header, plaintext: plaintext, aad: header)
+        var bodyLen = UInt16(header.count + cipher.count).bigEndian
+        var out = Data(bytes: &bodyLen, count: 2)
+        out.append(header)
+        out.append(cipher)
+        return out
+    }
+
+    private func decodeEarlyRecord(_ data: Data, base: Data) throws -> Data {
+        guard config.aeadMethod != .none else { return data }
+        var offset = 0
+        var out = Data()
+        while offset + 2 <= data.count {
+            let bodyLen = Int(UInt16(data[offset]) << 8 | UInt16(data[offset + 1]))
+            guard bodyLen >= 12 && offset + 2 + bodyLen <= data.count else {
+                if out.isEmpty { throw SudokuNativeError.protocolError("bad early record length") }
+                break
+            }
+            let body = data.subdata(in: (offset + 2)..<(offset + 2 + bodyLen))
+            let header = body.prefix(12)
+            let ciphertext = body.dropFirst(12)
+            let epoch = header.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+            let key = SudokuNativeCrypto.recordEpochKey(base: base, method: config.aeadMethod, epoch: epoch)
+            out.append(try SudokuNativeCrypto.open(method: config.aeadMethod, key: key, nonce: Data(header), ciphertext: Data(ciphertext), aad: Data(header)))
+            offset += 2 + bodyLen
+            if out.count >= 6 {
+                let kipLen = Int(UInt16(out[4]) << 8 | UInt16(out[5]))
+                if out.count >= 6 + kipLen { break }
+            }
+        }
+        guard !out.isEmpty else { throw SudokuNativeError.protocolError("short early record") }
+        return out
     }
 
     private func openHTTPMaskWebSocket() throws -> BlockingProxyStream {
@@ -1110,19 +1397,18 @@ final class SudokuNativeClient {
     }
 
     private func httpMaskAuthToken(mode: String, method: String, path: String) -> String {
-        var keyMaterial = Data("sudoku-httpmask-auth-v1:".utf8)
-        keyMaterial.append(Data(config.key.utf8))
-        let key = SudokuNativeCrypto.sha256(keyMaterial)
-        var ts = UInt64(Date().timeIntervalSince1970).bigEndian
-        let tsData = Data(bytes: &ts, count: 8)
-        let zero = Data([0])
-        let mac = SudokuNativeCrypto.hmacSHA256(key: key, parts: [Data(mode.utf8), zero, Data(method.utf8), zero, Data(path.utf8), zero, tsData])
-        var payload = tsData
-        payload.append(mac.prefix(16))
-        return payload.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        SudokuHTTPMaskAuth.token(key: config.key, mode: mode, method: method, path: path)
     }
 
     private func performKIP(record: SudokuRecordStream) throws {
+        let (state, payload) = try makeKIPClientHelloPayload()
+        try writeKIP(record: record, type: 0x01, payload: payload)
+        let msg = try readKIP(record: record)
+        let session = try finishKIP(state: state, message: msg)
+        try record.rekey(send: session.c2s, recv: session.s2c)
+    }
+
+    private func makeKIPClientHelloPayload() throws -> (SudokuKIPClientState, Data) {
         let privateKey = Curve25519.KeyAgreement.PrivateKey()
         let clientPub = privateKey.publicKey.rawRepresentation
         let nonce = try SudokuNativeCrypto.randomData(count: 16)
@@ -1139,20 +1425,25 @@ final class SudokuNativeClient {
             var hint = tables.hint.bigEndian
             payload.append(Data(bytes: &hint, count: 4))
         }
-        try writeKIP(record: record, type: 0x01, payload: payload)
-        let msg = try readKIP(record: record)
+        return (SudokuKIPClientState(privateKey: privateKey, nonce: nonce), payload)
+    }
+
+    private func finishKIP(state: SudokuKIPClientState, message msg: (type: UInt8, payload: Data)) throws -> (c2s: Data, s2c: Data) {
         guard msg.type == 0x02, msg.payload.count == 52 else { throw SudokuNativeError.protocolError("bad KIP server hello") }
-        guard msg.payload.prefix(16) == nonce else { throw SudokuNativeError.protocolError("KIP nonce mismatch") }
+        guard msg.payload.prefix(16) == state.nonce else { throw SudokuNativeError.protocolError("KIP nonce mismatch") }
         let serverPub = msg.payload.subdata(in: 16..<48)
-        let shared = try privateKey.sharedSecretFromKeyAgreement(with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverPub)).withUnsafeBytes { Data($0) }
-        let session = SudokuNativeCrypto.sessionBases(psk: config.key, shared: shared, nonce: nonce)
-        try record.rekey(send: session.c2s, recv: session.s2c)
+        let shared = try state.privateKey.sharedSecretFromKeyAgreement(with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverPub)).withUnsafeBytes { Data($0) }
+        return SudokuNativeCrypto.sessionBases(psk: config.key, shared: shared, nonce: state.nonce)
     }
 
     private func writeKIP(record: SudokuRecordStream, type: UInt8, payload: Data) throws {
+        try record.send(encodeKIP(type: type, payload: payload))
+    }
+
+    private func encodeKIP(type: UInt8, payload: Data) -> Data {
         var frame = Data([0x6b, 0x69, 0x70, type, UInt8(payload.count >> 8), UInt8(payload.count & 0xff)])
         frame.append(payload)
-        try record.send(frame)
+        return frame
     }
 
     private func readKIP(record: SudokuRecordStream) throws -> (type: UInt8, payload: Data) {
@@ -1160,6 +1451,14 @@ final class SudokuNativeClient {
         guard header[0] == 0x6b, header[1] == 0x69, header[2] == 0x70 else { throw SudokuNativeError.protocolError("bad KIP magic") }
         let length = Int(UInt16(header[4]) << 8 | UInt16(header[5]))
         return (header[3], try record.readExact(length))
+    }
+
+    private func parseKIP(_ data: Data) throws -> (type: UInt8, payload: Data) {
+        guard data.count >= 6 else { throw SudokuNativeError.protocolError("short KIP frame") }
+        guard data[0] == 0x6b, data[1] == 0x69, data[2] == 0x70 else { throw SudokuNativeError.protocolError("bad KIP magic") }
+        let length = Int(UInt16(data[4]) << 8 | UInt16(data[5]))
+        guard data.count >= 6 + length else { throw SudokuNativeError.protocolError("truncated KIP frame \(data.count)/\(6 + length)") }
+        return (data[3], data.subdata(in: 6..<(6 + length)))
     }
 }
 
@@ -1268,16 +1567,17 @@ final class SudokuMuxStream {
     let id: UInt32
     private weak var client: SudokuMuxClient?
     private let condition = NSCondition()
-    private var queue = Data()
+    private var queue = SudokuDataQueue()
     private var closed = false
 
     init(client: SudokuMuxClient, id: UInt32) { self.client = client; self.id = id }
 
     func send(_ data: Data) throws {
+        guard let client else { throw SudokuNativeError.closed }
         var offset = 0
         while offset < data.count {
             let count = min(128 * 1024, data.count - offset)
-            try client?.sendFrame(type: 0x02, streamID: id, payload: data.subdata(in: offset..<(offset + count)))
+            try client.sendFrame(type: 0x02, streamID: id, payload: data.subdata(in: offset..<(offset + count)))
             offset += count
         }
     }
@@ -1286,14 +1586,21 @@ final class SudokuMuxStream {
         condition.lock(); defer { condition.unlock() }
         while queue.isEmpty && !closed { condition.wait() }
         if queue.isEmpty && closed { throw SudokuNativeError.closed }
-        let n = min(max, queue.count)
-        let out = Data(queue.prefix(n))
-        queue.removeFirst(n)
+        let out = queue.read(max: max)
+        condition.signal()
         return out
     }
 
     func enqueue(_ data: Data) {
-        condition.lock(); if !closed { queue.append(data); condition.signal() }; condition.unlock()
+        condition.lock()
+        while queue.count + data.count > sudokuMuxMaxQueueBytes && !closed {
+            condition.wait()
+        }
+        if !closed {
+            queue.append(data)
+            condition.signal()
+        }
+        condition.unlock()
     }
 
     func close() { client?.close(stream: self) }
@@ -1310,13 +1617,30 @@ final class SudokuTCPProxyConnection: ProxyConnection {
     override var isConnected: Bool { !lock.withLock { closed } }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        writeQueue.async { do { try self.stream.send(data); completion(nil) } catch { completion(error) } }
+        writeQueue.async {
+            do {
+                if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
+                try self.stream.send(data)
+                completion(nil)
+            } catch { completion(error) }
+        }
     }
 
-    override func sendRaw(data: Data) { sendRaw(data: data) { if let error = $0 { sudokuLogger.error("[Sudoku] send failed: \(error.localizedDescription)") } } }
+    override func sendRaw(data: Data) {
+        sendRaw(data: data) { error in
+            guard let error else { return }
+            if case SudokuNativeError.closed = error { return }
+            sudokuLogger.error("[Sudoku] send failed: \(error.localizedDescription)")
+        }
+    }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        readQueue.async { do { completion(try self.stream.receive(max: 16 * 1024), nil) } catch SudokuNativeError.closed { completion(nil, nil) } catch { completion(nil, error) } }
+        readQueue.async {
+            do {
+                if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
+                completion(try self.stream.receive(max: sudokuTCPReceiveChunkSize), nil)
+            } catch SudokuNativeError.closed { completion(nil, nil) } catch { completion(nil, error) }
+        }
     }
 
     override func cancel() { lock.withLock { closed = true }; stream.close() }
@@ -1333,13 +1657,30 @@ final class SudokuMuxTCPProxyConnection: ProxyConnection {
     override var isConnected: Bool { !lock.withLock { closed } }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        writeQueue.async { do { try self.stream.send(data); completion(nil) } catch { completion(error) } }
+        writeQueue.async {
+            do {
+                if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
+                try self.stream.send(data)
+                completion(nil)
+            } catch { completion(error) }
+        }
     }
 
-    override func sendRaw(data: Data) { sendRaw(data: data) { if let error = $0 { sudokuLogger.error("[Sudoku-Mux] send failed: \(error.localizedDescription)") } } }
+    override func sendRaw(data: Data) {
+        sendRaw(data: data) { error in
+            guard let error else { return }
+            if case SudokuNativeError.closed = error { return }
+            sudokuLogger.error("[Sudoku-Mux] send failed: \(error.localizedDescription)")
+        }
+    }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        readQueue.async { do { completion(try self.stream.receive(max: 16 * 1024), nil) } catch SudokuNativeError.closed { completion(nil, nil) } catch { completion(nil, error) } }
+        readQueue.async {
+            do {
+                if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
+                completion(try self.stream.receive(max: sudokuTCPReceiveChunkSize), nil)
+            } catch SudokuNativeError.closed { completion(nil, nil) } catch { completion(nil, error) }
+        }
     }
 
     override func cancel() { lock.withLock { closed = true }; stream.close(); client.close() }
@@ -1365,7 +1706,10 @@ final class SudokuUDPProxyConnection: ProxyConnection {
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         writeQueue.async {
             do {
+                if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
                 let addr = try SudokuAddress.encode(host: self.destinationHost, port: self.destinationPort)
+                guard addr.count <= UInt16.max else { throw SudokuNativeError.protocolError("UoT address too large") }
+                guard data.count <= UInt16.max else { throw SudokuNativeError.protocolError("UoT payload too large") }
                 var frame = Data([UInt8(addr.count >> 8), UInt8(addr.count & 0xff), UInt8(data.count >> 8), UInt8(data.count & 0xff)])
                 frame.append(addr)
                 frame.append(data)
@@ -1375,14 +1719,23 @@ final class SudokuUDPProxyConnection: ProxyConnection {
         }
     }
 
-    override func sendRaw(data: Data) { sendRaw(data: data) { if let error = $0 { sudokuLogger.error("[Sudoku-UoT] send failed: \(error.localizedDescription)") } } }
+    override func sendRaw(data: Data) {
+        sendRaw(data: data) { error in
+            guard let error else { return }
+            if case SudokuNativeError.closed = error { return }
+            sudokuLogger.error("[Sudoku-UoT] send failed: \(error.localizedDescription)")
+        }
+    }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         readQueue.async {
             do {
+                if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
                 let hdr = try self.stream.readExact(4)
                 let addrLen = Int(UInt16(hdr[0]) << 8 | UInt16(hdr[1]))
                 let payloadLen = Int(UInt16(hdr[2]) << 8 | UInt16(hdr[3]))
+                guard addrLen > 0 && addrLen <= 64 * 1024 else { throw SudokuNativeError.protocolError("bad UoT address length") }
+                guard payloadLen <= 64 * 1024 else { throw SudokuNativeError.protocolError("bad UoT payload length") }
                 _ = try self.stream.readExact(addrLen)
                 completion(try self.stream.readExact(payloadLen), nil)
             } catch SudokuNativeError.closed { completion(nil, nil) } catch { completion(nil, error) }
