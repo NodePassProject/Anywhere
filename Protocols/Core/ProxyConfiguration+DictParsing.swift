@@ -102,7 +102,9 @@ extension ProxyConfiguration {
                 rawValue: (configurationDict["sudokuHTTPMaskMode"] as? String)
                     ?? SudokuHTTPMaskMode.legacy.rawValue
             ) ?? .legacy
-            let legacyCustomTable = (configurationDict["sudokuCustomTable"] as? String)?
+            let legacyCustomTable = ((configurationDict["sudokuCustomTable"] as? String)
+                ?? (configurationDict["sudokuTable"] as? String)
+                ?? (configurationDict["table"] as? String))?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let customTables = SudokuConfiguration.normalizeCustomTables(
                 (configurationDict["sudokuCustomTables"] as? [String]) ?? [],
