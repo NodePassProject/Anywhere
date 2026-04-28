@@ -175,6 +175,7 @@ struct SudokuConfiguration: Codable, Hashable {
         case paddingMin
         case paddingMax
         case asciiMode
+        case table
         case customTable
         case customTables
         case enablePureDownlink
@@ -184,7 +185,9 @@ struct SudokuConfiguration: Codable, Hashable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
-        let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .customTable) ?? ""
+        let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .customTable)
+            ?? container.decodeIfPresent(String.self, forKey: .table)
+            ?? ""
         let decodedCustomTables = try container.decodeIfPresent([String].self, forKey: .customTables) ?? []
 
         self.init(
@@ -211,20 +214,23 @@ struct SudokuConfiguration: Codable, Hashable {
         try container.encode(httpMask, forKey: .httpMask)
     }
 
+    /// Normalizes the plural table list. The legacy single-table field is only
+    /// used when the plural field has no valid entries.
     static func normalizeCustomTables(_ tables: [String], legacy: String = "") -> [String] {
         var seen = Set<String>()
         var normalized: [String] = []
-        let trimmedLegacy = legacy.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedLegacy.isEmpty {
-            normalized.append(trimmedLegacy)
-            seen.insert(trimmedLegacy)
-        }
         for table in tables {
             let trimmed = table.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty || !seen.insert(trimmed).inserted {
                 continue
             }
             normalized.append(trimmed)
+        }
+        if normalized.isEmpty {
+            let trimmedLegacy = legacy.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedLegacy.isEmpty {
+                normalized.append(trimmedLegacy)
+            }
         }
         return normalized
     }

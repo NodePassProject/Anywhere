@@ -22,13 +22,12 @@ enum OutboundProtocol: String, Codable {
     /// Whether this protocol uses a CONNECT tunnel (HTTP/1.1, HTTP/2, or HTTP/3).
     var isNaive: Bool { self == .http11 || self == .http2 || self == .http3 }
 
-    /// Whether the protocol's connect path can accept the caller's first
-    /// bytes before reporting success, letting the client ship the TLS
-    /// ClientHello / MTProto nonce / etc. without an extra post-connect turn.
+    /// Whether the protocol's handshake can carry the caller's first bytes
+    /// inline, letting the client ship the TLS ClientHello / MTProto nonce /
+    /// etc. in the same packet as the handshake.
     ///
-    /// `false` for protocols whose connect path has no payload slot or early
-    /// send guarantee (Shadowsocks, Naive's HTTP CONNECT, Hysteria's
-    /// TCPRequest, SOCKS5's method negotiation).
+    /// `false` for protocols whose handshake has no payload slot (Shadowsocks,
+    /// Naive's HTTP CONNECT, Hysteria's TCPRequest, SOCKS5's method negotiation).
     /// ``LWIPTCPConnection`` checks this to decide whether to hand `pendingData`
     /// to the handshake (true) or to leave it buffered and forward it via a
     /// separate `send(...)` right after the tunnel is up (false).

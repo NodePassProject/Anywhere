@@ -320,7 +320,12 @@ struct ClashProxyParser {
                 ?? getString(node, key: "ascii")
                 ?? SudokuASCIIMode.preferEntropy.rawValue
         ) ?? .preferEntropy
-        let legacyCustomTable = (getString(node, key: "custom-table") ?? getString(node, key: "custom_table") ?? "")
+        let legacyCustomTable = (
+            getString(node, key: "custom-table")
+                ?? getString(node, key: "custom_table")
+                ?? getString(node, key: "table")
+                ?? ""
+        )
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let customTables = SudokuConfiguration.normalizeCustomTables(
             getStringSequence(node, key: "custom-tables") ?? getStringSequence(node, key: "custom_tables") ?? [],
