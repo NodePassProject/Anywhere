@@ -442,10 +442,10 @@ extension ProxyConfiguration {
         let mixPortValue = json["m"] as? NSNumber
         let name = (json["n"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let legacyCustomTable = ((json["t"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        var customTables = (json["ts"] as? [String]) ?? []
-        if !legacyCustomTable.isEmpty && !customTables.contains(legacyCustomTable) {
-            customTables.insert(legacyCustomTable, at: 0)
-        }
+        let customTables = SudokuConfiguration.normalizeCustomTables(
+            (json["ts"] as? [String]) ?? [],
+            legacy: legacyCustomTable
+        )
         let enablePureDownlink = !((json["x"] as? Bool) ?? false)
         let httpMask = SudokuHTTPMaskConfiguration(
             disable: (json["hd"] as? Bool) ?? false,

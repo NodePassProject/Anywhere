@@ -22,12 +22,13 @@ enum OutboundProtocol: String, Codable {
     /// Whether this protocol uses a CONNECT tunnel (HTTP/1.1, HTTP/2, or HTTP/3).
     var isNaive: Bool { self == .http11 || self == .http2 || self == .http3 }
 
-    /// Whether the protocol's handshake can carry the caller's first bytes
-    /// inline, letting the client ship the TLS ClientHello / MTProto nonce /
-    /// etc. in the same packet as the handshake.
+    /// Whether the protocol's connect path can accept the caller's first
+    /// bytes before reporting success, letting the client ship the TLS
+    /// ClientHello / MTProto nonce / etc. without an extra post-connect turn.
     ///
-    /// `false` for protocols whose handshake has no payload slot (Shadowsocks,
-    /// Naive's HTTP CONNECT, Hysteria's TCPRequest, SOCKS5's method negotiation).
+    /// `false` for protocols whose connect path has no payload slot or early
+    /// send guarantee (Shadowsocks, Naive's HTTP CONNECT, Hysteria's
+    /// TCPRequest, SOCKS5's method negotiation).
     /// ``LWIPTCPConnection`` checks this to decide whether to hand `pendingData`
     /// to the handshake (true) or to leave it buffered and forward it via a
     /// separate `send(...)` right after the tunnel is up (false).
@@ -40,7 +41,9 @@ enum OutboundProtocol: String, Codable {
         switch self {
         case .vless:
             return true
-        case .hysteria, .trojan, .shadowsocks, .socks5, .sudoku, .http11, .http2, .http3:
+        case .sudoku:
+            return true
+        case .hysteria, .trojan, .shadowsocks, .socks5, .http11, .http2, .http3:
             return false
         }
     }
@@ -367,18 +370,17 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 ) ?? .preferEntropy
                 let httpMask = try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .sudokuHTTPMask) ?? .init()
                 let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .sudokuCustomTable) ?? ""
-                var mergedCustomTables = try container.decodeIfPresent([String].self, forKey: .sudokuCustomTables) ?? []
-                let trimmedLegacyCustomTable = legacyCustomTable.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmedLegacyCustomTable.isEmpty && !mergedCustomTables.contains(trimmedLegacyCustomTable) {
-                    mergedCustomTables.insert(trimmedLegacyCustomTable, at: 0)
-                }
+                let customTables = SudokuConfiguration.normalizeCustomTables(
+                    try container.decodeIfPresent([String].self, forKey: .sudokuCustomTables) ?? [],
+                    legacy: legacyCustomTable
+                )
                 outbound = .sudoku(SudokuConfiguration(
                     key: try container.decodeIfPresent(String.self, forKey: .sudokuKey) ?? "",
                     aeadMethod: aead,
                     paddingMin: try container.decodeIfPresent(Int.self, forKey: .sudokuPaddingMin) ?? 5,
                     paddingMax: try container.decodeIfPresent(Int.self, forKey: .sudokuPaddingMax) ?? 15,
                     asciiMode: asciiMode,
-                    customTables: mergedCustomTables,
+                    customTables: customTables,
                     enablePureDownlink: try container.decodeIfPresent(Bool.self, forKey: .sudokuEnablePureDownlink) ?? true,
                     httpMask: httpMask
                 ))

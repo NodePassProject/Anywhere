@@ -311,20 +311,24 @@ struct ClashProxyParser {
         else { return nil }
 
         let aead = SudokuAEADMethod(
-            rawValue: getString(node, key: "aead-method") ?? SudokuAEADMethod.chacha20Poly1305.rawValue
+            rawValue: getString(node, key: "aead-method")
+                ?? getString(node, key: "aead")
+                ?? SudokuAEADMethod.chacha20Poly1305.rawValue
         ) ?? .chacha20Poly1305
         let asciiMode = SudokuASCIIMode(
-            normalized: getString(node, key: "table-type") ?? SudokuASCIIMode.preferEntropy.rawValue
+            normalized: getString(node, key: "table-type")
+                ?? getString(node, key: "ascii")
+                ?? SudokuASCIIMode.preferEntropy.rawValue
         ) ?? .preferEntropy
-        let legacyCustomTable = (getString(node, key: "custom-table") ?? "")
+        let legacyCustomTable = (getString(node, key: "custom-table") ?? getString(node, key: "custom_table") ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        var customTables = getStringSequence(node, key: "custom-tables") ?? []
-        if !legacyCustomTable.isEmpty && !customTables.contains(legacyCustomTable) {
-            customTables.insert(legacyCustomTable, at: 0)
-        }
-        let paddingMin = getInt(node, key: "padding-min") ?? 5
-        let paddingMax = getInt(node, key: "padding-max") ?? max(paddingMin, 15)
-        let pureDownlink = getBool(node, key: "enable-pure-downlink") ?? true
+        let customTables = SudokuConfiguration.normalizeCustomTables(
+            getStringSequence(node, key: "custom-tables") ?? getStringSequence(node, key: "custom_tables") ?? [],
+            legacy: legacyCustomTable
+        )
+        let paddingMin = getInt(node, key: "padding-min") ?? getInt(node, key: "padding_min") ?? 5
+        let paddingMax = getInt(node, key: "padding-max") ?? getInt(node, key: "padding_max") ?? max(paddingMin, 15)
+        let pureDownlink = getBool(node, key: "enable-pure-downlink") ?? getBool(node, key: "enable_pure_downlink") ?? true
 
         let httpMaskNode = node["httpmask"]
         let httpMask = parseSudokuHTTPMask(httpMaskNode)

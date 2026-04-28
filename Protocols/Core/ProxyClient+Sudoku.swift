@@ -12,6 +12,7 @@ extension ProxyClient {
         command: ProxyCommand,
         destinationHost: String,
         destinationPort: UInt16,
+        initialData: Data? = nil,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard command != .mux else {
@@ -34,9 +35,11 @@ extension ProxyClient {
                     if client.shouldUseNativeMux {
                         let mux = try client.openMux()
                         let stream = try mux.dialTCP(host: destinationHost, port: destinationPort)
+                        try ProxyClient.sendSudokuInitialData(initialData, to: stream)
                         connection = SudokuMuxTCPProxyConnection(client: mux, stream: stream)
                     } else {
                         let stream = try client.openTCP(host: destinationHost, port: destinationPort)
+                        try stream.sendInitialDataIfNeeded(initialData)
                         connection = SudokuTCPProxyConnection(stream: stream)
                     }
                 case .udp:
@@ -55,5 +58,17 @@ extension ProxyClient {
                 completion(.failure(error))
             }
         }
+    }
+
+    private static func sendSudokuInitialData(_ data: Data?, to stream: SudokuMuxStream) throws {
+        guard let data, !data.isEmpty else { return }
+        try stream.send(data)
+    }
+}
+
+private extension SudokuRecordStream {
+    func sendInitialDataIfNeeded(_ data: Data?) throws {
+        guard let data, !data.isEmpty else { return }
+        try send(data)
     }
 }
