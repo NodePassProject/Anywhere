@@ -292,11 +292,13 @@ final class SudokuNativeConfig {
     }
 
     var nativeMuxEnabled: Bool {
-        // Native Sudoku mux currently corrupts or closes large downlink
-        // streams on some servers. Keep parsing/exporting the setting, but
-        // route app TCP through the regular Sudoku TCP command until the mux
-        // record path is reliable under sustained traffic.
-        false
+        guard !httpMask.disable, httpMask.multiplex == .on else { return false }
+        switch httpMask.mode {
+        case .stream, .poll, .auto, .ws:
+            return true
+        case .legacy:
+            return false
+        }
     }
 }
 
@@ -1563,7 +1565,15 @@ final class SudokuMuxClient {
     func dialTCP(host: String, port: UInt16) throws -> SudokuMuxStream {
         let stream = SudokuMuxStream(client: self, id: allocateStreamID())
         condition.lock(); streams[stream.id] = stream; condition.unlock()
-        try sendFrame(type: 0x01, streamID: stream.id, payload: SudokuAddress.encode(host: host, port: port))
+        do {
+            try sendFrame(type: 0x01, streamID: stream.id, payload: SudokuAddress.encode(host: host, port: port))
+        } catch {
+            condition.lock()
+            streams.removeValue(forKey: stream.id)
+            condition.unlock()
+            stream.markClosed(discardQueuedData: true)
+            throw error
+        }
         return stream
     }
 
@@ -1583,7 +1593,7 @@ final class SudokuMuxClient {
         let shouldSend = streams.removeValue(forKey: stream.id) != nil && !closed
         condition.unlock()
         if shouldSend { try? sendFrame(type: 0x03, streamID: stream.id, payload: Data()) }
-        stream.markClosed()
+        stream.markClosed(discardQueuedData: true)
     }
 
     func close() {
@@ -1592,7 +1602,7 @@ final class SudokuMuxClient {
         let all = Array(streams.values)
         streams.removeAll()
         condition.unlock()
-        for stream in all { stream.markClosed() }
+        for stream in all { stream.markClosed(discardQueuedData: true) }
         record.close()
     }
 
@@ -1615,7 +1625,7 @@ final class SudokuMuxClient {
                 switch type {
                 case 0x02:
                     if let stream, !stream.enqueue(payload) {
-                        sudokuLogger.warning("[Sudoku-Mux] stream \(streamID) receive queue overflow, resetting stream")
+                        sudokuLogger.warning("[Sudoku-Mux] stream \(streamID) closed while receiving, resetting stream")
                         condition.lock()
                         let shouldReset = streams.removeValue(forKey: streamID) != nil && !closed
                         condition.unlock()
@@ -1623,7 +1633,10 @@ final class SudokuMuxClient {
                             try? sendFrame(type: 0x04, streamID: streamID, payload: Data())
                         }
                     }
-                case 0x03, 0x04: stream?.markClosed()
+                case 0x03:
+                    stream?.markClosed()
+                case 0x04:
+                    stream?.markClosed(discardQueuedData: true)
                 default: throw SudokuNativeError.protocolError("bad mux frame")
                 }
             } catch SudokuNativeError.closed {
@@ -1649,6 +1662,10 @@ final class SudokuMuxStream {
 
     func send(_ data: Data) throws {
         guard let client else { throw SudokuNativeError.closed }
+        condition.lock()
+        let isClosed = closed
+        condition.unlock()
+        guard !isClosed else { throw SudokuNativeError.closed }
         var offset = 0
         while offset < data.count {
             let count = min(128 * 1024, data.count - offset)
@@ -1669,24 +1686,23 @@ final class SudokuMuxStream {
     func enqueue(_ data: Data) -> Bool {
         condition.lock()
         defer { condition.unlock() }
-        guard !closed else { return false }
         let queueLimit = max(sudokuMuxMaxQueueBytes, data.count)
-        guard queue.count + data.count <= queueLimit else {
-            closed = true
-            queue.removeAll(keepingCapacity: false)
-            condition.broadcast()
-            return false
+        while queue.count + data.count > queueLimit && !closed {
+            condition.wait()
         }
+        guard !closed else { return false }
         queue.append(data)
         condition.signal()
         return true
     }
 
     func close() { client?.close(stream: self) }
-    func markClosed() {
+    func markClosed(discardQueuedData: Bool = false) {
         condition.lock()
         closed = true
-        queue.removeAll(keepingCapacity: false)
+        if discardQueuedData {
+            queue.removeAll(keepingCapacity: false)
+        }
         condition.broadcast()
         condition.unlock()
     }

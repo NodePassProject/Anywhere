@@ -373,7 +373,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 let customTables = SudokuConfiguration.normalizeCustomTables(
                     decodedCustomTables ?? [],
                     legacy: legacyCustomTable,
-                    legacyFallback: decodedCustomTables == nil
+                    legacyFallback: true
                 )
                 outbound = .sudoku(SudokuConfiguration(
                     key: try container.decodeIfPresent(String.self, forKey: .sudokuKey) ?? "",

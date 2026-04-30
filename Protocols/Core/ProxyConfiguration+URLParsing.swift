@@ -451,7 +451,7 @@ extension ProxyConfiguration {
         let customTables = SudokuConfiguration.normalizeCustomTables(
             rawCustomTables ?? [],
             legacy: legacyCustomTable,
-            legacyFallback: rawCustomTables == nil
+            legacyFallback: true
         )
         let enablePureDownlink = !((json["x"] as? Bool) ?? false)
         let httpMask = SudokuHTTPMaskConfiguration(
