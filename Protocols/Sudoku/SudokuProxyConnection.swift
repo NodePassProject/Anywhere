@@ -40,6 +40,30 @@ private enum SudokuHTTPMaskAuth {
     }
 }
 
+private enum SudokuHTTPMaskPathRoot {
+    static func apply(_ root: String, to path: String) -> String {
+        let clean = normalize(root)
+        guard !clean.isEmpty else { return path }
+        let suffix = path.hasPrefix("/") ? path : "/\(path)"
+        return "/\(clean)\(suffix)"
+    }
+
+    private static func normalize(_ root: String) -> String {
+        let slashes = CharacterSet(charactersIn: "/")
+        let trimmed = root.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: slashes)
+        guard !trimmed.isEmpty else { return "" }
+        for scalar in trimmed.unicodeScalars {
+            switch scalar.value {
+            case 48...57, 65...90, 97...122, 45, 95:
+                continue
+            default:
+                return ""
+            }
+        }
+        return trimmed
+    }
+}
+
 private struct SudokuDataQueue {
     private var storage = Data()
     private var offset = 0
@@ -856,8 +880,7 @@ final class SudokuHTTPMaskTransport {
     }
 
     private func applyPathRoot(_ path: String) -> String {
-        let clean = config.httpMask.pathRoot.filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
-        return clean.isEmpty ? path : "/\(clean)\(path)"
+        SudokuHTTPMaskPathRoot.apply(config.httpMask.pathRoot, to: path)
     }
 
     private func authToken(mode: String, method: String, path: String) -> String {
@@ -1334,7 +1357,7 @@ final class SudokuNativeClient {
         } else {
             let stream = try factory.open(host: config.serverHost, port: config.serverPort, useTLS: false, serverName: nil)
             if !config.httpMask.disable && config.httpMask.mode == .legacy {
-                let path = config.httpMask.pathRoot.isEmpty ? "/api" : "/\(config.httpMask.pathRoot)/api"
+                let path = SudokuHTTPMaskPathRoot.apply(config.httpMask.pathRoot, to: "/api")
                 let host = config.httpMask.host.isEmpty ? config.serverHost : config.httpMask.host
                 let req = "POST \(path) HTTP/1.1\r\nHost: \(host)\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nConnection: keep-alive\r\nContent-Type: application/octet-stream\r\nContent-Length: 1048576\r\n\r\n"
                 try stream.sendAll(Data(req.utf8))
@@ -1452,8 +1475,7 @@ final class SudokuNativeClient {
     }
 
     private func applyHTTPMaskPathRoot(_ path: String) -> String {
-        let clean = config.httpMask.pathRoot.filter { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
-        return clean.isEmpty ? path : "/\(clean)\(path)"
+        SudokuHTTPMaskPathRoot.apply(config.httpMask.pathRoot, to: path)
     }
 
     private func appendHTTPMaskAuth(_ path: String, token: String) -> String {
@@ -1557,6 +1579,12 @@ final class SudokuMuxClient {
     private var nextStreamID: UInt32 = 0
     private var closed = false
 
+    var isClosed: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return closed
+    }
+
     init(record: SudokuRecordStream) {
         self.record = record
         DispatchQueue.global(qos: .userInitiated).async { self.readerLoop() }
@@ -1564,7 +1592,13 @@ final class SudokuMuxClient {
 
     func dialTCP(host: String, port: UInt16) throws -> SudokuMuxStream {
         let stream = SudokuMuxStream(client: self, id: allocateStreamID())
-        condition.lock(); streams[stream.id] = stream; condition.unlock()
+        condition.lock()
+        if closed {
+            condition.unlock()
+            throw SudokuNativeError.closed
+        }
+        streams[stream.id] = stream
+        condition.unlock()
         do {
             try sendFrame(type: 0x01, streamID: stream.id, payload: SudokuAddress.encode(host: host, port: port))
         } catch {
@@ -1643,7 +1677,12 @@ final class SudokuMuxClient {
                 close()
                 return
             } catch {
-                sudokuLogger.error("[Sudoku-Mux] reader failed: \(error.localizedDescription)")
+                condition.lock()
+                let wasClosed = closed
+                condition.unlock()
+                if !wasClosed {
+                    sudokuLogger.error("[Sudoku-Mux] reader failed: \(error.localizedDescription)")
+                }
                 close()
                 return
             }
@@ -1752,10 +1791,28 @@ final class SudokuMuxTCPProxyConnection: ProxyConnection {
     private let stream: SudokuMuxStream
     private let readQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.mux.read", qos: .userInitiated)
     private let writeQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.mux.write", qos: .userInitiated)
+    private let closesClientOnClose: Bool
+    private var onClose: (() -> Void)?
     private var closed = false
 
-    init(client: SudokuMuxClient, stream: SudokuMuxStream) { self.client = client; self.stream = stream; super.init() }
-    override var isConnected: Bool { !lock.withLock { closed } }
+    init(
+        client: SudokuMuxClient,
+        stream: SudokuMuxStream,
+        closesClientOnClose: Bool = true,
+        onClose: (() -> Void)? = nil
+    ) {
+        self.client = client
+        self.stream = stream
+        self.closesClientOnClose = closesClientOnClose
+        self.onClose = onClose
+        super.init()
+    }
+
+    deinit {
+        closeResources(closeStream: true)
+    }
+
+    override var isConnected: Bool { !lock.withLock { closed } && !client.isClosed }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         writeQueue.async {
@@ -1763,7 +1820,10 @@ final class SudokuMuxTCPProxyConnection: ProxyConnection {
                 if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
                 try self.stream.send(data)
                 completion(nil)
-            } catch { completion(error) }
+            } catch {
+                self.closeResources(closeStream: false)
+                completion(error)
+            }
         }
     }
 
@@ -1780,11 +1840,32 @@ final class SudokuMuxTCPProxyConnection: ProxyConnection {
             do {
                 if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
                 completion(try self.stream.receive(max: sudokuTCPReceiveChunkSize), nil)
-            } catch SudokuNativeError.closed { completion(nil, nil) } catch { completion(nil, error) }
+            } catch SudokuNativeError.closed {
+                self.closeResources(closeStream: false)
+                completion(nil, nil)
+            } catch {
+                self.closeResources(closeStream: false)
+                completion(nil, error)
+            }
         }
     }
 
-    override func cancel() { lock.withLock { closed = true }; stream.close(); client.close() }
+    override func cancel() {
+        closeResources(closeStream: true)
+    }
+
+    private func closeResources(closeStream: Bool) {
+        let callback: (() -> Void)? = lock.withLock {
+            guard !closed else { return nil }
+            closed = true
+            let callback = onClose
+            onClose = nil
+            return callback
+        }
+        if closeStream { stream.close() }
+        if closesClientOnClose { client.close() }
+        callback?()
+    }
 }
 
 final class SudokuUDPProxyConnection: ProxyConnection {
