@@ -369,9 +369,11 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 ) ?? .preferEntropy
                 let httpMask = try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .sudokuHTTPMask) ?? .init()
                 let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .sudokuCustomTable) ?? ""
+                let decodedCustomTables = try container.decodeIfPresent([String].self, forKey: .sudokuCustomTables)
                 let customTables = SudokuConfiguration.normalizeCustomTables(
-                    try container.decodeIfPresent([String].self, forKey: .sudokuCustomTables) ?? [],
-                    legacy: legacyCustomTable
+                    decodedCustomTables ?? [],
+                    legacy: legacyCustomTable,
+                    legacyFallback: decodedCustomTables == nil
                 )
                 outbound = .sudoku(SudokuConfiguration(
                     key: try container.decodeIfPresent(String.self, forKey: .sudokuKey) ?? "",

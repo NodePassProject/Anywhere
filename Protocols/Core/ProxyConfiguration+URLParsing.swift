@@ -447,9 +447,11 @@ extension ProxyConfiguration {
                 ?? (json["custom_table"] as? String)
                 ?? ""
         ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawCustomTables = json["ts"] as? [String]
         let customTables = SudokuConfiguration.normalizeCustomTables(
-            (json["ts"] as? [String]) ?? [],
-            legacy: legacyCustomTable
+            rawCustomTables ?? [],
+            legacy: legacyCustomTable,
+            legacyFallback: rawCustomTables == nil
         )
         let enablePureDownlink = !((json["x"] as? Bool) ?? false)
         let httpMask = SudokuHTTPMaskConfiguration(

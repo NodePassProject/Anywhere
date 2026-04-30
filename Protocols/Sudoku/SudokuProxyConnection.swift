@@ -292,7 +292,11 @@ final class SudokuNativeConfig {
     }
 
     var nativeMuxEnabled: Bool {
-        !httpMask.disable && [.stream, .poll, .auto, .ws].contains(httpMask.mode) && httpMask.multiplex == .on
+        // Native Sudoku mux currently corrupts or closes large downlink
+        // streams on some servers. Keep parsing/exporting the setting, but
+        // route app TCP through the regular Sudoku TCP command until the mux
+        // record path is reliable under sustained traffic.
+        false
     }
 }
 
@@ -304,9 +308,9 @@ private struct SudokuTableCacheKey: Hashable {
 
 private enum SudokuTableCache {
     private static let lock = UnfairLock()
-    private static let maxEntries = 32
+    private static let maxEntries = 8
     private static var pairs: [SudokuTableCacheKey: SudokuTablePair] = [:]
-    private static var insertionOrder: [SudokuTableCacheKey] = []
+    private static var accessOrder: [SudokuTableCacheKey] = []
 
     static func pair(for config: SudokuNativeConfig) throws -> SudokuTablePair {
         let cacheKey = SudokuTableCacheKey(
@@ -316,6 +320,7 @@ private enum SudokuTableCache {
         )
         return try lock.withLock {
             if let pair = pairs[cacheKey] {
+                touch(cacheKey)
                 return pair
             }
 
@@ -326,12 +331,21 @@ private enum SudokuTableCache {
                 customDownlink: config.selectedCustomTable
             )
             pairs[cacheKey] = pair
-            insertionOrder.append(cacheKey)
-            while insertionOrder.count > maxEntries, let evicted = insertionOrder.first {
-                insertionOrder.removeFirst()
-                pairs.removeValue(forKey: evicted)
-            }
+            touch(cacheKey)
+            trimIfNeeded()
             return pair
+        }
+    }
+
+    private static func touch(_ key: SudokuTableCacheKey) {
+        accessOrder.removeAll { $0 == key }
+        accessOrder.append(key)
+    }
+
+    private static func trimIfNeeded() {
+        while accessOrder.count > maxEntries, let evicted = accessOrder.first {
+            accessOrder.removeFirst()
+            pairs.removeValue(forKey: evicted)
         }
     }
 }
@@ -1065,6 +1079,10 @@ final class SudokuObfsTransport {
             if !plainBuffer.isEmpty {
                 return plainBuffer.read(max: max)
             }
+            let pending = try drainDecoderPending(max: max)
+            if !pending.isEmpty {
+                return pending
+            }
             while true {
                 let wireData = try receiveWire(max: sudokuObfsReadChunkSize)
                 let out = try tables.withDownlink { table -> Data in
@@ -1107,6 +1125,15 @@ final class SudokuObfsTransport {
         switch wire {
         case .stream(let stream): return try stream.readSome(max: max)
         case .httpMask(let mask): return try mask.receive(max: max)
+        }
+    }
+
+    private func drainDecoderPending(max: Int) throws -> Data {
+        try tables.withDownlink { table -> Data in
+            if pureDownlink {
+                return try pureDecoder.decode(Data(), table: table, limit: max)
+            }
+            return try packedDecoder.decode(Data(), table: table, limit: max)
         }
     }
 }
@@ -1586,11 +1613,24 @@ final class SudokuMuxClient {
                 let payload = try record.readExact(length)
                 condition.lock(); let stream = streams[streamID]; if type == 0x03 || type == 0x04 { streams.removeValue(forKey: streamID) }; condition.unlock()
                 switch type {
-                case 0x02: stream?.enqueue(payload)
+                case 0x02:
+                    if let stream, !stream.enqueue(payload) {
+                        sudokuLogger.warning("[Sudoku-Mux] stream \(streamID) receive queue overflow, resetting stream")
+                        condition.lock()
+                        let shouldReset = streams.removeValue(forKey: streamID) != nil && !closed
+                        condition.unlock()
+                        if shouldReset {
+                            try? sendFrame(type: 0x04, streamID: streamID, payload: Data())
+                        }
+                    }
                 case 0x03, 0x04: stream?.markClosed()
                 default: throw SudokuNativeError.protocolError("bad mux frame")
                 }
+            } catch SudokuNativeError.closed {
+                close()
+                return
             } catch {
+                sudokuLogger.error("[Sudoku-Mux] reader failed: \(error.localizedDescription)")
                 close()
                 return
             }
@@ -1626,20 +1666,30 @@ final class SudokuMuxStream {
         return out
     }
 
-    func enqueue(_ data: Data) {
+    func enqueue(_ data: Data) -> Bool {
         condition.lock()
-        while queue.count + data.count > sudokuMuxMaxQueueBytes && !closed {
-            condition.wait()
+        defer { condition.unlock() }
+        guard !closed else { return false }
+        let queueLimit = max(sudokuMuxMaxQueueBytes, data.count)
+        guard queue.count + data.count <= queueLimit else {
+            closed = true
+            queue.removeAll(keepingCapacity: false)
+            condition.broadcast()
+            return false
         }
-        if !closed {
-            queue.append(data)
-            condition.signal()
-        }
-        condition.unlock()
+        queue.append(data)
+        condition.signal()
+        return true
     }
 
     func close() { client?.close(stream: self) }
-    func markClosed() { condition.lock(); closed = true; condition.broadcast(); condition.unlock() }
+    func markClosed() {
+        condition.lock()
+        closed = true
+        queue.removeAll(keepingCapacity: false)
+        condition.broadcast()
+        condition.unlock()
+    }
 }
 
 final class SudokuTCPProxyConnection: ProxyConnection {

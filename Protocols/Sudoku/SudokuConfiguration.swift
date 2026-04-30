@@ -188,7 +188,7 @@ struct SudokuConfiguration: Codable, Hashable {
         let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .customTable)
             ?? container.decodeIfPresent(String.self, forKey: .table)
             ?? ""
-        let decodedCustomTables = try container.decodeIfPresent([String].self, forKey: .customTables) ?? []
+        let decodedCustomTables = try container.decodeIfPresent([String].self, forKey: .customTables)
 
         self.init(
             key: try container.decode(String.self, forKey: .key),
@@ -196,7 +196,11 @@ struct SudokuConfiguration: Codable, Hashable {
             paddingMin: try container.decodeIfPresent(Int.self, forKey: .paddingMin) ?? 5,
             paddingMax: try container.decodeIfPresent(Int.self, forKey: .paddingMax) ?? 15,
             asciiMode: try container.decodeIfPresent(SudokuASCIIMode.self, forKey: .asciiMode) ?? .preferEntropy,
-            customTables: Self.normalizeCustomTables(decodedCustomTables, legacy: legacyCustomTable),
+            customTables: Self.normalizeCustomTables(
+                decodedCustomTables ?? [],
+                legacy: legacyCustomTable,
+                legacyFallback: decodedCustomTables == nil
+            ),
             enablePureDownlink: try container.decodeIfPresent(Bool.self, forKey: .enablePureDownlink) ?? true,
             httpMask: try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .httpMask) ?? .init()
         )
@@ -215,8 +219,8 @@ struct SudokuConfiguration: Codable, Hashable {
     }
 
     /// Normalizes the plural table list. The legacy single-table field is only
-    /// used when the plural field has no valid entries.
-    static func normalizeCustomTables(_ tables: [String], legacy: String = "") -> [String] {
+    /// used when the plural field is absent.
+    static func normalizeCustomTables(_ tables: [String], legacy: String = "", legacyFallback: Bool = true) -> [String] {
         var seen = Set<String>()
         var normalized: [String] = []
         for table in tables {
@@ -226,7 +230,7 @@ struct SudokuConfiguration: Codable, Hashable {
             }
             normalized.append(trimmed)
         }
-        if normalized.isEmpty {
+        if normalized.isEmpty && legacyFallback {
             let trimmedLegacy = legacy.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedLegacy.isEmpty {
                 normalized.append(trimmedLegacy)

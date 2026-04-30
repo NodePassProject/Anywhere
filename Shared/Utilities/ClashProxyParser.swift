@@ -327,9 +327,11 @@ struct ClashProxyParser {
                 ?? ""
         )
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawCustomTables = getStringSequence(node, key: "custom-tables") ?? getStringSequence(node, key: "custom_tables")
         let customTables = SudokuConfiguration.normalizeCustomTables(
-            getStringSequence(node, key: "custom-tables") ?? getStringSequence(node, key: "custom_tables") ?? [],
-            legacy: legacyCustomTable
+            rawCustomTables ?? [],
+            legacy: legacyCustomTable,
+            legacyFallback: rawCustomTables == nil
         )
         let paddingMin = getInt(node, key: "padding-min") ?? getInt(node, key: "padding_min") ?? 5
         let paddingMax = getInt(node, key: "padding-max") ?? getInt(node, key: "padding_max") ?? max(paddingMin, 15)
