@@ -100,6 +100,11 @@ struct ClashProxyParser {
     }
 
     private static func getStringSequence(_ node: Node, key: String) -> [String]? {
+        guard let result = getStringSequenceIfPresent(node, key: key) else { return nil }
+        return result.isEmpty ? nil : result
+    }
+
+    private static func getStringSequenceIfPresent(_ node: Node, key: String) -> [String]? {
         let seq = node[key]
         guard seq.type == .sequence else { return nil }
         var result: [String] = []
@@ -108,7 +113,7 @@ struct ClashProxyParser {
                 result.append(item.scalar)
             }
         }
-        return result.isEmpty ? nil : result
+        return result
     }
 
     /// Pulls the `name`/`server`/`port` triple every Clash proxy requires.
@@ -327,7 +332,9 @@ struct ClashProxyParser {
                 ?? ""
         )
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let rawCustomTables = getStringSequence(node, key: "custom-tables") ?? getStringSequence(node, key: "custom_tables")
+        let rawCustomTables = getStringSequenceIfPresent(node, key: "custom-tables")
+            ?? getStringSequenceIfPresent(node, key: "custom_tables")
+            ?? getStringSequenceIfPresent(node, key: "customTables")
         let customTables = SudokuConfiguration.normalizeCustomTables(
             rawCustomTables ?? [],
             legacy: legacyCustomTable,

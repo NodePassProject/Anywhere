@@ -576,13 +576,6 @@ struct ProxyEditorView: View {
                             } label: {
                                 TextWithColorfulIcon(title: "Path Root", comment: "Path Root for Sudoku protocol HTTP Mask feature", systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
                             }
-                            Picker(selection: $sudokuHTTPMaskMultiplex) {
-                                ForEach(SudokuHTTPMaskMultiplex.allCases, id: \.self) { mode in
-                                    Text(mode.displayName).tag(mode)
-                                }
-                            } label: {
-                                TextWithColorfulIcon(title: "Multiplex", comment: "Multiplex for Sudoku protocol HTTP Mask feature", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
-                            }
                         }
                     }
                 }
@@ -752,7 +745,7 @@ struct ProxyEditorView: View {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isNaive {
+        if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = self.configuration?.uuid ?? UUID()
         } else {
             guard let u = UUID(xrayString: uuid) else { return }
