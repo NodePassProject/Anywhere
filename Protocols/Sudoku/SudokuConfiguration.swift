@@ -199,7 +199,7 @@ struct SudokuConfiguration: Codable, Hashable {
             customTables: Self.normalizeCustomTables(
                 decodedCustomTables ?? [],
                 legacy: legacyCustomTable,
-                legacyFallback: decodedCustomTables == nil
+                legacyFallback: true
             ),
             enablePureDownlink: try container.decodeIfPresent(Bool.self, forKey: .enablePureDownlink) ?? true,
             httpMask: try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .httpMask) ?? .init()
@@ -218,8 +218,9 @@ struct SudokuConfiguration: Codable, Hashable {
         try container.encode(httpMask, forKey: .httpMask)
     }
 
-    /// Normalizes the plural table list. The legacy single-table field is only
-    /// used when the plural field is absent.
+    /// Normalizes custom table entries. Plural table entries win when they
+    /// contain at least one usable value; otherwise the legacy single-table
+    /// field remains a fallback.
     static func normalizeCustomTables(_ tables: [String], legacy: String = "", legacyFallback: Bool = true) -> [String] {
         var seen = Set<String>()
         var normalized: [String] = []

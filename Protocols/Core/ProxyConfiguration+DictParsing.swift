@@ -110,7 +110,7 @@ extension ProxyConfiguration {
             let customTables = SudokuConfiguration.normalizeCustomTables(
                 rawCustomTables ?? [],
                 legacy: legacyCustomTable,
-                legacyFallback: rawCustomTables == nil
+                legacyFallback: true
             )
             let httpMask = SudokuHTTPMaskConfiguration(
                 disable: (configurationDict["sudokuHTTPMaskDisable"] as? Bool) ?? false,

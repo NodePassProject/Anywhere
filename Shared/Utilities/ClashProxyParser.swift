@@ -100,11 +100,6 @@ struct ClashProxyParser {
     }
 
     private static func getStringSequence(_ node: Node, key: String) -> [String]? {
-        guard let result = getStringSequenceIfPresent(node, key: key) else { return nil }
-        return result.isEmpty ? nil : result
-    }
-
-    private static func getStringSequenceIfPresent(_ node: Node, key: String) -> [String]? {
         let seq = node[key]
         guard seq.type == .sequence else { return nil }
         var result: [String] = []
@@ -113,7 +108,7 @@ struct ClashProxyParser {
                 result.append(item.scalar)
             }
         }
-        return result
+        return result.isEmpty ? nil : result
     }
 
     /// Pulls the `name`/`server`/`port` triple every Clash proxy requires.
@@ -332,13 +327,13 @@ struct ClashProxyParser {
                 ?? ""
         )
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let rawCustomTables = getStringSequenceIfPresent(node, key: "custom-tables")
-            ?? getStringSequenceIfPresent(node, key: "custom_tables")
-            ?? getStringSequenceIfPresent(node, key: "customTables")
+        let rawCustomTables = getStringSequence(node, key: "custom-tables")
+            ?? getStringSequence(node, key: "custom_tables")
+            ?? getStringSequence(node, key: "customTables")
         let customTables = SudokuConfiguration.normalizeCustomTables(
             rawCustomTables ?? [],
             legacy: legacyCustomTable,
-            legacyFallback: rawCustomTables == nil
+            legacyFallback: true
         )
         let paddingMin = getInt(node, key: "padding-min") ?? getInt(node, key: "padding_min") ?? 5
         let paddingMax = getInt(node, key: "padding-max") ?? getInt(node, key: "padding_max") ?? max(paddingMin, 15)

@@ -252,6 +252,7 @@ class TVProxyEditorViewController: UITableViewController {
                 httpMaskRows.append(.toggle(label: String(localized: "TLS"), isOn: sudokuHTTPMaskTLS, key: .sudokuHTTPMaskTLS))
                 httpMaskRows.append(.text(label: String(localized: "Host"), value: sudokuHTTPMaskHost, placeholder: String(localized: "Host"), key: .sudokuHTTPMaskHost))
                 httpMaskRows.append(.text(label: String(localized: "Path Root", comment: "Path Root for Sudoku protocol HTTP Mask feature"), value: sudokuHTTPMaskPathRoot, placeholder: String(localized: "Path Root", comment: "Path Root for Sudoku protocol HTTP Mask feature"), key: .sudokuHTTPMaskPathRoot))
+                httpMaskRows.append(.selection(label: String(localized: "Multiplex", comment: "Multiplex for Sudoku protocol HTTP Mask feature"), value: sudokuHTTPMaskMultiplex.displayName, options: SudokuHTTPMaskMultiplex.allCases.map { ($0.displayName, $0.rawValue) }, key: .sudokuHTTPMaskMultiplex))
             }
             sections.append((String(localized: "HTTP Mask", comment: "HTTP Mask for Sudoku protocol"), httpMaskRows))
         }
