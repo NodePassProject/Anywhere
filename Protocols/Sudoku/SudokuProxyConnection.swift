@@ -308,7 +308,7 @@ private struct SudokuTableCacheKey: Hashable {
 
 private enum SudokuTableCache {
     private static let lock = UnfairLock()
-    private static let maxEntries = 8
+    private static let maxEntries = 16
     private static var pairs: [SudokuTableCacheKey: SudokuTablePair] = [:]
     private static var accessOrder: [SudokuTableCacheKey] = []
 
