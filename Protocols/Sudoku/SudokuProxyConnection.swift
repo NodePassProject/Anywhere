@@ -296,6 +296,46 @@ final class SudokuNativeConfig {
     }
 }
 
+private struct SudokuTableCacheKey: Hashable {
+    let key: String
+    let asciiMode: String
+    let customTable: String
+}
+
+private enum SudokuTableCache {
+    private static let lock = UnfairLock()
+    private static let maxEntries = 32
+    private static var pairs: [SudokuTableCacheKey: SudokuTablePair] = [:]
+    private static var insertionOrder: [SudokuTableCacheKey] = []
+
+    static func pair(for config: SudokuNativeConfig) throws -> SudokuTablePair {
+        let cacheKey = SudokuTableCacheKey(
+            key: config.key,
+            asciiMode: config.asciiMode,
+            customTable: config.selectedCustomTable
+        )
+        return try lock.withLock {
+            if let pair = pairs[cacheKey] {
+                return pair
+            }
+
+            let pair = try SudokuTablePair(
+                key: config.key,
+                asciiMode: config.asciiMode,
+                customUplink: config.selectedCustomTable,
+                customDownlink: config.selectedCustomTable
+            )
+            pairs[cacheKey] = pair
+            insertionOrder.append(cacheKey)
+            while insertionOrder.count > maxEntries, let evicted = insertionOrder.first {
+                insertionOrder.removeFirst()
+                pairs.removeValue(forKey: evicted)
+            }
+            return pair
+        }
+    }
+}
+
 final class SudokuTables {
     private let pair: SudokuTablePair
     private let lock = UnfairLock()
@@ -303,12 +343,7 @@ final class SudokuTables {
 
     init(config: SudokuNativeConfig) throws {
         sendsTableHint = config.sendsTableHint
-        pair = try SudokuTablePair(
-            key: config.key,
-            asciiMode: config.asciiMode,
-            customUplink: config.selectedCustomTable,
-            customDownlink: config.selectedCustomTable
-        )
+        pair = try SudokuTableCache.pair(for: config)
     }
 
     func withUplink<T>(_ body: (SudokuTable) throws -> T) rethrows -> T {
