@@ -441,11 +441,18 @@ extension ProxyConfiguration {
         let asciiMode = SudokuASCIIMode(normalized: (json["a"] as? String) ?? SudokuASCIIMode.preferEntropy.shortLinkToken) ?? .preferEntropy
         let mixPortValue = json["m"] as? NSNumber
         let name = (json["n"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let legacyCustomTable = ((json["t"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        var customTables = (json["ts"] as? [String]) ?? []
-        if !legacyCustomTable.isEmpty && !customTables.contains(legacyCustomTable) {
-            customTables.insert(legacyCustomTable, at: 0)
-        }
+        let legacyCustomTable = (
+            (json["t"] as? String)
+                ?? (json["table"] as? String)
+                ?? (json["custom_table"] as? String)
+                ?? ""
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawCustomTables = json["ts"] as? [String]
+        let customTables = SudokuConfiguration.normalizeCustomTables(
+            rawCustomTables ?? [],
+            legacy: legacyCustomTable,
+            legacyFallback: true
+        )
         let enablePureDownlink = !((json["x"] as? Bool) ?? false)
         let httpMask = SudokuHTTPMaskConfiguration(
             disable: (json["hd"] as? Bool) ?? false,

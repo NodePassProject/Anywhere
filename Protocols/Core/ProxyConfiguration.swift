@@ -40,7 +40,9 @@ enum OutboundProtocol: String, Codable {
         switch self {
         case .vless:
             return true
-        case .hysteria, .trojan, .shadowsocks, .socks5, .sudoku, .http11, .http2, .http3:
+        case .sudoku:
+            return true
+        case .hysteria, .trojan, .shadowsocks, .socks5, .http11, .http2, .http3:
             return false
         }
     }
@@ -367,18 +369,19 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 ) ?? .preferEntropy
                 let httpMask = try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .sudokuHTTPMask) ?? .init()
                 let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .sudokuCustomTable) ?? ""
-                var mergedCustomTables = try container.decodeIfPresent([String].self, forKey: .sudokuCustomTables) ?? []
-                let trimmedLegacyCustomTable = legacyCustomTable.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmedLegacyCustomTable.isEmpty && !mergedCustomTables.contains(trimmedLegacyCustomTable) {
-                    mergedCustomTables.insert(trimmedLegacyCustomTable, at: 0)
-                }
+                let decodedCustomTables = try container.decodeIfPresent([String].self, forKey: .sudokuCustomTables)
+                let customTables = SudokuConfiguration.normalizeCustomTables(
+                    decodedCustomTables ?? [],
+                    legacy: legacyCustomTable,
+                    legacyFallback: true
+                )
                 outbound = .sudoku(SudokuConfiguration(
                     key: try container.decodeIfPresent(String.self, forKey: .sudokuKey) ?? "",
                     aeadMethod: aead,
                     paddingMin: try container.decodeIfPresent(Int.self, forKey: .sudokuPaddingMin) ?? 5,
                     paddingMax: try container.decodeIfPresent(Int.self, forKey: .sudokuPaddingMax) ?? 15,
                     asciiMode: asciiMode,
-                    customTables: mergedCustomTables,
+                    customTables: customTables,
                     enablePureDownlink: try container.decodeIfPresent(Bool.self, forKey: .sudokuEnablePureDownlink) ?? true,
                     httpMask: httpMask
                 ))

@@ -128,8 +128,14 @@ struct SudokuHTTPMaskConfiguration: Codable, Hashable {
     }
 
     static func normalizePathRoot(_ raw: String) -> String {
-        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmed.isEmpty else { return "" }
+        let isAllowed: (UInt8) -> Bool = {
+            ($0 >= 65 && $0 <= 90) || ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 95 || $0 == 45
+        }
+        guard trimmed.utf8.allSatisfy(isAllowed) else { return "" }
+        return trimmed
     }
 }
 
@@ -169,6 +175,7 @@ struct SudokuConfiguration: Codable, Hashable {
         case paddingMin
         case paddingMax
         case asciiMode
+        case table
         case customTable
         case customTables
         case enablePureDownlink
@@ -178,12 +185,10 @@ struct SudokuConfiguration: Codable, Hashable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
-        let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .customTable) ?? ""
-        var mergedCustomTables = try container.decodeIfPresent([String].self, forKey: .customTables) ?? []
-        let trimmedLegacyCustomTable = legacyCustomTable.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedLegacyCustomTable.isEmpty && !mergedCustomTables.contains(trimmedLegacyCustomTable) {
-            mergedCustomTables.insert(trimmedLegacyCustomTable, at: 0)
-        }
+        let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .customTable)
+            ?? container.decodeIfPresent(String.self, forKey: .table)
+            ?? ""
+        let decodedCustomTables = try container.decodeIfPresent([String].self, forKey: .customTables)
 
         self.init(
             key: try container.decode(String.self, forKey: .key),
@@ -191,7 +196,11 @@ struct SudokuConfiguration: Codable, Hashable {
             paddingMin: try container.decodeIfPresent(Int.self, forKey: .paddingMin) ?? 5,
             paddingMax: try container.decodeIfPresent(Int.self, forKey: .paddingMax) ?? 15,
             asciiMode: try container.decodeIfPresent(SudokuASCIIMode.self, forKey: .asciiMode) ?? .preferEntropy,
-            customTables: mergedCustomTables,
+            customTables: Self.normalizeCustomTables(
+                decodedCustomTables ?? [],
+                legacy: legacyCustomTable,
+                legacyFallback: true
+            ),
             enablePureDownlink: try container.decodeIfPresent(Bool.self, forKey: .enablePureDownlink) ?? true,
             httpMask: try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .httpMask) ?? .init()
         )
@@ -209,7 +218,10 @@ struct SudokuConfiguration: Codable, Hashable {
         try container.encode(httpMask, forKey: .httpMask)
     }
 
-    private static func normalizeCustomTables(_ tables: [String]) -> [String] {
+    /// Normalizes custom table entries. Plural table entries win when they
+    /// contain at least one usable value; otherwise the legacy single-table
+    /// field remains a fallback.
+    static func normalizeCustomTables(_ tables: [String], legacy: String = "", legacyFallback: Bool = true) -> [String] {
         var seen = Set<String>()
         var normalized: [String] = []
         for table in tables {
@@ -218,6 +230,12 @@ struct SudokuConfiguration: Codable, Hashable {
                 continue
             }
             normalized.append(trimmed)
+        }
+        if normalized.isEmpty && legacyFallback {
+            let trimmedLegacy = legacy.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedLegacy.isEmpty {
+                normalized.append(trimmedLegacy)
+            }
         }
         return normalized
     }
