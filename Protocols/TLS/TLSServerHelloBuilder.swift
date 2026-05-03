@@ -97,6 +97,152 @@ enum TLSServerHelloBuilder {
         return wrapHandshake(type: 0x02, body: body)
     }
 
+    // MARK: - TLS 1.2 ServerHello
+
+    /// Builds a TLS 1.2 ServerHello.
+    ///
+    /// Differs from the TLS 1.3 form in three ways: legacy_version is the
+    /// negotiated value (0x0303) rather than the supported_versions sentinel;
+    /// no `supported_versions` extension is emitted; and ALPN/EMS extensions
+    /// (which TLS 1.3 carries inside the encrypted EncryptedExtensions
+    /// message) appear directly in the ServerHello extension list.
+    ///
+    /// - Parameters:
+    ///   - legacySessionID: 32-byte session ID echoed verbatim from the
+    ///     ClientHello (RFC 5246 §7.4.1.3).
+    ///   - cipherSuite: The TLS 1.2 cipher suite the server chose.
+    ///   - alpn: The negotiated ALPN protocol, or nil to omit the extension.
+    ///   - extendedMasterSecret: Whether to advertise EMS (RFC 7627) — set
+    ///     when the client offered the extension.
+    ///   - serverRandom: 32-byte server-side random (returned by the caller
+    ///     so it can mix into the master_secret seed downstream).
+    /// - Returns: A complete handshake-layer ServerHello (no record header).
+    static func buildServerHello12(
+        legacySessionID: Data,
+        cipherSuite: UInt16,
+        alpn: String?,
+        extendedMasterSecret: Bool,
+        secureRenegotiation: Bool,
+        serverRandom: Data
+    ) -> Data {
+        precondition(serverRandom.count == 32)
+
+        var body = Data()
+        body.append(0x03); body.append(0x03)                          // version = TLS 1.2
+        body.append(serverRandom)
+        body.append(UInt8(legacySessionID.count))
+        body.append(legacySessionID)
+        body.append(UInt8((cipherSuite >> 8) & 0xFF))
+        body.append(UInt8(cipherSuite & 0xFF))
+        body.append(0x00)                                             // legacy_compression_method = null
+
+        // Extensions. RFC 5246 §7.4.1.4: an extension MUST NOT appear in
+        // the ServerHello unless it appeared in the ClientHello. Each
+        // extension is gated on the corresponding ClientHello signal.
+        var extensions = Data()
+        if extendedMasterSecret {
+            extensions.append(0x00); extensions.append(0x17)          // ext type = extended_master_secret
+            extensions.append(0x00); extensions.append(0x00)          // ext data len = 0
+        }
+        if let alpn {
+            extensions.append(buildALPNExtension(protocols: [alpn]))
+        }
+        if secureRenegotiation {
+            extensions.append(0xFF); extensions.append(0x01)          // ext type = renegotiation_info
+            extensions.append(0x00); extensions.append(0x01)          // ext data len = 1
+            extensions.append(0x00)                                   // empty renegotiated_connection
+        }
+
+        body.append(UInt8((extensions.count >> 8) & 0xFF))
+        body.append(UInt8(extensions.count & 0xFF))
+        body.append(extensions)
+
+        return wrapHandshake(type: 0x02, body: body)
+    }
+
+    // MARK: - TLS 1.2 Certificate
+
+    /// Builds a TLS 1.2 Certificate message (RFC 5246 §7.4.2).
+    ///
+    /// Wire shape differs from TLS 1.3: no `certificate_request_context`
+    /// length prefix and no per-entry extension list — just a length-
+    /// prefixed list of length-prefixed cert bodies.
+    static func buildCertificate12(leafCertDER: Data) -> Data {
+        var body = Data()
+
+        // certificate_list: each entry is length(3) + cert
+        var entry = Data()
+        let certLen = leafCertDER.count
+        entry.append(UInt8((certLen >> 16) & 0xFF))
+        entry.append(UInt8((certLen >> 8) & 0xFF))
+        entry.append(UInt8(certLen & 0xFF))
+        entry.append(leafCertDER)
+
+        let listLen = entry.count
+        body.append(UInt8((listLen >> 16) & 0xFF))
+        body.append(UInt8((listLen >> 8) & 0xFF))
+        body.append(UInt8(listLen & 0xFF))
+        body.append(entry)
+
+        return wrapHandshake(type: 0x0B, body: body)
+    }
+
+    // MARK: - TLS 1.2 ServerKeyExchange
+
+    /// Builds the ECDHE ServerKeyExchange params blob (the bytes that get
+    /// signed and that prefix the SKE message).
+    ///
+    /// Format (RFC 8422 §5.4): curve_type(1) || named_curve(2) ||
+    /// pubkey_len(1) || pubkey(N).
+    static func serverECDHEParams(namedCurve: UInt16, publicKey: Data) -> Data {
+        var params = Data()
+        params.append(0x03)                                           // curve_type = named_curve
+        params.append(UInt8((namedCurve >> 8) & 0xFF))
+        params.append(UInt8(namedCurve & 0xFF))
+        params.append(UInt8(publicKey.count))
+        params.append(publicKey)
+        return params
+    }
+
+    /// Builds a TLS 1.2 ServerKeyExchange message for an ECDHE_ECDSA cipher
+    /// suite (RFC 5246 §7.4.3, RFC 8422 §5.4).
+    ///
+    /// - Parameters:
+    ///   - params: The pre-built params blob — also the prefix of the
+    ///     signed payload (caller computed `client_random || server_random
+    ///     || params` and signed that).
+    ///   - signatureAlgorithm: 0x0403 = ecdsa_secp256r1_sha256.
+    ///   - signature: DER-encoded ECDSA signature.
+    static func buildServerKeyExchange(
+        params: Data,
+        signatureAlgorithm: UInt16,
+        signature: Data
+    ) -> Data {
+        var body = Data()
+        body.append(params)
+        body.append(UInt8((signatureAlgorithm >> 8) & 0xFF))
+        body.append(UInt8(signatureAlgorithm & 0xFF))
+        body.append(UInt8((signature.count >> 8) & 0xFF))
+        body.append(UInt8(signature.count & 0xFF))
+        body.append(signature)
+        return wrapHandshake(type: 0x0C, body: body)
+    }
+
+    // MARK: - TLS 1.2 ServerHelloDone
+
+    /// Builds a TLS 1.2 ServerHelloDone message (RFC 5246 §7.4.5).
+    static func buildServerHelloDone() -> Data {
+        wrapHandshake(type: 0x0E, body: Data())
+    }
+
+    // MARK: - TLS 1.2 Finished
+
+    /// Builds a TLS 1.2 Finished message (RFC 5246 §7.4.9). Verify data is
+    /// always 12 bytes for TLS 1.2.
+    static func buildFinished12(verifyData: Data) -> Data {
+        wrapHandshake(type: 0x14, body: verifyData)
+    }
+
     // MARK: - EncryptedExtensions
 
     /// Builds an EncryptedExtensions handshake message advertising the

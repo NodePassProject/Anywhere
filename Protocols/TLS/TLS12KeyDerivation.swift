@@ -18,6 +18,27 @@ struct TLS12Keys {
     let serverIV: Data
 }
 
+/// Running TLS 1.2 server-side handshake state, mirroring
+/// ``TLS13ServerHandshakeState``.
+///
+/// The TLS 1.2 transcript is the concatenation of every plaintext
+/// handshake message (no record framing). It is appended to as messages
+/// are sent and received, and hashed at two points: at the master_secret
+/// derivation (when EMS is in use, hashing through ClientKeyExchange) and
+/// at the Finished verify_data computation (hashing through the peer's
+/// Finished).
+struct TLS12ServerHandshakeState {
+    var transcript: Data = Data()
+    var masterSecret: Data?
+    var keys: TLS12Keys?
+    var clientRandom: Data?
+    var serverRandom: Data?
+    var extendedMasterSecret: Bool = false
+    /// Set once the client's ChangeCipherSpec has been observed; subsequent
+    /// handshake records from the client are interpreted as encrypted.
+    var receivedCCS: Bool = false
+}
+
 /// TLS 1.2 key derivation utilities.
 ///
 /// Implements the TLS 1.2 PRF (RFC 5246 §5) and key schedule,

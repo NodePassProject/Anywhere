@@ -24,6 +24,15 @@ struct TLSClientHelloParsed {
     let random: Data
     let legacySessionID: Data
     let compressionMethods: [UInt8]
+    /// Whether the client offered the extended_master_secret extension (RFC 7627).
+    /// Only meaningful for TLS 1.2 negotiations.
+    let extendedMasterSecret: Bool
+    /// Whether the client signaled support for secure renegotiation (RFC 5746),
+    /// either by including the `renegotiation_info` extension or by listing
+    /// the TLS_EMPTY_RENEGOTIATION_INFO_SCSV (0x00FF) signalling cipher
+    /// suite. The server MUST NOT emit `renegotiation_info` in its
+    /// ServerHello unless one of these was present.
+    let secureRenegotiation: Bool
     /// Raw ClientHello (4-byte handshake header + body) — used for the TLS 1.3
     /// transcript hash.
     let handshakeMessage: Data
@@ -103,6 +112,13 @@ enum TLSClientHelloParser {
 
         let parsedExtensions = try parseExtensions(extensions)
 
+        // RFC 5746 §3.6: a ClientHello signals secure renegotiation either
+        // by carrying the `renegotiation_info` extension or by listing the
+        // TLS_EMPTY_RENEGOTIATION_INFO_SCSV (0x00FF) cipher suite. The
+        // ServerHello MUST NOT emit the extension otherwise.
+        let secureRenegotiation = parsedExtensions.renegotiationInfo
+            || cipherSuites.contains(0x00FF)
+
         return TLSClientHelloParsed(
             serverName: parsedExtensions.serverName,
             cipherSuites: cipherSuites,
@@ -115,6 +131,8 @@ enum TLSClientHelloParser {
             random: random,
             legacySessionID: sessionID,
             compressionMethods: compressionMethods,
+            extendedMasterSecret: parsedExtensions.extendedMasterSecret,
+            secureRenegotiation: secureRenegotiation,
             handshakeMessage: handshakeMessage
         )
     }
@@ -126,6 +144,8 @@ enum TLSClientHelloParser {
         var signatureAlgorithms: [UInt16] = []
         var alpnProtocols: [String] = []
         var keyShares: [UInt16: Data] = [:]
+        var extendedMasterSecret: Bool = false
+        var renegotiationInfo: Bool = false
     }
 
     private static func parseExtensions(_ buf: Data) throws -> ParsedExtensions {
@@ -140,6 +160,8 @@ enum TLSClientHelloParser {
             switch UInt16(extType) {
             case 0x0000: // server_name
                 result.serverName = parseServerName(extData)
+            case 0x0017: // extended_master_secret (RFC 7627) — empty data
+                result.extendedMasterSecret = true
             case 0x002B: // supported_versions (ClientHello: list)
                 result.supportedVersions = parseSupportedVersionsClient(extData)
             case 0x000A: // supported_groups
@@ -150,6 +172,8 @@ enum TLSClientHelloParser {
                 result.alpnProtocols = parseALPN(extData)
             case 0x0033: // key_share (ClientHello: list of (group, exchange))
                 result.keyShares = parseKeyShares(extData)
+            case 0xFF01: // renegotiation_info (RFC 5746)
+                result.renegotiationInfo = true
             default:
                 continue
             }
