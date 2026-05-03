@@ -342,3 +342,38 @@ struct TLS13KeyDerivation {
         computeFinishedVerifyData(trafficSecret: clientTrafficSecret, transcript: transcript)
     }
 }
+
+// MARK: - Server-Side Helpers
+
+/// The TLS 1.3 server runs the same key schedule as the client — only the
+/// "which side encrypts with which key" assignment differs. The math
+/// helpers ``deriveHandshakeKeys`` and ``deriveApplicationKeys`` remain
+/// shared; the server simply picks ``serverKey``/``serverIV`` to encrypt
+/// and ``clientKey``/``clientIV`` to decrypt.
+///
+/// A separate type wraps the running TLS 1.3 server-side state so the
+/// orchestrator (``TLSServer``) can step through messages without
+/// reaching into the client-side ``TLS13HandshakeState`` struct (whose
+/// fields name "server" and "client" relative to the local role).
+struct TLS13ServerHandshakeState {
+    var keyDerivation: TLS13KeyDerivation?
+    var handshakeSecret: Data?
+    var handshakeKeys: TLSHandshakeKeys?
+    var applicationKeys: TLSApplicationKeys?
+    /// Running transcript: ClientHello || (HRR || ClientHello2) || ServerHello || ...
+    var transcript: Data = Data()
+    /// Sequence number for handshake-keys decryption of inbound messages
+    /// (i.e. client-encrypted Finished). Increments per encrypted record.
+    var clientHandshakeSeqNum: UInt64 = 0
+    /// Sequence number for handshake-keys encryption of outbound messages
+    /// (EE/Cert/CertVerify/Finished, possibly split across records).
+    var serverHandshakeSeqNum: UInt64 = 0
+}
+
+extension TLS13KeyDerivation {
+    /// Convenience wrapper: returns finished verify_data for the server
+    /// direction. Same math as the client side.
+    func computeServerFinishedVerifyData(serverTrafficSecret: Data, transcript: Data) -> Data {
+        computeFinishedVerifyData(trafficSecret: serverTrafficSecret, transcript: transcript)
+    }
+}

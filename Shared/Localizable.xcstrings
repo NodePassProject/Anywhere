@@ -527,6 +527,9 @@
     "0-100" : {
       "shouldTranslate" : false
     },
+    "1. Tap “Install Profile” — the system will prompt you to download and install the profile.\n2. Open Settings → General → VPN & Device Management → install the profile.\n3. Open Settings → General → About → Certificate Trust Settings → enable “Anywhere MITM Root”." : {
+
+    },
     "A proxy chain needs at least 2 proxies." : {
       "localizations" : {
         "ar" : {
@@ -1526,6 +1529,9 @@
         }
       }
     },
+    "Any previously installed MITM profile will stop working until you re-install the new root." : {
+
+    },
     "Anywhere is an independent project and is not affiliated with, endorsed by, or sponsored by any of the companies listed below." : {
       "localizations" : {
         "ar" : {
@@ -1699,6 +1705,9 @@
           }
         }
       }
+    },
+    "Apps will accept the MITM certificate." : {
+
     },
     "ASCII" : {
       "shouldTranslate" : false
@@ -2060,6 +2069,9 @@
           }
         }
       }
+    },
+    "Certificate" : {
+
     },
     "ChaCha20-Poly1305" : {
       "shouldTranslate" : false
@@ -2821,6 +2833,12 @@
           }
         }
       }
+    },
+    "Delete Root" : {
+
+    },
+    "Delete Root?" : {
+
     },
     "Diagnostics" : {
       "localizations" : {
@@ -3645,6 +3663,9 @@
         }
       }
     },
+    "Edit Rule" : {
+
+    },
     "Enable" : {
       "localizations" : {
         "ar" : {
@@ -3876,6 +3897,9 @@
           }
         }
       }
+    },
+    "Enable MITM" : {
+
     },
     "Enabling Encrypted DNS will increase connection wait time and prevent routing rules from working." : {
       "localizations" : {
@@ -4226,6 +4250,9 @@
         }
       }
     },
+    "Error" : {
+
+    },
     "Exit" : {
       "localizations" : {
         "ar" : {
@@ -4342,12 +4369,33 @@
         }
       }
     },
+    "Export Certificate (.cer)" : {
+
+    },
+    "Failed to export certificate." : {
+
+    },
+    "Failed to export profile." : {
+
+    },
+    "Failed to open profile installer." : {
+
+    },
     "Fingerprint" : {
       "shouldTranslate" : false
     },
     "Flow" : {
       "comment" : "Flow for VLESS protocol TCP transport",
       "shouldTranslate" : false
+    },
+    "Generate a CA root certificate stored in this device's keychain. The private key never leaves the device." : {
+
+    },
+    "Generate a root to begin." : {
+
+    },
+    "Generate Root" : {
+
     },
     "Get Started" : {
       "localizations" : {
@@ -4764,6 +4812,9 @@
         }
       }
     },
+    "Hostnames" : {
+
+    },
     "HTTP Mask" : {
       "comment" : "HTTP Mask for Sudoku protocol",
       "shouldTranslate" : false
@@ -5127,6 +5178,15 @@
           }
         }
       }
+    },
+    "Install" : {
+
+    },
+    "Install Profile" : {
+
+    },
+    "Install the profile and enable trust to use MITM." : {
+
     },
     "Invalid chain — some proxies are missing" : {
       "localizations" : {
@@ -6009,6 +6069,12 @@
         }
       }
     },
+    "MITM" : {
+
+    },
+    "MITM intercepts and decrypts TLS traffic for matched hostnames. Apps with certificate pinning will fail. Only enable for hostnames you understand." : {
+
+    },
     "Mode" : {
       "localizations" : {
         "ar" : {
@@ -6774,6 +6840,12 @@
         }
       }
     },
+    "No Root Yet" : {
+
+    },
+    "No rules" : {
+
+    },
     "No trusted certificates" : {
       "localizations" : {
         "ar" : {
@@ -7121,6 +7193,9 @@
           }
         }
       }
+    },
+    "Not Trusted" : {
+
     },
     "Off" : {
       "localizations" : {
@@ -8077,6 +8152,18 @@
         }
       }
     },
+    "Regenerate" : {
+
+    },
+    "Regenerate Root" : {
+
+    },
+    "Regenerate Root?" : {
+
+    },
+    "Regenerating or deleting the root invalidates any previously installed MITM profile." : {
+
+    },
     "REJECT" : {
       "localizations" : {
         "ar" : {
@@ -8195,6 +8282,9 @@
           }
         }
       }
+    },
+    "Removes both the certificate and its private key. You'll need to regenerate to use MITM again." : {
+
     },
     "Rename" : {
       "localizations" : {
@@ -8369,6 +8459,9 @@
           }
         }
       }
+    },
+    "Root Certificate" : {
+
     },
     "Route Preview" : {
       "localizations" : {
@@ -9374,6 +9467,9 @@
     "SOCKS5" : {
       "shouldTranslate" : false
     },
+    "Status" : {
+
+    },
     "Stream One" : {
       "shouldTranslate" : false
     },
@@ -10089,6 +10185,9 @@
     "Trojan" : {
       "shouldTranslate" : false
     },
+    "Trusted" : {
+
+    },
     "Trusted Certificates" : {
       "localizations" : {
         "ar" : {
@@ -10320,6 +10419,9 @@
           }
         }
       }
+    },
+    "Unsupported" : {
+
     },
     "Update" : {
       "localizations" : {
@@ -10553,6 +10655,9 @@
           }
         }
       }
+    },
+    "Use \"Domain Suffix\" for label-aligned matches (\"example.com\" matches \"www.example.com\"). Use \"Domain Keyword\" for substring matches." : {
+
     },
     "User Agent" : {
       "shouldTranslate" : false

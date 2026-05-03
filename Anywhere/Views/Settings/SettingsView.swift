@@ -87,6 +87,11 @@ struct SettingsView: View {
                 } label: {
                     TextWithColorfulIcon(title: "Trusted Certificates", comment: nil, systemName: "checkmark.seal.fill", foregroundColor: .white, backgroundColor: .green)
                 }
+                NavigationLink {
+                    MITMSettingsView()
+                } label: {
+                    TextWithColorfulIcon(title: "MITM", comment: nil, systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .indigo)
+                }
             }
 
             Section {

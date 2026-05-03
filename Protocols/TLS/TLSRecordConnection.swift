@@ -80,6 +80,21 @@ class TLSRecordConnection {
 
     // MARK: Initialization
 
+    /// Side of the TLS connection this record layer represents. The math
+    /// is identical for client and server — only the "which key encrypts
+    /// outbound, which decrypts inbound" assignment swaps.
+    enum Direction {
+        /// Local role is client: encrypt with clientKey, decrypt with serverKey.
+        case client
+        /// Local role is server: encrypt with serverKey, decrypt with clientKey.
+        case server
+    }
+
+    /// Whether this connection encrypts in the client or server direction.
+    /// Defaults to ``Direction/client`` so existing call sites keep their
+    /// previous behaviour.
+    let direction: Direction
+
     /// Creates a new TLS 1.3 record connection with pre-derived TLS keys.
     ///
     /// - Parameters:
@@ -88,7 +103,10 @@ class TLSRecordConnection {
     ///   - serverKey: The server-to-client encryption key.
     ///   - serverIV: The server-to-client initialization vector (12 bytes).
     ///   - cipherSuite: The negotiated TLS 1.3 cipher suite.
-    init(clientKey: Data, clientIV: Data, serverKey: Data, serverIV: Data, cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256) {
+    ///   - direction: Whether the local endpoint is the client or server.
+    init(clientKey: Data, clientIV: Data, serverKey: Data, serverIV: Data,
+         cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256,
+         direction: Direction = .client) {
         self.tlsVersion = 0x0304
         self.clientKey = clientKey
         self.clientIV = clientIV
@@ -99,6 +117,7 @@ class TLSRecordConnection {
         self.cipherSuite = cipherSuite
         self.clientSymmetricKey = SymmetricKey(data: clientKey)
         self.serverSymmetricKey = SymmetricKey(data: serverKey)
+        self.direction = direction
     }
 
     /// Creates a new TLS 1.2 record connection with pre-derived keys.
@@ -136,6 +155,7 @@ class TLSRecordConnection {
         self.serverSeqNum = initialServerSeqNum
         self.clientSymmetricKey = SymmetricKey(data: clientKey)
         self.serverSymmetricKey = SymmetricKey(data: serverKey)
+        self.direction = .client
     }
 
     /// Pre-populates the receive buffer with data that was read during the
@@ -146,6 +166,31 @@ class TLSRecordConnection {
         receiveBuffer.append(data)
         receiveLock.unlock()
     }
+
+    // MARK: - Direction-aware Key/IV Selection
+    //
+    // ``send`` always encrypts in the local-egress direction and ``receive``
+    // always decrypts in the local-ingress direction. The four key/IV
+    // fields are populated using TLS 1.3's "client_*" and "server_*"
+    // labels — which coincide with local egress/ingress only when the
+    // local role is the client. For ``Direction/server`` we pick the
+    // opposite pair.
+    //
+    // The same swap applies to per-direction sequence numbers.
+
+    private var egressKey: Data { direction == .server ? serverKey : clientKey }
+    private var egressIV: Data { direction == .server ? serverIV : clientIV }
+    private var egressSymmetricKey: SymmetricKey {
+        direction == .server ? serverSymmetricKey : clientSymmetricKey
+    }
+    private var egressMACKey: Data { direction == .server ? serverMACKey : clientMACKey }
+
+    private var ingressKey: Data { direction == .server ? clientKey : serverKey }
+    private var ingressIV: Data { direction == .server ? clientIV : serverIV }
+    private var ingressSymmetricKey: SymmetricKey {
+        direction == .server ? clientSymmetricKey : serverSymmetricKey
+    }
+    private var ingressMACKey: Data { direction == .server ? clientMACKey : serverMACKey }
 
     // MARK: - Send (Encrypted)
 
@@ -436,8 +481,14 @@ class TLSRecordConnection {
 
             if contentType == 0x17 { // Application Data
                 seqLock.lock()
-                let seqNum = serverSeqNum
-                serverSeqNum += 1
+                let seqNum: UInt64
+                if direction == .server {
+                    seqNum = clientSeqNum
+                    clientSeqNum += 1
+                } else {
+                    seqNum = serverSeqNum
+                    serverSeqNum += 1
+                }
                 seqLock.unlock()
 
                 do {
@@ -546,14 +597,20 @@ class TLSRecordConnection {
     /// Record = header(5) || ciphertext || tag(16).
     private func encryptTLS13Record(plaintext: Data, contentType: UInt8 = 0x17) throws -> Data {
         seqLock.lock()
-        let seqNum = clientSeqNum
-        clientSeqNum += 1
+        let seqNum: UInt64
+        if direction == .server {
+            seqNum = serverSeqNum
+            serverSeqNum += 1
+        } else {
+            seqNum = clientSeqNum
+            clientSeqNum += 1
+        }
         seqLock.unlock()
 
         let innerLen = plaintext.count + 1
         let encryptedLen = innerLen + 16
 
-        var nonce = clientIV
+        var nonce = egressIV
         xorSeqIntoNonce(&nonce, seqNum: seqNum)
 
         var innerPlaintext = Data(count: innerLen)
@@ -564,7 +621,7 @@ class TLSRecordConnection {
 
         let aad = Data([0x17, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
 
-        let (sealedCt, sealedTag) = try sealAEAD(plaintext: innerPlaintext, nonce: nonce, aad: aad, key: clientSymmetricKey)
+        let (sealedCt, sealedTag) = try sealAEAD(plaintext: innerPlaintext, nonce: nonce, aad: aad, key: egressSymmetricKey)
 
         var record = Data(capacity: 5 + encryptedLen)
         record.append(aad)
@@ -579,13 +636,13 @@ class TLSRecordConnection {
             throw RealityError.handshakeFailed("Ciphertext too short")
         }
 
-        var nonce = serverIV
+        var nonce = ingressIV
         xorSeqIntoNonce(&nonce, seqNum: seqNum)
 
         let ct = Data(ciphertext.prefix(ciphertext.count - 16))
         let tag = Data(ciphertext.suffix(16))
 
-        let decrypted = try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: Data(header), key: serverSymmetricKey)
+        let decrypted = try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: Data(header), key: ingressSymmetricKey)
 
         guard !decrypted.isEmpty else {
             throw RealityError.handshakeFailed("Empty decrypted data")

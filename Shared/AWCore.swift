@@ -79,6 +79,7 @@ final class AWCore {
         static let proxyMode = "proxyMode"
         static let proxyServerAddresses = "proxyServerAddresses"
         static let remnawaveHWIDEnabled = "remnawaveHWIDEnabled"
+        static let mitmData = "mitmData"
         static let routingData = "routingData"
         static let ruleSetAssignments = "ruleSetAssignments"
         static let selectedConfigurationId = "selectedConfigurationId"
@@ -181,6 +182,14 @@ final class AWCore {
 
     static func setRoutingData(_ data: Data) {
         userDefaults.set(data, forKey: UserDefaultsKey.routingData)
+    }
+
+    static func getMITMData() -> Data? {
+        userDefaults.data(forKey: UserDefaultsKey.mitmData)
+    }
+
+    static func setMITMData(_ data: Data) {
+        userDefaults.set(data, forKey: UserDefaultsKey.mitmData)
     }
 
     // Settings
@@ -310,6 +319,7 @@ final class AWCore {
         static let tunnelSettingsChanged = "\(Identifier.bundle).tunnelSettingsChanged" as CFString
         static let routingChanged = "\(Identifier.bundle).routingChanged" as CFString
         static let certificatePolicyChanged = "\(Identifier.bundle).certificatePolicyChanged" as CFString
+        static let mitmChanged = "\(Identifier.bundle).mitmChanged" as CFString
     }
 
     private static var lastPostTimes = [CFNotificationName: CFAbsoluteTime]()
@@ -358,5 +368,9 @@ final class AWCore {
 
     static func notifyCertificatePolicyChanged() {
         postThrottled(CFNotificationName(Notification.certificatePolicyChanged))
+    }
+
+    static func notifyMITMChanged() {
+        postThrottled(CFNotificationName(Notification.mitmChanged))
     }
 }
