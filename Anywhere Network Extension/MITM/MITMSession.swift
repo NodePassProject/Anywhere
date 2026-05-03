@@ -131,8 +131,11 @@ final class MITMSession {
     private let proxyConnection: ProxyConnection
     private let proxyClient: ProxyClient?
 
-    /// Bytes received from the client before the inner handshake began —
-    /// at minimum a complete ClientHello.
+    /// Bytes received from the client before the inner ``TLSServer`` was
+    /// created. Always begins with a complete ClientHello; may also
+    /// contain bytes the client pushed while we were finishing the outer
+    /// handshake. Drained into ``TLSServer/feed(_:)`` once the inner leg
+    /// starts.
     private var pendingClientBytes: Data
 
     private var tlsServer: TLSServer?
@@ -148,6 +151,13 @@ final class MITMSession {
     private var outerRecord: TLSRecordConnection?
 
     private let rewriter = MITMRewriter()
+    private let h2Rewriter = MITMHTTP2Rewriter()
+
+    /// HTTP/2 frame translators — populated only when both legs
+    /// negotiated `h2` ALPN. ``inboundH2`` rewrites the client → server
+    /// direction; ``outboundH2`` rewrites the server → client direction.
+    private var inboundH2: MITMHTTP2Connection?
+    private var outboundH2: MITMHTTP2Connection?
 
     private var torn = false
 
@@ -183,21 +193,31 @@ final class MITMSession {
 
     // MARK: - Lifecycle
 
-    /// Starts both handshakes in parallel. Must be called on `lwipQueue`.
+    /// Starts the outer handshake first; the inner handshake follows once
+    /// the outer leg has negotiated an ALPN, so both sides commit to the
+    /// same application protocol (h2 or http/1.1). Must be called on
+    /// `lwipQueue`.
     func start(sni: String) {
-        startInnerHandshake(sni: sni)
-        startOuterHandshake(sni: sni)
+        // Pull the client's ALPN preferences out of the buffered
+        // ClientHello so we offer the same set upstream.
+        let clientALPNs = parseClientALPNs(from: pendingClientBytes)
+        startOuterHandshake(sni: sni, alpns: clientALPNs)
     }
 
-    /// Feeds bytes received from the client. While the inner handshake is
-    /// running, bytes go to ``TLSServer``; afterwards, they land in the
-    /// inner transport so ``TLSRecordConnection`` can decrypt them.
+    /// Feeds bytes received from the client. Until the inner ``TLSServer``
+    /// exists (i.e. while the outer handshake is still in progress) we
+    /// hold the bytes in ``pendingClientBytes``; afterwards they go to the
+    /// inner ``TLSServer`` or, post-handshake, to the inner transport.
     func feedClientBytes(_ data: Data) {
         guard !torn else { return }
         if innerRecord != nil {
             innerTransport.feedFromClient(data)
+        } else if let tlsServer {
+            tlsServer.feed(data)
         } else {
-            tlsServer?.feed(data)
+            // Outer handshake still running — buffer for the inner
+            // ``TLSServer`` once it is created.
+            pendingClientBytes.append(data)
         }
     }
 
@@ -229,19 +249,25 @@ final class MITMSession {
 
     // MARK: - Inner Handshake
 
-    private func startInnerHandshake(sni: String) {
+    /// Starts the inner-leg TLS server. Called only after the outer leg
+    /// has finished negotiating ALPN, so we can advertise the matching
+    /// protocol back to the client.
+    private func startInnerHandshake(sni: String, alpn: String) {
         do {
             let leaf = try leafCache.leaf(for: sni)
             let server = TLSServer(
                 leafCert: leaf.certificate,
                 leafCertDER: leaf.certificateDER,
                 leafPrivateKey: leaf.privateKeySecKey,
-                leafSigningKeyP256: leaf.privateKey
+                leafSigningKeyP256: leaf.privateKey,
+                acceptableALPNs: [alpn]
             )
             server.delegate = self
             tlsServer = server
 
-            // Drive in any bytes already buffered (the ClientHello at minimum).
+            // Drive in any bytes already buffered (the ClientHello plus
+            // anything the client sent while we were finishing the outer
+            // handshake).
             server.feed(pendingClientBytes)
             pendingClientBytes.removeAll(keepingCapacity: false)
         } catch {
@@ -252,10 +278,17 @@ final class MITMSession {
 
     // MARK: - Outer Handshake
 
-    private func startOuterHandshake(sni: String) {
+    private func startOuterHandshake(sni: String, alpns: [String]) {
+        // NOTE: ``minVersion`` / ``maxVersion`` here are decorative —
+        // ``TLSClient`` doesn't enforce them for browser-fingerprinted
+        // ClientHellos, so the upstream may negotiate either TLS 1.2 or
+        // TLS 1.3. ALPN is observed correctly in both cases (TLS 1.3 in
+        // EncryptedExtensions, TLS 1.2 in ServerHello). If we ever need
+        // a hard version floor, ``TLSClient`` must alert on a TLS 1.2
+        // ServerHello when ``maxVersion == .tls13``.
         let configuration = TLSConfiguration(
             serverName: sni,
-            alpn: ["http/1.1"],
+            alpn: alpns.isEmpty ? ["h2", "http/1.1"] : alpns,
             fingerprint: .chrome133,
             minVersion: .tls13,
             maxVersion: .tls13
@@ -270,7 +303,11 @@ final class MITMSession {
                 switch result {
                 case .success(let record):
                     self.outerRecord = record
-                    self.tryStartShuttling()
+                    // Inner handshake commits to whichever ALPN the upstream
+                    // server chose; fall back to http/1.1 if the server
+                    // omitted the extension.
+                    let alpn = record.negotiatedALPN.isEmpty ? "http/1.1" : record.negotiatedALPN
+                    self.startInnerHandshake(sni: sni, alpn: alpn)
                 case .failure(let error):
                     logger.error("[MITM] Outer handshake failed for \(self.dstHost): \(error)")
                     self.cancel(error: error)
@@ -279,10 +316,29 @@ final class MITMSession {
         }
     }
 
+    // MARK: - ALPN parsing
+
+    /// Best-effort extraction of the client's ALPN list out of a buffered
+    /// TLS ClientHello. Returns an empty list when parsing fails — the
+    /// caller falls back to a default offer.
+    private func parseClientALPNs(from buffer: Data) -> [String] {
+        guard !buffer.isEmpty else { return [] }
+        guard let parsed = try? TLSClientHelloParser.parse(buffer) else { return [] }
+        return parsed.alpnProtocols
+    }
+
     // MARK: - Shuttle
 
     private func tryStartShuttling() {
         guard let innerRecord, let outerRecord else { return }
+        // Both legs commit to the same ALPN by construction (the inner
+        // server is created with the outer's negotiated value as its
+        // sole acceptable ALPN). When that value is `h2`, swap the
+        // byte-stream rewriter for the frame-aware h2 translators.
+        if innerRecord.negotiatedALPN == "h2", outerRecord.negotiatedALPN == "h2" {
+            inboundH2 = MITMHTTP2Connection(direction: .inbound, rewriter: h2Rewriter)
+            outboundH2 = MITMHTTP2Connection(direction: .outbound, rewriter: h2Rewriter)
+        }
         startInboundPump(inner: innerRecord, outer: outerRecord)
         startOutboundPump(inner: innerRecord, outer: outerRecord)
     }
@@ -301,7 +357,19 @@ final class MITMSession {
                     self.cancel(error: nil)
                     return
                 }
-                let transformed = self.rewriter.transformRequest(data)
+                let transformed: Data
+                if let inboundH2 = self.inboundH2 {
+                    transformed = inboundH2.process(data)
+                } else {
+                    transformed = self.rewriter.transformRequest(data)
+                }
+                guard !transformed.isEmpty else {
+                    // The h2 translator may have buffered fragments
+                    // (CONTINUATION pending, partial preface, etc.).
+                    // Loop back for more bytes without writing.
+                    self.startInboundPump(inner: inner, outer: outer)
+                    return
+                }
                 outer.send(data: transformed) { sendError in
                     if let sendError {
                         self.lwipQueue.async { self.cancel(error: sendError) }
@@ -327,7 +395,16 @@ final class MITMSession {
                     self.cancel(error: nil)
                     return
                 }
-                let transformed = self.rewriter.transformResponse(data)
+                let transformed: Data
+                if let outboundH2 = self.outboundH2 {
+                    transformed = outboundH2.process(data)
+                } else {
+                    transformed = self.rewriter.transformResponse(data)
+                }
+                guard !transformed.isEmpty else {
+                    self.startOutboundPump(inner: inner, outer: outer)
+                    return
+                }
                 inner.send(data: transformed) { sendError in
                     if let sendError {
                         self.lwipQueue.async { self.cancel(error: sendError) }

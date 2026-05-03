@@ -92,6 +92,7 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Core/CertificatePolicy.swift,
+				Core/HPACKEncoder.swift,
 				Core/ProxyClient.swift,
 				"Core/ProxyClient+Hysteria.swift",
 				"Core/ProxyClient+Naive.swift",
@@ -126,7 +127,6 @@
 				Mux/MuxManager.swift,
 				Mux/MuxSession.swift,
 				Mux/XUDP.swift,
-				Naive/HTTP2/HPACKEncoder.swift,
 				Naive/HTTP2/HTTP2Connection.swift,
 				Naive/HTTP2/HTTP2FlowControl.swift,
 				Naive/HTTP2/HTTP2Framer.swift,

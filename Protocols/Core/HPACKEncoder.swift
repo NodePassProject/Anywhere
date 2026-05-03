@@ -97,6 +97,33 @@ enum HPACKEncoder {
         return block
     }
 
+    // MARK: - Generic Header Block Encoding
+
+    /// Encodes an arbitrary header list into a single HPACK header block.
+    ///
+    /// All entries are emitted as "Literal Header Field without Indexing"
+    /// (RFC 7541 §6.2.2): no entries are added to the encoder's dynamic
+    /// table, so the encoder is stateless across calls. Names that appear
+    /// in the static table are encoded with an indexed name reference;
+    /// other names are emitted as literal strings.
+    ///
+    /// Used by ``MITMHTTP2Connection`` to re-emit HEADERS / CONTINUATION
+    /// frames after rewriting — independent dynamic-table state on each
+    /// MITM leg means we can't byte-forward HPACK fragments.
+    static func encodeHeaderBlock(
+        _ headers: [(name: String, value: String)]
+    ) -> Data {
+        var block = Data()
+        for header in headers {
+            if let nameIdx = staticTableNameIndex(header.name) {
+                encodeLiteralWithoutIndexing(nameIndex: nameIdx, value: header.value, into: &block)
+            } else {
+                encodeLiteralWithoutIndexing(name: header.name, value: header.value, into: &block)
+            }
+        }
+        return block
+    }
+
     // MARK: - Response Decoding
 
     /// Decodes an HPACK header block into name-value pairs.

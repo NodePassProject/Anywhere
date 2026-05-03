@@ -42,6 +42,12 @@ class TLSRecordConnection {
     /// The negotiated TLS version (0x0303 = TLS 1.2, 0x0304 = TLS 1.3).
     let tlsVersion: UInt16
 
+    /// The negotiated ALPN protocol (e.g. "h2", "http/1.1"). Empty string
+    /// when the peer did not select one. Set by the handshake driver
+    /// (``TLSClient`` / ``TLSServer``) right before this connection is
+    /// handed back to its owner.
+    var negotiatedALPN: String = ""
+
     // TLS encryption keys
     private let clientKey: Data
     private let clientIV: Data

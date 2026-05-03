@@ -69,6 +69,11 @@ class TLSClient {
     // Buffer for data received after Server Finished (e.g. NewSessionTicket)
     private var postHandshakeBuffer: Data?
 
+    /// ALPN protocol parsed from the TLS handshake (TLS 1.3
+    /// EncryptedExtensions or TLS 1.2 ServerHello). Empty string when
+    /// the server did not echo an ALPN extension.
+    private var negotiatedALPN: String = ""
+
     /// RFC 8446 §4.1.3: a TLS 1.3 server signals HelloRetryRequest by sending this
     /// SHA-256("HelloRetryRequest") value in the ServerHello.random slot instead
     /// of a real random. Used to trigger a second ClientHello with an updated key share.
@@ -496,6 +501,21 @@ class TLSClient {
                 case 0x0017: // extended_master_secret (RFC 7627)
                     hasEMS = true
 
+                case 0x0010: // ALPN — TLS 1.2 echoes here (TLS 1.3 echoes in EncryptedExtensions)
+                    if extDataLen >= 3, extOffset + extDataLen <= extEnd {
+                        let listLen = Int(data[extOffset]) << 8 | Int(data[extOffset + 1])
+                        if 2 + listLen <= extDataLen {
+                            let nameLen = Int(data[extOffset + 2])
+                            if 3 + nameLen <= extDataLen {
+                                let nameStart = extOffset + 3
+                                let name = data.subdata(in: nameStart..<(nameStart + nameLen))
+                                if let s = String(data: name, encoding: .utf8) {
+                                    self.negotiatedALPN = s
+                                }
+                            }
+                        }
+                    }
+
                 default:
                     break
                 }
@@ -620,6 +640,9 @@ class TLSClient {
                         switch hsType {
                         case 0x08: // EncryptedExtensions
                             fullTranscript.append(hsMessage)
+                            if let alpn = parseALPNFromEncryptedExtensions(hsBody) {
+                                self.negotiatedALPN = alpn
+                            }
 
                         case 0x0B: // Certificate
                             fullTranscript.append(hsMessage)
@@ -779,6 +802,41 @@ class TLSClient {
         }
     }
 
+    // MARK: - TLS 1.3 EncryptedExtensions ALPN
+
+    /// Walks the TLS 1.3 EncryptedExtensions body looking for the ALPN
+    /// extension (0x0010) and returns the single negotiated protocol name.
+    /// Returns `nil` if the extension is absent or malformed.
+    private func parseALPNFromEncryptedExtensions(_ body: Data) -> String? {
+        guard body.count >= 2 else { return nil }
+        let extsTotal = Int(body[body.startIndex]) << 8 | Int(body[body.startIndex + 1])
+        let extsStart = body.startIndex + 2
+        let extsEnd = extsStart + extsTotal
+        guard extsEnd <= body.endIndex else { return nil }
+
+        var offset = extsStart
+        while offset + 4 <= extsEnd {
+            let extType = UInt16(body[offset]) << 8 | UInt16(body[offset + 1])
+            let extLen = Int(body[offset + 2]) << 8 | Int(body[offset + 3])
+            offset += 4
+            guard offset + extLen <= extsEnd else { return nil }
+
+            if extType == 0x0010 {
+                // ALPN: u16 list_len, repeating { u8 name_len, name_bytes }.
+                guard extLen >= 3 else { return nil }
+                let listLen = Int(body[offset]) << 8 | Int(body[offset + 1])
+                guard 2 + listLen <= extLen else { return nil }
+                let nameLen = Int(body[offset + 2])
+                guard 3 + nameLen <= extLen else { return nil }
+                let nameStart = offset + 3
+                let name = body.subdata(in: nameStart..<(nameStart + nameLen))
+                return String(data: name, encoding: .utf8)
+            }
+            offset += extLen
+        }
+        return nil
+    }
+
     // MARK: - TLS 1.3 Finish Handshake
 
     /// Derives application keys and sends Client Finished to complete the TLS 1.3 handshake.
@@ -816,6 +874,7 @@ class TLSClient {
                 cipherSuite: self.tls13.keyDerivation?.cipherSuite ?? TLSCipherSuite.TLS_AES_128_GCM_SHA256
             )
             tlsConnection.connection = self.connection
+            tlsConnection.negotiatedALPN = self.negotiatedALPN
             self.connection = nil
 
             if let remaining = self.postHandshakeBuffer, !remaining.isEmpty {
@@ -1837,6 +1896,7 @@ class TLSClient {
             initialServerSeqNum: 1
         )
         tlsConnection.connection = self.connection
+        tlsConnection.negotiatedALPN = self.negotiatedALPN
         self.connection = nil
 
         if let remaining = remainingBuffer, !remaining.isEmpty {
