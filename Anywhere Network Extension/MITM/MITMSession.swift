@@ -198,10 +198,16 @@ final class MITMSession {
     /// same application protocol (h2 or http/1.1). Must be called on
     /// `lwipQueue`.
     func start(sni: String) {
-        // Pull the client's ALPN preferences out of the buffered
-        // ClientHello so we offer the same set upstream.
-        let clientALPNs = parseClientALPNs(from: pendingClientBytes)
-        startOuterHandshake(sni: sni, alpns: clientALPNs)
+        // Peek at the buffered ClientHello to pull the inner client's
+        // ALPN offer and its TLS version capability. If the inner
+        // client doesn't advertise TLS 1.3 (i.e. it's TLS 1.2-only),
+        // constrain the outer leg to TLS 1.2 — otherwise the outer
+        // could negotiate 1.3 with a 1.3-capable origin and leave the
+        // inner leg unable to mirror.
+        let parsed = parseClientHello(pendingClientBytes)
+        let clientALPNs = parsed?.alpnProtocols ?? []
+        let clientSupportsTLS13 = parsed?.supportedVersions.contains(0x0304) ?? true
+        startOuterHandshake(sni: sni, alpns: clientALPNs, allowTLS13: clientSupportsTLS13)
     }
 
     /// Feeds bytes received from the client. Until the inner ``TLSServer``
@@ -217,6 +223,13 @@ final class MITMSession {
         } else {
             // Outer handshake still running — buffer for the inner
             // ``TLSServer`` once it is created.
+            //
+            // No size cap by design: a correct TLS client blocks on the
+            // ServerHello after sending its ClientHello, so this buffer
+            // stays at a few KB in the real-world flows we care about.
+            // A misbehaving local app could push more, but the worst
+            // case is bounded by the outer handshake's TCP timeout —
+            // far short of the Network Extension's memory ceiling.
             pendingClientBytes.append(data)
         }
     }
@@ -282,18 +295,31 @@ final class MITMSession {
 
     // MARK: - Outer Handshake
 
-    private func startOuterHandshake(sni: String, alpns: [String]) {
-        // ``TLSClient`` doesn't enforce ``minVersion`` / ``maxVersion`` for
-        // browser-fingerprinted ClientHellos, so the upstream may negotiate
-        // either TLS 1.2 or TLS 1.3. The inner leg mirrors whichever
-        // version the outer leg actually negotiated (see
-        // ``startInnerHandshake``).
+    private func startOuterHandshake(sni: String, alpns: [String], allowTLS13: Bool) {
+        // ``TLSClient`` strips TLS 1.3 from the fingerprinted
+        // supported_versions extension when ``maxVersion`` is set to
+        // .tls12, so capping the outer leg here actually forces the
+        // upstream to negotiate 1.2 even against 1.3-capable origins.
+        // The inner leg then mirrors whichever version the outer leg
+        // actually negotiated (see ``startInnerHandshake``).
+        //
+        // ALPN: if the inner client didn't offer ALPN, it expects
+        // plaintext HTTP/1.1 by default. We must NOT let the outer leg
+        // negotiate h2 in that case — we'd end up forwarding h2 binary
+        // frames to a client that's parsing HTTP/1.1 text. Only offer
+        // h2 upstream when the inner client opted in.
+        let outerALPN: [String]
+        if alpns.isEmpty {
+            outerALPN = ["http/1.1"]
+        } else {
+            outerALPN = alpns
+        }
         let configuration = TLSConfiguration(
             serverName: sni,
-            alpn: alpns.isEmpty ? ["h2", "http/1.1"] : alpns,
+            alpn: outerALPN,
             fingerprint: .chrome133,
             minVersion: .tls12,
-            maxVersion: .tls13
+            maxVersion: allowTLS13 ? .tls13 : .tls12
         )
         let client = TLSClient(configuration: configuration)
         tlsClient = client
@@ -318,15 +344,14 @@ final class MITMSession {
         }
     }
 
-    // MARK: - ALPN parsing
+    // MARK: - ClientHello parsing
 
-    /// Best-effort extraction of the client's ALPN list out of a buffered
-    /// TLS ClientHello. Returns an empty list when parsing fails — the
-    /// caller falls back to a default offer.
-    private func parseClientALPNs(from buffer: Data) -> [String] {
-        guard !buffer.isEmpty else { return [] }
-        guard let parsed = try? TLSClientHelloParser.parse(buffer) else { return [] }
-        return parsed.alpnProtocols
+    /// Best-effort parse of the buffered inner ClientHello. Returns nil
+    /// if the buffer is empty or doesn't yet hold a complete record —
+    /// callers fall back to permissive defaults in that case.
+    private func parseClientHello(_ buffer: Data) -> TLSClientHelloParsed? {
+        guard !buffer.isEmpty else { return nil }
+        return try? TLSClientHelloParser.parse(buffer)
     }
 
     // MARK: - Shuttle

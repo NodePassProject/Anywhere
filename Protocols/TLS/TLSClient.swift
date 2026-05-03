@@ -227,7 +227,7 @@ class TLSClient {
             throw TLSError.handshakeFailed("Failed to generate session ID")
         }
 
-        let rawClientHello = TLSClientHelloBuilder.buildRawClientHello(
+        var rawClientHello = TLSClientHelloBuilder.buildRawClientHello(
             fingerprint: configuration.fingerprint,
             random: random,
             sessionId: sessionId,
@@ -236,6 +236,15 @@ class TLSClient {
             alpn: configuration.alpn ?? ["h2", "http/1.1"],
             omitPQKeyShares: true
         )
+
+        // The browser fingerprints unconditionally advertise TLS 1.3 in
+        // supported_versions, leaving the upstream free to pick 1.3 even
+        // when the caller asked for `maxVersion: .tls12`. Strip 1.3 from
+        // the offer when the cap is set so the upstream is actually
+        // forced down to 1.2.
+        if let maxVersion = configuration.maxVersion, maxVersion.rawValue <= 0x0303 {
+            rawClientHello = TLSClientHelloBuilder.clampSupportedVersionsToTLS12(rawClientHello)
+        }
 
         return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: rawClientHello)
     }
