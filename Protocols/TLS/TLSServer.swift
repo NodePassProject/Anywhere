@@ -19,8 +19,8 @@ protocol TLSServerDelegate: AnyObject {
     /// returned ``TLSRecordConnection`` and route it onto the inner
     /// MITM pipeline.
     /// - Parameter alpn: The ALPN value advertised in EncryptedExtensions
-    ///   (always `http/1.1` in v1 — included so the caller doesn't need to
-    ///   re-derive it).
+    ///   (one of the protocols passed to ``TLSServer/init(...)`` as
+    ///   `acceptableALPNs`, intersected with the client's offer).
     /// - Parameter sni: Server name extracted from the ClientHello.
     /// - Parameter clientFinishedHandshakeTrailer: Bytes received in the
     ///   same chunk as the client Finished but belonging to the
@@ -62,6 +62,14 @@ final class TLSServer {
     private let leafSigningKeyP256: P256.Signing.PrivateKey
     private let preferredCipherSuites: [UInt16]
 
+    /// ALPN protocols the server is willing to negotiate, in preference
+    /// order. The first protocol that also appears in the client's offered
+    /// list wins.
+    private let acceptableALPNs: [String]
+
+    /// Negotiated ALPN — populated once the (final) ClientHello is processed.
+    private var negotiatedALPN: String = ""
+
     private var state: State = .waitingClientHello
 
     /// Buffer of bytes received from the client. We expect exactly one
@@ -96,6 +104,10 @@ final class TLSServer {
     ///   - leafPrivateKeyP256: P-256 signing key matching the leaf.
     ///     Held as ``P256.Signing.PrivateKey`` (CryptoKit) — the same
     ///     bytes that ``X509Builder`` embedded in the cert.
+    ///   - acceptableALPNs: ALPN protocols this server is willing to
+    ///     advertise, in preference order. The handshake fails with the
+    ///     `no_application_protocol` alert if none of them appear in the
+    ///     client's ALPN offer.
     ///   - preferredCipherSuites: Ordered list of cipher suites the server
     ///     prefers; pick first match in the client's list.
     init(
@@ -103,6 +115,7 @@ final class TLSServer {
         leafCertDER: Data,
         leafPrivateKey: SecKey,
         leafSigningKeyP256: P256.Signing.PrivateKey,
+        acceptableALPNs: [String] = ["http/1.1"],
         preferredCipherSuites: [UInt16] = [
             TLSCipherSuite.TLS_AES_128_GCM_SHA256,
             TLSCipherSuite.TLS_CHACHA20_POLY1305_SHA256,
@@ -113,6 +126,7 @@ final class TLSServer {
         self.leafCertDER = leafCertDER
         self.leafPrivateKey = leafPrivateKey
         self.leafSigningKeyP256 = leafSigningKeyP256
+        self.acceptableALPNs = acceptableALPNs
         self.preferredCipherSuites = preferredCipherSuites
     }
 
@@ -161,9 +175,14 @@ final class TLSServer {
             sendAlertAndFail(level: 2, description: 70, message: "TLS 1.3 not offered")  // protocol_version
             return
         }
-        guard !parsed.alpnProtocols.isEmpty, parsed.alpnProtocols.contains("http/1.1") else {
-            sendAlertAndFail(level: 2, description: 120, message: "http/1.1 ALPN required") // no_application_protocol
+        guard !parsed.alpnProtocols.isEmpty,
+              let alpn = acceptableALPNs.first(where: { parsed.alpnProtocols.contains($0) }) else {
+            sendAlertAndFail(level: 2, description: 120, message: "no overlapping ALPN") // no_application_protocol
             return
+        }
+        if negotiatedALPN.isEmpty {
+            // Lock in on the first ClientHello; HRR cannot change ALPN.
+            negotiatedALPN = alpn
         }
         guard parsed.signatureAlgorithms.contains(0x0403) else {
             sendAlertAndFail(level: 2, description: 40, message: "ecdsa_secp256r1_sha256 required") // handshake_failure
@@ -283,8 +302,7 @@ final class TLSServer {
     /// Emits EncryptedExtensions, Certificate, CertificateVerify, and Finished
     /// in one TLS 1.3 application_data record using the server handshake keys.
     private func emitServerEncryptedHandshake(keys: TLSHandshakeKeys, kd: TLS13KeyDerivation) throws {
-        let alpn = "http/1.1"
-        let ee = TLSServerHelloBuilder.buildEncryptedExtensions(alpn: alpn)
+        let ee = TLSServerHelloBuilder.buildEncryptedExtensions(alpn: negotiatedALPN)
         appendToTranscript(ee)
 
         let cert = TLSServerHelloBuilder.buildCertificate(leafCertDER: leafCertDER)
@@ -442,6 +460,7 @@ final class TLSServer {
             cipherSuite: chosenCipherSuite,
             direction: .server
         )
+        record.negotiatedALPN = negotiatedALPN
         // Anything left in rxBuffer is application-layer data that the
         // client started sending right after Finished. Hand it to the
         // record connection's receive buffer.
@@ -453,7 +472,7 @@ final class TLSServer {
             self,
             didCompleteHandshake: record,
             sni: sni ?? "",
-            alpn: "http/1.1",
+            alpn: negotiatedALPN,
             clientFinishedHandshakeTrailer: trailer
         )
     }
