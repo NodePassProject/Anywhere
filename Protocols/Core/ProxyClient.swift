@@ -386,7 +386,6 @@ class ProxyClient {
                 command: command,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort,
-                initialData: initialData,
                 completion: completion
             )
             return

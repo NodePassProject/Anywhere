@@ -115,6 +115,14 @@ extension LWIPStack {
                 return nil
             }
 
+            // Fake-IP MITM: domain is known at accept time, but we still
+            // need the ClientHello bytes to drive ``TLSServer``. Force
+            // sniffing on so the bytes land in ``LWIPTCPConnection.pendingData``;
+            // the connection wakes ``mitmEnabled`` once ``applySNI`` runs.
+            if shared.mitmEnabled && shared.mitmHostMatcher.matches(dstHost) {
+                sniffSNI = true
+            }
+
             let connection = LWIPTCPConnection(
                 pcb: pcb,
                 dstHost: dstHost,
@@ -192,6 +200,28 @@ extension LWIPStack {
                     udpPayloadLength: Int(len)
                 )
                 return
+            }
+
+            // MITM HTTP/3 reject: clients that hit a MITM-listed hostname
+            // over UDP/443 get the same ICMP unreachable so they fall back
+            // to TCP/TLS, where the MITM TCP path can terminate the
+            // connection. We can only do this for fake-IP UDP — without a
+            // domain we don't know whether the destination is on the list.
+            if shared.mitmEnabled && dstPort == 443 {
+                let dstIPProbe = LWIPStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
+                if FakeIPPool.isFakeIP(dstIPProbe),
+                   let entry = shared.fakeIPPool.lookup(ip: dstIPProbe),
+                   shared.mitmHostMatcher.matches(entry.domain) {
+                    shared.sendICMPPortUnreachable(
+                        srcIP: srcIP,
+                        srcPort: srcPort,
+                        dstIP: dstIP,
+                        dstPort: dstPort,
+                        isIPv6: isIPv6 != 0,
+                        udpPayloadLength: Int(len)
+                    )
+                    return
+                }
             }
 
             let srcHost = LWIPStack.ipAddrToString(srcIP, isIPv6: isIPv6 != 0)

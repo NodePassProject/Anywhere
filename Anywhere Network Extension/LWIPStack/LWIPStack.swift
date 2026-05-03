@@ -71,6 +71,20 @@ class LWIPStack {
     var encryptedDNSEnabled: Bool = false
     var encryptedDNSProtocol: String = "doh"
     var encryptedDNSServer: String = ""
+
+    // MARK: MITM
+    //
+    // The MITM master toggle and matcher live next to the routing decision
+    // rather than inside it: routing chooses which proxy carries the
+    // upstream leg, MITM chooses whether to crack open the TLS in transit.
+    // Empty matcher (or master toggle off) makes the entire MITM path a
+    // no-op — no allocations, no callbacks, nothing to test.
+    var mitmEnabled: Bool = false
+    let mitmHostMatcher = MITMHostMatcher()
+    /// Lazily-loaded leaf-cert cache — created on first MITM-enabled session
+    /// so the keychain isn't touched on stack start when no rules apply.
+    var mitmLeafCache: MITMLeafCertCache?
+    let mitmCertificateStore = MITMCertificateStore()
     
     var running = false
 
@@ -299,6 +313,7 @@ class LWIPStack {
         loadProxyModeSetting()
         loadHideVPNIconSetting()
         loadBlockQUICSetting()
+        loadMITMSetting()
         if shouldLoadProxyServerAddresses {
             loadProxyServerAddresses()
         }
@@ -432,6 +447,27 @@ class LWIPStack {
 
     private func loadBlockQUICSetting() {
         blockQUICEnabled = AWCore.getBlockQUICEnabled()
+    }
+
+    /// Loads the MITM master toggle and rebuilds the in-memory hostname
+    /// matcher. Called from ``configureRuntime`` and from the
+    /// ``mitmChanged`` Darwin notification observer.
+    func loadMITMSetting() {
+        guard let data = AWCore.getMITMData() else {
+            mitmEnabled = false
+            mitmHostMatcher.reset()
+            return
+        }
+
+        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let enabled = (json?["enabled"] as? Bool) ?? false
+
+        mitmEnabled = enabled
+        if enabled {
+            mitmHostMatcher.load(from: data)
+        } else {
+            mitmHostMatcher.reset()
+        }
     }
 
     // MARK: - IP Address Helpers

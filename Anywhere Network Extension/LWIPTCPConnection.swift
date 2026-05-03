@@ -31,6 +31,20 @@ class LWIPTCPConnection {
     private var pendingData = Data()
     private var closed = false
 
+    // MARK: MITM
+    //
+    // ``mitmEnabled`` flips on after ``applySNI`` (real-IP path) or
+    // ``init`` (fake-IP path) determines that the SNI matches the user's
+    // MITM rules. Once set, ``connectProxy``/``connectDirect`` branch off
+    // to ``startMITMSession`` which terminates and re-establishes TLS
+    // around the existing proxy/direct outbound leg.
+    private var mitmEnabled = false
+    /// SNI captured at MITM-decision time. The fake-IP path knows the
+    /// hostname at accept time; the real-IP path picks it up via the
+    /// existing sniffer.
+    private var mitmSNI: String?
+    private var mitmSession: MITMSession?
+
     // MARK: SNI Sniffing
     //
     // When present, the connection is in the "sniff" phase: inbound bytes are
@@ -242,6 +256,19 @@ class LWIPTCPConnection {
             return
         }
 
+        // MITM: once the session is up, all client bytes feed the inner
+        // TLS server (or, post-handshake, the inner record connection's
+        // transport). The lwIP downlink is driven by ``MITMSession`` —
+        // we do not touch ``uploadPipeline`` while MITM is active.
+        if let mitmSession {
+            let chunk = Data(bytes: bytePtr, count: count)
+            // Acknowledge to lwIP up-front; MITMSession owns flow control
+            // for the inner leg and the outer leg is a different pipe.
+            acknowledgeReceivedBytes(count)
+            mitmSession.feedClientBytes(chunk)
+            return
+        }
+
         guard proxyConnection != nil else {
             guard appendPendingData(bytes: bytePtr, count: count) else { return }
             beginConnecting()
@@ -396,6 +423,10 @@ class LWIPTCPConnection {
             beginConnecting()
         }
 
+        // MITM: the orderly close pushes through the inner TLS leg so the
+        // upstream sees the same end-of-stream signal.
+        mitmSession?.clientDidClose()
+
         uplinkDone = true
         if downlinkDone {
             close()
@@ -473,6 +504,14 @@ class LWIPTCPConnection {
         guard let stack = LWIPStack.shared else { return }
         let router = stack.domainRouter
 
+        // MITM check runs in parallel with routing — the two systems are
+        // independent: routing decides which proxy carries the upstream
+        // leg, MITM decides whether to crack open the TLS in transit.
+        if stack.mitmEnabled, stack.mitmHostMatcher.matches(sni) {
+            mitmEnabled = true
+            mitmSNI = sni
+        }
+
         guard let action = router.matchDomain(sni) else {
             // No domain rule — keep the IP-derived route as-is.
             return
@@ -512,8 +551,13 @@ class LWIPTCPConnection {
         guard !proxyConnecting && proxyConnection == nil && !closed else { return }
         proxyConnecting = true
 
-        let initialData = pendingData.isEmpty ? nil : pendingData
-        if initialData != nil {
+        let mitm = mitmEnabled
+
+        // For MITM the inner pipeline writes its own ClientHello; we keep
+        // pendingData and hand it to MITMSession, which extracts the
+        // ClientHello and starts the inner handshake.
+        let initialData: Data? = mitm ? nil : (pendingData.isEmpty ? nil : pendingData)
+        if !mitm, initialData != nil {
             pendingData.removeAll(keepingCapacity: true)
         }
 
@@ -542,6 +586,11 @@ class LWIPTCPConnection {
                     self.close()
                 }
 
+                if mitm {
+                    self.startMITMSession(over: connection)
+                    return
+                }
+
                 if let initialData {
                     self.uploadPipeline.buffer.append(initialData)
                 }
@@ -561,13 +610,18 @@ class LWIPTCPConnection {
         guard !proxyConnecting && proxyConnection == nil && !closed else { return }
         proxyConnecting = true
 
+        // MITM: the inner pipeline writes its own ClientHello; suppress the
+        // protocol's "initial data carries the user's bytes" optimisation
+        // and don't forward `pendingData` after connect — MITMSession owns it.
+        let mitm = mitmEnabled
+
         // If the protocol can embed the caller's first bytes in its handshake
         // (VLESS + its transports), extract pendingData into initialData here.
         // Otherwise leave pendingData intact so the post-connect send path
         // below forwards it — ``ProxyClient.connectWithCommand`` drops the
         // `initialData` argument for those protocols.
         let initialData: Data?
-        if configuration.outboundProtocol.handshakeCarriesInitialData {
+        if !mitm, configuration.outboundProtocol.handshakeCarriesInitialData {
             initialData = pendingData.isEmpty ? nil : pendingData
             if initialData != nil {
                 pendingData.removeAll(keepingCapacity: true)
@@ -599,6 +653,11 @@ class LWIPTCPConnection {
                         self.close()
                     }
 
+                    if mitm {
+                        self.startMITMSession(over: proxyConnection)
+                        return
+                    }
+
                     if let initialData {
                         // ProxyClient reports success only after VLESS
                         // handshake-carried initialData has been accepted.
@@ -617,6 +676,81 @@ class LWIPTCPConnection {
                 }
             }
         }
+    }
+
+    // MARK: - MITM Session
+
+    /// Starts MITM and transfers upstream reads/writes to ``MITMSession``.
+    private func startMITMSession(over proxy: ProxyConnection) {
+        guard let stack = LWIPStack.shared else { abort(); return }
+        let sni = mitmSNI ?? dstHost
+
+        let cache: MITMLeafCertCache
+        if let existing = stack.mitmLeafCache {
+            cache = existing
+        } else {
+            do {
+                let made = try MITMLeafCertCache(store: stack.mitmCertificateStore)
+                stack.mitmLeafCache = made
+                cache = made
+            } catch {
+                logger.error("[MITM] Failed to initialize leaf cache: \(error)")
+                abort()
+                return
+            }
+        }
+
+        let initialClientHello = pendingData
+        pendingData.removeAll(keepingCapacity: true)
+
+        // Hand off upstream ownership. MITMSession is now the sole party
+        // that may call send/receive on `proxy` or cancel `proxyClient`.
+        let transferredClient = proxyClient
+        proxyClient = nil
+        proxyConnection = nil
+
+        let session = MITMSession(
+            dstHost: dstHost,
+            dstPort: dstPort,
+            clientHello: initialClientHello,
+            leafCache: cache,
+            proxyClient: transferredClient,
+            proxyConnection: proxy,
+            lwipQueue: lwipQueue
+        )
+        // Inner-leg downlink: bytes the inner TLS server writes go straight
+        // to the lwIP send buffer.
+        session.onSendToClient = { [weak self] data, completion in
+            guard let self else { completion?(SocketError.notConnected); return }
+            self.lwipQueue.async {
+                if self.closed {
+                    completion?(SocketError.notConnected)
+                    return
+                }
+                self.writeToLWIP(data)
+                completion?(nil)
+            }
+        }
+        session.onTeardown = { [weak self] error in
+            guard let self else { return }
+            self.lwipQueue.async {
+                guard !self.closed else { return }
+                if error != nil {
+                    self.abort()
+                } else {
+                    self.close()
+                }
+            }
+        }
+        mitmSession = session
+
+        // We've consumed the bytes the client already sent; ack them so
+        // the client peer can keep going.
+        if !initialClientHello.isEmpty {
+            acknowledgeReceivedBytes(initialClientHello.count)
+        }
+
+        session.start(sni: sni)
     }
 
     // MARK: - Proxy Receive Loop
@@ -839,6 +973,7 @@ class LWIPTCPConnection {
         activityTimer = nil
         let connection = proxyConnection
         let client = proxyClient
+        let session = mitmSession
         proxyConnection = nil
         proxyClient = nil
         proxyConnecting = false
@@ -846,6 +981,8 @@ class LWIPTCPConnection {
         pendingWrite = Data()
         pendingWriteOffset = 0
         uploadPipeline = UploadPipeline()
+        mitmSession = nil
+        session?.cancel(error: nil)
         connection?.cancel()
         client?.cancel()
     }

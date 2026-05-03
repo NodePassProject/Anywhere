@@ -102,16 +102,12 @@ extension ProxyConfiguration {
                 rawValue: (configurationDict["sudokuHTTPMaskMode"] as? String)
                     ?? SudokuHTTPMaskMode.legacy.rawValue
             ) ?? .legacy
-            let legacyCustomTable = ((configurationDict["sudokuCustomTable"] as? String)
-                ?? (configurationDict["sudokuTable"] as? String)
-                ?? (configurationDict["table"] as? String))?
+            let legacyCustomTable = (configurationDict["sudokuCustomTable"] as? String)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let rawCustomTables = configurationDict["sudokuCustomTables"] as? [String]
-            let customTables = SudokuConfiguration.normalizeCustomTables(
-                rawCustomTables ?? [],
-                legacy: legacyCustomTable,
-                legacyFallback: true
-            )
+            var mergedCustomTables = (configurationDict["sudokuCustomTables"] as? [String]) ?? []
+            if !legacyCustomTable.isEmpty && !mergedCustomTables.contains(legacyCustomTable) {
+                mergedCustomTables.insert(legacyCustomTable, at: 0)
+            }
             let httpMask = SudokuHTTPMaskConfiguration(
                 disable: (configurationDict["sudokuHTTPMaskDisable"] as? Bool) ?? false,
                 mode: mode,
@@ -126,7 +122,7 @@ extension ProxyConfiguration {
                 paddingMin: (configurationDict["sudokuPaddingMin"] as? Int) ?? 5,
                 paddingMax: (configurationDict["sudokuPaddingMax"] as? Int) ?? 15,
                 asciiMode: ascii,
-                customTables: customTables,
+                customTables: mergedCustomTables,
                 enablePureDownlink: (configurationDict["sudokuEnablePureDownlink"] as? Bool) ?? true,
                 httpMask: httpMask
             ))

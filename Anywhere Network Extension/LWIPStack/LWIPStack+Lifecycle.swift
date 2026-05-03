@@ -264,6 +264,19 @@ extension LWIPStack {
             nil,
             .deliverImmediately
         )
+
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            { _, observer, _, _, _ in
+                guard let observer else { return }
+                let stack = Unmanaged<LWIPStack>.fromOpaque(observer).takeUnretainedValue()
+                stack.handleMITMChanged()
+            },
+            AWCore.Notification.mitmChanged,
+            nil,
+            .deliverImmediately
+        )
     }
 
     private func stopObservingSettings() {
@@ -327,6 +340,20 @@ extension LWIPStack {
             guard running, let configuration else { return }
             logger.info("[VPN] Routing changed; reconnecting active connections")
             restartStack(configuration: configuration)
+        }
+    }
+
+    /// Handles the "mitmChanged" notification (MITM toggle or rules changed).
+    ///
+    /// MITM only affects connection establishment, so existing connections
+    /// finish on their old policy and new connections see the new one. No
+    /// stack restart is needed — we rebuild the matcher in place on
+    /// `lwipQueue` to serialize against connection accept callbacks.
+    fileprivate func handleMITMChanged() {
+        lwipQueue.async { [self] in
+            guard running else { return }
+            logger.info("[VPN] MITM settings changed; reloading matcher")
+            loadMITMSetting()
         }
     }
 }

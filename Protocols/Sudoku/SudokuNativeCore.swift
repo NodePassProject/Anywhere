@@ -487,16 +487,14 @@ final class SudokuTablePair {
 
     init(key: String, asciiMode: String, customUplink: String, customDownlink: String) throws {
         let mode = try Self.parseMode(asciiMode)
-        let uplinkPattern = mode.uplink == "entropy" ? customUplink : ""
-        let downlinkPattern = mode.downlink == "entropy" ? customDownlink : ""
-        uplink = try SudokuTable(key: key, token: mode.uplink, customPattern: uplinkPattern)
-        if mode.uplink == mode.downlink && uplinkPattern == downlinkPattern {
+        uplink = try SudokuTable(key: key, token: mode.uplink, customPattern: customUplink)
+        if mode.uplink == mode.downlink && customUplink == customDownlink {
             downlink = uplink
         } else {
-            downlink = try SudokuTable(key: key, token: mode.downlink, customPattern: downlinkPattern)
+            downlink = try SudokuTable(key: key, token: mode.downlink, customPattern: customDownlink)
         }
         let canonical = mode.uplink == "ascii" && mode.downlink == "ascii" ? "prefer_ascii" : (mode.uplink == "entropy" && mode.downlink == "entropy" ? "prefer_entropy" : asciiMode)
-        let hint = Self.tableHintFingerprint(key: key, mode: canonical, uplinkPattern: uplinkPattern, downlinkPattern: downlinkPattern)
+        let hint = Self.tableHintFingerprint(key: key, mode: canonical, uplinkPattern: customUplink, downlinkPattern: customDownlink)
         uplink.hint = hint
         downlink.hint = hint
     }
@@ -514,16 +512,7 @@ final class SudokuTablePair {
 
     private static func tableHintFingerprint(key: String, mode: String, uplinkPattern: String, downlinkPattern: String) -> UInt32 {
         var data = Data("sudoku-table-hint".utf8)
-        let uplink = uplinkPattern.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let downlink = downlinkPattern.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        data.append(0)
-        data.append(Data(key.utf8))
-        data.append(0)
-        data.append(Data(mode.utf8))
-        data.append(0)
-        data.append(Data(uplink.utf8))
-        data.append(0)
-        data.append(Data(downlink.utf8))
+        data.append(0); data.append(Data(key.utf8)); data.append(0); data.append(Data(mode.utf8)); data.append(0); data.append(Data(uplinkPattern.utf8)); data.append(0); data.append(Data(downlinkPattern.utf8))
         let sum = sudokuSHA256(data)
         return (UInt32(sum[0]) << 24) | (UInt32(sum[1]) << 16) | (UInt32(sum[2]) << 8) | UInt32(sum[3])
     }
