@@ -1231,4 +1231,104 @@ struct TLSClientHelloBuilder {
         record.append(clientHello)
         return record
     }
+
+    /// Rewrites the `supported_versions` extension of an assembled (but
+    /// not record-wrapped) ClientHello to remove TLS 1.3 (`0x0304`) and
+    /// any GREASE values, leaving only TLS 1.2 (and below) on offer. The
+    /// extension-list length and the handshake length fields are
+    /// adjusted to match the new size; everything else is preserved.
+    ///
+    /// Used by the MITM outer leg when the inner client only supports
+    /// TLS 1.2: forcing the upstream to negotiate 1.2 keeps the two
+    /// legs version-equivalent.
+    ///
+    /// Note: the BoringSSL padding extension is sized by the per-
+    /// fingerprint builder before clamping and isn't recomputed here,
+    /// so the resulting ClientHello is a few bytes short of the
+    /// canonical Chrome-padded length. That's fine for the MITM use
+    /// case — the inner leg is already a TLS server we mint, so any
+    /// observer who cares about fingerprints can already see this is
+    /// a proxied connection. Don't reuse this clamp for paths that do
+    /// rely on fingerprint camouflage (e.g. Reality / VLESS).
+    static func clampSupportedVersionsToTLS12(_ clientHello: Data) -> Data {
+        let bytes = [UInt8](clientHello)
+        guard bytes.count >= 4, bytes[0] == 0x01 else { return clientHello }
+
+        // Walk the ClientHello body to find the extensions block.
+        var pos = 4 + 2 + 32                                          // hs header + legacy_version + random
+        guard pos < bytes.count else { return clientHello }
+        let sidLen = Int(bytes[pos]); pos += 1 + sidLen
+        guard pos + 2 <= bytes.count else { return clientHello }
+        let csLen = (Int(bytes[pos]) << 8) | Int(bytes[pos + 1])
+        pos += 2 + csLen
+        guard pos < bytes.count else { return clientHello }
+        let cmLen = Int(bytes[pos]); pos += 1 + cmLen
+        guard pos + 2 <= bytes.count else { return clientHello }
+        let extsLenOffset = pos
+        let extsLen = (Int(bytes[pos]) << 8) | Int(bytes[pos + 1]); pos += 2
+        let extsStart = pos
+        let extsEnd = pos + extsLen
+        guard extsEnd <= bytes.count else { return clientHello }
+
+        var cur = extsStart
+        while cur + 4 <= extsEnd {
+            let extType = (Int(bytes[cur]) << 8) | Int(bytes[cur + 1])
+            let extDataLen = (Int(bytes[cur + 2]) << 8) | Int(bytes[cur + 3])
+            let dataStart = cur + 4
+            let dataEnd = dataStart + extDataLen
+            guard dataEnd <= extsEnd else { return clientHello }
+
+            if extType == 0x002B {
+                guard extDataLen >= 1 else { return clientHello }
+                let listLen = Int(bytes[dataStart])
+                guard dataStart + 1 + listLen == dataEnd, listLen % 2 == 0 else {
+                    return clientHello
+                }
+
+                var versions: [UInt16] = []
+                var v = dataStart + 1
+                while v + 2 <= dataEnd {
+                    versions.append((UInt16(bytes[v]) << 8) | UInt16(bytes[v + 1]))
+                    v += 2
+                }
+
+                // RFC 8701: GREASE values are 0x?A?A — both nibbles equal
+                // to 0xA. They're TLS 1.3 ossification probes and have
+                // no meaning in TLS 1.2; drop along with 0x0304.
+                let filtered = versions.filter { $0 != 0x0304 && ($0 & 0x0F0F) != 0x0A0A }
+                guard !filtered.isEmpty else { return clientHello }
+
+                var newPayload = Data()
+                newPayload.append(UInt8(filtered.count * 2))
+                for val in filtered {
+                    newPayload.append(UInt8((val >> 8) & 0xFF))
+                    newPayload.append(UInt8(val & 0xFF))
+                }
+
+                var result = Data()
+                result.append(Data(bytes[0..<(cur + 2)]))             // through ext_type
+                result.append(UInt8((newPayload.count >> 8) & 0xFF))  // new ext_data_len
+                result.append(UInt8(newPayload.count & 0xFF))
+                result.append(newPayload)
+                result.append(Data(bytes[dataEnd..<bytes.count]))
+
+                let sizeDelta = newPayload.count - extDataLen
+                let newExtsLen = extsLen + sizeDelta
+                result[extsLenOffset] = UInt8((newExtsLen >> 8) & 0xFF)
+                result[extsLenOffset + 1] = UInt8(newExtsLen & 0xFF)
+
+                let origHsLen = (Int(bytes[1]) << 16) | (Int(bytes[2]) << 8) | Int(bytes[3])
+                let newHsLen = origHsLen + sizeDelta
+                result[1] = UInt8((newHsLen >> 16) & 0xFF)
+                result[2] = UInt8((newHsLen >> 8) & 0xFF)
+                result[3] = UInt8(newHsLen & 0xFF)
+
+                return result
+            }
+
+            cur = dataEnd
+        }
+
+        return clientHello
+    }
 }

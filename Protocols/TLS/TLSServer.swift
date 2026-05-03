@@ -257,14 +257,19 @@ final class TLSServer {
 
         let parsed = try TLSClientHelloParser.parse(record)
 
-        guard !parsed.alpnProtocols.isEmpty,
-              let alpn = acceptableALPNs.first(where: { parsed.alpnProtocols.contains($0) }) else {
-            sendAlertAndFail(level: 2, description: 120, message: "no overlapping ALPN") // no_application_protocol
-            return
-        }
-        if negotiatedALPN.isEmpty {
-            // Lock in on the first ClientHello; HRR cannot change ALPN.
-            negotiatedALPN = alpn
+        // ALPN handling per RFC 7301 §3.2: if the client didn't offer
+        // ALPN at all, the server proceeds without it and MUST NOT echo
+        // the extension. Only fail when the client did offer a list and
+        // none of its entries overlap our acceptable set.
+        if !parsed.alpnProtocols.isEmpty {
+            guard let alpn = acceptableALPNs.first(where: { parsed.alpnProtocols.contains($0) }) else {
+                sendAlertAndFail(level: 2, description: 120, message: "no overlapping ALPN") // no_application_protocol
+                return
+            }
+            if negotiatedALPN.isEmpty {
+                // Lock in on the first ClientHello; HRR cannot change ALPN.
+                negotiatedALPN = alpn
+            }
         }
 
         // Decide the protocol version. supported_versions takes precedence
@@ -408,7 +413,7 @@ final class TLSServer {
     /// Emits EncryptedExtensions, Certificate, CertificateVerify, and Finished
     /// in one TLS 1.3 application_data record using the server handshake keys.
     private func emitServerEncryptedHandshake(keys: TLSHandshakeKeys, kd: TLS13KeyDerivation) throws {
-        let ee = TLSServerHelloBuilder.buildEncryptedExtensions(alpn: negotiatedALPN)
+        let ee = TLSServerHelloBuilder.buildEncryptedExtensions(alpn: negotiatedALPN.isEmpty ? nil : negotiatedALPN)
         appendToTranscript(ee)
 
         let cert = TLSServerHelloBuilder.buildCertificate(leafCertDER: leafCertDER)

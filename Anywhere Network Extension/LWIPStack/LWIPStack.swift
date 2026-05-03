@@ -453,18 +453,10 @@ class LWIPStack {
     /// matcher. Called from ``configureRuntime`` and from the
     /// ``mitmChanged`` Darwin notification observer.
     func loadMITMSetting() {
-        guard let data = AWCore.getMITMData() else {
-            mitmEnabled = false
-            mitmHostMatcher.reset()
-            return
-        }
-
-        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let enabled = (json?["enabled"] as? Bool) ?? false
-
-        mitmEnabled = enabled
-        if enabled {
-            mitmHostMatcher.load(from: data)
+        let snapshot = MITMSnapshot.load()
+        mitmEnabled = snapshot.enabled
+        if snapshot.enabled {
+            mitmHostMatcher.load(rules: snapshot.rules)
         } else {
             mitmHostMatcher.reset()
         }

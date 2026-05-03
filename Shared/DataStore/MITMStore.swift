@@ -23,7 +23,7 @@ final class MITMStore: ObservableObject {
     @Published private(set) var rules: [MITMRule]
 
     private init() {
-        let snapshot = Self.load()
+        let snapshot = MITMSnapshot.load()
         self.enabled = snapshot.enabled
         self.rules = snapshot.rules
     }
@@ -58,25 +58,7 @@ final class MITMStore: ObservableObject {
 
     // MARK: - Persistence
 
-    private struct Snapshot: Codable {
-        var enabled: Bool
-        var rules: [MITMRule]
-    }
-
-    private static func load() -> Snapshot {
-        guard let data = AWCore.getMITMData() else {
-            return Snapshot(enabled: false, rules: [])
-        }
-        if let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) {
-            return snapshot
-        }
-        return Snapshot(enabled: false, rules: [])
-    }
-
     private func save() {
-        let snapshot = Snapshot(enabled: enabled, rules: rules)
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        AWCore.setMITMData(data)
-        AWCore.notifyMITMChanged()
+        MITMSnapshot(enabled: enabled, rules: rules).save()
     }
 }
