@@ -30,38 +30,25 @@ final class MITMHostMatcher {
         ruleCount = 0
     }
 
-    /// Replaces the in-memory rule set with the JSON shape persisted by
-    /// ``MITMStore``. Caller should clear or rebuild on the lwIP queue.
+    /// Replaces the in-memory rule set with rules from a typed
+    /// ``MITMSnapshot`` (decoded by the caller). Caller should clear
+    /// or rebuild on the lwIP queue.
     ///
-    /// JSON shape:
-    /// ```
-    /// { "enabled": Bool, "rules": [{"type": Int, "value": String}] }
-    /// ```
-    /// `type` reuses the routing-side ``DomainRuleType`` raw values:
-    /// `domainSuffix = 2`, `domainKeyword = 3`. IP-CIDR types are ignored —
-    /// MITM is SNI-based and has no meaning for raw IP selectors.
-    func load(from data: Data) {
+    /// IP-CIDR rule types are ignored — MITM is SNI-based and has no
+    /// meaning for raw IP selectors.
+    func load(rules: [MITMRule]) {
         reset()
 
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rules = json["rules"] as? [[String: Any]] else {
-            logger.debug("[MITM] No matcher rules to load")
-            return
-        }
-
         for rule in rules {
-            guard let rawType = rule["type"] as? Int,
-                  let type = DomainRuleType(rawValue: rawType),
-                  let value = rule["value"] as? String,
-                  !value.isEmpty else { continue }
-            let lowered = value.lowercased()
-            switch type {
+            let value = rule.value.lowercased()
+            guard !value.isEmpty else { continue }
+            switch rule.type {
             case .domainSuffix:
-                insertSuffix(lowered)
+                insertSuffix(value)
                 ruleCount += 1
             case .domainKeyword:
-                if !keywords.contains(lowered) {
-                    keywords.append(lowered)
+                if !keywords.contains(value) {
+                    keywords.append(value)
                     ruleCount += 1
                 }
             case .ipCIDR, .ipCIDR6:

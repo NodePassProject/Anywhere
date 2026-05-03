@@ -227,15 +227,22 @@ extension LWIPStack {
 
     // MARK: - Settings Observation
     //
-    // Two Darwin notifications are observed. Both trigger a full stack restart
-    // (shutdownInternal → restartStack), which closes all TCP/UDP connections
-    // and re-reads settings. FakeIPPool is preserved — routing decisions are
-    // made at connection time, so rule changes take effect immediately.
+    // Three Darwin notifications are observed. The first two trigger a full
+    // stack restart (shutdownInternal → restartStack), which closes all
+    // TCP/UDP connections and re-reads settings. FakeIPPool is preserved —
+    // routing decisions are made at connection time, so rule changes take
+    // effect immediately.
     //
     // 1. "tunnelSettingsChanged" — posted by SettingsView when IPv6/Encrypted DNS/Country Bypass toggles change.
     //    IPv6 additionally re-applies tunnel network settings (routes + DNS servers).
     //
     // 2. "routingChanged" — posted by RuleSetListView when routing rule assignments change.
+    //
+    // 3. "mitmChanged" — posted by MITMSnapshot.save() when the MITM toggle or
+    //    rules change. Does NOT restart the stack: established connections
+    //    (already past their TLS handshake) keep running unaffected, and we
+    //    rebuild the in-memory hostname matcher on lwipQueue so it serializes
+    //    against new accept callbacks.
 
     /// Registers Darwin notification observers for cross-process settings changes.
     private func startObservingSettings() {
