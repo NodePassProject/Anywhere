@@ -250,9 +250,12 @@ final class MITMSession {
     // MARK: - Inner Handshake
 
     /// Starts the inner-leg TLS server. Called only after the outer leg
-    /// has finished negotiating ALPN, so we can advertise the matching
-    /// protocol back to the client.
-    private func startInnerHandshake(sni: String, alpn: String) {
+    /// has finished negotiating its TLS version + ALPN, so we can mirror
+    /// both back to the client. Mirroring keeps the two legs feature-
+    /// equivalent (h2 over TLS 1.2 on both sides, etc.) and prevents
+    /// fingerprinting drift between what the user thinks they negotiated
+    /// and what we negotiated upstream.
+    private func startInnerHandshake(sni: String, alpn: String, tlsVersion: UInt16) {
         do {
             let leaf = try leafCache.leaf(for: sni)
             let server = TLSServer(
@@ -260,7 +263,8 @@ final class MITMSession {
                 leafCertDER: leaf.certificateDER,
                 leafPrivateKey: leaf.privateKeySecKey,
                 leafSigningKeyP256: leaf.privateKey,
-                acceptableALPNs: [alpn]
+                acceptableALPNs: [alpn],
+                acceptableTLSVersions: [tlsVersion]
             )
             server.delegate = self
             tlsServer = server
@@ -279,18 +283,16 @@ final class MITMSession {
     // MARK: - Outer Handshake
 
     private func startOuterHandshake(sni: String, alpns: [String]) {
-        // NOTE: ``minVersion`` / ``maxVersion`` here are decorative —
-        // ``TLSClient`` doesn't enforce them for browser-fingerprinted
-        // ClientHellos, so the upstream may negotiate either TLS 1.2 or
-        // TLS 1.3. ALPN is observed correctly in both cases (TLS 1.3 in
-        // EncryptedExtensions, TLS 1.2 in ServerHello). If we ever need
-        // a hard version floor, ``TLSClient`` must alert on a TLS 1.2
-        // ServerHello when ``maxVersion == .tls13``.
+        // ``TLSClient`` doesn't enforce ``minVersion`` / ``maxVersion`` for
+        // browser-fingerprinted ClientHellos, so the upstream may negotiate
+        // either TLS 1.2 or TLS 1.3. The inner leg mirrors whichever
+        // version the outer leg actually negotiated (see
+        // ``startInnerHandshake``).
         let configuration = TLSConfiguration(
             serverName: sni,
             alpn: alpns.isEmpty ? ["h2", "http/1.1"] : alpns,
             fingerprint: .chrome133,
-            minVersion: .tls13,
+            minVersion: .tls12,
             maxVersion: .tls13
         )
         let client = TLSClient(configuration: configuration)
@@ -307,7 +309,7 @@ final class MITMSession {
                     // server chose; fall back to http/1.1 if the server
                     // omitted the extension.
                     let alpn = record.negotiatedALPN.isEmpty ? "http/1.1" : record.negotiatedALPN
-                    self.startInnerHandshake(sni: sni, alpn: alpn)
+                    self.startInnerHandshake(sni: sni, alpn: alpn, tlsVersion: record.tlsVersion)
                 case .failure(let error):
                     logger.error("[MITM] Outer handshake failed for \(self.dstHost): \(error)")
                     self.cancel(error: error)

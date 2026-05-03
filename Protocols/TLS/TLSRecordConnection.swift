@@ -147,7 +147,8 @@ class TLSRecordConnection {
         cipherSuite: UInt16,
         protocolVersion: UInt16 = 0x0303,
         initialClientSeqNum: UInt64 = 0,
-        initialServerSeqNum: UInt64 = 0
+        initialServerSeqNum: UInt64 = 0,
+        direction: Direction = .client
     ) {
         self.tlsVersion = protocolVersion
         self.clientKey = clientKey
@@ -161,7 +162,7 @@ class TLSRecordConnection {
         self.serverSeqNum = initialServerSeqNum
         self.clientSymmetricKey = SymmetricKey(data: clientKey)
         self.serverSymmetricKey = SymmetricKey(data: serverKey)
-        self.direction = .client
+        self.direction = direction
     }
 
     /// Pre-populates the receive buffer with data that was read during the
@@ -684,8 +685,14 @@ class TLSRecordConnection {
     /// Dispatches between AEAD (GCM/ChaCha20) and CBC+HMAC cipher suites.
     private func encryptTLS12Record(plaintext: Data, contentType: UInt8 = 0x17) throws -> Data {
         seqLock.lock()
-        let seqNum = clientSeqNum
-        clientSeqNum += 1
+        let seqNum: UInt64
+        if direction == .server {
+            seqNum = serverSeqNum
+            serverSeqNum += 1
+        } else {
+            seqNum = clientSeqNum
+            clientSeqNum += 1
+        }
         seqLock.unlock()
 
         let version = tlsVersion
@@ -711,7 +718,7 @@ class TLSRecordConnection {
         let explicitNonce: Data
         if isChaCha {
             // ChaCha20: XOR IV with padded seq (same as TLS 1.3)
-            var n = clientIV
+            var n = egressIV
             xorSeqIntoNonce(&n, seqNum: seqNum)
             nonce = n
             explicitNonce = Data()
@@ -719,7 +726,7 @@ class TLSRecordConnection {
             // AES-GCM: implicit(4) || explicit(8) where explicit = seq number
             var seqBytes = Data(count: 8)
             for i in 0..<8 { seqBytes[i] = UInt8((seqNum >> ((7 - i) * 8)) & 0xFF) }
-            var n = clientIV  // 4 bytes implicit
+            var n = egressIV  // 4 bytes implicit
             n.append(seqBytes)
             nonce = n
             explicitNonce = seqBytes
@@ -734,7 +741,7 @@ class TLSRecordConnection {
         aad.append(UInt8((plaintext.count >> 8) & 0xFF))
         aad.append(UInt8(plaintext.count & 0xFF))
 
-        let (ct, tag) = try sealAEAD(plaintext: plaintext, nonce: nonce, aad: aad, key: clientSymmetricKey)
+        let (ct, tag) = try sealAEAD(plaintext: plaintext, nonce: nonce, aad: aad, key: egressSymmetricKey)
 
         // Record: header(5) || [explicit_nonce(8)] || ciphertext || tag(16)
         let recordPayloadLen = explicitNonceLen + ct.count + tag.count
@@ -770,7 +777,7 @@ class TLSRecordConnection {
 
         // Compute MAC
         let mac = TLS12KeyDerivation.tls10MAC(
-            macKey: clientMACKey, seqNum: seqNum,
+            macKey: egressMACKey, seqNum: seqNum,
             contentType: contentType, protocolVersion: version,
             payload: plaintext, useSHA384: useSHA384, useSHA256: useSHA256
         )
@@ -794,15 +801,16 @@ class TLSRecordConnection {
         // AES-CBC encrypt (no PKCS7 padding — we handle it ourselves)
         var encrypted = Data(count: data.count)
         var numBytesEncrypted = 0
+        let cbcKey = egressKey
         let status = encrypted.withUnsafeMutableBytes { outPtr in
             data.withUnsafeBytes { inPtr in
-                clientKey.withUnsafeBytes { keyPtr in
+                cbcKey.withUnsafeBytes { keyPtr in
                     iv.withUnsafeBytes { ivPtr in
                         CCCrypt(
                             CCOperation(kCCEncrypt),
                             CCAlgorithm(kCCAlgorithmAES),
                             0,  // No padding
-                            keyPtr.baseAddress!, clientKey.count,
+                            keyPtr.baseAddress!, cbcKey.count,
                             ivPtr.baseAddress!,
                             inPtr.baseAddress!, data.count,
                             outPtr.baseAddress!, data.count,
@@ -857,11 +865,11 @@ class TLSRecordConnection {
         // Build nonce
         let nonce: Data
         if isChaCha {
-            var n = serverIV
+            var n = ingressIV
             xorSeqIntoNonce(&n, seqNum: seqNum)
             nonce = n
         } else {
-            var n = serverIV  // 4 bytes implicit
+            var n = ingressIV  // 4 bytes implicit
             n.append(explicitNonce)
             nonce = n
         }
@@ -879,7 +887,7 @@ class TLSRecordConnection {
         let ct = Data(payload.prefix(payload.count - 16))
         let tag = Data(payload.suffix(16))
 
-        return try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: aad, key: serverSymmetricKey)
+        return try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: aad, key: ingressSymmetricKey)
     }
 
     /// TLS 1.2 CBC+HMAC decryption.
@@ -903,15 +911,16 @@ class TLSRecordConnection {
         // AES-CBC decrypt
         var decrypted = Data(count: encrypted.count)
         var numBytesDecrypted = 0
+        let cbcKey = ingressKey
         let status = decrypted.withUnsafeMutableBytes { outPtr in
             encrypted.withUnsafeBytes { inPtr in
-                serverKey.withUnsafeBytes { keyPtr in
+                cbcKey.withUnsafeBytes { keyPtr in
                     iv.withUnsafeBytes { ivPtr in
                         CCCrypt(
                             CCOperation(kCCDecrypt),
                             CCAlgorithm(kCCAlgorithmAES),
                             0,  // No PKCS7 padding
-                            keyPtr.baseAddress!, serverKey.count,
+                            keyPtr.baseAddress!, cbcKey.count,
                             ivPtr.baseAddress!,
                             inPtr.baseAddress!, encrypted.count,
                             outPtr.baseAddress!, encrypted.count,
@@ -971,7 +980,7 @@ class TLSRecordConnection {
         }
 
         let expectedMAC = TLS12KeyDerivation.tls10MAC(
-            macKey: serverMACKey, seqNum: seqNum,
+            macKey: ingressMACKey, seqNum: seqNum,
             contentType: contentType, protocolVersion: version,
             payload: payload, useSHA384: useSHA384, useSHA256: useSHA256
         )
