@@ -28,7 +28,7 @@ struct SettingsView: View {
 
     @State private var adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
     @State private var showInsecureAlert = false
-    
+
     var body: some View {
         Form {
             Section("VPN") {
@@ -65,7 +65,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            
+
             Section("Security") {
                 Toggle(isOn: Binding(
                     get: { allowInsecure },
@@ -87,6 +87,9 @@ struct SettingsView: View {
                 } label: {
                     TextWithColorfulIcon(title: "Trusted Certificates", comment: nil, systemName: "checkmark.seal.fill", foregroundColor: .white, backgroundColor: .green)
                 }
+            }
+
+            Section("Utilities") {
                 NavigationLink {
                     MITMSettingsView()
                 } label: {
@@ -171,7 +174,7 @@ struct SettingsView: View {
             adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
         }
     }
-    
+
     private func flag(for countryCode: String) -> String {
         String(countryCode.unicodeScalars.compactMap {
             UnicodeScalar(127397 + $0.value)

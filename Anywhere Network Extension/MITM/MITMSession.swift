@@ -128,6 +128,8 @@ final class MITMSession {
     private let lwipQueue: DispatchQueue
 
     private let leafCache: MITMLeafCertCache
+    private let policy: MITMRewritePolicy
+    private let rewriteTarget: MITMRewriteTarget?
     private let proxyConnection: ProxyConnection
     private let proxyClient: ProxyClient?
 
@@ -143,21 +145,25 @@ final class MITMSession {
 
     private let innerTransport: InnerTransport
 
-    /// Inner record connection (post-handshake) — encrypts/decrypts to the
-    /// client. Plaintext on the inside.
+    /// Inner record connection after handshake. Encrypts and decrypts
+    /// traffic with the client; plaintext stays inside the session.
     private var innerRecord: TLSRecordConnection?
-    /// Outer record connection (post-handshake) — encrypts/decrypts to the
-    /// real server. Plaintext on the inside.
+    /// Outer record connection after handshake. Encrypts and decrypts
+    /// traffic with the real server; plaintext stays inside the session.
     private var outerRecord: TLSRecordConnection?
 
-    private let rewriter = MITMRewriter()
-    private let h2Rewriter = MITMHTTP2Rewriter()
+    /// HTTP/1.1 stream rewriters, one per direction. Each owns the
+    /// message-framing state machine for its half of the connection.
+    private let requestStream: MITMHTTP1Stream
+    private let responseStream: MITMHTTP1Stream
 
-    /// HTTP/2 frame translators — populated only when both legs
-    /// negotiated `h2` ALPN. ``inboundH2`` rewrites the client → server
-    /// direction; ``outboundH2`` rewrites the server → client direction.
+    /// HTTP/2 frame translators, populated only when both legs negotiate
+    /// `h2` ALPN. ``inboundH2`` rewrites client-to-server traffic;
+    /// ``outboundH2`` rewrites server-to-client traffic.
     private var inboundH2: MITMHTTP2Connection?
     private var outboundH2: MITMHTTP2Connection?
+
+    private let h2Rewriter: MITMHTTP2Rewriter
 
     private var torn = false
 
@@ -177,6 +183,8 @@ final class MITMSession {
         dstPort: UInt16,
         clientHello: Data,
         leafCache: MITMLeafCertCache,
+        policy: MITMRewritePolicy,
+        rewriteTarget: MITMRewriteTarget?,
         proxyClient: ProxyClient?,
         proxyConnection: ProxyConnection,
         lwipQueue: DispatchQueue
@@ -185,10 +193,36 @@ final class MITMSession {
         self.dstPort = dstPort
         self.pendingClientBytes = clientHello
         self.leafCache = leafCache
+        self.policy = policy
+        self.rewriteTarget = rewriteTarget
         self.proxyClient = proxyClient
         self.proxyConnection = proxyConnection
         self.lwipQueue = lwipQueue
         self.innerTransport = InnerTransport(queue: lwipQueue)
+        // Authority string used to auto-rewrite Host (HTTP/1.1) and
+        // :authority (HTTP/2) when a redirect is in play. Format follows
+        // RFC 9112 section 3.2: bare host or "host:port".
+        let effectiveAuthority: String? = rewriteTarget.map { target in
+            if let port = target.port { return "\(target.host):\(port)" }
+            return target.host
+        }
+        self.requestStream = MITMHTTP1Stream(
+            host: dstHost,
+            phase: .httpRequest,
+            policy: policy,
+            effectiveAuthority: effectiveAuthority
+        )
+        self.responseStream = MITMHTTP1Stream(
+            host: dstHost,
+            phase: .httpResponse,
+            policy: policy,
+            effectiveAuthority: nil // Host headers do not apply on responses.
+        )
+        self.h2Rewriter = MITMHTTP2Rewriter(
+            host: dstHost,
+            policy: policy,
+            effectiveAuthority: effectiveAuthority
+        )
     }
 
     // MARK: - Lifecycle
@@ -199,15 +233,21 @@ final class MITMSession {
     /// `lwipQueue`.
     func start(sni: String) {
         // Peek at the buffered ClientHello to pull the inner client's
-        // ALPN offer and its TLS version capability. If the inner
-        // client doesn't advertise TLS 1.3 (i.e. it's TLS 1.2-only),
-        // constrain the outer leg to TLS 1.2 — otherwise the outer
-        // could negotiate 1.3 with a 1.3-capable origin and leave the
-        // inner leg unable to mirror.
+        // ALPN offer and TLS version capability. If the inner client does
+        // not advertise TLS 1.3, constrain the outer leg to TLS 1.2 so both
+        // legs can mirror the negotiated version.
         let parsed = parseClientHello(pendingClientBytes)
         let clientALPNs = parsed?.alpnProtocols ?? []
         let clientSupportsTLS13 = parsed?.supportedVersions.contains(0x0304) ?? true
-        startOuterHandshake(sni: sni, alpns: clientALPNs, allowTLS13: clientSupportsTLS13)
+        // Outer SNI follows the redirect when present. The inner leaf
+        // certificate uses ``sni`` so the client sees the requested host.
+        let outerSNI = rewriteTarget?.host ?? sni
+        startOuterHandshake(
+            innerSNI: sni,
+            outerSNI: outerSNI,
+            alpns: clientALPNs,
+            allowTLS13: clientSupportsTLS13
+        )
     }
 
     /// Feeds bytes received from the client. Until the inner ``TLSServer``
@@ -295,7 +335,12 @@ final class MITMSession {
 
     // MARK: - Outer Handshake
 
-    private func startOuterHandshake(sni: String, alpns: [String], allowTLS13: Bool) {
+    private func startOuterHandshake(
+        innerSNI: String,
+        outerSNI: String,
+        alpns: [String],
+        allowTLS13: Bool
+    ) {
         // ``TLSClient`` strips TLS 1.3 from the fingerprinted
         // supported_versions extension when ``maxVersion`` is set to
         // .tls12, so capping the outer leg here actually forces the
@@ -315,7 +360,7 @@ final class MITMSession {
             outerALPN = alpns
         }
         let configuration = TLSConfiguration(
-            serverName: sni,
+            serverName: outerSNI,
             alpn: outerALPN,
             fingerprint: .chrome133,
             minVersion: .tls12,
@@ -335,7 +380,7 @@ final class MITMSession {
                     // server chose; fall back to http/1.1 if the server
                     // omitted the extension.
                     let alpn = record.negotiatedALPN.isEmpty ? "http/1.1" : record.negotiatedALPN
-                    self.startInnerHandshake(sni: sni, alpn: alpn, tlsVersion: record.tlsVersion)
+                    self.startInnerHandshake(sni: innerSNI, alpn: alpn, tlsVersion: record.tlsVersion)
                 case .failure(let error):
                     logger.error("[MITM] Outer handshake failed for \(self.dstHost): \(error)")
                     self.cancel(error: error)
@@ -388,12 +433,13 @@ final class MITMSession {
                 if let inboundH2 = self.inboundH2 {
                     transformed = inboundH2.process(data)
                 } else {
-                    transformed = self.rewriter.transformRequest(data)
+                    transformed = self.requestStream.transform(data)
                 }
                 guard !transformed.isEmpty else {
-                    // The h2 translator may have buffered fragments
-                    // (CONTINUATION pending, partial preface, etc.).
-                    // Loop back for more bytes without writing.
+                    // The h2 translator or HTTP/1.1 stream may have
+                    // buffered fragments (CONTINUATION pending, partial
+                    // preface, body buffered for rewrite, etc.). Loop
+                    // back for more bytes without writing.
                     self.startInboundPump(inner: inner, outer: outer)
                     return
                 }
@@ -426,7 +472,7 @@ final class MITMSession {
                 if let outboundH2 = self.outboundH2 {
                     transformed = outboundH2.process(data)
                 } else {
-                    transformed = self.rewriter.transformResponse(data)
+                    transformed = self.responseStream.transform(data)
                 }
                 guard !transformed.isEmpty else {
                     self.startOutboundPump(inner: inner, outer: outer)

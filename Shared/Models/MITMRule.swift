@@ -7,52 +7,201 @@
 
 import Foundation
 
-struct MITMRule: Codable, Equatable, Identifiable {
-    var id = UUID()
-    var type: DomainRuleType
-    var value: String
+enum MITMPhase: String, Codable, CaseIterable, Identifiable {
+    case httpRequest
+    case httpResponse
 
-    init(id: UUID = UUID(), type: DomainRuleType, value: String) {
-        self.id = id
-        self.type = type
-        self.value = value
+    var id: String { rawValue }
+}
+
+/// A single rewrite operation. The associated values carry only the fields
+/// that operation needs, keeping the editor UI and runtime engine from
+/// threading optional fields around.
+///
+/// Note: ``urlReplace`` rewrites only the path-and-query. The
+/// destination of the upstream connection lives on ``MITMRuleSet`` as
+/// ``rewriteTarget``, so a single rule set always has a coherent
+/// upstream.
+enum MITMOperation: Equatable {
+    case urlReplace(pattern: String, path: String)
+    case headerAdd(name: String, value: String)
+    case headerDelete(name: String)
+    case headerReplace(pattern: String, name: String, value: String)
+    case bodyReplace(pattern: String, body: String)
+}
+
+extension MITMOperation: Codable {
+    private enum Kind: String, Codable {
+        case urlReplace
+        case headerAdd
+        case headerDelete
+        case headerReplace
+        case bodyReplace
     }
 
     private enum CodingKeys: String, CodingKey {
-        case type
+        case kind
+        case name
         case value
+        case pattern
+        case replacement
     }
 
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.type = try container.decode(DomainRuleType.self, forKey: .type)
-        self.value = try container.decode(String.self, forKey: .value)
-        self.id = UUID()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(Kind.self, forKey: .kind)
+        switch kind {
+        case .urlReplace:
+            self = .urlReplace(
+                pattern: try c.decode(String.self, forKey: .pattern),
+                path: try c.decode(String.self, forKey: .replacement)
+            )
+        case .headerAdd:
+            self = .headerAdd(
+                name: try c.decode(String.self, forKey: .name),
+                value: try c.decode(String.self, forKey: .value)
+            )
+        case .headerDelete:
+            self = .headerDelete(name: try c.decode(String.self, forKey: .name))
+        case .headerReplace:
+            self = .headerReplace(
+                pattern: try c.decode(String.self, forKey: .pattern),
+                name: try c.decode(String.self, forKey: .name),
+                value: try c.decode(String.self, forKey: .value)
+            )
+        case .bodyReplace:
+            self = .bodyReplace(
+                pattern: try c.decode(String.self, forKey: .pattern),
+                body: try c.decode(String.self, forKey: .replacement)
+            )
+        }
     }
 
     func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(type, forKey: .type)
-        try container.encode(value, forKey: .value)
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .urlReplace(let pattern, let replacement):
+            try c.encode(Kind.urlReplace, forKey: .kind)
+            try c.encode(pattern, forKey: .pattern)
+            try c.encode(replacement, forKey: .replacement)
+        case .headerAdd(let name, let value):
+            try c.encode(Kind.headerAdd, forKey: .kind)
+            try c.encode(name, forKey: .name)
+            try c.encode(value, forKey: .value)
+        case .headerDelete(let name):
+            try c.encode(Kind.headerDelete, forKey: .kind)
+            try c.encode(name, forKey: .name)
+        case .headerReplace(let pattern, let name, let value):
+            try c.encode(Kind.headerReplace, forKey: .kind)
+            try c.encode(pattern, forKey: .pattern)
+            try c.encode(name, forKey: .name)
+            try c.encode(value, forKey: .value)
+        case .bodyReplace(let pattern, let replacement):
+            try c.encode(Kind.bodyReplace, forKey: .kind)
+            try c.encode(pattern, forKey: .pattern)
+            try c.encode(replacement, forKey: .replacement)
+        }
+    }
+}
+
+struct MITMRule: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var phase: MITMPhase
+    var operation: MITMOperation
+
+    init(
+        id: UUID = UUID(),
+        phase: MITMPhase,
+        operation: MITMOperation
+    ) {
+        self.id = id
+        self.phase = phase
+        self.operation = operation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case phase
+        case operation
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = UUID()
+        self.phase = try c.decode(MITMPhase.self, forKey: .phase)
+        self.operation = try c.decode(MITMOperation.self, forKey: .operation)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(phase, forKey: .phase)
+        try c.encode(operation, forKey: .operation)
+    }
+}
+
+/// Upstream destination for traffic matched by this rule set. ``port`` of
+/// nil means "keep the original port", the port the client tried to connect
+/// to.
+struct MITMRewriteTarget: Codable, Equatable {
+    var host: String
+    var port: UInt16?
+}
+
+/// An ordered group of rewrite rules tied to one domain suffix. The optional
+/// ``rewriteTarget`` is what gives the set a coherent upstream; if set,
+/// every connection to a host matched by ``domainSuffix`` is redirected
+/// to the target, regardless of which rule fires.
+struct MITMRuleSet: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var domainSuffix: String
+    var rewriteTarget: MITMRewriteTarget?
+    var rules: [MITMRule]
+
+    init(
+        id: UUID = UUID(),
+        domainSuffix: String,
+        rewriteTarget: MITMRewriteTarget? = nil,
+        rules: [MITMRule] = []
+    ) {
+        self.id = id
+        self.domainSuffix = domainSuffix
+        self.rewriteTarget = rewriteTarget
+        self.rules = rules
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case domainSuffix
+        case rewriteTarget
+        case rules
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = UUID()
+        self.domainSuffix = try c.decode(String.self, forKey: .domainSuffix)
+        self.rewriteTarget = try c.decodeIfPresent(MITMRewriteTarget.self, forKey: .rewriteTarget)
+        self.rules = try c.decode([MITMRule].self, forKey: .rules)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(domainSuffix, forKey: .domainSuffix)
+        try c.encodeIfPresent(rewriteTarget, forKey: .rewriteTarget)
+        try c.encode(rules, forKey: .rules)
     }
 }
 
 /// Persisted shape for the MITM feature: master toggle plus the user's
-/// match rules. Owned by the app side via ``MITMStore`` and read by the
-/// network extension via ``LWIPStack/loadMITMSetting``. Keeping the
-/// schema in one Codable type means new fields show up at compile time
-/// on both sides instead of silently disappearing through a
-/// hand-rolled JSON parser.
+/// rule sets. Owned by the app side via ``MITMStore`` and read by the
+/// network extension via ``LWIPStack/loadMITMSetting``.
 struct MITMSnapshot: Codable, Equatable {
     var enabled: Bool
-    var rules: [MITMRule]
+    var ruleSets: [MITMRuleSet]
 
-    static let empty = MITMSnapshot(enabled: false, rules: [])
+    static let empty = MITMSnapshot(enabled: false, ruleSets: [])
 
-    /// Best-effort decode of the persisted blob. Returns ``empty`` when
-    /// no snapshot has been written yet or the blob fails to decode
-    /// (older schema, corruption, etc.) — both sides treat that as
-    /// "MITM disabled" rather than crashing.
+    /// Best-effort decode of the persisted blob. Returns ``empty`` when no
+    /// snapshot has been written yet or the blob fails to decode. Both sides
+    /// treat that as "MITM disabled" rather than crashing.
     static func load() -> MITMSnapshot {
         guard let data = AWCore.getMITMData() else { return .empty }
         return (try? JSONDecoder().decode(MITMSnapshot.self, from: data)) ?? .empty

@@ -119,7 +119,7 @@ extension LWIPStack {
             // need the ClientHello bytes to drive ``TLSServer``. Force
             // sniffing on so the bytes land in ``LWIPTCPConnection.pendingData``;
             // the connection wakes ``mitmEnabled`` once ``applySNI`` runs.
-            if shared.mitmEnabled && shared.mitmHostMatcher.matches(dstHost) {
+            if shared.mitmEnabled && shared.mitmPolicy.matches(dstHost) {
                 sniffSNI = true
             }
 
@@ -211,7 +211,7 @@ extension LWIPStack {
                 let dstIPProbe = LWIPStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
                 if FakeIPPool.isFakeIP(dstIPProbe),
                    let entry = shared.fakeIPPool.lookup(ip: dstIPProbe),
-                   shared.mitmHostMatcher.matches(entry.domain) {
+                   shared.mitmPolicy.matches(entry.domain) {
                     shared.sendICMPPortUnreachable(
                         srcIP: srcIP,
                         srcPort: srcPort,

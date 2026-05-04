@@ -20,45 +20,84 @@ final class MITMStore: ObservableObject {
         }
     }
 
-    @Published private(set) var rules: [MITMRule]
+    @Published private(set) var ruleSets: [MITMRuleSet]
 
     private init() {
         let snapshot = MITMSnapshot.load()
         self.enabled = snapshot.enabled
-        self.rules = snapshot.rules
+        self.ruleSets = snapshot.ruleSets
     }
 
-    // MARK: - Mutations
+    // MARK: - Rule set CRUD
 
-    func add(_ rule: MITMRule) {
-        rules.append(rule)
+    func addRuleSet(_ ruleSet: MITMRuleSet) {
+        ruleSets.append(ruleSet)
         save()
     }
 
-    func update(_ rule: MITMRule) {
-        guard let index = rules.firstIndex(where: { $0.id == rule.id }) else { return }
-        rules[index] = rule
+    func updateRuleSet(_ ruleSet: MITMRuleSet) {
+        guard let index = ruleSets.firstIndex(where: { $0.id == ruleSet.id }) else { return }
+        ruleSets[index] = ruleSet
         save()
     }
 
-    func remove(atOffsets offsets: IndexSet) {
-        rules.remove(atOffsets: offsets)
+    func removeRuleSets(atOffsets offsets: IndexSet) {
+        ruleSets.remove(atOffsets: offsets)
         save()
     }
 
-    func remove(id: UUID) {
-        rules.removeAll { $0.id == id }
+    func removeRuleSet(id: UUID) {
+        ruleSets.removeAll { $0.id == id }
         save()
     }
 
-    func move(fromOffsets source: IndexSet, toOffset destination: Int) {
-        rules.move(fromOffsets: source, toOffset: destination)
+    func moveRuleSets(fromOffsets source: IndexSet, toOffset destination: Int) {
+        ruleSets.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
+    // MARK: - Per-set rule CRUD
+
+    /// Looks up a rule set by id. Returns nil if it was removed after the
+    /// caller last read it, such as while an editor sheet is still on screen.
+    func ruleSet(id: UUID) -> MITMRuleSet? {
+        ruleSets.first(where: { $0.id == id })
+    }
+
+    func addRule(_ rule: MITMRule, toRuleSet ruleSetID: UUID) {
+        guard let index = ruleSets.firstIndex(where: { $0.id == ruleSetID }) else { return }
+        ruleSets[index].rules.append(rule)
+        save()
+    }
+
+    func updateRule(_ rule: MITMRule, inRuleSet ruleSetID: UUID) {
+        guard let setIndex = ruleSets.firstIndex(where: { $0.id == ruleSetID }) else { return }
+        guard let ruleIndex = ruleSets[setIndex].rules.firstIndex(where: { $0.id == rule.id }) else {
+            return
+        }
+        ruleSets[setIndex].rules[ruleIndex] = rule
+        save()
+    }
+
+    func removeRules(atOffsets offsets: IndexSet, inRuleSet ruleSetID: UUID) {
+        guard let setIndex = ruleSets.firstIndex(where: { $0.id == ruleSetID }) else { return }
+        ruleSets[setIndex].rules.remove(atOffsets: offsets)
+        save()
+    }
+
+    func moveRules(
+        fromOffsets source: IndexSet,
+        toOffset destination: Int,
+        inRuleSet ruleSetID: UUID
+    ) {
+        guard let setIndex = ruleSets.firstIndex(where: { $0.id == ruleSetID }) else { return }
+        ruleSets[setIndex].rules.move(fromOffsets: source, toOffset: destination)
         save()
     }
 
     // MARK: - Persistence
 
     private func save() {
-        MITMSnapshot(enabled: enabled, rules: rules).save()
+        MITMSnapshot(enabled: enabled, ruleSets: ruleSets).save()
     }
 }

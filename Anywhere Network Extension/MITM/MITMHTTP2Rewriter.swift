@@ -7,59 +7,160 @@
 
 import Foundation
 
-/// HTTP/2 analog of ``MITMRewriter``. Where ``MITMRewriter`` operates on
-/// the raw plaintext byte stream that the HTTP/1.1 pipeline produces,
-/// this rewriter operates at HTTP/2 frame granularity — the unit at
-/// which h2 traffic is naturally split.
+private let logger = AnywhereLogger(category: "MITM")
+
+/// HTTP/2 analog of ``MITMHTTP1Stream``. Where the HTTP/1.1 path
+/// operates on raw bytes, this rewriter operates on (name, value)
+/// arrays after HPACK decode and on whole-body buffers handed in by
+/// ``MITMHTTP2Connection``.
 ///
-/// All hooks are passthrough today. Wiring matches the HTTP/1.1 stub
-/// (`transformRequest` / `transformResponse`): rewriting rules will be
-/// applied here once the rule engine lands.
+/// Stateless: per-stream buffering lives on the connection. The
+/// rewriter applies the compiled rule list for the host.
 final class MITMHTTP2Rewriter {
 
-    /// Called once per request HEADERS block (after CONTINUATION is
-    /// reassembled) flowing client → server.
+    private let host: String
+    private let policy: MITMRewritePolicy
+    /// When set, every request's `:authority` pseudo-header is rewritten to
+    /// this value. Driven by the rule set's ``rewriteTarget``; nil means
+    /// "leave :authority alone".
+    private let effectiveAuthority: String?
+
+    init(host: String, policy: MITMRewritePolicy, effectiveAuthority: String?) {
+        self.host = host
+        self.policy = policy
+        self.effectiveAuthority = effectiveAuthority
+    }
+
+    // MARK: - Headers
+
     func transformRequestHeaders(
         _ headers: [(name: String, value: String)],
         streamID: UInt32
     ) -> [(name: String, value: String)] {
-        // Test rewrite: tag every outgoing request so we can verify the
-        // pipeline by visiting an echo endpoint (e.g. httpbin.org/headers
-        // or postman-echo.com/headers).
-        var modified = headers
-        modified.append((name: "x-anywhere-mitm-req", value: "1"))
-        return modified
+        // :authority rewrite runs first so configured headerReplace rules
+        // see the canonical post-redirect value and can override it.
+        let withAuthority = applyAuthorityRewrite(headers)
+        return applyHeaderRules(withAuthority, phase: .httpRequest)
     }
 
-    /// Called once per response HEADERS block flowing server → client.
     func transformResponseHeaders(
         _ headers: [(name: String, value: String)],
         streamID: UInt32
     ) -> [(name: String, value: String)] {
-        // Test rewrite: tag every response so we can verify the pipeline
-        // by inspecting headers in browser DevTools (Network tab).
-        var modified = headers
-        modified.append((name: "x-anywhere-mitm-resp", value: "1"))
-        return modified
+        applyHeaderRules(headers, phase: .httpResponse)
     }
 
-    /// Called per DATA frame flowing client → server.
-    func transformRequestData(
-        _ data: Data,
-        streamID: UInt32,
-        endStream: Bool
-    ) -> Data {
-        // TODO: Apply request body rewrite rules.
-        data
+    // MARK: - Body rewrite preflight
+
+    /// Whether any ``bodyReplace`` rule applies for this host + phase.
+    /// The connection uses this to decide whether to buffer DATA frames.
+    func hasBodyRewrite(phase: MITMPhase) -> Bool {
+        policy.rules(for: host, phase: phase).contains {
+            if case .bodyReplace = $0.operation { return true }
+            return false
+        }
     }
 
-    /// Called per DATA frame flowing server → client.
-    func transformResponseData(
-        _ data: Data,
-        streamID: UInt32,
-        endStream: Bool
-    ) -> Data {
-        // TODO: Apply response body rewrite rules.
-        data
+    /// Applies every ``bodyReplace`` rule for the given phase to the
+    /// fully-buffered body. Body rules operate on UTF-8 strings; invalid
+    /// byte sequences are replaced with U+FFFD during decode.
+    func rewriteBody(_ data: Data, phase: MITMPhase) -> Data {
+        let rules = policy.rules(for: host, phase: phase)
+        var bodyString = String(decoding: data, as: UTF8.self)
+        var changed = false
+        for rule in rules {
+            guard case .bodyReplace(let regex, let replacement) = rule.operation else {
+                continue
+            }
+            let range = NSRange(bodyString.startIndex..., in: bodyString)
+            let mutated = regex.stringByReplacingMatches(
+                in: bodyString,
+                options: [],
+                range: range,
+                withTemplate: replacement
+            )
+            if mutated != bodyString {
+                bodyString = mutated
+                changed = true
+            }
+        }
+        return changed ? Data(bodyString.utf8) : data
+    }
+
+    // MARK: - Authority rewrite
+
+    /// HTTP/2 analog of HTTP/1.1's Host rewrite. The `:authority`
+    /// pseudo-header is replaced; if absent, one is inserted before regular
+    /// headers as required by RFC 9113 section 8.3.
+    private func applyAuthorityRewrite(
+        _ headers: [(name: String, value: String)]
+    ) -> [(name: String, value: String)] {
+        guard let authority = effectiveAuthority else { return headers }
+        var sawAuthority = false
+        var result = headers.map { entry -> (name: String, value: String) in
+            if entry.name == ":authority" {
+                sawAuthority = true
+                return (name: ":authority", value: authority)
+            }
+            return entry
+        }
+        if !sawAuthority {
+            result.insert((name: ":authority", value: authority), at: 0)
+        }
+        return result
+    }
+
+    // MARK: - Header rule application
+
+    private func applyHeaderRules(
+        _ headers: [(name: String, value: String)],
+        phase: MITMPhase
+    ) -> [(name: String, value: String)] {
+        let rules = policy.rules(for: host, phase: phase)
+        guard !rules.isEmpty else { return headers }
+
+        var current = headers
+        for rule in rules {
+            switch rule.operation {
+            case .urlReplace(let regex, let replacement):
+                guard phase == .httpRequest else { continue }
+                current = current.map { entry in
+                    guard entry.name == ":path" else { return entry }
+                    let range = NSRange(entry.value.startIndex..., in: entry.value)
+                    guard regex.firstMatch(in: entry.value, options: [], range: range) != nil else {
+                        return entry
+                    }
+                    let rewritten = regex.stringByReplacingMatches(
+                        in: entry.value,
+                        options: [],
+                        range: range,
+                        withTemplate: replacement
+                    )
+                    return (name: entry.name, value: rewritten)
+                }
+            case .headerAdd(let name, let value):
+                current.append((name: name, value: value))
+            case .headerDelete(let nameLower):
+                current.removeAll { $0.name.lowercased() == nameLower }
+            case .headerReplace(let regex, let name, let value):
+                current = current.map { entry in
+                    let literal = "\(entry.name): \(entry.value)"
+                    let range = NSRange(literal.startIndex..., in: literal)
+                    guard regex.firstMatch(in: literal, options: [], range: range) != nil else {
+                        return entry
+                    }
+                    let rewritten = regex.stringByReplacingMatches(
+                        in: literal,
+                        options: [],
+                        range: range,
+                        withTemplate: "\(name): \(value)"
+                    )
+                    return (name: name, value: value)
+                }
+            case .bodyReplace:
+                continue
+            }
+        }
+        return current
     }
 }

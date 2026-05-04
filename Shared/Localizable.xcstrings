@@ -10,6 +10,9 @@
     "/" : {
       "shouldTranslate" : false
     },
+    "/everywhere" : {
+
+    },
     "%@ %@" : {
       "localizations" : {
         "ar" : {
@@ -524,10 +527,22 @@
         }
       }
     },
+    "%lld rules" : {
+
+    },
+    "^(?i)User-Agent: Anywhere$" : {
+
+    },
+    "^\\/anywhere$" : {
+
+    },
+    "^Anywhere$" : {
+
+    },
     "0-100" : {
       "shouldTranslate" : false
     },
-    "1. Tap “Install Profile” — the system will prompt you to download and install the profile.\n2. Open Settings → General → VPN & Device Management → install the profile.\n3. Open Settings → General → About → Certificate Trust Settings → enable “Anywhere MITM Root”." : {
+    "1 rule" : {
 
     },
     "A proxy chain needs at least 2 proxies." : {
@@ -1168,6 +1183,9 @@
         }
       }
     },
+    "Add Rule Set" : {
+
+    },
     "Address" : {
       "localizations" : {
         "ar" : {
@@ -1529,7 +1547,10 @@
         }
       }
     },
-    "Any previously installed MITM profile will stop working until you re-install the new root." : {
+    "Any previously installed MITM profile will stop working until you re-install the new certificate." : {
+
+    },
+    "Anywhere" : {
 
     },
     "Anywhere is an independent project and is not affiliated with, endorsed by, or sponsored by any of the companies listed below." : {
@@ -1589,6 +1610,9 @@
           }
         }
       }
+    },
+    "Anywhere Root Certificate is installed and trusted." : {
+
     },
     "Anywhere Rule List URL" : {
       "localizations" : {
@@ -1705,9 +1729,6 @@
           }
         }
       }
-    },
-    "Apps will accept the MITM certificate." : {
-
     },
     "ASCII" : {
       "shouldTranslate" : false
@@ -2012,6 +2033,9 @@
         }
       }
     },
+    "Body Replace" : {
+
+    },
     "Cancel" : {
       "localizations" : {
         "ar" : {
@@ -2069,9 +2093,6 @@
           }
         }
       }
-    },
-    "Certificate" : {
-
     },
     "ChaCha20-Poly1305" : {
       "shouldTranslate" : false
@@ -2834,10 +2855,7 @@
         }
       }
     },
-    "Delete Root" : {
-
-    },
-    "Delete Root?" : {
+    "Delete Certificate" : {
 
     },
     "Diagnostics" : {
@@ -3314,8 +3332,10 @@
         }
       }
     },
+    "Domain suffix is required." : {
+
+    },
     "Done" : {
-      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -3666,6 +3686,9 @@
     "Edit Rule" : {
 
     },
+    "Edit Rule Set" : {
+
+    },
     "Enable" : {
       "localizations" : {
         "ar" : {
@@ -3897,9 +3920,6 @@
           }
         }
       }
-    },
-    "Enable MITM" : {
-
     },
     "Enabling Encrypted DNS will increase connection wait time and prevent routing rules from working." : {
       "localizations" : {
@@ -4253,6 +4273,12 @@
     "Error" : {
 
     },
+    "Everywhere" : {
+
+    },
+    "example.com" : {
+
+    },
     "Exit" : {
       "localizations" : {
         "ar" : {
@@ -4369,7 +4395,7 @@
         }
       }
     },
-    "Export Certificate (.cer)" : {
+    "Export Certificate" : {
 
     },
     "Failed to export certificate." : {
@@ -4388,13 +4414,10 @@
       "comment" : "Flow for VLESS protocol TCP transport",
       "shouldTranslate" : false
     },
-    "Generate a CA root certificate stored in this device's keychain. The private key never leaves the device." : {
+    "Generate a certificate to begin." : {
 
     },
-    "Generate a root to begin." : {
-
-    },
-    "Generate Root" : {
+    "Generate Certificate" : {
 
     },
     "Get Started" : {
@@ -4638,6 +4661,24 @@
     "h2,http/1.1" : {
       "shouldTranslate" : false
     },
+    "Header Add" : {
+
+    },
+    "Header Delete" : {
+
+    },
+    "Header Name" : {
+
+    },
+    "Header name is required." : {
+
+    },
+    "Header Replace" : {
+
+    },
+    "Header Value" : {
+
+    },
     "Hide VPN Icon" : {
       "localizations" : {
         "ar" : {
@@ -4812,7 +4853,7 @@
         }
       }
     },
-    "Hostnames" : {
+    "Host (e.g. staging.example.com)" : {
 
     },
     "HTTP Mask" : {
@@ -5179,13 +5220,10 @@
         }
       }
     },
-    "Install" : {
+    "Install Certificate" : {
 
     },
-    "Install Profile" : {
-
-    },
-    "Install the profile and enable trust to use MITM." : {
+    "Install the profile and trust in Settings to use MITM." : {
 
     },
     "Invalid chain — some proxies are missing" : {
@@ -6072,9 +6110,6 @@
     "MITM" : {
 
     },
-    "MITM intercepts and decrypts TLS traffic for matched hostnames. Apps with certificate pinning will fail. Only enable for hostnames you understand." : {
-
-    },
     "Mode" : {
       "localizations" : {
         "ar" : {
@@ -6666,6 +6701,9 @@
         }
       }
     },
+    "No Certificate" : {
+
+    },
     "No Chains" : {
       "localizations" : {
         "ar" : {
@@ -6840,7 +6878,7 @@
         }
       }
     },
-    "No Root Yet" : {
+    "No rule sets" : {
 
     },
     "No rules" : {
@@ -7429,6 +7467,9 @@
         }
       }
     },
+    "Operation" : {
+
+    },
     "Other" : {
       "localizations" : {
         "ar" : {
@@ -7618,6 +7659,15 @@
       "comment" : "Path Root for Sudoku protocol HTTP Mask feature",
       "shouldTranslate" : false
     },
+    "Pattern" : {
+
+    },
+    "Pattern is not a valid regular expression." : {
+
+    },
+    "Pattern is required." : {
+
+    },
     "Permission denied" : {
       "localizations" : {
         "ar" : {
@@ -7676,6 +7726,9 @@
         }
       }
     },
+    "Phase" : {
+
+    },
     "Port" : {
       "localizations" : {
         "ar" : {
@@ -7733,6 +7786,12 @@
           }
         }
       }
+    },
+    "Port (optional)" : {
+
+    },
+    "Port must be a number between 1 and 65535." : {
+
     },
     "Protocol" : {
       "localizations" : {
@@ -8152,16 +8211,16 @@
         }
       }
     },
+    "Redirect host is required when redirect is enabled." : {
+
+    },
+    "Redirect Upstream" : {
+
+    },
     "Regenerate" : {
 
     },
-    "Regenerate Root" : {
-
-    },
-    "Regenerate Root?" : {
-
-    },
-    "Regenerating or deleting the root invalidates any previously installed MITM profile." : {
+    "Regenerate Certificate" : {
 
     },
     "REJECT" : {
@@ -8283,9 +8342,6 @@
         }
       }
     },
-    "Removes both the certificate and its private key. You'll need to regenerate to use MITM again." : {
-
-    },
     "Rename" : {
       "localizations" : {
         "ar" : {
@@ -8402,6 +8458,12 @@
         }
       }
     },
+    "Replacement" : {
+
+    },
+    "Request" : {
+
+    },
     "Reset" : {
       "localizations" : {
         "ar" : {
@@ -8459,6 +8521,9 @@
           }
         }
       }
+    },
+    "Response" : {
+
     },
     "Root Certificate" : {
 
@@ -8926,6 +8991,9 @@
           }
         }
       }
+    },
+    "Rule Sets" : {
+
     },
     "Rules" : {
       "localizations" : {
@@ -9466,9 +9534,6 @@
     },
     "SOCKS5" : {
       "shouldTranslate" : false
-    },
-    "Status" : {
-
     },
     "Stream One" : {
       "shouldTranslate" : false
@@ -10420,9 +10485,6 @@
         }
       }
     },
-    "Unsupported" : {
-
-    },
     "Update" : {
       "localizations" : {
         "ar" : {
@@ -10656,11 +10718,14 @@
         }
       }
     },
-    "Use \"Domain Suffix\" for label-aligned matches (\"example.com\" matches \"www.example.com\"). Use \"Domain Keyword\" for substring matches." : {
+    "URL Replace" : {
 
     },
     "User Agent" : {
       "shouldTranslate" : false
+    },
+    "User-Agent" : {
+
     },
     "Username" : {
       "localizations" : {
@@ -10719,6 +10784,9 @@
           }
         }
       }
+    },
+    "Utilities" : {
+
     },
     "UUID" : {
       "comment" : "UUID for VLESS protocol",
@@ -10907,6 +10975,9 @@
     "WebSocket" : {
       "shouldTranslate" : false
     },
+    "When set, every connection matched by this rule set is redirected to the target host. The Host / :authority header is auto-rewritten to match." : {
+
+    },
     "XHTTP" : {
       "shouldTranslate" : false
     },
@@ -10971,6 +11042,9 @@
           }
         }
       }
+    },
+    "You'll need to regenerate a certificate to use MITM again." : {
+
     }
   },
   "version" : "1.1"

@@ -95,7 +95,7 @@ enum X509Builder {
         let leafSPKI = try buildECP256SPKI(publicKeyX963: leafPublicKey.x963Representation)
         let caComponents = try parseCAComponents(certDER: caCertificateDER)
 
-        let subject = encodeName(commonName: hostname, organization: "Anywhere MITM")
+        let subject = encodeName(commonName: hostname, organization: "Anywhere")
         let validity = encodeValidity(notBefore: notBefore, notAfter: notAfter)
 
         let extensions = encodeExtensions([

@@ -74,15 +74,14 @@ class LWIPStack {
 
     // MARK: MITM
     //
-    // The MITM master toggle and matcher live next to the routing decision
-    // rather than inside it: routing chooses which proxy carries the
-    // upstream leg, MITM chooses whether to crack open the TLS in transit.
-    // Empty matcher (or master toggle off) makes the entire MITM path a
-    // no-op — no allocations, no callbacks, nothing to test.
+    // MITM state lives beside routing state: routing selects the upstream
+    // proxy, while MITM decides whether to intercept TLS in transit.
+    // With the master toggle off or no compiled rules, the connection path
+    // stays unchanged.
     var mitmEnabled: Bool = false
-    let mitmHostMatcher = MITMHostMatcher()
-    /// Lazily-loaded leaf-cert cache — created on first MITM-enabled session
-    /// so the keychain isn't touched on stack start when no rules apply.
+    let mitmPolicy = MITMRewritePolicy()
+    /// Lazily-created leaf certificate cache. Defers keychain access until a
+    /// MITM session needs a leaf certificate.
     var mitmLeafCache: MITMLeafCertCache?
     let mitmCertificateStore = MITMCertificateStore()
     
@@ -449,16 +448,16 @@ class LWIPStack {
         blockQUICEnabled = AWCore.getBlockQUICEnabled()
     }
 
-    /// Loads the MITM master toggle and rebuilds the in-memory hostname
-    /// matcher. Called from ``configureRuntime`` and from the
+    /// Loads the MITM master toggle and rebuilds the in-memory rewrite
+    /// policy. Called from ``configureRuntime`` and from the
     /// ``mitmChanged`` Darwin notification observer.
     func loadMITMSetting() {
         let snapshot = MITMSnapshot.load()
         mitmEnabled = snapshot.enabled
         if snapshot.enabled {
-            mitmHostMatcher.load(rules: snapshot.rules)
+            mitmPolicy.load(ruleSets: snapshot.ruleSets)
         } else {
-            mitmHostMatcher.reset()
+            mitmPolicy.reset()
         }
     }
 
