@@ -54,6 +54,8 @@ final class MITMCertificateController: ObservableObject {
 }
 
 struct MITMCertificateView: View {
+    @Environment(\.scenePhase) private var scenePhase
+
     @StateObject private var controller = MITMCertificateController.shared
 
     @State private var exportingCer = false
@@ -64,84 +66,99 @@ struct MITMCertificateView: View {
 
     var body: some View {
         Form {
-            Section("Status") {
+            Section {
                 HStack {
-                    Image(systemName: badgeIcon)
-                        .foregroundStyle(badgeColor)
+                    Image("certificate")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 60)
                     VStack(alignment: .leading) {
-                        Text(badgeTitle)
-                            .font(.headline)
+                        HStack {
+                            Image(systemName: badgeIcon)
+                                .foregroundStyle(badgeColor)
+                                .animation(.default, value: badgeIcon)
+                                .animation(.default, value: badgeColor)
+                            Text(badgeTitle)
+                                .font(.headline)
+                                .animation(.default, value: badgeTitle)
+                        }
                         Text(badgeSubtitle)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .animation(.default, value: badgeSubtitle)
                     }
                 }
+                .frame(minHeight: 80)
             }
 
             if controller.hasCA {
-                Section("Install") {
-                    Text("1. Tap “Install Profile” — the system will prompt you to download and install the profile.\n2. Open Settings → General → VPN & Device Management → install the profile.\n3. Open Settings → General → About → Certificate Trust Settings → enable “Anywhere MITM Root”.")
-                        .font(.callout)
-
-                    Button {
-                        installProfile()
-                    } label: {
-                        Label("Install Profile", systemImage: "lock.shield")
+                Section {
+                    HStack {
+                        TextWithColorfulIcon(title: "Install Certificate", comment: nil, systemName: "square.and.arrow.down", foregroundColor: .white, backgroundColor: .blue)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.bold())
+                            .foregroundStyle(.tertiary)
                     }
-
-                    Button {
-                        prepareCerExport()
-                    } label: {
-                        Label("Export Certificate (.cer)", systemImage: "doc.badge.arrow.up")
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        installProfile()
                     }
                 }
 
                 Section {
                     Button {
+                        prepareCerExport()
+                    } label: {
+                        Text("Export Certificate")
+                    }
+
+                    Button {
                         showRegenerateConfirm = true
                     } label: {
-                        Label("Regenerate Root", systemImage: "arrow.clockwise")
+                        Text("Regenerate Certificate")
                     }
-                    .tint(.orange)
 
                     Button(role: .destructive) {
                         showDeleteConfirm = true
                     } label: {
-                        Label("Delete Root", systemImage: "trash")
+                        Text("Delete Certificate")
                     }
-                } footer: {
-                    Text("Regenerating or deleting the root invalidates any previously installed MITM profile.")
                 }
             } else {
                 Section {
                     Button {
-                        do { try controller.ensureCA() }
-                        catch { errorMessage = String(describing: error) }
+                        do {
+                            try controller.ensureCA()
+                        } catch {
+                            errorMessage = String(describing: error)
+                        }
                     } label: {
-                        Label("Generate Root", systemImage: "lock.shield")
+                        Label("Generate Certificate", systemImage: "plus")
                     }
-                } footer: {
-                    Text("Generate a CA root certificate stored in this device's keychain. The private key never leaves the device.")
                 }
             }
         }
         .navigationTitle("Root Certificate")
-        .alert("Regenerate Root?", isPresented: $showRegenerateConfirm) {
+        .alert("Regenerate Certificate", isPresented: $showRegenerateConfirm) {
             Button("Regenerate", role: .destructive) {
-                do { try controller.regenerate() }
-                catch { errorMessage = String(describing: error) }
+                do {
+                    try controller.regenerate()
+                } catch {
+                    errorMessage = String(describing: error)
+                }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Any previously installed MITM profile will stop working until you re-install the new root.")
+            Text("Any previously installed MITM profile will stop working until you re-install the new certificate.")
         }
-        .alert("Delete Root?", isPresented: $showDeleteConfirm) {
+        .alert("Delete Certificate", isPresented: $showDeleteConfirm) {
             Button("Delete", role: .destructive) {
                 controller.delete()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Removes both the certificate and its private key. You'll need to regenerate to use MITM again.")
+            Text("You'll need to regenerate a certificate to use MITM again.")
         }
         .alert("Error", isPresented: Binding(
             get: { errorMessage != nil },
@@ -156,34 +173,43 @@ struct MITMCertificateView: View {
                 ShareSheet(items: [url])
             }
         }
-        .onAppear { controller.refresh() }
-        .onDisappear { MITMProfileServer.shared.stop() }
+        .onAppear {
+            controller.refresh()
+        }
+        .onDisappear {
+            MITMProfileServer.shared.stop()
+        }
+        .onChange(of: scenePhase) { _, newValue in
+            if newValue == .active {
+                controller.refresh()
+            }
+        }
     }
 
     // MARK: - Status badge
 
     private var badgeIcon: String {
-        if !controller.hasCA { return "exclamationmark.shield" }
-        return controller.trusted ? "checkmark.shield.fill" : "exclamationmark.shield.fill"
+        if !controller.hasCA { return "xmark.circle.fill" }
+        return controller.trusted ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
     }
 
     private var badgeColor: Color {
-        if !controller.hasCA { return .gray }
+        if !controller.hasCA { return .red }
         return controller.trusted ? .green : .orange
     }
 
     private var badgeTitle: String {
-        if !controller.hasCA { return String(localized: "No Root Yet") }
+        if !controller.hasCA { return String(localized: "No Certificate") }
         return controller.trusted ? String(localized: "Trusted") : String(localized: "Not Trusted")
     }
 
     private var badgeSubtitle: String {
         if !controller.hasCA {
-            return String(localized: "Generate a root to begin.")
+            return String(localized: "Generate a certificate to begin.")
         }
         return controller.trusted
-            ? String(localized: "Apps will accept the MITM certificate.")
-            : String(localized: "Install the profile and enable trust to use MITM.")
+            ? String(localized: "Anywhere Root Certificate is installed and trusted.")
+            : String(localized: "Install the profile and trust in Settings to use MITM.")
     }
 
     // MARK: - Export

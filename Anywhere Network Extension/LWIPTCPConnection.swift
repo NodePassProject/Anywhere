@@ -43,6 +43,11 @@ class LWIPTCPConnection {
     /// hostname at accept time; the real-IP path picks it up via the
     /// existing sniffer.
     private var mitmSNI: String?
+    /// Upstream redirect from the matched rule set, captured with
+    /// ``mitmSNI``. ``connectDirect`` and ``connectProxy`` use it for the
+    /// outer destination when present; leaf certificates still use
+    /// ``mitmSNI``.
+    private var mitmRewriteTarget: MITMRewriteTarget?
     private var mitmSession: MITMSession?
 
     // MARK: SNI Sniffing
@@ -504,12 +509,15 @@ class LWIPTCPConnection {
         guard let stack = LWIPStack.shared else { return }
         let router = stack.domainRouter
 
-        // MITM check runs in parallel with routing — the two systems are
-        // independent: routing decides which proxy carries the upstream
-        // leg, MITM decides whether to crack open the TLS in transit.
-        if stack.mitmEnabled, stack.mitmHostMatcher.matches(sni) {
+        // MITM policy is evaluated independently of routing: routing selects
+        // the upstream leg, while MITM decides whether to intercept TLS.
+        if stack.mitmEnabled, let set = stack.mitmPolicy.set(for: sni) {
             mitmEnabled = true
             mitmSNI = sni
+            // Set-level redirects update the outer connection target and
+            // outer TLS SNI. The inner leaf certificate still uses
+            // ``mitmSNI`` so the client sees the requested hostname.
+            mitmRewriteTarget = set.rewriteTarget
         }
 
         guard let action = router.matchDomain(sni) else {
@@ -564,7 +572,9 @@ class LWIPTCPConnection {
         let transport = RawTCPSocket()
         let connection = DirectProxyConnection(connection: transport)
         self.proxyConnection = connection
-        transport.connect(host: dstHost, port: dstPort) { [weak self] error in
+        let upstreamHost = mitmRewriteTarget?.host ?? dstHost
+        let upstreamPort = mitmRewriteTarget?.port ?? dstPort
+        transport.connect(host: upstreamHost, port: upstreamPort) { [weak self] error in
             guard let self else { return }
 
             self.lwipQueue.async {
@@ -633,7 +643,9 @@ class LWIPTCPConnection {
         let client = ProxyClient(configuration: configuration)
         self.proxyClient = client
 
-        client.connect(to: dstHost, port: dstPort, initialData: initialData) { [weak self] result in
+        let upstreamHost = mitmRewriteTarget?.host ?? dstHost
+        let upstreamPort = mitmRewriteTarget?.port ?? dstPort
+        client.connect(to: upstreamHost, port: upstreamPort, initialData: initialData) { [weak self] result in
             guard let self else { return }
 
             self.lwipQueue.async {
@@ -709,11 +721,15 @@ class LWIPTCPConnection {
         proxyClient = nil
         proxyConnection = nil
 
+        // Pass SNI as ``dstHost`` instead of the IP-derived value so
+        // rewriters match the hostname used in configured rules.
         let session = MITMSession(
-            dstHost: dstHost,
+            dstHost: sni,
             dstPort: dstPort,
             clientHello: initialClientHello,
             leafCache: cache,
+            policy: stack.mitmPolicy,
+            rewriteTarget: mitmRewriteTarget,
             proxyClient: transferredClient,
             proxyConnection: proxy,
             lwipQueue: lwipQueue

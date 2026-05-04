@@ -62,6 +62,13 @@ final class MITMHTTP2Connection {
     private let rewriter: MITMHTTP2Rewriter
     private let decoder = HPACKDecoder()
 
+    /// Phase this connection rewrites. Inbound client-to-server traffic is
+    /// the request half; outbound server-to-client traffic is the response
+    /// half. See RFC 9113 section 8.1.
+    private var phase: MITMPhase {
+        direction == .inbound ? .httpRequest : .httpResponse
+    }
+
     /// Bytes of the connection preface still to be forwarded verbatim.
     private var prefaceRemaining: Int
 
@@ -87,6 +94,11 @@ final class MITMHTTP2Connection {
             case pushPromise(promisedStreamID: UInt32)
         }
     }
+
+    /// Per-stream body buffer used when at least one ``bodyReplace`` rule
+    /// applies for the current direction. Missing entry means pass-through;
+    /// present entry means accumulate, rewrite, and emit at END_STREAM.
+    private var bodyBuffers: [UInt32: Data] = [:]
 
     // MARK: - Init
 
@@ -243,8 +255,8 @@ final class MITMHTTP2Connection {
         let rewritten: [(name: String, value: String)]
         switch kind {
         case .headers:
-            // RFC 9113 §8.1: client→server is a request, server→client
-            // is a response. Pick the hook that matches our direction.
+            // RFC 9113 section 8.1: client-to-server is a request and
+            // server-to-client is a response. Pick the matching hook.
             rewritten = (direction == .inbound)
                 ? rewriter.transformRequestHeaders(decoded, streamID: streamID)
                 : rewriter.transformResponseHeaders(decoded, streamID: streamID)
@@ -255,9 +267,17 @@ final class MITMHTTP2Connection {
             rewritten = decoded
         }
 
-        // TODO: Default SETTINGS_MAX_FRAME_SIZE is 16 KiB. We don't yet
-        // split a re-encoded block into HEADERS+CONTINUATION, so an
-        // oversized block here will be rejected by the peer.
+        // Decide body-buffering policy for the upcoming DATA frames on
+        // this stream. Buffer only when a bodyReplace rule applies and the
+        // body uses a readable content encoding (identity).
+        // Skip on END_STREAM HEADERS because there is no body.
+        if case .headers = kind,
+           originalFlags & 0x1 == 0,
+           rewriter.hasBodyRewrite(phase: phase),
+           bodyEncodingIsRewritable(rewritten) {
+            bodyBuffers[streamID] = Data()
+        }
+
         let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten)
 
         // Emit flags: keep END_STREAM and END_HEADERS (always set on
@@ -299,19 +319,52 @@ final class MITMHTTP2Connection {
         }
 
         let endStream = frame.flags & 0x1 != 0
-        let transformed = (direction == .inbound)
-            ? rewriter.transformRequestData(body, streamID: frame.streamID, endStream: endStream)
-            : rewriter.transformResponseData(body, streamID: frame.streamID, endStream: endStream)
+        let streamID = frame.streamID
 
-        var emittedFlags: UInt8 = 0
-        if endStream { emittedFlags |= 0x1 }
+        // Pass-through path: no body rewrite for this stream. Re-emit the
+        // DATA frame with the original body and END_STREAM flag, with
+        // PADDED cleared.
+        guard var accumulator = bodyBuffers[streamID] else {
+            var emittedFlags: UInt8 = 0
+            if endStream { emittedFlags |= 0x1 }
+            return serializeFrame(RawFrame(
+                typeCode: FrameTypeCode.data,
+                flags: emittedFlags,
+                streamID: streamID,
+                payload: body
+            ))
+        }
+
+        // Buffering path: accumulate until END_STREAM.
+        accumulator.append(body)
+        if !endStream {
+            bodyBuffers[streamID] = accumulator
+            return Data()
+        }
+
+        bodyBuffers.removeValue(forKey: streamID)
+        let rewritten = rewriter.rewriteBody(accumulator, phase: phase)
 
         return serializeFrame(RawFrame(
             typeCode: FrameTypeCode.data,
-            flags: emittedFlags,
-            streamID: frame.streamID,
-            payload: transformed
+            flags: 0x1, // END_STREAM
+            streamID: streamID,
+            payload: rewritten
         ))
+    }
+
+    // MARK: - Body-encoding gate
+
+    /// Returns `true` when the headers describe a body that can be
+    /// regex-rewritten without decoding a content coding. Compressed
+    /// bodies are passed through.
+    private func bodyEncodingIsRewritable(_ headers: [(name: String, value: String)]) -> Bool {
+        for (name, value) in headers where name.lowercased() == "content-encoding" {
+            let trimmed = value.trimmingCharacters(in: CharacterSet.whitespaces).lowercased()
+            if trimmed.isEmpty || trimmed == "identity" { continue }
+            return false
+        }
+        return true
     }
 
     // MARK: - Padding helpers

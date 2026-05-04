@@ -35,7 +35,7 @@ final class MITMCertificateStore {
     private static let certAccount = "\(service).caCertificate"
     private static let serialAccount = "\(service).caSerial"
 
-    private static let caSubjectCN = "Anywhere MITM Root"
+    private static let caSubjectCN = "Anywhere Root Certificate"
     private static let caOrganization = "Anywhere"
 
     private let lock = NSLock()
@@ -89,16 +89,40 @@ final class MITMCertificateStore {
 
     // MARK: - Trust State
 
-    /// Whether the system trust store evaluates the persisted CA cert as
-    /// trusted (i.e., the user installed and enabled the profile).
+    /// Whether the persisted CA is trusted by the system SSL policy.
     func isCATrusted() -> Bool {
-        guard let (_, certDER) = loadCA(),
-              let secCert = SecCertificateCreateWithData(nil, certDER as CFData) else {
+        guard let (caKey, caCertDER) = loadCA() else {
             return false
         }
+
+        let testHost = "anywhere-mitm-trust-check.invalid"
+        let leafKey = P256.Signing.PrivateKey()
+        let now = Date()
+
+        let leafDER: Data
+        do {
+            leafDER = try X509Builder.buildLeafCertificate(
+                leafPublicKey: leafKey.publicKey,
+                caPrivateKey: caKey,
+                caCertificateDER: caCertDER,
+                hostname: testHost,
+                serial: randomSerial(),
+                notBefore: now.addingTimeInterval(-60),
+                notAfter: now.addingTimeInterval(60 * 60)
+            )
+        } catch {
+            return false
+        }
+
+        guard let leafCert = SecCertificateCreateWithData(nil, leafDER as CFData),
+              let caCert = SecCertificateCreateWithData(nil, caCertDER as CFData) else {
+            return false
+        }
+
         var trust: SecTrust?
-        let policy = SecPolicyCreateBasicX509()
-        let status = SecTrustCreateWithCertificates(secCert, policy, &trust)
+        let policy = SecPolicyCreateSSL(true, testHost as CFString)
+        let chain: [SecCertificate] = [leafCert, caCert]
+        let status = SecTrustCreateWithCertificates(chain as CFArray, policy, &trust)
         guard status == errSecSuccess, let trust else { return false }
         var error: CFError?
         return SecTrustEvaluateWithError(trust, &error)
@@ -127,8 +151,8 @@ final class MITMCertificateStore {
             "PayloadVersion": 1,
             "PayloadIdentifier": identifier,
             "PayloadUUID": outerUUID,
-            "PayloadDisplayName": "Anywhere MITM Root",
-            "PayloadDescription": "Installs the Anywhere MITM root certificate.",
+            "PayloadDisplayName": "Anywhere Root Certificate",
+            "PayloadDescription": "Installs Anywhere Root Certificate.",
             "PayloadOrganization": "Anywhere",
             "PayloadContent": [
                 [
@@ -136,9 +160,9 @@ final class MITMCertificateStore {
                     "PayloadVersion": 1,
                     "PayloadIdentifier": payloadIdentifier,
                     "PayloadUUID": payloadUUID,
-                    "PayloadDisplayName": "Anywhere MITM Root Certificate",
-                    "PayloadDescription": "The CA used to terminate TLS for MITM-listed hostnames.",
-                    "PayloadCertificateFileName": "AnywhereMITMRoot.cer",
+                    "PayloadDisplayName": "Anywhere Root Certificate",
+                    "PayloadDescription": "The CA is used in Anywhere app.",
+                    "PayloadCertificateFileName": "AnywhereRootCertificate.cer",
                     "PayloadContent": certDER,
                 ]
             ]

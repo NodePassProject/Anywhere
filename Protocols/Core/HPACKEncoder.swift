@@ -262,7 +262,7 @@ enum HPACKEncoder {
     /// Encodes a literal header without indexing, using a literal name.
     private static func encodeLiteralWithoutIndexing(name: String, value: String, into data: inout Data) {
         data.append(0x00)  // 0000 0000 — literal name, no indexing
-        encodeString(name, into: &data)
+        encodeString(name.lowercased(), into: &data)
         encodeString(value, into: &data)
     }
 
