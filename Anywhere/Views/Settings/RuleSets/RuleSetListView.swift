@@ -84,7 +84,7 @@ struct RuleSetListView: View {
                         Button {
                             showAddSheet = true
                         } label: {
-                            Label("New Rule Set", systemImage: "plus")
+                            Label("Add Rule Set", systemImage: "plus")
                         }
                     }
                     Button {
@@ -110,7 +110,7 @@ struct RuleSetListView: View {
             builtInServiceRuleSets = RuleSetStore.shared.builtInServiceRuleSets
             customRuleSets = RuleSetStore.shared.customRuleSets
         }
-        .alert("New Rule Set", isPresented: $showAddSheet) {
+        .alert("Add Rule Set", isPresented: $showAddSheet) {
             TextField("Name", text: $newRuleSetName)
             Button("Add") {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
