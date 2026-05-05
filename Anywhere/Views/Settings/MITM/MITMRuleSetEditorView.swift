@@ -17,63 +17,88 @@ struct MITMRuleSetEditorView: View {
     @State private var redirectEnabled: Bool = false
     @State private var redirectHost: String = ""
     @State private var redirectPort: String = ""
+    
+    
     @State private var rules: [MITMRule] = []
 
-    @State private var validationError: String?
     @State private var addingRule: Bool = false
+    @State private var editMode: EditMode = .inactive
     @State private var editingRule: MITMRule?
+    
+    @State private var validationError: String?
 
     var body: some View {
         Form {
             Section("Domain Suffix") {
-                TextField("example.com", text: $domainSuffix)
+                TextField(String("anywhere.com"), text: $domainSuffix)
+                    .keyboardType(.URL)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
             }
 
             Section {
-                Toggle("Redirect Upstream", isOn: $redirectEnabled)
-                if redirectEnabled {
-                    TextField("Host (e.g. staging.example.com)", text: $redirectHost)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                    TextField("Port (optional)", text: $redirectPort)
-                        .keyboardType(.numberPad)
+                Toggle(isOn: $redirectEnabled) {
+                    TextWithColorfulIcon(title: "Redirect", comment: nil, systemName: "arrow.trianglehead.turn.up.right.circle", foregroundColor: .white, backgroundColor: .blue)
                 }
-            } footer: {
-                Text("When set, every connection matched by this rule set is redirected to the target host. The Host / :authority header is auto-rewritten to match.")
+                if redirectEnabled {
+                    LabeledContent {
+                        TextField(String("everywhere.com"), text: $redirectHost)
+                            .keyboardType(.URL)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                    }
+                    LabeledContent {
+                        TextField(String("443"), text: $redirectPort)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
+                    }
+                }
             }
 
-            Section("Rules") {
-                if rules.isEmpty {
-                    Text("No rules")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(rules) { rule in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(MITMRuleSummary.title(for: rule))
-                                .foregroundStyle(.primary)
-                            Text(MITMRuleSummary.subtitle(for: rule))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            editingRule = rule
-                        }
+            Section {
+                ForEach(rules) { rule in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(MITMRuleSummary.title(for: rule))
+                            .foregroundStyle(.primary)
+                        Text(MITMRuleSummary.subtitle(for: rule))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .truncationMode(.middle)
+                            .lineLimit(1)
                     }
-                    .onDelete { offsets in
-                        rules.remove(atOffsets: offsets)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        editingRule = rule
                     }
-                    .onMove { source, destination in
-                        rules.move(fromOffsets: source, toOffset: destination)
-                    }
+                }
+                .onDelete { offsets in
+                    rules.remove(atOffsets: offsets)
+                }
+                .onMove { source, destination in
+                    rules.move(fromOffsets: source, toOffset: destination)
                 }
                 Button {
                     addingRule = true
                 } label: {
-                    Label("Add Rule", systemImage: "plus")
+                    Label("Add", systemImage: "plus")
+                }
+            } header: {
+                HStack {
+                    Text("Rules")
+                    Spacer()
+                    Button(editMode == .active ? "Done" : "Edit") {
+                        if editMode == .active {
+                            editMode = .inactive
+                        } else {
+                            editMode = .active
+                        }
+                    }
                 }
             }
 
@@ -84,21 +109,17 @@ struct MITMRuleSetEditorView: View {
                 }
             }
         }
+        .environment(\.editMode, $editMode)
         .navigationTitle(ruleSet == nil ? "Add Rule Set" : "Edit Rule Set")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Save") { save() }
+                ConfirmButton("Done", action: save)
             }
             ToolbarItem(placement: .cancellationAction) {
-                Button("Cancel") {
+                CancelButton("Cancel") {
                     onCommit(nil)
                     dismiss()
-                }
-            }
-            ToolbarItem(placement: .automatic) {
-                if !rules.isEmpty {
-                    EditButton()
                 }
             }
         }

@@ -9,8 +9,10 @@ import SwiftUI
 
 struct MITMSettingsView: View {
     @StateObject private var store = MITMStore.shared
-
+    
     @State private var showAdd = false
+
+    @State private var editMode: EditMode = .inactive
     @State private var editing: MITMRuleSet?
 
     var body: some View {
@@ -30,50 +32,49 @@ struct MITMSettingsView: View {
             }
 
             Section {
-                if store.ruleSets.isEmpty {
-                    Text("No rule sets")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(store.ruleSets) { ruleSet in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(ruleSet.domainSuffix)
-                                .foregroundStyle(.primary)
-                            Text(summary(for: ruleSet))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            editing = ruleSet
-                        }
+                ForEach(store.ruleSets) { ruleSet in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(ruleSet.domainSuffix)
+                            .foregroundStyle(.primary)
+                        Text(summary(for: ruleSet))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .truncationMode(.middle)
+                            .lineLimit(1)
                     }
-                    .onDelete { offsets in
-                        store.removeRuleSets(atOffsets: offsets)
-                    }
-                    .onMove { source, destination in
-                        store.moveRuleSets(fromOffsets: source, toOffset: destination)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        editing = ruleSet
                     }
                 }
-            } header: {
-                Text("Rule Sets")
-            }
-        }
-        .navigationTitle("MITM")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+                .onDelete { offsets in
+                    store.removeRuleSets(atOffsets: offsets)
+                }
+                .onMove { source, destination in
+                    store.moveRuleSets(fromOffsets: source, toOffset: destination)
+                }
                 Button {
                     showAdd = true
                 } label: {
-                    Image(systemName: "plus")
+                    Label("Add", systemImage: "plus")
                 }
-            }
-            ToolbarItem(placement: .automatic) {
-                if !store.ruleSets.isEmpty {
-                    EditButton()
+            } header: {
+                HStack {
+                    Text("Rule Sets")
+                    Spacer()
+                    Button(editMode == .active ? "Done" : "Edit") {
+                        if editMode == .active {
+                            editMode = .inactive
+                        } else {
+                            editMode = .active
+                        }
+                    }
                 }
             }
         }
+        .environment(\.editMode, $editMode)
+        .navigationTitle("MITM")
         .sheet(isPresented: $showAdd) {
             NavigationStack {
                 MITMRuleSetEditorView(ruleSet: nil) { ruleSet in
@@ -92,9 +93,7 @@ struct MITMSettingsView: View {
 
     private func summary(for ruleSet: MITMRuleSet) -> String {
         let count = ruleSet.rules.count
-        let rulesPart = count == 1
-            ? String(localized: "1 rule")
-            : String(localized: "\(count) rules")
+        let rulesPart = "\(count) rule(s)"
         if let target = ruleSet.rewriteTarget {
             let authority = target.port.map { "\(target.host):\($0)" } ?? target.host
             return "→ \(authority) · \(rulesPart)"
