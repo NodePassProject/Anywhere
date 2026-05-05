@@ -83,7 +83,7 @@ struct MITMRuleEditorView: View {
                 switch operationKind {
                 case .urlReplace:
                     LabeledContent {
-                        TextField("^\\/anywhere$", text: $pattern)
+                        TextField(String("^\\/anywhere$"), text: $pattern)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -91,7 +91,7 @@ struct MITMRuleEditorView: View {
                         TextWithColorfulIcon(title: "Pattern", comment: nil, systemName: "asterisk", foregroundColor: .white, backgroundColor: .gray)
                     }
                     LabeledContent {
-                        TextField("/everywhere", text: $replacement)
+                        TextField(String("/everywhere"), text: $replacement)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -100,7 +100,7 @@ struct MITMRuleEditorView: View {
                     }
                 case .headerAdd:
                     LabeledContent {
-                        TextField("User-Agent", text: $headerName)
+                        TextField(String("User-Agent"), text: $headerName)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -108,7 +108,7 @@ struct MITMRuleEditorView: View {
                         TextWithColorfulIcon(title: "Header Name", comment: nil, systemName: "tag.fill", foregroundColor: .white, backgroundColor: .gray)
                     }
                     LabeledContent {
-                        TextField("Anywhere", text: $headerValue)
+                        TextField(String("Anywhere"), text: $headerValue)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -117,7 +117,7 @@ struct MITMRuleEditorView: View {
                     }
                 case .headerDelete:
                     LabeledContent {
-                        TextField("User-Agent", text: $headerName)
+                        TextField(String("User-Agent"), text: $headerName)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -126,7 +126,7 @@ struct MITMRuleEditorView: View {
                     }
                 case .headerReplace:
                     LabeledContent {
-                        TextField("^(?i)User-Agent: Anywhere$", text: $pattern)
+                        TextField(String("^(?i)User-Agent: Anywhere$"), text: $pattern)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -134,7 +134,7 @@ struct MITMRuleEditorView: View {
                         TextWithColorfulIcon(title: "Pattern", comment: nil, systemName: "asterisk", foregroundColor: .white, backgroundColor: .gray)
                     }
                     LabeledContent {
-                        TextField("User-Agent", text: $headerName)
+                        TextField(String("User-Agent"), text: $headerName)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -142,7 +142,7 @@ struct MITMRuleEditorView: View {
                         TextWithColorfulIcon(title: "Header Name", comment: nil, systemName: "tag.fill", foregroundColor: .white, backgroundColor: .gray)
                     }
                     LabeledContent {
-                        TextField("Everywhere", text: $headerValue)
+                        TextField(String("Everywhere"), text: $headerValue)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -151,7 +151,7 @@ struct MITMRuleEditorView: View {
                     }
                 case .bodyReplace:
                     LabeledContent {
-                        TextField("^Anywhere$", text: $pattern)
+                        TextField(String("^Anywhere$"), text: $pattern)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -159,7 +159,7 @@ struct MITMRuleEditorView: View {
                         TextWithColorfulIcon(title: "Pattern", comment: nil, systemName: "asterisk", foregroundColor: .white, backgroundColor: .gray)
                     }
                     LabeledContent {
-                        TextField("Everywhere", text: $replacement)
+                        TextField(String("Everywhere"), text: $replacement)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
