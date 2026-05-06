@@ -1,5 +1,5 @@
 //
-//  RuleSetStore.swift
+//  RoutingRuleSetStore.swift
 //  Anywhere
 //
 //  Created by Argsment Limited on 3/1/26.
@@ -8,38 +8,38 @@
 import Foundation
 import Combine
 
-private let logger = AnywhereLogger(category: "RuleSetStore")
+private let logger = AnywhereLogger(category: "RoutingRuleSetStore")
+
+struct RoutingRuleSet: Identifiable, Equatable {
+    let id: String   // built-in: name, custom: UUID string
+    let name: String
+    var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
+    var isCustom: Bool = false
+}
+
+struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
+    let id: UUID
+    var name: String
+    var rules: [RoutingRule]
+
+    init(name: String, rules: [RoutingRule] = []) {
+        self.id = UUID()
+        self.name = name
+        self.rules = rules
+    }
+}
 
 @MainActor
-class RuleSetStore: ObservableObject {
-    static let shared = RuleSetStore()
+class RoutingRuleSetStore: ObservableObject {
+    static let shared = RoutingRuleSetStore()
 
-    struct RuleSet: Identifiable, Equatable {
-        let id: String   // built-in: name, custom: UUID string
-        let name: String
-        var assignedConfigurationId: String?  // nil = default, "DIRECT" = bypass, "REJECT" = block, UUID string = proxy
-        var isCustom: Bool = false
-    }
-    
-    struct CustomRuleSet: Codable, Identifiable, Equatable {
-        let id: UUID
-        var name: String
-        var rules: [DomainRule]
+    @Published private(set) var ruleSets: [RoutingRuleSet] = []
+    @Published private(set) var customRuleSets: [CustomRoutingRuleSet] = []
 
-        init(name: String, rules: [DomainRule] = []) {
-            self.id = UUID()
-            self.name = name
-            self.rules = rules
-        }
-    }
-
-    @Published private(set) var ruleSets: [RuleSet] = []
-    @Published private(set) var customRuleSets: [CustomRuleSet] = []
-
-    var adBlockRuleSet: RuleSet? {
+    var adBlockRuleSet: RoutingRuleSet? {
         ruleSets.first(where: { $0.name == "ADBlock" })
     }
-    var builtInServiceRuleSets: [RuleSetStore.RuleSet] {
+    var builtInServiceRuleSets: [RoutingRuleSet] {
         ruleSets.filter { $0.name != "Direct" && $0.name != "ADBlock" }
     }
 
@@ -57,7 +57,7 @@ class RuleSetStore: ObservableObject {
 
         // Load custom rulesets
         if let data = JSONBlobStore.shared.load(.customRuleSets),
-           let decoded = try? JSONDecoder().decode([CustomRuleSet].self, from: data) {
+           let decoded = try? JSONDecoder().decode([CustomRoutingRuleSet].self, from: data) {
             customRuleSets = decoded
         }
 
@@ -68,7 +68,7 @@ class RuleSetStore: ObservableObject {
         let assignmentsDict = assignments ?? AWCore.getRuleSetAssignments()
 
         var sets = Self.builtIn.map { name in
-            RuleSet(id: name, name: name, assignedConfigurationId: assignmentsDict[name] ?? Self.defaultAssignments[name])
+            RoutingRuleSet(id: name, name: name, assignedConfigurationId: assignmentsDict[name] ?? Self.defaultAssignments[name])
         }
 
         // Insert custom rule sets before ADBlock so that ADBlock retains
@@ -77,7 +77,7 @@ class RuleSetStore: ObservableObject {
         let insertionIndex = sets.firstIndex(where: { $0.id == "ADBlock" }) ?? sets.endIndex
         for (offset, custom) in customRuleSets.enumerated() {
             let id = custom.id.uuidString
-            sets.insert(RuleSet(
+            sets.insert(RoutingRuleSet(
                 id: id,
                 name: custom.name,
                 assignedConfigurationId: assignmentsDict[id],
@@ -90,7 +90,7 @@ class RuleSetStore: ObservableObject {
 
     // MARK: - Assignment
 
-    func updateAssignment(_ ruleSet: RuleSet, configurationId: String?) {
+    func updateAssignment(_ ruleSet: RoutingRuleSet, configurationId: String?) {
         guard let index = ruleSets.firstIndex(where: { $0.id == ruleSet.id }) else { return }
         ruleSets[index].assignedConfigurationId = configurationId
         saveAssignments()
@@ -128,8 +128,8 @@ class RuleSetStore: ObservableObject {
 
     // MARK: - Custom Rule Set CRUD
 
-    func addCustomRuleSet(name: String) -> CustomRuleSet {
-        let ruleSet = CustomRuleSet(name: name)
+    func addCustomRuleSet(name: String) -> CustomRoutingRuleSet {
+        let ruleSet = CustomRoutingRuleSet(name: name)
         customRuleSets.append(ruleSet)
         saveCustomRuleSets()
         rebuildRuleSets()
@@ -148,7 +148,7 @@ class RuleSetStore: ObservableObject {
         rebuildRuleSets()
     }
 
-    func updateCustomRuleSet(_ id: UUID, name: String? = nil, rules: [DomainRule]? = nil) {
+    func updateCustomRuleSet(_ id: UUID, name: String? = nil, rules: [RoutingRule]? = nil) {
         guard let index = customRuleSets.firstIndex(where: { $0.id == id }) else { return }
         if let name { customRuleSets[index].name = name }
         if let rules { customRuleSets[index].rules = rules }
@@ -156,13 +156,13 @@ class RuleSetStore: ObservableObject {
         rebuildRuleSets()
     }
 
-    func addRule(to customRuleSetId: UUID, rule: DomainRule) {
+    func addRule(to customRuleSetId: UUID, rule: RoutingRule) {
         guard let index = customRuleSets.firstIndex(where: { $0.id == customRuleSetId }) else { return }
         customRuleSets[index].rules.append(rule)
         saveCustomRuleSets()
     }
 
-    func addRules(to customRuleSetId: UUID, rules: [DomainRule]) {
+    func addRules(to customRuleSetId: UUID, rules: [RoutingRule]) {
         guard !rules.isEmpty,
               let index = customRuleSets.firstIndex(where: { $0.id == customRuleSetId }) else { return }
         customRuleSets[index].rules.append(contentsOf: rules)
@@ -177,7 +177,7 @@ class RuleSetStore: ObservableObject {
         saveCustomRuleSets()
     }
 
-    func customRuleSet(for id: UUID) -> CustomRuleSet? {
+    func customRuleSet(for id: UUID) -> CustomRoutingRuleSet? {
         customRuleSets.first { $0.id == id }
     }
 
@@ -185,11 +185,11 @@ class RuleSetStore: ObservableObject {
 
     /// Loads rules for a given built-in rule set name. Thread-safe – no instance state accessed.
     /// All built-in rules are stored in the bundled Rules.db SQLite database.
-    static func loadRules(for name: String) -> [DomainRule] {
+    static func loadRules(for name: String) -> [RoutingRule] {
         if name != "Direct" && name != "ADBlock" {
             return serviceCatalog.rules(for: name)
         }
-        return RulesDatabase.shared.loadRules(for: name)
+        return RoutingRulesDatabase.shared.loadRules(for: name)
     }
 
     // MARK: - App Group Sync
@@ -221,7 +221,7 @@ class RuleSetStore: ObservableObject {
                 guard let assignedId = ruleSet.assignedConfigurationId else { continue }
 
                 // Load rules: custom rulesets use captured data, built-in use database
-                let domainRules: [DomainRule]
+                let domainRules: [RoutingRule]
                 if ruleSet.isCustom,
                    let customId = UUID(uuidString: ruleSet.id),
                    let custom = customSnapshot.first(where: { $0.id == customId }) {

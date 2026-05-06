@@ -1688,6 +1688,58 @@
         }
       }
     },
+    "Anywhere MITM Rule List URL" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "رابط قائمة قواعد MITM لـ Anywhere"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL de lista de reglas MITM de Anywhere"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "آدرس لیست قوانین MITM در Anywhere"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL списка правил MITM Anywhere"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere MITM düzgün sanawy URL"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere MITM Kural Listesi URL'si"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "URL danh sách quy tắc MITM Anywhere"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anywhere MITM 规则列表 URL"
+          }
+        }
+      }
+    },
     "Anywhere Root Certificate is installed and trusted." : {
       "localizations" : {
         "ar" : {

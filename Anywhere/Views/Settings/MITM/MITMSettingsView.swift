@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct MITMSettingsView: View {
-    @StateObject private var store = MITMStore.shared
+    @StateObject private var store = MITMRuleSetStore.shared
     
     @State private var showAdd = false
 

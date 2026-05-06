@@ -22,9 +22,10 @@ struct MITMRuleSetEditorView: View {
     @State private var rules: [MITMRule] = []
 
     @State private var addingRule: Bool = false
+    @State private var importingRules: Bool = false
     @State private var editMode: EditMode = .inactive
     @State private var editingRule: MITMRule?
-    
+
     @State private var validationError: String?
 
     var body: some View {
@@ -88,6 +89,11 @@ struct MITMRuleSetEditorView: View {
                 } label: {
                     Label("Add", systemImage: "plus")
                 }
+                Button {
+                    importingRules = true
+                } label: {
+                    Label("Import Rules", systemImage: "square.and.arrow.down")
+                }
             } header: {
                 HStack {
                     Text("Rules")
@@ -138,6 +144,11 @@ struct MITMRuleSetEditorView: View {
                         rules[index] = updated
                     }
                 }
+            }
+        }
+        .sheet(isPresented: $importingRules) {
+            ImportMITMRulesView { imported in
+                rules.append(contentsOf: imported)
             }
         }
         .onAppear { loadInitial() }

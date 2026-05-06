@@ -1808,9 +1808,10 @@ final class SudokuMuxTCPProxyConnection: ProxyConnection {
         super.init()
     }
 
-    deinit {
-        closeResources(closeStream: true)
-    }
+    // TODO: Fix
+//    deinit {
+//        closeResources(closeStream: true)
+//    }
 
     override var isConnected: Bool { !lock.withLock { closed } && !client.isClosed }
 

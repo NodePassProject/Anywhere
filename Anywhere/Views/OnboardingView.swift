@@ -219,8 +219,8 @@ struct OnboardingView: View {
 
         // Apply AD block setting
         if adBlockEnabled {
-            if let adBlock = RuleSetStore.shared.ruleSets.first(where: { $0.name == "ADBlock" }) {
-                RuleSetStore.shared.updateAssignment(adBlock, configurationId: "REJECT")
+            if let adBlock = RoutingRuleSetStore.shared.ruleSets.first(where: { $0.name == "ADBlock" }) {
+                RoutingRuleSetStore.shared.updateAssignment(adBlock, configurationId: "REJECT")
             }
         }
 

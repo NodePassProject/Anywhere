@@ -311,9 +311,9 @@ class DomainRouter {
 
     // MARK: - CIDR Parsing
 
-    private static func parseRuleType(_ rawValue: Any?) -> DomainRuleType? {
+    private static func parseRuleType(_ rawValue: Any?) -> RoutingRuleType? {
         guard let rawValue = rawValue as? Int else { return nil }
-        return DomainRuleType(rawValue: rawValue)
+        return RoutingRuleType(rawValue: rawValue)
     }
 
     /// Parses "A.B.C.D/prefix" into (network, prefixLen) with host bits zeroed.

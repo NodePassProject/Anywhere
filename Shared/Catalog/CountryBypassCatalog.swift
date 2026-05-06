@@ -20,14 +20,14 @@ struct CountryBypassCatalog {
         return languageToCountry[languageCode]
     }
 
-    func rules(for countryCode: String) -> [DomainRule] {
-        RulesDatabase.shared.loadRules(for: countryCode)
+    func rules(for countryCode: String) -> [RoutingRule] {
+        RoutingRulesDatabase.shared.loadRules(for: countryCode)
     }
 
     private static func load() -> CountryBypassCatalog {
         CountryBypassCatalog(
-            supportedCountryCodes: RulesDatabase.shared.loadStringArray("supportedCountryCodes"),
-            languageToCountry: RulesDatabase.shared.loadStringDictionary("languageToCountry")
+            supportedCountryCodes: RoutingRulesDatabase.shared.loadStringArray("supportedCountryCodes"),
+            languageToCountry: RoutingRulesDatabase.shared.loadStringDictionary("languageToCountry")
         )
     }
 }
