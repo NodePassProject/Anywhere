@@ -14,37 +14,32 @@ class ConfigurationStore: ObservableObject {
 
     @Published private(set) var configurations: [ProxyConfiguration] = []
 
-    private let fileURL: URL
-
     private init() {
-        AWCore.migrateToAppGroup(fileName: "configurations.json")
-        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.Identifier.appGroupSuite)!
-        fileURL = container.appendingPathComponent("configurations.json")
-        configurations = loadFromDisk()
+        configurations = Self.load()
     }
 
     // MARK: - CRUD
 
     func add(_ configuration: ProxyConfiguration) {
         configurations.append(configuration)
-        saveToDisk()
+        save()
     }
 
     func update(_ configuration: ProxyConfiguration) {
         if let index = configurations.firstIndex(where: { $0.id == configuration.id }) {
             configurations[index] = configuration
-            saveToDisk()
+            save()
         }
     }
 
     func delete(_ configuration: ProxyConfiguration) {
         configurations.removeAll { $0.id == configuration.id }
-        saveToDisk()
+        save()
     }
 
     func deleteConfigurations(for subscriptionId: UUID) {
         configurations.removeAll { $0.subscriptionId == subscriptionId }
-        saveToDisk()
+        save()
     }
 
     /// Atomically replaces all configurations for a subscription in a single assignment,
@@ -53,18 +48,14 @@ class ConfigurationStore: ObservableObject {
         var updated = configurations.filter { $0.subscriptionId != subscriptionId }
         updated.append(contentsOf: newConfigurations)
         configurations = updated
-        saveToDisk()
+        save()
     }
 
     // MARK: - Persistence
 
-    private func loadFromDisk() -> [ProxyConfiguration] {
-        if FileManager.default.fileExists(atPath: fileURL.path),
-           let data = try? Data(contentsOf: fileURL),
-           let result = Self.decodeSkippingInvalid(data) {
-            return result
-        }
-        return []
+    private static func load() -> [ProxyConfiguration] {
+        guard let data = JSONBlobStore.shared.load(.configurations) else { return [] }
+        return decodeSkippingInvalid(data) ?? []
     }
 
     private static func decodeSkippingInvalid(_ data: Data) -> [ProxyConfiguration]? {
@@ -81,15 +72,14 @@ class ConfigurationStore: ObservableObject {
         }
     }
 
-    private func saveToDisk() {
+    private func save() {
         let snapshot = configurations
-        let url = fileURL
         Task.detached {
             do {
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
                 let data = try encoder.encode(snapshot)
-                try data.write(to: url, options: .atomic)
+                JSONBlobStore.shared.save(.configurations, data: data)
             } catch {
                 print("Failed to save configurations: \(error)")
             }
