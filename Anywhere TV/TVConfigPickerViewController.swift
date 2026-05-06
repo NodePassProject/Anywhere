@@ -10,12 +10,12 @@ import UIKit
 class TVConfigPickerViewController: UITableViewController {
 
     private let viewModel = VPNViewModel.shared
-    private var items: [PickerItem] = []
+    private var sections: [(header: String?, items: [PickerItem])] = []
 
     override func viewDidLoad() {
         super.viewDidLoad()
         title = String(localized: "Select Proxy")
-        items = viewModel.allPickerItems
+        sections = Self.buildSections(viewModel: viewModel)
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
         tableView.rowHeight = UITableView.automaticDimension
         tableView.estimatedRowHeight = 80
@@ -29,15 +29,41 @@ class TVConfigPickerViewController: UITableViewController {
         dismiss(animated: true)
     }
 
+    /// Builds picker sections in the canonical order: standalone (no header),
+    /// chains (under "Chains"), then one section per non-empty subscription.
+    private static func buildSections(viewModel: VPNViewModel) -> [(header: String?, items: [PickerItem])] {
+        var sections: [(header: String?, items: [PickerItem])] = []
+        let standalone = viewModel.standalonePickerItems
+        if !standalone.isEmpty {
+            sections.append((nil, standalone))
+        }
+        let chains = viewModel.chainPickerItems
+        if !chains.isEmpty {
+            sections.append((String(localized: "Chains"), chains))
+        }
+        for sub in viewModel.subscriptionPickerSections {
+            sections.append((sub.header, sub.items))
+        }
+        return sections
+    }
+
     // MARK: - Table View
 
+    override func numberOfSections(in tableView: UITableView) -> Int {
+        sections.count
+    }
+
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        items.count
+        sections[section].items.count
+    }
+
+    override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
+        sections[section].header
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "cell", for: indexPath)
-        let item = items[indexPath.row]
+        let item = sections[indexPath.section].items[indexPath.row]
 
         var content = cell.defaultContentConfiguration()
         content.text = item.name
@@ -72,7 +98,7 @@ class TVConfigPickerViewController: UITableViewController {
     // MARK: - Selection
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        let item = items[indexPath.row]
+        let item = sections[indexPath.section].items[indexPath.row]
         if let configuration = viewModel.configurations.first(where: { $0.id == item.id }) {
             viewModel.selectedConfiguration = configuration
         } else if let chain = viewModel.chains.first(where: { $0.id == item.id }) {

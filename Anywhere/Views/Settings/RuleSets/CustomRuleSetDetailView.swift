@@ -25,17 +25,6 @@ struct CustomRuleSetDetailView: View {
         ruleSetStore.ruleSets.first { $0.id == customRuleSetId.uuidString }
     }
 
-    private var standaloneConfigurations: [ProxyConfiguration] {
-        viewModel.configurations.filter { $0.subscriptionId == nil }
-    }
-
-    private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
-        viewModel.subscriptions.compactMap { subscription in
-            let configurations = viewModel.configurations(for: subscription)
-            return configurations.isEmpty ? nil : (subscription, configurations)
-        }
-    }
-
     var body: some View {
         List {
             if let ruleSet {
@@ -124,16 +113,25 @@ struct CustomRuleSetDetailView: View {
             Text("Default").tag(nil as String?)
             Text("DIRECT").tag("DIRECT" as String?)
             Text("REJECT").tag("REJECT" as String?)
-            ForEach(standaloneConfigurations) { configuration in
-                Text(configuration.name).tag(configuration.id.uuidString as String?)
+            ForEach(viewModel.standalonePickerItems) { item in
+                Text(item.name).tag(item.id.uuidString as String?)
             }
-            ForEach(subscribedGroups, id: \.0.id) { subscription, configurations in
+            if !viewModel.chainPickerItems.isEmpty {
                 Section {
-                    ForEach(configurations) { configuration in
-                        Text(configuration.name).tag(configuration.id.uuidString as String?)
+                    ForEach(viewModel.chainPickerItems) { item in
+                        Text(item.name).tag(item.id.uuidString as String?)
                     }
                 } header: {
-                    Text(subscription.name)
+                    Text("Chains")
+                }
+            }
+            ForEach(viewModel.subscriptionPickerSections) { section in
+                Section {
+                    ForEach(section.items) { item in
+                        Text(item.name).tag(item.id.uuidString as String?)
+                    }
+                } header: {
+                    Text(section.header ?? "")
                 }
             }
         }

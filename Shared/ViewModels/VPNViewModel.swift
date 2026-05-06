@@ -110,13 +110,11 @@ class VPNViewModel: ObservableObject {
                     }
                 }
 
-                // Reset routing rules that reference deleted configs
-                let validIds = Set(newConfigurations.map { $0.id.uuidString })
-                let affected = self.ruleSetStore.clearOrphanedAssignments(availableConfigIds: validIds)
-                if !affected.isEmpty {
-                    self.orphanedRuleSetNames = affected
-                    Task { await self.syncRoutingConfigurationToNE() }
-                }
+                // Reset routing rules that reference deleted configs/chains
+                self.clearOrphanedRuleSetAssignments(
+                    configIds: Set(newConfigurations.map { $0.id.uuidString }),
+                    chainIds: Set(self.chains.map { $0.id.uuidString })
+                )
 
             }
 
@@ -138,6 +136,12 @@ class VPNViewModel: ObservableObject {
                     AWCore.setSelectedChainId(nil)
                     self.selectedConfiguration = self.configurations.first
                 }
+
+                // Reset routing rules that reference deleted chains
+                self.clearOrphanedRuleSetAssignments(
+                    configIds: Set(self.configurations.map { $0.id.uuidString }),
+                    chainIds: Set(newChains.map { $0.id.uuidString })
+                )
             }
 
         setupStatusObserver()
@@ -241,17 +245,7 @@ class VPNViewModel: ObservableObject {
     ///
     /// The last proxy becomes the main config; preceding proxies fill the `chain` field.
     func resolveChain(_ chain: ProxyChain) -> ProxyConfiguration? {
-        let configs = chain.resolveProxies(from: configurations)
-        guard configs.count == chain.proxyIds.count, configs.count >= 2 else { return nil }
-        let exitProxy = configs.last!
-        let chainProxies = Array(configs.dropLast())
-        return ProxyConfiguration(
-            name: chain.name,
-            serverAddress: exitProxy.serverAddress,
-            serverPort: exitProxy.serverPort,
-            outbound: exitProxy.outbound,
-            chain: chainProxies
-        )
+        chain.resolveComposite(from: configurations)
     }
 
     /// Re-resolves the currently selected chain after underlying configs change.
@@ -269,30 +263,6 @@ class VPNViewModel: ObservableObject {
             AWCore.setSelectedChainId(nil)
             selectedConfiguration = configurations.first
         }
-    }
-
-    /// All items available for the Home picker (proxies + chains).
-    var allPickerItems: [PickerItem] {
-        var items: [PickerItem] = []
-        for chain in chains {
-            let proxies = chain.resolveProxies(from: configurations)
-            guard proxies.count == chain.proxyIds.count, proxies.count >= 2 else { continue }
-            items.append(PickerItem(id: chain.id, name: chain.name))
-        }
-        let standaloneConfigurations: [ProxyConfiguration] = configurations.filter { $0.subscriptionId == nil }
-        for configuration in standaloneConfigurations {
-            items.append(PickerItem(id: configuration.id, name: configuration.name))
-        }
-        let subscribedGroups: [(Subscription, [ProxyConfiguration])] = subscriptions.compactMap { subscription in
-            let configurations = configurations(for: subscription)
-            return configurations.isEmpty ? nil : (subscription, configurations)
-        }
-        for (_, configurations) in subscribedGroups {
-            for configuration in configurations {
-                items.append(PickerItem(id: configuration.id, name: configuration.name))
-            }
-        }
-        return items
     }
 
     // MARK: - Subscription CRUD
@@ -745,7 +715,16 @@ class VPNViewModel: ObservableObject {
 
     /// Builds routing configuration from rulesets and writes to App Group for the NE.
     func syncRoutingConfigurationToNE() async {
-        await ruleSetStore.syncToAppGroup(configurations: configurations, serializeConfiguration: VPNViewModel.serializeConfiguration)
+        await ruleSetStore.syncToAppGroup(configurations: configurations, chains: chains, serializeConfiguration: VPNViewModel.serializeConfiguration)
+    }
+
+    /// Drops rule-set assignments whose target (proxy or chain) no longer exists,
+    /// surfaces the affected names for UI, and re-syncs routing.
+    private func clearOrphanedRuleSetAssignments(configIds: Set<String>, chainIds: Set<String>) {
+        let affected = ruleSetStore.clearOrphanedAssignments(availableIds: configIds.union(chainIds))
+        guard !affected.isEmpty else { return }
+        orphanedRuleSetNames = affected
+        Task { await syncRoutingConfigurationToNE() }
     }
 
     // MARK: - Proxy Server Address Sync
