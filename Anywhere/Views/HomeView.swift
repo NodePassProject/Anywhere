@@ -216,9 +216,31 @@ struct HomeView: View {
 
     private func selectedConfigurationCard(_ configuration: ProxyConfiguration) -> some View {
         Menu {
-            Picker("Configuration", selection: selectedPickerId) {
-                ForEach(viewModel.allPickerItems) { item in
-                    Text(item.name).tag(Optional(item.id))
+            ForEach(viewModel.standalonePickerItems) { item in
+                Button(item.name) {
+                    selectedPickerId.wrappedValue = item.id
+                }
+            }
+            if !viewModel.chainPickerItems.isEmpty {
+                Section {
+                    ForEach(viewModel.chainPickerItems) { item in
+                        Button(item.name) {
+                            selectedPickerId.wrappedValue = item.id
+                        }
+                    }
+                } header: {
+                    Text("Chains")
+                }
+            }
+            ForEach(viewModel.subscriptionPickerSections) { section in
+                Section {
+                    ForEach(section.items) { item in
+                        Button(item.name) {
+                            selectedPickerId.wrappedValue = item.id
+                        }
+                    }
+                } header: {
+                    Text(section.header ?? "")
                 }
             }
         } label: {

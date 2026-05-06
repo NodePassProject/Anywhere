@@ -108,15 +108,15 @@ class RuleSetStore: ObservableObject {
         saveAssignments()
     }
 
-    /// Resets any rule set assignments that reference configuration UUIDs not in `availableConfigIds`.
-    /// Returns the names of affected rule sets, or empty if nothing changed.
-    func clearOrphanedAssignments(availableConfigIds: Set<String>) -> [String] {
+    /// Resets any rule set assignments that reference UUIDs (configuration or chain)
+    /// not in `availableIds`. Returns the names of affected rule sets, or empty.
+    func clearOrphanedAssignments(availableIds: Set<String>) -> [String] {
         var affected: [String] = []
         for (index, ruleSet) in ruleSets.enumerated() {
             guard let assignedId = ruleSet.assignedConfigurationId,
                   assignedId != "DIRECT",
                   assignedId != "REJECT",
-                  !availableConfigIds.contains(assignedId) else { continue }
+                  !availableIds.contains(assignedId) else { continue }
             ruleSets[index].assignedConfigurationId = nil
             affected.append(ruleSet.name)
         }
@@ -194,11 +194,24 @@ class RuleSetStore: ObservableObject {
 
     // MARK: - App Group Sync
 
-    func syncToAppGroup(configurations: [ProxyConfiguration], serializeConfiguration: @escaping @Sendable (ProxyConfiguration) -> [String: Any]) async {
+    func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain], serializeConfiguration: @escaping @Sendable (ProxyConfiguration) -> [String: Any]) async {
         // Snapshot main-actor state
         let snapshot = ruleSets
         let customSnapshot = customRuleSets
-        let configs = configurations
+
+        // Pre-resolve each rule set's assigned target on the main actor — chain composites
+        // are constructed here so the detached worker only sees Sendable lookup data.
+        var resolvedTargets: [String: ProxyConfiguration] = [:]
+        for ruleSet in snapshot {
+            guard let assignedId = ruleSet.assignedConfigurationId,
+                  let id = UUID(uuidString: assignedId) else { continue }
+            if let direct = configurations.first(where: { $0.id == id }) {
+                resolvedTargets[assignedId] = direct
+            } else if let chain = chains.first(where: { $0.id == id }),
+                      let composite = chain.resolveComposite(from: configurations) {
+                resolvedTargets[assignedId] = composite
+            }
+        }
 
         await Task.detached {
             var routingRules: [[String: Any]] = []
@@ -243,8 +256,7 @@ class RuleSetStore: ObservableObject {
                     ruleEntry["action"] = "direct"
                 } else if assignedId == "REJECT" {
                     ruleEntry["action"] = "reject"
-                } else if let configurationUUID = UUID(uuidString: assignedId),
-                          let configuration = configs.first(where: { $0.id == configurationUUID }) {
+                } else if let configuration = resolvedTargets[assignedId] {
                     ruleEntry["action"] = "proxy"
                     ruleEntry["configId"] = assignedId
                     var serialized = serializeConfiguration(configuration)

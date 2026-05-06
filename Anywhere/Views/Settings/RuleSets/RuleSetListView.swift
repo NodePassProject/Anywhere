@@ -9,22 +9,11 @@ import SwiftUI
 
 struct RuleSetListView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
-    
+
     private var experimentalEnabled: Bool {
         AWCore.getExperimentalEnabled()
     }
-    
-    private var standaloneConfigurations: [ProxyConfiguration] {
-        viewModel.configurations.filter { $0.subscriptionId == nil }
-    }
-    
-    private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
-        viewModel.subscriptions.compactMap { subscription in
-            let configurations = viewModel.configurations(for: subscription)
-            return configurations.isEmpty ? nil : (subscription, configurations)
-        }
-    }
-    
+
     @State var builtInServiceRuleSets: [RuleSetStore.RuleSet] = RuleSetStore.shared.builtInServiceRuleSets
     @State var customRuleSets: [RuleSetStore.CustomRuleSet] = RuleSetStore.shared.customRuleSets
     @State private var showAddSheet = false
@@ -131,16 +120,25 @@ struct RuleSetListView: View {
             Text("Default").tag(nil as String?)
             Text("DIRECT").tag("DIRECT" as String?)
             Text("REJECT").tag("REJECT" as String?)
-            ForEach(standaloneConfigurations) { configuration in
-                Text(configuration.name).tag(configuration.id.uuidString as String?)
+            ForEach(viewModel.standalonePickerItems) { item in
+                Text(item.name).tag(item.id.uuidString as String?)
             }
-            ForEach(subscribedGroups, id: \.0.id) { subscription, configurations in
+            if !viewModel.chainPickerItems.isEmpty {
                 Section {
-                    ForEach(configurations) { configuration in
-                        Text(configuration.name).tag(configuration.id.uuidString as String?)
+                    ForEach(viewModel.chainPickerItems) { item in
+                        Text(item.name).tag(item.id.uuidString as String?)
                     }
                 } header: {
-                    Text(subscription.name)
+                    Text("Chains")
+                }
+            }
+            ForEach(viewModel.subscriptionPickerSections) { section in
+                Section {
+                    ForEach(section.items) { item in
+                        Text(item.name).tag(item.id.uuidString as String?)
+                    }
+                } header: {
+                    Text(section.header ?? "")
                 }
             }
         } label: {
@@ -150,7 +148,7 @@ struct RuleSetListView: View {
             }
         }
     }
-    
+
     @ViewBuilder
     private func assignmentLabel(for ruleSet: RuleSetStore.RuleSet) -> some View {
         HStack {
@@ -161,6 +159,8 @@ struct RuleSetListView: View {
                     Text("REJECT")
                 } else if let config = viewModel.configurations.first(where: { $0.id.uuidString == assignedId }) {
                     Text(config.name)
+                } else if let chain = viewModel.chains.first(where: { $0.id.uuidString == assignedId }) {
+                    Text(chain.name)
                 } else {
                     Text("Default")
                 }

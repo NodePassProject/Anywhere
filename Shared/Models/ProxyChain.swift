@@ -28,4 +28,20 @@ struct ProxyChain: Identifiable, Codable, Hashable {
     func resolveProxies(from pool: [ProxyConfiguration]) -> [ProxyConfiguration] {
         proxyIds.compactMap { id in pool.first(where: { $0.id == id }) }
     }
+
+    /// Resolves the chain into a single composite ProxyConfiguration: the last proxy
+    /// becomes the exit, preceding proxies fill the `chain` field. Returns `nil` if
+    /// any proxy is missing or fewer than 2 proxies resolve.
+    func resolveComposite(from pool: [ProxyConfiguration]) -> ProxyConfiguration? {
+        let configs = resolveProxies(from: pool)
+        guard configs.count == proxyIds.count, configs.count >= 2 else { return nil }
+        let exit = configs.last!
+        return ProxyConfiguration(
+            name: name,
+            serverAddress: exit.serverAddress,
+            serverPort: exit.serverPort,
+            outbound: exit.outbound,
+            chain: Array(configs.dropLast())
+        )
+    }
 }
