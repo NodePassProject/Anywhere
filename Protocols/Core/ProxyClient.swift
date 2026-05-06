@@ -266,6 +266,19 @@ class ProxyClient {
             return
         }
 
+        if case .vmess(let vmess) = configuration.outbound {
+            sendVMessHandshake(
+                vmess: vmess,
+                over: connection,
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                initialData: initialData,
+                completion: completion
+            )
+            return
+        }
+
         // VLESS path
         let isVision = supportsVision && isVisionFlow && (command == .tcp || command == .mux)
 
@@ -323,6 +336,41 @@ class ProxyClient {
             } else {
                 completion(.success(proxyConnection))
             }
+        }
+    }
+
+    private func sendVMessHandshake(
+        vmess: VMessConfiguration,
+        over connection: ProxyConnection,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        guard vmess.alterId == 0 else {
+            completion(.failure(ProxyError.protocolError("Legacy VMess alterId is not supported by Xray AEAD VMess")))
+            return
+        }
+
+        do {
+            let session = VMessProtocol.makeSession(security: vmess.security, command: command)
+            let requestHeader = try VMessProtocol.encodeRequestHeader(
+                uuid: vmess.uuid,
+                session: session,
+                destinationAddress: destinationHost,
+                destinationPort: destinationPort
+            )
+            let vmessConnection = VMessConnection(inner: connection, session: session)
+            vmessConnection.sendHandshake(requestHeader: requestHeader, initialData: initialData) { error in
+                if let error {
+                    completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
+                } else {
+                    completion(.success(vmessConnection))
+                }
+            }
+        } catch {
+            completion(.failure(error))
         }
     }
 

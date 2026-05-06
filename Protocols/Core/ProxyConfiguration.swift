@@ -10,6 +10,7 @@ import Foundation
 /// Outbound protocol type.
 enum OutboundProtocol: String, Codable {
     case vless
+    case vmess
     case hysteria
     case trojan
     case shadowsocks
@@ -38,7 +39,7 @@ enum OutboundProtocol: String, Codable {
     /// obfuscation nonce never reached the server.
     var handshakeCarriesInitialData: Bool {
         switch self {
-        case .vless:
+        case .vless, .vmess:
             return true
         case .hysteria, .trojan, .shadowsocks, .socks5, .sudoku, .http11, .http2, .http3:
             return false
@@ -50,13 +51,15 @@ enum OutboundProtocol: String, Codable {
     /// VLESS carries a mux-capable framing on the wire; every other protocol
     /// must reject a ``ProxyCommand/mux`` request at dispatch time.
     var supportsMux: Bool {
-        self == .vless
+        self == .vless || self == .vmess
     }
 
     var name: String {
         switch self {
         case .vless:
             "VLESS"
+        case .vmess:
+            "VMess"
         case .hysteria:
             "Hysteria"
         case .trojan:
@@ -95,6 +98,10 @@ enum Outbound: Hashable {
         muxEnabled: Bool,
         xudpEnabled: Bool
     )
+    /// VMess uses Xray's current AEAD request/response header and can reuse
+    /// the same stream transports/security wrappers as VLESS, except Reality
+    /// and Vision flow.
+    case vmess(VMessConfiguration)
     /// Hysteria2 runs over QUIC with its own internal TLS. The SNI is always
     /// populated — callers default it to the server address when there is no
     /// explicit override. `uploadMbps` is clamped to `HysteriaUploadMbpsRange`.
@@ -184,16 +191,19 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     /// Transport layer. Always `.tcp` for non-VLESS outbounds.
     var transportLayer: TransportLayer {
         if case .vless(_, _, _, let t, _, _, _) = outbound { return t }
+        if case .vmess(let vmess) = outbound { return vmess.transport }
         return .tcp
     }
     /// Security layer. Always `.none` for non-VLESS outbounds.
     var securityLayer: SecurityLayer {
         if case .vless(_, _, _, _, let s, _, _) = outbound { return s }
+        if case .vmess(let vmess) = outbound { return vmess.securityLayer }
         return .none
     }
     /// Whether Mux is enabled. Only meaningful for VLESS+TCP with Vision flow.
     var muxEnabled: Bool {
         if case .vless(_, _, _, _, _, let m, _) = outbound { return m }
+        if case .vmess(let vmess) = outbound { return vmess.muxEnabled }
         return false
     }
     /// Whether XUDP (GlobalID-based flow identification) is enabled for muxed UDP.
@@ -246,6 +256,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     private enum CodingKeys: String, CodingKey {
         case id, name, serverAddress, serverPort, resolvedIP, subscriptionId
         case outboundProtocol, uuid, encryption, flow
+        case vmessSecurity, vmessAlterId
         case transport, websocket, httpUpgrade, grpc, xhttp
         case security, tls, reality
         case muxEnabled, xudpEnabled
@@ -316,6 +327,40 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 muxEnabled: try container.decodeIfPresent(Bool.self, forKey: .muxEnabled) ?? true,
                 xudpEnabled: try container.decodeIfPresent(Bool.self, forKey: .xudpEnabled) ?? true
             )
+
+        case .vmess:
+            let transportStr = try container.decodeIfPresent(String.self, forKey: .transport) ?? "tcp"
+            let transport: TransportLayer
+            switch transportStr {
+            case "ws":
+                transport = (try container.decodeIfPresent(WebSocketConfiguration.self, forKey: .websocket)).map { .ws($0) } ?? .tcp
+            case "httpupgrade":
+                transport = (try container.decodeIfPresent(HTTPUpgradeConfiguration.self, forKey: .httpUpgrade)).map { .httpUpgrade($0) } ?? .tcp
+            case "grpc":
+                transport = (try container.decodeIfPresent(GRPCConfiguration.self, forKey: .grpc)).map { .grpc($0) } ?? .tcp
+            case "xhttp":
+                transport = (try container.decodeIfPresent(XHTTPConfiguration.self, forKey: .xhttp)).map { .xhttp($0) } ?? .tcp
+            default:
+                transport = .tcp
+            }
+
+            let securityStr = try container.decodeIfPresent(String.self, forKey: .security) ?? "none"
+            let security: SecurityLayer
+            switch securityStr {
+            case "tls":
+                security = (try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)).map { .tls($0) } ?? .none
+            default:
+                security = .none
+            }
+
+            outbound = .vmess(VMessConfiguration(
+                uuid: try container.decode(UUID.self, forKey: .uuid),
+                security: VMessSecurity(normalized: try container.decodeIfPresent(String.self, forKey: .vmessSecurity)),
+                alterId: try container.decodeIfPresent(Int.self, forKey: .vmessAlterId) ?? 0,
+                transport: transport,
+                securityLayer: security,
+                muxEnabled: try container.decodeIfPresent(Bool.self, forKey: .muxEnabled) ?? false
+            ))
 
         case .hysteria:
             // Older builds stashed SNI inside a top-level TLSConfiguration
@@ -444,6 +489,27 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(muxEnabled, forKey: .muxEnabled)
             try container.encode(xudpEnabled, forKey: .xudpEnabled)
 
+        case .vmess(let vmess):
+            try container.encode(vmess.uuid, forKey: .uuid)
+            try container.encode("none", forKey: .encryption)
+            try container.encode(vmess.security.rawValue, forKey: .vmessSecurity)
+            try container.encode(vmess.alterId, forKey: .vmessAlterId)
+
+            try container.encode(transportString(for: vmess.transport), forKey: .transport)
+            switch vmess.transport {
+            case .tcp: break
+            case .ws(let config): try container.encode(config, forKey: .websocket)
+            case .httpUpgrade(let config): try container.encode(config, forKey: .httpUpgrade)
+            case .grpc(let config): try container.encode(config, forKey: .grpc)
+            case .xhttp(let config): try container.encode(config, forKey: .xhttp)
+            }
+
+            try container.encode(securityString(for: vmess.securityLayer), forKey: .security)
+            if case .tls(let config) = vmess.securityLayer {
+                try container.encode(config, forKey: .tls)
+            }
+            try container.encode(vmess.muxEnabled, forKey: .muxEnabled)
+
         case .hysteria(let password, let uploadMbps, let sni):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
@@ -528,6 +594,7 @@ extension ProxyConfiguration {
     var outboundProtocol: OutboundProtocol {
         switch outbound {
         case .vless:        .vless
+        case .vmess:        .vmess
         case .hysteria:     .hysteria
         case .trojan:       .trojan
         case .shadowsocks:  .shadowsocks
@@ -542,6 +609,7 @@ extension ProxyConfiguration {
     /// VLESS UUID (returns `id` as stable fallback for non-VLESS protocols).
     var uuid: UUID {
         if case .vless(let uuid, _, _, _, _, _, _) = outbound { return uuid }
+        if case .vmess(let vmess) = outbound { return vmess.uuid }
         return id
     }
 
@@ -549,6 +617,18 @@ extension ProxyConfiguration {
     var encryption: String {
         if case .vless(_, let encryption, _, _, _, _, _) = outbound { return encryption }
         return "none"
+    }
+
+    /// VMess body cipher setting. Defaults to `.auto` for non-VMess protocols.
+    var vmessSecurity: VMessSecurity {
+        if case .vmess(let vmess) = outbound { return vmess.security }
+        return .auto
+    }
+
+    /// VMess AlterID. Current Xray AEAD VMess uses 0.
+    var vmessAlterId: Int {
+        if case .vmess(let vmess) = outbound { return vmess.alterId }
+        return 0
     }
 
     /// VLESS flow (e.g. `"xtls-rprx-vision"`). `nil` for non-VLESS.
@@ -624,7 +704,7 @@ extension ProxyConfiguration {
     var activeUsername: String? {
         switch outbound {
         case .socks5(let u, _): u
-        case .sudoku: nil
+        case .vmess, .sudoku: nil
         case .http11(let u, _): u
         case .http2(let u, _):  u
         case .http3(let u, _):  u
@@ -636,7 +716,7 @@ extension ProxyConfiguration {
     var activePassword: String? {
         switch outbound {
         case .socks5(_, let p): p
-        case .sudoku: nil
+        case .vmess, .sudoku: nil
         case .http11(_, let p): p
         case .http2(_, let p):  p
         case .http3(_, let p):  p
