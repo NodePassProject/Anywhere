@@ -14,64 +14,47 @@ class ChainStore: ObservableObject {
 
     @Published private(set) var chains: [ProxyChain] = []
 
-    private let fileURL: URL
-
     private init() {
-        AWCore.migrateToAppGroup(fileName: "chains.json")
-        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AWCore.Identifier.appGroupSuite)!
-        fileURL = container.appendingPathComponent("chains.json")
-        chains = loadFromDisk()
+        chains = Self.load()
     }
 
     // MARK: - CRUD
 
     func add(_ chain: ProxyChain) {
         chains.append(chain)
-        saveToDisk()
+        save()
     }
 
     func update(_ chain: ProxyChain) {
         if let index = chains.firstIndex(where: { $0.id == chain.id }) {
             chains[index] = chain
-            saveToDisk()
+            save()
         }
     }
 
     func delete(_ chain: ProxyChain) {
         chains.removeAll { $0.id == chain.id }
-        saveToDisk()
+        save()
     }
 
     // MARK: - Persistence
 
-    private func loadFromDisk() -> [ProxyChain] {
-        if FileManager.default.fileExists(atPath: fileURL.path),
-           let data = try? Data(contentsOf: fileURL),
-           let result = try? JSONDecoder().decode([ProxyChain].self, from: data) {
-            return result
+    private static func load() -> [ProxyChain] {
+        guard let data = JSONBlobStore.shared.load(.chains),
+              let result = try? JSONDecoder().decode([ProxyChain].self, from: data) else {
+            return []
         }
-        #if os(tvOS)
-        if let data = AWCore.getChainsData(),
-           let result = try? JSONDecoder().decode([ProxyChain].self, from: data) {
-            return result
-        }
-        #endif
-        return []
+        return result
     }
 
-    private func saveToDisk() {
+    private func save() {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             let data = try encoder.encode(chains)
-            try data.write(to: fileURL, options: .atomic)
+            JSONBlobStore.shared.save(.chains, data: data)
         } catch {
             print("Failed to save chains: \(error)")
         }
-        #if os(tvOS)
-        if let data = try? JSONEncoder().encode(chains) {
-            AWCore.setChainsData(data)
-        }
-        #endif
     }
 }

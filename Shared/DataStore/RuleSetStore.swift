@@ -56,7 +56,7 @@ class RuleSetStore: ObservableObject {
         let assignments = AWCore.getRuleSetAssignments()
 
         // Load custom rulesets
-        if let data = AWCore.getCustomRuleSetsData(),
+        if let data = JSONBlobStore.shared.load(.customRuleSets),
            let decoded = try? JSONDecoder().decode([CustomRuleSet].self, from: data) {
             customRuleSets = decoded
         }
@@ -293,7 +293,7 @@ class RuleSetStore: ObservableObject {
 
     private func saveCustomRuleSets() {
         if let data = try? JSONEncoder().encode(customRuleSets) {
-            AWCore.setCustomRuleSetsData(data)
+            JSONBlobStore.shared.save(.customRuleSets, data: data)
         }
     }
 }
