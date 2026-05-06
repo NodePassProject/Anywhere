@@ -68,6 +68,7 @@ struct ClashProxyParser {
         guard let type = getString(node, key: "type") else { return nil }
         switch type {
         case "vless":     return parseVLESSProxy(node)
+        case "vmess":     return parseVMessProxy(node)
         case "hysteria2": return parseHysteria2Proxy(node)
         case "trojan":    return parseTrojanProxy(node)
         case "ss":        return parseShadowsocksProxy(node)
@@ -193,6 +194,49 @@ struct ClashProxyParser {
                 muxEnabled: true,
                 xudpEnabled: true
             )
+        )
+    }
+
+    // MARK: - VMess
+
+    private static func parseVMessProxy(_ node: Node) -> ProxyConfiguration? {
+        guard
+            let basics = parseBasics(node),
+            let uuidString = getString(node, key: "uuid"),
+            let uuid = UUID(xrayString: uuidString)
+        else { return nil }
+
+        let network = getString(node, key: "network") ?? "tcp"
+        let transportLayer: TransportLayer
+        switch network {
+        case "tcp":
+            transportLayer = .tcp
+        case "ws":
+            transportLayer = parseWSTransportLayer(from: node, server: basics.server)
+        default:
+            return nil
+        }
+
+        let tlsEnabled = getBool(node, key: "tls") ?? false
+        let securityLayer: SecurityLayer = tlsEnabled
+            ? .tls(TLSConfiguration(
+                serverName: parseSNI(node, server: basics.server),
+                alpn: getStringSequence(node, key: "alpn"),
+                fingerprint: parseFingerprint(node)
+            ))
+            : .none
+
+        return ProxyConfiguration(
+            name: basics.name,
+            serverAddress: basics.server,
+            serverPort: basics.port,
+            outbound: .vmess(VMessConfiguration(
+                uuid: uuid,
+                security: VMessSecurity(normalized: getString(node, key: "cipher")),
+                alterId: getInt(node, key: "alterId") ?? getInt(node, key: "alter-id") ?? 0,
+                transport: transportLayer,
+                securityLayer: securityLayer
+            ))
         )
     }
     

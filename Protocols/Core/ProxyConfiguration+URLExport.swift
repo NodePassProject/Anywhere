@@ -22,6 +22,8 @@ extension ProxyConfiguration {
         switch outboundProtocol {
         case .vless:
             return toVLESSURL()
+        case .vmess:
+            return toVMessURL()
         case .hysteria:
             return toHysteriaURL()
         case .trojan:
@@ -87,6 +89,57 @@ extension ProxyConfiguration {
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "vless://\(uuid.uuidString.lowercased())@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
+    }
+
+    private func toVMessURL() -> String {
+        guard case .vmess(let vmess) = outbound else { return "vmess://" }
+
+        var payload: [String: Any] = [
+            "v": "2",
+            "ps": name,
+            "add": serverAddress,
+            "port": String(serverPort),
+            "id": vmess.uuid.uuidString.lowercased(),
+            "aid": String(vmess.alterId),
+            "scy": vmess.security.rawValue,
+            "net": transport,
+            "type": "none",
+            "tls": security == "tls" ? "tls" : "",
+        ]
+        if vmess.muxEnabled {
+            payload["mux"] = ["enabled": true]
+        }
+
+        if let ws = websocket {
+            payload["host"] = ws.host
+            payload["path"] = ws.path
+        } else if let hu = httpUpgrade {
+            payload["host"] = hu.host
+            payload["path"] = hu.path
+            payload["net"] = "httpupgrade"
+        } else if let grpc {
+            payload["host"] = grpc.authority
+            payload["path"] = grpc.serviceName
+            payload["net"] = "grpc"
+        } else if let xhttp {
+            payload["host"] = xhttp.host
+            payload["path"] = xhttp.path
+            payload["net"] = "xhttp"
+            payload["mode"] = xhttp.mode.rawValue
+        }
+
+        if let tls {
+            payload["sni"] = tls.serverName
+            if let alpn = tls.alpn, !alpn.isEmpty {
+                payload["alpn"] = alpn.joined(separator: ",")
+            }
+            payload["fp"] = tls.fingerprint.rawValue
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            return "vmess://"
+        }
+        return "vmess://\(data.base64EncodedString())"
     }
     
     private func toHysteriaURL() -> String {

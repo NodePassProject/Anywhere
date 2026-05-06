@@ -12,7 +12,7 @@ import Foundation
 extension ProxyConfiguration {
 
     /// URL scheme prefixes that ``parse(url:)`` can handle.
-    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "trojan://", "ss://", "socks5://", "socks://", "sudoku://", "https://", "quic://"]
+    static let parsableURLPrefixes = ["vless://", "vmess://", "hysteria2://", "hy2://", "trojan://", "ss://", "socks5://", "socks://", "sudoku://", "https://", "quic://"]
 
     /// Whether the given string starts with a URL scheme that ``parse(url:)`` can handle.
     static func canParseURL(_ string: String) -> Bool {
@@ -28,6 +28,9 @@ extension ProxyConfiguration {
     static func parse(url: String, naiveProtocol: OutboundProtocol? = nil) throws -> ProxyConfiguration {
         if url.hasPrefix("hysteria2://") || url.hasPrefix("hy2://") {
             return try parseHysteria(url: url)
+        }
+        if url.hasPrefix("vmess://") {
+            return try parseVMess(url: url)
         }
         if url.hasPrefix("trojan://") {
             return try parseTrojan(url: url)
@@ -45,7 +48,7 @@ extension ProxyConfiguration {
             return try parseNaive(url: url, protocolOverride: naiveProtocol)
         }
         guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless://, trojan://, ss://, socks5://, sudoku://, https://, or quic://")
+            throw ProxyError.invalidURL("URL must start with vless://, vmess://, trojan://, ss://, socks5://, sudoku://, https://, or quic://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -144,6 +147,141 @@ extension ProxyConfiguration {
                 muxEnabled: muxEnabled,
                 xudpEnabled: xudpEnabled
             )
+        )
+    }
+
+    /// Parse a VMess URL.
+    /// Standard VMess share links use `vmess://base64(json)` where the JSON
+    /// carries `add`, `port`, `id`, `aid`, `scy`, `net`, `tls`, `host`, `path`,
+    /// `sni`, and `alpn`.
+    private static func parseVMess(url: String) throws -> ProxyConfiguration {
+        var encoded = String(url.dropFirst("vmess://".count))
+        var fragmentName: String?
+        if let hashIndex = encoded.firstIndex(of: "#") {
+            fragmentName = String(encoded[encoded.index(after: hashIndex)...]).removingPercentEncoding
+            encoded = String(encoded[..<hashIndex])
+        }
+        DeviceCensorship.deCensor(&fragmentName)
+        encoded = encoded.removingPercentEncoding ?? encoded
+
+        guard let payload = Data(base64URLEncoded: encoded)
+                ?? Data(base64Encoded: padBase64(encoded)),
+              let json = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            throw ProxyError.invalidURL("Invalid VMess URL payload")
+        }
+
+        func stringValue(_ key: String) -> String? {
+            if let string = json[key] as? String { return string }
+            if let number = json[key] as? NSNumber { return number.stringValue }
+            return nil
+        }
+
+        func decodedStringValue(_ key: String) -> String? {
+            guard let raw = stringValue(key) else {
+                return nil
+            }
+            let value = (raw.removingPercentEncoding ?? raw)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return nil }
+            return value
+        }
+
+        func boolValue(_ key: String) -> Bool? {
+            if let bool = json[key] as? Bool { return bool }
+            if let number = json[key] as? NSNumber { return number.boolValue }
+            guard let value = decodedStringValue(key)?.lowercased() else { return nil }
+            switch value {
+            case "1", "true", "yes", "on", "enabled":
+                return true
+            case "0", "false", "no", "off", "disabled":
+                return false
+            default:
+                return nil
+            }
+        }
+
+        guard let host = stringValue("add"), !host.isEmpty,
+              let portString = stringValue("port"),
+              let port = UInt16(portString),
+              let uuidString = stringValue("id"),
+              let uuid = UUID(xrayString: uuidString) else {
+            throw ProxyError.invalidURL("VMess URL is missing host, port, or UUID")
+        }
+
+        let payloadName = (stringValue("ps")?.removingPercentEncoding)
+            .flatMap { $0.isEmpty ? nil : $0 }
+        let name = (fragmentName?.isEmpty == false ? fragmentName : nil) ?? payloadName ?? "VMess"
+        let network = (decodedStringValue("net") ?? decodedStringValue("type") ?? "tcp").lowercased()
+        let tlsEnabled = [stringValue("tls"), stringValue("security")].contains { raw in
+            guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                  !value.isEmpty else {
+                return false
+            }
+            return value == "1" || value == "true" || value == "yes" || value == "tls"
+        }
+        let sni = decodedStringValue("sni") ?? host
+        let alpn = stringValue("alpn")
+            .map {
+                $0.split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        let muxEnabled: Bool = {
+            if let mux = json["mux"] as? [String: Any] {
+                if let enabled = mux["enabled"] as? Bool { return enabled }
+                if let enabled = mux["enabled"] as? NSNumber { return enabled.boolValue }
+                if let enabled = mux["enabled"] as? String {
+                    switch enabled.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                    case "1", "true", "yes", "on", "enabled":
+                        return true
+                    default:
+                        return false
+                    }
+                }
+            }
+            return boolValue("mux") ?? false
+        }()
+
+        let securityLayer: SecurityLayer = tlsEnabled
+            ? .tls(TLSConfiguration(serverName: sni, alpn: alpn))
+            : .none
+
+        let transportLayer: TransportLayer
+        switch network {
+        case "ws":
+            let wsHost = decodedStringValue("host") ?? host
+            let wsPath = decodedStringValue("path") ?? "/"
+            transportLayer = .ws(WebSocketConfiguration(host: wsHost, path: wsPath))
+        case "httpupgrade":
+            let huHost = decodedStringValue("host") ?? host
+            let huPath = decodedStringValue("path") ?? "/"
+            transportLayer = .httpUpgrade(HTTPUpgradeConfiguration(host: huHost, path: huPath))
+        case "grpc":
+            let serviceName = decodedStringValue("path") ?? decodedStringValue("serviceName") ?? ""
+            let authority = decodedStringValue("host") ?? ""
+            transportLayer = .grpc(GRPCConfiguration(serviceName: serviceName, authority: authority))
+        case "xhttp":
+            let xhttpHost = decodedStringValue("host") ?? host
+            let xhttpPath = decodedStringValue("path") ?? "/"
+            let mode = stringValue("mode").flatMap(XHTTPMode.init(rawValue:)) ?? .auto
+            transportLayer = .xhttp(XHTTPConfiguration(host: xhttpHost, path: xhttpPath, mode: mode))
+        default:
+            transportLayer = .tcp
+        }
+
+        return ProxyConfiguration(
+            name: name,
+            serverAddress: host,
+            serverPort: port,
+            outbound: .vmess(VMessConfiguration(
+                uuid: uuid,
+                security: VMessSecurity(normalized: stringValue("scy") ?? stringValue("cipher") ?? stringValue("security")),
+                alterId: Int(stringValue("aid") ?? stringValue("alterId") ?? "0") ?? 0,
+                transport: transportLayer,
+                securityLayer: securityLayer,
+                muxEnabled: muxEnabled
+            ))
         )
     }
     

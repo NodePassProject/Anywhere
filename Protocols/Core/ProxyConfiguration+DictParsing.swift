@@ -61,6 +61,29 @@ extension ProxyConfiguration {
                 xudpEnabled: xudpEnabled
             )
 
+        case .vmess:
+            let uuidString = configurationDict["uuid"] as? String
+            let uuid = uuidString.flatMap { UUID(xrayString: $0) } ?? UUID()
+            let rawSecurity = (configurationDict["vmessSecurity"] as? String)
+                ?? (configurationDict["cipher"] as? String)
+            var securityLayer = parseSecurityLayer(from: configurationDict, serverAddress: serverAddress)
+            if case .reality = securityLayer {
+                securityLayer = .none
+            }
+            let transportLayer = parseTransportLayer(
+                from: configurationDict, serverAddress: serverAddress, securityLayer: securityLayer
+            )
+            outbound = .vmess(VMessConfiguration(
+                uuid: uuid,
+                security: VMessSecurity(normalized: rawSecurity),
+                alterId: (configurationDict["vmessAlterId"] as? Int)
+                    ?? (configurationDict["alterId"] as? Int)
+                    ?? 0,
+                transport: transportLayer,
+                securityLayer: securityLayer,
+                muxEnabled: (configurationDict["muxEnabled"] as? Bool) ?? false
+            ))
+
         case .hysteria:
             let rawMbps = (configurationDict["hysteriaUploadMbps"] as? Int) ?? HysteriaUploadMbpsDefault
             // Fall back to legacy `tlsServerName` when `hysteriaSNI` is absent,

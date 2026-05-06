@@ -821,6 +821,9 @@ class VPNViewModel: ObservableObject {
         // Add protocol-specific credential fields
         switch configuration.outbound {
         case .vless: break
+        case .vmess(let vmess):
+            configurationDict["vmessSecurity"] = vmess.security.rawValue
+            configurationDict["vmessAlterId"] = vmess.alterId
         case .hysteria(let password, let uploadMbps, let sni):
             configurationDict["hysteriaPassword"] = password
             configurationDict["hysteriaUploadMbps"] = uploadMbps
@@ -880,7 +883,7 @@ class VPNViewModel: ObservableObject {
             configurationDict["tlsFingerprint"] = tls.fingerprint.rawValue
         }
         
-        if configuration.outboundProtocol == .vless {
+        if configuration.outboundProtocol == .vless || configuration.outboundProtocol == .vmess {
             configurationDict["transport"] = configuration.transport
             if let ws = configuration.websocket {
                 configurationDict["wsHost"] = ws.host
