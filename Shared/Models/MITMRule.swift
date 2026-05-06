@@ -191,7 +191,7 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
 }
 
 /// Persisted shape for the MITM feature: master toggle plus the user's
-/// rule sets. Owned by the app side via ``MITMStore`` and read by the
+/// rule sets. Owned by the app side via ``MITMRuleSetStore`` and read by the
 /// network extension via ``LWIPStack/loadMITMSetting``.
 struct MITMSnapshot: Codable, Equatable {
     var enabled: Bool

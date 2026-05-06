@@ -10,12 +10,12 @@ import Foundation
 struct ServiceCatalog {
     let supportedServices: [String]
 
-    func rules(for service: String) -> [DomainRule] {
-        RulesDatabase.shared.loadRules(for: service)
+    func rules(for service: String) -> [RoutingRule] {
+        RoutingRulesDatabase.shared.loadRules(for: service)
     }
 
     static func load() -> ServiceCatalog {
-        let services = RulesDatabase.shared.loadStringArray("supportedServices")
+        let services = RoutingRulesDatabase.shared.loadStringArray("supportedServices")
         return ServiceCatalog(supportedServices: services)
     }
 }

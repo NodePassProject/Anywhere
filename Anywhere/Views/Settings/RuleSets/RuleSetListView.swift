@@ -14,8 +14,8 @@ struct RuleSetListView: View {
         AWCore.getExperimentalEnabled()
     }
 
-    @State var builtInServiceRuleSets: [RuleSetStore.RuleSet] = RuleSetStore.shared.builtInServiceRuleSets
-    @State var customRuleSets: [RuleSetStore.CustomRuleSet] = RuleSetStore.shared.customRuleSets
+    @State var builtInServiceRuleSets: [RoutingRuleSet] = RoutingRuleSetStore.shared.builtInServiceRuleSets
+    @State var customRuleSets: [CustomRoutingRuleSet] = RoutingRuleSetStore.shared.customRuleSets
     @State private var showAddSheet = false
     @State private var newRuleSetName = ""
     
@@ -52,11 +52,11 @@ struct RuleSetListView: View {
                         }
                     }
                     .onDelete { offsets in
-                        let customs = RuleSetStore.shared.customRuleSets
+                        let customs = RoutingRuleSetStore.shared.customRuleSets
                         for offset in offsets {
-                            RuleSetStore.shared.removeCustomRuleSet(customs[offset].id)
+                            RoutingRuleSetStore.shared.removeCustomRuleSet(customs[offset].id)
                         }
-                        customRuleSets = RuleSetStore.shared.customRuleSets
+                        customRuleSets = RoutingRuleSetStore.shared.customRuleSets
                         Task { await viewModel.syncRoutingConfigurationToNE() }
                     }
                 } header: {
@@ -77,8 +77,8 @@ struct RuleSetListView: View {
                         }
                     }
                     Button {
-                        RuleSetStore.shared.resetAssignments()
-                        builtInServiceRuleSets = RuleSetStore.shared.builtInServiceRuleSets
+                        RoutingRuleSetStore.shared.resetAssignments()
+                        builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
                         Task { await viewModel.syncRoutingConfigurationToNE() }
                     } label: {
                         Label("Reset", systemImage: "arrow.clockwise")
@@ -90,22 +90,22 @@ struct RuleSetListView: View {
             for currentRuleSet in newValue {
                 let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
                 if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
-                    RuleSetStore.shared.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
+                    RoutingRuleSetStore.shared.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
                 }
             }
             Task { await viewModel.syncRoutingConfigurationToNE() }
         }
         .onAppear {
-            builtInServiceRuleSets = RuleSetStore.shared.builtInServiceRuleSets
-            customRuleSets = RuleSetStore.shared.customRuleSets
+            builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
+            customRuleSets = RoutingRuleSetStore.shared.customRuleSets
         }
         .alert("Add Rule Set", isPresented: $showAddSheet) {
             TextField("Name", text: $newRuleSetName)
             Button("Add") {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
-                _ = RuleSetStore.shared.addCustomRuleSet(name: name)
-                customRuleSets = RuleSetStore.shared.customRuleSets
+                _ = RoutingRuleSetStore.shared.addCustomRuleSet(name: name)
+                customRuleSets = RoutingRuleSetStore.shared.customRuleSets
                 newRuleSetName = ""
             }
             Button("Cancel", role: .cancel) {
@@ -115,7 +115,7 @@ struct RuleSetListView: View {
     }
     
     @ViewBuilder
-    private func assignmentPicker(for ruleSet: Binding<RuleSetStore.RuleSet>) -> some View {
+    private func assignmentPicker(for ruleSet: Binding<RoutingRuleSet>) -> some View {
         Picker(selection: ruleSet.assignedConfigurationId) {
             Text("Default").tag(nil as String?)
             Text("DIRECT").tag("DIRECT" as String?)
@@ -150,7 +150,7 @@ struct RuleSetListView: View {
     }
 
     @ViewBuilder
-    private func assignmentLabel(for ruleSet: RuleSetStore.RuleSet) -> some View {
+    private func assignmentLabel(for ruleSet: RoutingRuleSet) -> some View {
         HStack {
             if let assignedId = ruleSet.assignedConfigurationId {
                 if assignedId == "DIRECT" {

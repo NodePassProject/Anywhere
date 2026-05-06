@@ -45,7 +45,7 @@ class VPNViewModel: ObservableObject {
     private let store = ConfigurationStore.shared
     private let subscriptionStore = SubscriptionStore.shared
     private let chainStore = ChainStore.shared
-    private let ruleSetStore = RuleSetStore.shared
+    private let ruleSetStore = RoutingRuleSetStore.shared
     @Published private(set) var isManagerReady = false
     private var vpnManager: NETunnelProviderManager?
     private var statusObserver: AnyCancellable?

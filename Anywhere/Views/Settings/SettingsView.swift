@@ -26,7 +26,7 @@ struct SettingsView: View {
     @State private var bypassCountryCode = AWCore.getBypassCountryCode()
     @State private var allowInsecure = AWCore.getAllowInsecure()
 
-    @State private var adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+    @State private var adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
     @State private var showInsecureAlert = false
 
     var body: some View {
@@ -141,11 +141,11 @@ struct SettingsView: View {
             AWCore.notifyTunnelSettingsChanged()
         }
         .onChange(of: adBlockEnabled) { _, newValue in
-            if let adBlockRuleSet = RuleSetStore.shared.adBlockRuleSet {
+            if let adBlockRuleSet = RoutingRuleSetStore.shared.adBlockRuleSet {
                 if newValue {
-                    RuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: "REJECT")
+                    RoutingRuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: "REJECT")
                 } else {
-                    RuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: nil)
+                    RoutingRuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: nil)
                 }
             }
             Task { await viewModel.syncRoutingConfigurationToNE() }
@@ -169,7 +169,7 @@ struct SettingsView: View {
         }
         .onAppear {
             proxyMode = AWCore.getProxyMode()
-            adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+            adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
         }
     }
 

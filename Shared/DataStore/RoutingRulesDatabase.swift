@@ -1,5 +1,5 @@
 //
-//  RulesDatabase.swift
+//  RoutingRulesDatabase.swift
 //  Anywhere
 //
 //  Created by Argsment Limited on 4/5/26.
@@ -8,25 +8,25 @@
 import Foundation
 import SQLite3
 
-private let logger = AnywhereLogger(category: "RulesDatabase")
+private let logger = AnywhereLogger(category: "RoutingRulesDatabase")
 
 /// Read-only SQLite database for bundled routing rules (replaces JSON resource files).
 ///
 /// Tables:
 /// - `rules(source, type, value)` — domain/IP rules keyed by source name
 /// - `metadata(key, value)` — JSON-encoded lists and mappings
-final class RulesDatabase {
-    static let shared = RulesDatabase()
+final class RoutingRulesDatabase {
+    static let shared = RoutingRulesDatabase()
 
     private var db: OpaquePointer?
 
     private init() {
         guard let url = Bundle.main.url(forResource: "Rules", withExtension: "db") else {
-            logger.error("[RulesDatabase] Rules.db not found in bundle")
+            logger.error("[RoutingRulesDatabase] Rules.db not found in bundle")
             return
         }
         if sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) != SQLITE_OK {
-            logger.error("[RulesDatabase] Failed to open Rules.db")
+            logger.error("[RoutingRulesDatabase] Failed to open Rules.db")
             db = nil
         }
     }
@@ -38,7 +38,7 @@ final class RulesDatabase {
     // MARK: - Queries
 
     /// Returns all rules for a given source (e.g. "Direct", "ADBlock", "Telegram", "CN").
-    func loadRules(for source: String) -> [DomainRule] {
+    func loadRules(for source: String) -> [RoutingRule] {
         guard let db else { return [] }
 
         var stmt: OpaquePointer?
@@ -49,12 +49,12 @@ final class RulesDatabase {
         }
         sqlite3_bind_text(stmt, 1, source, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
 
-        var rules: [DomainRule] = []
+        var rules: [RoutingRule] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let type = Int(sqlite3_column_int(stmt, 0))
             guard let cValue = sqlite3_column_text(stmt, 1),
-                  let ruleType = DomainRuleType(rawValue: type) else { continue }
-            rules.append(DomainRule(type: ruleType, value: String(cString: cValue)))
+                  let ruleType = RoutingRuleType(rawValue: type) else { continue }
+            rules.append(RoutingRule(type: ruleType, value: String(cString: cValue)))
         }
         return rules
     }

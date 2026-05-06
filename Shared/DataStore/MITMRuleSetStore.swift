@@ -1,5 +1,5 @@
 //
-//  MITMStore.swift
+//  MITMRuleSetStore.swift
 //  Anywhere
 //
 //  Created by Argsment Limited on 5/3/26.
@@ -10,8 +10,8 @@ import Combine
 import SwiftUI
 
 @MainActor
-final class MITMStore: ObservableObject {
-    static let shared = MITMStore()
+final class MITMRuleSetStore: ObservableObject {
+    static let shared = MITMRuleSetStore()
 
     @Published var enabled: Bool {
         didSet {
