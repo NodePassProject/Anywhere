@@ -243,6 +243,11 @@ struct HomeView: View {
                     Text(section.header ?? "")
                 }
             }
+            Button {
+                showingAddSheet = true
+            } label: {
+                Label("Add", systemImage: "plus")
+            }
         } label: {
             cardContent {
                 HStack {

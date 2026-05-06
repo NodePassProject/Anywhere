@@ -132,9 +132,6 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
-        .onAppear {
-            proxyMode = AWCore.getProxyMode()
-        }
         .onChange(of: alwaysOnEnabled) { _, newValue in
             AWCore.setAlwaysOnEnabled(newValue)
             viewModel.reconnectVPN()
@@ -171,6 +168,7 @@ struct SettingsView: View {
             Text("This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
         }
         .onAppear {
+            proxyMode = AWCore.getProxyMode()
             adBlockEnabled = RuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
         }
     }

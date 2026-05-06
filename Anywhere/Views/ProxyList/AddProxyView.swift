@@ -81,9 +81,6 @@ struct AddProxyView: View {
         }
         .padding(20)
         .frame(maxHeight: .infinity, alignment: .bottom)
-        .onAppear {
-            
-        }
         .onChange(of: selectedMethod) {
             if selectedMethod == .link && linkURL.isEmpty {
                 checkClipboard()

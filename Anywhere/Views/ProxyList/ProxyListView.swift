@@ -34,11 +34,9 @@ struct ProxyListView: View {
 
     var body: some View {
         List {
-            if !standaloneConfigurations.isEmpty {
-                Section {
-                    ForEach(standaloneConfigurations) { configuration in
-                        configurationRow(configuration)
-                    }
+            Section {
+                ForEach(standaloneConfigurations) { configuration in
+                    configurationRow(configuration)
                 }
             }
             ForEach(viewModel.subscriptions) { subscription in
