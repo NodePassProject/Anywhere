@@ -65,8 +65,6 @@ final class AWCore {
         static let alwaysOnEnabled = "alwaysOnEnabled"
         static let blockQUICEnabled = "blockQUICEnabled"
         static let bypassCountryCode = "bypassCountryCode"
-        static let chains = "store.chains"
-        static let customRuleSets = "customRuleSets"
         static let encryptedDNSEnabled = "encryptedDNSEnabled"
         static let encryptedDNSProtocol = "encryptedDNSProtocol"
         static let encryptedDNSServer = "encryptedDNSServer"
@@ -79,12 +77,10 @@ final class AWCore {
         static let proxyMode = "proxyMode"
         static let proxyServerAddresses = "proxyServerAddresses"
         static let remnawaveHWIDEnabled = "remnawaveHWIDEnabled"
-        static let mitmData = "mitmData"
         static let routingData = "routingData"
         static let ruleSetAssignments = "ruleSetAssignments"
         static let selectedConfigurationId = "selectedConfigurationId"
         static let selectedChainId = "selectedChainId"
-        static let subscriptions = "store.subscriptions"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
     }
 
@@ -117,24 +113,7 @@ final class AWCore {
     static func setOnboardingCompleted(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.onboardingCompleted)
     }
-    
-    // tvOS
-    static func getSubscriptionsData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.subscriptions)
-    }
 
-    static func setSubscriptionsData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.subscriptions)
-    }
-
-    static func getChainsData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.chains)
-    }
-
-    static func setChainsData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.chains)
-    }
-    
     // Tunnel
     static func getLastConfigurationData() -> Data? {
         userDefaults.data(forKey: UserDefaultsKey.lastConfigurationData)
@@ -184,14 +163,6 @@ final class AWCore {
         userDefaults.set(data, forKey: UserDefaultsKey.routingData)
     }
 
-    static func getMITMData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.mitmData)
-    }
-
-    static func setMITMData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.mitmData)
-    }
-
     // Settings
     static func getAlwaysOnEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.alwaysOnEnabled)
@@ -223,14 +194,6 @@ final class AWCore {
 
     static func setRuleSetAssignments(_ assignments: [String: String]) {
         userDefaults.set(assignments, forKey: UserDefaultsKey.ruleSetAssignments)
-    }
-
-    static func getCustomRuleSetsData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.customRuleSets)
-    }
-
-    static func setCustomRuleSetsData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.customRuleSets)
     }
 
     static func getAllowInsecure() -> Bool {

@@ -202,16 +202,30 @@ struct MITMSnapshot: Codable, Equatable {
     /// Best-effort decode of the persisted blob. Returns ``empty`` when no
     /// snapshot has been written yet or the blob fails to decode. Both sides
     /// treat that as "MITM disabled" rather than crashing.
+    ///
+    /// If SwiftData has nothing yet, fall back to the legacy UserDefaults
+    /// key so the Network Extension keeps working during the upgrade window
+    /// before the host has migrated. The host removes that key once the
+    /// blob is in SwiftData, so the fallback turns into a no-op afterwards.
     static func load() -> MITMSnapshot {
-        guard let data = AWCore.getMITMData() else { return .empty }
-        return (try? JSONDecoder().decode(MITMSnapshot.self, from: data)) ?? .empty
+        if let data = JSONBlobStore.shared.load(.mitm),
+           let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
+            return snapshot
+        }
+        if let data = UserDefaults(suiteName: AWCore.Identifier.appGroupSuite)?.data(forKey: legacyMITMDefaultsKey),
+           let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
+            return snapshot
+        }
+        return .empty
     }
+
+    private static let legacyMITMDefaultsKey = "mitmData"
 
     /// Encodes and persists the snapshot, then fires the Darwin
     /// notification the extension observes to trigger a reload.
     func save() {
         guard let data = try? JSONEncoder().encode(self) else { return }
-        AWCore.setMITMData(data)
+        JSONBlobStore.shared.save(.mitm, data: data)
         AWCore.notifyMITMChanged()
     }
 }

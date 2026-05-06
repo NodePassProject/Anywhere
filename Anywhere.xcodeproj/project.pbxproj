@@ -194,6 +194,7 @@
 			membershipExceptions = (
 				AWCore.swift,
 				Blake3/Blake3Hasher.swift,
+				DataStore/JSONBlobStore.swift,
 				MITM/MITMCertificateStore.swift,
 				MITM/X509Builder.swift,
 				Models/DomainRule.swift,
