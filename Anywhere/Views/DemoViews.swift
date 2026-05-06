@@ -242,7 +242,7 @@ struct DemoProxyListView: View {
                     .foregroundStyle(.secondary)
                 HStack(spacing: 4) {
                     Text(configuration.outboundProtocol.name)
-                    if configuration.outboundProtocol == .vless {
+                    if configuration.outboundProtocol == .vless || configuration.outboundProtocol == .vmess {
                         Text("·")
                         Text(configuration.transport.uppercased())
                     }

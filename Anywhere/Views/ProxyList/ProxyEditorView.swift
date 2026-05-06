@@ -19,6 +19,8 @@ struct ProxyEditorView: View {
     @State private var serverPort = ""
     @State private var uuid = ""
     @State private var encryption = "none"
+    @State private var vmessSecurity: VMessSecurity = .auto
+    @State private var vmessAlterIdText = "0"
     @State private var transport = "tcp"
     @State private var flow = ""
     @State private var security = "none"
@@ -92,6 +94,7 @@ struct ProxyEditorView: View {
     @State private var naivePassword = ""
 
     private var isVLESS: Bool { selectedProtocol == .vless }
+    private var isVMess: Bool { selectedProtocol == .vmess }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
     private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
@@ -117,6 +120,11 @@ struct ProxyEditorView: View {
         }
         if isSOCKS5 {
             return true // username/password optional for SOCKS5
+        }
+        if isVMess {
+            guard UUID(xrayString: uuid) != nil else { return false }
+            guard let alterId = Int(vmessAlterIdText), alterId >= 0 else { return false }
+            return !isReality
         }
         if isSudoku {
             guard !sudokuKey.isEmpty else { return false }
@@ -151,6 +159,7 @@ struct ProxyEditorView: View {
                 Section {
                     Picker(selection: $selectedProtocol) {
                         Text(String("VLESS")).tag(OutboundProtocol.vless)
+                        Text(String("VMess")).tag(OutboundProtocol.vmess)
                         Text(String("Hysteria")).tag(OutboundProtocol.hysteria)
                         Text(String("Trojan")).tag(OutboundProtocol.trojan)
                         Text(String("Shadowsocks")).tag(OutboundProtocol.shadowsocks)
@@ -166,6 +175,12 @@ struct ProxyEditorView: View {
                         if isTrojan || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
                             flow = ""
                             security = security == "reality" ? "none" : security
+                        }
+                        if isVMess {
+                            flow = ""
+                            if security == "reality" { security = "none" }
+                            muxEnabled = false
+                            xudpEnabled = false
                         }
                     }
                 }
@@ -200,6 +215,29 @@ struct ProxyEditorView: View {
                             Text("None").tag("none")
                         } label: {
                             TextWithColorfulIcon(title: "Encryption", comment: "Encryption for VLESS protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                        }
+                    } else if isVMess {
+                        LabeledContent {
+                            TextField(String("UUID"), text: $uuid)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "UUID", comment: "UUID for VMess protocol", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                        Picker(selection: $vmessSecurity) {
+                            ForEach(VMessSecurity.allCases, id: \.self) { security in
+                                Text(security.displayName).tag(security)
+                            }
+                        } label: {
+                            TextWithColorfulIcon(title: "Cipher", comment: "Cipher for VMess protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                        }
+                        LabeledContent {
+                            TextField(String("0"), text: $vmessAlterIdText)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Alter ID", comment: "Alter ID for VMess protocol", systemName: "number.square.fill", foregroundColor: .white, backgroundColor: .orange)
                         }
                     } else if isHysteria {
                        LabeledContent {
@@ -331,7 +369,7 @@ struct ProxyEditorView: View {
                     }
                 }
 
-                if isVLESS {
+                if isVLESS || isVMess {
                     Section("Transport") {
                         Picker(selection: $transport) {
                             Text("TCP").tag("tcp")
@@ -347,7 +385,7 @@ struct ProxyEditorView: View {
                                 flow = ""
                             }
                         }
-                        if transport == "tcp" {
+                        if isVLESS && transport == "tcp" {
                             Picker(selection: $flow) {
                                 Text(String(localized: "None")).tag("")
                                 Text(String("Vision")).tag("xtls-rprx-vision")
@@ -367,6 +405,11 @@ struct ProxyEditorView: View {
                                 Toggle(isOn: $xudpEnabled) {
                                     TextWithColorfulIcon(title: "XUDP", comment: "XUDP for VLESS protocol TCP transport", systemName: "arrow.up.arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .cyan)
                                 }
+                            }
+                        }
+                        if isVMess {
+                            Toggle(isOn: $muxEnabled) {
+                                TextWithColorfulIcon(title: "Mux", comment: "Mux for VMess protocol", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
                             }
                         }
                         if transport == "ws" {
@@ -470,7 +513,7 @@ struct ProxyEditorView: View {
                     }
                 }
 
-                if isVLESS || isTrojan {
+                if isVLESS || isVMess || isTrojan {
                     Section("TLS") {
                         if isVLESS {
                             Picker(selection: $security) {
@@ -479,6 +522,13 @@ struct ProxyEditorView: View {
                                 Text("Reality").tag("reality")
                             } label: {
                                 TextWithColorfulIcon(title: "Security", comment: "Security for VLESS protocol", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                        } else if isVMess {
+                            Picker(selection: $security) {
+                                Text(String("None")).tag("none")
+                                Text("TLS").tag("tls")
+                            } label: {
+                                TextWithColorfulIcon(title: "Security", comment: "Security for VMess protocol", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
                             }
                         }
                         if isTLS || isTrojan {
@@ -674,6 +724,9 @@ struct ProxyEditorView: View {
         switch configuration.outbound {
         case .vless:
             break
+        case .vmess(let vmess):
+            vmessSecurity = vmess.security
+            vmessAlterIdText = String(vmess.alterId)
         case .hysteria(let password, let uploadMbps, _):
             hysteriaPassword = password
             hysteriaUploadMbpsText = String(uploadMbps)
@@ -850,6 +903,24 @@ struct ProxyEditorView: View {
                 muxEnabled: muxEnabled,
                 xudpEnabled: xudpEnabled
             )
+        case .vmess:
+            let transportLayer: TransportLayer
+            if let websocketConfiguration { transportLayer = .ws(websocketConfiguration) }
+            else if let httpUpgradeConfiguration { transportLayer = .httpUpgrade(httpUpgradeConfiguration) }
+            else if let xhttpConfiguration { transportLayer = .xhttp(xhttpConfiguration) }
+            else if let grpcConfiguration { transportLayer = .grpc(grpcConfiguration) }
+            else { transportLayer = .tcp }
+
+            let securityLayer: SecurityLayer = tlsConfiguration.map { .tls($0) } ?? .none
+
+            outbound = .vmess(VMessConfiguration(
+                uuid: parsedUUID,
+                security: vmessSecurity,
+                alterId: Int(vmessAlterIdText) ?? 0,
+                transport: transportLayer,
+                securityLayer: securityLayer,
+                muxEnabled: muxEnabled
+            ))
         case .hysteria:
             let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
             outbound = .hysteria(

@@ -21,6 +21,8 @@ class TVProxyEditorViewController: UITableViewController {
     private var serverPort = ""
     private var uuid = ""
     private var encryption = "none"
+    private var vmessSecurity: VMessSecurity = .auto
+    private var vmessAlterIdText = "0"
     private var transport = "tcp"
     private var flow = ""
     private var security = "none"
@@ -68,6 +70,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var naivePassword = ""
 
     private var isVLESS: Bool { selectedProtocol == .vless }
+    private var isVMess: Bool { selectedProtocol == .vmess }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
     private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
@@ -87,7 +90,7 @@ class TVProxyEditorViewController: UITableViewController {
 
     private enum FieldKey {
         case name, address, port, uuid
-        case outboundProtocol, encryption, transport, flow, security
+        case outboundProtocol, encryption, vmessSecurity, vmessAlterId, transport, flow, security
         case mux, xudp
         case wsHost, wsPath
         case huHost, huPath
@@ -118,6 +121,7 @@ class TVProxyEditorViewController: UITableViewController {
         // Protocol
         let protocolOptions: [(String, String)] = [
             ("VLESS", "vless"),
+            ("VMess", "vmess"),
             ("Hysteria", "hysteria"),
             ("Trojan", "trojan"),
             ("Shadowsocks", "shadowsocks"),
@@ -139,6 +143,10 @@ class TVProxyEditorViewController: UITableViewController {
         if isVLESS {
             serverRows.append(.text(label: String(localized: "UUID", comment: "UUID for VLESS protocol"), value: uuid, placeholder: String(localized: "UUID", comment: "UUID for VLESS protocol"), key: .uuid))
             serverRows.append(.selection(label: String(localized: "Encryption", comment: "Encryption for VLESS protocol"), value: encryptionDisplayValue, options: [("None", "none")], key: .encryption))
+        } else if isVMess {
+            serverRows.append(.text(label: String(localized: "UUID", comment: "UUID for VMess protocol"), value: uuid, placeholder: String(localized: "UUID", comment: "UUID for VMess protocol"), key: .uuid))
+            serverRows.append(.selection(label: String(localized: "Cipher", comment: "Cipher for VMess protocol"), value: vmessSecurity.displayName, options: VMessSecurity.allCases.map { ($0.displayName, $0.rawValue) }, key: .vmessSecurity))
+            serverRows.append(.text(label: String(localized: "Alter ID", comment: "Alter ID for VMess protocol"), value: vmessAlterIdText, placeholder: "0", key: .vmessAlterId))
         } else if isHysteria {
             serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: String(localized: "Password"), key: .hysteriaPassword, secure: true))
             serverRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
@@ -173,13 +181,13 @@ class TVProxyEditorViewController: UITableViewController {
         }
         sections.append((String(localized: "Server"), serverRows))
         
-        if isVLESS {
+        if isVLESS || isVMess {
             var transportRows: [RowType] = [
                 .selection(label: String(localized: "Transport", comment: "Transport for VLESS protocol"), value: transportDisplayValue, options: [
                     ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("gRPC", "grpc"), ("XHTTP", "xhttp"),
                 ], key: .transport),
             ]
-            if transport == "tcp" {
+            if isVLESS && transport == "tcp" {
                 transportRows.append(.selection(label: String(localized: "Flow", comment: "Flow for VLESS protocol TCP transport"), value: flowDisplayValue, options: [
                     (String(localized: "None"), ""),
                     ("Vision", "xtls-rprx-vision"),
@@ -189,6 +197,9 @@ class TVProxyEditorViewController: UITableViewController {
                 if muxEnabled {
                     transportRows.append(.toggle(label: String(localized: "XUDP", comment: "XUDP for VLESS protocol TCP transport"), isOn: xudpEnabled, key: .xudp))
                 }
+            }
+            if isVMess {
+                transportRows.append(.toggle(label: String(localized: "Mux", comment: "Mux for VMess protocol"), isOn: muxEnabled, key: .mux))
             }
             if transport == "ws" {
                 transportRows.append(.text(label: String(localized: "Host"), value: wsHost, placeholder: String(localized: "Host"), key: .wsHost))
@@ -220,13 +231,18 @@ class TVProxyEditorViewController: UITableViewController {
             sections.append((String(localized: "Transport"), transportRows))
         }
         
-        if isVLESS || isTrojan {
+        if isVLESS || isVMess || isTrojan {
             var tlsRows: [RowType] = []
             if isVLESS {
                 tlsRows.append(.selection(label: String(localized: "Security", comment: "Security for VLESS protocol"), value: securityDisplayValue, options: [
                     (String("None"), "none"),
                     ("TLS", "tls"),
                     ("Reality", "reality"),
+                ], key: .security))
+            } else if isVMess {
+                tlsRows.append(.selection(label: String(localized: "Security", comment: "Security for VMess protocol"), value: securityDisplayValue, options: [
+                    (String("None"), "none"),
+                    ("TLS", "tls"),
                 ], key: .security))
             }
             if isTLS || isTrojan {
@@ -336,6 +352,11 @@ class TVProxyEditorViewController: UITableViewController {
         if isTrojan { return !trojanPassword.isEmpty }
         if isShadowsocks { return !ssPassword.isEmpty }
         if isSOCKS5 { return true }
+        if isVMess {
+            guard UUID(xrayString: uuid) != nil else { return false }
+            guard let alterId = Int(vmessAlterIdText), alterId >= 0 else { return false }
+            return !isReality
+        }
         if isSudoku {
             guard !sudokuKey.isEmpty else { return false }
             guard let min = Int(sudokuPaddingMinText), let max = Int(sudokuPaddingMaxText) else { return false }
@@ -498,8 +519,17 @@ class TVProxyEditorViewController: UITableViewController {
                     flow = ""
                     if security == "reality" { security = "none" }
                 }
+                if isVMess {
+                    flow = ""
+                    if security == "reality" { security = "none" }
+                    muxEnabled = false
+                    xudpEnabled = false
+                }
             }
         case .encryption: encryption = value
+        case .vmessSecurity:
+            if let security = VMessSecurity(rawValue: value) { vmessSecurity = security }
+        case .vmessAlterId: vmessAlterIdText = value
         case .transport:
             transport = value
             if flow != "" && transport != "tcp" { flow = "" }
@@ -606,6 +636,9 @@ class TVProxyEditorViewController: UITableViewController {
         switch configuration.outbound {
         case .vless:
             break
+        case .vmess(let vmess):
+            vmessSecurity = vmess.security
+            vmessAlterIdText = String(vmess.alterId)
         case .hysteria(let password, let uploadMbps, _):
             hysteriaPassword = password
             hysteriaUploadMbpsText = String(uploadMbps)
@@ -699,7 +732,7 @@ class TVProxyEditorViewController: UITableViewController {
         if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = existingConfiguration?.uuid ?? UUID()
         } else {
-            guard let uuid = UUID(uuidString: uuid) else { return }
+            guard let uuid = UUID(xrayString: uuid) else { return }
             parsedUUID = uuid
         }
         
@@ -775,6 +808,24 @@ class TVProxyEditorViewController: UITableViewController {
                 muxEnabled: muxEnabled,
                 xudpEnabled: xudpEnabled
             )
+        case .vmess:
+            let transportLayer: TransportLayer
+            if let wsConfig { transportLayer = .ws(wsConfig) }
+            else if let huConfig { transportLayer = .httpUpgrade(huConfig) }
+            else if let grpcConfig { transportLayer = .grpc(grpcConfig) }
+            else if let xhttpConfig { transportLayer = .xhttp(xhttpConfig) }
+            else { transportLayer = .tcp }
+
+            let securityLayer: SecurityLayer = tlsConfiguration.map { .tls($0) } ?? .none
+
+            outbound = .vmess(VMessConfiguration(
+                uuid: parsedUUID,
+                security: vmessSecurity,
+                alterId: Int(vmessAlterIdText) ?? 0,
+                transport: transportLayer,
+                securityLayer: securityLayer,
+                muxEnabled: muxEnabled
+            ))
         case .hysteria:
             let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
             outbound = .hysteria(
