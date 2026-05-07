@@ -60,6 +60,7 @@ struct ProxyEditorView: View {
     // Hysteria fields
     @State private var hysteriaPassword = ""
     @State private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
+    @State private var hysteriaSNI = ""
 
     // Trojan fields (TLS knobs reuse the VLESS tlsSNI/tlsALPN/fingerprint state).
     @State private var trojanPassword = ""
@@ -202,21 +203,21 @@ struct ProxyEditorView: View {
                             TextWithColorfulIcon(title: "Encryption", comment: "Encryption for VLESS protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
                         }
                     } else if isHysteria {
-                       LabeledContent {
-                           SecureField("Password", text: $hysteriaPassword)
-                               .autocorrectionDisabled()
-                               .textInputAutocapitalization(.never)
-                               .multilineTextAlignment(.trailing)
-                       } label: {
-                           TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
-                       }
-                       LabeledContent {
-                           TextField("Mbps", text: $hysteriaUploadMbpsText)
-                               .keyboardType(.numberPad)
-                               .multilineTextAlignment(.trailing)
-                       } label: {
-                           TextWithColorfulIcon(title: "Upload Speed", comment: "Upload Speed for Hysteria protocol", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
-                       }
+                        LabeledContent {
+                            SecureField("Password", text: $hysteriaPassword)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                        LabeledContent {
+                            TextField("Mbps", text: $hysteriaUploadMbpsText)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Upload Speed", comment: "Upload Speed for Hysteria protocol", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                        }
                    } else if isTrojan {
                         LabeledContent {
                             SecureField("Password", text: $trojanPassword)
@@ -543,7 +544,21 @@ struct ProxyEditorView: View {
                         }
                     }
                 }
-
+                
+                if isHysteria {
+                    Section {
+                        LabeledContent {
+                            TextField("SNI", text: $hysteriaSNI)
+                                .keyboardType(.URL)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                    }
+                }
+                
                 if isSudoku {
                     Section(String(localized: "HTTP Mask", comment: "HTTP Mask for Sudoku protocol")) {
                         Toggle(isOn: $sudokuHTTPMaskDisable) {
@@ -674,9 +689,10 @@ struct ProxyEditorView: View {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let uploadMbps, _):
+        case .hysteria(let password, let uploadMbps, let sni):
             hysteriaPassword = password
             hysteriaUploadMbpsText = String(uploadMbps)
+            hysteriaSNI = sni
         case .trojan(let password, let tls):
             trojanPassword = password
             tlsSNI = tls.serverName
@@ -852,10 +868,11 @@ struct ProxyEditorView: View {
             )
         case .hysteria:
             let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
+            let sni = hysteriaSNI.isEmpty ? bareAddress : hysteriaSNI
             outbound = .hysteria(
                 password: hysteriaPassword,
                 uploadMbps: mbps,
-                sni: self.configuration?.hysteriaSNI ?? bareAddress
+                sni: sni
             )
         case .trojan:
             let sni = tlsSNI.isEmpty ? bareAddress : tlsSNI

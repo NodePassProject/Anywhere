@@ -31,5 +31,4 @@ struct HysteriaConfiguration {
     var uploadBytesPerSec: UInt64 {
         UInt64(uploadMbps) * 1_000_000 / 8
     }
-
 }
