@@ -17,6 +17,7 @@ struct RuleSetListView: View {
     @State var builtInServiceRuleSets: [RoutingRuleSet] = RoutingRuleSetStore.shared.builtInServiceRuleSets
     @State var customRuleSets: [CustomRoutingRuleSet] = RoutingRuleSetStore.shared.customRuleSets
     @State private var showAddSheet = false
+    @State private var showImportSheet = false
     @State private var newRuleSetName = ""
     
     var body: some View {
@@ -77,6 +78,11 @@ struct RuleSetListView: View {
                         }
                     }
                     Button {
+                        showImportSheet = true
+                    } label: {
+                        Label("Import Rule Set", systemImage: "square.and.arrow.down")
+                    }
+                    Button {
                         RoutingRuleSetStore.shared.resetAssignments()
                         builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
                         Task { await viewModel.syncRoutingConfigurationToNE() }
@@ -110,6 +116,13 @@ struct RuleSetListView: View {
             }
             Button("Cancel", role: .cancel) {
                 newRuleSetName = ""
+            }
+        }
+        .sheet(isPresented: $showImportSheet) {
+            ImportRoutingRuleSetView { ruleSet in
+                RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet)
+                customRuleSets = RoutingRuleSetStore.shared.customRuleSets
+                Task { await viewModel.syncRoutingConfigurationToNE() }
             }
         }
     }

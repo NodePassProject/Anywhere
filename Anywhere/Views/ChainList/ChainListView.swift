@@ -110,7 +110,7 @@ struct ChainListView: View {
                     }
 
                     HStack(spacing: 4) {
-                        Text("\(proxies.count) proxies")
+                        Text("\(proxies.count) proxie(s)")
                         if let entry = proxies.first, let exit = proxies.last, proxies.count >= 2 {
                             Text("·")
                             Text("\(entry.serverAddress) → \(exit.serverAddress)")

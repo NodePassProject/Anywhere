@@ -456,7 +456,7 @@ class TVDemoChainListViewController: UITableViewController {
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
         let isSelected = chain.id == selectedChainId
 
-        var infoText = "\(proxies.count) proxies"
+        var infoText = "\(proxies.count) proxie(s)"
         if let entry = proxies.first, let exit = proxies.last {
             infoText += " · \(entry.serverAddress) → \(exit.serverAddress)"
         }

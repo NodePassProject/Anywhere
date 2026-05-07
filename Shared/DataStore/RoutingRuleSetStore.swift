@@ -136,6 +136,12 @@ class RoutingRuleSetStore: ObservableObject {
         return ruleSet
     }
 
+    func addCustomRuleSet(_ ruleSet: CustomRoutingRuleSet) {
+        customRuleSets.append(ruleSet)
+        saveCustomRuleSets()
+        rebuildRuleSets()
+    }
+
     func removeCustomRuleSet(_ id: UUID) {
         customRuleSets.removeAll { $0.id == id }
         saveCustomRuleSets()

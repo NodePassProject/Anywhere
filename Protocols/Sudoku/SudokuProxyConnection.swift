@@ -1808,11 +1808,6 @@ final class SudokuMuxTCPProxyConnection: ProxyConnection {
         super.init()
     }
 
-    // TODO: Fix
-//    deinit {
-//        closeResources(closeStream: true)
-//    }
-
     override var isConnected: Bool { !lock.withLock { closed } && !client.isClosed }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {

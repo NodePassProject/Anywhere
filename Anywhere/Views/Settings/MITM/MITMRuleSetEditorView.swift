@@ -7,22 +7,31 @@
 
 import SwiftUI
 
+/// A single draft row in the suffix editor. The id is per-row so SwiftUI
+/// keeps focus and deletion stable while the user types — using the
+/// string itself as the id would collapse rows whenever two are momentarily
+/// equal (e.g. both empty).
+private struct MITMDomainSuffixDraft: Identifiable, Equatable {
+    let id = UUID()
+    var value: String
+}
+
 struct MITMRuleSetEditorView: View {
     @Environment(\.dismiss) private var dismiss
 
     let ruleSet: MITMRuleSet?
     let onCommit: (MITMRuleSet?) -> Void
 
-    @State private var domainSuffix: String = ""
+    @State private var name: String = ""
+    @State private var suffixDrafts: [MITMDomainSuffixDraft] = []
     @State private var redirectEnabled: Bool = false
     @State private var redirectHost: String = ""
     @State private var redirectPort: String = ""
-    
-    
+
+
     @State private var rules: [MITMRule] = []
 
     @State private var addingRule: Bool = false
-    @State private var importingRules: Bool = false
     @State private var editMode: EditMode = .inactive
     @State private var editingRule: MITMRule?
 
@@ -30,11 +39,32 @@ struct MITMRuleSetEditorView: View {
 
     var body: some View {
         Form {
-            Section("Domain Suffix") {
-                TextField(String("anywhere.com"), text: $domainSuffix)
-                    .keyboardType(.URL)
+            Section("Name") {
+                TextField("Name", text: $name)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
+            }
+
+            Section {
+                ForEach($suffixDrafts) { $draft in
+                    TextField(String("anywhere.com"), text: $draft.value)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                }
+                .onDelete { offsets in
+                    suffixDrafts.remove(atOffsets: offsets)
+                }
+                .onMove { source, destination in
+                    suffixDrafts.move(fromOffsets: source, toOffset: destination)
+                }
+                Button {
+                    suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+            } header: {
+                Text("Domain Suffixes")
             }
 
             Section {
@@ -89,11 +119,6 @@ struct MITMRuleSetEditorView: View {
                 } label: {
                     Label("Add", systemImage: "plus")
                 }
-                Button {
-                    importingRules = true
-                } label: {
-                    Label("Import Rules", systemImage: "square.and.arrow.down")
-                }
             } header: {
                 HStack {
                     Text("Rules")
@@ -116,11 +141,12 @@ struct MITMRuleSetEditorView: View {
             }
         }
         .environment(\.editMode, $editMode)
-        .navigationTitle(ruleSet == nil ? "Add Rule Set" : "Edit Rule Set")
+        .navigationTitle(ruleSet?.name ?? String(localized: "Rule Set"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 ConfirmButton("Done", action: save)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             ToolbarItem(placement: .cancellationAction) {
                 CancelButton("Cancel") {
@@ -146,20 +172,16 @@ struct MITMRuleSetEditorView: View {
                 }
             }
         }
-        .sheet(isPresented: $importingRules) {
-            ImportMITMRulesView { imported in
-                rules.append(contentsOf: imported)
-            }
-        }
         .onAppear { loadInitial() }
     }
 
     private func save() {
-        let suffix = domainSuffix.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !suffix.isEmpty else {
-            validationError = String(localized: "Domain suffix is required.")
-            return
-        }
+        // Empty suffixes are dropped silently — a set with zero suffixes is
+        // legal (it just won't match anything until the user adds some), so
+        // we don't refuse to save here.
+        let suffixes = suffixDrafts
+            .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
 
         var target: MITMRewriteTarget?
         if redirectEnabled {
@@ -182,7 +204,8 @@ struct MITMRuleSetEditorView: View {
 
         let result = MITMRuleSet(
             id: ruleSet?.id ?? UUID(),
-            domainSuffix: suffix,
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            domainSuffixes: suffixes,
             rewriteTarget: target,
             rules: rules
         )
@@ -192,7 +215,8 @@ struct MITMRuleSetEditorView: View {
 
     private func loadInitial() {
         guard let ruleSet else { return }
-        domainSuffix = ruleSet.domainSuffix
+        name = ruleSet.name
+        suffixDrafts = ruleSet.domainSuffixes.map { MITMDomainSuffixDraft(value: $0) }
         rules = ruleSet.rules
         if let target = ruleSet.rewriteTarget {
             redirectEnabled = true

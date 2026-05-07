@@ -146,30 +146,36 @@ struct MITMRewriteTarget: Codable, Equatable {
     var port: UInt16?
 }
 
-/// An ordered group of rewrite rules tied to one domain suffix. The optional
-/// ``rewriteTarget`` is what gives the set a coherent upstream; if set,
-/// every connection to a host matched by ``domainSuffix`` is redirected
-/// to the target, regardless of which rule fires.
+/// An ordered group of rewrite rules identified by a user-supplied name
+/// and applied to any host matching one of ``domainSuffixes``. The
+/// optional ``rewriteTarget`` gives the set a coherent upstream; if set,
+/// every connection covered by the set is redirected to the target,
+/// regardless of which rule fires.
 struct MITMRuleSet: Codable, Equatable, Identifiable {
     var id = UUID()
-    var domainSuffix: String
+    var name: String
+    var domainSuffixes: [String]
     var rewriteTarget: MITMRewriteTarget?
     var rules: [MITMRule]
 
     init(
         id: UUID = UUID(),
-        domainSuffix: String,
+        name: String,
+        domainSuffixes: [String] = [],
         rewriteTarget: MITMRewriteTarget? = nil,
         rules: [MITMRule] = []
     ) {
         self.id = id
-        self.domainSuffix = domainSuffix
+        self.name = name
+        self.domainSuffixes = domainSuffixes
         self.rewriteTarget = rewriteTarget
         self.rules = rules
     }
 
     private enum CodingKeys: String, CodingKey {
-        case domainSuffix
+        case name
+        case domainSuffix       // legacy: single-suffix shape predating named sets
+        case domainSuffixes
         case rewriteTarget
         case rules
     }
@@ -177,14 +183,23 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.id = UUID()
-        self.domainSuffix = try c.decode(String.self, forKey: .domainSuffix)
+        let legacySuffix = try c.decodeIfPresent(String.self, forKey: .domainSuffix)
+        if let suffixes = try c.decodeIfPresent([String].self, forKey: .domainSuffixes) {
+            self.domainSuffixes = suffixes
+        } else if let legacySuffix {
+            self.domainSuffixes = [legacySuffix]
+        } else {
+            self.domainSuffixes = []
+        }
+        self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? legacySuffix ?? ""
         self.rewriteTarget = try c.decodeIfPresent(MITMRewriteTarget.self, forKey: .rewriteTarget)
         self.rules = try c.decode([MITMRule].self, forKey: .rules)
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(domainSuffix, forKey: .domainSuffix)
+        try c.encode(name, forKey: .name)
+        try c.encode(domainSuffixes, forKey: .domainSuffixes)
         try c.encodeIfPresent(rewriteTarget, forKey: .rewriteTarget)
         try c.encode(rules, forKey: .rules)
     }

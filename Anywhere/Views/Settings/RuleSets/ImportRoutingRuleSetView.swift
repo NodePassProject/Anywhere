@@ -1,17 +1,14 @@
 //
-//  ImportMITMRulesView.swift
+//  ImportRoutingRuleSetView.swift
 //  Anywhere
 //
-//  Created by Argsment Limited on 5/6/26.
+//  Created by Argsment Limited on 5/8/26.
 //
 
 import SwiftUI
 
-/// Sheet that parses pasted/downloaded text via ``MITMRuleParser`` and
-/// hands the resulting rules back to the caller, which is responsible for
-/// appending them to the editor's working copy.
-struct ImportMITMRulesView: View {
-    let onImport: ([MITMRule]) -> Void
+struct ImportRoutingRuleSetView: View {
+    let onImport: (CustomRoutingRuleSet) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
@@ -20,14 +17,18 @@ struct ImportMITMRulesView: View {
     @State private var isDownloading = false
     @State private var downloadError: String?
 
-    private var parsedMITMRules: [MITMRule] {
-        MITMRuleParser.parse(text)
+    private var parsedRuleSet: CustomRoutingRuleSet {
+        RoutingRuleSetParser.parse(text)
+    }
+
+    private var canImport: Bool {
+        !parsedRuleSet.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Rules") {
+                Section("Rule Set") {
                     TextEditor(text: $text)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
@@ -37,7 +38,7 @@ struct ImportMITMRulesView: View {
 
                 Section {
                     HStack {
-                        TextField("Anywhere MITM Rule List URL", text: $url)
+                        TextField("Anywhere Routing Rule Set URL", text: $url)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .keyboardType(.URL)
@@ -83,15 +84,15 @@ struct ImportMITMRulesView: View {
                     }
                 }
 
-                let count = parsedMITMRules.count
-                if count > 0 {
+                if !text.isEmpty {
+                    let parsed = parsedRuleSet
                     Section {
-                        Text("\(count) rule(s)")
+                        Text("\(parsed.rules.count) rule(s)")
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-            .navigationTitle("Import Rules")
+            .navigationTitle("Import Rule Set")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -99,10 +100,10 @@ struct ImportMITMRulesView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     ConfirmButton("Import") {
-                        onImport(parsedMITMRules)
+                        onImport(parsedRuleSet)
                         dismiss()
                     }
-                    .disabled(parsedMITMRules.isEmpty)
+                    .disabled(!canImport)
                 }
             }
         }

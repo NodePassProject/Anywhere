@@ -24,8 +24,10 @@ enum CompiledMITMOperation {
     case bodyReplace(regex: NSRegularExpression, replacement: String)
 }
 
-/// Compiled view of a rule set: the suffix it covers, the optional
-/// upstream redirect, and its rules ready to apply.
+/// Compiled view of a rule set at one trie terminal: the specific suffix
+/// reached, the optional upstream redirect, and rules ready to apply. A
+/// source set with multiple suffixes produces one of these per suffix,
+/// each sharing the same compiled rules and target.
 struct CompiledMITMRuleSet {
     let domainSuffix: String
     let rewriteTarget: MITMRewriteTarget?
@@ -62,9 +64,10 @@ final class MITMRewritePolicy {
     }
 
     /// Replaces the in-memory rule set table from a typed
-    /// ``MITMSnapshot``. Rule sets whose suffix is empty are skipped
-    /// silently. Rules whose regex fails to compile are dropped with a
-    /// log line; the rest of the set still applies.
+    /// ``MITMSnapshot``. Suffixes that are empty are skipped silently;
+    /// a set with no usable suffixes contributes nothing. Rules whose
+    /// regex fails to compile are dropped with a log line; the rest of
+    /// the set still applies.
     ///
     /// Conflict handling: if two sets declare the same suffix, the
     /// later one wins (with a warning).
@@ -73,42 +76,44 @@ final class MITMRewritePolicy {
         for set in ruleSets {
             insert(set)
         }
-        logger.debug("[MITM] Loaded \(setCount) rule set(s)")
+        logger.debug("[MITM] Loaded \(ruleSets.count) rule set(s)")
     }
 
     private func insert(_ set: MITMRuleSet) {
-        let suffix = set.domainSuffix
-            .lowercased()
-            .trimmingCharacters(in: CharacterSet.whitespaces)
-        guard !suffix.isEmpty else { return }
-
-        let labels = suffix.split(separator: ".").map(String.init).reversed()
-        var node = root
-        for label in labels {
-            if let child = node.children[label] {
-                node = child
-            } else {
-                let child = TrieNode()
-                node.children[label] = child
-                node = child
-            }
-        }
+        let suffixes = set.domainSuffixes
+            .map { $0.lowercased().trimmingCharacters(in: CharacterSet.whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !suffixes.isEmpty else { return }
 
         let compiledRules = set.rules.compactMap { rule -> CompiledMITMRule? in
-            guard let op = compile(rule.operation, suffix: suffix) else { return nil }
+            guard let op = compile(rule.operation, suffix: set.name) else { return nil }
             return CompiledMITMRule(phase: rule.phase, operation: op)
         }
 
-        if node.ruleSet != nil {
-            logger.warning("[MITM] Duplicate rule set for suffix \(suffix); later definition wins")
-        } else {
-            setCount += 1
+        for suffix in suffixes {
+            let labels = suffix.split(separator: ".").map(String.init).reversed()
+            var node = root
+            for label in labels {
+                if let child = node.children[label] {
+                    node = child
+                } else {
+                    let child = TrieNode()
+                    node.children[label] = child
+                    node = child
+                }
+            }
+
+            if node.ruleSet != nil {
+                logger.warning("[MITM] Duplicate rule set for suffix \(suffix); later definition wins")
+            } else {
+                setCount += 1
+            }
+            node.ruleSet = CompiledMITMRuleSet(
+                domainSuffix: suffix,
+                rewriteTarget: set.rewriteTarget,
+                rules: compiledRules
+            )
         }
-        node.ruleSet = CompiledMITMRuleSet(
-            domainSuffix: suffix,
-            rewriteTarget: set.rewriteTarget,
-            rules: compiledRules
-        )
     }
 
     /// Returns `true` when the hostname is covered by any rule set. Empty
