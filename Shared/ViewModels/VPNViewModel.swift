@@ -372,6 +372,10 @@ class VPNViewModel: ObservableObject {
         subscriptionStore.move(fromOffsets: source, toOffset: destination)
     }
 
+    func moveStandaloneConfigurations(fromOffsets source: IndexSet, toOffset destination: Int) {
+        store.moveStandaloneConfigurations(fromOffsets: source, toOffset: destination)
+    }
+
     /// Returns the subscription that owns this configuration, if any.
     func subscription(for configuration: ProxyConfiguration) -> Subscription? {
         guard let subId = configuration.subscriptionId else { return nil }

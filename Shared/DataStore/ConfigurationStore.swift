@@ -7,6 +7,7 @@
 
 import Foundation
 import Combine
+import SwiftUI
 
 @MainActor
 class ConfigurationStore: ObservableObject {
@@ -47,6 +48,20 @@ class ConfigurationStore: ObservableObject {
     func replaceConfigurations(for subscriptionId: UUID, with newConfigurations: [ProxyConfiguration]) {
         var updated = configurations.filter { $0.subscriptionId != subscriptionId }
         updated.append(contentsOf: newConfigurations)
+        configurations = updated
+        save()
+    }
+
+    /// Reorders standalone configurations (those without a `subscriptionId`) while
+    /// leaving subscription-owned configurations at their original absolute positions.
+    func moveStandaloneConfigurations(fromOffsets source: IndexSet, toOffset destination: Int) {
+        let standaloneIndices = configurations.indices.filter { configurations[$0].subscriptionId == nil }
+        var standalone = standaloneIndices.map { configurations[$0] }
+        standalone.move(fromOffsets: source, toOffset: destination)
+        var updated = configurations
+        for (i, idx) in standaloneIndices.enumerated() {
+            updated[idx] = standalone[i]
+        }
         configurations = updated
         save()
     }

@@ -10772,60 +10772,60 @@
         }
       }
     },
-    "Reorder Subscriptions" : {
+    "Reorder Proxies" : {
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "إعادة ترتيب الاشتراكات"
+            "value" : "إعادة ترتيب البروكسيات"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Reorder Subscriptions"
+            "value" : "Reorder Proxies"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Reordenar suscripciones"
+            "value" : "Reordenar proxies"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "تغییر ترتیب اشتراک‌ها"
+            "value" : "مرتب‌سازی مجدد پروکسی‌ها"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Изменить порядок подписок"
+            "value" : "Изменить порядок прокси"
           }
         },
         "tk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Abunalary tertipleşdir"
+            "value" : "Proksileri täzeden tertiplemek"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Abonelikleri Yeniden Sırala"
+            "value" : "Proxy'leri Yeniden Sırala"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sắp xếp lại đăng ký"
+            "value" : "Sắp xếp lại Proxy"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "重新排序订阅"
+            "value" : "重新排序代理"
           }
         }
       }
@@ -12230,6 +12230,64 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Abonelik"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Đăng ký"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "订阅"
+          }
+        }
+      }
+    },
+    "Subscriptions" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الاشتراكات"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Subscriptions"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Suscripciones"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "اشتراک‌ها"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Подписки"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Abunalar"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Abonelikler"
           }
         },
         "vi" : {
