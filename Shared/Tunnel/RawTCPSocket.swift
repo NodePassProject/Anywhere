@@ -237,6 +237,14 @@ class RawTCPSocket: RawTransport {
     private let stateLock = UnfairLock()
     private var _state: State = .setup
 
+    /// Completions waiting for full teardown (fd close + dispatch source cancel
+    /// handlers fired). Drained by `notifyTeardownComplete` once the last
+    /// handler runs. Protected by `stateLock`.
+    private var teardownCompletions: [@Sendable () -> Void] = []
+    /// Set once teardown has fully finished. Subsequent `forceCancel(completion:)`
+    /// calls fire their completion synchronously. Protected by `stateLock`.
+    private var teardownComplete = false
+
     /// The current state of the transport. Thread-safe.
     var state: State {
         stateLock.withLock { _state }
@@ -441,32 +449,70 @@ class RawTCPSocket: RawTransport {
     /// completion fan-out happen asynchronously on `ioQueue` to keep the data
     /// structures free of races.
     func forceCancel() {
-        // Synchronously latch .cancelled. Sticky: `transitionFromSetup` will
-        // refuse to move off of it.
-        let alreadyCancelled: Bool = stateLock.withLock {
-            if case .cancelled = _state { return true }
-            _state = .cancelled
-            return false
-        }
-        if alreadyCancelled { return }
+        forceCancel(completion: {})
+    }
 
-        ioQueue.async { [self] in
-            if let c = connectCompletion {
-                connectCompletion = nil
-                c(SocketError.connectionFailed("Cancelled"))
+    /// Awaitable variant of `forceCancel`. The completion fires once the
+    /// underlying file descriptor is fully closed (i.e. after both
+    /// dispatch-source cancel handlers have run on `ioQueue`). Multiple
+    /// concurrent callers all see their completion fired exactly once when
+    /// teardown finishes; calls after teardown is complete fire immediately.
+    func forceCancel(completion: @escaping @Sendable () -> Void) {
+        enum Action { case startTeardown, queue, fireImmediately }
+
+        let action: Action = stateLock.withLock { () -> Action in
+            if teardownComplete {
+                return .fireImmediately
             }
-            if let completion = pendingReceiveCompletion {
-                pendingReceiveCompletion = nil
-                completion(nil, true, SocketError.notConnected)
+            if case .cancelled = _state {
+                teardownCompletions.append(completion)
+                return .queue
             }
-            if !sendQueue.isEmpty {
-                failPendingSends(with: SocketError.sendFailed("Cancelled"))
+            _state = .cancelled
+            teardownCompletions.append(completion)
+            return .startTeardown
+        }
+
+        switch action {
+        case .fireImmediately:
+            completion()
+        case .queue:
+            return
+        case .startTeardown:
+            ioQueue.async { [self] in
+                if let c = connectCompletion {
+                    connectCompletion = nil
+                    c(SocketError.connectionFailed("Cancelled"))
+                }
+                if let pendingComp = pendingReceiveCompletion {
+                    pendingReceiveCompletion = nil
+                    pendingComp(nil, true, SocketError.notConnected)
+                }
+                if !sendQueue.isEmpty {
+                    failPendingSends(with: SocketError.sendFailed("Cancelled"))
+                }
+                pendingInitialData = nil
+                remainingIPs.removeAll()
+                connectTimer?.cancel()
+                connectTimer = nil
+                tearDownSocket { [self] in
+                    notifyTeardownComplete()
+                }
             }
-            pendingInitialData = nil
-            remainingIPs.removeAll()
-            connectTimer?.cancel()
-            connectTimer = nil
-            tearDownSocket()
+        }
+    }
+
+    /// Drains queued teardown completions. Called from `tearDownSocket`'s
+    /// completion path once the fd is closed.
+    private func notifyTeardownComplete() {
+        let completions: [@Sendable () -> Void] = stateLock.withLock {
+            teardownComplete = true
+            let pending = teardownCompletions
+            teardownCompletions.removeAll()
+            return pending
+        }
+        for completion in completions {
+            completion()
         }
     }
 
@@ -821,6 +867,14 @@ class RawTCPSocket: RawTransport {
     /// it — this is required by the `DispatchSource` contract. Must run on
     /// `ioQueue`.
     private func tearDownSocket() {
+        tearDownSocket(completion: {})
+    }
+
+    /// Variant of `tearDownSocket` that fires `completion` once the fd is
+    /// actually closed (after both dispatch-source cancel handlers have run).
+    /// Internal callers that don't need to know when teardown finishes can use
+    /// the no-arg form.
+    private func tearDownSocket(completion: @escaping @Sendable () -> Void) {
         let fdToClose = socketFD
         socketFD = -1
 
@@ -832,22 +886,26 @@ class RawTCPSocket: RawTransport {
         if fdToClose < 0 {
             rs?.cancel()
             ws?.cancel()
+            completion()
             return
         }
 
         // No sources to wait on — close immediately.
         if rs == nil && ws == nil {
             _ = Darwin.close(fdToClose)
+            completion()
             return
         }
 
-        // Count cancel handlers; the last one to fire closes the fd. Cancel
-        // handlers run on `ioQueue` (serial), so the counter needs no lock.
+        // Count cancel handlers; the last one to fire closes the fd, then
+        // fires the completion. Cancel handlers run on `ioQueue` (serial), so
+        // the counter needs no lock.
         var pending = (rs != nil ? 1 : 0) + (ws != nil ? 1 : 0)
         let closeHandler: () -> Void = {
             pending -= 1
             if pending == 0 {
                 _ = Darwin.close(fdToClose)
+                completion()
             }
         }
 

@@ -9,6 +9,28 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "Proxy")
 
+/// Counts down `remaining` callbacks and fires `completion` when the last one
+/// arrives. Used to fan in async-teardown notifications from a `ProxyClient`'s
+/// raw socket plus its chain clients into a single completion.
+private final class TeardownCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: Int
+    private let completion: @Sendable () -> Void
+
+    init(remaining: Int, completion: @escaping @Sendable () -> Void) {
+        self.remaining = remaining
+        self.completion = completion
+    }
+
+    func decrement() {
+        lock.lock()
+        remaining -= 1
+        let done = remaining == 0
+        lock.unlock()
+        if done { completion() }
+    }
+}
+
 // MARK: - ProxyClient
 
 /// Client for establishing proxy connections over TCP or UDP.
@@ -212,8 +234,22 @@ class ProxyClient {
         }
     }
 
-    /// Cancels the connection and releases all resources.
+    /// Cancels the connection and releases all resources. Returns synchronously;
+    /// the underlying TCP teardown happens asynchronously. Callers that need
+    /// to wait for the file descriptor to actually close should use
+    /// ``cancel(completion:)``.
     func cancel() {
+        cancel(completion: {})
+    }
+
+    /// Awaitable variant of ``cancel()``. Fires `completion` once every
+    /// underlying socket (this client's `connection` and any `chainClients`
+    /// it owns) has fully torn down — fd closed, dispatch-source cancel
+    /// handlers fired. Higher-level wrappers (TLS, WebSocket, gRPC, etc.) are
+    /// torn down synchronously here since they don't own fds of their own.
+    func cancel(completion: @escaping @Sendable () -> Void) {
+        // Synchronous teardown of higher-level wrappers — they don't hold fds
+        // directly; their cancels are fast bookkeeping.
         webSocketConnection?.cancel()
         webSocketConnection = nil
         httpUpgradeConnection?.cancel()
@@ -222,8 +258,6 @@ class ProxyClient {
         grpcConnection = nil
         xhttpConnection?.cancel()
         xhttpConnection = nil
-        connection?.forceCancel()
-        connection = nil
         realityConnection?.cancel()
         realityConnection = nil
         realityClient?.cancel()
@@ -232,10 +266,26 @@ class ProxyClient {
         tlsConnection = nil
         tlsClient?.cancel()
         tlsClient = nil
-        // Cancel chain link clients
-        for client in chainClients { client.cancel() }
-        chainClients.removeAll()
         tunnel = nil
+
+        // Awaitable teardowns: the raw socket and any chain clients (each of
+        // which owns its own raw socket).
+        let socket = connection
+        connection = nil
+        let chains = chainClients
+        chainClients.removeAll()
+
+        let total = (socket != nil ? 1 : 0) + chains.count
+        if total == 0 {
+            completion()
+            return
+        }
+
+        let counter = TeardownCounter(remaining: total, completion: completion)
+        socket?.forceCancel { counter.decrement() }
+        for client in chains {
+            client.cancel { counter.decrement() }
+        }
     }
 
     // MARK: - Protocol Handshake
