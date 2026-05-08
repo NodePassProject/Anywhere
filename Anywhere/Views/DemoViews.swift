@@ -227,7 +227,7 @@ struct DemoProxyListView: View {
         let latency = SampleData.latencyResults[configuration.id]
 
         HStack {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading) {
                 HStack {
                     Text(configuration.name)
                         .font(.body)

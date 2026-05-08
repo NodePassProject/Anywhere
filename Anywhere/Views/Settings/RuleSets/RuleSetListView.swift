@@ -16,9 +16,11 @@ struct RuleSetListView: View {
 
     @State var builtInServiceRuleSets: [RoutingRuleSet] = RoutingRuleSetStore.shared.builtInServiceRuleSets
     @State var customRuleSets: [CustomRoutingRuleSet] = RoutingRuleSetStore.shared.customRuleSets
+    
     @State private var showAddSheet = false
-    @State private var showImportSheet = false
     @State private var newRuleSetName = ""
+    
+    @State private var showImportSheet = false
     
     var body: some View {
         List {

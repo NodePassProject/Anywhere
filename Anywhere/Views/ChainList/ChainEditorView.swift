@@ -57,7 +57,7 @@ struct ChainEditorView: View {
                                         .fill(index == 0 ? Color.blue : index == selectedProxies.count - 1 ? Color.green : Color.secondary)
                                 )
 
-                            VStack(alignment: .leading, spacing: 2) {
+                            VStack(alignment: .leading) {
                                 Text(proxy.name)
                                     .font(.body)
                                 Text("\(proxy.serverAddress):\(proxy.serverPort, format: .number.grouping(.never))")
@@ -254,7 +254,7 @@ private struct ProxyPickerView: View {
             onSelect(configuration)
             dismiss()
         } label: {
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading) {
                 Text(configuration.name)
                     .font(.body)
                     .foregroundStyle(.primary)

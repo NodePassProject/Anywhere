@@ -14,6 +14,17 @@ enum MITMPhase: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+extension MITMPhase: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .httpRequest:
+            String(localized: "Request")
+        case .httpResponse:
+            String(localized: "Response")
+        }
+    }
+}
+
 /// A single rewrite operation. The associated values carry only the fields
 /// that operation needs, keeping the editor UI and runtime engine from
 /// threading optional fields around.
@@ -28,6 +39,23 @@ enum MITMOperation: Equatable {
     case headerDelete(name: String)
     case headerReplace(pattern: String, name: String, value: String)
     case bodyReplace(pattern: String, body: String)
+}
+
+extension MITMOperation: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .urlReplace:
+            String(localized: "URL Replace")
+        case .headerAdd:
+            String(localized: "Header Add")
+        case .headerDelete:
+            String(localized: "Header Delete")
+        case .headerReplace:
+            String(localized: "Header Replace")
+        case .bodyReplace:
+            String(localized: "Body Replace")
+        }
+    }
 }
 
 extension MITMOperation: Codable {
