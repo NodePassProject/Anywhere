@@ -61,12 +61,16 @@ final class MITMHTTP2Rewriter {
         }
     }
 
-    /// Applies every ``bodyReplace`` rule for the given phase to the
-    /// fully-buffered body. Body rules operate on UTF-8 strings; invalid
-    /// byte sequences are replaced with U+FFFD during decode.
+    /// Applies every ``bodyReplace`` rule for the given phase. Bodies
+    /// are mapped to a Latin-1 string (1:1 byte-to-codepoint) so the
+    /// regex round-trip preserves binary and non-UTF-8 payloads
+    /// exactly. The caller is responsible for decompressing
+    /// content-encoded bodies before passing them in.
     func rewriteBody(_ data: Data, phase: MITMPhase) -> Data {
         let rules = policy.rules(for: host, phase: phase)
-        var bodyString = String(decoding: data, as: UTF8.self)
+        guard var bodyString = String(bytes: data, encoding: .isoLatin1) else {
+            return data
+        }
         var changed = false
         for rule in rules {
             guard case .bodyReplace(let regex, let replacement) = rule.operation else {
@@ -84,7 +88,8 @@ final class MITMHTTP2Rewriter {
                 changed = true
             }
         }
-        return changed ? Data(bodyString.utf8) : data
+        guard changed else { return data }
+        return bodyString.data(using: .isoLatin1) ?? data
     }
 
     // MARK: - Authority rewrite
@@ -149,12 +154,6 @@ final class MITMHTTP2Rewriter {
                     guard regex.firstMatch(in: literal, options: [], range: range) != nil else {
                         return entry
                     }
-                    let rewritten = regex.stringByReplacingMatches(
-                        in: literal,
-                        options: [],
-                        range: range,
-                        withTemplate: "\(name): \(value)"
-                    )
                     return (name: name, value: value)
                 }
             case .bodyReplace:
