@@ -7,6 +7,7 @@
 
 import Foundation
 import Combine
+import SwiftUI
 
 @MainActor
 class SubscriptionStore: ObservableObject {
@@ -35,6 +36,11 @@ class SubscriptionStore: ObservableObject {
     func delete(_ subscription: Subscription, configurationStore: ConfigurationStore = .shared) {
         configurationStore.deleteConfigurations(for: subscription.id)
         subscriptions.removeAll { $0.id == subscription.id }
+        save()
+    }
+
+    func move(fromOffsets source: IndexSet, toOffset destination: Int) {
+        subscriptions.move(fromOffsets: source, toOffset: destination)
         save()
     }
 

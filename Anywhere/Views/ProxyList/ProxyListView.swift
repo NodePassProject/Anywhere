@@ -60,6 +60,15 @@ struct ProxyListView: View {
         }
         .navigationTitle("Proxies")
         .toolbar {
+            if viewModel.subscriptions.count > 1 {
+                ToolbarItem {
+                    NavigationLink {
+                        ManageSubscriptionsView()
+                    } label: {
+                        Label("Reorder Subscriptions", systemImage: "arrow.up.arrow.down")
+                    }
+                }
+            }
             ToolbarItem {
                 Button {
                     let visibleConfigurations = standaloneConfigurations + subscribedGroups
