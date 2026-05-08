@@ -74,10 +74,12 @@ nonisolated enum LatencyTester {
         }
     }
 
-    /// Maximum number of latency tests running at the same time. High enough that
-    /// unavailable proxies (which sit on the per-test timeout) do not starve out
-    /// working proxies further down the list.
-    private static let maxConcurrentTests = 16
+    /// Maximum number of latency tests running at the same time. Capped low so
+    /// total simultaneous proxy connections (handshakes + receives across all
+    /// in-flight tests) stay within what a typical residential uplink/NAT can
+    /// sustain without packet loss. Higher concurrency caused later tests to
+    /// false-timeout as connections accumulated.
+    private static let maxConcurrentTests = 4
 
     /// Test all configurations concurrently (capped), emitting results as each test finishes.
     nonisolated static func testAll(_ configurations: [ProxyConfiguration]) -> AsyncStream<(UUID, LatencyResult)> {
@@ -152,74 +154,102 @@ nonisolated enum LatencyTester {
         let client = ProxyClient(configuration: configuration, useResolvedAddressForDirectDial: true)
         let resumer = LatencyTester.PendingResumer()
 
-        return try await withTaskCancellationHandler {
-            defer { client.cancel() }
+        do {
+            let ms = try await withTaskCancellationHandler {
+                // Phases 1 + 2: connect + warmup, priming the proxy-to-target
+                // connection so phase 4 measures only the network round-trip.
+                let proxyConnection = try await Self.establishWarmedConnection(client: client, resumer: resumer)
 
-            // Phase 1 (untimed): Establish proxy connection.
-            // TCP + TLS/Reality + VLESS/SS handshake.
-            let proxyConnection: ProxyConnection = try await awaitCallback(resumer: resumer) { complete in
-                client.connect(to: Self.latencyHost, port: Self.latencyPort) { complete($0) }
-            }
+                // Phase 3 (untimed): Send the timed HTTP request.
+                let httpRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
 
-            // Phase 2 (untimed warmup): Send a first request to prime the
-            // proxy-to-target connection.
-            let warmupRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\n\r\n".data(using: .utf8)!
-
-            try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
-                proxyConnection.send(data: warmupRequest) { error in
-                    if let error { complete(.failure(error)) } else { complete(.success(())) }
+                try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
+                    proxyConnection.send(data: httpRequest) { error in
+                        if let error { complete(.failure(error)) } else { complete(.success(())) }
+                    }
                 }
-            }
 
-            let warmupData: Data? = try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Data?, Error>) -> Void) in
-                proxyConnection.receive { data, error in
-                    if let error { complete(.failure(error)) } else { complete(.success(data)) }
+                // Phase 4 (timed): Wait for the response.
+                // Timer starts after send completes — measures the actual network
+                // round-trip: data traverses client → proxy chain → target → back.
+                let clock = ContinuousClock()
+                let start = clock.now
+
+                let responseData: Data? = try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Data?, Error>) -> Void) in
+                    proxyConnection.receive { data, error in
+                        if let error { complete(.failure(error)) } else { complete(.success(data)) }
+                    }
                 }
-            }
 
-            // Validate warmup response
-            let warmupStatus = warmupData.flatMap { String(data: $0, encoding: .utf8) }?
-                .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
-            guard let warmupStatus, warmupStatus.contains("200") else {
-                throw LatencyTestError.unexpectedStatus(warmupStatus ?? "no response")
-            }
+                let elapsed = clock.now - start
 
-            // Phase 3 (untimed): Send the timed HTTP request.
-            let httpRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
-
-            try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
-                proxyConnection.send(data: httpRequest) { error in
-                    if let error { complete(.failure(error)) } else { complete(.success(())) }
+                // Validate HTTP 200 response
+                let statusLine = responseData.flatMap { String(data: $0, encoding: .utf8) }?
+                    .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
+                guard let statusLine, statusLine.contains("200") else {
+                    throw LatencyTestError.unexpectedStatus(statusLine ?? "no response")
                 }
+
+                return Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
+            } onCancel: {
+                // Just unblock the pending awaitCallback so the body throws
+                // out. `awaitClientCancel(client)` in the catch block then
+                // tears the socket down and waits for the fd to actually
+                // close — calling `client.cancel()` here too would race with
+                // it (state nilled before the awaitable cancel can attach).
+                resumer.cancel()
             }
-
-            // Phase 4 (timed): Wait for the response.
-            // Timer starts after send completes — measures the actual network
-            // round-trip: data traverses client → proxy chain → target → back.
-            let clock = ContinuousClock()
-            let start = clock.now
-
-            let responseData: Data? = try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Data?, Error>) -> Void) in
-                proxyConnection.receive { data, error in
-                    if let error { complete(.failure(error)) } else { complete(.success(data)) }
-                }
-            }
-
-            let elapsed = clock.now - start
-
-            // Validate HTTP 200 response
-            let statusLine = responseData.flatMap { String(data: $0, encoding: .utf8) }?
-                .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
-            guard let statusLine, statusLine.contains("200") else {
-                throw LatencyTestError.unexpectedStatus(statusLine ?? "no response")
-            }
-
-            let ms = Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
+            await awaitClientCancel(client)
             return ms
-        } onCancel: {
-            client.cancel()
-            resumer.cancel()
+        } catch {
+            await awaitClientCancel(client)
+            throw error
         }
+    }
+
+    /// Wraps `ProxyClient.cancel(completion:)` as `async`. The continuation
+    /// resumes once the underlying file descriptor is fully closed, so the
+    /// next test in the `testAll` task group doesn't reuse resources before
+    /// they've been released.
+    private static func awaitClientCancel(_ client: ProxyClient) async {
+        await withCheckedContinuation { continuation in
+            client.cancel { continuation.resume() }
+        }
+    }
+
+    /// Phases 1 + 2: TCP/TLS/outbound handshake plus a warmup HEAD round-trip
+    /// to prime the proxy-to-target connection.
+    private static func establishWarmedConnection(client: ProxyClient, resumer: PendingResumer) async throws -> ProxyConnection {
+        // Phase 1 (untimed): Establish proxy connection.
+        // TCP + TLS/Reality + VLESS/SS handshake.
+        let proxyConnection: ProxyConnection = try await awaitCallback(resumer: resumer) { complete in
+            client.connect(to: Self.latencyHost, port: Self.latencyPort) { complete($0) }
+        }
+
+        // Phase 2 (untimed warmup): Send a first request to prime the
+        // proxy-to-target connection.
+        let warmupRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\n\r\n".data(using: .utf8)!
+
+        try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
+            proxyConnection.send(data: warmupRequest) { error in
+                if let error { complete(.failure(error)) } else { complete(.success(())) }
+            }
+        }
+
+        let warmupData: Data? = try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Data?, Error>) -> Void) in
+            proxyConnection.receive { data, error in
+                if let error { complete(.failure(error)) } else { complete(.success(data)) }
+            }
+        }
+
+        // Validate warmup response
+        let warmupStatus = warmupData.flatMap { String(data: $0, encoding: .utf8) }?
+            .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
+        guard let warmupStatus, warmupStatus.contains("200") else {
+            throw LatencyTestError.unexpectedStatus(warmupStatus ?? "no response")
+        }
+
+        return proxyConnection
     }
 
     /// Hook that the task-cancellation handler invokes to fail whichever phase
