@@ -1,5 +1,5 @@
 //
-//  MITMRuleSetEditorView.swift
+//  MITMRuleSetDetailView.swift
 //  Anywhere
 //
 //  Created by Argsment Limited on 5/4/26.
@@ -16,11 +16,12 @@ private struct MITMDomainSuffixDraft: Identifiable, Equatable {
     var value: String
 }
 
-struct MITMRuleSetEditorView: View {
-    @Environment(\.dismiss) private var dismiss
+struct MITMRuleSetDetailView: View {
+    @Environment(\.editMode) private var editMode
+    
+    @StateObject private var store = MITMRuleSetStore.shared
 
     let ruleSet: MITMRuleSet?
-    let onCommit: (MITMRuleSet?) -> Void
 
     @State private var name: String = ""
     @State private var suffixDrafts: [MITMDomainSuffixDraft] = []
@@ -31,20 +32,55 @@ struct MITMRuleSetEditorView: View {
 
     @State private var rules: [MITMRule] = []
 
-    @State private var addingRule: Bool = false
-    @State private var editMode: EditMode = .inactive
+    @State private var showAddSheet: Bool = false
     @State private var editingRule: MITMRule?
 
     @State private var validationError: String?
+    
+    private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
 
     var body: some View {
         Form {
-            Section("Name") {
-                TextField("Name", text: $name)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
+            Section {
+                if isEditing == true {
+                    Toggle(isOn: $redirectEnabled) {
+                        TextWithColorfulIcon(title: "Redirect", comment: nil, systemName: "arrow.trianglehead.turn.up.right.circle", foregroundColor: .white, backgroundColor: .blue)
+                    }
+                    if redirectEnabled {
+                        LabeledContent {
+                            TextField(String("everywhere.com"), text: $redirectHost)
+                                .keyboardType(.URL)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                        LabeledContent {
+                            TextField(String("443"), text: $redirectPort)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
+                        }
+                    }
+                } else {
+                    LabeledContent {
+                        if redirectHost == "" {
+                            Text("Disabled")
+                        } else {
+                            if redirectPort == "" {
+                                Text(redirectHost)
+                            } else {
+                                Text("\(redirectHost):\(redirectPort)")
+                            }
+                        }
+                    } label: {
+                        TextWithColorfulIcon(title: "Redirect", comment: nil, systemName: "arrow.trianglehead.turn.up.right.circle", foregroundColor: .white, backgroundColor: .blue)
+                    }
+                }
             }
-
+            
             Section {
                 ForEach($suffixDrafts) { $draft in
                     TextField(String("anywhere.com"), text: $draft.value)
@@ -58,42 +94,22 @@ struct MITMRuleSetEditorView: View {
                 .onMove { source, destination in
                     suffixDrafts.move(fromOffsets: source, toOffset: destination)
                 }
-                Button {
-                    suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
-                } label: {
-                    Label("Add", systemImage: "plus")
+                if isEditing == true {
+                    Button {
+                        withAnimation {
+                            suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
+                        }
+                    } label: {
+                        Label("Add", systemImage: "plus")
+                    }
                 }
             } header: {
                 Text("Domain Suffixes")
             }
 
-            Section {
-                Toggle(isOn: $redirectEnabled) {
-                    TextWithColorfulIcon(title: "Redirect", comment: nil, systemName: "arrow.trianglehead.turn.up.right.circle", foregroundColor: .white, backgroundColor: .blue)
-                }
-                if redirectEnabled {
-                    LabeledContent {
-                        TextField(String("everywhere.com"), text: $redirectHost)
-                            .keyboardType(.URL)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                    }
-                    LabeledContent {
-                        TextField(String("443"), text: $redirectPort)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
-                    }
-                }
-            }
-
-            Section {
+            Section("Rules") {
                 ForEach(rules) { rule in
-                    VStack(alignment: .leading, spacing: 2) {
+                    VStack(alignment: .leading) {
                         Text(MITMRuleSummary.title(for: rule))
                             .foregroundStyle(.primary)
                         Text(MITMRuleSummary.subtitle(for: rule))
@@ -114,48 +130,23 @@ struct MITMRuleSetEditorView: View {
                 .onMove { source, destination in
                     rules.move(fromOffsets: source, toOffset: destination)
                 }
-                Button {
-                    addingRule = true
-                } label: {
-                    Label("Add", systemImage: "plus")
-                }
-            } header: {
-                HStack {
-                    Text("Rules")
-                    Spacer()
-                    Button(editMode == .active ? "Done" : "Edit") {
-                        if editMode == .active {
-                            editMode = .inactive
-                        } else {
-                            editMode = .active
-                        }
+                if isEditing == true {
+                    Button {
+                        showAddSheet = true
+                    } label: {
+                        Label("Add", systemImage: "plus")
                     }
                 }
             }
-
-            if let validationError {
-                Section {
-                    Text(validationError)
-                        .foregroundStyle(.red)
-                }
-            }
         }
-        .environment(\.editMode, $editMode)
         .navigationTitle(ruleSet?.name ?? String(localized: "Rule Set"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                ConfirmButton("Done", action: save)
-                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            ToolbarItem(placement: .cancellationAction) {
-                CancelButton("Cancel") {
-                    onCommit(nil)
-                    dismiss()
-                }
+            ToolbarItem {
+                EditButton()
             }
         }
-        .sheet(isPresented: $addingRule) {
+        .sheet(isPresented: $showAddSheet) {
             NavigationStack {
                 MITMRuleEditorView(rule: nil) { rule in
                     if let rule { rules.append(rule) }
@@ -173,33 +164,32 @@ struct MITMRuleSetEditorView: View {
             }
         }
         .onAppear { loadInitial() }
+        .onChange(of: isEditing) { _, newValue in
+            if newValue == false {
+                save()
+            }
+        }
     }
 
     private func save() {
-        // Empty suffixes are dropped silently — a set with zero suffixes is
-        // legal (it just won't match anything until the user adds some), so
-        // we don't refuse to save here.
+        suffixDrafts = suffixDrafts
+            .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let suffixes = suffixDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
 
         var target: MITMRewriteTarget?
         if redirectEnabled {
             let host = redirectHost.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !host.isEmpty else {
-                validationError = String(localized: "Redirect host is required when redirect is enabled.")
-                return
-            }
             var port: UInt16?
             let portTrimmed = redirectPort.trimmingCharacters(in: .whitespacesAndNewlines)
             if !portTrimmed.isEmpty {
-                guard let parsed = UInt16(portTrimmed) else {
-                    validationError = String(localized: "Port must be a number between 1 and 65535.")
-                    return
-                }
-                port = parsed
+                port = UInt16(portTrimmed)
+            } else {
+                port = nil
             }
-            target = MITMRewriteTarget(host: host, port: port)
+            if !host.isEmpty {
+                target = MITMRewriteTarget(host: host, port: port)
+            }
         }
 
         let result = MITMRuleSet(
@@ -209,8 +199,7 @@ struct MITMRuleSetEditorView: View {
             rewriteTarget: target,
             rules: rules
         )
-        onCommit(result)
-        dismiss()
+        store.updateRuleSet(result)
     }
 
     private func loadInitial() {
@@ -231,21 +220,21 @@ struct MITMRuleSetEditorView: View {
 /// Centralized label generation so the rule list and editor agree.
 enum MITMRuleSummary {
     static func title(for rule: MITMRule) -> String {
-        switch rule.operation {
-        case .urlReplace:                   return "URL Replace"
-        case .headerAdd(let name, _):       return "Header Add: \(name)"
-        case .headerDelete(let name):       return "Header Delete: \(name)"
-        case .headerReplace:                return "Header Replace"
-        case .bodyReplace:                  return "Body Replace"
-        }
+        return "\(rule.phase.description) \(rule.operation.description)"
     }
 
     static func subtitle(for rule: MITMRule) -> String {
-        let phaseLabel: String
-        switch rule.phase {
-        case .httpRequest:  phaseLabel = String(localized: "Request")
-        case .httpResponse: phaseLabel = String(localized: "Response")
+        switch rule.operation {
+        case .urlReplace(let pattern, _):
+            return pattern
+        case .headerAdd(let name, _):
+            return name
+        case .headerDelete(let name):
+            return name
+        case .headerReplace(let pattern, _, _):
+            return pattern
+        case .bodyReplace(let pattern, _):
+            return pattern
         }
-        return phaseLabel
     }
 }

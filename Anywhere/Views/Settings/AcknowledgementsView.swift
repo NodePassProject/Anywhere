@@ -70,7 +70,7 @@ struct AcknowledgementsView: View {
                 ForEach(Self.trademarks, id: \.name) { item in
                     HStack(spacing: 12) {
                         AppIconView(item.name)
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading) {
                             Text(item.name)
                             Text(item.owner)
                                 .font(.caption)
@@ -97,7 +97,7 @@ struct AcknowledgementsView: View {
                             .foregroundStyle(.secondary)
                             .padding(.top, 4)
                     } label: {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading) {
                             Text(library.name)
                             Text(library.licenseType)
                                 .font(.caption)

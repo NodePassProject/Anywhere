@@ -45,6 +45,7 @@ struct CustomRuleSetDetailView: View {
             }
         }
         .navigationTitle(customRuleSet?.name ?? String(localized: "Rule Set"))
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu("More", systemImage: "ellipsis") {
