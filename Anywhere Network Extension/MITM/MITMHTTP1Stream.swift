@@ -59,9 +59,18 @@ final class MITMHTTP1Stream {
 
         /// Buffering the body to rewrite it. The head is emitted only once
         /// the body completes, so Content-Length or chunk framing can be
-        /// updated before sending.
-        case rewritingLength(headBytes: Data, expected: Int, accumulator: Data)
-        case rewritingChunked(headBytes: Data, accumulator: Data, reader: ChunkedReader)
+        /// updated before sending. ``codec`` records the
+        /// `Content-Encoding` plan so the buffered body can be
+        /// decompressed before regex rules run.
+        case rewritingLength(headBytes: Data, expected: Int, accumulator: Data, codec: MITMBodyCodec.Plan)
+        case rewritingChunked(headBytes: Data, accumulator: Data, reader: ChunkedReader, codec: MITMBodyCodec.Plan)
+
+        /// Reached when a chunked body has overflowed
+        /// ``MITMBodyCodec/maxBufferedBodyBytes`` mid-rewrite. The
+        /// head + truncated rewritten body have already been emitted;
+        /// the remaining wire chunks are parsed and discarded so the
+        /// connection returns to ``awaitingHead`` cleanly.
+        case discardingChunked(reader: ChunkedReader)
 
         /// Permanent: forward bytes verbatim. Reached on protocol
         /// upgrades (101), CONNECT-style tunnels, or any framing error.
@@ -107,13 +116,17 @@ final class MITMHTTP1Stream {
             mode = .forwardingChunked(reader: reader)
             return forwardChunked(reader: &reader, into: &output)
 
-        case .rewritingLength(let headBytes, let expected, var accumulator):
-            mode = .rewritingLength(headBytes: headBytes, expected: expected, accumulator: accumulator)
-            return rewriteLength(headBytes: headBytes, expected: expected, accumulator: &accumulator, into: &output)
+        case .rewritingLength(let headBytes, let expected, var accumulator, let codec):
+            mode = .rewritingLength(headBytes: headBytes, expected: expected, accumulator: accumulator, codec: codec)
+            return rewriteLength(headBytes: headBytes, expected: expected, accumulator: &accumulator, codec: codec, into: &output)
 
-        case .rewritingChunked(let headBytes, var accumulator, var reader):
-            mode = .rewritingChunked(headBytes: headBytes, accumulator: accumulator, reader: reader)
-            return rewriteChunked(headBytes: headBytes, accumulator: &accumulator, reader: &reader, into: &output)
+        case .rewritingChunked(let headBytes, var accumulator, var reader, let codec):
+            mode = .rewritingChunked(headBytes: headBytes, accumulator: accumulator, reader: reader, codec: codec)
+            return rewriteChunked(headBytes: headBytes, accumulator: &accumulator, reader: &reader, codec: codec, into: &output)
+
+        case .discardingChunked(var reader):
+            mode = .discardingChunked(reader: reader)
+            return discardChunked(reader: &reader)
         }
     }
 
@@ -189,12 +202,25 @@ final class MITMHTTP1Stream {
         length: Int,
         into output: inout Data
     ) -> Bool {
-        if shouldRewriteBody(headers: originalHeaders) {
+        let decision = bodyRewriteDecision(headers: originalHeaders)
+        // The length is known up front, so we can opt out of buffering
+        // before consuming a single body byte when the response would
+        // exceed the cap. This keeps huge downloads (videos, archives)
+        // from ever reaching the accumulator.
+        if decision.shouldRewrite, length <= MITMBodyCodec.maxBufferedBodyBytes {
             // Withhold the head until the rewritten body length is known,
-            // then patch Content-Length before emitting head + body.
-            let headBytes = serializeHead(startLine: startLine, headers: rewrittenHeaders)
-            mode = .rewritingLength(headBytes: headBytes, expected: length, accumulator: Data())
+            // then patch Content-Length before emitting head + body. When
+            // we plan to decompress, also strip Content-Encoding so the
+            // outbound message is self-consistent (we emit identity).
+            let outgoing = decision.codec.requiresDecompression
+                ? stripContentEncoding(rewrittenHeaders)
+                : rewrittenHeaders
+            let headBytes = serializeHead(startLine: startLine, headers: outgoing)
+            mode = .rewritingLength(headBytes: headBytes, expected: length, accumulator: Data(), codec: decision.codec)
             return true
+        }
+        if decision.shouldRewrite {
+            logger.warning("[MITM] Skipping body rewrite for \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
         }
         output.append(serializeHead(startLine: startLine, headers: rewrittenHeaders))
         mode = .forwardingLength(remaining: length)
@@ -207,9 +233,13 @@ final class MITMHTTP1Stream {
         startLine: String,
         into output: inout Data
     ) -> Bool {
-        if shouldRewriteBody(headers: originalHeaders) {
-            let headBytes = serializeHead(startLine: startLine, headers: rewrittenHeaders)
-            mode = .rewritingChunked(headBytes: headBytes, accumulator: Data(), reader: ChunkedReader())
+        let decision = bodyRewriteDecision(headers: originalHeaders)
+        if decision.shouldRewrite {
+            let outgoing = decision.codec.requiresDecompression
+                ? stripContentEncoding(rewrittenHeaders)
+                : rewrittenHeaders
+            let headBytes = serializeHead(startLine: startLine, headers: outgoing)
+            mode = .rewritingChunked(headBytes: headBytes, accumulator: Data(), reader: ChunkedReader(), codec: decision.codec)
             return true
         }
         output.append(serializeHead(startLine: startLine, headers: rewrittenHeaders))
@@ -258,6 +288,7 @@ final class MITMHTTP1Stream {
         headBytes: Data,
         expected: Int,
         accumulator: inout Data,
+        codec: MITMBodyCodec.Plan,
         into output: inout Data
     ) -> Bool {
         guard !rxBuffer.isEmpty else { return false }
@@ -266,14 +297,14 @@ final class MITMHTTP1Stream {
         accumulator.append(rxBuffer.prefix(take))
         rxBuffer.removeFirst(take)
         if accumulator.count == expected {
-            let rewrittenBody = applyBodyRules(accumulator)
+            let rewrittenBody = decompressAndApply(accumulator, codec: codec)
             let patchedHead = patchContentLength(in: headBytes, to: rewrittenBody.count)
             output.append(patchedHead)
             output.append(rewrittenBody)
             mode = .awaitingHead
             return true
         }
-        mode = .rewritingLength(headBytes: headBytes, expected: expected, accumulator: accumulator)
+        mode = .rewritingLength(headBytes: headBytes, expected: expected, accumulator: accumulator, codec: codec)
         return false
     }
 
@@ -281,16 +312,31 @@ final class MITMHTTP1Stream {
         headBytes: Data,
         accumulator: inout Data,
         reader: inout ChunkedReader,
+        codec: MITMBodyCodec.Plan,
         into output: inout Data
     ) -> Bool {
         guard !rxBuffer.isEmpty else { return false }
         let result = reader.consumeBuffered(&rxBuffer, into: &accumulator)
         switch result {
         case .needMore:
-            mode = .rewritingChunked(headBytes: headBytes, accumulator: accumulator, reader: reader)
+            // Chunked bodies have no up-front length, so the cap can
+            // only be enforced as bytes flow in. On overflow we apply
+            // rules to the partial buffer, emit it, and drain the rest.
+            // Lossy, but the alternative — refusing to rewrite chunked
+            // bodies entirely — would silently break common APIs whose
+            // bodies are well under the cap.
+            if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
+                logger.warning("[MITM] Chunked body for \(host) exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); truncating")
+                let rewrittenBody = decompressAndApply(accumulator, codec: codec)
+                output.append(headBytes)
+                output.append(rechunk(body: rewrittenBody, originalSizes: [rewrittenBody.count]))
+                mode = .discardingChunked(reader: reader)
+                return true
+            }
+            mode = .rewritingChunked(headBytes: headBytes, accumulator: accumulator, reader: reader, codec: codec)
             return false
         case .complete(let originalSizes):
-            let rewrittenBody = applyBodyRules(accumulator)
+            let rewrittenBody = decompressAndApply(accumulator, codec: codec)
             output.append(headBytes)
             output.append(rechunk(body: rewrittenBody, originalSizes: originalSizes))
             mode = .awaitingHead
@@ -299,6 +345,42 @@ final class MITMHTTP1Stream {
             mode = .passthrough
             return true
         }
+    }
+
+    /// Drains the remaining wire chunks of an over-cap rewriting body.
+    /// The truncated rewritten body has already been emitted, so all we
+    /// need to do is keep the stream parser advancing until the
+    /// terminator/trailers and then return to ``awaitingHead`` so the
+    /// next message on this connection is parsed normally.
+    private func discardChunked(reader: inout ChunkedReader) -> Bool {
+        guard !rxBuffer.isEmpty else { return false }
+        var sink = Data()
+        let result = reader.consumeBuffered(&rxBuffer, into: &sink)
+        switch result {
+        case .needMore:
+            mode = .discardingChunked(reader: reader)
+            return false
+        case .complete:
+            mode = .awaitingHead
+            return true
+        case .malformed:
+            mode = .passthrough
+            return true
+        }
+    }
+
+    /// Decompresses ``data`` per ``codec`` (no-op when identity) and
+    /// applies the body rules. If decompression fails, the original
+    /// bytes are passed through unmodified — better to leak the
+    /// upstream's payload than break the connection.
+    private func decompressAndApply(_ data: Data, codec: MITMBodyCodec.Plan) -> Data {
+        guard codec.requiresDecompression else {
+            return applyBodyRules(data)
+        }
+        guard let decoded = MITMBodyCodec.decompress(data, plan: codec) else {
+            return data
+        }
+        return applyBodyRules(decoded)
     }
 
     // MARK: - Re-chunking
@@ -452,19 +534,53 @@ final class MITMHTTP1Stream {
 
     // MARK: - Body rewrite gate
 
-    private func shouldRewriteBody(headers: [Header]) -> Bool {
+    /// Decision about how to handle the next message's body. Captured
+    /// once at head-completion time so the rewriting state machine
+    /// doesn't have to re-inspect headers.
+    private struct BodyDecision {
+        let shouldRewrite: Bool
+        let codec: MITMBodyCodec.Plan
+    }
+
+    /// Returns whether the body should be buffered for rewrite, plus
+    /// the codec plan that the buffer will be decoded with. Skips
+    /// rewrite when no `bodyReplace` rule applies for the host/phase,
+    /// when `Content-Encoding` includes a codec we don't recognise, or
+    /// when `Content-Type` is in the binary denylist (images, video,
+    /// wasm, etc.).
+    private func bodyRewriteDecision(headers: [Header]) -> BodyDecision {
         let rules = policy.rules(for: host, phase: phase)
         let hasBodyRule = rules.contains {
             if case .bodyReplace = $0.operation { return true }
             return false
         }
-        guard hasBodyRule else { return false }
-        for (name, value) in headers where name.lowercased() == "content-encoding" {
-            let trimmed = value.trimmingCharacters(in: CharacterSet.whitespaces).lowercased()
-            if trimmed.isEmpty || trimmed == "identity" { continue }
-            return false
+        guard hasBodyRule else {
+            return BodyDecision(shouldRewrite: false, codec: .identity)
         }
-        return true
+        let encoding = firstHeaderValue(headers, name: "content-encoding")
+        let plan = MITMBodyCodec.plan(for: encoding)
+        guard plan.supported else {
+            return BodyDecision(shouldRewrite: false, codec: plan)
+        }
+        let contentType = firstHeaderValue(headers, name: "content-type")
+        guard MITMBodyCodec.isRewritableType(contentType) else {
+            return BodyDecision(shouldRewrite: false, codec: plan)
+        }
+        return BodyDecision(shouldRewrite: true, codec: plan)
+    }
+
+    private func firstHeaderValue(_ headers: [Header], name: String) -> String? {
+        let target = name.lowercased()
+        for (n, v) in headers where n.lowercased() == target {
+            return v
+        }
+        return nil
+    }
+
+    /// Removes any `Content-Encoding` headers. Used when we have
+    /// decompressed the body and emit it as identity.
+    private func stripContentEncoding(_ headers: [Header]) -> [Header] {
+        headers.filter { $0.name.lowercased() != "content-encoding" }
     }
 
     // MARK: - Rule application
@@ -556,9 +672,18 @@ final class MITMHTTP1Stream {
         return current
     }
 
+    /// Applies every ``bodyReplace`` rule to ``data`` on a byte-for-byte
+    /// view. Bodies are mapped to a Latin-1 string (a bijection between
+    /// 0x00–0xFF and U+0000–U+00FF) so binary payloads and non-UTF-8
+    /// text are preserved through the regex round-trip. ASCII patterns
+    /// match the same bytes they always did; non-ASCII bytes are
+    /// addressable in patterns via `\xHH` escapes.
     private func applyBodyRules(_ data: Data) -> Data {
         let rules = policy.rules(for: host, phase: phase)
-        var bodyString = String(decoding: data, as: UTF8.self)
+        // .isoLatin1 decode never fails for any byte sequence.
+        guard var bodyString = String(bytes: data, encoding: .isoLatin1) else {
+            return data
+        }
         var changed = false
         for rule in rules {
             guard case .bodyReplace(let regex, let replacement) = rule.operation else {
@@ -576,7 +701,8 @@ final class MITMHTTP1Stream {
                 changed = true
             }
         }
-        return changed ? Data(bodyString.utf8) : data
+        guard changed else { return data }
+        return bodyString.data(using: .isoLatin1) ?? data
     }
 }
 

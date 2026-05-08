@@ -50,6 +50,17 @@ import Foundation
 /// trimmed. A field that begins with `"` is read until the matching `"`,
 /// with `""` inside a quoted field producing a literal `"` — so values
 /// containing commas can be wrapped in double quotes.
+///
+/// Pattern semantics for `body-replace`: the runtime applies the
+/// pattern byte-for-byte to the decompressed body (gzip/deflate/br are
+/// decoded first). Bodies are viewed through Latin-1, where every byte
+/// 0x00–0xFF corresponds to one code point U+0000–U+00FF, so ASCII
+/// patterns match the same bytes they always did. Non-ASCII bytes —
+/// UTF-8 multibyte sequences for CJK or emoji, GBK / Shift-JIS text,
+/// raw binary — must be addressed via `\xHH` escapes inside the
+/// pattern, not as Unicode characters. (Patterns for `url-replace`
+/// and `header-replace` operate on header / request-target text and
+/// follow the usual NSRegularExpression Unicode semantics.)
 enum MITMRuleSetParser {
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""

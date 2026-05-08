@@ -7,6 +7,8 @@
 
 import Foundation
 
+private let logger = AnywhereLogger(category: "MITM")
+
 /// Per-direction HTTP/2 plaintext translator wired between
 /// ``TLSRecordConnection`` legs in ``MITMSession``.
 ///
@@ -97,8 +99,17 @@ final class MITMHTTP2Connection {
 
     /// Per-stream body buffer used when at least one ``bodyReplace`` rule
     /// applies for the current direction. Missing entry means pass-through;
-    /// present entry means accumulate, rewrite, and emit at END_STREAM.
-    private var bodyBuffers: [UInt32: Data] = [:]
+    /// present entry means accumulate, decompress per ``codec``, rewrite,
+    /// and emit at END_STREAM. ``abandoned`` flips when an identity
+    /// stream overflows ``MITMBodyCodec/maxBufferedBodyBytes`` mid-flight:
+    /// the buffered prefix has already been emitted as DATA, and
+    /// subsequent DATA on the stream is forwarded verbatim.
+    private struct BodyBuffer {
+        var data: Data
+        let codec: MITMBodyCodec.Plan
+        var abandoned: Bool = false
+    }
+    private var bodyBuffers: [UInt32: BodyBuffer] = [:]
 
     // MARK: - Init
 
@@ -252,7 +263,16 @@ final class MITMHTTP2Connection {
             return Data()
         }
 
-        let rewritten: [(name: String, value: String)]
+        // Trailer detection: a HEADERS frame on a stream that already
+        // has a buffered body is a trailer. Flush the body as DATA
+        // (without END_STREAM — the trailer carries it) so the receiver
+        // sees DATA before HEADERS-with-END_STREAM, per RFC 9113 §8.1.
+        var output = Data()
+        if case .headers = kind, bodyBuffers[streamID] != nil {
+            output.append(flushBufferedBody(streamID: streamID, endStream: false))
+        }
+
+        var rewritten: [(name: String, value: String)]
         switch kind {
         case .headers:
             // RFC 9113 section 8.1: client-to-server is a request and
@@ -268,14 +288,29 @@ final class MITMHTTP2Connection {
         }
 
         // Decide body-buffering policy for the upcoming DATA frames on
-        // this stream. Buffer only when a bodyReplace rule applies and the
-        // body uses a readable content encoding (identity).
-        // Skip on END_STREAM HEADERS because there is no body.
+        // this stream. Buffer when a bodyReplace rule applies, the
+        // codec is one we can decode (or identity), the content type is
+        // safe to regex over, and either content-length is within the
+        // cap or absent (identity only — we cannot recover wire shape
+        // for a compressed body that overflows mid-stream). Skip on
+        // END_STREAM HEADERS because there is no body.
         if case .headers = kind,
            originalFlags & 0x1 == 0,
            rewriter.hasBodyRewrite(phase: phase),
-           bodyEncodingIsRewritable(rewritten) {
-            bodyBuffers[streamID] = Data()
+           shouldBufferStream(headers: rewritten) {
+            let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
+            bodyBuffers[streamID] = BodyBuffer(data: Data(), codec: codec)
+            // The rewritten body's length is unknown at header emit
+            // time. RFC 9113 §8.2.1 requires the sum of DATA frame
+            // payloads to match `content-length` exactly when
+            // present, so drop it; END_STREAM is the canonical
+            // framing signal in HTTP/2.
+            rewritten.removeAll { $0.name.lowercased() == "content-length" }
+            if codec.requiresDecompression {
+                // We will emit the body decompressed (identity), so
+                // drop the codec from the outgoing header block.
+                rewritten.removeAll { $0.name.lowercased() == "content-encoding" }
+            }
         }
 
         let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten)
@@ -288,12 +323,13 @@ final class MITMHTTP2Connection {
 
         switch kind {
         case .headers:
-            return serializeFrame(RawFrame(
+            output.append(serializeFrame(RawFrame(
                 typeCode: FrameTypeCode.headers,
                 flags: emittedFlags,
                 streamID: streamID,
                 payload: reencoded
-            ))
+            )))
+            return output
         case .pushPromise(let promisedStreamID):
             var payload = Data(capacity: 4 + reencoded.count)
             let p = promisedStreamID & 0x7FFFFFFF
@@ -302,12 +338,13 @@ final class MITMHTTP2Connection {
             payload.append(UInt8((p >> 8) & 0xFF))
             payload.append(UInt8(p & 0xFF))
             payload.append(reencoded)
-            return serializeFrame(RawFrame(
+            output.append(serializeFrame(RawFrame(
                 typeCode: FrameTypeCode.pushPromise,
                 flags: emittedFlags,
                 streamID: streamID,
                 payload: payload
-            ))
+            )))
+            return output
         }
     }
 
@@ -324,7 +361,27 @@ final class MITMHTTP2Connection {
         // Pass-through path: no body rewrite for this stream. Re-emit the
         // DATA frame with the original body and END_STREAM flag, with
         // PADDED cleared.
-        guard var accumulator = bodyBuffers[streamID] else {
+        guard var buffer = bodyBuffers[streamID] else {
+            var emittedFlags: UInt8 = 0
+            if endStream { emittedFlags |= 0x1 }
+            return serializeFrame(RawFrame(
+                typeCode: FrameTypeCode.data,
+                flags: emittedFlags,
+                streamID: streamID,
+                payload: body
+            ))
+        }
+
+        // Abandoned path: a previous DATA frame on this stream blew
+        // through the buffer cap. The buffered prefix has already been
+        // emitted as DATA, so all we need to do is forward this frame
+        // verbatim and clean up at END_STREAM.
+        if buffer.abandoned {
+            if endStream {
+                bodyBuffers.removeValue(forKey: streamID)
+            } else {
+                bodyBuffers[streamID] = buffer
+            }
             var emittedFlags: UInt8 = 0
             if endStream { emittedFlags |= 0x1 }
             return serializeFrame(RawFrame(
@@ -336,35 +393,98 @@ final class MITMHTTP2Connection {
         }
 
         // Buffering path: accumulate until END_STREAM.
-        accumulator.append(body)
-        if !endStream {
-            bodyBuffers[streamID] = accumulator
-            return Data()
+        buffer.data.append(body)
+
+        // Mid-stream cap check. Only reachable for identity bodies
+        // (compressed streams are pre-gated when content-length is
+        // missing or already over the cap) so flushing the prefix as a
+        // plain DATA frame is non-lossy.
+        if !endStream, buffer.data.count > MITMBodyCodec.maxBufferedBodyBytes {
+            logger.warning("[MITM] HTTP/2 stream \(streamID) exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); abandoning rewrite")
+            let prefix = buffer.data
+            buffer.data = Data()
+            buffer.abandoned = true
+            bodyBuffers[streamID] = buffer
+            return serializeFrame(RawFrame(
+                typeCode: FrameTypeCode.data,
+                flags: 0,
+                streamID: streamID,
+                payload: prefix
+            ))
         }
 
-        bodyBuffers.removeValue(forKey: streamID)
-        let rewritten = rewriter.rewriteBody(accumulator, phase: phase)
+        bodyBuffers[streamID] = buffer
+        if !endStream {
+            return Data()
+        }
+        return flushBufferedBody(streamID: streamID, endStream: true)
+    }
 
+    /// Emits the buffered body for ``streamID`` as a DATA frame, after
+    /// decompressing per the recorded codec and applying body rules.
+    /// Removes the entry from ``bodyBuffers`` so the stream is settled.
+    /// Returns empty when there is no buffered body, or when the stream
+    /// was already abandoned (its prefix has already been forwarded as
+    /// raw DATA — nothing more to flush).
+    private func flushBufferedBody(streamID: UInt32, endStream: Bool) -> Data {
+        guard let buffer = bodyBuffers.removeValue(forKey: streamID) else {
+            return Data()
+        }
+        if buffer.abandoned {
+            return Data()
+        }
+        let plaintext: Data
+        if buffer.codec.requiresDecompression {
+            // If decode fails, emit the original (still-compressed) bytes
+            // as identity. The peer will see corrupt content but the
+            // stream stays usable; this is the same trade-off the HTTP/1
+            // path makes.
+            plaintext = MITMBodyCodec.decompress(buffer.data, plan: buffer.codec) ?? buffer.data
+        } else {
+            plaintext = buffer.data
+        }
+        let rewritten = rewriter.rewriteBody(plaintext, phase: phase)
+        var flags: UInt8 = 0
+        if endStream { flags |= 0x1 }
         return serializeFrame(RawFrame(
             typeCode: FrameTypeCode.data,
-            flags: 0x1, // END_STREAM
+            flags: flags,
             streamID: streamID,
             payload: rewritten
         ))
     }
 
-    // MARK: - Body-encoding gate
+    // MARK: - Body-buffer policy
 
-    /// Returns `true` when the headers describe a body that can be
-    /// regex-rewritten without decoding a content coding. Compressed
-    /// bodies are passed through.
-    private func bodyEncodingIsRewritable(_ headers: [(name: String, value: String)]) -> Bool {
-        for (name, value) in headers where name.lowercased() == "content-encoding" {
-            let trimmed = value.trimmingCharacters(in: CharacterSet.whitespaces).lowercased()
-            if trimmed.isEmpty || trimmed == "identity" { continue }
+    /// Decides whether a stream's DATA frames should be buffered for
+    /// rewrite. Combines the codec, content-type, and content-length
+    /// gates so the decision is made once at HEADERS time rather than
+    /// rediscovered per-frame.
+    private func shouldBufferStream(headers: [(name: String, value: String)]) -> Bool {
+        let codec = MITMBodyCodec.plan(for: firstHeaderValue(headers, name: "content-encoding"))
+        guard codec.supported else { return false }
+        guard MITMBodyCodec.isRewritableType(firstHeaderValue(headers, name: "content-type")) else {
             return false
         }
-        return true
+        if let raw = firstHeaderValue(headers, name: "content-length"),
+           let length = Int(raw.trimmingCharacters(in: .whitespaces)) {
+            return length <= MITMBodyCodec.maxBufferedBodyBytes
+        }
+        // No content-length. We can recover from a mid-stream cap
+        // overflow only when the body is identity (just flush + pass
+        // through). Compressed bodies whose size we cannot bound up
+        // front are not safe to buffer optimistically — skip them.
+        return !codec.requiresDecompression
+    }
+
+    /// Returns the first header value matching ``name`` (case-insensitive),
+    /// or nil when absent.
+    private func firstHeaderValue(_ headers: [(name: String, value: String)], name: String) -> String? {
+        let target = name.lowercased()
+        for (n, v) in headers where n.lowercased() == target {
+            return v
+        }
+        return nil
     }
 
     // MARK: - Padding helpers
