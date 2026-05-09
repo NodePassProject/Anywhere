@@ -9,13 +9,6 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "LatencyTester")
 
-enum LatencyResult: Sendable {
-    case testing
-    case success(Int)  // milliseconds
-    case failed
-    case insecure
-}
-
 private enum LatencyTestError: Error, LocalizedError {
     case unexpectedStatus(String)
 
@@ -74,72 +67,22 @@ nonisolated enum LatencyTester {
         }
     }
 
-    /// Maximum number of latency tests running at the same time. Capped low so
-    /// total simultaneous proxy connections (handshakes + receives across all
-    /// in-flight tests) stay within what a typical residential uplink/NAT can
-    /// sustain without packet loss. Higher concurrency caused later tests to
-    /// false-timeout as connections accumulated.
-    private static let maxConcurrentTests = 4
-
-    /// Test all configurations concurrently (capped), emitting results as each test finishes.
-    nonisolated static func testAll(_ configurations: [ProxyConfiguration]) -> AsyncStream<(UUID, LatencyResult)> {
-        AsyncStream { continuation in
-            let task = Task {
-                await withTaskGroup(of: (UUID, LatencyResult).self) { group in
-                    var iterator = configurations.makeIterator()
-
-                    for _ in 0..<min(Self.maxConcurrentTests, configurations.count) {
-                        if let config = iterator.next() {
-                            group.addTask { (config.id, await Self.test(config)) }
-                        }
-                    }
-
-                    for await pair in group {
-                        continuation.yield(pair)
-                        if let config = iterator.next() {
-                            group.addTask { (config.id, await Self.test(config)) }
-                        }
-                    }
-                }
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
     // MARK: - Private
 
     /// Resolves each proxy hop ahead of time so latency tests can dial the same
     /// first-hop IPs the tunnel expects, without depending on in-tunnel DNS timing.
-    nonisolated static func resolvedConfiguration(_ configuration: ProxyConfiguration) -> ProxyConfiguration {
+    private static func resolvedConfiguration(_ configuration: ProxyConfiguration) -> ProxyConfiguration {
         let resolvedChain = configuration.chain?.map(resolvedConfiguration)
         return ProxyConfiguration(
             id: configuration.id,
             name: configuration.name,
             serverAddress: configuration.serverAddress,
             serverPort: configuration.serverPort,
-            resolvedIP: configuration.resolvedIP ?? VPNViewModel.resolveServerAddress(configuration.serverAddress),
+            resolvedIP: configuration.resolvedIP ?? ProxyDNSCache.shared.resolveHost(configuration.serverAddress),
             subscriptionId: configuration.subscriptionId,
             outbound: configuration.outbound,
             chain: resolvedChain
         )
-    }
-
-    /// Resolves a batch of configurations in parallel. `resolvedConfiguration`
-    /// makes blocking `getaddrinfo` calls for any hop without a cached IP, so
-    /// running a serial map over a list with several unresolvable hosts can
-    /// stall a latency-test batch for many seconds before any test starts.
-    nonisolated static func resolvedConfigurations(_ configurations: [ProxyConfiguration]) async -> [ProxyConfiguration] {
-        await withTaskGroup(of: (Int, ProxyConfiguration).self) { group in
-            for (index, configuration) in configurations.enumerated() {
-                group.addTask { (index, resolvedConfiguration(configuration)) }
-            }
-            var results = [ProxyConfiguration?](repeating: nil, count: configurations.count)
-            for await (index, resolved) in group {
-                results[index] = resolved
-            }
-            return results.compactMap { $0 }
-        }
     }
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {

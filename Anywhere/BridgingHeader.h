@@ -8,6 +8,4 @@
 #ifndef BridgingHeader_h
 #define BridgingHeader_h
 
-#include "../Shared/ngtcp2/ngtcp2_bridge.h"
-
 #endif /* BridgingHeader_h */

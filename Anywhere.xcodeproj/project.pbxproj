@@ -11,8 +11,6 @@
 		CB1C10822F23B82F00B74CD8 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		CB2B54B22F6C3E2800F24AC2 /* Anywhere Network Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CB1C10772F23B82F00B74CD8 /* Anywhere Network Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		CB2B9C922F77722600F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C912F77722600F24AC2 /* BLAKE3 */; };
-		CB2B9C942F77724D00F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C932F77724D00F24AC2 /* BLAKE3 */; };
-		CB2B9C962F77725900F24AC2 /* BLAKE3 in Frameworks */ = {isa = PBXBuildFile; productRef = CB2B9C952F77725900F24AC2 /* BLAKE3 */; };
 		CB2BA8542F7821F400F24AC2 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = CB2BA8532F7821F400F24AC2 /* YAML */; };
 		CB2BA8562F78220C00F24AC2 /* YAML in Frameworks */ = {isa = PBXBuildFile; productRef = CB2BA8552F78220C00F24AC2 /* YAML */; };
 		CB71CDC52F837D11002B9E1D /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CB71CDC42F837D11002B9E1D /* WidgetKit.framework */; };
@@ -88,176 +86,18 @@
 			);
 			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
 		};
-		CB650E422F6307AF00C85E4A /* Exceptions for "Protocols" folder in "Anywhere Network Extension" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Core/CertificatePolicy.swift,
-				Core/HPACKEncoder.swift,
-				Core/ProxyClient.swift,
-				"Core/ProxyClient+Hysteria.swift",
-				"Core/ProxyClient+Naive.swift",
-				"Core/ProxyClient+SOCKS5.swift",
-				"Core/ProxyClient+Sudoku.swift",
-				"Core/ProxyClient+Trojan.swift",
-				Core/ProxyConfiguration.swift,
-				"Core/ProxyConfiguration+DictParsing.swift",
-				"Core/ProxyConfiguration+URLExport.swift",
-				"Core/ProxyConfiguration+URLParsing.swift",
-				Core/ProxyConnection.swift,
-				Core/ProxyUserAgent.swift,
-				Core/TransportClosures.swift,
-				Core/TunneledTransport.swift,
-				Core/UDPFraming.swift,
-				Direct/DirectProxyConnection.swift,
-				GRPC/GRPCConfiguration.swift,
-				GRPC/GRPCConnection.swift,
-				GRPC/GRPCProxyConnection.swift,
-				HTTPUpgrade/HTTPUpgradeConfiguration.swift,
-				HTTPUpgrade/HTTPUpgradeConnection.swift,
-				HTTPUpgrade/HTTPUpgradeProxyConnection.swift,
-				Hysteria/HysteriaClient.swift,
-				Hysteria/HysteriaConfiguration.swift,
-				Hysteria/HysteriaConnection.swift,
-				Hysteria/HysteriaHTTP3Codec.swift,
-				Hysteria/HysteriaProtocol.swift,
-				Hysteria/HysteriaSession.swift,
-				Hysteria/HysteriaUDPConnection.swift,
-				Mux/MuxClient.swift,
-				Mux/MuxFrame.swift,
-				Mux/MuxManager.swift,
-				Mux/MuxSession.swift,
-				Mux/XUDP.swift,
-				Naive/HTTP2/HTTP2Connection.swift,
-				Naive/HTTP2/HTTP2FlowControl.swift,
-				Naive/HTTP2/HTTP2Framer.swift,
-				Naive/HTTP2/HTTP2Session.swift,
-				Naive/HTTP2/HTTP2SessionPool.swift,
-				Naive/HTTP2/HTTP2Stream.swift,
-				Naive/HTTP3/HTTP3Connection.swift,
-				Naive/HTTP3/HTTP3Framer.swift,
-				Naive/HTTP3/HTTP3Session.swift,
-				Naive/HTTP3/HTTP3SessionPool.swift,
-				Naive/HTTP3/HTTP3Stream.swift,
-				Naive/HTTP3/QPACKEncoder.swift,
-				Naive/HTTP11/HTTP11Connection.swift,
-				Naive/NaiveConfiguration.swift,
-				Naive/NaivePaddingFramer.swift,
-				Naive/NaivePaddingNegotiator.swift,
-				Naive/NaiveProxyConnection.swift,
-				Naive/NaiveTLSTransport.swift,
-				Naive/SessionPool.swift,
-				Reality/RealityClient.swift,
-				Reality/RealityConfiguration.swift,
-				Reality/RealityProxyConnection.swift,
-				Shadowsocks/Shadowsocks2022.swift,
-				Shadowsocks/ShadowsocksAEAD.swift,
-				Shadowsocks/ShadowsocksConnection.swift,
-				Shadowsocks/ShadowsocksProtocol.swift,
-				Shadowsocks/ShadowsocksUDPSession.swift,
-				SOCKS5/SOCKS5Connection.swift,
-				Sudoku/SudokuConfiguration.swift,
-				Sudoku/SudokuNativeCore.swift,
-				Sudoku/SudokuProxyConnection.swift,
-				TLS/TLS12KeyDerivation.swift,
-				TLS/TLS13KeyDerivation.swift,
-				TLS/TLSClient.swift,
-				TLS/TLSClientHelloBuilder.swift,
-				TLS/TLSClientHelloParser.swift,
-				TLS/TLSConfiguration.swift,
-				TLS/TLSProxyConnection.swift,
-				TLS/TLSRecordConnection.swift,
-				TLS/TLSRecordCrypto.swift,
-				TLS/TLSServer.swift,
-				TLS/TLSServerHelloBuilder.swift,
-				Trojan/TrojanConnection.swift,
-				Trojan/TrojanProtocol.swift,
-				Trojan/TrojanUDPConnection.swift,
-				VLESS/VLESSConnection.swift,
-				VLESS/VLESSProtocol.swift,
-				VLESS/VLESSUDPConnection.swift,
-				VLESS/VLESSVision.swift,
-				WebSocket/WebSocketConfiguration.swift,
-				WebSocket/WebSocketConnection.swift,
-				WebSocket/WebSocketProxyConnection.swift,
-				XHTTP/XHTTPChunkedTransfer.swift,
-				XHTTP/XHTTPConfiguration.swift,
-				XHTTP/XHTTPConnection.swift,
-				"XHTTP/XHTTPConnection+H2.swift",
-				"XHTTP/XHTTPConnection+H2Transport.swift",
-				"XHTTP/XHTTPConnection+HTTP11.swift",
-				XHTTP/XHTTPProxyConnection.swift,
-			);
-			target = CB1C10762F23B82F00B74CD8 /* Anywhere Network Extension */;
-		};
 		CB65476A2F65715600C85E4A /* Exceptions for "Shared" folder in "Anywhere Network Extension" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AWCore.swift,
-				Blake3/Blake3Hasher.swift,
 				DataStore/FailableDecodable.swift,
 				DataStore/JSONBlobStore.swift,
 				MITM/MITMCertificateStore.swift,
 				MITM/X509Builder.swift,
+				Models/LatencyResult.swift,
 				Models/MITMRule.swift,
 				Models/RoutingRule.swift,
-				ngtcp2/ngtcp2_acktr.c,
-				ngtcp2/ngtcp2_addr.c,
-				ngtcp2/ngtcp2_balloc.c,
-				ngtcp2/ngtcp2_bbr.c,
-				ngtcp2/ngtcp2_buf.c,
-				ngtcp2/ngtcp2_callbacks.c,
-				ngtcp2/ngtcp2_cc.c,
-				ngtcp2/ngtcp2_cid.c,
-				ngtcp2/ngtcp2_conn_info.c,
-				ngtcp2/ngtcp2_conn.c,
-				ngtcp2/ngtcp2_conv.c,
-				ngtcp2/ngtcp2_crypto_apple.c,
-				ngtcp2/ngtcp2_crypto.c,
-				ngtcp2/ngtcp2_dcidtr.c,
-				ngtcp2/ngtcp2_err.c,
-				ngtcp2/ngtcp2_fmt.c,
-				ngtcp2/ngtcp2_frame_chain.c,
-				ngtcp2/ngtcp2_gaptr.c,
-				ngtcp2/ngtcp2_idtr.c,
-				ngtcp2/ngtcp2_ksl.c,
-				ngtcp2/ngtcp2_log.c,
-				ngtcp2/ngtcp2_map.c,
-				ngtcp2/ngtcp2_mem.c,
-				ngtcp2/ngtcp2_objalloc.c,
-				ngtcp2/ngtcp2_opl.c,
-				ngtcp2/ngtcp2_path.c,
-				ngtcp2/ngtcp2_pcg.c,
-				ngtcp2/ngtcp2_pkt.c,
-				ngtcp2/ngtcp2_pmtud.c,
-				ngtcp2/ngtcp2_ppe.c,
-				ngtcp2/ngtcp2_pq.c,
-				ngtcp2/ngtcp2_pv.c,
-				ngtcp2/ngtcp2_qlog.c,
-				ngtcp2/ngtcp2_range.c,
-				ngtcp2/ngtcp2_ratelim.c,
-				ngtcp2/ngtcp2_ringbuf.c,
-				ngtcp2/ngtcp2_rob.c,
-				ngtcp2/ngtcp2_rst.c,
-				ngtcp2/ngtcp2_rtb.c,
-				ngtcp2/ngtcp2_settings.c,
-				ngtcp2/ngtcp2_str.c,
-				ngtcp2/ngtcp2_strm.c,
-				ngtcp2/ngtcp2_swift_brutal.c,
-				ngtcp2/ngtcp2_transport_params.c,
-				ngtcp2/ngtcp2_unreachable.c,
-				ngtcp2/ngtcp2_vec.c,
-				ngtcp2/ngtcp2_version.c,
-				ngtcp2/ngtcp2_window_filter.c,
-				ngtcp2/shared.c,
-				QUIC/BrutalCongestionControl.swift,
-				QUIC/QUICConnection.swift,
-				QUIC/QUICCrypto.swift,
-				QUIC/QUICTLSHandler.swift,
-				QUIC/QUICTuning.swift,
-				Tunnel/ProxyDNSCache.swift,
-				Tunnel/RawTCPSocket.swift,
-				Tunnel/RawUDPSocket.swift,
-				Tunnel/TunnelConstants.swift,
+				Models/TunnelMessage.swift,
 				Utilities/ActivityTimer.swift,
 				Utilities/AnywhereLogger.swift,
 				"Utilities/Data+init.swift",
@@ -296,6 +136,46 @@
 			);
 			target = CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */;
 		};
+		CBF1E77B2FAF1CB100D91BE7 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Protocols/Core/ProxyConfiguration.swift,
+				"Protocols/Core/ProxyConfiguration+DictParsing.swift",
+				"Protocols/Core/ProxyConfiguration+URLExport.swift",
+				"Protocols/Core/ProxyConfiguration+URLParsing.swift",
+				Protocols/GRPC/GRPCConfiguration.swift,
+				Protocols/HTTPUpgrade/HTTPUpgradeConfiguration.swift,
+				Protocols/Hysteria/HysteriaConfiguration.swift,
+				Protocols/Naive/NaiveConfiguration.swift,
+				Protocols/Reality/RealityConfiguration.swift,
+				Protocols/Shadowsocks/ShadowsocksCipher.swift,
+				Protocols/Sudoku/SudokuConfiguration.swift,
+				Protocols/TLS/TLSConfiguration.swift,
+				Protocols/WebSocket/WebSocketConfiguration.swift,
+				Protocols/XHTTP/XHTTPConfiguration.swift,
+			);
+			target = CB1C10642F23B81500B74CD8 /* Anywhere */;
+		};
+		CBF1E77C2FAF1CB100D91BE7 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere TV" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Protocols/Core/ProxyConfiguration.swift,
+				"Protocols/Core/ProxyConfiguration+DictParsing.swift",
+				"Protocols/Core/ProxyConfiguration+URLExport.swift",
+				"Protocols/Core/ProxyConfiguration+URLParsing.swift",
+				Protocols/GRPC/GRPCConfiguration.swift,
+				Protocols/HTTPUpgrade/HTTPUpgradeConfiguration.swift,
+				Protocols/Hysteria/HysteriaConfiguration.swift,
+				Protocols/Naive/NaiveConfiguration.swift,
+				Protocols/Reality/RealityConfiguration.swift,
+				Protocols/Shadowsocks/ShadowsocksCipher.swift,
+				Protocols/Sudoku/SudokuConfiguration.swift,
+				Protocols/TLS/TLSConfiguration.swift,
+				Protocols/WebSocket/WebSocketConfiguration.swift,
+				Protocols/XHTTP/XHTTPConfiguration.swift,
+			);
+			target = CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -310,6 +190,8 @@
 		CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
+				CBF1E77B2FAF1CB100D91BE7 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere" target */,
+				CBF1E77C2FAF1CB100D91BE7 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere TV" target */,
 				CB1C10832F23B82F00B74CD8 /* Exceptions for "Anywhere Network Extension" folder in "Anywhere Network Extension" target */,
 			);
 			path = "Anywhere Network Extension";
@@ -321,14 +203,6 @@
 				CBE5F58E2F6D0A74003CECEF /* Exceptions for "Anywhere TV" folder in "Anywhere TV" target */,
 			);
 			path = "Anywhere TV";
-			sourceTree = "<group>";
-		};
-		CB650DD92F6307AF00C85E4A /* Protocols */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				CB650E422F6307AF00C85E4A /* Exceptions for "Protocols" folder in "Anywhere Network Extension" target */,
-			);
-			path = Protocols;
 			sourceTree = "<group>";
 		};
 		CB71CDC82F837D11002B9E1D /* Anywhere Widget */ = {
@@ -355,7 +229,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CB2B9C942F77724D00F24AC2 /* BLAKE3 in Frameworks */,
 				CB2BA8542F7821F400F24AC2 /* YAML in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -373,7 +246,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CB2B9C962F77725900F24AC2 /* BLAKE3 in Frameworks */,
 				CB2BA8562F78220C00F24AC2 /* YAML in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -394,7 +266,6 @@
 			isa = PBXGroup;
 			children = (
 				CB7A00022F65700100C85E4A /* Shared */,
-				CB650DD92F6307AF00C85E4A /* Protocols */,
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
 				CB2B549D2F6C3E2700F24AC2 /* Anywhere TV */,
 				CB1C107B2F23B82F00B74CD8 /* Anywhere Network Extension */,
@@ -445,12 +316,10 @@
 			);
 			fileSystemSynchronizedGroups = (
 				CB1C10672F23B81500B74CD8 /* Anywhere */,
-				CB650DD92F6307AF00C85E4A /* Protocols */,
 				CB7A00022F65700100C85E4A /* Shared */,
 			);
 			name = Anywhere;
 			packageProductDependencies = (
-				CB2B9C932F77724D00F24AC2 /* BLAKE3 */,
 				CB2BA8532F7821F400F24AC2 /* YAML */,
 			);
 			productName = Anywhere;
@@ -496,12 +365,10 @@
 			);
 			fileSystemSynchronizedGroups = (
 				CB2B549D2F6C3E2700F24AC2 /* Anywhere TV */,
-				CB650DD92F6307AF00C85E4A /* Protocols */,
 				CB7A00022F65700100C85E4A /* Shared */,
 			);
 			name = "Anywhere TV";
 			packageProductDependencies = (
-				CB2B9C952F77725900F24AC2 /* BLAKE3 */,
 				CB2BA8552F78220C00F24AC2 /* YAML */,
 			);
 			productName = Anywhere;
@@ -811,7 +678,7 @@
 					"HAVE_CONFIG_H=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Anywhere Network Extension/ngtcp2\"";
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -856,7 +723,7 @@
 					"HAVE_CONFIG_H=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Anywhere Network Extension/ngtcp2\"";
 				INFOPLIST_FILE = Anywhere/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -902,7 +769,7 @@
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
-					"\"$(SRCROOT)/Shared/ngtcp2\"",
+					"\"$(SRCROOT)/Anywhere Network Extension/ngtcp2\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
@@ -947,7 +814,7 @@
 				HEADER_SEARCH_PATHS = (
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/src/include\"",
 					"\"$(SRCROOT)/Anywhere Network Extension/lwip/port\"",
-					"\"$(SRCROOT)/Shared/ngtcp2\"",
+					"\"$(SRCROOT)/Anywhere Network Extension/ngtcp2\"",
 				);
 				INFOPLIST_FILE = "Anywhere Network Extension/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = "Anywhere Network Extension";
@@ -990,7 +857,7 @@
 					"HAVE_CONFIG_H=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Anywhere Network Extension/ngtcp2\"";
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1032,7 +899,7 @@
 					"HAVE_CONFIG_H=1",
 				);
 				GENERATE_INFOPLIST_FILE = YES;
-				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Shared/ngtcp2\"";
+				HEADER_SEARCH_PATHS = "\"$(SRCROOT)/Anywhere Network Extension/ngtcp2\"";
 				INFOPLIST_FILE = "Anywhere TV/Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
@@ -1195,16 +1062,6 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		CB2B9C912F77722600F24AC2 /* BLAKE3 */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
-			productName = BLAKE3;
-		};
-		CB2B9C932F77724D00F24AC2 /* BLAKE3 */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
-			productName = BLAKE3;
-		};
-		CB2B9C952F77725900F24AC2 /* BLAKE3 */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = CB2B9C902F77722600F24AC2 /* XCRemoteSwiftPackageReference "BLAKE3" */;
 			productName = BLAKE3;

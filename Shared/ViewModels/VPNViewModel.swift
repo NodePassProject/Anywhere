@@ -388,18 +388,28 @@ class VPNViewModel: ObservableObject {
     }
 
     // MARK: - Latency Testing
+    //
+    // Latency tests run inside the network extension via IPC. The main app
+    // sends a `testLatency` message containing the configuration to test; the
+    // extension dials the proxy directly (independent of the active tunnel)
+    // and replies with the round-trip time. The tunnel must be running to
+    // serve as the IPC host — if it isn't, we start it first.
 
     private var latencyTask: Task<Void, Never>?
+
+    /// Cap on simultaneous in-flight test requests. Mirrors the previous
+    /// in-process limit; keeps extension proxy connections within what a
+    /// typical residential uplink/NAT can sustain.
+    private static let maxConcurrentLatencyTests = 4
 
     func testLatency(for configuration: ProxyConfiguration) {
         latencyTask?.cancel()
         let configurationId = configuration.id
         latencyResults[configurationId] = .testing
-        latencyTask = Task.detached { [weak self] in
-            let resolved = LatencyTester.resolvedConfiguration(configuration)
-            await MainActor.run { self?.syncProxyServerAddresses(for: resolved) }
-            let result = await LatencyTester.test(resolved)
-            await MainActor.run { self?.latencyResults[configurationId] = result }
+        latencyTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await self.runLatencyTest(for: configuration)
+            self.latencyResults[configurationId] = result
         }
     }
 
@@ -409,13 +419,10 @@ class VPNViewModel: ObservableObject {
         for config in configs {
             latencyResults[config.id] = .testing
         }
-        latencyTask = Task.detached { [weak self] in
-            let resolvedConfigurations = await LatencyTester.resolvedConfigurations(configs)
-            await MainActor.run { self?.syncProxyServerAddresses(for: resolvedConfigurations) }
-            for await (id, result) in LatencyTester.testAll(resolvedConfigurations) {
-                await MainActor.run { [weak self] in
-                    self?.latencyResults[id] = result
-                }
+        latencyTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runLatencyTests(configs) { id, result in
+                self.latencyResults[id] = result
             }
         }
     }
@@ -429,11 +436,10 @@ class VPNViewModel: ObservableObject {
         chainLatencyResults[chain.id] = .testing
         let chainId = chain.id
         chainLatencyTask?.cancel()
-        chainLatencyTask = Task.detached { [weak self] in
-            let resolvedForTest = LatencyTester.resolvedConfiguration(resolved)
-            await MainActor.run { self?.syncProxyServerAddresses(for: resolvedForTest) }
-            let result = await LatencyTester.test(resolvedForTest)
-            await MainActor.run { self?.chainLatencyResults[chainId] = result }
+        chainLatencyTask = Task { [weak self] in
+            guard let self else { return }
+            let result = await self.runLatencyTest(for: resolved)
+            self.chainLatencyResults[chainId] = result
         }
     }
 
@@ -446,17 +452,158 @@ class VPNViewModel: ObservableObject {
                 chainData.append((chain.id, resolved))
             }
         }
-        chainLatencyTask = Task.detached { [weak self] in
-            let resolvedConfigs = await LatencyTester.resolvedConfigurations(chainData.map(\.1))
-            await MainActor.run { self?.syncProxyServerAddresses(for: resolvedConfigs) }
-            let idMap = Dictionary(uniqueKeysWithValues: zip(resolvedConfigs.map(\.id), chainData.map(\.0)))
-            for await (configId, result) in LatencyTester.testAll(resolvedConfigs) {
-                if let chainId = idMap[configId] {
-                    await MainActor.run { [weak self] in
-                        self?.chainLatencyResults[chainId] = result
+        let chainIdByConfigId: [UUID: UUID] = Dictionary(uniqueKeysWithValues: chainData.map { ($0.1.id, $0.0) })
+        chainLatencyTask = Task { [weak self] in
+            guard let self else { return }
+            await self.runLatencyTests(chainData.map(\.1)) { configId, result in
+                if let chainId = chainIdByConfigId[configId] {
+                    self.chainLatencyResults[chainId] = result
+                }
+            }
+        }
+    }
+
+    // MARK: - IPC-Backed Latency Tests
+
+    /// Runs a single latency test in the network extension. Starts the tunnel
+    /// if it isn't already up so the IPC message has a recipient.
+    private func runLatencyTest(for configuration: ProxyConfiguration) async -> LatencyResult {
+        guard await ensureTunnelRunningForTesting() else { return .failed }
+        return await sendLatencyTestMessage(for: configuration)
+    }
+
+    /// Runs latency tests for a batch, capped at ``maxConcurrentLatencyTests``
+    /// in-flight requests. Reports each result via `onResult` as it arrives.
+    private func runLatencyTests(
+        _ configurations: [ProxyConfiguration],
+        onResult: @MainActor @escaping (UUID, LatencyResult) -> Void
+    ) async {
+        guard !configurations.isEmpty else { return }
+        guard await ensureTunnelRunningForTesting() else {
+            for config in configurations { onResult(config.id, .failed) }
+            return
+        }
+        await withTaskGroup(of: (UUID, LatencyResult).self) { group in
+            var iterator = configurations.makeIterator()
+            for _ in 0..<min(Self.maxConcurrentLatencyTests, configurations.count) {
+                if let config = iterator.next() {
+                    group.addTask { [weak self] in
+                        let r = await self?.sendLatencyTestMessage(for: config) ?? .failed
+                        return (config.id, r)
                     }
                 }
             }
+            for await pair in group {
+                onResult(pair.0, pair.1)
+                if let config = iterator.next() {
+                    group.addTask { [weak self] in
+                        let r = await self?.sendLatencyTestMessage(for: config) ?? .failed
+                        return (config.id, r)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Sends one `testLatency` IPC message and awaits the extension's reply.
+    /// Pre-resolves the proxy server address so the extension can dial via IP
+    /// without any DNS-over-tunnel path.
+    private func sendLatencyTestMessage(for configuration: ProxyConfiguration) async -> LatencyResult {
+        guard let session = vpnManager?.connection as? NETunnelProviderSession else { return .failed }
+
+        let resolved = await Self.resolved(configuration)
+        guard let messageData = try? JSONEncoder().encode(TunnelMessage.testLatency(resolved)) else { return .failed }
+
+        return await withCheckedContinuation { continuation in
+            do {
+                try session.sendProviderMessage(messageData) { responseData in
+                    let result = (responseData.flatMap { try? JSONDecoder().decode(LatencyTestResponse.self, from: $0) })?.asLatencyResult ?? .failed
+                    continuation.resume(returning: result)
+                }
+            } catch {
+                logger.warning("Failed to send latency test request: \(error.localizedDescription)")
+                continuation.resume(returning: .failed)
+            }
+        }
+    }
+
+    /// Returns a copy of `configuration` with `resolvedIP` set when missing.
+    /// Runs DNS resolution off the main actor since `getaddrinfo` blocks.
+    private static func resolved(_ configuration: ProxyConfiguration) async -> ProxyConfiguration {
+        await Task.detached { Self.withResolvedIP(configuration) }.value
+    }
+
+    /// Returns `configuration` with `resolvedIP` set, preferring an existing
+    /// value, then `fallback`, then a fresh `getaddrinfo` lookup.
+    nonisolated static func withResolvedIP(
+        _ configuration: ProxyConfiguration,
+        fallback: String? = nil
+    ) -> ProxyConfiguration {
+        if configuration.resolvedIP != nil { return configuration }
+        guard let resolved = fallback ?? resolveServerAddress(configuration.serverAddress) else {
+            return configuration
+        }
+        return ProxyConfiguration(
+            id: configuration.id,
+            name: configuration.name,
+            serverAddress: configuration.serverAddress,
+            serverPort: configuration.serverPort,
+            resolvedIP: resolved,
+            subscriptionId: configuration.subscriptionId,
+            outbound: configuration.outbound,
+            chain: configuration.chain
+        )
+    }
+
+    /// Per-test timeout for waiting on tunnel startup before the IPC roundtrip.
+    private static let tunnelStartupTimeout: Duration = .seconds(15)
+
+    /// Ensures the tunnel is `.connected` so it can receive IPC messages.
+    /// Triggers a connect if currently disconnected and waits for the status
+    /// transition. Returns false if startup times out or fails.
+    private func ensureTunnelRunningForTesting() async -> Bool {
+        // Wait for the manager to finish loading on first launch.
+        if !isManagerReady {
+            for await ready in $isManagerReady.values where ready { break }
+        }
+        if vpnStatus == .connected { return true }
+
+        // Bootstrap a selection if there is none — otherwise connectVPN() noops.
+        if selectedConfiguration == nil {
+            selectedConfiguration = configurations.first
+            guard selectedConfiguration != nil else { return false }
+        }
+
+        if vpnStatus != .connecting && vpnStatus != .reasserting {
+            connectVPN()
+        }
+
+        return await waitForVPNStatus(.connected, timeout: Self.tunnelStartupTimeout)
+    }
+
+    private func waitForVPNStatus(_ target: NEVPNStatus, timeout: Duration) async -> Bool {
+        if vpnStatus == target { return true }
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask { @MainActor [weak self] in
+                guard let self else { return false }
+                // Wait for an active transition before treating .disconnected/.invalid
+                // as a failure — `$vpnStatus.values` emits the current value first,
+                // which is typically .disconnected when starting from cold.
+                var sawTransition = false
+                for await status in self.$vpnStatus.values {
+                    if status == target { return true }
+                    if status == .connecting || status == .reasserting { sawTransition = true }
+                    if sawTransition && (status == .invalid || status == .disconnected) { return false }
+                }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
         }
     }
 
@@ -528,9 +675,6 @@ class VPNViewModel: ObservableObject {
         guard let manager = vpnManager,
               let configuration = selectedConfiguration else { return }
 
-        // Mark the active proxy domain so ProxyDNSCache returns stale IPs on expiry
-        ProxyDNSCache.shared.setActiveProxyDomain(configuration.serverAddress)
-
         // Sync proxy server addresses so the extension can bypass them at the lwIP level
         syncProxyServerAddresses(for: configuration)
 
@@ -576,20 +720,18 @@ class VPNViewModel: ObservableObject {
                         return
                     }
 
+                    let resolved = Self.withResolvedIP(configuration, fallback: resolvedIP)
+
+                    // Persist configuration to App Group so the Network Extension
+                    // can read it when started from Settings or Always On (On Demand),
+                    // where options is nil.
+                    if let configData = try? JSONEncoder().encode(resolved) {
+                        AWCore.setLastConfigurationData(configData)
+                    }
+
                     do {
-                        var configurationDict = VPNViewModel.serializeConfiguration(configuration)
-                        if let resolvedIP {
-                            configurationDict["resolvedIP"] = resolvedIP
-                        }
-
-                        // Persist configuration to App Group so the Network Extension
-                        // can read it when started from Settings or Always On (On Demand),
-                        // where options is nil.
-                        if let jsonData = try? JSONSerialization.data(withJSONObject: configurationDict) {
-                            AWCore.setLastConfigurationData(jsonData)
-                        }
-
-                        try manager.connection.startVPNTunnel(options: ["config": configurationDict as NSObject])
+                        let messageData = try JSONEncoder().encode(TunnelMessage.setConfiguration(resolved))
+                        try manager.connection.startVPNTunnel(options: [TunnelMessage.optionKey: messageData as NSObject])
                     } catch {
                         Task { @MainActor in self.startError = error.localizedDescription }
                     }
@@ -636,32 +778,20 @@ class VPNViewModel: ObservableObject {
         // Sync proxy addresses so the extension bypasses this config's server at the lwIP level
         syncProxyServerAddresses(for: configuration)
 
-        var configurationDict = Self.serializeConfiguration(configuration)
-
-        // Resolve DNS and send off main actor
+        // Resolve DNS and send off main actor.
         Task.detached {
-            VPNViewModel.resolveAddressesInDict(&configurationDict)
+            let resolved = Self.withResolvedIP(configuration)
 
-            // Keep App Group in sync so On Demand restarts use the latest selection
-            if let jsonData = try? JSONSerialization.data(withJSONObject: configurationDict) {
-                AWCore.setLastConfigurationData(jsonData)
+            // Keep App Group in sync so On Demand restarts use the latest selection.
+            if let configData = try? JSONEncoder().encode(resolved) {
+                AWCore.setLastConfigurationData(configData)
             }
 
-            guard let data = try? JSONSerialization.data(withJSONObject: configurationDict) else { return }
+            guard let data = try? JSONEncoder().encode(TunnelMessage.setConfiguration(resolved)) else { return }
             do {
                 try session.sendProviderMessage(data) { _ in }
             } catch {
                 logger.warning("Failed to send configuration to tunnel: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// Resolves `serverAddress` to IP for a config dict (main proxy only, for logging/initial bypass).
-    /// Chain proxy addresses are resolved lazily via ProxyDNSCache at connection time.
-    nonisolated private static func resolveAddressesInDict(_ dict: inout [String: Any]) {
-        if let addr = dict["serverAddress"] as? String, dict["resolvedIP"] == nil {
-            if let resolved = resolveServerAddress(addr) {
-                dict["resolvedIP"] = resolved
             }
         }
     }
@@ -762,26 +892,21 @@ class VPNViewModel: ObservableObject {
             }
         }
 
-        // Collect domains + any explicit or already-cached resolved IPs
+        // Collect domains + any explicit resolved IPs. The extension resolves
+        // any remaining domains itself via its own DNS cache.
         addresses.formUnion(domains)
-        for domain in domains {
-            if let ips = ProxyDNSCache.shared.cachedIPs(for: domain) {
-                addresses.formUnion(ips)
-            }
-        }
 
         let addressArray = Array(addresses)
 
         // Persist to App Group so the extension can read them on start (Settings / Always On)
-        if let data = try? JSONSerialization.data(withJSONObject: addressArray) {
+        if let data = try? JSONEncoder().encode(addressArray) {
             AWCore.setProxyServerAddressesData(data)
         }
 
         // Send to running tunnel via IPC
         guard vpnStatus == .connected,
               let session = vpnManager?.connection as? NETunnelProviderSession else { return }
-        let message: [String: Any] = ["type": "proxyAddresses", "addresses": addressArray]
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
+        guard let data = try? JSONEncoder().encode(TunnelMessage.syncProxyAddresses(addressArray)) else { return }
         do {
             try session.sendProviderMessage(data) { _ in }
         } catch {

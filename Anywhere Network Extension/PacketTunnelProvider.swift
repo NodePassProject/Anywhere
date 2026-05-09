@@ -86,20 +86,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // - Bypass country: only affects per-connection GeoIP checks in LWIPStack.
 
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
-        // When started from the app, configuration is passed in options.
-        // When started from Settings or Always On (On Demand), options is nil —
-        // fall back to the last configuration saved in the App Group.
-        let configurationDict: [String: Any]?
-        if let dict = options?["config"] as? [String: Any] {
-            configurationDict = dict
-        } else if let savedData = AWCore.getLastConfigurationData(),
-                  let dict = try? JSONSerialization.jsonObject(with: savedData) as? [String: Any] {
-            configurationDict = dict
+        // When started from the app, the configuration arrives in `options`
+        // wrapped in a ``TunnelMessage`` envelope. When started from Settings
+        // or Always-On (On Demand), `options` is nil and we fall back to the
+        // last configuration persisted in the App Group.
+        let configuration: ProxyConfiguration?
+        if let messageData = options?[TunnelMessage.optionKey] as? Data,
+           case .setConfiguration(let config) = try? JSONDecoder().decode(TunnelMessage.self, from: messageData) {
+            configuration = config
+        } else if let savedData = AWCore.getLastConfigurationData() {
+            configuration = try? JSONDecoder().decode(ProxyConfiguration.self, from: savedData)
         } else {
-            configurationDict = nil
+            configuration = nil
         }
 
-        guard let configurationDict, let configuration = Self.parseConfiguration(from: configurationDict) else {
+        guard let configuration else {
             logger.error("[VPN] Invalid or missing configuration")
             completionHandler(NSError(domain: AWCore.Identifier.errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"]))
             return
@@ -252,47 +253,38 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - App Messages
 
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
-        guard let dict = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {
+        guard let message = try? JSONDecoder().decode(TunnelMessage.self, from: messageData) else {
             completionHandler?(nil)
             return
         }
 
-        let messageType = dict["type"] as? String
+        switch message {
+        case .setConfiguration(let configuration):
+            lwipStack.switchConfiguration(configuration)
+            completionHandler?(nil)
 
-        if messageType == "stats" {
-            let response: [String: Any] = [
-                "bytesIn": lwipStack.totalBytesIn,
-                "bytesOut": lwipStack.totalBytesOut
-            ]
-            let data = try? JSONSerialization.data(withJSONObject: response)
-            completionHandler?(data)
-            return
-        }
+        case .syncProxyAddresses(let addresses):
+            lwipStack.updateProxyServerAddresses(addresses)
+            completionHandler?(nil)
 
-        if messageType == "logs" {
-            let logs = lwipStack.fetchLogs()
-            let response: [String: Any] = ["logs": logs]
-            let data = try? JSONSerialization.data(withJSONObject: response)
-            completionHandler?(data)
-            return
-        }
-
-        if messageType == "proxyAddresses" {
-            if let addresses = dict["addresses"] as? [String] {
-                lwipStack.updateProxyServerAddresses(addresses)
+        case .testLatency(let configuration):
+            Task {
+                let result = await LatencyTester.test(configuration)
+                let response = LatencyTestResponse(result)
+                completionHandler?(try? JSONEncoder().encode(response))
             }
-            completionHandler?(nil)
-            return
-        }
 
-        // Configuration switch (explicit "configuration" type or legacy messages without a type key)
-        guard let configuration = Self.parseConfiguration(from: dict) else {
-            completionHandler?(nil)
-            return
-        }
+        case .fetchStats:
+            let response = StatsResponse(
+                bytesIn: lwipStack.totalBytesIn,
+                bytesOut: lwipStack.totalBytesOut
+            )
+            completionHandler?(try? JSONEncoder().encode(response))
 
-        lwipStack.switchConfiguration(configuration)
-        completionHandler?(nil)
+        case .fetchLogs:
+            let response = LogsResponse(logs: lwipStack.fetchLogs())
+            completionHandler?(try? JSONEncoder().encode(response))
+        }
     }
 
     override func wake() {

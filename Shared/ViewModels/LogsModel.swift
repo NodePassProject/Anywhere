@@ -61,8 +61,7 @@ class LogsModel: ObservableObject {
 
     private func pollLogs() async {
         guard let session = await resolveSession() else { return }
-        let message: [String: String] = ["type": "logs"]
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
+        guard let data = try? JSONEncoder().encode(TunnelMessage.fetchLogs) else { return }
 
         let response: Data? = await withCheckedContinuation { continuation in
             do {
@@ -75,17 +74,13 @@ class LogsModel: ObservableObject {
         }
 
         guard let response,
-              let dict = try? JSONSerialization.jsonObject(with: response) as? [String: Any],
-              let entries = dict["logs"] as? [[String: Any]] else { return }
+              let payload = try? JSONDecoder().decode(LogsResponse.self, from: response) else { return }
 
-        self.logs = entries.compactMap { entry in
-            guard let timestamp = entry["timestamp"] as? Double,
-                  let levelStr = entry["level"] as? String,
-                  let message = entry["message"] as? String else { return nil }
-            return LogEntry(
-                timestamp: Date(timeIntervalSinceReferenceDate: timestamp),
-                level: LogLevel(rawValue: levelStr) ?? .info,
-                message: message
+        self.logs = payload.logs.map { entry in
+            LogEntry(
+                timestamp: Date(timeIntervalSinceReferenceDate: entry.timestamp),
+                level: LogLevel(rawValue: entry.level.rawValue) ?? .info,
+                message: entry.message
             )
         }
     }

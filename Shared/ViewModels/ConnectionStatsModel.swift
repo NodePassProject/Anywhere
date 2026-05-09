@@ -47,8 +47,7 @@ class ConnectionStatsModel: ObservableObject {
 
     private func pollStats() async {
         guard let session else { return }
-        let message: [String: String] = ["type": "stats"]
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
+        guard let data = try? JSONEncoder().encode(TunnelMessage.fetchStats) else { return }
 
         let response: Data? = await withCheckedContinuation { continuation in
             do {
@@ -61,8 +60,8 @@ class ConnectionStatsModel: ObservableObject {
         }
 
         guard let response,
-              let dict = try? JSONSerialization.jsonObject(with: response) as? [String: Any] else { return }
-        self.bytesIn = (dict["bytesIn"] as? NSNumber)?.int64Value ?? 0
-        self.bytesOut = (dict["bytesOut"] as? NSNumber)?.int64Value ?? 0
+              let stats = try? JSONDecoder().decode(StatsResponse.self, from: response) else { return }
+        self.bytesIn = stats.bytesIn
+        self.bytesOut = stats.bytesOut
     }
 }

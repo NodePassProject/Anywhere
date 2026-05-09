@@ -126,17 +126,8 @@ class LWIPStack {
     // Thread-safe via NSLock — logs may be appended from I/O completion
     // handlers off lwipQueue, while fetches come from IPC.
 
-    enum LogLevel: String {
-        case info
-        case warning
-        case error
-    }
-
-    struct LogEntry {
-        let timestamp: CFAbsoluteTime
-        let level: LogLevel
-        let message: String
-    }
+    typealias LogLevel = TunnelLogLevel
+    typealias LogEntry = TunnelLogEntry
 
     struct RecentTunnelInterruption {
         let timestamp: CFAbsoluteTime
@@ -156,14 +147,12 @@ class LWIPStack {
         logLock.unlock()
     }
 
-    /// Returns all log entries within the retention window as serializable dictionaries.
-    func fetchLogs() -> [[String: Any]] {
+    /// Returns all log entries within the retention window.
+    func fetchLogs() -> [LogEntry] {
         let now = CFAbsoluteTimeGetCurrent()
         logLock.lock()
         compactLogs(now: now)
-        let result = logEntries.map { entry in
-            ["timestamp": entry.timestamp, "level": entry.level.rawValue, "message": entry.message] as [String: Any]
-        }
+        let result = logEntries
         logLock.unlock()
         return result
     }
@@ -352,7 +341,7 @@ class LWIPStack {
     /// domains to IPs in the background. Called on initial start.
     private func loadProxyServerAddresses() {
         guard let data = AWCore.getProxyServerAddressesData(),
-              let addresses = try? JSONSerialization.jsonObject(with: data) as? [String] else {
+              let addresses = try? JSONDecoder().decode([String].self, from: data) else {
             return
         }
         // Use stale IPs temporarily
