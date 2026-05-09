@@ -97,16 +97,20 @@ final class MITMHTTP2Connection {
         }
     }
 
-    /// Per-stream body buffer used when at least one ``bodyReplace`` rule
+    /// Per-stream body buffer used when at least one body-touching rule
     /// applies for the current direction. Missing entry means pass-through;
     /// present entry means accumulate, decompress per ``codec``, rewrite,
     /// and emit at END_STREAM. ``abandoned`` flips when an identity
     /// stream overflows ``MITMBodyCodec/maxBufferedBodyBytes`` mid-flight:
     /// the buffered prefix has already been emitted as DATA, and
     /// subsequent DATA on the stream is forwarded verbatim.
+    /// ``headers`` snapshots the rewritten header block at HEADERS time
+    /// so script rules can inspect it via the `ctx` argument; the list
+    /// stays small (a few hundred bytes) and is dropped at END_STREAM.
     private struct BodyBuffer {
         var data: Data
         let codec: MITMBodyCodec.Plan
+        let headers: [(name: String, value: String)]
         var abandoned: Bool = false
     }
     private var bodyBuffers: [UInt32: BodyBuffer] = [:]
@@ -288,18 +292,18 @@ final class MITMHTTP2Connection {
         }
 
         // Decide body-buffering policy for the upcoming DATA frames on
-        // this stream. Buffer when a bodyReplace rule applies, the
-        // codec is one we can decode (or identity), the content type is
-        // safe to regex over, and either content-length is within the
-        // cap or absent (identity only — we cannot recover wire shape
-        // for a compressed body that overflows mid-stream). Skip on
-        // END_STREAM HEADERS because there is no body.
+        // this stream. Buffer when a body-script rule applies, the
+        // codec is one we can decode (or identity), and either
+        // content-length is within the cap or absent (identity only —
+        // we cannot recover wire shape for a compressed body that
+        // overflows mid-stream). Skip on END_STREAM HEADERS because
+        // there is no body.
         if case .headers = kind,
            originalFlags & 0x1 == 0,
            rewriter.hasBodyRewrite(phase: phase),
            shouldBufferStream(headers: rewritten) {
             let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
-            bodyBuffers[streamID] = BodyBuffer(data: Data(), codec: codec)
+            bodyBuffers[streamID] = BodyBuffer(data: Data(), codec: codec, headers: rewritten)
             // The rewritten body's length is unknown at header emit
             // time. RFC 9113 §8.2.1 requires the sum of DATA frame
             // payloads to match `content-length` exactly when
@@ -443,7 +447,8 @@ final class MITMHTTP2Connection {
         } else {
             plaintext = buffer.data
         }
-        let rewritten = rewriter.rewriteBody(plaintext, phase: phase)
+        let context = makeScriptContext(headers: buffer.headers)
+        let rewritten = rewriter.rewriteBody(plaintext, phase: phase, context: context)
         var flags: UInt8 = 0
         if endStream { flags |= 0x1 }
         return serializeFrame(RawFrame(
@@ -457,15 +462,14 @@ final class MITMHTTP2Connection {
     // MARK: - Body-buffer policy
 
     /// Decides whether a stream's DATA frames should be buffered for
-    /// rewrite. Combines the codec, content-type, and content-length
-    /// gates so the decision is made once at HEADERS time rather than
-    /// rediscovered per-frame.
+    /// rewrite. Combines the codec and content-length gates so the
+    /// decision is made once at HEADERS time rather than rediscovered
+    /// per-frame. The content-type whitelist isn't consulted because
+    /// the only body-touching rule is ``bodyScript``, which handles
+    /// binary.
     private func shouldBufferStream(headers: [(name: String, value: String)]) -> Bool {
         let codec = MITMBodyCodec.plan(for: firstHeaderValue(headers, name: "content-encoding"))
         guard codec.supported else { return false }
-        guard MITMBodyCodec.isRewritableType(firstHeaderValue(headers, name: "content-type")) else {
-            return false
-        }
         if let raw = firstHeaderValue(headers, name: "content-length"),
            let length = Int(raw.trimmingCharacters(in: .whitespaces)) {
             return length <= MITMBodyCodec.maxBufferedBodyBytes
@@ -485,6 +489,30 @@ final class MITMHTTP2Connection {
             return v
         }
         return nil
+    }
+
+    /// Builds the per-message `ctx` argument for the script's
+    /// `process(body, ctx)`. Pseudo-headers `:method`, `:authority`, and
+    /// `:path` give us method and URL on requests; responses leave both
+    /// nil. The script sees the same header list that was emitted on
+    /// the wire (pseudo-headers included).
+    private func makeScriptContext(headers: [(name: String, value: String)]) -> MITMScriptEngine.Context {
+        var method: String?
+        var url: String?
+        if phase == .httpRequest {
+            method = firstHeaderValue(headers, name: ":method")
+            if let path = firstHeaderValue(headers, name: ":path") {
+                let authority = firstHeaderValue(headers, name: ":authority") ?? ""
+                url = "https://\(authority)\(path)"
+            }
+        }
+        return MITMScriptEngine.Context(
+            phase: phase,
+            method: method,
+            url: url,
+            headers: headers,
+            ruleSetID: rewriter.ruleSetID
+        )
     }
 
     // MARK: - Padding helpers

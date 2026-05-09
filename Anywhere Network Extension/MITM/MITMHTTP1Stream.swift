@@ -31,17 +31,22 @@ final class MITMHTTP1Stream {
     /// ``rewriteTarget``; nil means "leave Host alone". Used only on request
     /// streams; response streams pass nil.
     private let effectiveAuthority: String?
+    /// Lazy JS runtime, shared across both directions of the same MITM
+    /// session. Touched only when a body-script rule fires.
+    private let scriptEngineProvider: MITMScriptEngine.Provider
 
     init(
         host: String,
         phase: MITMPhase,
         policy: MITMRewritePolicy,
-        effectiveAuthority: String?
+        effectiveAuthority: String?,
+        scriptEngineProvider: MITMScriptEngine.Provider
     ) {
         self.host = host
         self.phase = phase
         self.policy = policy
         self.effectiveAuthority = effectiveAuthority
+        self.scriptEngineProvider = scriptEngineProvider
     }
 
     // MARK: - State
@@ -52,8 +57,8 @@ final class MITMHTTP1Stream {
         case awaitingHead
 
         /// Header rewrite already emitted; pass body bytes through
-        /// unchanged. Used when no bodyReplace rule applies, or when the
-        /// body is opaque-encoded.
+        /// unchanged. Used when no body-script rule applies, or when
+        /// the body is opaque-encoded.
         case forwardingLength(remaining: Int)
         case forwardingChunked(reader: ChunkedReader)
 
@@ -297,7 +302,7 @@ final class MITMHTTP1Stream {
         accumulator.append(rxBuffer.prefix(take))
         rxBuffer.removeFirst(take)
         if accumulator.count == expected {
-            let rewrittenBody = decompressAndApply(accumulator, codec: codec)
+            let rewrittenBody = decompressAndApply(accumulator, codec: codec, headBytes: headBytes)
             let patchedHead = patchContentLength(in: headBytes, to: rewrittenBody.count)
             output.append(patchedHead)
             output.append(rewrittenBody)
@@ -327,7 +332,7 @@ final class MITMHTTP1Stream {
             // bodies are well under the cap.
             if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
                 logger.warning("[MITM] Chunked body for \(host) exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); truncating")
-                let rewrittenBody = decompressAndApply(accumulator, codec: codec)
+                let rewrittenBody = decompressAndApply(accumulator, codec: codec, headBytes: headBytes)
                 output.append(headBytes)
                 output.append(rechunk(body: rewrittenBody, originalSizes: [rewrittenBody.count]))
                 mode = .discardingChunked(reader: reader)
@@ -336,7 +341,7 @@ final class MITMHTTP1Stream {
             mode = .rewritingChunked(headBytes: headBytes, accumulator: accumulator, reader: reader, codec: codec)
             return false
         case .complete(let originalSizes):
-            let rewrittenBody = decompressAndApply(accumulator, codec: codec)
+            let rewrittenBody = decompressAndApply(accumulator, codec: codec, headBytes: headBytes)
             output.append(headBytes)
             output.append(rechunk(body: rewrittenBody, originalSizes: originalSizes))
             mode = .awaitingHead
@@ -370,17 +375,53 @@ final class MITMHTTP1Stream {
     }
 
     /// Decompresses ``data`` per ``codec`` (no-op when identity) and
-    /// applies the body rules. If decompression fails, the original
-    /// bytes are passed through unmodified — better to leak the
-    /// upstream's payload than break the connection.
-    private func decompressAndApply(_ data: Data, codec: MITMBodyCodec.Plan) -> Data {
-        guard codec.requiresDecompression else {
-            return applyBodyRules(data)
+    /// applies the body rules. ``headBytes`` is the rewritten head we
+    /// already serialized for emission; we re-parse it to give script
+    /// rules a `ctx` reflecting the same view the upstream will see. If
+    /// decompression fails, the original bytes are passed through
+    /// unmodified — better to leak the upstream's payload than break
+    /// the connection.
+    private func decompressAndApply(_ data: Data, codec: MITMBodyCodec.Plan, headBytes: Data) -> Data {
+        let rules = policy.rules(for: host, phase: phase)
+        let body: Data
+        if codec.requiresDecompression {
+            guard let decoded = MITMBodyCodec.decompress(data, plan: codec) else {
+                return data
+            }
+            body = decoded
+        } else {
+            body = data
         }
-        guard let decoded = MITMBodyCodec.decompress(data, plan: codec) else {
-            return data
+        return MITMBodyTransform.apply(
+            body,
+            rules: rules,
+            engineProvider: scriptEngineProvider,
+            context: makeScriptContext(headBytes: headBytes)
+        )
+    }
+
+    /// Builds the per-message `ctx` argument the script's
+    /// `process(body, ctx)` receives. ``method`` and ``url`` are nil on
+    /// the response phase; ``headers`` mirrors the rewritten header
+    /// block on the wire.
+    private func makeScriptContext(headBytes: Data) -> MITMScriptEngine.Context {
+        let parsed = parseHead(headBytes)
+        var method: String?
+        var url: String?
+        if phase == .httpRequest, let parsed {
+            let parts = parsed.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+            if parts.count >= 2 {
+                method = String(parts[0])
+                url = "https://\(host)\(String(parts[1]))"
+            }
         }
-        return applyBodyRules(decoded)
+        return MITMScriptEngine.Context(
+            phase: phase,
+            method: method,
+            url: url,
+            headers: parsed?.headers ?? [],
+            ruleSetID: policy.set(for: host)?.id
+        )
     }
 
     // MARK: - Re-chunking
@@ -544,17 +585,11 @@ final class MITMHTTP1Stream {
 
     /// Returns whether the body should be buffered for rewrite, plus
     /// the codec plan that the buffer will be decoded with. Skips
-    /// rewrite when no `bodyReplace` rule applies for the host/phase,
-    /// when `Content-Encoding` includes a codec we don't recognise, or
-    /// when `Content-Type` is in the binary denylist (images, video,
-    /// wasm, etc.).
+    /// rewrite when no body-script rule applies for the host/phase or
+    /// when `Content-Encoding` includes a codec we don't recognise.
     private func bodyRewriteDecision(headers: [Header]) -> BodyDecision {
         let rules = policy.rules(for: host, phase: phase)
-        let hasBodyRule = rules.contains {
-            if case .bodyReplace = $0.operation { return true }
-            return false
-        }
-        guard hasBodyRule else {
+        guard MITMBodyTransform.hasBodyRule(in: rules) else {
             return BodyDecision(shouldRewrite: false, codec: .identity)
         }
         let encoding = firstHeaderValue(headers, name: "content-encoding")
@@ -562,10 +597,8 @@ final class MITMHTTP1Stream {
         guard plan.supported else {
             return BodyDecision(shouldRewrite: false, codec: plan)
         }
-        let contentType = firstHeaderValue(headers, name: "content-type")
-        guard MITMBodyCodec.isRewritableType(contentType) else {
-            return BodyDecision(shouldRewrite: false, codec: plan)
-        }
+        // Body rules are scripts; scripts handle binary, so the
+        // content-type whitelist doesn't apply.
         return BodyDecision(shouldRewrite: true, codec: plan)
     }
 
@@ -665,45 +698,13 @@ final class MITMHTTP1Stream {
                     )
                     return (name: name, value: value)
                 }
-            case .urlReplace, .bodyReplace:
+            case .urlReplace, .bodyScript:
                 continue
             }
         }
         return current
     }
 
-    /// Applies every ``bodyReplace`` rule to ``data`` on a byte-for-byte
-    /// view. Bodies are mapped to a Latin-1 string (a bijection between
-    /// 0x00–0xFF and U+0000–U+00FF) so binary payloads and non-UTF-8
-    /// text are preserved through the regex round-trip. ASCII patterns
-    /// match the same bytes they always did; non-ASCII bytes are
-    /// addressable in patterns via `\xHH` escapes.
-    private func applyBodyRules(_ data: Data) -> Data {
-        let rules = policy.rules(for: host, phase: phase)
-        // .isoLatin1 decode never fails for any byte sequence.
-        guard var bodyString = String(bytes: data, encoding: .isoLatin1) else {
-            return data
-        }
-        var changed = false
-        for rule in rules {
-            guard case .bodyReplace(let regex, let replacement) = rule.operation else {
-                continue
-            }
-            let range = NSRange(bodyString.startIndex..., in: bodyString)
-            let mutated = regex.stringByReplacingMatches(
-                in: bodyString,
-                options: [],
-                range: range,
-                withTemplate: replacement
-            )
-            if mutated != bodyString {
-                bodyString = mutated
-                changed = true
-            }
-        }
-        guard changed else { return data }
-        return bodyString.data(using: .isoLatin1) ?? data
-    }
 }
 
 // MARK: - ChunkedReader

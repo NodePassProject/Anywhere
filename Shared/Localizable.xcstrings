@@ -242,6 +242,172 @@
         }
       }
     },
+    "%lld byte(s)": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld byte"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld bytes"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld 字节"
+                }
+              }
+            }
+          }
+        },
+        "ar": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "بايت واحد"
+                }
+              },
+              "two": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "بايتان"
+                }
+              },
+              "few": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld بايتات"
+                }
+              },
+              "many": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld بايتًا"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld بايت"
+                }
+              }
+            }
+          }
+        },
+        "es": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld byte"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld bytes"
+                }
+              }
+            }
+          }
+        },
+        "fa": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld بایت"
+                }
+              }
+            }
+          }
+        },
+        "ru": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld байт"
+                }
+              },
+              "few": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld байта"
+                }
+              },
+              "many": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld байт"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld байт"
+                }
+              }
+            }
+          }
+        },
+        "tk": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld bayt"
+                }
+              }
+            }
+          }
+        },
+        "tr": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld bayt"
+                }
+              }
+            }
+          }
+        },
+        "vi": {
+          "variations": {
+            "plural": {
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld byte"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "%lld domain suffix(es) · %lld rule(s)": {
       "localizations": {
         "ar": {
@@ -1070,12 +1236,6 @@
     },
     "200 Reject": {
       "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "200 拒绝"
-          }
-        },
         "ar": {
           "stringUnit": {
             "state": "translated",
@@ -1117,17 +1277,17 @@
             "state": "translated",
             "value": "200 Từ chối"
           }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "200 拒绝"
+          }
         }
       }
     },
     "302 Redirect": {
       "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "302 重定向"
-          }
-        },
         "ar": {
           "stringUnit": {
             "state": "translated",
@@ -1168,6 +1328,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "302 Chuyển hướng"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "302 重定向"
           }
         }
       }
@@ -2883,72 +3049,60 @@
         }
       }
     },
-    "Body Replace": {
+    "Body Script": {
       "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "体脚本"
+          }
+        },
         "ar": {
           "stringUnit": {
             "state": "translated",
-            "value": "استبدال الجسم"
-          }
-        },
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Body Replace"
+            "value": "سكربت النص"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Reemplazar cuerpo"
+            "value": "Script de cuerpo"
           }
         },
         "fa": {
           "stringUnit": {
             "state": "translated",
-            "value": "جایگزینی بدنه"
+            "value": "اسکریپت بدنه"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Замена тела"
+            "value": "Скрипт тела"
           }
         },
         "tk": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bedeni çalşyr"
+            "value": "Body skript"
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Gövdeyi Değiştir"
+            "value": "Gövde Betiği"
           }
         },
         "vi": {
           "stringUnit": {
             "state": "translated",
-            "value": "Thay thế nội dung"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "体替换"
+            "value": "Tập lệnh thân"
           }
         }
       }
     },
     "Body Type": {
       "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "体类型"
-          }
-        },
         "ar": {
           "stringUnit": {
             "state": "translated",
@@ -2989,6 +3143,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Loại nội dung"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "体类型"
           }
         }
       }
@@ -3346,12 +3506,6 @@
     },
     "Content": {
       "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "内容"
-          }
-        },
         "ar": {
           "stringUnit": {
             "state": "translated",
@@ -3392,6 +3546,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nội dung"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "内容"
           }
         }
       }
@@ -3750,12 +3910,6 @@
     },
     "Data": {
       "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "数据"
-          }
-        },
         "ar": {
           "stringUnit": {
             "state": "translated",
@@ -3796,6 +3950,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Dữ liệu"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "数据"
           }
         }
       }
@@ -11326,12 +11486,6 @@
     "Rewrite": {
       "comment": "MITM rewrite action",
       "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "重写"
-          }
-        },
         "ar": {
           "stringUnit": {
             "state": "translated",
@@ -11372,6 +11526,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Viết lại"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重写"
           }
         }
       }
@@ -12858,12 +13018,6 @@
     },
     "Text": {
       "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "文本"
-          }
-        },
         "ar": {
           "stringUnit": {
             "state": "translated",
@@ -12904,6 +13058,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Văn bản"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文本"
           }
         }
       }
@@ -13084,12 +13244,6 @@
     },
     "Tiny GIF": {
       "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "微小 GIF"
-          }
-        },
         "ar": {
           "stringUnit": {
             "state": "translated",
@@ -13130,6 +13284,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "GIF nhỏ"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "微小 GIF"
           }
         }
       }
@@ -13313,12 +13473,6 @@
     },
     "Transparent Redirect": {
       "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "透明重定向"
-          }
-        },
         "ar": {
           "stringUnit": {
             "state": "translated",
@@ -13359,6 +13513,12 @@
           "stringUnit": {
             "state": "translated",
             "value": "Chuyển hướng trong suốt"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "透明重定向"
           }
         }
       }

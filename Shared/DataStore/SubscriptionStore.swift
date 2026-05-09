@@ -47,11 +47,8 @@ class SubscriptionStore: ObservableObject {
     // MARK: - Persistence
 
     private static func load() -> [Subscription] {
-        guard let data = JSONBlobStore.shared.load(.subscriptions),
-              let result = try? JSONDecoder().decode([Subscription].self, from: data) else {
-            return []
-        }
-        return result
+        guard let data = JSONBlobStore.shared.load(.subscriptions) else { return [] }
+        return JSONDecoder().decodeSkippingInvalid([Subscription].self, from: data) ?? []
     }
 
     private func save() {

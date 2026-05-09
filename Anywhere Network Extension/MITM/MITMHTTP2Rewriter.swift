@@ -24,11 +24,20 @@ final class MITMHTTP2Rewriter {
     /// this value. Driven by the rule set's ``rewriteTarget``; nil means
     /// "leave :authority alone".
     private let effectiveAuthority: String?
+    /// Lazy JS runtime, shared with the HTTP/1 streams of the same
+    /// session. Touched only when a body-script rule fires.
+    private let scriptEngineProvider: MITMScriptEngine.Provider
 
-    init(host: String, policy: MITMRewritePolicy, effectiveAuthority: String?) {
+    init(
+        host: String,
+        policy: MITMRewritePolicy,
+        effectiveAuthority: String?,
+        scriptEngineProvider: MITMScriptEngine.Provider
+    ) {
         self.host = host
         self.policy = policy
         self.effectiveAuthority = effectiveAuthority
+        self.scriptEngineProvider = scriptEngineProvider
     }
 
     // MARK: - Headers
@@ -52,44 +61,30 @@ final class MITMHTTP2Rewriter {
 
     // MARK: - Body rewrite preflight
 
-    /// Whether any ``bodyReplace`` rule applies for this host + phase.
+    /// Whether any body-touching rule applies for this host + phase.
     /// The connection uses this to decide whether to buffer DATA frames.
     func hasBodyRewrite(phase: MITMPhase) -> Bool {
-        policy.rules(for: host, phase: phase).contains {
-            if case .bodyReplace = $0.operation { return true }
-            return false
-        }
+        MITMBodyTransform.hasBodyRule(in: policy.rules(for: host, phase: phase))
     }
 
-    /// Applies every ``bodyReplace`` rule for the given phase. Bodies
-    /// are mapped to a Latin-1 string (1:1 byte-to-codepoint) so the
-    /// regex round-trip preserves binary and non-UTF-8 payloads
-    /// exactly. The caller is responsible for decompressing
-    /// content-encoded bodies before passing them in.
-    func rewriteBody(_ data: Data, phase: MITMPhase) -> Data {
-        let rules = policy.rules(for: host, phase: phase)
-        guard var bodyString = String(bytes: data, encoding: .isoLatin1) else {
-            return data
-        }
-        var changed = false
-        for rule in rules {
-            guard case .bodyReplace(let regex, let replacement) = rule.operation else {
-                continue
-            }
-            let range = NSRange(bodyString.startIndex..., in: bodyString)
-            let mutated = regex.stringByReplacingMatches(
-                in: bodyString,
-                options: [],
-                range: range,
-                withTemplate: replacement
-            )
-            if mutated != bodyString {
-                bodyString = mutated
-                changed = true
-            }
-        }
-        guard changed else { return data }
-        return bodyString.data(using: .isoLatin1) ?? data
+    /// The matched rule set's ID, used as the script-store scope key.
+    /// Stable for the rewriter's lifetime since ``host`` is fixed at
+    /// init time.
+    var ruleSetID: UUID? {
+        policy.set(for: host)?.id
+    }
+
+    /// Applies every body-touching rule for the given phase. The caller
+    /// is responsible for decompressing content-encoded bodies before
+    /// passing them in, and for building ``context`` from the rewritten
+    /// header block (used by script rules; ignored otherwise).
+    func rewriteBody(_ data: Data, phase: MITMPhase, context: MITMScriptEngine.Context) -> Data {
+        MITMBodyTransform.apply(
+            data,
+            rules: policy.rules(for: host, phase: phase),
+            engineProvider: scriptEngineProvider,
+            context: context
+        )
     }
 
     // MARK: - Authority rewrite
@@ -156,7 +151,7 @@ final class MITMHTTP2Rewriter {
                     }
                     return (name: name, value: value)
                 }
-            case .bodyReplace:
+            case .bodyScript:
                 continue
             }
         }

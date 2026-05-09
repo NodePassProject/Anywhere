@@ -38,7 +38,12 @@ enum MITMOperation: Equatable {
     case headerAdd(name: String, value: String)
     case headerDelete(name: String)
     case headerReplace(pattern: String, name: String, value: String)
-    case bodyReplace(pattern: String, body: String)
+    /// JavaScript transform. ``scriptBase64`` is the base64-encoded
+    /// UTF-8 source of a script that defines `function process(body, ctx)`;
+    /// the runtime decodes, compiles, and invokes it on the buffered
+    /// (decompressed) body. Stored base64-encoded so rule-set text
+    /// import/export survives newlines and quoting.
+    case bodyScript(scriptBase64: String)
 }
 
 extension MITMOperation: CustomStringConvertible {
@@ -52,8 +57,8 @@ extension MITMOperation: CustomStringConvertible {
             String(localized: "Header Delete")
         case .headerReplace:
             String(localized: "Header Replace")
-        case .bodyReplace:
-            String(localized: "Body Replace")
+        case .bodyScript:
+            String(localized: "Body Script")
         }
     }
 }
@@ -64,7 +69,7 @@ extension MITMOperation: Codable {
         case headerAdd
         case headerDelete
         case headerReplace
-        case bodyReplace
+        case bodyScript
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -73,6 +78,7 @@ extension MITMOperation: Codable {
         case value
         case pattern
         case replacement
+        case script
     }
 
     init(from decoder: Decoder) throws {
@@ -97,10 +103,9 @@ extension MITMOperation: Codable {
                 name: try c.decode(String.self, forKey: .name),
                 value: try c.decode(String.self, forKey: .value)
             )
-        case .bodyReplace:
-            self = .bodyReplace(
-                pattern: try c.decode(String.self, forKey: .pattern),
-                body: try c.decode(String.self, forKey: .replacement)
+        case .bodyScript:
+            self = .bodyScript(
+                scriptBase64: try c.decode(String.self, forKey: .script)
             )
         }
     }
@@ -124,10 +129,9 @@ extension MITMOperation: Codable {
             try c.encode(pattern, forKey: .pattern)
             try c.encode(name, forKey: .name)
             try c.encode(value, forKey: .value)
-        case .bodyReplace(let pattern, let replacement):
-            try c.encode(Kind.bodyReplace, forKey: .kind)
-            try c.encode(pattern, forKey: .pattern)
-            try c.encode(replacement, forKey: .replacement)
+        case .bodyScript(let scriptBase64):
+            try c.encode(Kind.bodyScript, forKey: .kind)
+            try c.encode(scriptBase64, forKey: .script)
         }
     }
 }
@@ -339,7 +343,8 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         }
         self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? legacySuffix ?? ""
         self.rewriteTarget = try c.decodeIfPresent(MITMRewriteTarget.self, forKey: .rewriteTarget)
-        self.rules = try c.decode([MITMRule].self, forKey: .rules)
+        // A single corrupt rule shouldn't take down the whole set.
+        self.rules = try c.decodeSkippingInvalid([MITMRule].self, forKey: .rules)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -359,6 +364,29 @@ struct MITMSnapshot: Codable, Equatable {
     var ruleSets: [MITMRuleSet]
 
     static let empty = MITMSnapshot(enabled: false, ruleSets: [])
+
+    init(enabled: Bool, ruleSets: [MITMRuleSet]) {
+        self.enabled = enabled
+        self.ruleSets = ruleSets
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case ruleSets
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        // A single corrupt rule set shouldn't take down the whole snapshot.
+        self.ruleSets = try c.decodeSkippingInvalid([MITMRuleSet].self, forKey: .ruleSets)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(enabled, forKey: .enabled)
+        try c.encode(ruleSets, forKey: .ruleSets)
+    }
 
     /// Best-effort decode of the persisted blob. Returns ``empty`` when no
     /// snapshot has been written yet or the blob fails to decode. Both sides
