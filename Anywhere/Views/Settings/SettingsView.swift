@@ -20,13 +20,16 @@ import SwiftUI
 /// - "alwaysOnEnabled": triggers VPN reconnect (if connected) so on-demand rules update immediately.
 struct SettingsView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
+    
+    @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
 
     @State private var alwaysOnEnabled = AWCore.getAlwaysOnEnabled()
+    
     @State private var proxyMode = AWCore.getProxyMode()
-    @State private var bypassCountryCode = AWCore.getBypassCountryCode()
-    @State private var allowInsecure = AWCore.getAllowInsecure()
-
     @State private var adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+    @State private var bypassCountryCode = AWCore.getBypassCountryCode()
+    
+    @State private var allowInsecure = AWCore.getAllowInsecure()
     @State private var showInsecureAlert = false
 
     var body: some View {
@@ -89,11 +92,13 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Utilities") {
-                NavigationLink {
-                    MITMSettingsView()
-                } label: {
-                    TextWithColorfulIcon(title: "MITM", comment: nil, systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .indigo)
+            if experimentalEnabled {
+                Section("Utilities") {
+                    NavigationLink {
+                        MITMSettingsView()
+                    } label: {
+                        TextWithColorfulIcon(title: "MITM", comment: nil, systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .indigo)
+                    }
                 }
             }
 
@@ -168,8 +173,15 @@ struct SettingsView: View {
             Text("This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
         }
         .onAppear {
+            experimentalEnabled = AWCore.getExperimentalEnabled()
+
+            alwaysOnEnabled = AWCore.getAlwaysOnEnabled()
+            
             proxyMode = AWCore.getProxyMode()
             adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+            bypassCountryCode = AWCore.getBypassCountryCode()
+            
+            allowInsecure = AWCore.getAllowInsecure()
         }
     }
 
