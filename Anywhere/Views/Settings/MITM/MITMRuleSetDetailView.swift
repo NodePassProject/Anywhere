@@ -96,9 +96,11 @@ struct MITMRuleSetDetailView: View {
                 }
                 .onDelete { offsets in
                     suffixDrafts.remove(atOffsets: offsets)
+                    save()
                 }
                 .onMove { source, destination in
                     suffixDrafts.move(fromOffsets: source, toOffset: destination)
+                    save()
                 }
                 if isEditing == true {
                     Button {
@@ -132,9 +134,11 @@ struct MITMRuleSetDetailView: View {
                 }
                 .onDelete { offsets in
                     rules.remove(atOffsets: offsets)
+                    save()
                 }
                 .onMove { source, destination in
                     rules.move(fromOffsets: source, toOffset: destination)
+                    save()
                 }
                 if isEditing == true {
                     Button {
