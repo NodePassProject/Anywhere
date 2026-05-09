@@ -166,12 +166,130 @@ struct MITMRule: Codable, Equatable, Identifiable {
     }
 }
 
-/// Upstream destination for traffic matched by this rule set. ``port`` of
-/// nil means "keep the original port", the port the client tried to connect
-/// to.
+/// Action applied to traffic matched by a rule set. Three modes:
+///
+/// - ``transparent``: the outer leg is dialed to ``host``:``port`` instead
+///   of the original destination, and request authority headers are
+///   rewritten so the upstream sees the redirect target. The client still
+///   sees the original SNI on the leaf certificate. ``port`` of nil keeps
+///   the original port.
+/// - ``redirect302``: no outer leg. The session synthesizes
+///   `HTTP/1.1 302 Found` (or h2 equivalent) with
+///   `Location: https://<host>[:<port>]<original-path-and-query>`.
+/// - ``reject200``: no outer leg. The session synthesizes
+///   `HTTP/1.1 200 OK` (or h2 equivalent) with the configured
+///   ``rejectBody`` and an optional ``Content-Type`` override.
+enum MITMRewriteAction: String, Codable {
+    case transparent
+    case redirect302
+    case reject200
+
+    /// True for actions that synthesize the response on the inner leg
+    /// without ever opening an outer connection. The lwIP/MITM glue uses
+    /// this to skip the proxy/direct dial entirely.
+    var synthesizesResponse: Bool {
+        switch self {
+        case .transparent: return false
+        case .redirect302, .reject200: return true
+        }
+    }
+}
+
+/// Canned response body for ``MITMRewriteAction/reject200``. Three input
+/// shapes:
+///
+/// - ``text``: ``contents`` is plain UTF-8 text. Default Content-Type is
+///   `text/plain; charset=utf-8`.
+/// - ``gif``: a 43-byte 1×1 transparent GIF89a. ``contents`` is ignored.
+///   Default Content-Type is `image/gif`.
+/// - ``data``: ``contents`` is base64. Decoded at request time. Default
+///   Content-Type is `application/octet-stream`.
+///
+/// ``contentType`` overrides the default for any kind. Empty / nil keeps
+/// the default.
+struct MITMRejectBody: Codable, Equatable {
+    enum Kind: String, Codable {
+        case text
+        case gif
+        case data
+
+        /// Body to use when the user left ``MITMRejectBody/contents``
+        /// blank. Substituted at response-synthesis time so the wire
+        /// reply is never zero-length (some upstream apps treat an empty
+        /// 200 response as an error). The stored model keeps the empty
+        /// string so the editor doesn't show a fabricated value.
+        ///
+        /// - ``text``: a short ASCII line.
+        /// - ``data``: base64 for the literal "Anywhere".
+        /// - ``gif``: empty — the synthesizer always emits the canned
+        ///   1×1 GIF for this kind, regardless of ``contents``.
+        var defaultContents: String {
+            switch self {
+            case .text: return "Success from Anywhere"
+            case .data: return "QW55d2hlcmU="
+            case .gif:  return ""
+            }
+        }
+    }
+
+    var kind: Kind
+    var contents: String
+    var contentType: String?
+
+    init(kind: Kind = .text, contents: String = "", contentType: String? = nil) {
+        self.kind = kind
+        self.contents = contents
+        self.contentType = contentType
+    }
+}
+
+/// Per-rule-set redirect/reject configuration. The ``action`` field
+/// selects the mode; ``host``/``port`` only apply to ``transparent`` and
+/// ``redirect302``; ``rejectBody`` only applies to ``reject200``.
+///
+/// Codable is backward-compatible: persisted blobs that predate the
+/// ``action`` field decode as ``transparent``, preserving the host/port
+/// the user originally configured.
 struct MITMRewriteTarget: Codable, Equatable {
+    var action: MITMRewriteAction
     var host: String
     var port: UInt16?
+    var rejectBody: MITMRejectBody?
+
+    init(
+        action: MITMRewriteAction = .transparent,
+        host: String = "",
+        port: UInt16? = nil,
+        rejectBody: MITMRejectBody? = nil
+    ) {
+        self.action = action
+        self.host = host
+        self.port = port
+        self.rejectBody = rejectBody
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case host
+        case port
+        case rejectBody
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.action = try c.decodeIfPresent(MITMRewriteAction.self, forKey: .action) ?? .transparent
+        self.host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        self.port = try c.decodeIfPresent(UInt16.self, forKey: .port)
+        self.rejectBody = try c.decodeIfPresent(MITMRejectBody.self, forKey: .rejectBody)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(action, forKey: .action)
+        try c.encode(host, forKey: .host)
+        try c.encodeIfPresent(port, forKey: .port)
+        try c.encodeIfPresent(rejectBody, forKey: .rejectBody)
+    }
 }
 
 /// An ordered group of rewrite rules identified by a user-supplied name

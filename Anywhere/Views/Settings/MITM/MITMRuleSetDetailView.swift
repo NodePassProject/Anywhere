@@ -16,18 +16,52 @@ private struct MITMDomainSuffixDraft: Identifiable, Equatable {
     var value: String
 }
 
+/// Local picker state. ``disabled`` means "no rewriteTarget"; the other
+/// cases mirror ``MITMRewriteAction`` one-to-one. Kept separate so the
+/// ``Disabled`` choice has somewhere to live without leaking nil into
+/// the model layer.
+private enum MITMRewriteActionChoice: String, Hashable, CaseIterable, Identifiable {
+    case disabled
+    case transparent
+    case redirect302
+    case reject200
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .disabled:    return String(localized: "Disabled")
+        case .transparent: return String(localized: "Transparent Redirect")
+        case .redirect302: return String(localized: "302 Redirect")
+        case .reject200:   return String(localized: "200 Reject")
+        }
+    }
+}
+
+private extension MITMRejectBody.Kind {
+    var label: String {
+        switch self {
+        case .text: return String(localized: "Text")
+        case .gif:  return String(localized: "Tiny GIF")
+        case .data: return String(localized: "Data")
+        }
+    }
+}
+
 struct MITMRuleSetDetailView: View {
     @Environment(\.editMode) private var editMode
-    
+
     @StateObject private var store = MITMRuleSetStore.shared
 
     let ruleSet: MITMRuleSet?
 
     @State private var name: String = ""
     @State private var suffixDrafts: [MITMDomainSuffixDraft] = []
-    @State private var redirectEnabled: Bool = false
+    @State private var actionChoice: MITMRewriteActionChoice = .disabled
     @State private var redirectHost: String = ""
     @State private var redirectPort: String = ""
+    @State private var rejectBodyKind: MITMRejectBody.Kind = .text
+    @State private var rejectBodyContents: String = ""
 
 
     @State private var rules: [MITMRule] = []
@@ -36,47 +70,19 @@ struct MITMRuleSetDetailView: View {
     @State private var editingRule: MITMRule?
 
     @State private var validationError: String?
-    
+
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
 
     var body: some View {
         Form {
             Section {
                 if isEditing == true {
-                    Toggle(isOn: $redirectEnabled) {
-                        TextWithColorfulIcon(title: "Redirect", comment: nil, systemName: "arrow.trianglehead.turn.up.right.circle", foregroundColor: .white, backgroundColor: .blue)
-                    }
-                    if redirectEnabled {
-                        LabeledContent {
-                            TextField(String("everywhere.com"), text: $redirectHost)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-                        }
-                        LabeledContent {
-                            TextField(String("443"), text: $redirectPort)
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
-                        }
-                    }
+                    actionEditor
                 } else {
                     LabeledContent {
-                        if redirectHost == "" {
-                            Text("Disabled")
-                        } else {
-                            if redirectPort == "" {
-                                Text(redirectHost)
-                            } else {
-                                Text("\(redirectHost):\(redirectPort)")
-                            }
-                        }
+                        Text(actionChoice.label)
                     } label: {
-                        TextWithColorfulIcon(title: "Redirect", comment: nil, systemName: "arrow.trianglehead.turn.up.right.circle", foregroundColor: .white, backgroundColor: .blue)
+                        TextWithColorfulIcon(title: "Rewrite", comment: "MITM rewrite action", systemName: "arrow.trianglehead.turn.up.right", foregroundColor: .white, backgroundColor: .purple)
                     }
                 }
             }
@@ -171,26 +177,83 @@ struct MITMRuleSetDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private var actionEditor: some View {
+        actionPicker
+        switch actionChoice {
+        case .disabled:
+            EmptyView()
+        case .transparent, .redirect302:
+            authorityFields
+        case .reject200:
+            rejectFields
+        }
+    }
+
+    private var actionPicker: some View {
+        LabeledContent {
+            Picker(String(localized: "Rewrite", comment: "MITM rewrite action"), selection: $actionChoice) {
+                ForEach(MITMRewriteActionChoice.allCases) { choice in
+                    Text(choice.label).tag(choice)
+                }
+            }
+            .labelsHidden()
+        } label: {
+            TextWithColorfulIcon(title: "Rewrite", comment: "MITM rewrite action", systemName: "arrow.trianglehead.turn.up.right", foregroundColor: .white, backgroundColor: .purple)
+        }
+    }
+
+    @ViewBuilder
+    private var authorityFields: some View {
+        LabeledContent {
+            TextField(String("everywhere.com"), text: $redirectHost)
+                .keyboardType(.URL)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .multilineTextAlignment(.trailing)
+        } label: {
+            TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+        }
+        LabeledContent {
+            TextField(String("443"), text: $redirectPort)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+        } label: {
+            TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
+        }
+    }
+
+    @ViewBuilder
+    private var rejectFields: some View {
+        LabeledContent {
+            Picker("Body Type", selection: $rejectBodyKind) {
+                Text(MITMRejectBody.Kind.text.label).tag(MITMRejectBody.Kind.text)
+                Text(MITMRejectBody.Kind.gif.label).tag(MITMRejectBody.Kind.gif)
+                Text(MITMRejectBody.Kind.data.label).tag(MITMRejectBody.Kind.data)
+            }
+            .labelsHidden()
+        } label: {
+            TextWithColorfulIcon(title: "Body Type", comment: nil, systemName: "doc.badge.gearshape", foregroundColor: .white, backgroundColor: .purple)
+        }
+        if rejectBodyKind != .gif {
+            LabeledContent {
+                TextField(rejectBodyKind.defaultContents, text: $rejectBodyContents)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .multilineTextAlignment(.trailing)
+            } label: {
+                TextWithColorfulIcon(title: "Content", comment: nil, systemName: "text.alignleft", foregroundColor: .white, backgroundColor: .gray)
+            }
+        }
+    }
+
     private func save() {
         suffixDrafts = suffixDrafts
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let suffixes = suffixDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-        var target: MITMRewriteTarget?
-        if redirectEnabled {
-            let host = redirectHost.trimmingCharacters(in: .whitespacesAndNewlines)
-            var port: UInt16?
-            let portTrimmed = redirectPort.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !portTrimmed.isEmpty {
-                port = UInt16(portTrimmed)
-            } else {
-                port = nil
-            }
-            if !host.isEmpty {
-                target = MITMRewriteTarget(host: host, port: port)
-            }
-        }
+        let target = buildRewriteTarget()
 
         let result = MITMRuleSet(
             id: ruleSet?.id ?? UUID(),
@@ -202,17 +265,62 @@ struct MITMRuleSetDetailView: View {
         store.updateRuleSet(result)
     }
 
+    /// Translates the editor's local fields into a ``MITMRewriteTarget``,
+    /// or nil when the user picked Disabled / left the required fields
+    /// empty.
+    private func buildRewriteTarget() -> MITMRewriteTarget? {
+        switch actionChoice {
+        case .disabled:
+            return nil
+        case .transparent, .redirect302:
+            let host = redirectHost.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !host.isEmpty else { return nil }
+            let portTrimmed = redirectPort.trimmingCharacters(in: .whitespacesAndNewlines)
+            let port: UInt16? = portTrimmed.isEmpty ? nil : UInt16(portTrimmed)
+            let action: MITMRewriteAction = actionChoice == .redirect302 ? .redirect302 : .transparent
+            return MITMRewriteTarget(action: action, host: host, port: port)
+        case .reject200:
+            let body = MITMRejectBody(
+                kind: rejectBodyKind,
+                contents: rejectBodyKind == .gif ? "" : rejectBodyContents,
+                contentType: nil
+            )
+            return MITMRewriteTarget(action: .reject200, rejectBody: body)
+        }
+    }
+
     private func loadInitial() {
         guard let ruleSet else { return }
         name = ruleSet.name
         suffixDrafts = ruleSet.domainSuffixes.map { MITMDomainSuffixDraft(value: $0) }
         rules = ruleSet.rules
-        if let target = ruleSet.rewriteTarget {
-            redirectEnabled = true
+        guard let target = ruleSet.rewriteTarget else {
+            actionChoice = .disabled
+            return
+        }
+        switch target.action {
+        case .transparent:
+            actionChoice = .transparent
             redirectHost = target.host
-            if let port = target.port {
-                redirectPort = String(port)
+            redirectPort = target.port.map(String.init) ?? ""
+        case .redirect302:
+            actionChoice = .redirect302
+            redirectHost = target.host
+            redirectPort = target.port.map(String.init) ?? ""
+        case .reject200:
+            actionChoice = .reject200
+            if let body = target.rejectBody {
+                rejectBodyKind = body.kind
+                rejectBodyContents = body.contents
             }
+        }
+    }
+
+    private func defaultContentTypePlaceholder(for kind: MITMRejectBody.Kind) -> String {
+        switch kind {
+        case .text: return "text/plain; charset=utf-8"
+        case .gif:  return "image/gif"
+        case .data: return "application/octet-stream"
         }
     }
 }

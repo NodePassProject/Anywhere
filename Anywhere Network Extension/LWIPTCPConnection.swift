@@ -481,8 +481,17 @@ class LWIPTCPConnection {
     /// Kicks off the outbound connection using the currently committed
     /// routing (`configuration`, `bypass`, `dstHost`). Idempotent — no-op
     /// once the connect has started or completed.
+    ///
+    /// Synthesize-mode shortcut: when MITM is on and the matched rule's
+    /// action produces its own response (302 redirect / 200 reject),
+    /// skip the proxy/direct dial entirely and hand the connection to a
+    /// no-outer-leg ``MITMSession``.
     private func beginConnecting() {
-        guard !closed, !proxyConnecting, proxyConnection == nil else { return }
+        guard !closed, !proxyConnecting, proxyConnection == nil, mitmSession == nil else { return }
+        if mitmEnabled, mitmRewriteTarget?.action.synthesizesResponse == true {
+            startSynthesizingMITMSession()
+            return
+        }
         if bypass {
             connectDirect()
         } else {
@@ -694,6 +703,31 @@ class LWIPTCPConnection {
 
     /// Starts MITM and transfers upstream reads/writes to ``MITMSession``.
     private func startMITMSession(over proxy: ProxyConnection) {
+        startMITMSession(proxy: proxy, transferringClient: true)
+    }
+
+    /// Starts MITM in synthesize-only mode: the rule set's action
+    /// produces its own response (302 / 200 reject), so no upstream
+    /// connection is dialed. The handshake / activity timers that the
+    /// proxy/direct path normally arms on connect are armed here too,
+    /// since we are skipping the dial that would have done it.
+    private func startSynthesizingMITMSession() {
+        handshakeTimer?.cancel()
+        handshakeTimer = nil
+        activityTimer = ActivityTimer(
+            queue: lwipQueue,
+            timeout: TunnelConstants.connectionIdleTimeout
+        ) { [weak self] in
+            guard let self, !self.closed else { return }
+            self.close()
+        }
+        startMITMSession(proxy: nil, transferringClient: false)
+    }
+
+    /// Shared session bootstrap. ``proxy`` is nil in synthesize-only
+    /// mode; in that case ``MITMSession`` skips the outer handshake and
+    /// drives a ``MITMResponseSynthesizer`` after the inner handshake.
+    private func startMITMSession(proxy: ProxyConnection?, transferringClient: Bool) {
         guard let stack = LWIPStack.shared else { abort(); return }
         let sni = mitmSNI ?? dstHost
 
@@ -717,8 +751,13 @@ class LWIPTCPConnection {
 
         // Hand off upstream ownership. MITMSession is now the sole party
         // that may call send/receive on `proxy` or cancel `proxyClient`.
-        let transferredClient = proxyClient
-        proxyClient = nil
+        let transferredClient: ProxyClient?
+        if transferringClient {
+            transferredClient = proxyClient
+            proxyClient = nil
+        } else {
+            transferredClient = nil
+        }
         proxyConnection = nil
 
         // Pass SNI as ``dstHost`` instead of the IP-derived value so

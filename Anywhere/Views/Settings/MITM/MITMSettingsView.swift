@@ -97,10 +97,18 @@ struct MITMSettingsView: View {
     private func summary(for ruleSet: MITMRuleSet) -> String {
         let count = ruleSet.rules.count
         let rulesPart = String(localized: "\(count) rule(s)")
-        if let target = ruleSet.rewriteTarget {
+        guard let target = ruleSet.rewriteTarget else {
+            return rulesPart
+        }
+        switch target.action {
+        case .transparent:
             let authority = target.port.map { "\(target.host):\($0)" } ?? target.host
             return "→ \(authority) · \(rulesPart)"
+        case .redirect302:
+            let authority = target.port.map { "\(target.host):\($0)" } ?? target.host
+            return "302 → \(authority) · \(rulesPart)"
+        case .reject200:
+            return "Reject 200 · \(rulesPart)"
         }
-        return rulesPart
     }
 }

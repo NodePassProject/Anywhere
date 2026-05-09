@@ -22,9 +22,20 @@ import Foundation
 ///
 /// Recognized keys:
 ///
-/// - `name`     — display name for the rule set
-/// - `hostname` — comma-separated list of domain suffixes
-/// - `redirect` — `host` or `host:port` for a per-set rewrite target
+/// - `name`         — display name for the rule set
+/// - `hostname`     — comma-separated list of domain suffixes
+/// - `redirect`     — transparent rewrite target: `host` or `host:port`
+/// - `redirect-302` — synthesize a 302 response with
+///                    `Location: https://<host>[:<port>]<original-path>`
+/// - `reject-200`   — synthesize a 200 response. Value is `<kind>` or
+///                    `<kind> <content>`. Kind is `text`, `gif`, or `data`.
+///                    For `text`, content is the literal UTF-8 body. For
+///                    `gif`, content is ignored (1×1 transparent GIF).
+///                    For `data`, content is base64 (decoded at apply time).
+/// - `content-type` — optional Content-Type override for `reject-200`.
+///
+/// `redirect`, `redirect-302`, and `reject-200` are mutually exclusive;
+/// the last one to appear wins.
 ///
 /// Unrecognized header keys are ignored. Comment lines start with `#`
 /// or `//`. Lines that fail to parse as either a header or a rule are
@@ -66,6 +77,7 @@ enum MITMRuleSetParser {
         var name = ""
         var suffixes: [String] = []
         var target: MITMRewriteTarget?
+        var contentTypeOverride: String?
         var rules: [MITMRule] = []
 
         for raw in text.components(separatedBy: .newlines) {
@@ -83,13 +95,27 @@ enum MITMRuleSetParser {
                         .map { $0.trimmingCharacters(in: .whitespaces) }
                         .filter { !$0.isEmpty }
                 case "redirect":
-                    target = parseRedirect(header.value)
+                    target = parseAuthority(header.value, action: .transparent)
+                case "redirect-302":
+                    target = parseAuthority(header.value, action: .redirect302)
+                case "reject-200":
+                    target = parseReject200(header.value)
+                case "content-type":
+                    contentTypeOverride = header.value
                 default:
                     break
                 }
             } else if let rule = parseRuleLine(line) {
                 rules.append(rule)
             }
+        }
+
+        if let override = contentTypeOverride,
+           !override.isEmpty,
+           target?.action == .reject200,
+           var body = target?.rejectBody {
+            body.contentType = override
+            target?.rejectBody = body
         }
 
         return MITMRuleSet(
@@ -100,7 +126,14 @@ enum MITMRuleSetParser {
         )
     }
 
-    private static let recognizedHeaders: Set<String> = ["name", "hostname", "redirect"]
+    private static let recognizedHeaders: Set<String> = [
+        "name",
+        "hostname",
+        "redirect",
+        "redirect-302",
+        "reject-200",
+        "content-type",
+    ]
 
     private static func parseHeader(_ line: String) -> (key: String, value: String)? {
         guard let equal = line.firstIndex(of: "=") else { return nil }
@@ -113,19 +146,44 @@ enum MITMRuleSetParser {
         return (key, value)
     }
 
-    /// Parses `host` or `host:port`. Returns nil only when the value is
-    /// empty after trimming.
-    private static func parseRedirect(_ value: String) -> MITMRewriteTarget? {
+    /// Parses `host` or `host:port` for the transparent and 302 redirect
+    /// modes. Returns nil only when the value is empty after trimming.
+    private static func parseAuthority(_ value: String, action: MITMRewriteAction) -> MITMRewriteTarget? {
         let trimmed = value.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
         if let colon = trimmed.lastIndex(of: ":") {
             let hostPart = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
             let portPart = String(trimmed[trimmed.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
             if !hostPart.isEmpty, let port = UInt16(portPart) {
-                return MITMRewriteTarget(host: hostPart, port: port)
+                return MITMRewriteTarget(action: action, host: hostPart, port: port)
             }
         }
-        return MITMRewriteTarget(host: trimmed, port: nil)
+        return MITMRewriteTarget(action: action, host: trimmed, port: nil)
+    }
+
+    /// Parses `reject-200` value. Format: `<kind>` or `<kind> <content>`,
+    /// where kind is `text`, `gif`, or `data`. The first whitespace run
+    /// separates kind from content; everything after is the content
+    /// (preserved verbatim, except a single trailing CR is removed). An
+    /// unknown kind falls back to ``MITMRejectBody/Kind/text``.
+    private static func parseReject200(_ value: String) -> MITMRewriteTarget {
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            return MITMRewriteTarget(action: .reject200, rejectBody: MITMRejectBody())
+        }
+        let parts = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        let rawKind = parts.first.map(String.init)?.lowercased() ?? "text"
+        let content = parts.count > 1 ? String(parts[1]) : ""
+        let kind: MITMRejectBody.Kind
+        switch rawKind {
+        case "gif": kind = .gif
+        case "data": kind = .data
+        default: kind = .text
+        }
+        return MITMRewriteTarget(
+            action: .reject200,
+            rejectBody: MITMRejectBody(kind: kind, contents: content)
+        )
     }
 
     // MARK: - Rule line parsing
