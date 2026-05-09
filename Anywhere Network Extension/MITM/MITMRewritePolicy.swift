@@ -21,14 +21,20 @@ enum CompiledMITMOperation {
     case headerAdd(name: String, value: String)
     case headerDelete(nameLower: String)
     case headerReplace(regex: NSRegularExpression, name: String, value: String)
-    case bodyReplace(regex: NSRegularExpression, replacement: String)
+    /// JavaScript transform. ``source`` is the decoded UTF-8 source of
+    /// `function process(body, ctx)`. Compilation/execution belongs to
+    /// ``MITMScriptEngine`` so the policy stays free of JSContext.
+    case bodyScript(source: String)
 }
 
 /// Compiled view of a rule set at one trie terminal: the specific suffix
 /// reached, the optional upstream redirect, and rules ready to apply. A
 /// source set with multiple suffixes produces one of these per suffix,
-/// each sharing the same compiled rules and target.
+/// each sharing the same compiled rules and target. ``id`` is copied
+/// from the source ``MITMRuleSet`` so the runtime can use it as a
+/// stable scope key for ``MITMScriptStore``.
 struct CompiledMITMRuleSet {
+    let id: UUID
     let domainSuffix: String
     let rewriteTarget: MITMRewriteTarget?
     let rules: [CompiledMITMRule]
@@ -109,6 +115,7 @@ final class MITMRewritePolicy {
                 setCount += 1
             }
             node.ruleSet = CompiledMITMRuleSet(
+                id: set.id,
                 domainSuffix: suffix,
                 rewriteTarget: set.rewriteTarget,
                 rules: compiledRules
@@ -173,12 +180,16 @@ final class MITMRewritePolicy {
                 return nil
             }
             return .headerReplace(regex: regex, name: name, value: value)
-        case .bodyReplace(let pattern, let replacement):
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-                logger.warning("[MITM] bodyReplace pattern failed to compile (suffix=\(suffix)): \(pattern)")
+        case .bodyScript(let scriptBase64):
+            guard let raw = Data(base64Encoded: scriptBase64) else {
+                logger.warning("[MITM] bodyScript invalid base64 (suffix=\(suffix))")
                 return nil
             }
-            return .bodyReplace(regex: regex, replacement: replacement)
+            guard let source = String(data: raw, encoding: .utf8) else {
+                logger.warning("[MITM] bodyScript source not valid UTF-8 (suffix=\(suffix))")
+                return nil
+            }
+            return .bodyScript(source: source)
         }
     }
 }

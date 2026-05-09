@@ -176,6 +176,11 @@ final class MITMSession {
 
     private let h2Rewriter: MITMHTTP2Rewriter
 
+    /// Lazy JavaScript runtime shared by both HTTP/1 streams and the
+    /// HTTP/2 rewriter. Materializes only when a ``CompiledMITMOperation/bodyScript``
+    /// rule actually fires for this connection.
+    private let scriptEngineProvider = MITMScriptEngine.Provider()
+
     private var torn = false
 
     /// Set by the lwIP-side caller to receive inner-leg bytes that need
@@ -221,18 +226,21 @@ final class MITMSession {
             host: dstHost,
             phase: .httpRequest,
             policy: policy,
-            effectiveAuthority: effectiveAuthority
+            effectiveAuthority: effectiveAuthority,
+            scriptEngineProvider: scriptEngineProvider
         )
         self.responseStream = MITMHTTP1Stream(
             host: dstHost,
             phase: .httpResponse,
             policy: policy,
-            effectiveAuthority: nil // Host headers do not apply on responses.
+            effectiveAuthority: nil, // Host headers do not apply on responses.
+            scriptEngineProvider: scriptEngineProvider
         )
         self.h2Rewriter = MITMHTTP2Rewriter(
             host: dstHost,
             policy: policy,
-            effectiveAuthority: effectiveAuthority
+            effectiveAuthority: effectiveAuthority,
+            scriptEngineProvider: scriptEngineProvider
         )
     }
 

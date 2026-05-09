@@ -70,21 +70,7 @@ class ConfigurationStore: ObservableObject {
 
     private static func load() -> [ProxyConfiguration] {
         guard let data = JSONBlobStore.shared.load(.configurations) else { return [] }
-        return decodeSkippingInvalid(data) ?? []
-    }
-
-    private static func decodeSkippingInvalid(_ data: Data) -> [ProxyConfiguration]? {
-        guard let wrapped = try? JSONDecoder().decode([FailableDecodable<ProxyConfiguration>].self, from: data) else {
-            return nil
-        }
-        return wrapped.compactMap(\.value)
-    }
-
-    private struct FailableDecodable<T: Decodable>: Decodable {
-        let value: T?
-        init(from decoder: Decoder) throws {
-            value = try? T(from: decoder)
-        }
+        return JSONDecoder().decodeSkippingInvalid([ProxyConfiguration].self, from: data) ?? []
     }
 
     private func save() {

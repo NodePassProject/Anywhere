@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import JavaScriptCore
 
 /// Text-based importer for ``MITMRuleSet``s.
 ///
@@ -55,23 +56,23 @@ import Foundation
 /// | `1` | header-add     | both            | name, value           |
 /// | `2` | header-delete  | both            | name                  |
 /// | `3` | header-replace | both            | pattern, name, value  |
-/// | `4` | body-replace   | both            | pattern, replacement  |
+/// | `4` | body-script    | both            | base64                |
 ///
 /// Fields are separated by `,`. Whitespace around unquoted fields is
 /// trimmed. A field that begins with `"` is read until the matching `"`,
 /// with `""` inside a quoted field producing a literal `"` — so values
-/// containing commas can be wrapped in double quotes.
+/// containing commas can be wrapped in double quotes. Patterns for
+/// `url-replace` and `header-replace` are NSRegularExpression with the
+/// usual Unicode semantics.
 ///
-/// Pattern semantics for `body-replace`: the runtime applies the
-/// pattern byte-for-byte to the decompressed body (gzip/deflate/br are
-/// decoded first). Bodies are viewed through Latin-1, where every byte
-/// 0x00–0xFF corresponds to one code point U+0000–U+00FF, so ASCII
-/// patterns match the same bytes they always did. Non-ASCII bytes —
-/// UTF-8 multibyte sequences for CJK or emoji, GBK / Shift-JIS text,
-/// raw binary — must be addressed via `\xHH` escapes inside the
-/// pattern, not as Unicode characters. (Patterns for `url-replace`
-/// and `header-replace` operate on header / request-target text and
-/// follow the usual NSRegularExpression Unicode semantics.)
+/// `body-script` carries a base64-encoded UTF-8 JavaScript source
+/// defining `function process(body, ctx)`. The runtime invokes it on
+/// the buffered (decompressed) body as a `Uint8Array`; the function
+/// returns `Uint8Array | string | null` (null leaves the body
+/// unchanged). Scripts are stored base64-encoded so newlines and
+/// quoting in the source survive the line-based rule format. See
+/// ``MITMScriptEngine`` for the full runtime contract, including the
+/// `Anywhere.utf8 / base64 / hex` helper globals.
 enum MITMRuleSetParser {
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""
@@ -222,11 +223,11 @@ enum MITMRuleSetParser {
             guard !pattern.isEmpty, !name.isEmpty, isValidRegex(pattern) else { return nil }
             return MITMRule(phase: phase, operation: .headerReplace(pattern: pattern, name: name, value: args[2]))
 
-        case 4:  // body-replace
-            guard args.count == 2 else { return nil }
-            let pattern = args[0]
-            guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
-            return MITMRule(phase: phase, operation: .bodyReplace(pattern: pattern, body: args[1]))
+        case 4:  // body-script
+            guard args.count == 1 else { return nil }
+            let b64 = args[0]
+            guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
+            return MITMRule(phase: phase, operation: .bodyScript(scriptBase64: b64))
 
         default:
             return nil
@@ -291,5 +292,31 @@ enum MITMRuleSetParser {
 
     private static func isValidRegex(_ pattern: String) -> Bool {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
+    }
+
+    /// Validates a `body-script` field: base64 → UTF-8 → JavaScript
+    /// parse. Wraps the source in the same IIFE the runtime uses so a
+    /// rule that imports cleanly here is one the runtime can compile.
+    /// Parse-only — does not evaluate, so user code with side effects
+    /// is not run at import time.
+    private static func isValidScriptBase64(_ b64: String) -> Bool {
+        guard let raw = Data(base64Encoded: b64),
+              let source = String(data: raw, encoding: .utf8)
+        else { return false }
+        let wrapped = "(function(){\n\(source)\nreturn process;\n})()"
+        guard let context = JSContext() else { return false }
+        return wrapped.withCString { cString in
+            guard let scriptRef = JSStringCreateWithUTF8CString(cString) else {
+                return false
+            }
+            defer { JSStringRelease(scriptRef) }
+            return JSCheckScriptSyntax(
+                context.jsGlobalContextRef,
+                scriptRef,
+                nil,
+                0,
+                nil
+            )
+        }
     }
 }

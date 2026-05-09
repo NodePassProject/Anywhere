@@ -28,7 +28,6 @@ struct MITMRuleEditorView: View {
         case headerAdd
         case headerDelete
         case headerReplace
-        case bodyReplace
 
         var id: String { rawValue }
         var label: String {
@@ -37,7 +36,6 @@ struct MITMRuleEditorView: View {
             case .headerAdd:     return String(localized: "Header Add")
             case .headerDelete:  return String(localized: "Header Delete")
             case .headerReplace: return String(localized: "Header Replace")
-            case .bodyReplace:   return String(localized: "Body Replace")
             }
         }
 
@@ -149,23 +147,6 @@ struct MITMRuleEditorView: View {
                     } label: {
                         TextWithColorfulIcon(title: "Header Value", comment: nil, systemName: "abc", foregroundColor: .white, backgroundColor: .gray)
                     }
-                case .bodyReplace:
-                    LabeledContent {
-                        TextField(String("^Anywhere$"), text: $pattern)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Pattern", comment: nil, systemName: "asterisk", foregroundColor: .white, backgroundColor: .gray)
-                    }
-                    LabeledContent {
-                        TextField(String("Everywhere"), text: $replacement)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Replacement", comment: nil, systemName: "doc.text.fill", foregroundColor: .white, backgroundColor: .gray)
-                    }
                 }
             } footer: {
                 if let validationError {
@@ -236,16 +217,6 @@ struct MITMRuleEditorView: View {
                 return
             }
             operation = .headerReplace(pattern: pattern, name: headerName, value: headerValue)
-        case .bodyReplace:
-            guard !pattern.isEmpty else {
-                validationError = String(localized: "Pattern is required.")
-                return
-            }
-            guard (try? NSRegularExpression(pattern: pattern, options: [])) != nil else {
-                validationError = String(localized: "Pattern is not a valid regular expression.")
-                return
-            }
-            operation = .bodyReplace(pattern: pattern, body: replacement)
         }
 
         let result = MITMRule(
@@ -279,10 +250,11 @@ struct MITMRuleEditorView: View {
             self.pattern = pattern
             self.headerName = name
             self.headerValue = value
-        case .bodyReplace(let pattern, let body):
-            operationKind = .bodyReplace
-            self.pattern = pattern
-            self.replacement = body
+        case .bodyScript:
+            // Scripts are import-only; the detail view should never route
+            // a .bodyScript rule into this editor. Guard anyway so the
+            // exhaustiveness check passes.
+            break
         }
     }
 }

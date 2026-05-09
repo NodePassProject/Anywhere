@@ -119,7 +119,6 @@ struct MITMRuleSetDetailView: View {
                 ForEach(rules) { rule in
                     VStack(alignment: .leading) {
                         Text(MITMRuleSummary.title(for: rule))
-                            .foregroundStyle(.primary)
                         Text(MITMRuleSummary.subtitle(for: rule))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -129,6 +128,8 @@ struct MITMRuleSetDetailView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        // Script editor not implemented
+                        if case .bodyScript = rule.operation { return }
                         editingRule = rule
                     }
                 }
@@ -345,8 +346,9 @@ enum MITMRuleSummary {
             return name
         case .headerReplace(let pattern, _, _):
             return pattern
-        case .bodyReplace(let pattern, _):
-            return pattern
+        case .bodyScript(let scriptBase64):
+            let bytes = Data(base64Encoded: scriptBase64)?.count ?? 0
+            return String(localized: "\(bytes) byte(s)")
         }
     }
 }

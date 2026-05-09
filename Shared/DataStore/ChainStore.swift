@@ -40,11 +40,8 @@ class ChainStore: ObservableObject {
     // MARK: - Persistence
 
     private static func load() -> [ProxyChain] {
-        guard let data = JSONBlobStore.shared.load(.chains),
-              let result = try? JSONDecoder().decode([ProxyChain].self, from: data) else {
-            return []
-        }
-        return result
+        guard let data = JSONBlobStore.shared.load(.chains) else { return [] }
+        return JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) ?? []
     }
 
     private func save() {

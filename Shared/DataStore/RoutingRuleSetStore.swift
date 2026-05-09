@@ -27,6 +27,25 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
         self.name = name
         self.rules = rules
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, rules
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        // A single corrupt rule shouldn't take down the whole set.
+        self.rules = try c.decodeSkippingInvalid([RoutingRule].self, forKey: .rules)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(rules, forKey: .rules)
+    }
 }
 
 @MainActor
@@ -57,7 +76,7 @@ class RoutingRuleSetStore: ObservableObject {
 
         // Load custom rulesets
         if let data = JSONBlobStore.shared.load(.customRuleSets),
-           let decoded = try? JSONDecoder().decode([CustomRoutingRuleSet].self, from: data) {
+           let decoded = JSONDecoder().decodeSkippingInvalid([CustomRoutingRuleSet].self, from: data) {
             customRuleSets = decoded
         }
 
