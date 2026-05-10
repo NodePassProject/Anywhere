@@ -71,6 +71,14 @@ nonisolated enum LatencyTester {
 
     /// Resolves each proxy hop ahead of time so latency tests can dial the same
     /// first-hop IPs the tunnel expects, without depending on in-tunnel DNS timing.
+    ///
+    /// Any `resolvedIP` arriving in `configuration` from the IPC sender (the main
+    /// app) is discarded: while the tunnel is up, main-app `getaddrinfo` is scoped
+    /// inside `NEDNSSettings` and returns a fake IP from lwIP's interception
+    /// pool. That IP would route via the NE's kernel-bypassed sockets out the
+    /// physical interface, where 198.18.0.0/15 has no route, and the test would
+    /// hit its 3-second timeout. Resolving here uses NE-process `getaddrinfo`,
+    /// which Apple scopes outside the tunnel and returns a real IP.
     private static func resolvedConfiguration(_ configuration: ProxyConfiguration) -> ProxyConfiguration {
         let resolvedChain = configuration.chain?.map(resolvedConfiguration)
         return ProxyConfiguration(
@@ -78,7 +86,7 @@ nonisolated enum LatencyTester {
             name: configuration.name,
             serverAddress: configuration.serverAddress,
             serverPort: configuration.serverPort,
-            resolvedIP: configuration.resolvedIP ?? ProxyDNSCache.shared.resolveHost(configuration.serverAddress, forceFresh: true),
+            resolvedIP: ProxyDNSCache.shared.resolveHost(configuration.serverAddress, forceFresh: true),
             subscriptionId: configuration.subscriptionId,
             outbound: configuration.outbound,
             chain: resolvedChain

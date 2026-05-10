@@ -506,13 +506,14 @@ class VPNViewModel: ObservableObject {
     }
 
     /// Sends one `testLatency` IPC message and awaits the extension's reply.
-    /// Pre-resolves the proxy server address so the extension can dial via IP
-    /// without any DNS-over-tunnel path.
+    /// The extension resolves the proxy server address itself via NE-process
+    /// `getaddrinfo` (scoped outside the tunnel). Resolving here would route
+    /// through `NEDNSSettings` and yield a fake IP from lwIP's interception,
+    /// which the test would then dial and time out on.
     private func sendLatencyTestMessage(for configuration: ProxyConfiguration) async -> LatencyResult {
         guard let session = vpnManager?.connection as? NETunnelProviderSession else { return .failed }
 
-        let resolved = await Self.resolved(configuration)
-        guard let messageData = try? JSONEncoder().encode(TunnelMessage.testLatency(resolved)) else { return .failed }
+        guard let messageData = try? JSONEncoder().encode(TunnelMessage.testLatency(configuration)) else { return .failed }
 
         return await withCheckedContinuation { continuation in
             do {
@@ -525,12 +526,6 @@ class VPNViewModel: ObservableObject {
                 continuation.resume(returning: .failed)
             }
         }
-    }
-
-    /// Returns a copy of `configuration` with `resolvedIP` set when missing.
-    /// Runs DNS resolution off the main actor since `getaddrinfo` blocks.
-    private static func resolved(_ configuration: ProxyConfiguration) async -> ProxyConfiguration {
-        await Task.detached { Self.withResolvedIP(configuration) }.value
     }
 
     /// Returns `configuration` with `resolvedIP` set, preferring an existing
