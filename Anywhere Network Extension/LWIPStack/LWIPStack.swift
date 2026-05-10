@@ -107,11 +107,6 @@ class LWIPStack {
     /// Used to gate DomainRouter bypass flags and detect settings changes.
     var bypassCountryCode: String = ""
 
-    /// All proxy server addresses (domains and resolved IPs) from all configurations.
-    /// Updated via IPC from the app when configurations change. The extension also
-    /// resolves domains to IPs so it can match connections by IP address.
-    private var proxyServerAddresses: Set<String> = []
-
     /// Global traffic counters (bytes through the tunnel).
     /// Incremented on lwipQueue; read from the NE provider message handler thread.
     /// Small races are tolerable — these are only used for UI display.
@@ -205,34 +200,6 @@ class LWIPStack {
     /// Singleton for C callback access (one NE process = one stack).
     static var shared: LWIPStack?
 
-    // MARK: - Proxy Server Address Bypass
-
-    /// Returns true if traffic to the given host should bypass the tunnel.
-    /// Checks proxy server addresses (prevents routing loops after config switch).
-    /// Country-based bypass is handled entirely by DomainRouter rules.
-    func shouldBypass(host: String) -> Bool {
-        isProxyServerAddress(host)
-    }
-
-    /// Returns true if the given host matches any proxy server address across all
-    /// configurations. Prevents routing loops and ensures latency tests bypass the tunnel.
-    ///
-    /// Checks the proxy server address set (domains + resolved IPs synced from the app)
-    /// with a fallback to the active configuration in case IPC hasn't arrived yet.
-    private func isProxyServerAddress(_ host: String) -> Bool {
-        // Fast path: direct set lookup (covers domains and resolved IPs)
-        if proxyServerAddresses.contains(host) { return true }
-        // Fallback: check active config in case proxyServerAddresses hasn't been populated yet
-        guard let configuration = configuration else { return false }
-        if host == configuration.serverAddress || host == configuration.resolvedIP { return true }
-        if let chain = configuration.chain {
-            for proxy in chain {
-                if host == proxy.serverAddress || host == proxy.resolvedIP { return true }
-            }
-        }
-        return false
-    }
-
     // MARK: - Shadowsocks UDP Sessions
 
     /// Returns the shared SS UDP session for `configuration`, creating one on
@@ -294,7 +261,7 @@ class LWIPStack {
 
     // MARK: - Runtime Configuration
 
-    func configureRuntime(for configuration: ProxyConfiguration, shouldLoadProxyServerAddresses: Bool) {
+    func configureRuntime(for configuration: ProxyConfiguration) {
         loadIPv6Settings()
         loadBypassCountry()
         loadEncryptedDNSSetting()
@@ -302,9 +269,12 @@ class LWIPStack {
         loadHideVPNIconSetting()
         loadBlockQUICSetting()
         loadMITMSetting()
-        if shouldLoadProxyServerAddresses {
-            loadProxyServerAddresses()
-        }
+
+        // The first hop is the only domain the NE itself re-resolves frequently
+        // (subsequent chain hops are resolved by upstream proxy servers). Mark
+        // it active so ProxyDNSCache returns stale IPs immediately on TTL
+        // expiry and refreshes in the background, keeping reconnects snappy.
+        ProxyDNSCache.shared.setActiveProxyDomain(Self.firstHopAddress(for: configuration))
 
         if Self.shouldUseVisionMux(configuration) {
             muxManager = MuxManager(configuration: configuration, lwipQueue: lwipQueue)
@@ -317,6 +287,12 @@ class LWIPStack {
         } else {
             domainRouter.reset()
         }
+    }
+
+    /// The serverAddress of the first proxy the NE dials directly. For chain
+    /// configurations that's `chain[0]`; otherwise it's the exit proxy itself.
+    private static func firstHopAddress(for configuration: ProxyConfiguration) -> String {
+        configuration.chain?.first?.serverAddress ?? configuration.serverAddress
     }
 
     static func shouldUseVisionMux(_ configuration: ProxyConfiguration) -> Bool {
@@ -333,89 +309,6 @@ class LWIPStack {
     /// Reads the bypass country code from app group UserDefaults.
     private func loadBypassCountry() {
         bypassCountryCode = AWCore.getBypassCountryCode()
-    }
-
-    // MARK: - Proxy Server Address Bypass
-
-    /// Loads proxy server addresses from App Group UserDefaults and resolves
-    /// domains to IPs in the background. Called on initial start.
-    private func loadProxyServerAddresses() {
-        guard let data = AWCore.getProxyServerAddressesData(),
-              let addresses = try? JSONDecoder().decode([String].self, from: data) else {
-            return
-        }
-        // Use stale IPs temporarily
-        proxyServerAddresses = Set(addresses)
-        // Resolve domains to IPs in background
-        Self.resolveProxyDomains(addresses) { [weak self] resolvedIPs in
-            self?.lwipQueue.async {
-                self?.proxyServerAddresses.formUnion(resolvedIPs)
-            }
-        }
-    }
-
-    /// Updates the set of proxy server addresses from the app via IPC.
-    /// Immediately stores domains, then resolves them to IPs in the background.
-    func updateProxyServerAddresses(_ addresses: [String]) {
-        lwipQueue.async { [self] in
-            // Use stale IPs temporarily
-            proxyServerAddresses = Set(addresses)
-            // Resolve domains to IPs in background
-            Self.resolveProxyDomains(addresses) { [weak self] resolvedIPs in
-                self?.lwipQueue.async {
-                    guard let self else { return }
-                    self.proxyServerAddresses.formUnion(resolvedIPs)
-                }
-            }
-        }
-    }
-
-    /// Resolves an array of addresses (domains and IPs) to IP strings on a background queue.
-    /// IPs pass through unchanged; domains are resolved via `getaddrinfo`.
-    private static func resolveProxyDomains(_ addresses: [String], completion: @escaping (Set<String>) -> Void) {
-        DispatchQueue.global(qos: .utility).async {
-            var resolvedIPs = Set<String>()
-            for address in addresses {
-                let ips = resolveHostname(address)
-                resolvedIPs.formUnion(ips)
-            }
-            completion(resolvedIPs)
-        }
-    }
-
-    /// Resolves a hostname to IP strings via getaddrinfo. Blocking — call from a background queue.
-    private static func resolveHostname(_ hostname: String) -> [String] {
-        var hints = addrinfo()
-        hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
-        var result: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(hostname, nil, &hints, &result) == 0, let res = result else { return [] }
-        defer { freeaddrinfo(res) }
-
-        var ips: [String] = []
-        var current: UnsafeMutablePointer<addrinfo>? = res
-        while let info = current {
-            switch info.pointee.ai_family {
-            case AF_INET:
-                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { ptr in
-                    var sinAddr = ptr.pointee.sin_addr
-                    var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                    inet_ntop(AF_INET, &sinAddr, &buf, socklen_t(INET_ADDRSTRLEN))
-                    ips.append(String(cString: buf))
-                }
-            case AF_INET6:
-                info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { ptr in
-                    var sin6Addr = ptr.pointee.sin6_addr
-                    var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-                    inet_ntop(AF_INET6, &sin6Addr, &buf, socklen_t(INET6_ADDRSTRLEN))
-                    ips.append(String(cString: buf))
-                }
-            default:
-                break
-            }
-            current = info.pointee.ai_next
-        }
-        return ips
     }
 
     /// Reads encrypted DNS settings from app group UserDefaults.

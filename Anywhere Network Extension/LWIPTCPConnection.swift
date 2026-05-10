@@ -147,7 +147,7 @@ class LWIPTCPConnection {
         self.dstPort = dstPort
         self.configuration = configuration
         self.lwipQueue = lwipQueue
-        self.bypass = forceBypass || (LWIPStack.shared?.shouldBypass(host: dstHost) == true)
+        self.bypass = forceBypass
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
         }
@@ -558,7 +558,6 @@ class LWIPTCPConnection {
             } else {
                 logger.warning("[TCP] SNI routing configuration not found for \(sni)")
             }
-            bypass = stack.shouldBypass(host: sni)
         }
     }
 

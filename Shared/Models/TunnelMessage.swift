@@ -22,10 +22,6 @@ enum TunnelMessage: Codable, Sendable {
     /// the tunnel is running.
     case setConfiguration(ProxyConfiguration)
 
-    /// Refresh the lwIP-level bypass set with the latest proxy server
-    /// addresses. Domains are resolved to IPs inside the extension.
-    case syncProxyAddresses([String])
-
     /// Run a latency test against the given configuration. Independent of
     /// the active tunnel — the extension dials the proxy directly. Reply:
     /// ``LatencyTestResponse``.

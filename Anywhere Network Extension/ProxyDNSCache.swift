@@ -53,11 +53,15 @@ final class ProxyDNSCache {
     ///
     /// - If `host` is already an IP, returns it directly without caching.
     /// - If `host` is the active proxy domain and cache is expired, returns stale
-    ///   IPs immediately and refreshes in the background.
+    ///   IPs immediately and refreshes in the background — unless `forceFresh`
+    ///   is set, in which case the call always blocks for a fresh lookup.
     /// - Otherwise, resolves synchronously and caches the result.
     ///
+    /// - Parameter forceFresh: Bypass the active-proxy stale-fast path and always
+    ///   resolve synchronously when the cache is missing or expired. Use this
+    ///   for latency tests and other flows where stale IPs would skew results.
     /// - Returns: All resolved IP addresses (IPv4 and IPv6), or empty on failure.
-    func resolveAll(_ host: String) -> [String] {
+    func resolveAll(_ host: String, forceFresh: Bool = false) -> [String] {
         let bare = Self.stripBrackets(host)
 
         // IP addresses bypass cache
@@ -82,8 +86,10 @@ final class ProxyDNSCache {
         // Cache hit — not expired
         if let cached, !expired { return cached }
 
-        // Active proxy with stale cache — return stale, refresh in background
-        if let cached, expired, isActive {
+        // Active proxy with stale cache — return stale, refresh in background.
+        // Skipped under forceFresh so callers that need accuracy (latency tests)
+        // always block for a fresh lookup.
+        if let cached, expired, isActive, !forceFresh {
             DispatchQueue.global(qos: .utility).async { [self] in
                 let ips = Self.resolveViaGetaddrinfo(bare)
                 if !ips.isEmpty {
@@ -95,7 +101,7 @@ final class ProxyDNSCache {
             return cached
         }
 
-        // Cache miss or expired non-active entry — resolve synchronously
+        // Cache miss, expired non-active entry, or forceFresh — resolve synchronously
         let ips = Self.resolveViaGetaddrinfo(bare)
         guard !ips.isEmpty else {
             // If we have stale IPs, return them as fallback
@@ -121,13 +127,13 @@ final class ProxyDNSCache {
     }
 
     /// Convenience: returns a single resolved IP (first result), or `nil` on failure.
-    func resolveHost(_ host: String) -> String? {
-        resolveAll(host).first
+    func resolveHost(_ host: String, forceFresh: Bool = false) -> String? {
+        resolveAll(host, forceFresh: forceFresh).first
     }
 
     /// Pre-resolves and caches a hostname so subsequent lookups are instant.
-    func prewarm(_ host: String) {
-        _ = resolveAll(host)
+    func prewarm(_ host: String, forceFresh: Bool = false) {
+        _ = resolveAll(host, forceFresh: forceFresh)
     }
 
     // MARK: - Internal

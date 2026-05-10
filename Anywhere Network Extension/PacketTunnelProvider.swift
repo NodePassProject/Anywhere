@@ -143,8 +143,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // MARK: - Bypass Routes
     //
     // These local/private IP ranges are always excluded from the VPN tunnel (sent directly).
-    // Proxy server addresses are NOT excluded here — they are bypassed at the lwIP level
-    // (isProxyServerAddress check) which handles DNS rotation and covers all proxies.
+    // Outbound proxy connections from the extension's own sockets are kernel-excluded
+    // by the NE framework (see RawTCPSocket "Loopback" docs), so the upstream proxy IP
+    // does not need a route here. Apps on the device that explicitly target the proxy IP
+    // will go through the tunnel like any other destination — matching standard VPN
+    // client behavior (sing-box, WireGuard, OpenVPN).
     //
     // Domain-based entries (localhost, *.local, captive.apple.com) are not
     // expressible as packet-level route exclusions:
@@ -261,10 +264,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         switch message {
         case .setConfiguration(let configuration):
             lwipStack.switchConfiguration(configuration)
-            completionHandler?(nil)
-
-        case .syncProxyAddresses(let addresses):
-            lwipStack.updateProxyServerAddresses(addresses)
             completionHandler?(nil)
 
         case .testLatency(let configuration):

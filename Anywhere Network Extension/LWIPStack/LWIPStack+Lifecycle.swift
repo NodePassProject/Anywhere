@@ -38,7 +38,7 @@ extension LWIPStack {
             totalBytesIn = 0
             totalBytesOut = 0
 
-            configureRuntime(for: configuration, shouldLoadProxyServerAddresses: true)
+            configureRuntime(for: configuration)
             registerCallbacks()
             lwip_bridge_init()
             startOutputDrainSource()
@@ -63,6 +63,7 @@ extension LWIPStack {
             fakeIPPool.reset()
         }
 
+        ProxyDNSCache.shared.setActiveProxyDomain(nil)
         AnywhereLogger.logSink = nil
         packetFlow = nil
         configuration = nil
@@ -214,7 +215,7 @@ extension LWIPStack {
         shutdownInternal()
 
         self.configuration = configuration
-        configureRuntime(for: configuration, shouldLoadProxyServerAddresses: false)
+        configureRuntime(for: configuration)
         registerCallbacks()
         lwip_bridge_init()
         startOutputDrainSource()

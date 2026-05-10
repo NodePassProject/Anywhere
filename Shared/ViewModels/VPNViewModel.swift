@@ -675,9 +675,6 @@ class VPNViewModel: ObservableObject {
         guard let manager = vpnManager,
               let configuration = selectedConfiguration else { return }
 
-        // Sync proxy server addresses so the extension can bypass them at the lwIP level
-        syncProxyServerAddresses(for: configuration)
-
         Task {
             // Routing sync (file I/O + DNS off main actor)
             await syncRoutingConfigurationToNE()
@@ -775,9 +772,6 @@ class VPNViewModel: ObservableObject {
     private func sendConfigurationToTunnel(_ configuration: ProxyConfiguration) {
         guard let session = vpnManager?.connection as? NETunnelProviderSession else { return }
 
-        // Sync proxy addresses so the extension bypasses this config's server at the lwIP level
-        syncProxyServerAddresses(for: configuration)
-
         // Resolve DNS and send off main actor.
         Task.detached {
             let resolved = Self.withResolvedIP(configuration)
@@ -863,55 +857,6 @@ class VPNViewModel: ObservableObject {
         guard !affected.isEmpty else { return }
         orphanedRuleSetNames = affected
         Task { await syncRoutingConfigurationToNE() }
-    }
-
-    // MARK: - Proxy Server Address Sync
-
-    /// Syncs proxy server domains for the given configuration (including chain
-    /// proxies) plus any already-cached resolved IPs to the extension via
-    /// App Group + IPC. Called on VPN connect, configuration switch, and latency test.
-    func syncProxyServerAddresses(for configuration: ProxyConfiguration) {
-        syncProxyServerAddresses(for: [configuration])
-    }
-
-    func syncProxyServerAddresses(for configurations: [ProxyConfiguration]) {
-        var domains = Set<String>()
-        var addresses = Set<String>()
-        for configuration in configurations {
-            domains.insert(configuration.serverAddress)
-            if let resolvedIP = configuration.resolvedIP {
-                addresses.insert(resolvedIP)
-            }
-            if let chain = configuration.chain {
-                for proxy in chain {
-                    domains.insert(proxy.serverAddress)
-                    if let resolvedIP = proxy.resolvedIP {
-                        addresses.insert(resolvedIP)
-                    }
-                }
-            }
-        }
-
-        // Collect domains + any explicit resolved IPs. The extension resolves
-        // any remaining domains itself via its own DNS cache.
-        addresses.formUnion(domains)
-
-        let addressArray = Array(addresses)
-
-        // Persist to App Group so the extension can read them on start (Settings / Always On)
-        if let data = try? JSONEncoder().encode(addressArray) {
-            AWCore.setProxyServerAddressesData(data)
-        }
-
-        // Send to running tunnel via IPC
-        guard vpnStatus == .connected,
-              let session = vpnManager?.connection as? NETunnelProviderSession else { return }
-        guard let data = try? JSONEncoder().encode(TunnelMessage.syncProxyAddresses(addressArray)) else { return }
-        do {
-            try session.sendProviderMessage(data) { _ in }
-        } catch {
-            logger.warning("Failed to send proxy addresses to tunnel: \(error.localizedDescription)")
-        }
     }
 
     // MARK: - Configuration Serialization

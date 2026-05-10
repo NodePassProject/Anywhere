@@ -164,7 +164,7 @@ class LWIPUDPFlow {
     private func connectProxy() {
         guard !proxyConnecting && proxyConnection == nil && muxSession == nil && directSocket == nil && ssUDPSession == nil && !closed else { return }
 
-        if forceBypass || LWIPStack.shared?.shouldBypass(host: dstHost) == true {
+        if forceBypass {
             connectDirectUDP()
             return
         }
