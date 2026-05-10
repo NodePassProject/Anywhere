@@ -287,13 +287,16 @@ final class ShadowsocksUDPSession {
         }
     }
 
-    /// Tears down the socket and drops all registrations. Completions of
-    /// in-flight sends may still fire on the socket's I/O queue after this
-    /// returns, so callers should guard their closures against stale state.
+    /// Tears down the socket and drops all registrations. Notifies dependent
+    /// flows so they don't silently orphan when callers don't close them in
+    /// the same pass. Completions of in-flight sends may still fire on the
+    /// socket's I/O queue after this returns, so callers should guard their
+    /// closures against stale state.
     func cancel() {
         if case .cancelled = state { return }
         state = .cancelled
         socket.cancel()
+        notifyAllFlows(error: ProxyError.connectionFailed("Session cancelled"))
         registrations.removeAll()
         tokensByResponse.removeAll()
         tokensByPort.removeAll()

@@ -40,10 +40,6 @@ final class ReadWriteLock {
         pthread_rwlock_init(&_lock, nil)
     }
 
-    deinit {
-        pthread_rwlock_destroy(&_lock)
-    }
-
     /// Acquire read lock (shared - multiple readers allowed)
     @inline(__always)
     func readLock() {

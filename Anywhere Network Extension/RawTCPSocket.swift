@@ -312,18 +312,6 @@ class RawTCPSocket: RawTransport {
 
     init() {}
 
-    deinit {
-        // By the time deinit runs, all blocks on `ioQueue` have drained (they
-        // retain self), so no further mutation is possible. Defensive cleanup
-        // only for code paths that skipped `forceCancel()`.
-        if socketFD >= 0 {
-            _ = Darwin.close(socketFD)
-            socketFD = -1
-        }
-        recvScratch?.deallocate()
-        recvScratch = nil
-    }
-
     // MARK: - RawTransport
 
     var isTransportReady: Bool {

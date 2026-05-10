@@ -123,7 +123,11 @@ class ProxyConnection: ProxyConnectionProtocol {
 
     private func receiveLoop(handler: @escaping (Data) -> Void, errorHandler: @escaping (Error?) -> Void) {
         receive { [weak self] data, error in
-            guard let self else { return }
+            // Surface EOF on dealloc so ``startReceiving``'s "errorHandler called on close" contract holds.
+            guard let self else {
+                errorHandler(nil)
+                return
+            }
 
             if let error {
                 errorHandler(error)

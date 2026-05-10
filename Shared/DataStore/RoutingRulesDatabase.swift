@@ -31,10 +31,6 @@ final class RoutingRulesDatabase {
         }
     }
 
-    deinit {
-        if let db { sqlite3_close(db) }
-    }
-
     // MARK: - Queries
 
     /// Returns all rules for a given source (e.g. "Direct", "ADBlock", "Telegram", "CN").

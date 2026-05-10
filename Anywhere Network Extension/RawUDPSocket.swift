@@ -82,15 +82,6 @@ final class RawUDPSocket {
 
     init() {}
 
-    deinit {
-        // Defensive: if `cancel()` wasn't called, still close the fd so we
-        // don't leak a descriptor.
-        if socketFD >= 0 {
-            _ = Darwin.close(socketFD)
-            socketFD = -1
-        }
-    }
-
     // MARK: - Connect
 
     /// Resolves `host` via ``ProxyDNSCache`` and creates a connected

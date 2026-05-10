@@ -338,10 +338,4 @@ class MuxClient {
         timer.resume()
         idleTimer = timer
     }
-
-    deinit {
-        idleTimer?.cancel()
-        proxyConnection?.cancel()
-        proxyClient?.cancel()
-    }
 }

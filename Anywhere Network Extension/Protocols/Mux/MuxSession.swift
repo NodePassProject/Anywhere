@@ -119,11 +119,4 @@ class MuxSession {
         closed = true
         closeHandler?()
     }
-
-    deinit {
-        if !closed {
-            // Best-effort End frame on dealloc
-            client?.removeSession(sessionID)
-        }
-    }
 }

@@ -176,8 +176,6 @@ class QUICConnection {
         queue.setSpecific(key: Self.queueKey, value: true)
     }
 
-    deinit { close() }
-
     // MARK: Connect
 
     func connect(completion: @escaping (Error?) -> Void) {

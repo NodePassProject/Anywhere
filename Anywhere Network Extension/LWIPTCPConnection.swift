@@ -782,6 +782,8 @@ class LWIPTCPConnection {
                     completion?(SocketError.notConnected)
                     return
                 }
+                // Downlink activity in MITM mode — non-MITM path updates this in ``tryArmReceive``.
+                self.activityTimer?.update()
                 self.writeToLWIP(data)
                 completion?(nil)
             }
@@ -1040,10 +1042,5 @@ class LWIPTCPConnection {
         session?.cancel(error: nil)
         connection?.cancel()
         client?.cancel()
-    }
-
-    deinit {
-        proxyConnection?.cancel()
-        proxyClient?.cancel()
     }
 }

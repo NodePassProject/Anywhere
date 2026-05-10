@@ -543,14 +543,4 @@ class LWIPUDPFlow {
         client?.cancel()
         session?.close()
     }
-
-    deinit {
-        directSocket?.cancel()
-        if let ssUDPSession, let ssUDPSessionToken {
-            ssUDPSession.unregister(token: ssUDPSessionToken)
-        }
-        proxyConnection?.cancel()
-        proxyClient?.cancel()
-        muxSession?.close()
-    }
 }
