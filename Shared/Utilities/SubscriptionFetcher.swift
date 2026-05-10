@@ -19,6 +19,7 @@ struct SubscriptionFetcher {
 
     enum FetchError: Error, LocalizedError {
         case invalidURL
+        case insecureURL
         case noConfigurations
         case networkError(String)
 
@@ -26,6 +27,8 @@ struct SubscriptionFetcher {
             switch self {
             case .invalidURL:
                 return String(localized: "Invalid subscription URL.")
+            case .insecureURL:
+                return String(localized: "Subscription URL must use HTTPS.")
             case .noConfigurations:
                 return String(localized: "No valid configurations found in subscription.")
             case .networkError(let message):
@@ -37,6 +40,10 @@ struct SubscriptionFetcher {
     static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
         guard let url = URL(string: urlString) else {
             throw FetchError.invalidURL
+        }
+
+        guard url.scheme?.lowercased() == "https" else {
+            throw FetchError.insecureURL
         }
 
         var request = URLRequest(url: url)
