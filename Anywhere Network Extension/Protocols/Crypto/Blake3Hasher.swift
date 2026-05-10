@@ -28,6 +28,13 @@ struct Blake3Hasher {
         hasher = BLAKE3Hasher(derivingKeyFromContext: context)
     }
 
+    /// Initialize for key derivation with raw context bytes.
+    /// Use this when the context contains binary data (random IVs, public keys,
+    /// etc.) that isn't valid UTF-8 — the String overload would mangle it.
+    init(deriveKeyContextBytes context: Data) {
+        hasher = BLAKE3Hasher(derivingKeyFromContextBytes: Array(context))
+    }
+
     /// Feed input data into the hasher.
     mutating func update(_ data: Data) {
         hasher.update(Array(data))
@@ -55,6 +62,13 @@ struct Blake3Hasher {
     /// Derive a key using BLAKE3 key derivation mode.
     static func deriveKey(context: String, input: Data, count: Int = 32) -> Data {
         var h = Blake3Hasher(deriveKeyContext: context)
+        h.update(input)
+        return h.finalizeData(count: count)
+    }
+
+    /// Derive a key using BLAKE3 key derivation mode with binary context bytes.
+    static func deriveKey(contextBytes: Data, input: Data, count: Int = 32) -> Data {
+        var h = Blake3Hasher(deriveKeyContextBytes: contextBytes)
         h.update(input)
         return h.finalizeData(count: count)
     }

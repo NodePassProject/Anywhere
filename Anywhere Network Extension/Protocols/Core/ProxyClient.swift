@@ -317,6 +317,81 @@ class ProxyClient {
         }
 
         // VLESS path
+
+        // Parse the encryption field upfront. `nil` means the legacy
+        // `"none"` / empty value — proceed with plaintext VLESS as before.
+        // Anything else means the new `mlkem768x25519plus` scheme: until
+        // VLESSEncryptionClient lands (and at all on iOS < 26), we MUST
+        // refuse to dial. A silent downgrade would send the plaintext
+        // request header — including UUID and destination — to a server
+        // that expects the encrypted handshake.
+        let encryptionConfig: VLESSEncryptionConfig?
+        do {
+            encryptionConfig = try VLESSEncryptionConfig.parse(configuration.encryption)
+        } catch {
+            completion(.failure(ProxyError.protocolError(
+                "Invalid VLESS encryption: \(error.localizedDescription)"
+            )))
+            return
+        }
+        if let encryptionConfig {
+            guard #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) else {
+                completion(.failure(ProxyError.protocolError(
+                    "VLESS encryption requires iOS 26 / macOS 26 / tvOS 26 or later"
+                )))
+                return
+            }
+            do {
+                let client = try VLESSEncryptionClient(config: encryptionConfig)
+                client.handshake(over: connection) { [weak self] result in
+                    guard let self else {
+                        completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                        return
+                    }
+                    switch result {
+                    case .failure(let error):
+                        completion(.failure(error))
+                    case .success(let encryptedConnection):
+                        self.continueVLESSHandshake(
+                            over: encryptedConnection,
+                            command: command,
+                            destinationHost: destinationHost,
+                            destinationPort: destinationPort,
+                            initialData: initialData,
+                            supportsVision: supportsVision,
+                            completion: completion
+                        )
+                    }
+                }
+            } catch {
+                completion(.failure(error))
+            }
+            return
+        }
+
+        continueVLESSHandshake(
+            over: connection,
+            command: command,
+            destinationHost: destinationHost,
+            destinationPort: destinationPort,
+            initialData: initialData,
+            supportsVision: supportsVision,
+            completion: completion
+        )
+    }
+
+    /// Per-command VLESS handshake on top of an already-prepared transport.
+    /// Split out so the encryption-enabled path can chain into it after the
+    /// `mlkem768x25519plus` handshake completes.
+    private func continueVLESSHandshake(
+        over connection: ProxyConnection,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?,
+        supportsVision: Bool,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
         let isVision = supportsVision && isVisionFlow && (command == .tcp || command == .mux)
 
         let requestHeader = VLESSProtocol.encodeRequestHeader(

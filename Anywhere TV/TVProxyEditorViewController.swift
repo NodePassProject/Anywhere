@@ -138,7 +138,12 @@ class TVProxyEditorViewController: UITableViewController {
         ]
         if isVLESS {
             serverRows.append(.text(label: String(localized: "UUID", comment: "UUID for VLESS protocol"), value: uuid, placeholder: String(localized: "UUID", comment: "UUID for VLESS protocol"), key: .uuid))
-            serverRows.append(.selection(label: String(localized: "Encryption", comment: "Encryption for VLESS protocol"), value: encryptionDisplayValue, options: [("None", "none")], key: .encryption))
+            // Encryption (mlkem768x25519plus) requires CryptoKit's
+            // ML-KEM-768 — tvOS 26+ only. Older OSes refuse the feature
+            // at dial time, so don't expose the field there.
+            if #available(tvOS 26.0, *) {
+                serverRows.append(.text(label: String(localized: "Encryption", comment: "Encryption for VLESS protocol"), value: encryption, placeholder: "none", key: .encryption))
+            }
         } else if isHysteria {
             serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: String(localized: "Password"), key: .hysteriaPassword, secure: true))
             serverRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
@@ -260,13 +265,6 @@ class TVProxyEditorViewController: UITableViewController {
         return sections
     }
     
-    private var encryptionDisplayValue: String {
-        switch encryption {
-        case "none": String(localized: "None")
-        default: encryption
-        }
-    }
-
     private var ssMethodDisplayValue: String {
         switch ssMethod {
         case "none": String(localized: "None")
