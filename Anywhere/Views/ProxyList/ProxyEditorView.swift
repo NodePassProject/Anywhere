@@ -197,10 +197,17 @@ struct ProxyEditorView: View {
                         } label: {
                             TextWithColorfulIcon(title: "UUID", comment: "UUID for VLESS protocol", systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                         }
-                        Picker(selection: $encryption) {
-                            Text("None").tag("none")
-                        } label: {
-                            TextWithColorfulIcon(title: "Encryption", comment: "Encryption for VLESS protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                        // Encryption (mlkem768x25519plus) requires CryptoKit's
+                        // ML-KEM-768 — iOS/macOS/tvOS 26+ only.
+                        if #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) {
+                            LabeledContent {
+                                TextField("none", text: $encryption)
+                                    .autocorrectionDisabled()
+                                    .textInputAutocapitalization(.never)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(title: "Encryption", comment: "Encryption for VLESS protocol", systemName: "lock.fill", foregroundColor: .white, backgroundColor: .red)
+                            }
                         }
                     } else if isHysteria {
                         LabeledContent {
