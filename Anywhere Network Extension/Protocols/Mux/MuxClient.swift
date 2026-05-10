@@ -156,7 +156,12 @@ class MuxClient {
     }
 
     /// Closes all sessions and the underlying proxy connection.
-    func closeAll() {
+    ///
+    /// `error` is non-nil only when the mux connection died with a transport
+    /// failure (receive/write error on the shared mux pipe). Each owning flow
+    /// then sees the error in its `closeHandler` and reports its own death.
+    /// Pass `nil` for normal teardown (idle close, deliberate cancel).
+    func closeAll(error: Error? = nil) {
         guard !closed else { return }
         closed = true
 
@@ -167,7 +172,7 @@ class MuxClient {
         sessions.removeAll()
 
         for session in allSessions {
-            session.deliverClose()
+            session.deliverClose(error: error)
         }
 
         proxyConnection?.cancel()
@@ -230,7 +235,7 @@ class MuxClient {
                     for cb in completions { cb(nil) }
 
                 case .failure(let error):
-                    self.closeAll()
+                    self.closeAll(error: error)
                     for cb in completions { cb(error) }
                 }
             }
@@ -264,8 +269,8 @@ class MuxClient {
                 self.isWriting = false
                 completion(error)
 
-                if error != nil {
-                    self.closeAll()
+                if let error {
+                    self.closeAll(error: error)
                 } else {
                     self.drainWriteQueue()
                 }
@@ -283,11 +288,8 @@ class MuxClient {
             }
         }, errorHandler: { [weak self] (error: Error?) in
             guard let self, !self.closed else { return }
-            if let error {
-                logger.error("[Mux] Receive error: \(error.localizedDescription)")
-            }
             self.lwipQueue.async { [weak self] in
-                self?.closeAll()
+                self?.closeAll(error: error)
             }
         })
     }

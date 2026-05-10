@@ -131,7 +131,6 @@ final class HysteriaSession {
             guard let self else { return }
             self.queue.async {
                 if let error {
-                    logger.error("[Hysteria] QUIC connect failed: \(error.localizedDescription)")
                     self.failSession(error)
                     return
                 }

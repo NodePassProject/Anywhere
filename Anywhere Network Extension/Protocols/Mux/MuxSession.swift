@@ -22,8 +22,11 @@ class MuxSession {
     /// Called by MuxClient when demuxed data arrives for this session.
     var dataHandler: ((Data) -> Void)?
 
-    /// Called by MuxClient when the session is closed (End frame received or connection error).
-    var closeHandler: (() -> Void)?
+    /// Called by MuxClient when the session is closed. The error parameter
+    /// is non-nil when the underlying mux connection died with a transport
+    /// failure (so each owning flow can report its own death); nil when the
+    /// session ended cleanly (End frame, normal cancel).
+    var closeHandler: ((Error?) -> Void)?
 
     init(
         sessionID: UInt16,
@@ -102,7 +105,7 @@ class MuxSession {
             client.removeSession(sessionID)
         }
 
-        closeHandler?()
+        closeHandler?(nil)
     }
 
     // MARK: - Called by MuxClient (demux)
@@ -113,10 +116,11 @@ class MuxSession {
         dataHandler?(data)
     }
 
-    /// Delivers a close event to this session.
-    func deliverClose() {
+    /// Delivers a close event to this session. `error` is non-nil only when
+    /// the underlying mux connection died with a transport failure.
+    func deliverClose(error: Error? = nil) {
         guard !closed else { return }
         closed = true
-        closeHandler?()
+        closeHandler?(error)
     }
 }

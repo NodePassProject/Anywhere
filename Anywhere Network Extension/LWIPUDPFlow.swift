@@ -48,6 +48,11 @@ class LWIPUDPFlow {
     private var didWarnPendingOverflow = false
     private var closed = false
 
+    /// One-shot reporter that logs this flow's terminal failure at most once.
+    /// All terminal-error paths funnel through it so the LWIP boundary emits
+    /// exactly one error line per dead flow.
+    private let failureReporter = ConnectionFailureReporter(prefix: "[UDP]", logger: logger)
+
 
     init(flowKey: LWIPStack.UDPFlowKey,
          srcHost: String, srcPort: UInt16,
@@ -70,14 +75,16 @@ class LWIPUDPFlow {
         self.lwipQueue = lwipQueue
     }
 
-    private func logTransportFailure(_ operation: String, error: Error, defaultLevel: LWIPStack.LogLevel) {
-        TransportErrorLogger.log(
-            operation: operation,
+    private func reportFailure(_ operation: String, error: Error) {
+        failureReporter.report(operation: operation, endpoint: "\(flowKey)", error: error)
+    }
+
+    private func logTransientSendFailure(_ error: Error) {
+        TransportErrorLogger.logTransientSend(
             endpoint: "\(flowKey)",
             error: error,
             logger: logger,
-            prefix: "[UDP]",
-            defaultLevel: defaultLevel
+            prefix: "[UDP]"
         )
     }
 
@@ -101,7 +108,7 @@ class LWIPUDPFlow {
         if let socket = directSocket {
             socket.send(data: payload) { [weak self] error in
                 if let error {
-                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                    self?.logTransientSendFailure(error)
                 }
             }
             return
@@ -111,7 +118,7 @@ class LWIPUDPFlow {
         if let session = ssUDPSession, let token = ssUDPSessionToken {
             session.send(token: token, dstHost: dstHost, dstPort: dstPort, payload: payload) { [weak self] error in
                 if let error {
-                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                    self?.logTransientSendFailure(error)
                 }
             }
             return
@@ -121,7 +128,7 @@ class LWIPUDPFlow {
         if let session = muxSession {
             session.send(data: payload) { [weak self] error in
                 if let error {
-                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                    self?.logTransientSendFailure(error)
                 }
             }
             return
@@ -135,7 +142,7 @@ class LWIPUDPFlow {
         if let connection = proxyConnection {
             connection.send(data: payload) { [weak self] error in
                 if let error {
-                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                    self?.logTransientSendFailure(error)
                 }
             }
             return
@@ -236,9 +243,12 @@ class LWIPUDPFlow {
                     session.dataHandler = { [weak self] data in
                         self?.handleProxyData(data)
                     }
-                    session.closeHandler = { [weak self] in
+                    session.closeHandler = { [weak self] error in
                         guard let self else { return }
                         self.lwipQueue.async {
+                            if let error {
+                                self.reportFailure("Mux", error: error)
+                            }
                             self.close()
                             LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                         }
@@ -261,14 +271,14 @@ class LWIPUDPFlow {
                     for payload in buffered {
                         session.send(data: payload) { [weak self] error in
                             if let error {
-                                self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                                self?.logTransientSendFailure(error)
                             }
                         }
                     }
 
                 case .failure(let error):
                     if case .dropped = error as? ProxyError {} else {
-                        self.logTransportFailure("Connect", error: error, defaultLevel: .error)
+                        self.reportFailure("Connect", error: error)
                     }
                     self.close()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
@@ -299,7 +309,7 @@ class LWIPUDPFlow {
                     for payload in self.pendingData {
                         proxyConnection.send(data: payload) { [weak self] error in
                             if let error {
-                                self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                                self?.logTransientSendFailure(error)
                             }
                         }
                     }
@@ -311,7 +321,7 @@ class LWIPUDPFlow {
 
                 case .failure(let error):
                     if case .dropped = error as? ProxyError {} else {
-                        self.logTransportFailure("Connect", error: error, defaultLevel: .error)
+                        self.reportFailure("Connect", error: error)
                     }
                     self.close()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
@@ -334,7 +344,7 @@ class LWIPUDPFlow {
         case .success(let s):
             session = s
         case .failure(let error):
-            logger.error("[UDP] SS session unavailable for \(flowKey): \(error.localizedDescription)")
+            reportFailure("SS session", error: error)
             close()
             stack.udpFlows.removeValue(forKey: flowKey)
             return
@@ -359,8 +369,8 @@ class LWIPUDPFlow {
             },
             errorHandler: { [weak self] error in
                 guard let self else { return }
-                self.logTransportFailure("Receive", error: error, defaultLevel: .warning)
                 self.lwipQueue.async {
+                    self.reportFailure("Receive", error: error)
                     self.close()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                 }
@@ -377,7 +387,7 @@ class LWIPUDPFlow {
         for payload in pendingData {
             session.send(token: token, dstHost: host, dstPort: port, payload: payload) { [weak self] error in
                 if let error {
-                    self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                    self?.logTransientSendFailure(error)
                 }
             }
         }
@@ -433,7 +443,7 @@ class LWIPUDPFlow {
                 guard !self.closed else { return }
 
                 if let error {
-                    self.logTransportFailure("Connect", error: error, defaultLevel: .error)
+                    self.reportFailure("Connect", error: error)
                     self.close()
                     LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                     return
@@ -443,7 +453,7 @@ class LWIPUDPFlow {
                 for payload in self.pendingData {
                     socket.send(data: payload) { [weak self] error in
                         if let error {
-                            self?.logTransportFailure("Send", error: error, defaultLevel: .warning)
+                            self?.logTransientSendFailure(error)
                         }
                     }
                 }
@@ -456,8 +466,8 @@ class LWIPUDPFlow {
                     self?.handleProxyData(data)
                 }, errorHandler: { [weak self] error in
                     guard let self else { return }
-                    self.logTransportFailure("Receive", error: error, defaultLevel: .warning)
                     self.lwipQueue.async {
+                        self.reportFailure("Receive", error: error)
                         self.close()
                         LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                     }
@@ -472,10 +482,10 @@ class LWIPUDPFlow {
             self.handleProxyData(data)
         } errorHandler: { [weak self] error in
             guard let self else { return }
-            if let error {
-                self.logTransportFailure("Receive", error: error, defaultLevel: .error)
-            }
             self.lwipQueue.async {
+                if let error {
+                    self.reportFailure("Receive", error: error)
+                }
                 self.close()
                 LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
             }

@@ -109,11 +109,7 @@ final class MITMRewritePolicy {
                 }
             }
 
-            if node.ruleSet != nil {
-                logger.warning("[MITM] Duplicate rule set for suffix \(suffix); later definition wins")
-            } else {
-                setCount += 1
-            }
+            if node.ruleSet == nil { setCount += 1 }
             node.ruleSet = CompiledMITMRuleSet(
                 id: set.id,
                 domainSuffix: suffix,

@@ -51,11 +51,7 @@ class ShadowsocksConnection: ProxyConnection {
     }
 
     override func sendRaw(data: Data) {
-        sendRaw(data: data) { error in
-            if let error {
-                logger.error("[SS] Send error: \(error.localizedDescription)")
-            }
-        }
+        sendRaw(data: data) { _ in }
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
@@ -125,11 +121,7 @@ class ShadowsocksUDPConnection: ProxyConnection {
     }
 
     override func sendRaw(data: Data) {
-        sendRaw(data: data) { error in
-            if let error {
-                logger.error("[SS-UDP] Send error: \(error.localizedDescription)")
-            }
-        }
+        sendRaw(data: data) { _ in }
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {

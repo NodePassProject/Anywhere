@@ -86,11 +86,7 @@ class NaiveProxyConnection: ProxyConnection {
     }
 
     override func sendRaw(data: Data) {
-        sendRaw(data: data) { error in
-            if let error {
-                logger.error("[Naive] Send error: \(error.localizedDescription)")
-            }
-        }
+        sendRaw(data: data) { _ in }
     }
 
     /// Fragments medium payloads into 200–300 byte chunks, each padded separately.

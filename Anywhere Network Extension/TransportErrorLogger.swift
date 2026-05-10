@@ -9,11 +9,17 @@ import Foundation
 
 /// Shared error-reporting helper for TCP/UDP connections.
 ///
-/// Consolidates the classification logic that both ``LWIPTCPConnection`` and
-/// ``LWIPUDPFlow`` used to duplicate: trimming redundant prefixes from
-/// `SocketError` descriptions, demoting expected cascade errors so one peer
-/// reset doesn't produce a wall of lines, and attributing failures to a recent
-/// tunnel interruption when one is in the attribution window.
+/// Logging policy
+/// ==============
+/// - Connection failures (TCP connect/send/receive, UDP connect/receive) are
+///   terminal events. The user-facing connection (``LWIPTCPConnection`` /
+///   ``LWIPUDPFlow``) owns a ``ConnectionFailureReporter`` that logs them
+///   exactly once.
+/// - Non-terminal send failures (UDP datagram drops, control-frame sends on a
+///   still-alive transport) use ``logTransientSend`` and log at warning level.
+/// - Inner transport / session / handshake layers must not call
+///   ``AnywhereLogger.error`` directly. They propagate errors via
+///   `Result`/`Error`; the LWIP boundary logs once.
 enum TransportErrorLogger {
 
     // MARK: - Formatting
@@ -86,9 +92,10 @@ enum TransportErrorLogger {
         }
     }
 
-    // MARK: - Classified Logging
+    // MARK: - Terminal Failure Logging
 
-    /// Logs a transport-level failure with a consistent shape and level.
+    /// Logs a terminal connection failure with consistent shape and level.
+    /// Used by ``ConnectionFailureReporter``; not intended for direct use.
     ///
     /// Classification, in order:
     /// 1. `HTTP2Error` is downgraded to `debug` — GOAWAY/stream-reset is normal
@@ -99,22 +106,13 @@ enum TransportErrorLogger {
     ///    double-report.
     /// 3. `SocketError` carrying `ECONNRESET` is demoted to `info` — expected
     ///    termination from the remote's side, not our failure.
-    /// 4. Otherwise the failure logs at `defaultLevel`.
-    ///
-    /// - Parameters:
-    ///   - operation: "Connect", "Send", "Receive", etc.
-    ///   - endpoint: Human-readable endpoint identifier (host:port or flow key).
-    ///   - error: The failure.
-    ///   - logger: Category logger (LWIP-TCP / LWIP-UDP / …).
-    ///   - prefix: Log-line prefix (e.g., "[TCP]", "[UDP]").
-    ///   - defaultLevel: Level used when none of the demotion rules apply.
-    static func log(
+    /// 4. Otherwise the failure logs at `error`.
+    fileprivate static func logTerminal(
         operation: String,
         endpoint: String,
         error: Error,
         logger: AnywhereLogger,
-        prefix: String,
-        defaultLevel: LWIPStack.LogLevel = .error
+        prefix: String
     ) {
         let errorDescription = conciseErrorDescription(error)
 
@@ -128,21 +126,75 @@ enum TransportErrorLogger {
             logger.debug("\(prefix) \(operation) after peer close: \(endpoint): \(errorDescription)")
             return
         case .reset:
-            // Peer-initiated RST: normal termination from their side, not a
-            // failure of ours — keep it visible but out of the error stream.
             logger.info("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)")
             return
         case .none:
             break
         }
 
-        switch defaultLevel {
-        case .info:
-            logger.info("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)")
-        case .warning:
-            logger.warning("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)")
-        case .error:
-            logger.error("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)")
-        }
+        logger.error("\(prefix) \(operation) failed: \(endpoint): \(errorDescription)")
+    }
+
+    // MARK: - Transient Failure Logging
+
+    /// Logs a non-terminal send failure at warning level.
+    ///
+    /// Use this for UDP datagram sends that don't tear the flow down (UDP is
+    /// lossy by design) or for control-frame sends on a still-alive transport
+    /// where the failure is recoverable.
+    static func logTransientSend(
+        endpoint: String,
+        error: Error,
+        logger: AnywhereLogger,
+        prefix: String
+    ) {
+        let errorDescription = conciseErrorDescription(error)
+        logger.warning("\(prefix) Send failed: \(endpoint): \(errorDescription)")
+    }
+}
+
+// MARK: - ConnectionFailureReporter
+
+/// One-shot terminal-failure reporter owned by an LWIP-layer connection.
+///
+/// The first ``report(operation:endpoint:error:)`` call logs at error level
+/// (subject to ``TransportErrorLogger``'s peer-close demotion rules);
+/// subsequent calls no-op. Guarantees that exactly one error line is emitted
+/// for any given connection's death, regardless of how many failure paths
+/// fire during teardown.
+///
+/// Not thread-safe by itself. Intended to be owned by a connection that
+/// serializes access through its own queue (`lwipQueue`).
+final class ConnectionFailureReporter {
+    private let prefix: String
+    private let logger: AnywhereLogger
+    private var reported = false
+
+    init(prefix: String, logger: AnywhereLogger) {
+        self.prefix = prefix
+        self.logger = logger
+    }
+
+    /// Logs the terminal failure the first time it's called. Subsequent calls
+    /// are no-ops. `endpoint` is supplied at call time so callers can surface
+    /// the most current endpoint description (e.g. post-SNI hostname).
+    func report(operation: String, endpoint: @autoclosure () -> String, error: Error) {
+        guard !reported else { return }
+        reported = true
+        TransportErrorLogger.logTerminal(
+            operation: operation,
+            endpoint: endpoint(),
+            error: error,
+            logger: logger,
+            prefix: prefix
+        )
+    }
+
+    /// Marks the connection as reported without logging. Use when the
+    /// connection is ending for a non-error reason (graceful close, deliberate
+    /// reject, system pressure abort with its own warning) but we want to
+    /// suppress any spurious error log that might fire later in teardown.
+    func markReported() {
+        reported = true
     }
 }

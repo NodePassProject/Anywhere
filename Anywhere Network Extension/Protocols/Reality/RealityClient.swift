@@ -73,7 +73,6 @@ class RealityClient {
         do {
             clientHello = try buildRealityClientHello(privateKey: privateKey)
         } catch {
-            logger.error("[Reality] Failed to build ClientHello: \(error.localizedDescription)")
             completion(.failure(error))
             return
         }
@@ -84,7 +83,6 @@ class RealityClient {
 
         transport.connect(host: host, port: port, initialData: clientHello) { [weak self] error in
             if let error {
-                logger.error("[Reality] TCP connection failed: \(error.localizedDescription)")
                 completion(.failure(RealityError.connectionFailed(error.localizedDescription)))
                 return
             }
@@ -130,7 +128,6 @@ class RealityClient {
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         guard let privateKey = ephemeralPrivateKey else {
-            logger.error("[Reality] No ephemeral key for handshake")
             completion(.failure(RealityError.handshakeFailed("No ephemeral key")))
             return
         }
@@ -149,7 +146,6 @@ class RealityClient {
                 guard let self else { return }
 
                 if let error {
-                    logger.error("[Reality] Failed to send ClientHello: \(error.localizedDescription)")
                     completion(.failure(RealityError.handshakeFailed(error.localizedDescription)))
                     return
                 }
@@ -157,7 +153,6 @@ class RealityClient {
                 self.receiveServerResponse(completion: completion)
             }
         } catch {
-            logger.error("[Reality] Failed to build ClientHello: \(error.localizedDescription)")
             completion(.failure(error))
         }
     }
@@ -275,11 +270,8 @@ class RealityClient {
             } else if contentType == 0x15 { // Alert
                 let alertLevel = buffer.count > 5 ? buffer[5] : 0
                 let alertDesc = buffer.count > 6 ? buffer[6] : 0
-                logger.error("[Reality] TLS Alert: level=\(alertLevel), desc=\(alertDesc)")
                 completion(.failure(RealityError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")))
             } else {
-                let hex = buffer.prefix(32).map { String(format: "%02x", $0) }.joined(separator: " ")
-                logger.error("[Reality] Unexpected content type: 0x\(String(format: "%02x", contentType)), first 32 bytes: \(hex)")
                 completion(.failure(RealityError.handshakeFailed("Unexpected content type: \(contentType)")))
             }
             return
@@ -293,15 +285,11 @@ class RealityClient {
             guard let self else { return }
 
             if let error {
-                logger.error("[Reality] Error receiving server response: \(error.localizedDescription)")
                 completion(.failure(RealityError.handshakeFailed(error.localizedDescription)))
                 return
             }
 
             guard let data, !data.isEmpty else {
-                let len = buffer.count
-                let hex = buffer.isEmpty ? "nil" : buffer.prefix(16).map { String(format: "%02x", $0) }.joined(separator: " ")
-                logger.error("[Reality] No server response (connection closed) (len=\(len), data=\(hex))")
                 completion(.failure(RealityError.handshakeFailed("No server response")))
                 return
             }
@@ -329,13 +317,11 @@ class RealityClient {
                 guard let self else { return }
 
                 if let error {
-                    logger.error("[Reality] Error receiving more data: \(error.localizedDescription)")
                     completion(.failure(RealityError.handshakeFailed(error.localizedDescription)))
                     return
                 }
 
                 guard let moreData, !moreData.isEmpty else {
-                    logger.error("[Reality] Connection closed before ServerHello")
                     completion(.failure(RealityError.handshakeFailed("Connection closed before ServerHello")))
                     return
                 }
@@ -349,7 +335,6 @@ class RealityClient {
         }
 
         guard verifyServerResponse(data: buffer) else {
-            logger.error("[Reality] Server verification failed")
             completion(.failure(RealityError.authenticationFailed))
             return
         }
@@ -357,7 +342,6 @@ class RealityClient {
         guard let (serverKeyShare, keyShareGroup, cipherSuite) = parseServerHello(data: buffer),
               let privateKey = ephemeralPrivateKey,
               let clientHello = storedClientHello else {
-            logger.error("[Reality] Failed to parse ServerHello or missing keys")
             completion(.failure(RealityError.handshakeFailed("Failed to parse ServerHello")))
             return
         }
@@ -395,7 +379,6 @@ class RealityClient {
 
             consumeRemainingHandshake(buffer: buffer, completion: completion)
         } catch {
-            logger.error("[Reality] Failed to derive TLS keys: \(error.localizedDescription)")
             completion(.failure(RealityError.handshakeFailed("Key derivation failed")))
         }
     }
@@ -596,7 +579,7 @@ class RealityClient {
                         hsOffset += 4 + hsLen
                     }
                 } catch {
-                    logger.error("[Reality] Failed to decrypt handshake record: \(error.localizedDescription)")
+                    // Decrypt failures fall through to the outer guard below.
                 }
             }
 
@@ -613,7 +596,6 @@ class RealityClient {
 
         if foundServerFinished {
             guard serverCertVerified else {
-                logger.error("[Reality] Server certificate verification failed - not an authenticated Reality server")
                 completion(.failure(RealityError.authenticationFailed))
                 return
             }
@@ -624,13 +606,11 @@ class RealityClient {
                 guard let self else { return }
 
                 if let error {
-                    logger.error("[Reality] Failed to send Client Finished: \(error.localizedDescription)")
                     completion(.failure(RealityError.handshakeFailed("Failed to send Client Finished")))
                     return
                 }
 
                 guard let appKeys = self.tls13.applicationKeys else {
-                    logger.error("[Reality] Application keys not available")
                     completion(.failure(RealityError.handshakeFailed("Application keys not available")))
                     return
                 }
@@ -666,13 +646,11 @@ class RealityClient {
                 guard let self else { return }
 
                 if let error {
-                    logger.error("[Reality] Error receiving more handshake data: \(error.localizedDescription)")
                     completion(.failure(RealityError.handshakeFailed(error.localizedDescription)))
                     return
                 }
 
                 guard let moreData, !moreData.isEmpty else {
-                    logger.error("[Reality] Connection closed before Server Finished")
                     completion(.failure(RealityError.handshakeFailed("Connection closed before Server Finished")))
                     return
                 }

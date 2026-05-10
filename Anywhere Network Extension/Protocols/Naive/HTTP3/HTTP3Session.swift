@@ -195,7 +195,6 @@ class HTTP3Session: PoolableSession {
         // so the pool stops handing out streams on this dead session.
         quic.connectionClosedHandler = { [weak self] error in
             guard let self else { return }
-            logger.error("[HTTP3Session] QUIC connection closed: \(error.localizedDescription)")
             self.failSession(error)
         }
 
@@ -203,7 +202,6 @@ class HTTP3Session: PoolableSession {
             guard let self else { return }
             self.queue.async {
                 if let error {
-                    logger.error("[HTTP3Session] QUIC connect failed: \(error.localizedDescription)")
                     self.failSession(error)
                     return
                 }

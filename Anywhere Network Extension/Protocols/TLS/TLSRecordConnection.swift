@@ -219,7 +219,6 @@ class TLSRecordConnection {
             sendLock.unlock()
         } catch {
             sendLock.unlock()
-            logger.error("[TLS] Encryption error: \(error.localizedDescription)")
             completion(error)
         }
     }
@@ -239,7 +238,6 @@ class TLSRecordConnection {
             sendLock.unlock()
         } catch {
             sendLock.unlock()
-            logger.error("[TLS] Encryption error: \(error.localizedDescription)")
         }
     }
 

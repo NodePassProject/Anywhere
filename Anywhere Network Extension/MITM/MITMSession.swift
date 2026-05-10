@@ -392,7 +392,6 @@ final class MITMSession {
             server.feed(pendingClientBytes)
             pendingClientBytes.removeAll(keepingCapacity: false)
         } catch {
-            logger.error("[MITM] Inner handshake start failed for \(sni): \(error)")
             cancel(error: error)
         }
     }
@@ -472,7 +471,6 @@ final class MITMSession {
                     let alpn = record.negotiatedALPN.isEmpty ? "http/1.1" : record.negotiatedALPN
                     self.startInnerHandshake(sni: innerSNI, alpn: alpn, tlsVersion: record.tlsVersion)
                 case .failure(let error):
-                    logger.error("[MITM] Outer handshake failed for \(self.dstHost): \(error)")
                     self.cancel(error: error)
                 }
             }
@@ -610,7 +608,6 @@ extension MITMSession: TLSServerDelegate {
     }
 
     func tlsServer(_ server: TLSServer, didFail error: TLSError) {
-        logger.error("[MITM] Inner handshake failed for \(dstHost): \(error)")
         cancel(error: error)
     }
 }

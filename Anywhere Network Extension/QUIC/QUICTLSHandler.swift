@@ -275,7 +275,6 @@ class QUICTLSHandler {
 
     private func processServerHello(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
         guard body.count >= 34 else {
-            logger.error("[QUIC-TLS] ServerHello truncated before random (\(body.count) bytes)")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
@@ -288,14 +287,12 @@ class QUICTLSHandler {
         // rather than silently treating the message as a real ServerHello and
         // dereferencing bogus key material.
         if serverRandom == Data(kHelloRetryRequestRandom) {
-            logger.error("[QUIC-TLS] HelloRetryRequest received — offered groups rejected")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
         // Parse session ID length and skip
         var offset = 34
         guard offset < body.count else {
-            logger.error("[QUIC-TLS] ServerHello truncated before session_id")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
         let sessionIdLen = Int(body[offset])
@@ -303,7 +300,6 @@ class QUICTLSHandler {
 
         // Parse cipher suite
         guard offset + 2 <= body.count else {
-            logger.error("[QUIC-TLS] ServerHello truncated before cipher_suite")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
         cipherSuite = (UInt16(body[offset]) << 8) | UInt16(body[offset + 1])
@@ -314,7 +310,6 @@ class QUICTLSHandler {
 
         // Parse extensions to find key_share
         guard offset + 2 <= body.count else {
-            logger.error("[QUIC-TLS] ServerHello truncated before extensions")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
         let extLen = (Int(body[offset]) << 8) | Int(body[offset + 1])
@@ -359,12 +354,10 @@ class QUICTLSHandler {
         // Rejecting anything else prevents a downgrade-advertising server from
         // getting past the handshake.
         guard supportedVersionsSeen, negotiatedVersion == 0x0304 else {
-            logger.error("[QUIC-TLS] Invalid supported_versions: seen=\(supportedVersionsSeen) value=\(String(format: "0x%04x", negotiatedVersion))")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
         guard let serverPublicKey else {
-            logger.error("[QUIC-TLS] ServerHello missing key_share public key")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
@@ -389,7 +382,6 @@ class QUICTLSHandler {
                 let shared = try priv.sharedSecretFromKeyAgreement(with: serverKey)
                 sharedSecretData = shared.withUnsafeBytes { Data($0) }
             default:
-                logger.error("[QUIC-TLS] Server selected unoffered group: \(String(format: "0x%04x", serverKeyShareGroup))")
                 return .error(NGTCP2_ERR_CALLBACK_FAILURE)
             }
 
@@ -417,7 +409,6 @@ class QUICTLSHandler {
             state = .serverHelloReceived
 
         } catch {
-            logger.error("[QUIC-TLS] ECDHE failed: \(error)")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
@@ -452,9 +443,10 @@ class QUICTLSHandler {
                             conn, ptr, params.count
                         )
                     }
-                    if rv != 0 {
-                        logger.error("[QUIC-TLS] Failed to set remote transport params: \(rv)")
-                    }
+                    // Non-zero rv means ngtcp2 rejected the transport params;
+                    // the QUIC connection will surface the failure on its next
+                    // read_pkt cycle. Nothing to do here.
+                    _ = rv
                 }
             } else if extType == 0x0010 { // application_layer_protocol_negotiation (RFC 7301)
                 // ProtocolNameList: uint16 list_len, then one ProtocolName:
@@ -475,7 +467,6 @@ class QUICTLSHandler {
                 // treat the handshake as a protocol violation.
                 if !alpn.isEmpty {
                     guard let picked = negotiatedALPN, alpn.contains(picked) else {
-                        logger.error("[QUIC-TLS] ALPN mismatch: offered \(alpn), server picked \(negotiatedALPN ?? "<none>")")
                         return .error(NGTCP2_ERR_CALLBACK_FAILURE)
                     }
                 }
@@ -490,13 +481,11 @@ class QUICTLSHandler {
 
     private func processServerFinished(_ body: Data, conn: OpaquePointer) -> QUICTLSResult {
         guard let keyDerivation, let handshakeSecret, let clientHTS = clientHandshakeTrafficSecret else {
-            logger.error("[QUIC-TLS] Missing key derivation state for Finished")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
         // Validate server certificate chain (respects allowInsecure setting)
         if let error = validateCertificate() {
-            logger.error("[QUIC-TLS] \(error.localizedDescription)")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
@@ -509,7 +498,6 @@ class QUICTLSHandler {
                 algorithm: certificateVerifyAlgorithm,
                 signature: signature
             ) {
-                logger.error("[QUIC-TLS] \(error.localizedDescription)")
                 return .error(NGTCP2_ERR_CALLBACK_FAILURE)
             }
         }
@@ -535,7 +523,6 @@ class QUICTLSHandler {
         }
 
         if rv != 0 {
-            logger.error("[QUIC-TLS] Failed to submit client Finished: \(rv)")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 

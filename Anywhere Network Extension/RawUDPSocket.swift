@@ -217,7 +217,6 @@ final class RawUDPSocket {
             if n < 0 {
                 let err = errno
                 if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
-                logger.error("[RawUDP] recv errno=\(err)")
                 // Surface terminal recv failures so the flow can close; clear
                 // the read source so the dispatch event handler stops firing
                 // on the failed fd.

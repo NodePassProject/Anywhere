@@ -283,9 +283,6 @@ class HTTP2Connection: NaiveTunnel {
             case .rstStream:
                 if frame.streamID == 1 && state == .tunnelPending {
                     state = .closed
-                    if let errorCode = HTTP2Framer.parseRstStream(payload: frame.payload) {
-                        logger.error("[HTTP2] Stream 1 reset during CONNECT: errorCode=\(errorCode)")
-                    }
                     completion(HTTP2Error.streamReset(frame.streamID))
                     return
                 }
@@ -371,11 +368,9 @@ class HTTP2Connection: NaiveTunnel {
             completion(nil)
         } else if status == "407" {
             state = .closed
-            logger.error("[HTTP2] Proxy authentication required (407)")
             completion(HTTP2Error.authenticationRequired)
         } else {
             state = .closed
-            logger.error("[HTTP2] CONNECT failed with status \(status)")
             completion(HTTP2Error.tunnelFailed(statusCode: status))
         }
     }
@@ -562,6 +557,7 @@ class HTTP2Connection: NaiveTunnel {
                 }
                 self.receiveBuffer.append(data)
                 if self.receiveBuffer.count > Self.maxReceiveBufferSize {
+                    logger.warning("[HTTP2] Receive buffer cap (\(Self.maxReceiveBufferSize)B) exceeded; closing")
                     self.receiveBuffer.removeAll()
                     self.state = .closed
                     self.transport.cancel()

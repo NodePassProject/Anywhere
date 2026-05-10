@@ -244,11 +244,7 @@ final class HysteriaConnection: ProxyConnection {
     }
 
     override func sendRaw(data: Data) {
-        sendRaw(data: data) { error in
-            if let error {
-                logger.error("[Hysteria] TCP send error: \(error.localizedDescription)")
-            }
-        }
+        sendRaw(data: data) { _ in }
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {

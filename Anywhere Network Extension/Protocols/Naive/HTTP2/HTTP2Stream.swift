@@ -207,10 +207,8 @@ class HTTP2Stream: NaiveTunnel {
                 connectCompletion = nil
                 cb?(nil)
             } else if status == "407" {
-                logger.error("[HTTP2Stream] Proxy authentication required (407) on stream \(self.streamID)")
                 handleStreamError(HTTP2Error.authenticationRequired)
             } else {
-                logger.error("[HTTP2Stream] CONNECT failed with status \(status) on stream \(self.streamID)")
                 handleStreamError(HTTP2Error.tunnelFailed(statusCode: status))
             }
         }
@@ -250,7 +248,6 @@ class HTTP2Stream: NaiveTunnel {
 
     /// Handles RST_STREAM for this stream.
     func handleReset(errorCode: UInt32) {
-        logger.error("[HTTP2Stream] Stream \(self.streamID) reset: errorCode=\(errorCode)")
         handleStreamError(HTTP2Error.streamReset(streamID))
     }
 

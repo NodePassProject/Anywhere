@@ -92,7 +92,6 @@ class NaiveTLSTransport {
                 completion(nil)
             case .failure(let error):
                 self.tlsClient = nil
-                logger.error("[NaiveTLS] Connection failed: \(error.localizedDescription)")
                 completion(error)
             }
         }

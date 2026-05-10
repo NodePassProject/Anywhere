@@ -188,7 +188,6 @@ class HTTP11Connection: NaiveTunnel {
 
             let statusCode = String(parts[1])
             guard statusCode == "200" else {
-                logger.error("[HTTP11] CONNECT rejected: \(String(statusLine))")
                 if statusCode == "407" {
                     completion(NaiveTLSError.connectionFailed("Proxy authentication required (407)"))
                 } else {

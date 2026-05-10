@@ -362,7 +362,6 @@ final class ShadowsocksUDPSession {
                 completion?(err)
             }
         } catch {
-            logger.error("[SS-UDP] Encrypt error: \(error.localizedDescription)")
             completion?(error)
         }
     }

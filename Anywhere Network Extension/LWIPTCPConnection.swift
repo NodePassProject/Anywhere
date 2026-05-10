@@ -9,6 +9,20 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "LWIP-TCP")
 
+private struct HandshakeTimeoutError: LocalizedError {
+    let phase: String
+    var errorDescription: String? { "Handshake timed out during \(phase)" }
+}
+
+private struct LWIPWriteFatalError: LocalizedError {
+    let pending: Int
+    let sndbuf: Int
+    let queuelen: Int
+    var errorDescription: String? {
+        "tcp_write fatal (pending=\(pending), sndbuf=\(sndbuf), queuelen=\(queuelen))"
+    }
+}
+
 class LWIPTCPConnection {
     let pcb: UnsafeMutableRawPointer
     let dstPort: UInt16
@@ -136,6 +150,11 @@ class LWIPTCPConnection {
     private var uplinkDone = false
     private var downlinkDone = false
 
+    /// One-shot reporter that logs this connection's terminal failure at
+    /// most once. All transport error paths funnel through it so the LWIP
+    /// boundary emits exactly one error line per dead connection.
+    private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
+
     // MARK: Lifecycle
 
     init(pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
@@ -159,7 +178,11 @@ class LWIPTCPConnection {
             guard let self, !self.closed else { return }
             if self.isEstablishing {
                 let phase = self.sniffer != nil ? "TLS ClientHello sniff" : "proxy dial"
-                logger.error("[TCP] Handshake timeout during \(phase): \(self.dstHost):\(self.dstPort)")
+                self.failureReporter.report(
+                    operation: "Handshake",
+                    endpoint: self.endpointDescription,
+                    error: HandshakeTimeoutError(phase: phase)
+                )
                 self.abort()
             }
         }
@@ -200,6 +223,9 @@ class LWIPTCPConnection {
     private func appendPendingData(bytes ptr: UnsafePointer<UInt8>, count: Int) -> Bool {
         if pendingData.count + count > TunnelConstants.tcpMaxPendingDataSize {
             logger.warning("[TCP] pendingData cap exceeded for \(dstHost):\(dstPort) (\(pendingData.count) + \(count) > \(TunnelConstants.tcpMaxPendingDataSize)), aborting")
+            // Bottleneck-driven abort: the warning above describes both the
+            // cause and the termination. Suppress any later spurious error.
+            failureReporter.markReported()
             abort()
             return false
         }
@@ -338,7 +364,7 @@ class LWIPTCPConnection {
                 self.uploadPipeline.sendInFlight = false
                 guard !self.closed else { return }
                 if let error {
-                    self.logTransportFailure("Send", error: error)
+                    self.reportFailure("Send", error: error)
                     self.abort()
                     return
                 }
@@ -458,6 +484,9 @@ class LWIPTCPConnection {
         } else {
             logger.warning("[TCP] lwIP aborted connection: \(endpointDescription): \(reason)")
         }
+        // The connection ends here — suppress any later spurious error log
+        // that might fire as in-flight callbacks unwind.
+        failureReporter.markReported()
         closed = true
         releaseProxy()
     }
@@ -466,14 +495,8 @@ class LWIPTCPConnection {
         "\(dstHost):\(dstPort)"
     }
 
-    private func logTransportFailure(_ operation: String, error: Error) {
-        TransportErrorLogger.log(
-            operation: operation,
-            endpoint: endpointDescription,
-            error: error,
-            logger: logger,
-            prefix: "[TCP]"
-        )
+    private func reportFailure(_ operation: String, error: Error) {
+        failureReporter.report(operation: operation, endpoint: endpointDescription, error: error)
     }
 
     // MARK: - Route Commit
@@ -590,7 +613,7 @@ class LWIPTCPConnection {
                 guard !self.closed else { return }
 
                 if let error {
-                    self.logTransportFailure("Connect", error: error)
+                    self.reportFailure("Connect", error: error)
                     self.abort()
                     return
                 }
@@ -691,7 +714,7 @@ class LWIPTCPConnection {
                     self.tryArmReceive()
 
                 case .failure(let error):
-                    self.logTransportFailure("Connect", error: error)
+                    self.reportFailure("Connect", error: error)
                     self.abort()
                 }
             }
@@ -739,7 +762,7 @@ class LWIPTCPConnection {
                 stack.mitmLeafCache = made
                 cache = made
             } catch {
-                logger.error("[MITM] Failed to initialize leaf cache: \(error)")
+                reportFailure("MITM leaf cache", error: error)
                 abort()
                 return
             }
@@ -791,7 +814,8 @@ class LWIPTCPConnection {
             guard let self else { return }
             self.lwipQueue.async {
                 guard !self.closed else { return }
-                if error != nil {
+                if let error {
+                    self.reportFailure("MITM", error: error)
                     self.abort()
                 } else {
                     self.close()
@@ -839,7 +863,7 @@ class LWIPTCPConnection {
                 guard !self.closed else { return }
 
                 if let error {
-                    self.logTransportFailure("Receive", error: error)
+                    self.reportFailure("Receive", error: error)
                     self.abort()
                     return
                 }
@@ -919,7 +943,10 @@ class LWIPTCPConnection {
                 if n == -1 {
                     let sndbuf = Int(lwip_bridge_tcp_sndbuf(self.pcb))
                     let queuelen = Int(lwip_bridge_tcp_snd_queuelen(self.pcb))
-                    logger.error("[TCP] tcp_write fatal: \(self.dstHost):\(self.dstPort) (pending=\(live), sndbuf=\(sndbuf), queuelen=\(queuelen))")
+                    self.reportFailure(
+                        "Write",
+                        error: LWIPWriteFatalError(pending: live, sndbuf: sndbuf, queuelen: queuelen)
+                    )
                     self.abort()
                     return 0
                 }

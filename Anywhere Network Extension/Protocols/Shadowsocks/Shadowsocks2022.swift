@@ -95,11 +95,7 @@ class Shadowsocks2022Connection: ProxyConnection {
     }
 
     override func sendRaw(data: Data) {
-        sendRaw(data: data) { error in
-            if let error {
-                logger.error("[SS2022] Send error: \(error.localizedDescription)")
-            }
-        }
+        sendRaw(data: data) { _ in }
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
@@ -500,11 +496,7 @@ class Shadowsocks2022AESUDPConnection: ProxyConnection {
     }
 
     override func sendRaw(data: Data) {
-        sendRaw(data: data) { error in
-            if let error {
-                logger.error("[SS2022-UDP] Send error: \(error.localizedDescription)")
-            }
-        }
+        sendRaw(data: data) { _ in }
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
@@ -718,11 +710,7 @@ class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
     }
 
     override func sendRaw(data: Data) {
-        sendRaw(data: data) { error in
-            if let error {
-                logger.error("[SS2022-ChaCha-UDP] Send error: \(error.localizedDescription)")
-            }
-        }
+        sendRaw(data: data) { _ in }
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {

@@ -119,7 +119,6 @@ class TLSClient {
         do {
             clientHello = try buildTLSClientHello(privateKey: privateKey)
         } catch {
-            logger.error("[TLS] Failed to build ClientHello: \(error.localizedDescription)")
             completion(.failure(error))
             return
         }
@@ -130,7 +129,6 @@ class TLSClient {
 
         transport.connect(host: host, port: port, initialData: clientHello) { [weak self] error in
             if let error {
-                logger.error("[TLS] TCP connection failed: \(error.localizedDescription)")
                 completion(.failure(TLSError.connectionFailed(error.localizedDescription)))
                 return
             }
@@ -176,7 +174,6 @@ class TLSClient {
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         guard let privateKey = ephemeralPrivateKey else {
-            logger.error("[TLS] No ephemeral key for handshake")
             completion(.failure(TLSError.handshakeFailed("No ephemeral key")))
             return
         }
@@ -195,7 +192,6 @@ class TLSClient {
                 guard let self else { return }
 
                 if let error {
-                    logger.error("[TLS] Failed to send ClientHello: \(error.localizedDescription)")
                     completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                     return
                 }
@@ -203,7 +199,6 @@ class TLSClient {
                 self.receiveServerResponse(completion: completion)
             }
         } catch {
-            logger.error("[TLS] Failed to build ClientHello: \(error.localizedDescription)")
             completion(.failure(error))
         }
     }
@@ -269,10 +264,8 @@ class TLSClient {
             } else if contentType == 0x15 { // Alert
                 let alertLevel = buffer.count > 5 ? buffer[5] : 0
                 let alertDesc = buffer.count > 6 ? buffer[6] : 0
-                logger.error("[TLS] TLS Alert: level=\(alertLevel), desc=\(alertDesc)")
                 completion(.failure(TLSError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")))
             } else {
-                logger.error("[TLS] Unexpected content type: 0x\(String(format: "%02x", contentType))")
                 completion(.failure(TLSError.handshakeFailed("Unexpected content type: \(contentType)")))
             }
             return
@@ -287,13 +280,11 @@ class TLSClient {
             guard let self else { return }
 
             if let error {
-                logger.error("[TLS] Error receiving server response: \(error.localizedDescription)")
                 completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                 return
             }
 
             guard let data, !data.isEmpty else {
-                logger.error("[TLS] No server response (connection closed)")
                 completion(.failure(TLSError.handshakeFailed("No server response")))
                 return
             }
@@ -318,7 +309,6 @@ class TLSClient {
                 guard let self else { return }
 
                 if let error {
-                    logger.error("[TLS] Error receiving more data: \(error.localizedDescription)")
                     completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                     return
                 }
@@ -339,7 +329,6 @@ class TLSClient {
 
         guard let serverHelloResult = parseServerHello(data: buffer),
               let clientHello = storedClientHello else {
-            logger.error("[TLS] Failed to parse ServerHello or missing keys")
             completion(.failure(TLSError.handshakeFailed("Failed to parse ServerHello")))
             return
         }
@@ -454,7 +443,6 @@ class TLSClient {
 
             // Check for HelloRetryRequest (RFC 8446 §4.1.3)
             if srvRandom == Self.helloRetryRequestRandom {
-                logger.error("[TLS] Server sent HelloRetryRequest (not supported)")
                 return nil
             }
 
@@ -537,7 +525,6 @@ class TLSClient {
                 if let keyShare = keyShareData {
                     return .tls13(keyShare: keyShare, cipherSuite: cipherSuite)
                 }
-                logger.error("[TLS] TLS 1.3 ServerHello missing key_share")
                 return nil
             }
 
@@ -585,7 +572,6 @@ class TLSClient {
 
             consumeRemainingTLS13Handshake(buffer: buffer, completion: completion)
         } catch {
-            logger.error("[TLS] Failed to derive TLS 1.3 keys: \(error.localizedDescription)")
             completion(.failure(TLSError.handshakeFailed("Key derivation failed")))
         }
     }
@@ -677,7 +663,6 @@ class TLSClient {
                                 // Constant-time comparison to prevent timing attacks
                                 guard hsBody.count == expectedVerifyData.count,
                                       constantTimeEqual(hsBody, expectedVerifyData) else {
-                                    logger.error("[TLS] Server Finished verification failed")
                                     completion(.failure(TLSError.handshakeFailed("Server Finished verification failed")))
                                     return
                                 }
@@ -700,7 +685,7 @@ class TLSClient {
                         hsOffset += 4 + hsLen
                     }
                 } catch {
-                    logger.error("[TLS] Failed to decrypt handshake record: \(error.localizedDescription)")
+                    // Decrypt failures fall through to the outer guard below.
                 }
             }
 
@@ -864,13 +849,11 @@ class TLSClient {
             guard let self else { return }
 
             if let error {
-                logger.error("[TLS] Failed to send Client Finished: \(error.localizedDescription)")
                 completion(.failure(TLSError.handshakeFailed("Failed to send Client Finished")))
                 return
             }
 
             guard let appKeys = self.tls13.applicationKeys else {
-                logger.error("[TLS] Application keys not available")
                 completion(.failure(TLSError.handshakeFailed("Application keys not available")))
                 return
             }
@@ -978,7 +961,6 @@ class TLSClient {
             guard let self else { return }
 
             if let error {
-                logger.error("[TLS] Error receiving TLS 1.2 handshake: \(error.localizedDescription)")
                 completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                 return
             }
@@ -1453,7 +1435,6 @@ class TLSClient {
             guard let self else { return }
 
             if let error {
-                logger.error("[TLS] Failed to send TLS 1.2 handshake: \(error.localizedDescription)")
                 completion(.failure(TLSError.handshakeFailed(error.localizedDescription)))
                 return
             }
@@ -1955,7 +1936,6 @@ class TLSClient {
                 return
             }
             let message = (cfError as Error?)?.localizedDescription ?? "Certificate evaluation failed"
-            logger.error("[TLS] Certificate validation failed: \(message)")
             completion(.failure(TLSError.certificateValidationFailed(message)))
         }
     }

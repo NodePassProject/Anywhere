@@ -199,7 +199,6 @@ class QUICConnection {
         let streamData: UnsafeMutableRawPointer? = nil
         let rv = ngtcp2_conn_open_bidi_stream(conn, &streamId, streamData)
         if rv != 0 {
-            logger.error("[QUIC] Failed to open bidi stream: \(rv)")
             return nil
         }
         return streamId
@@ -211,7 +210,6 @@ class QUICConnection {
         let streamData: UnsafeMutableRawPointer? = nil
         let rv = ngtcp2_conn_open_uni_stream(conn, &streamId, streamData)
         if rv != 0 {
-            logger.error("[QUIC] Failed to open uni stream: \(rv)")
             return nil
         }
         return streamId
@@ -642,7 +640,6 @@ class QUICConnection {
             if n < 0 {
                 let err = errno
                 if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
-                logger.error("[QUIC] recv errno=\(err)")
                 close(error: QUICError.connectionFailed("recv errno=\(err)"))
                 return
             }
@@ -771,9 +768,8 @@ class QUICConnection {
             if n >= 0 { return }
             let err = errno
             if err == EINTR { continue }
-            if err != EAGAIN && err != EWOULDBLOCK {
-                logger.error("[QUIC] send errno=\(err)")
-            }
+            // Non-EAGAIN errors are silently dropped; ngtcp2's loss recovery
+            // handles the retransmit on the next tx loop.
             return
         }
     }
@@ -924,7 +920,6 @@ class QUICConnection {
         }
 
         if rv != 0 {
-            logger.error("[QUIC] read_pkt error: \(rv)")
             if rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING {
                 let error = QUICError.closed
                 if let cb = connectCompletion {
