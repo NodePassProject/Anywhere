@@ -358,7 +358,7 @@ class LWIPUDPFlow {
         // cache. Fresh resolutions aren't forced here because the cache
         // lookup is synchronous and lwipQueue is performance-critical; the
         // async prewarm below handles cache misses.
-        let cachedHints = ProxyDNSCache.shared.cachedIPs(for: dstHost) ?? []
+        let cachedHints = ProxyDNSResolver.shared.cachedIPs(for: dstHost) ?? []
 
         let token = session.register(
             dstHost: dstHost,
@@ -403,7 +403,7 @@ class LWIPUDPFlow {
             let weakSession = session
             let localQueue = lwipQueue
             DispatchQueue.global(qos: .userInitiated).async {
-                let ips = ProxyDNSCache.shared.resolveAll(host)
+                let ips = ProxyDNSResolver.shared.resolveAll(host)
                 guard !ips.isEmpty else { return }
                 localQueue.async { [weak weakSession] in
                     weakSession?.addResponseHints(token: token, hints: ips)

@@ -105,7 +105,7 @@ nonisolated final class RawUDPSocket {
                 return
             }
 
-            let ips = ProxyDNSCache.shared.resolveAll(host)
+            let ips = ProxyDNSResolver.shared.resolveAll(host)
             guard !ips.isEmpty else {
                 completionQueue.async {
                     completion(SocketError.resolutionFailed("DNS resolution failed for \(host)"))

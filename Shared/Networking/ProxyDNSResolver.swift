@@ -1,15 +1,15 @@
 //
-//  ProxyDNSCache.swift
-//  Network Extension
+//  ProxyDNSResolver.swift
+//  Anywhere
 //
 //  Created by Argsment Limited on 3/8/26.
 //
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "ProxyDNSCache")
+private let logger = AnywhereLogger(category: "ProxyDNSResolver")
 
-// MARK: - ProxyDNSCache
+// MARK: - ProxyDNSResolver
 
 /// Thread-safe DNS cache for proxy server domains. Always resolves through the
 /// physical network interface using `DNSServiceGetAddrInfo`, bypassing the VPN
@@ -18,8 +18,8 @@ private let logger = AnywhereLogger(category: "ProxyDNSCache")
 /// The active proxy domain (set via ``setActiveProxyDomain(_:)``) returns stale
 /// cached IPs on TTL expiry (to avoid blocking connections) while refreshing in
 /// the background. Non-active domains refresh synchronously.
-nonisolated final class ProxyDNSCache {
-    static let shared = ProxyDNSCache()
+nonisolated final class ProxyDNSResolver {
+    static let shared = ProxyDNSResolver()
 
     /// Default TTL for cached entries (seconds).
     static let defaultTTL: TimeInterval = 120

@@ -274,7 +274,7 @@ class LWIPStack {
         // (subsequent chain hops are resolved by upstream proxy servers). Mark
         // it active so ProxyDNSCache returns stale IPs immediately on TTL
         // expiry and refreshes in the background, keeping reconnects snappy.
-        ProxyDNSCache.shared.setActiveProxyDomain(Self.firstHopAddress(for: configuration))
+        ProxyDNSResolver.shared.setActiveProxyDomain(Self.firstHopAddress(for: configuration))
 
         if Self.shouldUseVisionMux(configuration) {
             muxManager = MuxManager(configuration: configuration, lwipQueue: lwipQueue)

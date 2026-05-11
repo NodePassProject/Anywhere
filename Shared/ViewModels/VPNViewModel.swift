@@ -546,7 +546,7 @@ class VPNViewModel: ObservableObject {
     }
 
     /// Returns `configuration` with `resolvedIP` set, preferring an existing
-    /// value, then `fallback`, then a fresh `getaddrinfo` lookup.
+    /// value, then `fallback`, then a ``ProxyDNSCache`` lookup.
     nonisolated static func withResolvedIP(
         _ configuration: ProxyConfiguration,
         fallback: String? = nil
@@ -752,55 +752,12 @@ class VPNViewModel: ObservableObject {
 
     // MARK: - DNS Resolution
 
-    /// Resolves a server address to an IP string.
-    /// If the address is already an IP (v4 or v6), returns it as-is.
-    /// If it's a domain, resolves via `getaddrinfo` (system DNS, before tunnel is up).
-    /// Returns `nil` on resolution failure.
+    /// Resolves a server address to an IP string. Returns the input unchanged if
+    /// it's already an IP literal. Delegates to ``ProxyDNSCache`` so every proxy
+    /// hostname resolution shares the same cache (and stale-fast wake-recovery
+    /// path) as the transport layers.
     nonisolated static func resolveServerAddress(_ address: String) -> String? {
-        // Strip brackets from IPv6 addresses (e.g. "[::1]" → "::1")
-        let bare = address.hasPrefix("[") && address.hasSuffix("]")
-            ? String(address.dropFirst().dropLast())
-            : address
-
-        // Check if already an IPv4 address
-        var sa4 = sockaddr_in()
-        if inet_pton(AF_INET, bare, &sa4.sin_addr) == 1 { return bare }
-
-        // Check if already an IPv6 address
-        var sa6 = sockaddr_in6()
-        if inet_pton(AF_INET6, bare, &sa6.sin6_addr) == 1 { return bare }
-
-        // Resolve domain → IP via getaddrinfo
-        var hints = addrinfo()
-        hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
-        var resolvedAddresses: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(bare, nil, &hints, &resolvedAddresses) == 0, let head = resolvedAddresses else {
-            return nil
-        }
-        defer { freeaddrinfo(head) }
-
-        // Extract the first resolved IP as a string
-        var current: UnsafeMutablePointer<addrinfo>? = head
-        while let info = current {
-            let family = info.pointee.ai_family
-            if family == AF_INET {
-                var addr = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
-                var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-                if inet_ntop(AF_INET, &addr.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
-                    return String(cString: buf)
-                }
-            } else if family == AF_INET6 {
-                var addr = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
-                var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
-                if inet_ntop(AF_INET6, &addr.sin6_addr, &buf, socklen_t(INET6_ADDRSTRLEN)) != nil {
-                    return String(cString: buf)
-                }
-            }
-            current = info.pointee.ai_next
-        }
-
-        return nil
+        ProxyDNSResolver.shared.resolveHost(address)
     }
 
     // MARK: - Routing Sync

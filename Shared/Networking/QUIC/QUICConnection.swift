@@ -687,30 +687,32 @@ nonisolated class QUICConnection {
             return
         }
 
-        // DNS resolution — prefer IPv6 if available, fall back to IPv4
-        var hints = addrinfo()
-        hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_DGRAM
-        var result: UnsafeMutablePointer<addrinfo>?
-        guard getaddrinfo(host, nil, &hints, &result) == 0, let res = result else { return }
-        defer { freeaddrinfo(result) }
-
-        // Walk the result list: prefer IPv4 for now, but accept IPv6
-        var found4: UnsafeMutablePointer<addrinfo>?
-        var found6: UnsafeMutablePointer<addrinfo>?
-        var cur: UnsafeMutablePointer<addrinfo>? = res
-        while let r = cur {
-            if r.pointee.ai_family == AF_INET && found4 == nil { found4 = r }
-            if r.pointee.ai_family == AF_INET6 && found6 == nil { found6 = r }
-            cur = r.pointee.ai_next
+        // Cache-backed resolution. A direct getaddrinfo() would block the QUIC
+        // queue on a cold system resolver (notably post-wake); ProxyDNSCache
+        // returns stale IPs immediately for the active proxy domain and refreshes
+        // in the background.
+        var found4: in_addr?
+        var found6: in6_addr?
+        for ip in ProxyDNSResolver.shared.resolveAll(host) {
+            if found4 == nil {
+                var a4 = in_addr()
+                if inet_pton(AF_INET, ip, &a4) == 1 {
+                    found4 = a4
+                    continue
+                }
+            }
+            if found6 == nil {
+                var a6 = in6_addr()
+                if inet_pton(AF_INET6, ip, &a6) == 1 {
+                    found6 = a6
+                }
+            }
         }
 
-        if let r = found4, let sa = r.pointee.ai_addr {
-            let sin = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
-            configureIPv4(sin.sin_addr)
-        } else if let r = found6, let sa = r.pointee.ai_addr {
-            let sin6 = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
-            configureIPv6(sin6.sin6_addr)
+        if let a4 = found4 {
+            configureIPv4(a4)
+        } else if let a6 = found6 {
+            configureIPv6(a6)
         }
     }
 

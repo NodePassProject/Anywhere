@@ -345,7 +345,7 @@ nonisolated class RawTCPSocket: RawTransport {
                 return
             }
 
-            let ips = ProxyDNSCache.shared.resolveAll(host)
+            let ips = ProxyDNSResolver.shared.resolveAll(host)
             guard !ips.isEmpty else {
                 let err = SocketError.resolutionFailed("DNS resolution failed for \(host)")
                 // Move to .failed if still in setup; keep .cancelled if already
