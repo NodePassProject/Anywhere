@@ -863,6 +863,11 @@ nonisolated class RawTCPSocket: RawTransport {
     /// Internal callers that don't need to know when teardown finishes can use
     /// the no-arg form.
     private func tearDownSocket(completion: @escaping @Sendable () -> Void) {
+        if let scratch = recvScratch {
+            recvScratch = nil
+            scratch.deallocate()
+        }
+
         let fdToClose = socketFD
         socketFD = -1
 
