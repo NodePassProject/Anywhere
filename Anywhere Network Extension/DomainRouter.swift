@@ -17,21 +17,19 @@ enum RouteAction {
 
 class DomainRouter {
 
-    // MARK: - Suffix Trie (reverse-label) & Keyword List
+    // MARK: - Tier model
     //
-    // DOMAIN-SUFFIX rules live in a reverse-label trie: "www.google.com" is
-    // inserted as ["com","google","www"]. Lookup walks the domain from the TLD
-    // inward and remembers the deepest action seen — naturally label-aligned
-    // and longest-match, O(labels) per query.
+    // Each rule source owns its own set of matching structures, so cross-source
+    // priority is enforced by the order tiers are queried, not by trie insert
+    // order. Within a tier, suffix rules win over keyword rules; deepest suffix
+    // and longest CIDR prefix still win, but that competition is now scoped to
+    // a single source.
     //
-    // DOMAIN-KEYWORD rules are substring matches, evaluated only if no suffix
-    // rule matched. Keyword rule sets are small enough that a linear scan keeps
-    // the precedence model explicit: suffix tier first, keyword tier second.
-    // Within the keyword tier, longer patterns win and later inserts win ties.
+    // Priority (highest first): User > ADBlock > Built-in > Country Bypass.
 
     private final class TrieNode {
         var children: [String: TrieNode] = [:]
-        var userAction: RouteAction?
+        var action: RouteAction?
     }
 
     private struct KeywordRule {
@@ -46,43 +44,106 @@ class DomainRouter {
         }
     }
 
-    private var trieRoot = TrieNode()
-    private var keywordRules: [KeywordRule] = []
+    private struct TierMatchers {
+        var trieRoot = TrieNode()
+        var keywordRules: [KeywordRule] = []
+        var ipv4Trie = CIDRTrie()
+        var ipv6Trie = CIDRTrie()
+        var domainRuleCount = 0
+        var ipRuleCount = 0
 
-    // MARK: - IP CIDR Binary Tries
-    //
-    // Binary tries for longest-prefix-match on IP addresses.
-    // Bypass country rules are inserted first as .direct, then user rules overwrite.
-    // Lookup is O(32) for IPv4, O(128) for IPv6 — constant regardless of rule count.
+        var isEmpty: Bool { domainRuleCount == 0 && ipRuleCount == 0 }
 
-    private var ipv4Trie = CIDRTrie()
-    private var ipv6Trie = CIDRTrie()
+        mutating func insertSuffix(_ suffix: String, action: RouteAction) {
+            var node = trieRoot
+            for label in suffix.split(separator: ".").reversed() {
+                let key = String(label)
+                if let child = node.children[key] {
+                    node = child
+                } else {
+                    let child = TrieNode()
+                    node.children[key] = child
+                    node = child
+                }
+            }
+            node.action = action
+            domainRuleCount += 1
+        }
+
+        mutating func insertKeyword(_ pattern: String, action: RouteAction) {
+            guard !pattern.isEmpty else { return }
+            let rule = KeywordRule(pattern: pattern, action: action)
+            if let index = keywordRules.firstIndex(where: { $0.pattern == pattern }) {
+                keywordRules[index] = rule
+            } else {
+                keywordRules.append(rule)
+            }
+            domainRuleCount += 1
+        }
+
+        mutating func insertIPv4(network: UInt32, prefixLen: Int, action: RouteAction) {
+            ipv4Trie.insert(network: network, prefixLen: prefixLen, action: action)
+            ipRuleCount += 1
+        }
+
+        mutating func insertIPv6(network: [UInt8], prefixLen: Int, action: RouteAction) {
+            ipv6Trie.insert(network: network, prefixLen: prefixLen, action: action)
+            ipRuleCount += 1
+        }
+
+        func lookupDomain(_ domain: String) -> RouteAction? {
+            lookupSuffix(domain) ?? lookupKeyword(domain)
+        }
+
+        private func lookupSuffix(_ domain: String) -> RouteAction? {
+            var node = trieRoot
+            var deepestAction: RouteAction? = nil
+            for label in domain.split(separator: ".").reversed() {
+                guard let child = node.children[String(label)] else { break }
+                node = child
+                if let action = node.action { deepestAction = action }
+            }
+            return deepestAction
+        }
+
+        private func lookupKeyword(_ domain: String) -> RouteAction? {
+            var bestAction: RouteAction? = nil
+            var bestLength = -1
+            for rule in keywordRules where domain.contains(rule.pattern) {
+                if rule.patternLength >= bestLength {
+                    bestAction = rule.action
+                    bestLength = rule.patternLength
+                }
+            }
+            return bestAction
+        }
+    }
+
+    // Tiers in priority order — first hit wins.
+    private enum Tier: Int, CaseIterable {
+        case user = 0
+        case adBlock = 1
+        case builtIn = 2
+        case bypass = 3
+    }
+
+    private var tiers: [TierMatchers] = Tier.allCases.map { _ in TierMatchers() }
 
     // Proxy configurations for rule-assigned proxies
     private var configurationMap: [UUID: ProxyConfiguration] = [:]
-
-    // Counts for hasRules (user rules only)
-    private var domainRuleCount = 0
-    private var ipRuleCount = 0
 
     // MARK: - Loading
 
     /// Clears all routing rules and configurations.
     /// Used when switching to global mode to ensure no stale rules affect routing.
     func reset() {
-        trieRoot = TrieNode()
-        keywordRules.removeAll()
-        domainRuleCount = 0
-        ipRuleCount = 0
-        ipv4Trie = CIDRTrie()
-        ipv6Trie = CIDRTrie()
+        tiers = Tier.allCases.map { _ in TierMatchers() }
         configurationMap.removeAll()
     }
 
-    /// Reads routing configuration from App Group UserDefaults and compiles rules.
-    /// Bypass country rules are loaded first as `.direct`, then user rules overwrite.
+    /// Reads routing configuration from App Group UserDefaults and compiles rules
+    /// into per-tier matching structures.
     func loadRoutingConfiguration() {
-        // Clear all matching structures
         reset()
 
         guard let data = AWCore.getRoutingData(),
@@ -91,38 +152,7 @@ class DomainRouter {
             return
         }
 
-        // Load bypass country rules first — user rules will overwrite on conflict
-        var bypassDomainRuleCount = 0
-        var bypassIPRuleCount = 0
-        if let bypassRules = json["bypassRules"] as? [[String: Any]] {
-            for rule in bypassRules {
-                guard let type = Self.parseRuleType(rule["type"]),
-                      let value = rule["value"] as? String else { continue }
-                switch type {
-                case .domainSuffix:
-                    trieInsert(value.lowercased(), action: .direct)
-                    bypassDomainRuleCount += 1
-                case .domainKeyword:
-                    insertKeywordRule(value.lowercased(), action: .direct)
-                    bypassDomainRuleCount += 1
-                case .ipCIDR:
-                    if let parsed = Self.parseIPv4CIDR(value) {
-                        ipv4Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: .direct)
-                        bypassIPRuleCount += 1
-                    }
-                case .ipCIDR6:
-                    if let parsed = Self.parseIPv6CIDR(value) {
-                        ipv6Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: .direct)
-                        bypassIPRuleCount += 1
-                    }
-                }
-            }
-        }
-        if bypassDomainRuleCount > 0 || bypassIPRuleCount > 0 {
-            logger.debug("[DomainRouter] Loaded \(bypassDomainRuleCount) bypass country domain rules, \(bypassIPRuleCount) IP rules")
-        }
-
-        // Parse configurations
+        // Configurations (tier-independent)
         if let configurations = json["configs"] as? [String: Any] {
             for (key, value) in configurations {
                 guard let configurationId = UUID(uuidString: key),
@@ -133,12 +163,25 @@ class DomainRouter {
             }
         }
 
-        // Parse user rules — these overwrite bypass rules within the same tier
-        guard let rules = json["rules"] as? [[String: Any]] else {
-            logger.warning("[VPN] Routing data malformed: missing rules")
-            return
+        // Tiered rule loading. Each tier reads from its own array.
+        if let entries = json["userRules"] as? [[String: Any]] {
+            loadRuleEntries(entries, into: .user)
         }
-        for rule in rules {
+        if let entries = json["adBlockRules"] as? [[String: Any]] {
+            loadRuleEntries(entries, into: .adBlock)
+        }
+        if let entries = json["builtInRules"] as? [[String: Any]] {
+            loadRuleEntries(entries, into: .builtIn)
+        }
+        if let entries = json["bypassRules"] as? [[String: Any]] {
+            loadBypassEntries(entries, into: .bypass)
+        }
+
+        logger.debug("[DomainRouter] Loaded tiers — user: \(self.tiers[Tier.user.rawValue].domainRuleCount)+\(self.tiers[Tier.user.rawValue].ipRuleCount), adBlock: \(self.tiers[Tier.adBlock.rawValue].domainRuleCount)+\(self.tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(self.tiers[Tier.builtIn.rawValue].domainRuleCount)+\(self.tiers[Tier.builtIn.rawValue].ipRuleCount), bypass: \(self.tiers[Tier.bypass.rawValue].domainRuleCount)+\(self.tiers[Tier.bypass.rawValue].ipRuleCount); \(self.configurationMap.count) configurations")
+    }
+
+    private func loadRuleEntries(_ entries: [[String: Any]], into tier: Tier) {
+        for rule in entries {
             guard let actionStr = rule["action"] as? String else { continue }
 
             let action: RouteAction
@@ -146,48 +189,42 @@ class DomainRouter {
                 action = .direct
             } else if actionStr == "reject" {
                 action = .reject
-            } else if actionStr == "proxy", let configurationIdStr = rule["configId"] as? String, let configurationId = UUID(uuidString: configurationIdStr) {
+            } else if actionStr == "proxy",
+                      let configurationIdStr = rule["configId"] as? String,
+                      let configurationId = UUID(uuidString: configurationIdStr) {
                 action = .proxy(configurationId)
             } else {
                 continue
             }
 
-            // Domain rules
             if let domainRules = rule["domainRules"] as? [[String: Any]] {
                 for dr in domainRules {
                     guard let type = Self.parseRuleType(dr["type"]),
                           let value = dr["value"] as? String else { continue }
                     let lowered = value.lowercased()
-
                     switch type {
                     case .domainSuffix:
-                        trieInsert(lowered, action: action)
-                        domainRuleCount += 1
+                        tiers[tier.rawValue].insertSuffix(lowered, action: action)
                     case .domainKeyword:
-                        insertKeywordRule(lowered, action: action)
-                        domainRuleCount += 1
+                        tiers[tier.rawValue].insertKeyword(lowered, action: action)
                     case .ipCIDR, .ipCIDR6:
                         break
                     }
                 }
             }
 
-            // IP CIDR rules
             if let ipRules = rule["ipRules"] as? [[String: Any]] {
                 for ir in ipRules {
                     guard let type = Self.parseRuleType(ir["type"]),
                           let value = ir["value"] as? String else { continue }
-
                     switch type {
                     case .ipCIDR:
                         if let parsed = Self.parseIPv4CIDR(value) {
-                            ipv4Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
-                            ipRuleCount += 1
+                            tiers[tier.rawValue].insertIPv4(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
                         }
                     case .ipCIDR6:
                         if let parsed = Self.parseIPv6CIDR(value) {
-                            ipv6Trie.insert(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
-                            ipRuleCount += 1
+                            tiers[tier.rawValue].insertIPv6(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
                         }
                     case .domainSuffix, .domainKeyword:
                         break
@@ -195,26 +232,48 @@ class DomainRouter {
                 }
             }
         }
-
-        logger.debug("[DomainRouter] Loaded \(self.domainRuleCount) domain rules, \(self.ipRuleCount) IP rules, \(self.configurationMap.count) configurations")
     }
 
-    // MARK: - Domain Matching (public API)
+    /// Bypass rules use a flat {type, value} shape with an implicit `.direct` action.
+    private func loadBypassEntries(_ entries: [[String: Any]], into tier: Tier) {
+        for rule in entries {
+            guard let type = Self.parseRuleType(rule["type"]),
+                  let value = rule["value"] as? String else { continue }
+            switch type {
+            case .domainSuffix:
+                tiers[tier.rawValue].insertSuffix(value.lowercased(), action: .direct)
+            case .domainKeyword:
+                tiers[tier.rawValue].insertKeyword(value.lowercased(), action: .direct)
+            case .ipCIDR:
+                if let parsed = Self.parseIPv4CIDR(value) {
+                    tiers[tier.rawValue].insertIPv4(network: parsed.network, prefixLen: parsed.prefixLen, action: .direct)
+                }
+            case .ipCIDR6:
+                if let parsed = Self.parseIPv6CIDR(value) {
+                    tiers[tier.rawValue].insertIPv6(network: parsed.network, prefixLen: parsed.prefixLen, action: .direct)
+                }
+            }
+        }
+    }
 
-    /// Whether any user routing rules have been loaded.
+    // MARK: - Matching (public API)
+
+    /// Whether any routing rules have been loaded across any tier.
     var hasRules: Bool {
-        domainRuleCount > 0 || ipRuleCount > 0
+        tiers.contains { !$0.isEmpty }
     }
 
-    /// Matches a domain in two tiers: suffix rules first, keyword rules second.
+    /// Matches a domain by walking tiers in priority order. First hit wins.
     func matchDomain(_ domain: String) -> RouteAction? {
         guard !domain.isEmpty else { return nil }
         let lowered = domain.lowercased()
-        return trieLookup(lowered) ?? lookupKeywordRule(lowered)
+        for tier in tiers {
+            if let action = tier.lookupDomain(lowered) { return action }
+        }
+        return nil
     }
 
-    /// Matches an IP address against CIDR rules via binary trie.
-    /// O(32) for IPv4, O(128) for IPv6 — constant regardless of rule count.
+    /// Matches an IP address against per-tier CIDR tries in priority order.
     func matchIP(_ ip: String) -> RouteAction? {
         guard !ip.isEmpty else { return nil }
 
@@ -222,16 +281,23 @@ class DomainRouter {
             var addr = in6_addr()
             guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
             return withUnsafeBytes(of: &addr) { raw in
-                ipv6Trie.lookup(raw.bindMemory(to: UInt8.self))
+                let buf = raw.bindMemory(to: UInt8.self)
+                for tier in tiers {
+                    if let action = tier.ipv6Trie.lookup(buf) { return action }
+                }
+                return nil
             }
         } else {
             guard let ip32 = Self.parseIPv4(ip) else { return nil }
-            return ipv4Trie.lookup(ip32)
+            for tier in tiers {
+                if let action = tier.ipv4Trie.lookup(ip32) { return action }
+            }
+            return nil
         }
     }
 
     /// Resolves a RouteAction to a ProxyConfiguration.
-    /// Returns nil for .direct or when the configuration UUID is not found.
+    /// Returns nil for .direct/.reject or when the configuration UUID is not found.
     func resolveConfiguration(action: RouteAction) -> ProxyConfiguration? {
         switch action {
         case .direct, .reject:
@@ -239,74 +305,6 @@ class DomainRouter {
         case .proxy(let id):
             return configurationMap[id]
         }
-    }
-
-    // MARK: - Domain Matching (private)
-
-    /// Inserts a suffix rule into the reverse-label trie, overwriting any existing action.
-    private func trieInsert(_ suffix: String, action: RouteAction) {
-        let node = trieWalkOrCreate(suffix)
-        node.userAction = action
-    }
-
-    /// Inserts a keyword pattern, overwriting any existing entry with the same pattern
-    /// so user rules replace bypass rules (mirroring the suffix trie's overwrite behavior).
-    private func insertKeywordRule(_ pattern: String, action: RouteAction) {
-        guard !pattern.isEmpty else { return }
-        let rule = KeywordRule(pattern: pattern, action: action)
-        if let index = keywordRules.firstIndex(where: { $0.pattern == pattern }) {
-            keywordRules[index] = rule
-        } else {
-            keywordRules.append(rule)
-        }
-    }
-
-    /// Walks (or creates) the trie path for a domain suffix, returning the leaf node.
-    private func trieWalkOrCreate(_ suffix: String) -> TrieNode {
-        var node = trieRoot
-        for label in suffix.split(separator: ".").reversed() {
-            let key = String(label)
-            if let child = node.children[key] {
-                node = child
-            } else {
-                let child = TrieNode()
-                node.children[key] = child
-                node = child
-            }
-        }
-        return node
-    }
-
-    /// Looks up a domain in the suffix trie. Returns the deepest action along the path.
-    private func trieLookup(_ domain: String) -> RouteAction? {
-        var node = trieRoot
-        var deepestAction: RouteAction? = nil
-
-        for label in domain.split(separator: ".").reversed() {
-            guard let child = node.children[String(label)] else { break }
-            node = child
-            if let action = node.userAction {
-                deepestAction = action
-            }
-        }
-
-        return deepestAction
-    }
-
-    /// Linearly scans keyword rules only after suffix lookup has failed.
-    /// Longer keywords win; ties go to the later inserted rule.
-    private func lookupKeywordRule(_ domain: String) -> RouteAction? {
-        var bestAction: RouteAction? = nil
-        var bestLength = -1
-
-        for rule in keywordRules where domain.contains(rule.pattern) {
-            if rule.patternLength >= bestLength {
-                bestAction = rule.action
-                bestLength = rule.patternLength
-            }
-        }
-
-        return bestAction
     }
 
     // MARK: - CIDR Parsing
@@ -368,7 +366,7 @@ class DomainRouter {
 //
 // Binary trie for longest-prefix-match on IP addresses.
 // Each bit of the address selects a child (0 = left, 1 = right).
-// Bypass country rules are inserted first as .direct, then user rules overwrite.
+// One trie per tier; cross-tier priority is handled by DomainRouter.
 // Lookup walks all address bits, tracking the deepest match — O(W) where
 // W = address width (32 for IPv4, 128 for IPv6), independent of rule count.
 

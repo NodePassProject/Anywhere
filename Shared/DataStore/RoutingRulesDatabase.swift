@@ -33,7 +33,7 @@ final class RoutingRulesDatabase {
 
     // MARK: - Queries
 
-    /// Returns all rules for a given source (e.g. "Direct", "ADBlock", "Telegram", "CN").
+    /// Returns all rules for a given source (e.g. "ADBlock", "Telegram", "CN").
     func loadRules(for source: String) -> [RoutingRule] {
         guard let db else { return [] }
 

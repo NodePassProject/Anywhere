@@ -59,17 +59,15 @@ class RoutingRuleSetStore: ObservableObject {
         ruleSets.first(where: { $0.name == "ADBlock" })
     }
     var builtInServiceRuleSets: [RoutingRuleSet] {
-        ruleSets.filter { $0.name != "Direct" && $0.name != "ADBlock" }
+        ruleSets.filter { $0.name != "ADBlock" }
     }
 
-    /// Bundled ruleset names: Direct + supported services + ADBlock.
+    /// Bundled ruleset names: supported services + ADBlock.
     private static let builtIn: [String] = {
-        ["Direct"] + serviceCatalog.supportedServices + ["ADBlock"]
+        serviceCatalog.supportedServices + ["ADBlock"]
     }()
 
     private static let serviceCatalog = ServiceCatalog.load()
-
-    private static let defaultAssignments: [String: String] = ["Direct": "DIRECT"]
 
     private init() {
         let assignments = AWCore.getRuleSetAssignments()
@@ -87,12 +85,12 @@ class RoutingRuleSetStore: ObservableObject {
         let assignmentsDict = assignments ?? AWCore.getRuleSetAssignments()
 
         var sets = Self.builtIn.map { name in
-            RoutingRuleSet(id: name, name: name, assignedConfigurationId: assignmentsDict[name] ?? Self.defaultAssignments[name])
+            RoutingRuleSet(id: name, name: name, assignedConfigurationId: assignmentsDict[name])
         }
 
-        // Insert custom rule sets before ADBlock so that ADBlock retains
-        // highest priority.  Desired trie-overwrite order (lowest → highest):
-        // Country Bypass → Direct → Services → User/Custom → ADBlock
+        // Custom rule sets sit between Services and ADBlock here for stable display
+        // ordering. Runtime priority is enforced separately by DomainRouter, which
+        // queries tiers in: User > ADBlock > Built-in > Country Bypass.
         let insertionIndex = sets.firstIndex(where: { $0.id == "ADBlock" }) ?? sets.endIndex
         for (offset, custom) in customRuleSets.enumerated() {
             let id = custom.id.uuidString
@@ -211,7 +209,7 @@ class RoutingRuleSetStore: ObservableObject {
     /// Loads rules for a given built-in rule set name. Thread-safe – no instance state accessed.
     /// All built-in rules are stored in the bundled Rules.db SQLite database.
     static func loadRules(for name: String) -> [RoutingRule] {
-        if name != "Direct" && name != "ADBlock" {
+        if name != "ADBlock" {
             return serviceCatalog.rules(for: name)
         }
         return RoutingRulesDatabase.shared.loadRules(for: name)
@@ -239,7 +237,9 @@ class RoutingRuleSetStore: ObservableObject {
         }
 
         await Task.detached {
-            var routingRules: [[String: Any]] = []
+            var userRules: [[String: Any]] = []
+            var adBlockRules: [[String: Any]] = []
+            var builtInRules: [[String: Any]] = []
             var configurationsDict: [String: Any] = [:]
 
             for ruleSet in snapshot {
@@ -293,7 +293,13 @@ class RoutingRuleSetStore: ObservableObject {
                     continue
                 }
 
-                routingRules.append(ruleEntry)
+                if ruleSet.isCustom {
+                    userRules.append(ruleEntry)
+                } else if ruleSet.name == "ADBlock" {
+                    adBlockRules.append(ruleEntry)
+                } else {
+                    builtInRules.append(ruleEntry)
+                }
             }
 
             // Fetch bypass country rules
@@ -306,10 +312,11 @@ class RoutingRuleSetStore: ObservableObject {
                 }
             }
 
-            var routing: [String: Any] = ["rules": routingRules, "configs": configurationsDict]
-            if !bypassRules.isEmpty {
-                routing["bypassRules"] = bypassRules
-            }
+            var routing: [String: Any] = ["configs": configurationsDict]
+            if !userRules.isEmpty { routing["userRules"] = userRules }
+            if !adBlockRules.isEmpty { routing["adBlockRules"] = adBlockRules }
+            if !builtInRules.isEmpty { routing["builtInRules"] = builtInRules }
+            if !bypassRules.isEmpty { routing["bypassRules"] = bypassRules }
 
             if let data = try? JSONSerialization.data(withJSONObject: routing) {
                 AWCore.setRoutingData(data)
