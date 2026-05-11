@@ -389,27 +389,31 @@ class VPNViewModel: ObservableObject {
 
     // MARK: - Latency Testing
     //
-    // Latency tests run inside the network extension via IPC. The main app
-    // sends a `testLatency` message containing the configuration to test; the
-    // extension dials the proxy directly (independent of the active tunnel)
-    // and replies with the round-trip time. The tunnel must be running to
-    // serve as the IPC host — if it isn't, we start it first.
+    // Latency tests run in one of two modes depending on the tunnel state:
+    //   - VPN connected:  Forward the test to the network extension via IPC.
+    //                     The extension dials the proxy directly (independent
+    //                     of the active tunnel) and replies with the RTT.
+    //                     Going through the NE here means the test reuses the
+    //                     in-tunnel ``ProxyDNSCache`` and avoids dialing
+    //                     interception fake-IPs from the main app.
+    //   - VPN off:        Dial the proxy from the main-app process directly
+    //                     via the shared ``LatencyTester``.
 
     private var latencyTask: Task<Void, Never>?
 
     /// Cap on simultaneous in-flight test requests. Mirrors the previous
-    /// in-process limit; keeps extension proxy connections within what a
-    /// typical residential uplink/NAT can sustain.
+    /// in-process limit; keeps proxy connections within what a typical
+    /// residential uplink/NAT can sustain whether tests run here or in the NE.
     private static let maxConcurrentLatencyTests = 4
 
     func testLatency(for configuration: ProxyConfiguration) {
         latencyTask?.cancel()
         let configurationId = configuration.id
         latencyResults[configurationId] = .testing
+        let useIPC = vpnStatus == .connected
         latencyTask = Task { [weak self] in
-            guard let self else { return }
-            let result = await self.runLatencyTest(for: configuration)
-            self.latencyResults[configurationId] = result
+            let result = await Self.runSingleLatencyTest(for: configuration, viaIPC: useIPC, session: useIPC ? self?.providerSession : nil)
+            await MainActor.run { self?.latencyResults[configurationId] = result }
         }
     }
 
@@ -419,10 +423,11 @@ class VPNViewModel: ObservableObject {
         for config in configs {
             latencyResults[config.id] = .testing
         }
+        let useIPC = vpnStatus == .connected
+        let session = useIPC ? providerSession : nil
         latencyTask = Task { [weak self] in
-            guard let self else { return }
-            await self.runLatencyTests(configs) { id, result in
-                self.latencyResults[id] = result
+            await Self.runLatencyTests(configs, viaIPC: useIPC, session: session) { id, result in
+                await MainActor.run { self?.latencyResults[id] = result }
             }
         }
     }
@@ -435,11 +440,12 @@ class VPNViewModel: ObservableObject {
         guard let resolved = resolveChain(chain) else { return }
         chainLatencyResults[chain.id] = .testing
         let chainId = chain.id
+        let useIPC = vpnStatus == .connected
+        let session = useIPC ? providerSession : nil
         chainLatencyTask?.cancel()
         chainLatencyTask = Task { [weak self] in
-            guard let self else { return }
-            let result = await self.runLatencyTest(for: resolved)
-            self.chainLatencyResults[chainId] = result
+            let result = await Self.runSingleLatencyTest(for: resolved, viaIPC: useIPC, session: session)
+            await MainActor.run { self?.chainLatencyResults[chainId] = result }
         }
     }
 
@@ -453,51 +459,60 @@ class VPNViewModel: ObservableObject {
             }
         }
         let chainIdByConfigId: [UUID: UUID] = Dictionary(uniqueKeysWithValues: chainData.map { ($0.1.id, $0.0) })
+        let useIPC = vpnStatus == .connected
+        let session = useIPC ? providerSession : nil
         chainLatencyTask = Task { [weak self] in
-            guard let self else { return }
-            await self.runLatencyTests(chainData.map(\.1)) { configId, result in
+            await Self.runLatencyTests(chainData.map(\.1), viaIPC: useIPC, session: session) { configId, result in
                 if let chainId = chainIdByConfigId[configId] {
-                    self.chainLatencyResults[chainId] = result
+                    await MainActor.run { self?.chainLatencyResults[chainId] = result }
                 }
             }
         }
     }
 
-    // MARK: - IPC-Backed Latency Tests
+    // MARK: - Latency Test Execution
 
-    /// Runs a single latency test in the network extension. Starts the tunnel
-    /// if it isn't already up so the IPC message has a recipient.
-    private func runLatencyTest(for configuration: ProxyConfiguration) async -> LatencyResult {
-        guard await ensureTunnelRunningForTesting() else { return .failed }
-        return await sendLatencyTestMessage(for: configuration)
+    /// Active provider session used for IPC, or nil when no tunnel manager is loaded.
+    private var providerSession: NETunnelProviderSession? {
+        vpnManager?.connection as? NETunnelProviderSession
+    }
+
+    /// Runs a single latency test using the chosen transport.
+    nonisolated private static func runSingleLatencyTest(
+        for configuration: ProxyConfiguration,
+        viaIPC: Bool,
+        session: NETunnelProviderSession?
+    ) async -> LatencyResult {
+        if viaIPC, let session {
+            return await sendLatencyTestMessage(for: configuration, session: session)
+        }
+        return await LatencyTester.test(configuration)
     }
 
     /// Runs latency tests for a batch, capped at ``maxConcurrentLatencyTests``
     /// in-flight requests. Reports each result via `onResult` as it arrives.
-    private func runLatencyTests(
+    nonisolated private static func runLatencyTests(
         _ configurations: [ProxyConfiguration],
-        onResult: @MainActor @escaping (UUID, LatencyResult) -> Void
+        viaIPC: Bool,
+        session: NETunnelProviderSession?,
+        onResult: @Sendable @escaping (UUID, LatencyResult) async -> Void
     ) async {
         guard !configurations.isEmpty else { return }
-        guard await ensureTunnelRunningForTesting() else {
-            for config in configurations { onResult(config.id, .failed) }
-            return
-        }
         await withTaskGroup(of: (UUID, LatencyResult).self) { group in
             var iterator = configurations.makeIterator()
             for _ in 0..<min(Self.maxConcurrentLatencyTests, configurations.count) {
                 if let config = iterator.next() {
-                    group.addTask { [weak self] in
-                        let r = await self?.sendLatencyTestMessage(for: config) ?? .failed
+                    group.addTask {
+                        let r = await runSingleLatencyTest(for: config, viaIPC: viaIPC, session: session)
                         return (config.id, r)
                     }
                 }
             }
             for await pair in group {
-                onResult(pair.0, pair.1)
+                await onResult(pair.0, pair.1)
                 if let config = iterator.next() {
-                    group.addTask { [weak self] in
-                        let r = await self?.sendLatencyTestMessage(for: config) ?? .failed
+                    group.addTask {
+                        let r = await runSingleLatencyTest(for: config, viaIPC: viaIPC, session: session)
                         return (config.id, r)
                     }
                 }
@@ -507,12 +522,14 @@ class VPNViewModel: ObservableObject {
 
     /// Sends one `testLatency` IPC message and awaits the extension's reply.
     /// The extension resolves the proxy server address itself via NE-process
-    /// `getaddrinfo` (scoped outside the tunnel). Resolving here would route
-    /// through `NEDNSSettings` and yield a fake IP from lwIP's interception,
-    /// which the test would then dial and time out on.
-    private func sendLatencyTestMessage(for configuration: ProxyConfiguration) async -> LatencyResult {
-        guard let session = vpnManager?.connection as? NETunnelProviderSession else { return .failed }
-
+    /// `getaddrinfo` (scoped outside the tunnel). Resolving in the main app
+    /// while the tunnel is up would route through `NEDNSSettings` and yield a
+    /// fake IP from lwIP's interception, which the test would then dial and
+    /// time out on.
+    nonisolated private static func sendLatencyTestMessage(
+        for configuration: ProxyConfiguration,
+        session: NETunnelProviderSession
+    ) async -> LatencyResult {
         guard let messageData = try? JSONEncoder().encode(TunnelMessage.testLatency(configuration)) else { return .failed }
 
         return await withCheckedContinuation { continuation in
@@ -548,58 +565,6 @@ class VPNViewModel: ObservableObject {
             outbound: configuration.outbound,
             chain: configuration.chain
         )
-    }
-
-    /// Per-test timeout for waiting on tunnel startup before the IPC roundtrip.
-    private static let tunnelStartupTimeout: Duration = .seconds(15)
-
-    /// Ensures the tunnel is `.connected` so it can receive IPC messages.
-    /// Triggers a connect if currently disconnected and waits for the status
-    /// transition. Returns false if startup times out or fails.
-    private func ensureTunnelRunningForTesting() async -> Bool {
-        // Wait for the manager to finish loading on first launch.
-        if !isManagerReady {
-            for await ready in $isManagerReady.values where ready { break }
-        }
-        if vpnStatus == .connected { return true }
-
-        // Bootstrap a selection if there is none — otherwise connectVPN() noops.
-        if selectedConfiguration == nil {
-            selectedConfiguration = configurations.first
-            guard selectedConfiguration != nil else { return false }
-        }
-
-        if vpnStatus != .connecting && vpnStatus != .reasserting {
-            connectVPN()
-        }
-
-        return await waitForVPNStatus(.connected, timeout: Self.tunnelStartupTimeout)
-    }
-
-    private func waitForVPNStatus(_ target: NEVPNStatus, timeout: Duration) async -> Bool {
-        if vpnStatus == target { return true }
-        return await withTaskGroup(of: Bool.self) { group in
-            group.addTask { @MainActor [weak self] in
-                guard let self else { return false }
-                // Wait for an active transition before treating .disconnected/.invalid
-                // as a failure — `$vpnStatus.values` emits the current value first,
-                // which is typically .disconnected when starting from cold.
-                var sawTransition = false
-                for await status in self.$vpnStatus.values {
-                    if status == target { return true }
-                    if status == .connecting || status == .reasserting { sawTransition = true }
-                    if sawTransition && (status == .invalid || status == .disconnected) { return false }
-                }
-                return false
-            }
-            group.addTask {
-                try? await Task.sleep(for: timeout)
-                return false
-            }
-            let result = await group.next() ?? false
-            group.cancelAll()
-            return result
-        }
     }
 
     // MARK: - Setup

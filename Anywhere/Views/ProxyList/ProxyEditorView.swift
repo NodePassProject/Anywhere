@@ -201,7 +201,7 @@ struct ProxyEditorView: View {
                         // ML-KEM-768 — iOS/macOS/tvOS 26+ only.
                         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) {
                             LabeledContent {
-                                TextField("none", text: $encryption)
+                                TextField(String("none"), text: $encryption)
                                     .autocorrectionDisabled()
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)

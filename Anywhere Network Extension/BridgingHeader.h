@@ -9,6 +9,6 @@
 #define BridgingHeader_h
 
 #include "./lwip/lwip_bridge.h"
-#include "./ngtcp2/ngtcp2_bridge.h"
+#include "ngtcp2_bridge.h"
 
 #endif /* BridgingHeader_h */
