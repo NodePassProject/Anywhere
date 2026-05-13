@@ -46,6 +46,10 @@ enum MITMBodyCodec {
     /// occasionally return JSON without a content type and rules
     /// targeting them are common; explicit binary responses always
     /// carry a type.
+    ///
+    /// Consumed by ``BodyContentTypeFilter`` as the fallback when a
+    /// body-script rule did not declare its own Content-Type list at
+    /// import time.
     static func isRewritableType(_ contentType: String?) -> Bool {
         guard let raw = contentType else { return true }
         let primary = raw
@@ -87,6 +91,18 @@ enum MITMBodyCodec {
         }
 
         return false
+    }
+
+    /// Lowercased primary `Content-Type` (everything before `;`) with
+    /// surrounding whitespace stripped. `nil` when the header is
+    /// absent. Used by ``BodyContentTypeFilter`` to compare an
+    /// incoming message's type against a user-supplied exact list.
+    static func primaryContentType(_ contentType: String?) -> String? {
+        guard let raw = contentType else { return nil }
+        let primary = raw
+            .split(separator: ";").first
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+        return primary.isEmpty ? nil : primary
     }
 
     /// One token in a `Content-Encoding` chain. The wire order is the

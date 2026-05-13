@@ -346,7 +346,7 @@ enum MITMRuleSummary {
             return name
         case .headerReplace(let pattern, _, _):
             return pattern
-        case .bodyScript(let scriptBase64):
+        case .bodyScript(let scriptBase64, _):
             let bytes = Data(base64Encoded: scriptBase64)?.count ?? 0
             return String(localized: "\(bytes) byte(s)")
         }

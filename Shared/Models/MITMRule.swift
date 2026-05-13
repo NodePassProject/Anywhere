@@ -43,7 +43,13 @@ enum MITMOperation: Equatable {
     /// the runtime decodes, compiles, and invokes it on the buffered
     /// (decompressed) body. Stored base64-encoded so rule-set text
     /// import/export survives newlines and quoting.
-    case bodyScript(scriptBase64: String)
+    ///
+    /// ``contentTypes`` gates which messages the script runs on by exact
+    /// Content-Type primary value (case-insensitive, parameters stripped).
+    /// `nil` means the user did not supply a list at import time; the
+    /// runtime falls back to ``MITMBodyCodec/isRewritableType``'s
+    /// allowlist of textual MIME types. An empty list matches nothing.
+    case bodyScript(scriptBase64: String, contentTypes: [String]?)
 }
 
 extension MITMOperation: CustomStringConvertible {
@@ -79,6 +85,7 @@ extension MITMOperation: Codable {
         case pattern
         case replacement
         case script
+        case contentTypes
     }
 
     init(from decoder: Decoder) throws {
@@ -105,7 +112,8 @@ extension MITMOperation: Codable {
             )
         case .bodyScript:
             self = .bodyScript(
-                scriptBase64: try c.decode(String.self, forKey: .script)
+                scriptBase64: try c.decode(String.self, forKey: .script),
+                contentTypes: try c.decodeIfPresent([String].self, forKey: .contentTypes)
             )
         }
     }
@@ -129,9 +137,10 @@ extension MITMOperation: Codable {
             try c.encode(pattern, forKey: .pattern)
             try c.encode(name, forKey: .name)
             try c.encode(value, forKey: .value)
-        case .bodyScript(let scriptBase64):
+        case .bodyScript(let scriptBase64, let contentTypes):
             try c.encode(Kind.bodyScript, forKey: .kind)
             try c.encode(scriptBase64, forKey: .script)
+            try c.encodeIfPresent(contentTypes, forKey: .contentTypes)
         }
     }
 }

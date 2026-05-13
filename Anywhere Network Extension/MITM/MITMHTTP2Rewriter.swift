@@ -61,10 +61,16 @@ final class MITMHTTP2Rewriter {
 
     // MARK: - Body rewrite preflight
 
-    /// Whether any body-touching rule applies for this host + phase.
-    /// The connection uses this to decide whether to buffer DATA frames.
-    func hasBodyRewrite(phase: MITMPhase) -> Bool {
-        MITMBodyTransform.hasBodyRule(in: policy.rules(for: host, phase: phase))
+    /// Whether any body-touching rule applies for this host + phase
+    /// with the in-flight message's ``contentType``. The connection
+    /// uses this to decide whether to buffer DATA frames; a script
+    /// rule whose Content-Type filter excludes the type contributes
+    /// nothing here, so we avoid buffering for it.
+    func hasBodyRewrite(phase: MITMPhase, contentType: String?) -> Bool {
+        MITMBodyTransform.hasBodyRule(
+            in: policy.rules(for: host, phase: phase),
+            contentType: contentType
+        )
     }
 
     /// The matched rule set's ID, used as the script-store scope key.
@@ -74,14 +80,21 @@ final class MITMHTTP2Rewriter {
         policy.set(for: host)?.id
     }
 
-    /// Applies every body-touching rule for the given phase. The caller
-    /// is responsible for decompressing content-encoded bodies before
+    /// Applies every body-touching rule for the given phase whose
+    /// Content-Type filter accepts ``contentType``. The caller is
+    /// responsible for decompressing content-encoded bodies before
     /// passing them in, and for building ``context`` from the rewritten
     /// header block (used by script rules; ignored otherwise).
-    func rewriteBody(_ data: Data, phase: MITMPhase, context: MITMScriptEngine.Context) -> Data {
+    func rewriteBody(
+        _ data: Data,
+        phase: MITMPhase,
+        contentType: String?,
+        context: MITMScriptEngine.Context
+    ) -> Data {
         MITMBodyTransform.apply(
             data,
             rules: policy.rules(for: host, phase: phase),
+            contentType: contentType,
             engineProvider: scriptEngineProvider,
             context: context
         )

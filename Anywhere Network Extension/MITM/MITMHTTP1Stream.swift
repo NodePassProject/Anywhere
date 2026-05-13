@@ -392,20 +392,23 @@ final class MITMHTTP1Stream {
         } else {
             body = data
         }
+        let parsed = parseHead(headBytes)
+        let contentType = parsed.flatMap { firstHeaderValue($0.headers, name: "content-type") }
         return MITMBodyTransform.apply(
             body,
             rules: rules,
+            contentType: contentType,
             engineProvider: scriptEngineProvider,
-            context: makeScriptContext(headBytes: headBytes)
+            context: makeScriptContext(parsed: parsed)
         )
     }
 
     /// Builds the per-message `ctx` argument the script's
     /// `process(body, ctx)` receives. ``method`` and ``url`` are nil on
     /// the response phase; ``headers`` mirrors the rewritten header
-    /// block on the wire.
-    private func makeScriptContext(headBytes: Data) -> MITMScriptEngine.Context {
-        let parsed = parseHead(headBytes)
+    /// block on the wire. Takes the already-parsed head to avoid
+    /// parsing the same bytes twice when the caller has it on hand.
+    private func makeScriptContext(parsed: ParsedHead?) -> MITMScriptEngine.Context {
         var method: String?
         var url: String?
         if phase == .httpRequest, let parsed {
@@ -587,9 +590,15 @@ final class MITMHTTP1Stream {
     /// the codec plan that the buffer will be decoded with. Skips
     /// rewrite when no body-script rule applies for the host/phase or
     /// when `Content-Encoding` includes a codec we don't recognise.
+    ///
+    /// Each script declares its own Content-Type allowlist; if every
+    /// configured script rejects the in-flight message's
+    /// `Content-Type`, there is nothing to do and the body is not
+    /// buffered.
     private func bodyRewriteDecision(headers: [Header]) -> BodyDecision {
         let rules = policy.rules(for: host, phase: phase)
-        guard MITMBodyTransform.hasBodyRule(in: rules) else {
+        let contentType = firstHeaderValue(headers, name: "content-type")
+        guard MITMBodyTransform.hasBodyRule(in: rules, contentType: contentType) else {
             return BodyDecision(shouldRewrite: false, codec: .identity)
         }
         let encoding = firstHeaderValue(headers, name: "content-encoding")
@@ -597,8 +606,6 @@ final class MITMHTTP1Stream {
         guard plan.supported else {
             return BodyDecision(shouldRewrite: false, codec: plan)
         }
-        // Body rules are scripts; scripts handle binary, so the
-        // content-type whitelist doesn't apply.
         return BodyDecision(shouldRewrite: true, codec: plan)
     }
 

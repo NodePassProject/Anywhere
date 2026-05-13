@@ -56,7 +56,7 @@ import JavaScriptCore
 /// | `1` | header-add     | both            | name, value           |
 /// | `2` | header-delete  | both            | name                  |
 /// | `3` | header-replace | both            | pattern, name, value  |
-/// | `4` | body-script    | both            | base64                |
+/// | `4` | body-script    | both            | [types,] base64       |
 ///
 /// Fields are separated by `,`. Whitespace around unquoted fields is
 /// trimmed. A field that begins with `"` is read until the matching `"`,
@@ -73,6 +73,19 @@ import JavaScriptCore
 /// quoting in the source survive the line-based rule format. See
 /// ``MITMScriptEngine`` for the full runtime contract, including the
 /// `Anywhere.utf8 / base64 / hex` helper globals.
+///
+/// `body-script` lines optionally lead the base64 with a comma-
+/// separated list of exact `Content-Type` primary values that the
+/// script applies to. Wrap the field in double quotes so the inner
+/// commas are not interpreted as CSV separators:
+///
+///     1, 4, "text/html, application/json", <base64>
+///
+/// Matching is case-insensitive and ignores parameters (everything
+/// from `;` onward). When the types field is omitted (single trailing
+/// argument), the runtime falls back to the default textual-MIME
+/// allowlist in ``MITMBodyCodec/isRewritableType``. An empty quoted
+/// types field disables the rule entirely (no Content-Type matches).
 enum MITMRuleSetParser {
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""
@@ -224,10 +237,16 @@ enum MITMRuleSetParser {
             return MITMRule(phase: phase, operation: .headerReplace(pattern: pattern, name: name, value: args[2]))
 
         case 4:  // body-script
-            guard args.count == 1 else { return nil }
-            let b64 = args[0]
+            guard args.count == 1 || args.count == 2 else { return nil }
+            // 1 arg: base64 only (default allowlist).
+            // 2 args: types, base64.
+            let b64 = args.last ?? ""
             guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
-            return MITMRule(phase: phase, operation: .bodyScript(scriptBase64: b64))
+            let contentTypes: [String]? = args.count == 2 ? parseContentTypes(args[0]) : nil
+            return MITMRule(
+                phase: phase,
+                operation: .bodyScript(scriptBase64: b64, contentTypes: contentTypes)
+            )
 
         default:
             return nil
@@ -292,6 +311,18 @@ enum MITMRuleSetParser {
 
     private static func isValidRegex(_ pattern: String) -> Bool {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
+    }
+
+    /// Parses the optional `body-script` Content-Type list. Splits on
+    /// `,`, lowercases, trims, and drops empties. An all-whitespace
+    /// field still produces a non-nil empty array so the rule honors
+    /// the user's "match nothing" intent rather than silently reverting
+    /// to the default allowlist.
+    private static func parseContentTypes(_ field: String) -> [String] {
+        field
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            .filter { !$0.isEmpty }
     }
 
     /// Validates a `body-script` field: base64 → UTF-8 → JavaScript

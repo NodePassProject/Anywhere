@@ -300,7 +300,10 @@ final class MITMHTTP2Connection {
         // there is no body.
         if case .headers = kind,
            originalFlags & 0x1 == 0,
-           rewriter.hasBodyRewrite(phase: phase),
+           rewriter.hasBodyRewrite(
+               phase: phase,
+               contentType: firstHeaderValue(rewritten, name: "content-type")
+           ),
            shouldBufferStream(headers: rewritten) {
             let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
             bodyBuffers[streamID] = BodyBuffer(data: Data(), codec: codec, headers: rewritten)
@@ -448,7 +451,13 @@ final class MITMHTTP2Connection {
             plaintext = buffer.data
         }
         let context = makeScriptContext(headers: buffer.headers)
-        let rewritten = rewriter.rewriteBody(plaintext, phase: phase, context: context)
+        let contentType = firstHeaderValue(buffer.headers, name: "content-type")
+        let rewritten = rewriter.rewriteBody(
+            plaintext,
+            phase: phase,
+            contentType: contentType,
+            context: context
+        )
         var flags: UInt8 = 0
         if endStream { flags |= 0x1 }
         return serializeFrame(RawFrame(
@@ -464,9 +473,8 @@ final class MITMHTTP2Connection {
     /// Decides whether a stream's DATA frames should be buffered for
     /// rewrite. Combines the codec and content-length gates so the
     /// decision is made once at HEADERS time rather than rediscovered
-    /// per-frame. The content-type whitelist isn't consulted because
-    /// the only body-touching rule is ``bodyScript``, which handles
-    /// binary.
+    /// per-frame. Content-Type filtering happens earlier, on the
+    /// rewriter side via ``MITMHTTP2Rewriter/hasBodyRewrite(phase:contentType:)``.
     private func shouldBufferStream(headers: [(name: String, value: String)]) -> Bool {
         let codec = MITMBodyCodec.plan(for: firstHeaderValue(headers, name: "content-encoding"))
         guard codec.supported else { return false }

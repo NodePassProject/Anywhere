@@ -24,7 +24,38 @@ enum CompiledMITMOperation {
     /// JavaScript transform. ``source`` is the decoded UTF-8 source of
     /// `function process(body, ctx)`. Compilation/execution belongs to
     /// ``MITMScriptEngine`` so the policy stays free of JSContext.
-    case bodyScript(source: String)
+    /// ``contentTypes`` gates the rule against the message's
+    /// `Content-Type`; see ``BodyContentTypeFilter``.
+    case bodyScript(source: String, contentTypes: BodyContentTypeFilter)
+}
+
+/// Resolved Content-Type filter for a body-script rule. Built once at
+/// rule-compilation time so the per-message check stays a constant-time
+/// set lookup (or a fixed allowlist walk).
+enum BodyContentTypeFilter: Equatable {
+    /// User did not supply a Content-Type list at import time. The
+    /// runtime falls back to ``MITMBodyCodec/isRewritableType``'s
+    /// textual MIME allowlist.
+    case defaultAllowlist
+    /// User-supplied exact-match list, lowercased and trimmed at parse
+    /// time. An empty set matches nothing — the import-time choice to
+    /// pass a `""` field is preserved instead of collapsing to default.
+    case exact(Set<String>)
+
+    /// Whether ``contentType`` is in-scope for the rule this filter
+    /// belongs to. Parameters (everything from `;` onward) are stripped
+    /// before comparison; matching is case-insensitive.
+    func matches(_ contentType: String?) -> Bool {
+        switch self {
+        case .defaultAllowlist:
+            return MITMBodyCodec.isRewritableType(contentType)
+        case .exact(let set):
+            guard let primary = MITMBodyCodec.primaryContentType(contentType) else {
+                return false
+            }
+            return set.contains(primary)
+        }
+    }
 }
 
 /// Compiled view of a rule set at one trie terminal: the specific suffix
@@ -176,7 +207,7 @@ final class MITMRewritePolicy {
                 return nil
             }
             return .headerReplace(regex: regex, name: name, value: value)
-        case .bodyScript(let scriptBase64):
+        case .bodyScript(let scriptBase64, let contentTypes):
             guard let raw = Data(base64Encoded: scriptBase64) else {
                 logger.warning("[MITM] bodyScript invalid base64 (suffix=\(suffix))")
                 return nil
@@ -185,7 +216,13 @@ final class MITMRewritePolicy {
                 logger.warning("[MITM] bodyScript source not valid UTF-8 (suffix=\(suffix))")
                 return nil
             }
-            return .bodyScript(source: source)
+            let filter: BodyContentTypeFilter
+            if let contentTypes {
+                filter = .exact(Set(contentTypes.map { $0.lowercased() }))
+            } else {
+                filter = .defaultAllowlist
+            }
+            return .bodyScript(source: source, contentTypes: filter)
         }
     }
 }
