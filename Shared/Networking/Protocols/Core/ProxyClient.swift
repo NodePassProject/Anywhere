@@ -57,19 +57,6 @@ nonisolated class ProxyClient {
     /// Intermediate chain proxy clients (retained for lifecycle management).
     private var chainClients: [ProxyClient] = []
 
-    /// The base Vision flow string sent on the wire (suffix stripped).
-    private static let visionFlow = "xtls-rprx-vision"
-
-    /// Whether the configured flow is a Vision variant.
-    private var isVisionFlow: Bool {
-        configuration.flow == Self.visionFlow || configuration.flow == Self.visionFlow + "-udp443"
-    }
-
-    /// Whether UDP port 443 is allowed (only with the `-udp443` suffix).
-    private var allowUDP443: Bool {
-        configuration.flow == Self.visionFlow + "-udp443"
-    }
-
     /// Creates a new proxy client with the given configuration.
     ///
     /// - Parameters:
@@ -291,14 +278,9 @@ nonisolated class ProxyClient {
     // MARK: - Protocol Handshake
 
     /// Wraps an established transport connection in the appropriate outbound
-    /// protocol (VLESS or Shadowsocks) for the requested command.
-    ///
-    /// - Shadowsocks: returns a Shadowsocks{,2022,UDP} connection that owns
-    ///   its own wire encryption and framing.
-    /// - VLESS: wraps in ``VLESSConnection``, writes the VLESS request header
-    ///   (plus `initialData` for non-Vision TCP), then layers
-    ///   ``VLESSUDPConnection`` (UDP) or ``VLESSVisionConnection`` (Vision)
-    ///   on top as needed.
+    /// protocol (VLESS or Shadowsocks) for the requested command. The
+    /// per-protocol bodies live in ``ProxyClient+VLESS.swift`` and
+    /// ``ProxyClient+Shadowsocks.swift``.
     private func sendProtocolHandshake(
         over connection: ProxyConnection,
         command: ProxyCommand,
@@ -309,145 +291,23 @@ nonisolated class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         if isShadowsocks {
-            completion(wrapWithShadowsocks(
-                inner: connection, command: command,
-                destinationHost: destinationHost, destinationPort: destinationPort
-            ))
-            return
-        }
-
-        // VLESS path
-
-        // Parse the encryption field upfront. `nil` means the legacy
-        // `"none"` / empty value — proceed with plaintext VLESS as before.
-        // Anything else means the new `mlkem768x25519plus` scheme: until
-        // VLESSEncryptionClient lands (and at all on iOS < 26), we MUST
-        // refuse to dial. A silent downgrade would send the plaintext
-        // request header — including UUID and destination — to a server
-        // that expects the encrypted handshake.
-        let encryptionConfig: VLESSEncryptionConfig?
-        do {
-            encryptionConfig = try VLESSEncryptionConfig.parse(configuration.encryption)
-        } catch {
-            completion(.failure(ProxyError.protocolError(
-                "Invalid VLESS encryption: \(error.localizedDescription)"
-            )))
-            return
-        }
-        if let encryptionConfig {
-            guard #available(iOS 26.0, macOS 26.0, tvOS 26.0, *) else {
-                completion(.failure(ProxyError.protocolError(
-                    "VLESS encryption requires iOS 26 / macOS 26 / tvOS 26 or later"
-                )))
-                return
-            }
-            do {
-                let client = try VLESSEncryptionClient(config: encryptionConfig)
-                client.handshake(over: connection) { [weak self] result in
-                    guard let self else {
-                        completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                        return
-                    }
-                    switch result {
-                    case .failure(let error):
-                        completion(.failure(error))
-                    case .success(let encryptedConnection):
-                        self.continueVLESSHandshake(
-                            over: encryptedConnection,
-                            command: command,
-                            destinationHost: destinationHost,
-                            destinationPort: destinationPort,
-                            initialData: initialData,
-                            supportsVision: supportsVision,
-                            completion: completion
-                        )
-                    }
-                }
-            } catch {
-                completion(.failure(error))
-            }
-            return
-        }
-
-        continueVLESSHandshake(
-            over: connection,
-            command: command,
-            destinationHost: destinationHost,
-            destinationPort: destinationPort,
-            initialData: initialData,
-            supportsVision: supportsVision,
-            completion: completion
-        )
-    }
-
-    /// Per-command VLESS handshake on top of an already-prepared transport.
-    /// Split out so the encryption-enabled path can chain into it after the
-    /// `mlkem768x25519plus` handshake completes.
-    private func continueVLESSHandshake(
-        over connection: ProxyConnection,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        supportsVision: Bool,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let isVision = supportsVision && isVisionFlow && (command == .tcp || command == .mux)
-
-        let requestHeader = VLESSProtocol.encodeRequestHeader(
-            uuid: configuration.uuid,
-            command: command,
-            destinationAddress: destinationHost,
-            destinationPort: destinationPort,
-            flow: isVision ? Self.visionFlow : nil
-        )
-
-        let vless = VLESSConnection(inner: connection)
-        // For Vision flow, initial data needs separate padding — don't append to the header.
-        let handshakeInitialData = isVision ? nil : initialData
-        vless.sendHandshake(requestHeader: requestHeader, initialData: handshakeInitialData) { [weak self] error in
-            if let error {
-                completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
-                return
-            }
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-
-            let proxyConnection: ProxyConnection = (command == .udp)
-                ? VLESSUDPConnection(inner: vless)
-                : vless
-
-            if isVision {
-                if let tlsError = self.validateOuterTLSForVision(proxyConnection) {
-                    completion(.failure(tlsError))
-                    return
-                }
-                let vision = self.wrapWithVision(proxyConnection)
-                // Wait for the introductory Vision-padded send (initial
-                // payload or empty padding) to be accepted by the inner
-                // transport before declaring the connect successful.
-                // Otherwise fire-and-forget here would race with the
-                // upload pipeline's first `send` issued from the caller's
-                // success callback — the pump's bytes could reach the
-                // framing layer before the padded intro and corrupt the
-                // proxy-side byte stream.
-                let introCompletion: (Error?) -> Void = { error in
-                    if let error {
-                        completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
-                    } else {
-                        completion(.success(vision))
-                    }
-                }
-                if let initialData {
-                    vision.sendRaw(data: initialData, completion: introCompletion)
-                } else {
-                    vision.sendEmptyPadding(completion: introCompletion)
-                }
-            } else {
-                completion(.success(proxyConnection))
-            }
+            sendShadowsocksProtocolHandshake(
+                over: connection,
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                completion: completion
+            )
+        } else {
+            sendVLESSProtocolHandshake(
+                over: connection,
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                initialData: initialData,
+                supportsVision: supportsVision,
+                completion: completion
+            )
         }
     }
 
@@ -1479,94 +1339,4 @@ nonisolated class ProxyClient {
         }
     }
 
-    // MARK: - Vision
-
-    /// Validates that the outer TLS connection is TLS 1.3 when using Vision flow.
-    /// Matches Xray-core `outbound.go` lines 346-355.
-    private func validateOuterTLSForVision(_ connection: ProxyConnection) -> Error? {
-        guard let version = connection.outerTLSVersion else {
-            return ProxyError.protocolError("Vision requires outer TLS or REALITY transport")
-        }
-        if version != .tls13 {
-            return ProxyError.protocolError("Vision requires outer TLS 1.3, found \(version)")
-        }
-        return nil
-    }
-
-    /// Wraps a VLESS connection with the XTLS Vision layer.
-    private func wrapWithVision(_ connection: ProxyConnection) -> VLESSVisionConnection {
-        let uuidBytes = configuration.uuid.uuid
-        let uuidData = Data([
-            uuidBytes.0, uuidBytes.1, uuidBytes.2, uuidBytes.3,
-            uuidBytes.4, uuidBytes.5, uuidBytes.6, uuidBytes.7,
-            uuidBytes.8, uuidBytes.9, uuidBytes.10, uuidBytes.11,
-            uuidBytes.12, uuidBytes.13, uuidBytes.14, uuidBytes.15
-        ])
-        return VLESSVisionConnection(connection: connection, userUUID: uuidData)
-    }
-    
-    // MARK: - Shadowsocks
-
-    /// Whether this client is configured for Shadowsocks outbound.
-    private var isShadowsocks: Bool {
-        configuration.outboundProtocol == .shadowsocks
-    }
-
-    /// Wraps a bare transport connection with Shadowsocks AEAD encryption.
-    private func wrapWithShadowsocks(
-        inner: ProxyConnection,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16
-    ) -> Result<ProxyConnection, Error> {
-        guard let method = configuration.ssMethod,
-              let cipher = ShadowsocksCipher(method: method) else {
-            return .failure(ProxyError.protocolError("Invalid Shadowsocks method: \(configuration.ssMethod ?? "nil")"))
-        }
-        guard let password = configuration.ssPassword else {
-            return .failure(ProxyError.protocolError("Shadowsocks password not set"))
-        }
-
-        if cipher.isSS2022 {
-            // Shadowsocks 2022: base64-encoded PSK(s), BLAKE3 key derivation
-            guard let pskList = ShadowsocksKeyDerivation.decodePSKList(password: password, keySize: cipher.keySize) else {
-                return .failure(ProxyError.protocolError("Invalid Shadowsocks 2022 PSK"))
-            }
-
-            if command == .udp {
-                if cipher == .blake3chacha20poly1305 {
-                    return .success(Shadowsocks2022ChaChaUDPConnection(
-                        inner: inner, psk: pskList.last!, dstHost: destinationHost, dstPort: destinationPort
-                    ))
-                } else {
-                    return .success(Shadowsocks2022AESUDPConnection(
-                        inner: inner, cipher: cipher, pskList: pskList,
-                        dstHost: destinationHost, dstPort: destinationPort
-                    ))
-                }
-            } else {
-                let addressHeader = ShadowsocksProtocol.buildAddressHeader(host: destinationHost, port: destinationPort)
-                return .success(Shadowsocks2022Connection(
-                    inner: inner, cipher: cipher, pskList: pskList,
-                    addressHeader: addressHeader
-                ))
-            }
-        } else {
-            // Legacy Shadowsocks: password-based EVP_BytesToKey derivation
-            let masterKey = ShadowsocksKeyDerivation.deriveKey(password: password, keySize: cipher.keySize)
-            let addressHeader = ShadowsocksProtocol.buildAddressHeader(host: destinationHost, port: destinationPort)
-
-            if command == .udp {
-                return .success(ShadowsocksUDPConnection(
-                    inner: inner, cipher: cipher, masterKey: masterKey,
-                    dstHost: destinationHost, dstPort: destinationPort
-                ))
-            } else {
-                return .success(ShadowsocksConnection(
-                    inner: inner, cipher: cipher, masterKey: masterKey,
-                    addressHeader: addressHeader
-                ))
-            }
-        }
-    }
 }
