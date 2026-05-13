@@ -8,9 +8,7 @@
 import Foundation
 
 /// Parsed form of a VLESS `encryption` (client) field as defined by Xray-core's
-/// `mlkem768x25519plus` scheme. Mirrors the parser at
-/// `infra/conf/vless.go:321-358` and the runtime split at
-/// `proxy/vless/outbound/outbound.go:86-94`.
+/// `mlkem768x25519plus` scheme.
 ///
 /// Wire format:
 /// ```
@@ -26,7 +24,7 @@ import Foundation
 ///    NFS relay chain in the order written.
 struct VLESSEncryptionConfig: Equatable, Hashable {
 
-    enum XorMode: UInt8 {
+    enum XORMode: UInt8 {
         case native = 0
         case xorpub = 1
         case random = 2
@@ -37,7 +35,7 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
         case zeroRTT
     }
 
-    let xorMode: XorMode
+    let xorMode: XORMode
     let rttMode: RTTMode
     /// Raw padding spec (e.g. `"100-111-1111.50-0-3333"`) preserved verbatim
     /// for re-serialization. Empty when none was specified, in which case
@@ -57,7 +55,7 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
     enum ParseError: Error, LocalizedError, Equatable {
         case wrongScheme
         case missingFields
-        case unknownXorMode(String)
+        case unknownXORMode(String)
         case unknownRTTMode(String)
         case invalidPublicKey(String)
         case noPublicKeys
@@ -68,7 +66,7 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
                 return "VLESS encryption: unsupported scheme (expected \"mlkem768x25519plus\")"
             case .missingFields:
                 return "VLESS encryption: too few fields"
-            case .unknownXorMode(let s):
+            case .unknownXORMode(let s):
                 return "VLESS encryption: unknown XOR mode \"\(s)\""
             case .unknownRTTMode(let s):
                 return "VLESS encryption: unknown RTT mode \"\(s)\""
@@ -99,13 +97,13 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
             throw ParseError.wrongScheme
         }
 
-        let xorMode: XorMode
+        let xorMode: XORMode
         switch segments[1] {
         case "native": xorMode = .native
         case "xorpub": xorMode = .xorpub
         case "random": xorMode = .random
         default:
-            throw ParseError.unknownXorMode(String(segments[1]))
+            throw ParseError.unknownXORMode(String(segments[1]))
         }
 
         let rttMode: RTTMode

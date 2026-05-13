@@ -87,8 +87,7 @@ private final class VLESSEncryptionAEAD {
     }
 
     /// Whether the *next* seal/open will use the maximum nonce, which
-    /// triggers an AEAD rekey on the call after that. Mirrors Go's check
-    /// `bytes.Equal(c.AEAD.Nonce[:], MaxNonce)` after the previous seal.
+    /// triggers an AEAD rekey on the call after that.
     var nonceIsAtMax: Bool {
         for byte in nonce where byte != 0xFF { return false }
         return true
@@ -316,41 +315,84 @@ private enum VLESSNfsPublicKey {
 
 // MARK: - VLESSEncryptionClient (matches Go's ClientInstance)
 
-/// Per-`ProxyConfiguration` state for VLESS encryption. Owns the parsed NFS
-/// keys and the padding schedule; produces a fresh ``VLESSEncryptedConnection``
-/// per dial via ``handshake(over:completion:)``.
+/// Per-dial state for VLESS encryption. Owns the parsed NFS keys, the
+/// padding schedule, and the (host, port)-scoped 0-RTT cache key; produces
+/// a fresh ``VLESSEncryptedConnection`` per dial via ``handshake(over:completion:)``.
 ///
-/// **v1 limitations** (throws ``VLESSEncryptionError/unsupported(_:)`` on init):
-/// - Multi-key NFS relay chains
-/// - `xorpub` and `random` XOR modes
-/// - 0-RTT ticket cache (configs with `0rtt` work but degrade to 1-RTT)
+/// Supports the full Go feature set:
+/// - Multi-key NFS relay chains (each relay's pubkey or KEM ciphertext is
+///   followed by the BLAKE3 hash of the next relay's pubkey, XOR'd with a
+///   CTR keyed on the current relay's nfsKey so an MITM can't swap relays).
+/// - `xorpub` / `random` XOR modes (`xorpub` masks the relay public keys;
+///   `random` adds a post-handshake XorConn that masks TLS record headers).
+/// - 0-RTT ticket cache (process-wide; see ``VLESSEncryption0RTTCache``).
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
 nonisolated final class VLESSEncryptionClient {
-    private let nfsKey: VLESSNfsPublicKey
+    private let nfsKeys: [VLESSNfsPublicKey]
+    /// Raw public-key bytes for each relay, in chain order. Used as the
+    /// keying material for `xorpub`/`random` CTR streams over the relay's
+    /// own pubkey, and as the BLAKE3 input for chain-hashes.
+    private let nfsKeysRaw: [Data]
+    /// BLAKE3-256 hash of each relay's raw pubkey. The j-th relay's slot
+    /// in the chain ends with `hash32[j+1]` XOR'd by the j-th `nfsKey`'s
+    /// CTR — that's what lets the server verify the chain order.
+    private let nfsKeysHash32: [Data]
     private let padding: VLESSEncryptionPadding
+    private let xorMode: VLESSEncryptionConfig.XORMode
+    private let seconds: UInt32
+    /// Composite key used to look up / store / invalidate the 0-RTT cache
+    /// entry for this `(host, port, config)`. Stable for the lifetime of
+    /// the client.
+    private let cacheKey: String
     /// Always true on Apple platforms — every iOS 26 device has hardware AES-GCM.
     private let useAES = true
 
-    init(config: VLESSEncryptionConfig) throws {
-        guard config.xorMode == .native else {
-            throw VLESSEncryptionError.unsupported("XOR mode \"\(config.xorMode)\" not yet supported")
+    init(config: VLESSEncryptionConfig, host: String, port: UInt16) throws {
+        var keys: [VLESSNfsPublicKey] = []
+        var raw: [Data] = []
+        var hashes: [Data] = []
+        for k in config.publicKeys {
+            keys.append(try VLESSNfsPublicKey.parse(k))
+            raw.append(k)
+            hashes.append(Blake3Hasher.hash(k))
         }
-        guard config.publicKeys.count == 1 else {
-            throw VLESSEncryptionError.unsupported("multi-key NFS relay chains not yet supported")
-        }
-        self.nfsKey = try VLESSNfsPublicKey.parse(config.publicKeys[0])
+        self.nfsKeys = keys
+        self.nfsKeysRaw = raw
+        self.nfsKeysHash32 = hashes
         self.padding = try VLESSEncryptionPadding.parse(config.padding)
+        self.xorMode = config.xorMode
+        self.seconds = config.seconds
+        self.cacheKey = VLESSEncryption0RTTCache.cacheKey(host: host, port: port, config: config)
     }
 
-    /// Perform a 1-RTT handshake over `connection`. Calls `completion` with an
-    /// encrypted ``VLESSEncryptedConnection`` ready for VLESS request bytes,
-    /// or with the first failure encountered.
+    /// Perform the handshake over `connection`. Decides 0-RTT vs 1-RTT
+    /// based on whether the config opted into 0-RTT *and* a valid cached
+    /// ticket is available.
     func handshake(
         over connection: ProxyConnection,
         completion: @escaping (Result<VLESSEncryptedConnection, Error>) -> Void
     ) {
+        // Total relay block size: each non-last relay contributes pubkey +
+        // 32 bytes of next-relay hash; the last contributes just pubkey.
+        // Matches `i.RelaysLength` in client.go (which is added to 16 to
+        // form `ivAndRealysLength`).
+        let cached: VLESSEncryption0RTTCache.Entry?
+        if seconds > 0 {
+            cached = VLESSEncryption0RTTCache.shared.lookup(key: cacheKey)
+        } else {
+            cached = nil
+        }
+
+        if let cached {
+            do {
+                try sendClientHello0RTT(over: connection, cached: cached, completion: completion)
+            } catch {
+                completion(.failure(error))
+            }
+            return
+        }
         do {
-            try sendClientHello(over: connection) { [self] result in
+            try sendClientHello1RTT(over: connection) { [self] result in
                 switch result {
                 case .failure(let error):
                     completion(.failure(error))
@@ -363,52 +405,165 @@ nonisolated final class VLESSEncryptionClient {
         }
     }
 
-    // MARK: - Client hello
+    // MARK: - Shared helpers
 
-    /// Mid-handshake state passed from `sendClientHello` to `readServerHello`.
+    /// Generate a 16-byte random IV. Throws on RNG failure.
+    private func generateIV() throws -> Data {
+        var iv = Data(count: 16)
+        let status = iv.withUnsafeMutableBytes { ptr in
+            SecRandomCopyBytes(kSecRandomDefault, 16, ptr.baseAddress!)
+        }
+        guard status == errSecSuccess else {
+            throw VLESSEncryptionError.handshakeFailed("rng failure")
+        }
+        return iv
+    }
+
+    /// Run the multi-relay NFS key-exchange loop and return both the
+    /// concatenated relay block (which goes on the wire after the IV) and
+    /// the final `nfsKey` (the shared secret of the *last* relay, used as
+    /// the AEAD key downstream).
+    private func buildRelayBlock(iv: Data) throws -> (relayBlock: Data, nfsKey: Data) {
+        var relayBlock = Data()
+        var nfsKey = Data()
+        var lastCTR: VLESSEncryptionCTR? = nil
+        for j in 0..<nfsKeys.count {
+            var pubOrCt = Data()
+            switch nfsKeys[j] {
+            case .x25519(let serverPub, _):
+                let priv = Curve25519.KeyAgreement.PrivateKey()
+                let shared = try priv.sharedSecretFromKeyAgreement(with: serverPub)
+                nfsKey = shared.withUnsafeBytes { Data($0) }
+                pubOrCt = priv.publicKey.rawRepresentation
+            case .mlkem768(let serverPub, _):
+                let result = try serverPub.encapsulate()
+                nfsKey = result.sharedSecret.withUnsafeBytes { Data($0) }
+                pubOrCt = result.encapsulated
+            }
+            if xorMode != .native {
+                let ctr = VLESSEncryptionCTR(key: nfsKeysRaw[j], iv: iv)
+                pubOrCt = ctr.process(pubOrCt)
+            }
+            if let lastCTR {
+                // XOR only the first 32 bytes of this relay's pubkey/CT
+                // with the previous nfsKey's keystream (continuing from
+                // where the chain-hash XOR left off).
+                let bytes = [UInt8](pubOrCt)
+                let xoredHead = lastCTR.process(Data(bytes[0..<32]))
+                var combined = xoredHead
+                combined.append(contentsOf: bytes[32..<bytes.count])
+                pubOrCt = combined
+            }
+            relayBlock.append(pubOrCt)
+            if j < nfsKeys.count - 1 {
+                // Append BLAKE3 hash of next relay's pubkey, XOR'd with a
+                // fresh CTR keyed on the current relay's nfsKey. This is
+                // what lets the *next* server in the chain verify it was
+                // actually expected (the hash binds the chain).
+                let newCTR = VLESSEncryptionCTR(key: nfsKey, iv: iv)
+                relayBlock.append(newCTR.process(nfsKeysHash32[j + 1]))
+                lastCTR = newCTR
+            }
+        }
+        return (relayBlock, nfsKey)
+    }
+
+    // MARK: - 0-RTT client hello
+
+    /// Build and dispatch a 0-RTT client hello using a cached ticket.
+    ///
+    /// The wire layout is:
+    /// `iv || relays || seal(EncodeLength(32)) || seal(ticket)`
+    /// — only 18 + 32 = 50 bytes more than 1-RTT's prefix, with no PFS
+    /// exchange. The cached `pfsKey` plus the freshly-derived `nfsKey`
+    /// form the new connection's united key. The first application
+    /// record gets prepended with the full hello via ``preludeBytes``.
+    private func sendClientHello0RTT(
+        over connection: ProxyConnection,
+        cached: VLESSEncryption0RTTCache.Entry,
+        completion: @escaping (Result<VLESSEncryptedConnection, Error>) -> Void
+    ) throws {
+        let iv = try generateIV()
+        let (relayBlock, nfsKey) = try buildRelayBlock(iv: iv)
+
+        let nfsAEAD = VLESSEncryptionAEAD(context: iv, key: nfsKey, useAES: useAES)
+        let sealedLength = try nfsAEAD.seal(VLESSLength.encode(32), additionalData: nil) // 18 bytes
+        let sealedTicket = try nfsAEAD.seal(cached.ticket, additionalData: nil)          // 32 bytes
+
+        var clientHello = Data()
+        clientHello.append(iv)
+        clientHello.append(relayBlock)
+        clientHello.append(sealedLength)
+        clientHello.append(sealedTicket)
+
+        var unitedKey = cached.pfsKey
+        unitedKey.append(nfsKey)
+        let writeAEAD = VLESSEncryptionAEAD(context: sealedTicket, key: unitedKey, useAES: useAES)
+
+        let xorConnection: VLESSXORConnection?
+        let transport: ProxyConnection
+        if xorMode == .random {
+            // outSkip = preludeBytes length: skip XOR across the unmasked
+            // pre-write blob, then mask each subsequent 5-byte record
+            // header. inSkip = 16: server sends 16 random bytes first
+            // (its "server random") before any masked record.
+            let xor = VLESSXORConnection(
+                inner: connection,
+                outCTR: VLESSEncryptionCTR(key: unitedKey, iv: iv),
+                inCTR: nil,
+                outSkip: clientHello.count,
+                inSkip: 16
+            )
+            xorConnection = xor
+            transport = xor
+        } else {
+            xorConnection = nil
+            transport = connection
+        }
+
+        let zeroRTT = VLESSEncryptedConnection.ZeroRTTState(
+            unitedKey: unitedKey,
+            pfsKey: cached.pfsKey,
+            cacheKey: cacheKey
+        )
+        let conn = VLESSEncryptedConnection(
+            inner: transport,
+            writeAEAD: writeAEAD,
+            readAEAD: nil,
+            unitedKey: unitedKey,
+            useAES: useAES,
+            preludeBytes: clientHello,
+            pendingServerPaddingLength: 0,
+            carryOverBytes: Data(),
+            xorConnection: xorConnection,
+            zeroRTTState: zeroRTT
+        )
+        completion(.success(conn))
+    }
+
+    // MARK: - 1-RTT client hello
+
+    /// Mid-handshake state passed from `sendClientHello1RTT` to `readServerHello`.
     private struct InFlightHandshake {
         let iv: Data
-        let nfsKey: SymmetricKey
+        let nfsKey: Data
         let mlkemPriv: MLKEM768.PrivateKey
         let x25519Priv: Curve25519.KeyAgreement.PrivateKey
         let pfsClientPublicKey: Data  // 1184 + 32 bytes (the AAD/ctx for AEAD setup)
         let nfsAEAD: VLESSEncryptionAEAD
     }
 
-    /// Build the client hello, send it (in padded fragments per the schedule),
-    /// and pass the partially-set-up state to `completion`.
-    private func sendClientHello(
+    /// Build a full 1-RTT client hello, send it (in padded fragments per
+    /// the schedule), and pass the partially-set-up state to `completion`.
+    private func sendClientHello1RTT(
         over connection: ProxyConnection,
         completion: @escaping (Result<InFlightHandshake, Error>) -> Void
     ) throws {
-        // 1. Random IV.
-        var iv = Data(count: 16)
-        let ivStatus = iv.withUnsafeMutableBytes { ptr in
-            SecRandomCopyBytes(kSecRandomDefault, 16, ptr.baseAddress!)
-        }
-        guard ivStatus == errSecSuccess else {
-            throw VLESSEncryptionError.handshakeFailed("rng failure")
-        }
+        let iv = try generateIV()
+        let (relayBlock, nfsKey) = try buildRelayBlock(iv: iv)
+        let nfsAEAD = VLESSEncryptionAEAD(context: iv, key: nfsKey, useAES: useAES)
 
-        // 2. NFS key exchange — single key only (v1).
-        let (nfsSecret, nfsRelayBytes): (SymmetricKey, Data)
-        switch nfsKey {
-        case .x25519(let serverPub, _):
-            let priv = Curve25519.KeyAgreement.PrivateKey()
-            let shared = try priv.sharedSecretFromKeyAgreement(with: serverPub)
-            nfsSecret = SymmetricKey(data: shared.withUnsafeBytes { Data($0) })
-            nfsRelayBytes = priv.publicKey.rawRepresentation
-        case .mlkem768(let serverPub, _):
-            let result = try serverPub.encapsulate()
-            nfsSecret = result.sharedSecret
-            nfsRelayBytes = result.encapsulated
-        }
-
-        // 3. Build AEAD keyed by (iv, nfsSecret). Server derives the same key.
-        let nfsKeyBytes = nfsSecret.withUnsafeBytes { Data($0) }
-        let nfsAEAD = VLESSEncryptionAEAD(context: iv, key: nfsKeyBytes, useAES: useAES)
-
-        // 4. PFS client hello: ML-KEM-768 encap key + X25519 public key, sealed.
+        // PFS client hello: ML-KEM-768 encap key + X25519 public key, sealed.
         let mlkemPriv = try MLKEM768.PrivateKey()
         let x25519Priv = Curve25519.KeyAgreement.PrivateKey()
         var pfsPublic = Data()
@@ -427,7 +582,7 @@ nonisolated final class VLESSEncryptionClient {
         )
         let sealedPfsPublic = try nfsAEAD.seal(pfsPublic, additionalData: nil)
 
-        // 5. Padding section (defaults if no spec).
+        // Padding section (defaults if no spec).
         let (paddingTotal, paddingLens, paddingGaps) = padding.materialize()
         let paddingPayloadLength = max(paddingTotal - 18 - 16, 0)
         let paddingPayload = Data(count: paddingPayloadLength)
@@ -437,22 +592,20 @@ nonisolated final class VLESSEncryptionClient {
         )
         let sealedPaddingBody = try nfsAEAD.seal(paddingPayload, additionalData: nil)
 
-        // 6. Assemble the full client hello.
         var clientHello = Data()
         clientHello.append(iv)                  // 16 bytes
-        clientHello.append(nfsRelayBytes)       // 32 (X25519) or 1088 (ML-KEM)
+        clientHello.append(relayBlock)          // 32 (1× X25519) up to 1088+32+1088 (etc.)
         clientHello.append(sealedLengthFrame)   // 18 bytes
         clientHello.append(sealedPfsPublic)     // 1184 + 32 + 16 = 1232 bytes
         clientHello.append(sealedPaddingLength) // 18 bytes
         clientHello.append(sealedPaddingBody)   // paddingPayloadLength + 16 bytes
 
-        // 7. Send the bytes in fragments per the padding schedule, sleeping
-        //    between fragments. The first fragment is grown by paddingLens[0]
-        //    so the very first bytes on the wire still make plausible sense
-        //    on capture (matches Go's loop in client.go:142-153).
+        // Send the bytes in fragments per the padding schedule, sleeping
+        // between fragments. The first fragment is grown by paddingLens[0]
+        // so the very first bytes on the wire still make plausible sense
+        // on capture (matches Go's loop in client.go:142-153).
         var fragmentLengths = paddingLens
         if !fragmentLengths.isEmpty {
-            // Pre-padding bytes (handshake proper) attach to the first fragment.
             let prePadding = clientHello.count - paddingTotal
             fragmentLengths[0] = prePadding + fragmentLengths[0]
         } else {
@@ -461,7 +614,7 @@ nonisolated final class VLESSEncryptionClient {
 
         let state = InFlightHandshake(
             iv: iv,
-            nfsKey: nfsSecret,
+            nfsKey: nfsKey,
             mlkemPriv: mlkemPriv,
             x25519Priv: x25519Priv,
             pfsClientPublicKey: pfsPublic,
@@ -577,7 +730,7 @@ nonisolated final class VLESSEncryptionClient {
                     pfsKey.append(mlkemSecret.withUnsafeBytes { Data($0) })   // 32 bytes
                     pfsKey.append(x25519Secret.withUnsafeBytes { Data($0) })  // 32 bytes
                     var unitedKey = pfsKey
-                    unitedKey.append(state.nfsKey.withUnsafeBytes { Data($0) })
+                    unitedKey.append(state.nfsKey)
 
                     // Both sides key the AEAD with the *plaintext* PFS pub
                     // bytes. Go's variable name `encryptedPfsPublicKey` is
@@ -594,6 +747,9 @@ nonisolated final class VLESSEncryptionClient {
                     self.readTicketAndPadding(
                         reader: reader,
                         connection: connection,
+                        state: state,
+                        pfsKey: pfsKey,
+                        unitedKey: unitedKey,
                         writeAEAD: writeAEAD,
                         readAEAD: readAEAD,
                         completion: completion
@@ -608,6 +764,9 @@ nonisolated final class VLESSEncryptionClient {
     private func readTicketAndPadding(
         reader: VLESSEncryptionByteReader,
         connection: ProxyConnection,
+        state: InFlightHandshake,
+        pfsKey: Data,
+        unitedKey: Data,
         writeAEAD: VLESSEncryptionAEAD,
         readAEAD: VLESSEncryptionAEAD,
         completion: @escaping (Result<VLESSEncryptedConnection, Error>) -> Void
@@ -617,13 +776,34 @@ nonisolated final class VLESSEncryptionClient {
             case .failure(let error):
                 completion(.failure(error))
             case .success(let sealedTicket):
+                let ticketPayload: Data
                 do {
-                    // We don't cache the ticket in v1, but we MUST decrypt it
-                    // to advance the read AEAD nonce in lockstep with the server.
-                    _ = try readAEAD.open(sealedTicket, additionalData: nil)
+                    ticketPayload = try readAEAD.open(sealedTicket, additionalData: nil)
                 } catch {
                     completion(.failure(error))
                     return
+                }
+                // Cache the new ticket if both sides opted in. The first
+                // two bytes of the ticket plaintext are a big-endian
+                // seconds value picked by the server (see server.go's
+                // `EncodeLength(int(seconds))`); zero means "no resumption".
+                //
+                // Go's `i.Ticket = encryptedTicket[:16]` is misleading:
+                // by that point the buffer has been overwritten with the
+                // decrypted plaintext (Open writes into `encryptedTicket[:0]`),
+                // so the cached value is the *plaintext* 16-byte ticket
+                // body that gets re-sealed on the 0-RTT replay.
+                if seconds > 0, ticketPayload.count >= 16 {
+                    let serverSeconds = VLESSLength.decode(ticketPayload)
+                    if serverSeconds > 0 {
+                        let expire = Date().addingTimeInterval(TimeInterval(serverSeconds))
+                        VLESSEncryption0RTTCache.shared.store(
+                            key: cacheKey,
+                            pfsKey: pfsKey,
+                            ticket: Data(ticketPayload.prefix(16)),
+                            expire: expire
+                        )
+                    }
                 }
                 reader.readExact(VLESSWire.sealedLengthFrame) { result in
                     switch result {
@@ -638,16 +818,49 @@ nonisolated final class VLESSEncryptionClient {
                             let sealedPaddingBodySize = VLESSLength.decode(lenBytes)
                             // Anything the reader buffered past the last
                             // readExact() must carry over to the encrypted
-                            // connection — typically the entire tail padding
-                            // (and sometimes early app data) arrives in the
-                            // same TCP write as the ticket.
+                            // connection. Since the server doesn't send
+                            // any post-handshake bytes until it has read
+                            // the client's first request, the leftover is
+                            // always a prefix of the padding tail (never
+                            // app data). It's also unmasked — the server
+                            // wrote padding to the raw conn *before* it
+                            // wrapped its end with XorConn.
                             let leftover = reader.drain()
+
+                            // For random mode, wrap the inner connection
+                            // with XorConn now that the handshake is done.
+                            // inSkip accounts for the padding tail bytes
+                            // *still on the wire* — we already siphoned
+                            // `leftover.count` of them into carryOverBytes,
+                            // which bypasses XorConn entirely, so the
+                            // XorConn must not skip those again.
+                            let xorConnection: VLESSXORConnection?
+                            let transport: ProxyConnection
+                            if self.xorMode == .random {
+                                let xor = VLESSXORConnection(
+                                    inner: connection,
+                                    outCTR: VLESSEncryptionCTR(key: unitedKey, iv: state.iv),
+                                    inCTR: VLESSEncryptionCTR(key: unitedKey, iv: Data(sealedTicket.prefix(16))),
+                                    outSkip: 0,
+                                    inSkip: max(0, sealedPaddingBodySize - leftover.count)
+                                )
+                                xorConnection = xor
+                                transport = xor
+                            } else {
+                                xorConnection = nil
+                                transport = connection
+                            }
                             let conn = VLESSEncryptedConnection(
-                                inner: connection,
+                                inner: transport,
                                 writeAEAD: writeAEAD,
                                 readAEAD: readAEAD,
+                                unitedKey: unitedKey,
+                                useAES: self.useAES,
+                                preludeBytes: nil,
                                 pendingServerPaddingLength: sealedPaddingBodySize,
-                                carryOverBytes: leftover
+                                carryOverBytes: leftover,
+                                xorConnection: xorConnection,
+                                zeroRTTState: nil
                             )
                             completion(.success(conn))
                         } catch {
@@ -717,22 +930,55 @@ private final class VLESSEncryptionByteReader {
 /// AEAD-framed wrapper around an inner ``ProxyConnection``. Application bytes
 /// pass through TLS-1.3-style records (5-byte header + sealed payload), with
 /// a BLAKE3 rekey when the AEAD nonce hits its maximum value.
+///
+/// Supports two construction modes:
+/// - 1-RTT: `readAEAD` is set, `preludeBytes` is nil, `pendingServerPaddingLength`
+///   carries the server's handshake-tail padding length.
+/// - 0-RTT: `readAEAD` is nil at first — the client doesn't know the server
+///   random yet. The first ``receiveRaw`` reads 16 bytes from `inner`,
+///   derives the read AEAD (and the inbound XOR CTR for `random` mode), then
+///   proceeds. `preludeBytes` holds the full handshake hello and gets
+///   prepended to the very first outbound record by ``buildOutboundFrames``.
 @available(iOS 26.0, macOS 26.0, tvOS 26.0, *)
 nonisolated final class VLESSEncryptedConnection: ProxyConnection {
+    /// Snapshot of the cache entry used to mount a 0-RTT handshake. Stored
+    /// so that on first-record decode failure (i.e., the server rejected
+    /// the ticket and wrote noise) we can invalidate the exact entry we
+    /// took — and not stomp on a newer ticket that raced us.
+    struct ZeroRTTState {
+        let unitedKey: Data
+        let pfsKey: Data
+        let cacheKey: String
+    }
+
     private let inner: ProxyConnection
+    private weak var xorConnection: VLESSXORConnection?
     private var writeAEAD: VLESSEncryptionAEAD
-    private var readAEAD: VLESSEncryptionAEAD
+    private var readAEAD: VLESSEncryptionAEAD?
     private let unitedKey: Data
     private let useAES: Bool
 
+    /// Bytes prepended to the very first outbound record (0-RTT pre-write
+    /// blob). Cleared as soon as it's been emitted.
+    private var preludeBytes: Data?
+
     /// Bytes the server promised in its handshake-tail padding; consumed and
-    /// discarded on the first application read.
+    /// discarded on the first application read. Only set for 1-RTT.
     private var pendingServerPaddingLength: Int
+
+    /// 0-RTT cache reference for invalidation on the first-record header
+    /// failure path. nil for 1-RTT.
+    private let zeroRTTState: ZeroRTTState?
+    /// Tracks whether we've decrypted any inbound application record yet.
+    /// The 0-RTT-rejection signal only counts on the *first* record; once
+    /// any record opens cleanly, the ticket was accepted.
+    private var firstRecordSeen = false
 
     /// Buffered plaintext from a previous receiveRaw whose record was larger
     /// than the caller's requested chunk. Drained before pulling new records.
     private var plaintextBuffer = Data()
     private let recvLock = UnfairLock()
+    private let sendLock = UnfairLock()
     /// Buffer for partial records read from the inner transport. Seeded at
     /// construction with any bytes the handshake reader had left over.
     private var inboundBuffer: Data
@@ -740,26 +986,25 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     fileprivate init(
         inner: ProxyConnection,
         writeAEAD: VLESSEncryptionAEAD,
-        readAEAD: VLESSEncryptionAEAD,
+        readAEAD: VLESSEncryptionAEAD?,
+        unitedKey: Data,
+        useAES: Bool,
+        preludeBytes: Data?,
         pendingServerPaddingLength: Int,
-        carryOverBytes: Data
+        carryOverBytes: Data,
+        xorConnection: VLESSXORConnection?,
+        zeroRTTState: ZeroRTTState?
     ) {
         self.inner = inner
+        self.xorConnection = xorConnection
         self.writeAEAD = writeAEAD
         self.readAEAD = readAEAD
-        self.useAES = writeAEAD.useAES
+        self.useAES = useAES
+        self.unitedKey = unitedKey
+        self.preludeBytes = preludeBytes
         self.inboundBuffer = carryOverBytes
-        // Stash the same key bytes the AEADs were derived from for rekey.
-        // We don't have direct access to the SymmetricKey contents from the
-        // AEAD wrapper, so callers must pass the key material in via
-        // `writeAEAD`/`readAEAD` only; we never need to re-derive from
-        // `unitedKey` because the BLAKE3 derivation is keyed by the previous
-        // record's bytes (see Go common.go's `NewAEAD(append(peerHeader,
-        // peerData...), c.UnitedKey, ...)`). The key argument to the new
-        // AEAD is `unitedKey`, which equals what we built during handshake.
-        // Stored here for the rekey path.
-        self.unitedKey = writeAEAD.key.withUnsafeBytes { Data($0) }
         self.pendingServerPaddingLength = pendingServerPaddingLength
+        self.zeroRTTState = zeroRTTState
     }
 
     override var isConnected: Bool { inner.isConnected }
@@ -782,36 +1027,60 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     }
 
     private func buildOutboundFrames(plaintext: Data) throws -> Data {
-        var output = Data()
-        var offset = 0
-        while offset < plaintext.count {
-            let chunkSize = min(plaintext.count - offset, VLESSWire.maxChunkPlaintext)
-            let chunk = plaintext.subdata(in: plaintext.startIndex.advanced(by: offset)
-                                          ..< plaintext.startIndex.advanced(by: offset + chunkSize))
-            // Header carries (chunkSize + tag) length per Go's EncodeHeader.
-            var header = Data()
-            VLESSHeader.encode(into: &header, payloadLength: chunkSize + VLESSWire.aeadTagLength)
-            let willRekey = writeAEAD.nonceIsAtMax
-            // The header is the AAD for this record (matches Go's
-            // `c.AEAD.Seal(headerAndData[:5], nil, b, headerAndData[:5])`).
-            let sealed = try writeAEAD.seal(chunk, additionalData: header)
-            output.append(header)
-            output.append(sealed)
-            if willRekey {
-                // Rekey: derive a fresh AEAD with context = (header || sealed payload).
-                var ctx = header
-                ctx.append(sealed)
-                writeAEAD = VLESSEncryptionAEAD(context: ctx, key: unitedKey, useAES: useAES)
+        return try sendLock.withLock {
+            var output = Data()
+            if let prelude = self.preludeBytes {
+                output.append(prelude)
+                self.preludeBytes = nil
             }
-            offset += chunkSize
+            var offset = 0
+            while offset < plaintext.count {
+                let chunkSize = min(plaintext.count - offset, VLESSWire.maxChunkPlaintext)
+                let chunk = plaintext.subdata(
+                    in: plaintext.startIndex.advanced(by: offset)
+                        ..< plaintext.startIndex.advanced(by: offset + chunkSize)
+                )
+                // Header carries (chunkSize + tag) length per Go's EncodeHeader.
+                var header = Data()
+                VLESSHeader.encode(into: &header, payloadLength: chunkSize + VLESSWire.aeadTagLength)
+                let willRekey = self.writeAEAD.nonceIsAtMax
+                // The header is the AAD for this record (matches Go's
+                // `c.AEAD.Seal(headerAndData[:5], nil, b, headerAndData[:5])`).
+                let sealed = try self.writeAEAD.seal(chunk, additionalData: header)
+                output.append(header)
+                output.append(sealed)
+                if willRekey {
+                    // Rekey: derive a fresh AEAD with context = (header || sealed payload).
+                    var ctx = header
+                    ctx.append(sealed)
+                    self.writeAEAD = VLESSEncryptionAEAD(context: ctx, key: self.unitedKey, useAES: self.useAES)
+                }
+                offset += chunkSize
+            }
+            return output
         }
-        return output
     }
 
     // MARK: Receive
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        // Fast path: already-decrypted leftovers.
+        // 0-RTT path: derive readAEAD from the 16-byte server random
+        // before pumping any record. The server random is also wired into
+        // the inbound XOR CTR for `random` mode.
+        if readAEAD == nil {
+            establishReadAEAD { [weak self] error in
+                guard let self else {
+                    completion(nil, VLESSEncryptionError.connectionClosed); return
+                }
+                if let error { completion(nil, error); return }
+                self.receiveAfterReadAEAD(completion: completion)
+            }
+            return
+        }
+        receiveAfterReadAEAD(completion: completion)
+    }
+
+    private func receiveAfterReadAEAD(completion: @escaping (Data?, Error?) -> Void) {
         recvLock.lock()
         if !plaintextBuffer.isEmpty {
             let snapshot = plaintextBuffer
@@ -824,6 +1093,42 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         pumpRecord(completion: completion)
     }
 
+    /// Read 16 bytes of server random from the inner connection, derive the
+    /// peer AEAD, and (for random mode) install the inbound XOR CTR. Called
+    /// once per 0-RTT connection on the first receive.
+    private func establishReadAEAD(completion: @escaping (Error?) -> Void) {
+        let needed = 16
+        recvLock.lock()
+        if inboundBuffer.count >= needed {
+            let serverRandom = Data(inboundBuffer.prefix(needed))
+            inboundBuffer.removeFirst(needed)
+            recvLock.unlock()
+            installReadAEAD(serverRandom: serverRandom)
+            completion(nil)
+            return
+        }
+        recvLock.unlock()
+        inner.receiveRaw { [weak self] data, error in
+            guard let self else {
+                completion(VLESSEncryptionError.connectionClosed); return
+            }
+            if let error { completion(error); return }
+            guard let data, !data.isEmpty else {
+                completion(VLESSEncryptionError.connectionClosed); return
+            }
+            self.recvLock.withLock { self.inboundBuffer.append(data) }
+            self.establishReadAEAD(completion: completion)
+        }
+    }
+
+    private func installReadAEAD(serverRandom: Data) {
+        let aead = VLESSEncryptionAEAD(context: serverRandom, key: unitedKey, useAES: useAES)
+        recvLock.withLock { self.readAEAD = aead }
+        if let xor = xorConnection {
+            xor.installInboundCTR(VLESSEncryptionCTR(key: unitedKey, iv: serverRandom))
+        }
+    }
+
     /// Pull bytes from `inner` until we have a full record (or the server
     /// padding tail), decrypt, and deliver the plaintext.
     private func pumpRecord(completion: @escaping (Data?, Error?) -> Void) {
@@ -834,10 +1139,11 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
             if inboundBuffer.count >= needed {
                 let blob = Data(inboundBuffer.prefix(needed))
                 inboundBuffer.removeFirst(needed)
+                let aead = readAEAD
                 recvLock.unlock()
                 do {
-                    _ = try readAEAD.open(blob, additionalData: nil)
-                    pendingServerPaddingLength = 0
+                    _ = try aead!.open(blob, additionalData: nil)
+                    recvLock.withLock { self.pendingServerPaddingLength = 0 }
                     pumpRecord(completion: completion)
                 } catch {
                     completion(nil, error)
@@ -883,6 +1189,14 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
             payloadLength = try VLESSHeader.decode(headerBytes)
         } catch {
             recvLock.unlock()
+            // 0-RTT rejection path: server wrote noise instead of an
+            // application record. Invalidate the cached ticket and surface
+            // a distinct error so a future caller can re-handshake.
+            if !firstRecordSeen, let z = zeroRTTState {
+                VLESSEncryption0RTTCache.shared.invalidate(key: z.cacheKey, matching: z.pfsKey)
+                completion(nil, VLESSEncryptionError.handshakeFailed("new handshake needed"))
+                return
+            }
             completion(nil, error)
             return
         }
@@ -905,17 +1219,20 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
 
         let recordBytes = Data(inboundBuffer.prefix(recordTotal))
         inboundBuffer.removeFirst(recordTotal)
+        let aead = readAEAD
         recvLock.unlock()
 
         do {
             let header = Data(recordBytes.prefix(VLESSWire.headerLength))
             let sealedPayload = recordBytes.suffix(payloadLength)
-            let willRekey = readAEAD.nonceIsAtMax
-            let plaintext = try readAEAD.open(Data(sealedPayload), additionalData: header)
+            let willRekey = aead!.nonceIsAtMax
+            let plaintext = try aead!.open(Data(sealedPayload), additionalData: header)
+            firstRecordSeen = true
             if willRekey {
                 var ctx = Data(header)
                 ctx.append(Data(sealedPayload))
-                readAEAD = VLESSEncryptionAEAD(context: ctx, key: unitedKey, useAES: useAES)
+                let newAEAD = VLESSEncryptionAEAD(context: ctx, key: unitedKey, useAES: useAES)
+                recvLock.withLock { self.readAEAD = newAEAD }
             }
             completion(plaintext, nil)
         } catch {

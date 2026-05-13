@@ -393,13 +393,6 @@ nonisolated class XHTTPConnection {
     // MARK: - Packet-Up Batching
 
     /// Queues a write for the next batched POST in packet-up mode.
-    ///
-    /// Mirrors Xray-core's buffered upload pipe in `splithttp/dialer.go`: writes append
-    /// to an in-memory queue and a single in-flight flush coalesces them into one POST
-    /// per `scMinPostsIntervalMs`. Without this, every individual `send()` (in particular
-    /// every UDP datagram delivered via `LWIPUDPFlow.sendUDPThroughProxy`) would become
-    /// its own HTTP POST request, causing huge per-packet overhead and, on HTTP/2,
-    /// rapid stream-ID exhaustion.
     func enqueuePacketUpSend(data: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
         if !_isConnected || (useHTTP2 && h2StreamClosed) {

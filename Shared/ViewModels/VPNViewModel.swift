@@ -401,9 +401,7 @@ class VPNViewModel: ObservableObject {
 
     private var latencyTask: Task<Void, Never>?
 
-    /// Cap on simultaneous in-flight test requests. Mirrors the previous
-    /// in-process limit; keeps proxy connections within what a typical
-    /// residential uplink/NAT can sustain whether tests run here or in the NE.
+    /// Cap on simultaneous in-flight test requests.
     private static let maxConcurrentLatencyTests = 4
 
     func testLatency(for configuration: ProxyConfiguration) {
