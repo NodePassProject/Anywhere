@@ -29,6 +29,21 @@ import JavaScriptCore
 /// without entering the JS engine.
 enum MITMScriptTransform {
 
+    /// Result of running a buffered ``.script`` rule on a message.
+    /// Distinguishes the normal rewrite path (``message``) from a
+    /// request-phase `Anywhere.respond(...)` short-circuit
+    /// (``synthesizedResponse``). Streaming-script rules don't produce
+    /// this outcome — see ``applyFrame``.
+    enum Outcome {
+        /// Use the (possibly mutated) message as the rewrite result;
+        /// emit to the upstream leg as usual.
+        case message(MITMScriptEngine.Message)
+        /// Request-phase script called `Anywhere.respond(...)`. Drop
+        /// the request without forwarding upstream and synthesize this
+        /// response back to the client.
+        case synthesizedResponse(MITMScriptEngine.SynthesizedResponse)
+    }
+
     /// True when at least one ``.script`` rule in ``rules`` would fire
     /// for a message with the given ``contentType``. Rewriters consult
     /// this at head-completion time to decide whether to defer head
@@ -68,22 +83,25 @@ enum MITMScriptTransform {
     /// message's `Content-Type`, picking the last matching rule when
     /// several would qualify (overwrite semantics; see the type-level
     /// note). Header-only rules are no-ops here (they ran at head
-    /// time). Returns the input message unchanged when no rule matches
-    /// or ``engineProvider`` is nil.
+    /// time). Returns ``Outcome/message`` carrying the input unchanged
+    /// when no rule matches or ``engineProvider`` is nil; returns
+    /// ``Outcome/synthesizedResponse`` when a request-phase script
+    /// called `Anywhere.respond(...)`.
     static func apply(
         _ message: MITMScriptEngine.Message,
         rules: [CompiledMITMRule],
         engineProvider: MITMScriptEngine.Provider? = nil
-    ) -> MITMScriptEngine.Message {
+    ) -> Outcome {
         let contentType = firstHeaderValue(message.headers, name: "content-type")
         guard let source = lastMatchingScriptSource(in: rules, contentType: contentType),
               let engineProvider
-        else { return message }
+        else { return .message(message) }
         let outcome = engineProvider.get().apply(message, source: source)
         switch outcome {
-        case .modified(let updated): return updated
-        case .done(let updated):     return updated
-        case .exit:                  return message
+        case .modified(let updated):  return .message(updated)
+        case .done(let updated):      return .message(updated)
+        case .exit:                   return .message(message)
+        case .respond(let response):  return .synthesizedResponse(response)
         }
     }
 

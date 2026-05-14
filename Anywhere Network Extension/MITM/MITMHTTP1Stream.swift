@@ -145,6 +145,14 @@ final class MITMHTTP1Stream {
     private var mode: Mode = .awaitingHead
     private var rxBuffer = Data()
 
+    /// Bytes the request stream has synthesized in response to a
+    /// `Anywhere.respond(...)` call and wants written straight back to
+    /// the client (i.e. injected onto the inner TLS record). Request
+    /// phase only; response streams never populate this. Drained by the
+    /// session pump via ``drainPendingClientBytes()`` immediately after
+    /// each ``transform(_:)`` call.
+    private var pendingClientBytes = Data()
+
     // MARK: - Public API
 
     func transform(_ data: Data) -> Data {
@@ -157,6 +165,16 @@ final class MITMHTTP1Stream {
         // bytes are needed.
         while drive(into: &output) { }
         return output
+    }
+
+    /// Drains and returns any client-bound bytes synthesized by
+    /// request-phase scripts that called `Anywhere.respond(...)` since
+    /// the last call. The session pump writes these directly to the
+    /// inner TLS record, bypassing the upstream leg entirely.
+    func drainPendingClientBytes() -> Data {
+        let bytes = pendingClientBytes
+        pendingClientBytes.removeAll(keepingCapacity: false)
+        return bytes
     }
 
     // MARK: - Driver
@@ -298,17 +316,22 @@ final class MITMHTTP1Stream {
                     body: Data(),
                     originatingRequest: originatingRequest
                 )
-                let result = MITMScriptTransform.apply(
+                let outcome = MITMScriptTransform.apply(
                     message,
                     rules: rules,
                     engineProvider: scriptEngineProvider
                 )
-                emitScriptedHead(
-                    fallbackStartLine: rewrittenStartLine,
-                    result: result,
-                    codecRequiresDecompression: false,
-                    into: &output
-                )
+                switch outcome {
+                case .message(let result):
+                    emitScriptedHead(
+                        fallbackStartLine: rewrittenStartLine,
+                        result: result,
+                        codecRequiresDecompression: false,
+                        into: &output
+                    )
+                case .synthesizedResponse(let response):
+                    queueSynthesizedResponse(response)
+                }
             } else {
                 if phase == .httpRequest {
                     logRequest(startLine: rewrittenStartLine)
@@ -809,11 +832,22 @@ final class MITMHTTP1Stream {
             body: body,
             originatingRequest: pending.originatingRequest
         )
-        let result = MITMScriptTransform.apply(
+        let outcome = MITMScriptTransform.apply(
             message,
             rules: rules,
             engineProvider: scriptEngineProvider
         )
+        let result: MITMScriptEngine.Message
+        switch outcome {
+        case .message(let updated):
+            result = updated
+        case .synthesizedResponse(let response):
+            // Request-phase short-circuit. Drop the request bytes
+            // we'd otherwise emit to upstream and queue the
+            // synthesized HTTP/1.1 response for the inner leg.
+            queueSynthesizedResponse(response)
+            return
+        }
 
         let finalStartLine = rebuildStartLine(from: result, fallback: pending.startLine)
         var finalHeaders = strippedFramingHeaders(result.headers, dropContentEncoding: pending.codec.requiresDecompression)
@@ -1004,6 +1038,28 @@ final class MITMHTTP1Stream {
         }
         out.append(0x0D); out.append(0x0A)
         return out
+    }
+
+    /// Serializes a request-phase `Anywhere.respond(...)` payload as an
+    /// HTTP/1.1 response and queues it on ``pendingClientBytes`` for
+    /// the session pump to inject onto the inner TLS record. Strips
+    /// user-supplied framing headers (``Content-Length`` /
+    /// ``Transfer-Encoding``) and re-emits a single ``Content-Length``
+    /// matching the body so the wire framing always agrees with the
+    /// payload. The reason phrase is the canonical one (``""`` for
+    /// unrecognised codes — clients ignore it per RFC 9112 §4).
+    private func queueSynthesizedResponse(_ response: MITMScriptEngine.SynthesizedResponse) {
+        let reason = canonicalReasonPhrase(for: response.status)
+        let startLine = "HTTP/1.1 \(response.status) \(reason)"
+        var headers = response.headers.filter { entry in
+            let n = entry.name.lowercased()
+            return n != "content-length" && n != "transfer-encoding"
+        }
+        headers.append((name: "Content-Length", value: String(response.body.count)))
+        pendingClientBytes.append(serializeHead(startLine: startLine, headers: headers))
+        if !response.body.isEmpty {
+            pendingClientBytes.append(response.body)
+        }
     }
 
     // MARK: - Framing decision

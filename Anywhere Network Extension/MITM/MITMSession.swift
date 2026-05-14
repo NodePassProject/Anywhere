@@ -513,6 +513,17 @@ final class MITMSession {
 
     /// Reads plaintext from the inner record (= what the client sent) and
     /// writes it to the outer record (= towards the real server).
+    ///
+    /// Request-phase scripts can short-circuit a request via
+    /// ``MITMScriptEngine/SynthesizedResponse`` (the JS-side
+    /// `Anywhere.respond(...)` hook). When that happens the stream /
+    /// h2 translator emits zero upstream bytes but populates a
+    /// client-bound buffer with the synthesized response; we drain
+    /// that buffer here and write straight to the inner record,
+    /// bypassing the upstream leg entirely. The two writes are
+    /// independent (different legs) and ``TLSRecordConnection``'s send
+    /// lock serializes any concurrent inner writes that may happen
+    /// alongside an in-flight outbound-pump write.
     private func startInboundPump(inner: TLSRecordConnection, outer: TLSRecordConnection) {
         inner.receive { [weak self] data, error in
             guard let self else { return }
@@ -526,16 +537,27 @@ final class MITMSession {
                     return
                 }
                 let transformed: Data
+                let injected: Data
                 if let inboundH2 = self.inboundH2 {
                     transformed = inboundH2.process(data)
+                    injected = inboundH2.drainPendingClientBytes()
                 } else {
                     transformed = self.requestStream.transform(data)
+                    injected = self.requestStream.drainPendingClientBytes()
+                }
+                if !injected.isEmpty {
+                    inner.send(data: injected) { [weak self] sendError in
+                        guard let self, let sendError else { return }
+                        self.lwipQueue.async { self.cancel(error: sendError) }
+                    }
                 }
                 guard !transformed.isEmpty else {
                     // The h2 translator or HTTP/1.1 stream may have
                     // buffered fragments (CONTINUATION pending, partial
-                    // preface, body buffered for rewrite, etc.). Loop
-                    // back for more bytes without writing.
+                    // preface, body buffered for rewrite, etc.) or
+                    // fully short-circuited the request via
+                    // Anywhere.respond. Loop back for more bytes
+                    // without writing to outer.
                     self.startInboundPump(inner: inner, outer: outer)
                     return
                 }

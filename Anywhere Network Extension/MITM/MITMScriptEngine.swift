@@ -43,6 +43,19 @@ final class MITMScriptEngine {
         let ruleSetID: UUID?
     }
 
+    /// Synthesized response produced when a request-phase script calls
+    /// `Anywhere.respond(...)`. The runtime drops the request before it
+    /// reaches the upstream leg and writes this response straight back to
+    /// the client instead. Only emitted on ``MITMPhase/httpRequest``;
+    /// response-phase invocations of ``Anywhere/respond`` are ignored
+    /// since the script can already rewrite the response via ctx
+    /// mutations.
+    struct SynthesizedResponse {
+        let status: Int
+        let headers: [(name: String, value: String)]
+        let body: Data
+    }
+
     /// Result of a single ``apply(_:source:)`` call. ``MITMScriptTransform``
     /// branches on this to chain rules normally, short-circuit with the
     /// current message, or roll back to the message as it entered the
@@ -56,6 +69,10 @@ final class MITMScriptEngine {
         /// Script called `Anywhere.exit()`. Revert to the message as it
         /// entered the rule chain; skip the remaining rules.
         case exit
+        /// Request-phase script called `Anywhere.respond(...)`. Drop the
+        /// request without forwarding upstream and synthesize this
+        /// response back to the client.
+        case respond(SynthesizedResponse)
     }
 
     /// Per-frame snapshot for ``applyFrame``. Mirrors ``Message`` for
@@ -92,12 +109,13 @@ final class MITMScriptEngine {
         case exit
     }
 
-    /// Internal tag set by the `Anywhere.done` / `Anywhere.exit`
-    /// blocks; ``apply`` reads it after the JS function returns and
-    /// converts it to ``Outcome``.
+    /// Internal tag set by the `Anywhere.done` / `Anywhere.exit` /
+    /// `Anywhere.respond` blocks; ``apply`` reads it after the JS
+    /// function returns and converts it to ``Outcome``.
     fileprivate enum Directive {
         case done
         case exit
+        case respond(SynthesizedResponse)
     }
 
     private let context: JSContext
@@ -109,9 +127,10 @@ final class MITMScriptEngine {
     /// nested or re-entrant invocation cannot leak into the wrong scope.
     fileprivate var currentScope: UUID?
 
-    /// Directive set by `Anywhere.done` / `Anywhere.exit`. ``apply``
-    /// inspects this after the JS function returns; when set, the
-    /// directive wins over whatever the function returned.
+    /// Directive set by `Anywhere.done` / `Anywhere.exit` /
+    /// `Anywhere.respond`. ``apply`` inspects this after the JS function
+    /// returns; when set, the directive wins over whatever the function
+    /// returned.
     fileprivate var currentDirective: Directive?
 
     init() {
@@ -145,6 +164,16 @@ final class MITMScriptEngine {
             switch directive {
             case .done: return .done(updated)
             case .exit: return .exit
+            case .respond(let response):
+                // Only request-phase scripts can synthesize a response;
+                // response-phase scripts can already rewrite the
+                // response via ctx mutations, so ``Anywhere.respond``
+                // there is treated as a no-op.
+                if message.phase == .httpRequest {
+                    return .respond(response)
+                }
+                logger.warning("[MITM][JS] Anywhere.respond ignored on response phase")
+                return .modified(updated)
             }
         }
         if context.exception != nil {
@@ -192,6 +221,12 @@ final class MITMScriptEngine {
             switch directive {
             case .done: return .done(body: body)
             case .exit: return .exit
+            case .respond:
+                // streamScript can't synthesize a response — the head
+                // has already gone on the wire by the time DATA frames
+                // flow. Treat it as a no-op and continue streaming.
+                logger.warning("[MITM][JS] Anywhere.respond ignored in streamScript")
+                return .modified(body: body, state: updatedState)
             }
         }
         if context.exception != nil {
@@ -443,6 +478,48 @@ final class MITMScriptEngine {
         }
         anywhere.setObject(doneBlock, forKeyedSubscript: "done" as NSString)
         anywhere.setObject(exitBlock, forKeyedSubscript: "exit" as NSString)
+
+        // Anywhere.respond({status, headers, body}) — request-phase
+        // short-circuit. The runtime drops the request before it
+        // reaches upstream and writes the supplied response back to
+        // the client. The spec object accepts:
+        //   - status: number (default 200)
+        //   - headers: [[name, value], ...] (default [])
+        //   - body: Uint8Array | ArrayBuffer | string (default empty)
+        // Any of those fields may be omitted. Response-phase and
+        // streamScript invocations are ignored (logged as warnings).
+        let respondBlock: @convention(block) (JSValue) -> Void = { [weak self] spec in
+            guard let self else { return }
+            guard !spec.isUndefined, !spec.isNull else {
+                self.currentDirective = .respond(
+                    SynthesizedResponse(status: 200, headers: [], body: Data())
+                )
+                return
+            }
+            let status: Int
+            if let statusVal = spec.objectForKeyedSubscript("status"),
+               statusVal.isNumber {
+                status = Int(statusVal.toInt32())
+            } else {
+                status = 200
+            }
+            var headers: [(name: String, value: String)] = []
+            if let headersVal = spec.objectForKeyedSubscript("headers"),
+               !headersVal.isUndefined, !headersVal.isNull {
+                headers = Self.headersFromValue(headersVal)
+            }
+            let body: Data
+            if let bodyVal = spec.objectForKeyedSubscript("body"),
+               !bodyVal.isUndefined, !bodyVal.isNull {
+                body = Self.bytesFromValue(bodyVal, in: self.context) ?? Data()
+            } else {
+                body = Data()
+            }
+            self.currentDirective = .respond(
+                SynthesizedResponse(status: status, headers: headers, body: body)
+            )
+        }
+        anywhere.setObject(respondBlock, forKeyedSubscript: "respond" as NSString)
 
         context.setObject(anywhere, forKeyedSubscript: "Anywhere" as NSString)
     }

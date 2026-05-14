@@ -74,8 +74,11 @@ import JavaScriptCore
 /// pairs). Scripts are stored base64-encoded so newlines and quoting
 /// in the source survive the line-based rule format. See
 /// ``MITMScriptEngine`` for the full runtime contract, including the
-/// `Anywhere.utf8 / base64 / hex / store` helper globals and the
-/// `Anywhere.done() / Anywhere.exit()` short-circuit hooks.
+/// `Anywhere.utf8 / base64 / hex / store` helper globals, the
+/// `Anywhere.done() / Anywhere.exit()` short-circuit hooks, and the
+/// request-phase-only `Anywhere.respond({status, headers, body})`
+/// hook that drops the upstream request and writes a synthesized
+/// response straight back to the client.
 ///
 /// `script` lines optionally lead the base64 with a comma-separated
 /// list of exact `Content-Type` primary values that the script
