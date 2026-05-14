@@ -55,7 +55,7 @@ enum MITMScriptTransform {
     static func hasScriptRule(in rules: [CompiledMITMRule], contentType: String?) -> Bool {
         rules.contains { rule in
             switch rule.operation {
-            case .script(_, let filter):
+            case .script(_, _, let filter):
                 return filter.matches(contentType)
             case .streamScript, .urlReplace, .headerAdd, .headerDelete, .headerReplace:
                 return false
@@ -71,7 +71,7 @@ enum MITMScriptTransform {
     static func hasStreamScriptRule(in rules: [CompiledMITMRule], contentType: String?) -> Bool {
         rules.contains { rule in
             switch rule.operation {
-            case .streamScript(_, let filter):
+            case .streamScript(_, _, let filter):
                 return filter.matches(contentType)
             case .script, .urlReplace, .headerAdd, .headerDelete, .headerReplace:
                 return false
@@ -93,10 +93,14 @@ enum MITMScriptTransform {
         engineProvider: MITMScriptEngine.Provider? = nil
     ) -> Outcome {
         let contentType = firstHeaderValue(message.headers, name: "content-type")
-        guard let source = lastMatchingScriptSource(in: rules, contentType: contentType),
+        guard let match = lastMatchingScriptSource(in: rules, contentType: contentType),
               let engineProvider
         else { return .message(message) }
-        let outcome = engineProvider.get().apply(message, source: source)
+        let outcome = engineProvider.get().apply(
+            message,
+            source: match.source,
+            sourceKey: match.sourceKey
+        )
         switch outcome {
         case .modified(let updated):  return .message(updated)
         case .done(let updated):      return .message(updated)
@@ -145,12 +149,13 @@ enum MITMScriptTransform {
         cursor: FrameCursor,
         engineProvider: MITMScriptEngine.Provider?
     ) -> StreamFrameResult {
-        guard let source = lastMatchingStreamScriptSource(in: rules, contentType: contentType),
+        guard let match = lastMatchingStreamScriptSource(in: rules, contentType: contentType),
               let engineProvider
         else { return StreamFrameResult(body: frame, bypass: false) }
         let outcome = engineProvider.get().applyFrame(
             frame,
-            source: source,
+            source: match.source,
+            sourceKey: match.sourceKey,
             frameContext: frameContext,
             state: cursor.state
         )
@@ -169,17 +174,25 @@ enum MITMScriptTransform {
 
     // MARK: - Last-match selection
 
+    /// Match for a script lookup: the source the engine compiles plus
+    /// the precomputed cache key the engine uses to dedup compilation
+    /// across calls.
+    private struct ScriptMatch {
+        let source: String
+        let sourceKey: Int
+    }
+
     /// Returns the source of the last ``.script`` rule whose filter
     /// matches ``contentType``, or nil when none match. Walks rules
     /// back-to-front so the first hit is the winner.
     private static func lastMatchingScriptSource(
         in rules: [CompiledMITMRule],
         contentType: String?
-    ) -> String? {
+    ) -> ScriptMatch? {
         for rule in rules.reversed() {
-            if case .script(let source, let filter) = rule.operation,
+            if case .script(let source, let sourceKey, let filter) = rule.operation,
                filter.matches(contentType) {
-                return source
+                return ScriptMatch(source: source, sourceKey: sourceKey)
             }
         }
         return nil
@@ -190,11 +203,11 @@ enum MITMScriptTransform {
     private static func lastMatchingStreamScriptSource(
         in rules: [CompiledMITMRule],
         contentType: String?
-    ) -> String? {
+    ) -> ScriptMatch? {
         for rule in rules.reversed() {
-            if case .streamScript(let source, let filter) = rule.operation,
+            if case .streamScript(let source, let sourceKey, let filter) = rule.operation,
                filter.matches(contentType) {
-                return source
+                return ScriptMatch(source: source, sourceKey: sourceKey)
             }
         }
         return nil

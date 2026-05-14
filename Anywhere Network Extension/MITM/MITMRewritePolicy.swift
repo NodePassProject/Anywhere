@@ -26,14 +26,21 @@ enum CompiledMITMOperation {
     /// ``MITMScriptEngine`` so the policy stays free of JSContext.
     /// ``contentTypes`` gates the rule against the message's
     /// `Content-Type`; see ``BodyContentTypeFilter``.
-    case script(source: String, contentTypes: BodyContentTypeFilter)
+    ///
+    /// ``sourceKey`` is a precomputed identifier the engine uses as
+    /// the compile cache key. Hashing the full source on every JS call
+    /// would otherwise be the dominant cost for large scripts (think
+    /// 100 KB) since ``[String: JSValue]`` walks every byte on lookup.
+    /// Computed once at rule-load time via ``Hasher`` so identical
+    /// sources share the same cache entry within a process.
+    case script(source: String, sourceKey: Int, contentTypes: BodyContentTypeFilter)
     /// Per-frame JavaScript transform. Same runtime contract as
     /// ``script`` for ctx fields the script reads, but the function is
     /// invoked once per DATA frame (HTTP/2) or per chunk (HTTP/1
     /// chunked) and only ``ctx.body`` is read back. Used to keep
     /// streaming-style bodies flowing without buffering the entire
     /// response.
-    case streamScript(source: String, contentTypes: BodyContentTypeFilter)
+    case streamScript(source: String, sourceKey: Int, contentTypes: BodyContentTypeFilter)
 }
 
 /// Resolved Content-Type filter for a script rule. Built once at
@@ -218,13 +225,35 @@ final class MITMRewritePolicy {
             guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "script") else {
                 return nil
             }
-            return .script(source: source, contentTypes: scriptFilter(contentTypes))
+            return .script(
+                source: source,
+                sourceKey: sourceCacheKey(source),
+                contentTypes: scriptFilter(contentTypes)
+            )
         case .streamScript(let scriptBase64, let contentTypes):
             guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "streamScript") else {
                 return nil
             }
-            return .streamScript(source: source, contentTypes: scriptFilter(contentTypes))
+            return .streamScript(
+                source: source,
+                sourceKey: sourceCacheKey(source),
+                contentTypes: scriptFilter(contentTypes)
+            )
         }
+    }
+
+    /// Produces the compile-cache key for a script source. Mixes both
+    /// the source bytes and the length into the hash so two distinct
+    /// sources of the same length still take different cache slots
+    /// even on the (vanishingly rare) ``Hasher`` byte-content
+    /// collision. Within a process Swift's hasher is stable, which is
+    /// all the engine needs — caches are per-session and the seed
+    /// only has to be consistent for the engine's lifetime.
+    private func sourceCacheKey(_ source: String) -> Int {
+        var hasher = Hasher()
+        hasher.combine(source.utf8.count)
+        hasher.combine(source)
+        return hasher.finalize()
     }
 
     private func decodeScript(_ scriptBase64: String, suffix: String, kind: String) -> String? {

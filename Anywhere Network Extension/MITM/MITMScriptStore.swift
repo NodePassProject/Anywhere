@@ -37,6 +37,12 @@ final class MITMScriptStore {
 
     private let lock = NSLock()
     private var buckets: [UUID: [String: Data]] = [:]
+    /// Running per-scope size in bytes (sum of key.utf8.count + value.count
+    /// over every entry). Mirrors ``buckets`` so ``set`` can compute the
+    /// cap-check projection in O(1) instead of rescanning the bucket on
+    /// every write — a script that stores hundreds of keys per request
+    /// would otherwise pay O(N²) over the request's lifetime.
+    private var bucketSizes: [UUID: Int] = [:]
 
     private init() {}
 
@@ -52,23 +58,30 @@ final class MITMScriptStore {
         lock.lock(); defer { lock.unlock() }
         var bucket = buckets[scope] ?? [:]
         let existing = bucket[key]
-        let oldEntryBytes = (existing?.count ?? 0) + (existing == nil ? 0 : key.utf8.count)
-        let newEntryBytes = value.count + key.utf8.count
-        let currentTotal = bucket.reduce(0) { $0 + $1.key.utf8.count + $1.value.count }
+        let keyBytes = key.utf8.count
+        let oldEntryBytes = existing.map { $0.count + keyBytes } ?? 0
+        let newEntryBytes = value.count + keyBytes
+        let currentTotal = bucketSizes[scope] ?? 0
         let projected = currentTotal - oldEntryBytes + newEntryBytes
         if projected > Self.maxBytesPerScope {
             throw StoreError.capacityExceeded
         }
         bucket[key] = value
         buckets[scope] = bucket
+        bucketSizes[scope] = projected
     }
 
     func delete(scope: UUID, key: String) {
         lock.lock(); defer { lock.unlock() }
         guard var bucket = buckets[scope] else { return }
+        if let existing = bucket[key] {
+            let delta = existing.count + key.utf8.count
+            bucketSizes[scope] = (bucketSizes[scope] ?? 0) - delta
+        }
         bucket.removeValue(forKey: key)
         if bucket.isEmpty {
             buckets.removeValue(forKey: scope)
+            bucketSizes.removeValue(forKey: scope)
         } else {
             buckets[scope] = bucket
         }

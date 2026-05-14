@@ -10,17 +10,43 @@ import JavaScriptCore
 
 private let logger = AnywhereLogger(category: "MITM")
 
+/// Trampoline to ``JSContextGroupSetExecutionTimeLimit``.
+///
+/// A nil callback tells JSC to terminate the offending script without
+/// asking. The terminated execution throws into the context's
+/// exception handler, which ``MITMScriptEngine.apply`` already drains
+/// and treats as a no-op rewrite — exactly the behaviour we want for
+/// runaway scripts.
+@_silgen_name("JSContextGroupSetExecutionTimeLimit")
+private func _JSContextGroupSetExecutionTimeLimit(
+    _ group: JSContextGroupRef,
+    _ limit: Double,
+    _ callback: (@convention(c) (JSContextRef?, UnsafeMutableRawPointer?) -> Bool)?,
+    _ context: UnsafeMutableRawPointer?
+)
+
 /// Per-``MITMSession`` JavaScript runtime for the
 /// ``CompiledMITMOperation/script`` rule. One ``JSContext`` is reused
 /// across every script invocation on the connection; compiled functions
 /// are cached by source content so duplicate scripts share work.
 ///
-/// Watchdog: ``JSContextGroupSetExecutionTimeLimit`` is private API on
-/// Apple platforms, so v1 ships without one. Scripts arrive through the
-/// rule importer and are treated as trusted author code; the
-/// ``MITMBodyCodec/maxBufferedBodyBytes`` cap bounds the working set
-/// even in the worst case.
+/// Watchdog: the engine sets a per-call execution time limit at init
+/// via ``JSContextGroupSetExecutionTimeLimit`` (see the
+/// ``_JSContextGroupSetExecutionTimeLimit`` trampoline above). A
+/// script that exceeds ``executionTimeLimit`` seconds is terminated by
+/// JSC and surfaces as a context exception — ``apply`` then leaves the
+/// in-flight message unchanged. Without this an infinite-loop script
+/// would wedge the lwIP queue for every MITM connection in the
+/// extension.
 final class MITMScriptEngine {
+
+    /// Wall-clock cap on a single `process(ctx)` invocation. JSC
+    /// counts from each call's entry, so a script gets the full budget
+    /// per request even when it's the same script running back-to-back.
+    /// 1 s is generous for legitimate transforms (which finish in
+    /// milliseconds) while still cutting runaway loops off before they
+    /// pile up against the next inbound packet.
+    private static let executionTimeLimit: Double = 1.0
 
     /// Mutable view of the in-flight HTTP message. The runtime hands
     /// this to `function process(ctx)` and reads each field back after
@@ -119,7 +145,13 @@ final class MITMScriptEngine {
     }
 
     private let context: JSContext
-    private var compiled: [String: JSValue] = [:]
+    /// Compiled `process(ctx)` functions keyed by the
+    /// ``CompiledMITMOperation``'s ``sourceKey``. Using a precomputed
+    /// hash as the key keeps lookups O(1) regardless of source size —
+    /// the previous ``[String: JSValue]`` cache rehashed and recompared
+    /// the entire source on every JS call, which dominated CPU for
+    /// large scripts on hot streams.
+    private var compiled: [Int: JSValue] = [:]
 
     /// Scope key the `Anywhere.store` globals consult on each call.
     /// Stashed by ``apply`` immediately before invoking the user
@@ -139,14 +171,22 @@ final class MITMScriptEngine {
         self.context.exceptionHandler = { _, exception in
             logger.warning("[MITM][JS] uncaught: \(exception?.toString() ?? "<unknown>")")
         }
+        // Arm the watchdog on this context group. The limit applies
+        // to every JS call routed through ``context`` for the
+        // engine's lifetime; we don't unset it.
+        let group = JSContextGetGroup(context.jsGlobalContextRef)
+        _JSContextGroupSetExecutionTimeLimit(group!, Self.executionTimeLimit, nil, nil)
         installAnywhereGlobals()
     }
 
     /// Runs ``source`` against ``message``. Returns the post-script
     /// message, or ``message`` unchanged when the script throws or
-    /// otherwise fails to compile.
-    func apply(_ message: Message, source: String) -> Outcome {
-        guard let function = compileIfNeeded(source) else { return .modified(message) }
+    /// otherwise fails to compile. ``sourceKey`` is the cache key
+    /// computed at rule-compile time; equal keys imply equal sources.
+    func apply(_ message: Message, source: String, sourceKey: Int) -> Outcome {
+        guard let function = compileIfNeeded(source, key: sourceKey) else {
+            return .modified(message)
+        }
         currentScope = message.ruleSetID
         currentDirective = nil
         defer {
@@ -191,10 +231,11 @@ final class MITMScriptEngine {
     func applyFrame(
         _ frame: Data,
         source: String,
+        sourceKey: Int,
         frameContext ctx: FrameContext,
         state: JSValue?
     ) -> FrameOutcome {
-        guard let function = compileIfNeeded(source) else {
+        guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(body: frame, state: state)
         }
         currentScope = ctx.ruleSetID
@@ -238,8 +279,8 @@ final class MITMScriptEngine {
 
     // MARK: - Compilation
 
-    private func compileIfNeeded(_ source: String) -> JSValue? {
-        if let cached = compiled[source] { return cached }
+    private func compileIfNeeded(_ source: String, key: Int) -> JSValue? {
+        if let cached = compiled[key] { return cached }
         // IIFE wrap so the user's `function process(...)` lives in its
         // own scope; we capture the function as the IIFE return value
         // rather than polluting globalThis.
@@ -253,7 +294,7 @@ final class MITMScriptEngine {
             logger.warning("[MITM][JS] script did not define process(ctx)")
             return nil
         }
-        compiled[source] = value
+        compiled[key] = value
         return value
     }
 
