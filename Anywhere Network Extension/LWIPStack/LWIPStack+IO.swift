@@ -138,7 +138,7 @@ extension LWIPStack {
         timeoutTimer = timer
     }
 
-    /// Starts the UDP flow cleanup timer (1-second interval, 60-second idle timeout).
+    /// Starts the UDP flow cleanup timer (1-second interval, 300-second idle timeout).
     func startUDPCleanupTimer() {
         let timer = DispatchSource.makeTimerSource(queue: lwipQueue)
         timer.schedule(
