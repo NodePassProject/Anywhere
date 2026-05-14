@@ -254,14 +254,15 @@ final class MITMHTTP1Stream {
         let rewrittenStartLine = applyURLRules(parsed.startLine)
         let withAuthority = applyAuthorityRewrite(parsed.headers)
         let rewrittenHeaders = applyHeaderRules(withAuthority)
-        let framing = bodyFraming(startLine: rewrittenStartLine, headers: rewrittenHeaders)
 
         // On the response side, every well-formed final message
         // corresponds to one request previously pushed by the request
         // stream. Pop the matching record here — once per final
-        // response head, before any framing dispatch — so the FIFO
+        // response head, before framing is computed — so the FIFO
         // never drifts even when the response is passthrough or no
-        // scripts fire.
+        // scripts fire, and so ``bodyFraming`` can see the originating
+        // method (HEAD responses carry Content-Length / Transfer-
+        // Encoding values that must not be followed by a body).
         //
         // Interim responses (1xx other than 101) are not the final
         // response: more headers follow on the same request. They
@@ -277,6 +278,12 @@ final class MITMHTTP1Stream {
         } else {
             originatingRequest = nil
         }
+
+        let framing = bodyFraming(
+            startLine: rewrittenStartLine,
+            headers: rewrittenHeaders,
+            originatingMethod: originatingRequest?.method
+        )
 
         // Protocol upgrades and "read until close" responses can't be
         // safely re-framed, so emit the rewritten head and downgrade.
@@ -1048,18 +1055,68 @@ final class MITMHTTP1Stream {
     /// matching the body so the wire framing always agrees with the
     /// payload. The reason phrase is the canonical one (``""`` for
     /// unrecognised codes — clients ignore it per RFC 9112 §4).
+    ///
+    /// Header names are checked against RFC 9110 §5.6.2 (token chars
+    /// only) and values against §5.5 (no CR/LF/NUL). Entries that
+    /// violate either are dropped with a warning so a script — even an
+    /// imported third-party one — can't smuggle CRLF into the header
+    /// block and split the response (response-splitting).
     private func queueSynthesizedResponse(_ response: MITMScriptEngine.SynthesizedResponse) {
         let reason = canonicalReasonPhrase(for: response.status)
         let startLine = "HTTP/1.1 \(response.status) \(reason)"
-        var headers = response.headers.filter { entry in
+        var headers: [Header] = []
+        headers.reserveCapacity(response.headers.count + 1)
+        for entry in response.headers {
             let n = entry.name.lowercased()
-            return n != "content-length" && n != "transfer-encoding"
+            if n == "content-length" || n == "transfer-encoding" { continue }
+            guard Self.isValidHeaderName(entry.name),
+                  Self.isValidHeaderValue(entry.value)
+            else {
+                logger.warning("[MITM][JS] Anywhere.respond dropping invalid header: \(entry.name)")
+                continue
+            }
+            headers.append((name: entry.name, value: entry.value))
         }
         headers.append((name: "Content-Length", value: String(response.body.count)))
         pendingClientBytes.append(serializeHead(startLine: startLine, headers: headers))
         if !response.body.isEmpty {
             pendingClientBytes.append(response.body)
         }
+    }
+
+    /// RFC 9110 §5.6.2: a header field-name is a `token` — one or more
+    /// `tchar` (alphanumerics plus a fixed punctuation set). Anything
+    /// outside that set (whitespace, CTL, `:`, CR, LF, …) would either
+    /// be misparsed by the receiver or, worst case, let an injected CR
+    /// LF break out of the current line.
+    private static func isValidHeaderName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        for byte in name.utf8 {
+            switch byte {
+            case 0x21, 0x23, 0x24, 0x25, 0x26, 0x27,
+                 0x2A, 0x2B, 0x2D, 0x2E,
+                 0x5E, 0x5F, 0x60, 0x7C, 0x7E:
+                continue
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A:
+                continue
+            default:
+                return false
+            }
+        }
+        return true
+    }
+
+    /// RFC 9110 §5.5: field-value is a sequence of visible / SP / HTAB
+    /// chars. CR, LF, and NUL are forbidden anywhere in the value;
+    /// allowing any of them would split the response head into two
+    /// (response-splitting) when the value is written verbatim.
+    private static func isValidHeaderValue(_ value: String) -> Bool {
+        for byte in value.utf8 {
+            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
+                return false
+            }
+        }
+        return true
     }
 
     // MARK: - Framing decision
@@ -1072,8 +1129,22 @@ final class MITMHTTP1Stream {
         case switchingProtocols
     }
 
-    private func bodyFraming(startLine: String, headers: [Header]) -> Framing {
+    private func bodyFraming(
+        startLine: String,
+        headers: [Header],
+        originatingMethod: String? = nil
+    ) -> Framing {
         if phase == .httpResponse {
+            // RFC 9110 §15.2: a response to HEAD never carries a body
+            // regardless of Content-Length / Transfer-Encoding. Without
+            // this short-circuit a HEAD response with `Content-Length:
+            // 1234` would have us wait for 1234 bytes that never arrive
+            // — or, on keep-alive, consume bytes from the next pipelined
+            // response.
+            if let method = originatingMethod,
+               method.uppercased() == "HEAD" {
+                return .none
+            }
             // Status line: "HTTP/1.x SSS Reason"
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             if parts.count >= 2, let status = Int(parts[1]) {
