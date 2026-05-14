@@ -43,6 +43,7 @@ final class MITMHTTP2Connection {
         static let data: UInt8         = 0x0
         static let headers: UInt8      = 0x1
         static let priority: UInt8     = 0x2
+        static let rstStream: UInt8    = 0x3
         static let pushPromise: UInt8  = 0x5
         static let continuation: UInt8 = 0x9
     }
@@ -216,9 +217,28 @@ final class MITMHTTP2Connection {
             return handlePushPromise(frame)
         case FrameTypeCode.data:
             return handleData(frame)
+        case FrameTypeCode.rstStream:
+            return handleRSTStream(frame)
         default:
             return serializeFrame(frame)
         }
+    }
+
+    /// Drops per-stream bookkeeping for an aborted stream and forwards
+    /// the RST_STREAM frame verbatim. Without this, a long-lived
+    /// connection that frequently RSTs (e.g. background sync apps that
+    /// cancel and retry) would accumulate dead entries in
+    /// ``pendingMessages`` and ``streamingScripts`` until the
+    /// connection closes. The shared ``MITMRequestLog`` entry is also
+    /// dropped so the cross-leg method/url map doesn't pin a record
+    /// for a stream that will never produce a response. Each leg
+    /// clears independently — the other leg's matching clear is a
+    /// no-op.
+    private func handleRSTStream(_ frame: RawFrame) -> Data {
+        pendingMessages.removeValue(forKey: frame.streamID)
+        streamingScripts.removeValue(forKey: frame.streamID)
+        _ = rewriter.requestLog.popHTTP2(streamID: frame.streamID)
+        return serializeFrame(frame)
     }
 
     // MARK: - HEADERS
@@ -407,7 +427,16 @@ final class MITMHTTP2Connection {
         // immediately below. Trailers and interim responses skip
         // scripting entirely: trailers have no real "head" to mutate,
         // and interim responses precede the actual final headers.
+        //
+        // ``endStreamOnHeaders`` skips this branch even when a stream
+        // script matches: there will be no DATA frame for the script
+        // to fire on, so the right behaviour is to fall through to the
+        // buffered-script path (which handles an empty body) or to
+        // pass-through. Without this gate, a request/response with no
+        // body would silently bypass any buffered script that also
+        // matched the same Content-Type.
         if case .headers = kind, !isTrailer, !isInterimResponse,
+           !endStreamOnHeaders,
            rewriter.hasStreamScriptRule(phase: phase, contentType: contentType) {
             if rewriter.hasScriptRule(phase: phase, contentType: contentType) {
                 logger.warning("[MITM] HTTP/2 stream \(streamID): streamScript rule wins over script rule on the same Content-Type")
@@ -423,20 +452,18 @@ final class MITMHTTP2Connection {
             // script chain. No body buffering, no decompression. The
             // originating request was popped once at the top of this
             // function for outbound streams.
-            if !endStreamOnHeaders {
-                streamingScripts[streamID] = StreamingState(
-                    headers: rewritten,
-                    contentType: contentType,
-                    originatingRequest: originatingRequest,
-                    cursor: MITMScriptTransform.FrameCursor()
-                )
-            }
+            streamingScripts[streamID] = StreamingState(
+                headers: rewritten,
+                contentType: contentType,
+                originatingRequest: originatingRequest,
+                cursor: MITMScriptTransform.FrameCursor()
+            )
 
             let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten)
             output.append(emitHeaderBlock(
                 streamID: streamID,
                 block: reencoded,
-                endStream: endStreamOnHeaders,
+                endStream: false,
                 kind: kind
             ))
             return output
@@ -863,6 +890,16 @@ final class MITMHTTP2Connection {
         return nil
     }
 
+    /// HTTP/2's default initial flow-control window (RFC 9113 §6.9.2).
+    /// A synthesized response body larger than this would overflow the
+    /// client's window before any WINDOW_UPDATE could arrive — we don't
+    /// track windows on the MITM path, so the conservative move is to
+    /// cap the body. 64 KiB comfortably covers the common
+    /// ``Anywhere.respond`` use cases (mocked JSON, redirect bodies,
+    /// canned error pages) and matches the cap an unconfigured peer
+    /// would enforce anyway.
+    private static let maxSynthesizedResponseBodyBytes: Int = 65_535
+
     /// Serializes a request-phase `Anywhere.respond(...)` payload as an
     /// HTTP/2 HEADERS (+ optional DATA) frame sequence ending with
     /// END_STREAM, and appends it to ``pendingClientBytes`` for the
@@ -874,6 +911,12 @@ final class MITMHTTP2Connection {
     /// likewise dropped since END_STREAM is the source of truth in
     /// HTTP/2 and a user-supplied value would risk disagreeing with
     /// the actual body size.
+    ///
+    /// Header names are checked against RFC 9110 §5.6.2 (token chars
+    /// only) and values against RFC 9113 §8.2.1 (no CR/LF/NUL). Entries
+    /// that violate either are dropped with a warning so a malicious
+    /// or accidental script can't desynchronise the HPACK decoder or
+    /// inject extra header lines.
     private func queueSynthesizedResponse(
         streamID: UInt32,
         response: MITMScriptEngine.SynthesizedResponse
@@ -885,13 +928,28 @@ final class MITMHTTP2Connection {
             let n = entry.name.lowercased()
             if n.hasPrefix(":") { continue }
             if n == "content-length" || n == "transfer-encoding" { continue }
+            guard Self.isValidHeaderName(n),
+                  Self.isValidHTTP2HeaderValue(entry.value)
+            else {
+                logger.warning("[MITM][JS] Anywhere.respond dropping invalid header: \(entry.name)")
+                continue
+            }
             // HTTP/2 forbids uppercase header names (RFC 9113 §8.2.1);
             // normalize defensively so a careless script can't blow up
             // the client's decoder.
             headers.append((name: n, value: entry.value))
         }
         let block = HPACKEncoder.encodeHeaderBlock(headers)
-        let body = response.body
+
+        let body: Data
+        if response.body.count > Self.maxSynthesizedResponseBodyBytes {
+            logger.warning("[MITM][JS] Anywhere.respond body \(response.body.count) B exceeds initial flow-control window; truncating to \(Self.maxSynthesizedResponseBodyBytes) B")
+            let end = response.body.startIndex + Self.maxSynthesizedResponseBodyBytes
+            body = response.body.subdata(in: response.body.startIndex..<end)
+        } else {
+            body = response.body
+        }
+
         let endStreamOnHeaders = body.isEmpty
         var out = emitHeaderBlock(
             streamID: streamID,
@@ -903,6 +961,40 @@ final class MITMHTTP2Connection {
             out.append(emitDataFrames(streamID: streamID, payload: body, endStream: true))
         }
         pendingClientBytes.append(out)
+    }
+
+    /// RFC 9110 §5.6.2: header field-name is a `token` — one or more of
+    /// `tchar` (alphanumerics plus a fixed punctuation set). Empty
+    /// names are rejected. Used to gate user-supplied headers from
+    /// ``Anywhere.respond`` before they reach the HPACK encoder.
+    private static func isValidHeaderName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        for byte in name.utf8 {
+            switch byte {
+            case 0x21, 0x23, 0x24, 0x25, 0x26, 0x27,
+                 0x2A, 0x2B, 0x2D, 0x2E,
+                 0x5E, 0x5F, 0x60, 0x7C, 0x7E:
+                continue
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A:
+                continue
+            default:
+                return false
+            }
+        }
+        return true
+    }
+
+    /// HTTP/2 disallows CR, LF, and NUL in header field values (RFC
+    /// 9113 §8.2.1). A scriptable inject path would otherwise let a
+    /// careless or malicious script slip extra header lines into the
+    /// re-encoded block via the decoder's string handling.
+    private static func isValidHTTP2HeaderValue(_ value: String) -> Bool {
+        for byte in value.utf8 {
+            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
+                return false
+            }
+        }
+        return true
     }
 
     // MARK: - Message build / header rebuild
