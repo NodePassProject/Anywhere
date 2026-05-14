@@ -250,9 +250,9 @@ struct MITMRuleEditorView: View {
             self.pattern = pattern
             self.headerName = name
             self.headerValue = value
-        case .bodyScript:
+        case .script, .streamScript:
             // Scripts are import-only; the detail view should never route
-            // a .bodyScript rule into this editor. Guard anyway so the
+            // a script rule into this editor. Guard anyway so the
             // exhaustiveness check passes.
             break
         }

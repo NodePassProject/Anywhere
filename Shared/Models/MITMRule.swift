@@ -39,9 +39,9 @@ enum MITMOperation: Equatable {
     case headerDelete(name: String)
     case headerReplace(pattern: String, name: String, value: String)
     /// JavaScript transform. ``scriptBase64`` is the base64-encoded
-    /// UTF-8 source of a script that defines `function process(body, ctx)`;
-    /// the runtime decodes, compiles, and invokes it on the buffered
-    /// (decompressed) body. Stored base64-encoded so rule-set text
+    /// UTF-8 source of a script that defines `function process(ctx)`;
+    /// the runtime decodes, compiles, and invokes it on a mutable
+    /// message-context object. Stored base64-encoded so rule-set text
     /// import/export survives newlines and quoting.
     ///
     /// ``contentTypes`` gates which messages the script runs on by exact
@@ -49,7 +49,21 @@ enum MITMOperation: Equatable {
     /// `nil` means the user did not supply a list at import time; the
     /// runtime falls back to ``MITMBodyCodec/isRewritableType``'s
     /// allowlist of textual MIME types. An empty list matches nothing.
-    case bodyScript(scriptBase64: String, contentTypes: [String]?)
+    case script(scriptBase64: String, contentTypes: [String]?)
+    /// Per-frame JavaScript transform for streaming bodies (gRPC,
+    /// server-sent events, chunked APIs). Same storage shape as
+    /// ``script`` but the runtime invokes the function once per DATA
+    /// frame (HTTP/2) or per chunk (HTTP/1 chunked) without buffering
+    /// the body, decompressing, or allowing head-field mutation. Useful
+    /// when the body is a stream of self-describing frames the script
+    /// can demux on its own (e.g. gRPC length-prefixed messages) and
+    /// when full-body buffering would stall the stream.
+    ///
+    /// HTTP/1 Content-Length bodies are skipped — changing the byte
+    /// count mid-stream would desync framing the head has already
+    /// committed to. If both ``script`` and ``streamScript`` rules
+    /// match the same message, ``streamScript`` wins.
+    case streamScript(scriptBase64: String, contentTypes: [String]?)
 }
 
 extension MITMOperation: CustomStringConvertible {
@@ -63,8 +77,10 @@ extension MITMOperation: CustomStringConvertible {
             String(localized: "Header Delete")
         case .headerReplace:
             String(localized: "Header Replace")
-        case .bodyScript:
-            String(localized: "Body Script")
+        case .script:
+            String(localized: "Script")
+        case .streamScript:
+            String(localized: "Stream Script")
         }
     }
 }
@@ -75,7 +91,8 @@ extension MITMOperation: Codable {
         case headerAdd
         case headerDelete
         case headerReplace
-        case bodyScript
+        case script
+        case streamScript
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -110,8 +127,13 @@ extension MITMOperation: Codable {
                 name: try c.decode(String.self, forKey: .name),
                 value: try c.decode(String.self, forKey: .value)
             )
-        case .bodyScript:
-            self = .bodyScript(
+        case .script:
+            self = .script(
+                scriptBase64: try c.decode(String.self, forKey: .script),
+                contentTypes: try c.decodeIfPresent([String].self, forKey: .contentTypes)
+            )
+        case .streamScript:
+            self = .streamScript(
                 scriptBase64: try c.decode(String.self, forKey: .script),
                 contentTypes: try c.decodeIfPresent([String].self, forKey: .contentTypes)
             )
@@ -137,8 +159,12 @@ extension MITMOperation: Codable {
             try c.encode(pattern, forKey: .pattern)
             try c.encode(name, forKey: .name)
             try c.encode(value, forKey: .value)
-        case .bodyScript(let scriptBase64, let contentTypes):
-            try c.encode(Kind.bodyScript, forKey: .kind)
+        case .script(let scriptBase64, let contentTypes):
+            try c.encode(Kind.script, forKey: .kind)
+            try c.encode(scriptBase64, forKey: .script)
+            try c.encodeIfPresent(contentTypes, forKey: .contentTypes)
+        case .streamScript(let scriptBase64, let contentTypes):
+            try c.encode(Kind.streamScript, forKey: .kind)
             try c.encode(scriptBase64, forKey: .script)
             try c.encodeIfPresent(contentTypes, forKey: .contentTypes)
         }

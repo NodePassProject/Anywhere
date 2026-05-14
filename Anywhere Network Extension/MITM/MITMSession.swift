@@ -177,9 +177,14 @@ final class MITMSession {
     private let h2Rewriter: MITMHTTP2Rewriter
 
     /// Lazy JavaScript runtime shared by both HTTP/1 streams and the
-    /// HTTP/2 rewriter. Materializes only when a ``CompiledMITMOperation/bodyScript``
+    /// HTTP/2 rewriter. Materializes only when a ``CompiledMITMOperation/script``
     /// rule actually fires for this connection.
     private let scriptEngineProvider = MITMScriptEngine.Provider()
+
+    /// Cross-direction record of the in-flight request's method+URL so
+    /// the response-phase script ctx can populate `ctx.method` /
+    /// `ctx.url` from the request that produced this response.
+    private let requestLog = MITMRequestLog()
 
     private var torn = false
 
@@ -227,20 +232,23 @@ final class MITMSession {
             phase: .httpRequest,
             policy: policy,
             effectiveAuthority: effectiveAuthority,
-            scriptEngineProvider: scriptEngineProvider
+            scriptEngineProvider: scriptEngineProvider,
+            requestLog: requestLog
         )
         self.responseStream = MITMHTTP1Stream(
             host: dstHost,
             phase: .httpResponse,
             policy: policy,
             effectiveAuthority: nil, // Host headers do not apply on responses.
-            scriptEngineProvider: scriptEngineProvider
+            scriptEngineProvider: scriptEngineProvider,
+            requestLog: requestLog
         )
         self.h2Rewriter = MITMHTTP2Rewriter(
             host: dstHost,
             policy: policy,
             effectiveAuthority: effectiveAuthority,
-            scriptEngineProvider: scriptEngineProvider
+            scriptEngineProvider: scriptEngineProvider,
+            requestLog: requestLog
         )
     }
 

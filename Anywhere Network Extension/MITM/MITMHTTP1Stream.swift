@@ -32,24 +32,79 @@ final class MITMHTTP1Stream {
     /// streams; response streams pass nil.
     private let effectiveAuthority: String?
     /// Lazy JS runtime, shared across both directions of the same MITM
-    /// session. Touched only when a body-script rule fires.
+    /// session. Touched only when a script rule fires.
     private let scriptEngineProvider: MITMScriptEngine.Provider
+    /// Cross-direction request bookkeeping. The request stream records
+    /// the (post-rewrite) method/URL as each request goes upstream; the
+    /// response stream pops it to populate the script ctx's
+    /// `method`/`url` fields on response phase.
+    private let requestLog: MITMRequestLog
 
     init(
         host: String,
         phase: MITMPhase,
         policy: MITMRewritePolicy,
         effectiveAuthority: String?,
-        scriptEngineProvider: MITMScriptEngine.Provider
+        scriptEngineProvider: MITMScriptEngine.Provider,
+        requestLog: MITMRequestLog
     ) {
         self.host = host
         self.phase = phase
         self.policy = policy
         self.effectiveAuthority = effectiveAuthority
         self.scriptEngineProvider = scriptEngineProvider
+        self.requestLog = requestLog
     }
 
     // MARK: - State
+
+    /// Snapshot of the rewritten head (start line + headers) plus the
+    /// originating request context (looked up from ``MITMRequestLog`` on
+    /// response phase). Saved when we decide to defer head emission so
+    /// the body-completion path can rebuild the final head from script
+    /// mutations.
+    private struct PendingHead {
+        let startLine: String
+        let headers: [Header]
+        /// Pre-decompression `Content-Encoding` plan. We emit identity
+        /// after decompressing, so the outbound head also drops
+        /// `Content-Encoding`.
+        let codec: MITMBodyCodec.Plan
+        /// Originating request's method/url for response-phase ctx.
+        /// Nil on request phase (the request stream itself sources these
+        /// from the start line).
+        let originatingRequest: MITMRequestLog.Record?
+    }
+
+    /// Streaming-script state for HTTP/1 chunked bodies. Set once at
+    /// head time when a ``streamScript`` rule matches; threaded through
+    /// the chunked-streaming mode along with a one-chunk lookahead so
+    /// the last chunk before the terminator can be marked
+    /// ``frame.end = true``.
+    private struct StreamingState {
+        let headers: [Header]
+        let contentType: String?
+        let originatingRequest: MITMRequestLog.Record?
+        let startLine: String
+        var frameIndex: Int = 0
+        /// Holds the most recently completed chunk's bytes; we don't
+        /// emit it until we know whether the next chunk exists (and
+        /// thus whether the held chunk was the last one). nil before
+        /// any chunk has completed.
+        var pendingChunk: Data? = nil
+        let cursor: MITMScriptTransform.FrameCursor
+    }
+
+    private enum StreamingChunkedInner {
+        case sizeLine
+        case chunkData(remaining: Int, accumulator: Data)
+        case dataCRLF
+        /// After the zero-size size line. Drain any trailer-section
+        /// lines from ``rxBuffer`` until the empty-line terminator so
+        /// the connection returns to a clean head-parsing state on
+        /// keep-alive.
+        case trailerOrEnd
+    }
 
     private enum Mode {
         /// Buffering the next message's head. The accumulator lives in
@@ -57,18 +112,16 @@ final class MITMHTTP1Stream {
         case awaitingHead
 
         /// Header rewrite already emitted; pass body bytes through
-        /// unchanged. Used when no body-script rule applies, or when
-        /// the body is opaque-encoded.
+        /// unchanged. Used when no script rule applies, or when the
+        /// body is opaque-encoded.
         case forwardingLength(remaining: Int)
         case forwardingChunked(reader: ChunkedReader)
 
-        /// Buffering the body to rewrite it. The head is emitted only once
-        /// the body completes, so Content-Length or chunk framing can be
-        /// updated before sending. ``codec`` records the
-        /// `Content-Encoding` plan so the buffered body can be
-        /// decompressed before regex rules run.
-        case rewritingLength(headBytes: Data, expected: Int, accumulator: Data, codec: MITMBodyCodec.Plan)
-        case rewritingChunked(headBytes: Data, accumulator: Data, reader: ChunkedReader, codec: MITMBodyCodec.Plan)
+        /// Buffering the body to rewrite it. The head is withheld
+        /// (saved in ``pending``) until the body completes so the
+        /// script chain can mutate it before we serialize.
+        case rewritingLength(pending: PendingHead, expected: Int, accumulator: Data)
+        case rewritingChunked(pending: PendingHead, accumulator: Data, reader: ChunkedReader)
 
         /// Reached when a chunked body has overflowed
         /// ``MITMBodyCodec/maxBufferedBodyBytes`` mid-rewrite. The
@@ -76,6 +129,13 @@ final class MITMHTTP1Stream {
         /// the remaining wire chunks are parsed and discarded so the
         /// connection returns to ``awaitingHead`` cleanly.
         case discardingChunked(reader: ChunkedReader)
+
+        /// Per-chunk streaming-script mode. The head is already
+        /// emitted; chunks flow through the script chain one at a
+        /// time. A one-chunk lookahead in ``streaming.pendingChunk``
+        /// lets us mark the final chunk before the terminator with
+        /// ``frame.end = true``.
+        case streamingChunked(streaming: StreamingState, inner: StreamingChunkedInner)
 
         /// Permanent: forward bytes verbatim. Reached on protocol
         /// upgrades (101), CONNECT-style tunnels, or any framing error.
@@ -121,17 +181,21 @@ final class MITMHTTP1Stream {
             mode = .forwardingChunked(reader: reader)
             return forwardChunked(reader: &reader, into: &output)
 
-        case .rewritingLength(let headBytes, let expected, var accumulator, let codec):
-            mode = .rewritingLength(headBytes: headBytes, expected: expected, accumulator: accumulator, codec: codec)
-            return rewriteLength(headBytes: headBytes, expected: expected, accumulator: &accumulator, codec: codec, into: &output)
+        case .rewritingLength(let pending, let expected, var accumulator):
+            mode = .rewritingLength(pending: pending, expected: expected, accumulator: accumulator)
+            return rewriteLength(pending: pending, expected: expected, accumulator: &accumulator, into: &output)
 
-        case .rewritingChunked(let headBytes, var accumulator, var reader, let codec):
-            mode = .rewritingChunked(headBytes: headBytes, accumulator: accumulator, reader: reader, codec: codec)
-            return rewriteChunked(headBytes: headBytes, accumulator: &accumulator, reader: &reader, codec: codec, into: &output)
+        case .rewritingChunked(let pending, var accumulator, var reader):
+            mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
+            return rewriteChunked(pending: pending, accumulator: &accumulator, reader: &reader, into: &output)
 
         case .discardingChunked(var reader):
             mode = .discardingChunked(reader: reader)
             return discardChunked(reader: &reader)
+
+        case .streamingChunked(var streaming, let inner):
+            mode = .streamingChunked(streaming: streaming, inner: inner)
+            return driveStreamingChunked(streaming: &streaming, inner: inner, into: &output)
         }
     }
 
@@ -141,7 +205,10 @@ final class MITMHTTP1Stream {
     /// applies header rewrites, decides on body framing, and either:
     ///   - emits the rewritten head and switches to forwarding mode, or
     ///   - withholds the head (saved in mode) and switches to rewrite
-    ///     mode so Content-Length can be fixed after the body is rewritten.
+    ///     mode so script mutations can be applied after the body is
+    ///     buffered, or
+    ///   - for no-body framings with scripts, runs scripts on an empty
+    ///     body and emits the (possibly mutated) head inline.
     private func consumeHead(into output: inout Data) -> Bool {
         guard let terminator = rxBuffer.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) else {
             return false
@@ -160,94 +227,220 @@ final class MITMHTTP1Stream {
 
         // Apply rewrite rules. URL rules touch the request-target on the
         // start line (request phase only); header rules touch the
-        // header block. Content-Length is recomputed below when a body
-        // rewrite is also in play.
+        // header block. Content-Length is recomputed below if scripts
+        // run.
         //
-        // Auto Host rewrite runs first so configured headerReplace rules see
-        // the canonical post-redirect Host and can still override it.
+        // Auto Host rewrite runs first so configured headerReplace rules
+        // see the canonical post-redirect Host and can still override
+        // it.
         let rewrittenStartLine = applyURLRules(parsed.startLine)
         let withAuthority = applyAuthorityRewrite(parsed.headers)
         let rewrittenHeaders = applyHeaderRules(withAuthority)
         let framing = bodyFraming(startLine: rewrittenStartLine, headers: rewrittenHeaders)
 
-        // Special case: response with status 101 Switching Protocols, or
-        // any "read until close" body. These cannot be re-framed reliably,
-        // so emit the rewritten head and switch to permanent passthrough.
+        // On the response side, every well-formed final message
+        // corresponds to one request previously pushed by the request
+        // stream. Pop the matching record here — once per final
+        // response head, before any framing dispatch — so the FIFO
+        // never drifts even when the response is passthrough or no
+        // scripts fire.
+        //
+        // Interim responses (1xx other than 101) are not the final
+        // response: more headers follow on the same request. They
+        // peek instead of pop so the matching record stays available
+        // for the final response.
+        let originatingRequest: MITMRequestLog.Record?
+        if phase == .httpResponse {
+            if isInterimResponseStartLine(rewrittenStartLine) {
+                originatingRequest = requestLog.peekHTTP1()
+            } else {
+                originatingRequest = requestLog.popHTTP1()
+            }
+        } else {
+            originatingRequest = nil
+        }
+
+        // Protocol upgrades and "read until close" responses can't be
+        // safely re-framed, so emit the rewritten head and downgrade.
         switch framing {
         case .switchingProtocols, .readUntilClose:
+            // Request side records the outgoing request even though
+            // scripts can't run, so the response leg can still look up
+            // method/url on subsequent messages.
+            if phase == .httpRequest {
+                logRequest(startLine: rewrittenStartLine)
+            }
             output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
             mode = .passthrough
             return true
+        case .none, .contentLength, .chunked:
+            break
+        }
+
+        let contentType = firstHeaderValue(rewrittenHeaders, name: "content-type")
+        let rules = policy.rules(for: host, phase: phase)
+        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, contentType: contentType)
+
+        switch framing {
         case .none:
-            output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
+            // Interim 1xx responses (100 Continue, 103 Early Hints, …)
+            // MUST NOT carry a body or framing headers (RFC 9110 §15.2);
+            // running scripts on them would let a no-op default-filter
+            // script fabricate `Content-Length: 0` and break the
+            // exchange. The matching final response will pop the
+            // request log and run scripts itself. HTTP/2 takes the
+            // same stance.
+            let runScripts = scriptsApply && !isInterimResponseStartLine(rewrittenStartLine)
+            if runScripts {
+                let message = buildMessage(
+                    startLine: rewrittenStartLine,
+                    headers: rewrittenHeaders,
+                    body: Data(),
+                    originatingRequest: originatingRequest
+                )
+                let result = MITMScriptTransform.apply(
+                    message,
+                    rules: rules,
+                    engineProvider: scriptEngineProvider
+                )
+                emitScriptedHead(
+                    fallbackStartLine: rewrittenStartLine,
+                    result: result,
+                    codecRequiresDecompression: false,
+                    into: &output
+                )
+            } else {
+                if phase == .httpRequest {
+                    logRequest(startLine: rewrittenStartLine)
+                }
+                output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
+            }
             mode = .awaitingHead
             return true
         case .contentLength(let length):
             return enterContentLength(
-                originalHeaders: parsed.headers,
+                rewrittenStartLine: rewrittenStartLine,
                 rewrittenHeaders: rewrittenHeaders,
-                startLine: rewrittenStartLine,
                 length: length,
+                scriptsApply: scriptsApply,
+                rules: rules,
+                originatingRequest: originatingRequest,
                 into: &output
             )
         case .chunked:
             return enterChunked(
-                originalHeaders: parsed.headers,
+                rewrittenStartLine: rewrittenStartLine,
                 rewrittenHeaders: rewrittenHeaders,
-                startLine: rewrittenStartLine,
+                scriptsApply: scriptsApply,
+                rules: rules,
+                originatingRequest: originatingRequest,
                 into: &output
             )
+        case .readUntilClose, .switchingProtocols:
+            preconditionFailure("handled above")
         }
     }
 
     private func enterContentLength(
-        originalHeaders: [Header],
+        rewrittenStartLine: String,
         rewrittenHeaders: [Header],
-        startLine: String,
         length: Int,
+        scriptsApply: Bool,
+        rules: [CompiledMITMRule],
+        originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
-        let decision = bodyRewriteDecision(headers: originalHeaders)
+        // Stream scripts can't safely modify a length-prefixed body —
+        // the head has already committed to a byte count we can't
+        // change. Warn and fall through to either buffered-script or
+        // passthrough.
+        let contentType = firstHeaderValue(rewrittenHeaders, name: "content-type")
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, contentType: contentType) {
+            logger.warning("[MITM] HTTP/1 \(host): streamScript skipped for Content-Length body (chunked encoding required)")
+        }
+
         // The length is known up front, so we can opt out of buffering
         // before consuming a single body byte when the response would
         // exceed the cap. This keeps huge downloads (videos, archives)
         // from ever reaching the accumulator.
-        if decision.shouldRewrite, length <= MITMBodyCodec.maxBufferedBodyBytes {
-            // Withhold the head until the rewritten body length is known,
-            // then patch Content-Length before emitting head + body. When
-            // we plan to decompress, also strip Content-Encoding so the
-            // outbound message is self-consistent (we emit identity).
-            let outgoing = decision.codec.requiresDecompression
-                ? stripContentEncoding(rewrittenHeaders)
-                : rewrittenHeaders
-            let headBytes = serializeHead(startLine: startLine, headers: outgoing)
-            mode = .rewritingLength(headBytes: headBytes, expected: length, accumulator: Data(), codec: decision.codec)
+        let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewrittenHeaders, name: "content-encoding"))
+        let canRewrite = scriptsApply && codec.supported && length <= MITMBodyCodec.maxBufferedBodyBytes
+
+        if canRewrite {
+            mode = .rewritingLength(
+                pending: PendingHead(
+                    startLine: rewrittenStartLine,
+                    headers: rewrittenHeaders,
+                    codec: codec,
+                    originatingRequest: originatingRequest
+                ),
+                expected: length,
+                accumulator: Data()
+            )
             return true
         }
-        if decision.shouldRewrite {
-            logger.warning("[MITM] Skipping body rewrite for \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
+        if scriptsApply, length > MITMBodyCodec.maxBufferedBodyBytes {
+            logger.warning("[MITM] Skipping script rewrite for \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
         }
-        output.append(serializeHead(startLine: startLine, headers: rewrittenHeaders))
+        if phase == .httpRequest {
+            logRequest(startLine: rewrittenStartLine)
+        }
+        output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
         mode = .forwardingLength(remaining: length)
         return true
     }
 
     private func enterChunked(
-        originalHeaders: [Header],
+        rewrittenStartLine: String,
         rewrittenHeaders: [Header],
-        startLine: String,
+        scriptsApply: Bool,
+        rules: [CompiledMITMRule],
+        originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
-        let decision = bodyRewriteDecision(headers: originalHeaders)
-        if decision.shouldRewrite {
-            let outgoing = decision.codec.requiresDecompression
-                ? stripContentEncoding(rewrittenHeaders)
-                : rewrittenHeaders
-            let headBytes = serializeHead(startLine: startLine, headers: outgoing)
-            mode = .rewritingChunked(headBytes: headBytes, accumulator: Data(), reader: ChunkedReader(), codec: decision.codec)
+        let contentType = firstHeaderValue(rewrittenHeaders, name: "content-type")
+
+        // Streaming-script wins over buffered-script. Emit head
+        // immediately and switch to per-chunk script mode. Stream
+        // scripts can't mutate head fields, so head emission is
+        // straightforward here.
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, contentType: contentType) {
+            if scriptsApply {
+                logger.warning("[MITM] HTTP/1 \(host): streamScript wins over script on the same Content-Type")
+            }
+            if phase == .httpRequest {
+                logRequest(startLine: rewrittenStartLine)
+            }
+            output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
+            let streaming = StreamingState(
+                headers: rewrittenHeaders,
+                contentType: contentType,
+                originatingRequest: originatingRequest,
+                startLine: rewrittenStartLine,
+                cursor: MITMScriptTransform.FrameCursor()
+            )
+            mode = .streamingChunked(streaming: streaming, inner: .sizeLine)
             return true
         }
-        output.append(serializeHead(startLine: startLine, headers: rewrittenHeaders))
+
+        let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewrittenHeaders, name: "content-encoding"))
+        if scriptsApply, codec.supported {
+            mode = .rewritingChunked(
+                pending: PendingHead(
+                    startLine: rewrittenStartLine,
+                    headers: rewrittenHeaders,
+                    codec: codec,
+                    originatingRequest: originatingRequest
+                ),
+                accumulator: Data(),
+                reader: ChunkedReader()
+            )
+            return true
+        }
+        if phase == .httpRequest {
+            logRequest(startLine: rewrittenStartLine)
+        }
+        output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
         mode = .forwardingChunked(reader: ChunkedReader())
         return true
     }
@@ -290,10 +483,9 @@ final class MITMHTTP1Stream {
     // MARK: - Body rewriting
 
     private func rewriteLength(
-        headBytes: Data,
+        pending: PendingHead,
         expected: Int,
         accumulator: inout Data,
-        codec: MITMBodyCodec.Plan,
         into output: inout Data
     ) -> Bool {
         guard !rxBuffer.isEmpty else { return false }
@@ -302,22 +494,18 @@ final class MITMHTTP1Stream {
         accumulator.append(rxBuffer.prefix(take))
         rxBuffer.removeFirst(take)
         if accumulator.count == expected {
-            let rewrittenBody = decompressAndApply(accumulator, codec: codec, headBytes: headBytes)
-            let patchedHead = patchContentLength(in: headBytes, to: rewrittenBody.count)
-            output.append(patchedHead)
-            output.append(rewrittenBody)
+            applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: nil, into: &output)
             mode = .awaitingHead
             return true
         }
-        mode = .rewritingLength(headBytes: headBytes, expected: expected, accumulator: accumulator, codec: codec)
+        mode = .rewritingLength(pending: pending, expected: expected, accumulator: accumulator)
         return false
     }
 
     private func rewriteChunked(
-        headBytes: Data,
+        pending: PendingHead,
         accumulator: inout Data,
         reader: inout ChunkedReader,
-        codec: MITMBodyCodec.Plan,
         into output: inout Data
     ) -> Bool {
         guard !rxBuffer.isEmpty else { return false }
@@ -332,24 +520,231 @@ final class MITMHTTP1Stream {
             // bodies are well under the cap.
             if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
                 logger.warning("[MITM] Chunked body for \(host) exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); truncating")
-                let rewrittenBody = decompressAndApply(accumulator, codec: codec, headBytes: headBytes)
-                output.append(headBytes)
-                output.append(rechunk(body: rewrittenBody, originalSizes: [rewrittenBody.count]))
+                applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: [accumulator.count], into: &output)
                 mode = .discardingChunked(reader: reader)
                 return true
             }
-            mode = .rewritingChunked(headBytes: headBytes, accumulator: accumulator, reader: reader, codec: codec)
+            mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
             return false
         case .complete(let originalSizes):
-            let rewrittenBody = decompressAndApply(accumulator, codec: codec, headBytes: headBytes)
-            output.append(headBytes)
-            output.append(rechunk(body: rewrittenBody, originalSizes: originalSizes))
+            applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: originalSizes, into: &output)
             mode = .awaitingHead
             return true
         case .malformed:
             mode = .passthrough
             return true
         }
+    }
+
+    /// Parses chunked-transfer encoding with a one-chunk lookahead so
+    /// each chunk can be handed to the streaming-script chain before
+    /// emission. The head was already emitted at ``enterChunked``
+    /// time; this loop pulls one chunk at a time off ``rxBuffer``,
+    /// holds it in ``streaming.pendingChunk`` until the next size line
+    /// tells us whether it was the final chunk, and emits each chunk
+    /// as its own chunked-transfer chunk on the way out. When the
+    /// zero-size terminator arrives, the held chunk is emitted with
+    /// ``frame.end = true`` (or, for an empty body, the script gets a
+    /// single isLast=true call against an empty body for cleanup).
+    private func driveStreamingChunked(
+        streaming: inout StreamingState,
+        inner startInner: StreamingChunkedInner,
+        into output: inout Data
+    ) -> Bool {
+        var currentInner = startInner
+        while true {
+            switch currentInner {
+            case .sizeLine:
+                guard let lineEnd = Self.findCRLF(in: rxBuffer) else {
+                    mode = .streamingChunked(streaming: streaming, inner: .sizeLine)
+                    return false
+                }
+                let line = rxBuffer.subdata(in: rxBuffer.startIndex..<lineEnd)
+                rxBuffer.removeSubrange(rxBuffer.startIndex..<(lineEnd + 2))
+                guard let size = Self.parseHexSize(line) else {
+                    mode = .passthrough
+                    return true
+                }
+                if size == 0 {
+                    // End of body. Emit the held chunk (or a single
+                    // empty-body flush call) with isLast=true, then
+                    // emit the zero-size size line on the wire. The
+                    // trailer-section bytes (zero or more field-lines
+                    // plus the empty CRLF terminator) still live in
+                    // ``rxBuffer`` and are drained in ``.trailerOrEnd``
+                    // — we must consume them, otherwise a keep-alive
+                    // connection's next message starts mid-trailer and
+                    // fails to parse.
+                    let finalChunk = streaming.pendingChunk ?? Data()
+                    streaming.pendingChunk = nil
+                    emitStreamingChunk(
+                        streaming: &streaming,
+                        chunk: finalChunk,
+                        isLast: true,
+                        into: &output
+                    )
+                    output.append(contentsOf: "0\r\n".utf8)
+                    currentInner = .trailerOrEnd
+                } else {
+                    currentInner = .chunkData(remaining: size, accumulator: Data())
+                }
+            case .chunkData(let remaining, var accumulator):
+                guard !rxBuffer.isEmpty else {
+                    mode = .streamingChunked(
+                        streaming: streaming,
+                        inner: .chunkData(remaining: remaining, accumulator: accumulator)
+                    )
+                    return false
+                }
+                let take = min(remaining, rxBuffer.count)
+                accumulator.append(rxBuffer.prefix(take))
+                rxBuffer.removeFirst(take)
+                let left = remaining - take
+                if left == 0 {
+                    // Chunk is complete. Flush the previous held chunk
+                    // (with isLast=false now that we know more chunks
+                    // follow), then hold this one.
+                    if let held = streaming.pendingChunk {
+                        emitStreamingChunk(
+                            streaming: &streaming,
+                            chunk: held,
+                            isLast: false,
+                            into: &output
+                        )
+                    }
+                    streaming.pendingChunk = accumulator
+                    currentInner = .dataCRLF
+                } else {
+                    mode = .streamingChunked(
+                        streaming: streaming,
+                        inner: .chunkData(remaining: left, accumulator: accumulator)
+                    )
+                    return false
+                }
+            case .dataCRLF:
+                guard rxBuffer.count >= 2 else {
+                    mode = .streamingChunked(streaming: streaming, inner: .dataCRLF)
+                    return false
+                }
+                guard rxBuffer[rxBuffer.startIndex] == 0x0D,
+                      rxBuffer[rxBuffer.startIndex + 1] == 0x0A
+                else {
+                    mode = .passthrough
+                    return true
+                }
+                rxBuffer.removeFirst(2)
+                currentInner = .sizeLine
+            case .trailerOrEnd:
+                // RFC 9112 §7.1.2: trailer-section is zero or more
+                // field-lines terminated by an empty line. Forward each
+                // line verbatim (we don't rewrite trailers) and stop
+                // once we hit the empty terminator.
+                guard let lineEnd = Self.findCRLF(in: rxBuffer) else {
+                    mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
+                    return false
+                }
+                let line = rxBuffer.subdata(in: rxBuffer.startIndex..<lineEnd)
+                rxBuffer.removeSubrange(rxBuffer.startIndex..<(lineEnd + 2))
+                output.append(line)
+                output.append(0x0D); output.append(0x0A)
+                if line.isEmpty {
+                    mode = .awaitingHead
+                    return true
+                }
+            }
+        }
+    }
+
+    /// Runs the streaming-script chain on ``chunk`` and appends the
+    /// result as a chunked-transfer chunk to ``output``. Empty results
+    /// are dropped (no zero-size chunk emitted mid-stream — the
+    /// terminator reserves that). ``cursor.bypass`` short-circuits the
+    /// script chain so subsequent chunks pass through unchanged.
+    private func emitStreamingChunk(
+        streaming: inout StreamingState,
+        chunk: Data,
+        isLast: Bool,
+        into output: inout Data
+    ) {
+        let body: Data
+        if streaming.cursor.bypass {
+            body = chunk
+        } else {
+            let frameCtx = MITMScriptEngine.FrameContext(
+                phase: phase,
+                method: streamingMethod(streaming),
+                url: streamingURL(streaming),
+                status: streamingStatus(streaming),
+                headers: streaming.headers,
+                frameIndex: streaming.frameIndex,
+                isLast: isLast,
+                ruleSetID: policy.set(for: host)?.id
+            )
+            let result = MITMScriptTransform.applyFrame(
+                chunk,
+                rules: policy.rules(for: host, phase: phase),
+                contentType: streaming.contentType,
+                frameContext: frameCtx,
+                cursor: streaming.cursor,
+                engineProvider: scriptEngineProvider
+            )
+            body = result.body
+        }
+        streaming.frameIndex += 1
+        if !body.isEmpty {
+            appendChunk(body, into: &output)
+        }
+    }
+
+    private func streamingMethod(_ streaming: StreamingState) -> String? {
+        switch phase {
+        case .httpRequest:
+            let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+            return parts.first.map(String.init)
+        case .httpResponse:
+            return streaming.originatingRequest?.method
+        }
+    }
+
+    private func streamingURL(_ streaming: StreamingState) -> String? {
+        switch phase {
+        case .httpRequest:
+            let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+            guard parts.count >= 2 else { return nil }
+            return "https://\(host)\(String(parts[1]))"
+        case .httpResponse:
+            return streaming.originatingRequest?.url
+        }
+    }
+
+    private func streamingStatus(_ streaming: StreamingState) -> Int? {
+        guard phase == .httpResponse else { return nil }
+        let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        return Int(parts[1])
+    }
+
+    /// Finds the first CRLF in ``buffer`` and returns the index of the
+    /// CR. nil when no CRLF is present.
+    fileprivate static func findCRLF(in buffer: Data) -> Int? {
+        guard buffer.count >= 2 else { return nil }
+        var i = buffer.startIndex
+        while i < buffer.endIndex - 1 {
+            if buffer[i] == 0x0D, buffer[i + 1] == 0x0A {
+                return i
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Parses the hex size from a chunked size line (ignoring any
+    /// chunk extensions after `;`).
+    fileprivate static func parseHexSize(_ data: Data) -> Int? {
+        guard let raw = String(data: data, encoding: .ascii) else { return nil }
+        let head = raw.split(separator: ";", maxSplits: 1).first.map(String.init) ?? raw
+        let trimmed = head.trimmingCharacters(in: CharacterSet.whitespaces)
+        return Int(trimmed, radix: 16)
     }
 
     /// Drains the remaining wire chunks of an over-cap rewriting body.
@@ -374,60 +769,147 @@ final class MITMHTTP1Stream {
         }
     }
 
-    /// Decompresses ``data`` per ``codec`` (no-op when identity) and
-    /// applies the body rules. ``headBytes`` is the rewritten head we
-    /// already serialized for emission; we re-parse it to give script
-    /// rules a `ctx` reflecting the same view the upstream will see. If
-    /// decompression fails, the original bytes are passed through
-    /// unmodified — better to leak the upstream's payload than break
-    /// the connection.
-    private func decompressAndApply(_ data: Data, codec: MITMBodyCodec.Plan, headBytes: Data) -> Data {
-        let rules = policy.rules(for: host, phase: phase)
+    // MARK: - Script application + head rebuild
+
+    /// Decompresses the buffered body, runs the script chain, and emits
+    /// the rebuilt head plus the (re-encoded if originally chunked)
+    /// body. If decompression fails, the original bytes are passed
+    /// through unmodified — better to leak the upstream's payload than
+    /// break the connection.
+    private func applyScriptsAndEmit(
+        pending: PendingHead,
+        rawBody: Data,
+        originalSizes: [Int]?,
+        into output: inout Data
+    ) {
         let body: Data
-        if codec.requiresDecompression {
-            guard let decoded = MITMBodyCodec.decompress(data, plan: codec) else {
-                return data
+        if pending.codec.requiresDecompression {
+            guard let decoded = MITMBodyCodec.decompress(rawBody, plan: pending.codec) else {
+                // Decompression failed; treat as identity passthrough.
+                if phase == .httpRequest {
+                    logRequest(startLine: pending.startLine)
+                }
+                output.append(serializeHead(startLine: pending.startLine, headers: pending.headers))
+                if let originalSizes {
+                    output.append(rechunk(body: rawBody, originalSizes: originalSizes))
+                } else {
+                    output.append(rawBody)
+                }
+                return
             }
             body = decoded
         } else {
-            body = data
+            body = rawBody
         }
-        let parsed = parseHead(headBytes)
-        let contentType = parsed.flatMap { firstHeaderValue($0.headers, name: "content-type") }
-        return MITMBodyTransform.apply(
-            body,
+
+        let rules = policy.rules(for: host, phase: phase)
+        let message = buildMessage(
+            startLine: pending.startLine,
+            headers: pending.headers,
+            body: body,
+            originatingRequest: pending.originatingRequest
+        )
+        let result = MITMScriptTransform.apply(
+            message,
             rules: rules,
-            contentType: contentType,
-            engineProvider: scriptEngineProvider,
-            context: makeScriptContext(parsed: parsed)
+            engineProvider: scriptEngineProvider
         )
-    }
 
-    /// Builds the per-message `ctx` argument the script's
-    /// `process(body, ctx)` receives. ``method`` and ``url`` are nil on
-    /// the response phase; ``headers`` mirrors the rewritten header
-    /// block on the wire. Takes the already-parsed head to avoid
-    /// parsing the same bytes twice when the caller has it on hand.
-    private func makeScriptContext(parsed: ParsedHead?) -> MITMScriptEngine.Context {
-        var method: String?
-        var url: String?
-        if phase == .httpRequest, let parsed {
-            let parts = parsed.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-            if parts.count >= 2 {
-                method = String(parts[0])
-                url = "https://\(host)\(String(parts[1]))"
-            }
+        let finalStartLine = rebuildStartLine(from: result, fallback: pending.startLine)
+        var finalHeaders = strippedFramingHeaders(result.headers, dropContentEncoding: pending.codec.requiresDecompression)
+        // Always set an explicit Content-Length matching the post-script
+        // body size. The original message may have been chunked, but we
+        // emit the rewritten body as a single length-prefixed unit since
+        // we've already buffered all of it.
+        finalHeaders.append((name: "Content-Length", value: String(result.body.count)))
+
+        if phase == .httpRequest {
+            logRequest(startLine: finalStartLine)
         }
-        return MITMScriptEngine.Context(
-            phase: phase,
-            method: method,
-            url: url,
-            headers: parsed?.headers ?? [],
-            ruleSetID: policy.set(for: host)?.id
-        )
+        output.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
+        if !result.body.isEmpty {
+            output.append(result.body)
+        }
+        _ = originalSizes // chunked re-encoding is unused once we collapse to Content-Length
     }
 
-    // MARK: - Re-chunking
+    /// Handles the no-body framing variant: scripts already ran, no
+    /// body to buffer or decompress. Emits the rebuilt head with any
+    /// script-supplied body inline.
+    ///
+    /// Framing-headers policy: when the post-script status semantically
+    /// forbids a body (1xx other than 101, 204, 205, 304) and the
+    /// script left the body empty, no `Content-Length` is emitted —
+    /// the status alone signals "no body" and adding the header would
+    /// violate RFC 9110 §15.2/§15.3. Everything else (regular response
+    /// statuses, requests, scripts that populated a body) gets an
+    /// explicit `Content-Length` matching the post-script body size so
+    /// the receiver can frame the message without ambiguity.
+    private func emitScriptedHead(
+        fallbackStartLine: String,
+        result: MITMScriptEngine.Message,
+        codecRequiresDecompression: Bool,
+        into output: inout Data
+    ) {
+        let finalStartLine = rebuildStartLine(from: result, fallback: fallbackStartLine)
+        var finalHeaders = strippedFramingHeaders(result.headers, dropContentEncoding: codecRequiresDecompression)
+
+        let preserveNoBody = phase == .httpResponse
+            && result.body.isEmpty
+            && isNoBodyStatus(responseStatusCode(from: finalStartLine))
+        if !preserveNoBody {
+            finalHeaders.append((name: "Content-Length", value: String(result.body.count)))
+        }
+
+        if phase == .httpRequest {
+            logRequest(startLine: finalStartLine)
+        }
+        output.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
+        if !result.body.isEmpty {
+            output.append(result.body)
+        }
+    }
+
+    /// True for HTTP/1 response statuses that forbid a body per RFC
+    /// 9110 §15: 1xx informational (other than 101 Switching Protocols),
+    /// 204 No Content, 205 Reset Content, 304 Not Modified.
+    private func isNoBodyStatus(_ status: Int?) -> Bool {
+        guard let status else { return false }
+        switch status {
+        case 204, 205, 304:
+            return true
+        default:
+            return (100..<200).contains(status) && status != 101
+        }
+    }
+
+    /// Extracts the numeric status code from an HTTP/1 response start
+    /// line. Returns nil for request start lines or malformed input.
+    private func responseStatusCode(from startLine: String) -> Int? {
+        guard startLine.hasPrefix("HTTP/") else { return nil }
+        let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        return Int(parts[1])
+    }
+
+    /// Strips framing-related headers that we re-emit ourselves
+    /// (`Transfer-Encoding`, `Content-Length`) and, when we just
+    /// decompressed the body, `Content-Encoding`.
+    private func strippedFramingHeaders(
+        _ headers: [Header],
+        dropContentEncoding: Bool
+    ) -> [Header] {
+        headers.filter { entry in
+            let n = entry.name.lowercased()
+            if n == "content-length" || n == "transfer-encoding" { return false }
+            if dropContentEncoding, n == "content-encoding" { return false }
+            return true
+        }
+    }
+
+    // MARK: - Re-chunking (legacy; kept for the chunked passthrough
+    // path where we want to preserve chunk shape rather than collapse
+    // to a single Content-Length unit).
 
     /// Re-emits ``body`` as chunked-transfer-encoding using
     /// ``originalSizes`` as chunk-size targets. All but the last emitted
@@ -498,6 +980,18 @@ final class MITMHTTP1Stream {
         return line.hasSuffix(" HTTP/1.1") || line.hasSuffix(" HTTP/1.0")
     }
 
+    /// True when ``startLine`` is a response start line with a 1xx
+    /// status that isn't 101 — i.e. an informational interim response
+    /// (100 Continue, 102 Processing, 103 Early Hints) that will be
+    /// followed by additional headers on the same request. 101 is a
+    /// final response (protocol upgrade) and pops normally.
+    private func isInterimResponseStartLine(_ startLine: String) -> Bool {
+        guard startLine.hasPrefix("HTTP/1.") else { return false }
+        let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count >= 2, let status = Int(parts[1]) else { return false }
+        return (100..<200).contains(status) && status != 101
+    }
+
     private func serializeHead(startLine: String, headers: [Header]) -> Data {
         var out = Data()
         out.append(contentsOf: startLine.utf8)
@@ -510,36 +1004,6 @@ final class MITMHTTP1Stream {
         }
         out.append(0x0D); out.append(0x0A)
         return out
-    }
-
-    private func patchContentLength(in head: Data, to newLength: Int) -> Data {
-        // Re-walk the head, swapping any existing Content-Length values
-        // for the rewritten size. If absent, append before the trailing
-        // CRLF CRLF.
-        guard let raw = String(data: head, encoding: .ascii) else {
-            return head
-        }
-        var lines = raw.components(separatedBy: "\r\n")
-        var found = false
-        for i in lines.indices {
-            let line = lines[i]
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            let name = line[..<colon].lowercased()
-            if name == "content-length" {
-                lines[i] = "Content-Length: \(newLength)"
-                found = true
-            }
-        }
-        if !found {
-            // Insert before the empty terminator line.
-            if let emptyIdx = lines.firstIndex(where: { $0.isEmpty }) {
-                lines.insert("Content-Length: \(newLength)", at: emptyIdx)
-            } else {
-                lines.append("Content-Length: \(newLength)")
-                lines.append("")
-            }
-        }
-        return Data(lines.joined(separator: "\r\n").utf8)
     }
 
     // MARK: - Framing decision
@@ -576,39 +1040,6 @@ final class MITMHTTP1Stream {
         return phase == .httpRequest ? .none : .readUntilClose
     }
 
-    // MARK: - Body rewrite gate
-
-    /// Decision about how to handle the next message's body. Captured
-    /// once at head-completion time so the rewriting state machine
-    /// doesn't have to re-inspect headers.
-    private struct BodyDecision {
-        let shouldRewrite: Bool
-        let codec: MITMBodyCodec.Plan
-    }
-
-    /// Returns whether the body should be buffered for rewrite, plus
-    /// the codec plan that the buffer will be decoded with. Skips
-    /// rewrite when no body-script rule applies for the host/phase or
-    /// when `Content-Encoding` includes a codec we don't recognise.
-    ///
-    /// Each script declares its own Content-Type allowlist; if every
-    /// configured script rejects the in-flight message's
-    /// `Content-Type`, there is nothing to do and the body is not
-    /// buffered.
-    private func bodyRewriteDecision(headers: [Header]) -> BodyDecision {
-        let rules = policy.rules(for: host, phase: phase)
-        let contentType = firstHeaderValue(headers, name: "content-type")
-        guard MITMBodyTransform.hasBodyRule(in: rules, contentType: contentType) else {
-            return BodyDecision(shouldRewrite: false, codec: .identity)
-        }
-        let encoding = firstHeaderValue(headers, name: "content-encoding")
-        let plan = MITMBodyCodec.plan(for: encoding)
-        guard plan.supported else {
-            return BodyDecision(shouldRewrite: false, codec: plan)
-        }
-        return BodyDecision(shouldRewrite: true, codec: plan)
-    }
-
     private func firstHeaderValue(_ headers: [Header], name: String) -> String? {
         let target = name.lowercased()
         for (n, v) in headers where n.lowercased() == target {
@@ -617,13 +1048,7 @@ final class MITMHTTP1Stream {
         return nil
     }
 
-    /// Removes any `Content-Encoding` headers. Used when we have
-    /// decompressed the body and emit it as identity.
-    private func stripContentEncoding(_ headers: [Header]) -> [Header] {
-        headers.filter { $0.name.lowercased() != "content-encoding" }
-    }
-
-    // MARK: - Rule application
+    // MARK: - Rule application (head-time)
 
     /// When the rule set declares a ``rewriteTarget``, the request's Host
     /// header is forced to the target authority so redirected requests use
@@ -697,7 +1122,7 @@ final class MITMHTTP1Stream {
                     guard regex.firstMatch(in: literal, options: [], range: range) != nil else {
                         return entry
                     }
-                    let rewritten = regex.stringByReplacingMatches(
+                    _ = regex.stringByReplacingMatches(
                         in: literal,
                         options: [],
                         range: range,
@@ -705,13 +1130,152 @@ final class MITMHTTP1Stream {
                     )
                     return (name: name, value: value)
                 }
-            case .urlReplace, .bodyScript:
+            case .urlReplace, .script, .streamScript:
                 continue
             }
         }
         return current
     }
 
+    // MARK: - Message build / head rebuild
+
+    /// Builds a ``MITMScriptEngine/Message`` from the in-flight head
+    /// state. On response phase, fills in `method`/`url` from the
+    /// originating request (looked up via ``MITMRequestLog`` by the
+    /// caller).
+    private func buildMessage(
+        startLine: String,
+        headers: [Header],
+        body: Data,
+        originatingRequest: MITMRequestLog.Record?
+    ) -> MITMScriptEngine.Message {
+        var method: String?
+        var url: String?
+        var status: Int?
+        switch phase {
+        case .httpRequest:
+            let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+            if parts.count >= 2 {
+                method = String(parts[0])
+                url = "https://\(host)\(String(parts[1]))"
+            }
+        case .httpResponse:
+            let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+            if parts.count >= 2, let code = Int(parts[1]) {
+                status = code
+            }
+            method = originatingRequest?.method
+            url = originatingRequest?.url
+        }
+        return MITMScriptEngine.Message(
+            phase: phase,
+            method: method,
+            url: url,
+            status: status,
+            headers: headers,
+            body: body,
+            ruleSetID: policy.set(for: host)?.id
+        )
+    }
+
+    /// Rebuilds the start/status line from a (possibly script-mutated)
+    /// message. For requests, the URL's path-and-query becomes the
+    /// request-target; the host portion is ignored since the upstream
+    /// is fixed at session creation. For responses, the status code
+    /// flows into the status line with a canonical reason phrase.
+    /// Falls back to the original line when the message lacks the
+    /// fields needed to rebuild.
+    private func rebuildStartLine(
+        from message: MITMScriptEngine.Message,
+        fallback: String
+    ) -> String {
+        switch message.phase {
+        case .httpRequest:
+            guard let method = message.method, let url = message.url else {
+                return fallback
+            }
+            let target = pathAndQuery(fromURL: url) ?? url
+            return "\(method) \(target) HTTP/1.1"
+        case .httpResponse:
+            guard let status = message.status else { return fallback }
+            let parts = fallback.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+            let version = parts.count >= 1 ? String(parts[0]) : "HTTP/1.1"
+            let reason = canonicalReasonPhrase(for: status)
+            return "\(version) \(status) \(reason)"
+        }
+    }
+
+    /// Extracts path-and-query from an absolute URL string, or returns
+    /// nil if the input looks like a relative reference (no scheme) —
+    /// in which case the caller treats the whole string as the target.
+    private func pathAndQuery(fromURL url: String) -> String? {
+        guard let components = URLComponents(string: url) else { return nil }
+        // Relative URL? Use as-is.
+        if components.scheme == nil && components.host == nil {
+            return nil
+        }
+        var target = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+        if let query = components.percentEncodedQuery {
+            target += "?\(query)"
+        }
+        return target
+    }
+
+    /// Minimal canonical reason phrase lookup for HTTP/1.1 status
+    /// codes. Returns an empty string for unrecognised codes so the
+    /// status line stays well-formed (clients ignore the reason
+    /// phrase per RFC 9112 §4).
+    private func canonicalReasonPhrase(for status: Int) -> String {
+        switch status {
+        case 100: return "Continue"
+        case 101: return "Switching Protocols"
+        case 200: return "OK"
+        case 201: return "Created"
+        case 202: return "Accepted"
+        case 204: return "No Content"
+        case 206: return "Partial Content"
+        case 301: return "Moved Permanently"
+        case 302: return "Found"
+        case 303: return "See Other"
+        case 304: return "Not Modified"
+        case 307: return "Temporary Redirect"
+        case 308: return "Permanent Redirect"
+        case 400: return "Bad Request"
+        case 401: return "Unauthorized"
+        case 403: return "Forbidden"
+        case 404: return "Not Found"
+        case 405: return "Method Not Allowed"
+        case 408: return "Request Timeout"
+        case 409: return "Conflict"
+        case 410: return "Gone"
+        case 418: return "I'm a teapot"
+        case 429: return "Too Many Requests"
+        case 500: return "Internal Server Error"
+        case 501: return "Not Implemented"
+        case 502: return "Bad Gateway"
+        case 503: return "Service Unavailable"
+        case 504: return "Gateway Timeout"
+        default:  return ""
+        }
+    }
+
+    // MARK: - Request log helpers
+
+    /// Push the in-flight request's method and absolute URL onto the
+    /// request log so the response stream can populate its script
+    /// `ctx.method` / `ctx.url`. Request phase only.
+    private func logRequest(startLine: String) {
+        guard phase == .httpRequest else { return }
+        let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+        guard parts.count >= 2 else {
+            requestLog.recordHTTP1(method: nil, url: nil)
+            return
+        }
+        let method = String(parts[0])
+        let target = String(parts[1])
+        let url = "https://\(host)\(target)"
+        requestLog.recordHTTP1(method: method, url: url)
+    }
 }
 
 // MARK: - ChunkedReader

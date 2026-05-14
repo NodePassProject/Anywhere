@@ -48,8 +48,8 @@ enum MITMBodyCodec {
     /// carry a type.
     ///
     /// Consumed by ``BodyContentTypeFilter`` as the fallback when a
-    /// body-script rule did not declare its own Content-Type list at
-    /// import time.
+    /// script rule did not declare its own Content-Type list at import
+    /// time.
     static func isRewritableType(_ contentType: String?) -> Bool {
         guard let raw = contentType else { return true }
         let primary = raw
