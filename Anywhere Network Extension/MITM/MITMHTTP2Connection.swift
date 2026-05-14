@@ -138,6 +138,14 @@ final class MITMHTTP2Connection {
     }
     private var streamingScripts: [UInt32: StreamingState] = [:]
 
+    /// Bytes synthesized by request-phase scripts that called
+    /// `Anywhere.respond(...)` and need to be written straight back to
+    /// the client (i.e. injected onto the inner TLS record). Populated
+    /// on the inbound leg only; the outbound leg never touches it.
+    /// Drained by the session pump via ``drainPendingClientBytes()``
+    /// immediately after each ``process(_:)`` call.
+    private var pendingClientBytes = Data()
+
     // MARK: - Init
 
     init(direction: Direction, rewriter: MITMHTTP2Rewriter) {
@@ -176,6 +184,20 @@ final class MITMHTTP2Connection {
         }
 
         return output
+    }
+
+    /// Drains and returns any client-bound bytes synthesized by
+    /// request-phase scripts that called `Anywhere.respond(...)` since
+    /// the last call. The session pump writes these directly to the
+    /// inner TLS record, bypassing the outbound translator entirely
+    /// (the HPACK encoder is stateless, so a fresh header block decodes
+    /// cleanly on the client side without disturbing either dynamic
+    /// table). The outbound leg never populates this — call sites
+    /// guard with ``direction == .inbound``.
+    func drainPendingClientBytes() -> Data {
+        let bytes = pendingClientBytes
+        pendingClientBytes.removeAll(keepingCapacity: false)
+        return bytes
     }
 
     // MARK: - Frame dispatch
@@ -758,7 +780,20 @@ final class MITMHTTP2Connection {
             body: plaintext,
             originatingRequest: pending.originatingRequest
         )
-        let result = rewriter.applyScripts(inputMessage, phase: phase)
+        let outcome = rewriter.applyScripts(inputMessage, phase: phase)
+        let result: MITMScriptEngine.Message
+        switch outcome {
+        case .message(let updated):
+            result = updated
+        case .synthesizedResponse(let response):
+            // Request-phase short-circuit. Suppress upstream emission
+            // for this stream entirely and queue the synthesized
+            // HEADERS + DATA on the inbound leg's client-bound buffer.
+            // The outer leg never saw a HEADERS for this stream so
+            // there's nothing to RST.
+            queueSynthesizedResponse(streamID: streamID, response: response)
+            return Data()
+        }
 
         // Re-build the HTTP/2 header block: pseudo-headers from the
         // (possibly script-mutated) method/url/status, regular headers
@@ -826,6 +861,48 @@ final class MITMHTTP2Connection {
             return v
         }
         return nil
+    }
+
+    /// Serializes a request-phase `Anywhere.respond(...)` payload as an
+    /// HTTP/2 HEADERS (+ optional DATA) frame sequence ending with
+    /// END_STREAM, and appends it to ``pendingClientBytes`` for the
+    /// session pump to inject onto the inner TLS record. Inbound leg
+    /// only — the outbound leg never reaches this path. ``:status`` is
+    /// taken from ``response.status``; any pseudo-headers the script
+    /// accidentally populated under ``headers`` are dropped so the
+    /// HPACK encoder never emits duplicates. ``content-length`` is
+    /// likewise dropped since END_STREAM is the source of truth in
+    /// HTTP/2 and a user-supplied value would risk disagreeing with
+    /// the actual body size.
+    private func queueSynthesizedResponse(
+        streamID: UInt32,
+        response: MITMScriptEngine.SynthesizedResponse
+    ) {
+        var headers: [(name: String, value: String)] = [
+            (name: ":status", value: String(response.status))
+        ]
+        for entry in response.headers {
+            let n = entry.name.lowercased()
+            if n.hasPrefix(":") { continue }
+            if n == "content-length" || n == "transfer-encoding" { continue }
+            // HTTP/2 forbids uppercase header names (RFC 9113 §8.2.1);
+            // normalize defensively so a careless script can't blow up
+            // the client's decoder.
+            headers.append((name: n, value: entry.value))
+        }
+        let block = HPACKEncoder.encodeHeaderBlock(headers)
+        let body = response.body
+        let endStreamOnHeaders = body.isEmpty
+        var out = emitHeaderBlock(
+            streamID: streamID,
+            block: block,
+            endStream: endStreamOnHeaders,
+            kind: .headers
+        )
+        if !body.isEmpty {
+            out.append(emitDataFrames(streamID: streamID, payload: body, endStream: true))
+        }
+        pendingClientBytes.append(out)
     }
 
     // MARK: - Message build / header rebuild

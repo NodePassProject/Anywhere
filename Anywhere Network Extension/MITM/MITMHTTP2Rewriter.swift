@@ -107,12 +107,16 @@ final class MITMHTTP2Rewriter {
     /// Applies every script rule for the given phase whose Content-Type
     /// filter accepts the message's `content-type` header. The caller
     /// is responsible for decompressing the body before passing it in;
-    /// the returned message has the (possibly modified) body in
-    /// identity form.
+    /// on the ``.message`` branch the returned message has the
+    /// (possibly modified) body in identity form. The
+    /// ``.synthesizedResponse`` branch fires only on request phase when
+    /// the script called `Anywhere.respond(...)` — the caller must
+    /// suppress upstream emission and inject the response on the inner
+    /// leg instead.
     func applyScripts(
         _ message: MITMScriptEngine.Message,
         phase: MITMPhase
-    ) -> MITMScriptEngine.Message {
+    ) -> MITMScriptTransform.Outcome {
         MITMScriptTransform.apply(
             message,
             rules: policy.rules(for: host, phase: phase),
