@@ -22,14 +22,21 @@ enum CompiledMITMOperation {
     case headerDelete(nameLower: String)
     case headerReplace(regex: NSRegularExpression, name: String, value: String)
     /// JavaScript transform. ``source`` is the decoded UTF-8 source of
-    /// `function process(body, ctx)`. Compilation/execution belongs to
+    /// `function process(ctx)`. Compilation/execution belongs to
     /// ``MITMScriptEngine`` so the policy stays free of JSContext.
     /// ``contentTypes`` gates the rule against the message's
     /// `Content-Type`; see ``BodyContentTypeFilter``.
-    case bodyScript(source: String, contentTypes: BodyContentTypeFilter)
+    case script(source: String, contentTypes: BodyContentTypeFilter)
+    /// Per-frame JavaScript transform. Same runtime contract as
+    /// ``script`` for ctx fields the script reads, but the function is
+    /// invoked once per DATA frame (HTTP/2) or per chunk (HTTP/1
+    /// chunked) and only ``ctx.body`` is read back. Used to keep
+    /// streaming-style bodies flowing without buffering the entire
+    /// response.
+    case streamScript(source: String, contentTypes: BodyContentTypeFilter)
 }
 
-/// Resolved Content-Type filter for a body-script rule. Built once at
+/// Resolved Content-Type filter for a script rule. Built once at
 /// rule-compilation time so the per-message check stays a constant-time
 /// set lookup (or a fixed allowlist walk).
 enum BodyContentTypeFilter: Equatable {
@@ -207,22 +214,35 @@ final class MITMRewritePolicy {
                 return nil
             }
             return .headerReplace(regex: regex, name: name, value: value)
-        case .bodyScript(let scriptBase64, let contentTypes):
-            guard let raw = Data(base64Encoded: scriptBase64) else {
-                logger.warning("[MITM] bodyScript invalid base64 (suffix=\(suffix))")
+        case .script(let scriptBase64, let contentTypes):
+            guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "script") else {
                 return nil
             }
-            guard let source = String(data: raw, encoding: .utf8) else {
-                logger.warning("[MITM] bodyScript source not valid UTF-8 (suffix=\(suffix))")
+            return .script(source: source, contentTypes: scriptFilter(contentTypes))
+        case .streamScript(let scriptBase64, let contentTypes):
+            guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "streamScript") else {
                 return nil
             }
-            let filter: BodyContentTypeFilter
-            if let contentTypes {
-                filter = .exact(Set(contentTypes.map { $0.lowercased() }))
-            } else {
-                filter = .defaultAllowlist
-            }
-            return .bodyScript(source: source, contentTypes: filter)
+            return .streamScript(source: source, contentTypes: scriptFilter(contentTypes))
         }
+    }
+
+    private func decodeScript(_ scriptBase64: String, suffix: String, kind: String) -> String? {
+        guard let raw = Data(base64Encoded: scriptBase64) else {
+            logger.warning("[MITM] \(kind) invalid base64 (suffix=\(suffix))")
+            return nil
+        }
+        guard let source = String(data: raw, encoding: .utf8) else {
+            logger.warning("[MITM] \(kind) source not valid UTF-8 (suffix=\(suffix))")
+            return nil
+        }
+        return source
+    }
+
+    private func scriptFilter(_ contentTypes: [String]?) -> BodyContentTypeFilter {
+        if let contentTypes {
+            return .exact(Set(contentTypes.map { $0.lowercased() }))
+        }
+        return .defaultAllowlist
     }
 }

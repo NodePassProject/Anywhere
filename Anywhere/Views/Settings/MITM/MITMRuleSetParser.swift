@@ -56,7 +56,8 @@ import JavaScriptCore
 /// | `1` | header-add     | both            | name, value           |
 /// | `2` | header-delete  | both            | name                  |
 /// | `3` | header-replace | both            | pattern, name, value  |
-/// | `4` | body-script    | both            | [types,] base64       |
+/// | `4` | script         | both            | [types,] base64       |
+/// | `5` | stream-script  | both            | [types,] base64       |
 ///
 /// Fields are separated by `,`. Whitespace around unquoted fields is
 /// trimmed. A field that begins with `"` is read until the matching `"`,
@@ -65,19 +66,21 @@ import JavaScriptCore
 /// `url-replace` and `header-replace` are NSRegularExpression with the
 /// usual Unicode semantics.
 ///
-/// `body-script` carries a base64-encoded UTF-8 JavaScript source
-/// defining `function process(body, ctx)`. The runtime invokes it on
-/// the buffered (decompressed) body as a `Uint8Array`; the function
-/// returns `Uint8Array | string | null` (null leaves the body
-/// unchanged). Scripts are stored base64-encoded so newlines and
-/// quoting in the source survive the line-based rule format. See
+/// `script` carries a base64-encoded UTF-8 JavaScript source defining
+/// `function process(ctx)`. The runtime invokes it with a mutable
+/// message-context object: the script can mutate `ctx.body`
+/// (`Uint8Array`, in-place or by assignment), `ctx.url`, `ctx.method`,
+/// `ctx.status`, and `ctx.headers` (an array of `[name, value]`
+/// pairs). Scripts are stored base64-encoded so newlines and quoting
+/// in the source survive the line-based rule format. See
 /// ``MITMScriptEngine`` for the full runtime contract, including the
-/// `Anywhere.utf8 / base64 / hex` helper globals.
+/// `Anywhere.utf8 / base64 / hex / store` helper globals and the
+/// `Anywhere.done() / Anywhere.exit()` short-circuit hooks.
 ///
-/// `body-script` lines optionally lead the base64 with a comma-
-/// separated list of exact `Content-Type` primary values that the
-/// script applies to. Wrap the field in double quotes so the inner
-/// commas are not interpreted as CSV separators:
+/// `script` lines optionally lead the base64 with a comma-separated
+/// list of exact `Content-Type` primary values that the script
+/// applies to. Wrap the field in double quotes so the inner commas
+/// are not interpreted as CSV separators:
 ///
 ///     1, 4, "text/html, application/json", <base64>
 ///
@@ -86,6 +89,17 @@ import JavaScriptCore
 /// argument), the runtime falls back to the default textual-MIME
 /// allowlist in ``MITMBodyCodec/isRewritableType``. An empty quoted
 /// types field disables the rule entirely (no Content-Type matches).
+///
+/// `stream-script` (op `5`) uses the same field shape as `script` but
+/// invokes the script once per HTTP/2 DATA frame or HTTP/1 chunked
+/// chunk — the body is never buffered, HTTP-level compression is not
+/// decoded, and the head's URL/method/status/headers are not
+/// mutable. The script's `process(ctx)` receives an immutable view of
+/// the head plus a mutable `ctx.body` (this frame's payload),
+/// `ctx.frame = { index, end }`, and `ctx.state` (a JS object
+/// persisted across frames of the same stream). HTTP/1 Content-Length
+/// bodies are skipped — the head has already committed to a byte
+/// count we can't change mid-stream.
 enum MITMRuleSetParser {
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""
@@ -236,7 +250,7 @@ enum MITMRuleSetParser {
             guard !pattern.isEmpty, !name.isEmpty, isValidRegex(pattern) else { return nil }
             return MITMRule(phase: phase, operation: .headerReplace(pattern: pattern, name: name, value: args[2]))
 
-        case 4:  // body-script
+        case 4:  // script
             guard args.count == 1 || args.count == 2 else { return nil }
             // 1 arg: base64 only (default allowlist).
             // 2 args: types, base64.
@@ -245,7 +259,17 @@ enum MITMRuleSetParser {
             let contentTypes: [String]? = args.count == 2 ? parseContentTypes(args[0]) : nil
             return MITMRule(
                 phase: phase,
-                operation: .bodyScript(scriptBase64: b64, contentTypes: contentTypes)
+                operation: .script(scriptBase64: b64, contentTypes: contentTypes)
+            )
+
+        case 5:  // stream-script
+            guard args.count == 1 || args.count == 2 else { return nil }
+            let b64 = args.last ?? ""
+            guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
+            let contentTypes: [String]? = args.count == 2 ? parseContentTypes(args[0]) : nil
+            return MITMRule(
+                phase: phase,
+                operation: .streamScript(scriptBase64: b64, contentTypes: contentTypes)
             )
 
         default:
@@ -313,7 +337,7 @@ enum MITMRuleSetParser {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
     }
 
-    /// Parses the optional `body-script` Content-Type list. Splits on
+    /// Parses the optional `script` Content-Type list. Splits on
     /// `,`, lowercases, trims, and drops empties. An all-whitespace
     /// field still produces a non-nil empty array so the rule honors
     /// the user's "match nothing" intent rather than silently reverting
@@ -325,9 +349,9 @@ enum MITMRuleSetParser {
             .filter { !$0.isEmpty }
     }
 
-    /// Validates a `body-script` field: base64 → UTF-8 → JavaScript
-    /// parse. Wraps the source in the same IIFE the runtime uses so a
-    /// rule that imports cleanly here is one the runtime can compile.
+    /// Validates a `script` field: base64 → UTF-8 → JavaScript parse.
+    /// Wraps the source in the same IIFE the runtime uses so a rule
+    /// that imports cleanly here is one the runtime can compile.
     /// Parse-only — does not evaluate, so user code with side effects
     /// is not run at import time.
     private static func isValidScriptBase64(_ b64: String) -> Bool {

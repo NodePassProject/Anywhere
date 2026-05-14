@@ -100,23 +100,43 @@ final class MITMHTTP2Connection {
         }
     }
 
-    /// Per-stream body buffer used when at least one body-touching rule
-    /// applies for the current direction. Missing entry means pass-through;
-    /// present entry means accumulate, decompress per ``codec``, rewrite,
-    /// and emit at END_STREAM. ``abandoned`` flips when an identity
-    /// stream overflows ``MITMBodyCodec/maxBufferedBodyBytes`` mid-flight:
-    /// the buffered prefix has already been emitted as DATA, and
-    /// subsequent DATA on the stream is forwarded verbatim.
-    /// ``headers`` snapshots the rewritten header block at HEADERS time
-    /// so script rules can inspect it via the `ctx` argument; the list
-    /// stays small (a few hundred bytes) and is dropped at END_STREAM.
-    private struct BodyBuffer {
+    /// Per-stream pending message used when at least one script rule
+    /// applies for the current direction. Missing entry means
+    /// pass-through (HEADERS already emitted, DATA forwarded verbatim);
+    /// present entry means we deferred HEADERS emission and are
+    /// accumulating DATA so the script chain can mutate the whole
+    /// message (headers + body + pseudo-headers) before re-encoding.
+    ///
+    /// ``data`` holds the raw (possibly compressed) body bytes seen so
+    /// far. ``headers`` is the rewritten header block from
+    /// ``MITMHTTP2Rewriter`` and is what the script ctx is built from.
+    /// ``abandoned`` flips when an identity stream overflows the body
+    /// cap mid-flight: the deferred HEADERS + buffered DATA prefix are
+    /// emitted un-mutated, and subsequent DATA is forwarded verbatim.
+    /// ``originatingRequest`` is the request method/url recorded by the
+    /// inbound leg, populated only on outbound (response) streams.
+    private struct PendingMessage {
         var data: Data
         let codec: MITMBodyCodec.Plan
-        let headers: [(name: String, value: String)]
+        var headers: [(name: String, value: String)]
+        let originatingRequest: MITMRequestLog.Record?
         var abandoned: Bool = false
     }
-    private var bodyBuffers: [UInt32: BodyBuffer] = [:]
+    private var pendingMessages: [UInt32: PendingMessage] = [:]
+
+    /// Per-stream state for streaming-script mode. Set at HEADERS time
+    /// when a ``streamScript`` rule matches the message Content-Type;
+    /// drives per-DATA-frame script invocation. Mutually exclusive
+    /// with ``pendingMessages`` — a stream is either buffered (full
+    /// script) or streamed (per-frame script), never both.
+    private struct StreamingState {
+        let headers: [(name: String, value: String)]
+        let contentType: String?
+        let originatingRequest: MITMRequestLog.Record?
+        var frameIndex: Int = 0
+        let cursor: MITMScriptTransform.FrameCursor
+    }
+    private var streamingScripts: [UInt32: StreamingState] = [:]
 
     // MARK: - Init
 
@@ -270,13 +290,56 @@ final class MITMHTTP2Connection {
             return Data()
         }
 
-        // Trailer detection: a HEADERS frame on a stream that already
-        // has a buffered body is a trailer. Flush the body as DATA
-        // (without END_STREAM — the trailer carries it) so the receiver
-        // sees DATA before HEADERS-with-END_STREAM, per RFC 9113 §8.1.
+        // Classify the HEADERS frame against the raw decoded block,
+        // BEFORE user header rules run (those can't fake a fresh
+        // response shape onto an actual trailer). A HEADERS without
+        // the primary pseudo-header — `:method` for requests,
+        // `:status` for responses — is a trailer (RFC 9113 §8.1) and
+        // gets emitted verbatim through the pass-through path without
+        // popping the request log or entering script mode. An
+        // outbound HEADERS with `:status` in the 1xx range (except
+        // 101) is an interim informational response (100 Continue,
+        // 103 Early Hints, …): more HEADERS follow on the same stream
+        // so the request-log record must stay live for the final
+        // response.
         var output = Data()
-        if case .headers = kind, bodyBuffers[streamID] != nil {
-            output.append(flushBufferedBody(streamID: streamID, endStream: false))
+        let isTrailer: Bool
+        let isInterimResponse: Bool
+        if case .headers = kind {
+            switch direction {
+            case .inbound:
+                isTrailer = firstHeaderValue(decoded, name: ":method") == nil
+                isInterimResponse = false
+            case .outbound:
+                if let raw = firstHeaderValue(decoded, name: ":status"),
+                   let status = Int(raw.trimmingCharacters(in: .whitespaces)) {
+                    isTrailer = false
+                    isInterimResponse = (100..<200).contains(status) && status != 101
+                } else {
+                    isTrailer = true
+                    isInterimResponse = false
+                }
+            }
+        } else {
+            isTrailer = false
+            isInterimResponse = false
+        }
+
+        // Flush deferred script state when a trailer or follow-on
+        // HEADERS arrives on a stream that previously entered scripted
+        // mode. For buffered mode we run scripts on the accumulated
+        // body and emit deferred HEADERS + DATA (without END_STREAM —
+        // the trailer carries it). For streaming mode we give the
+        // script one final invocation with an empty body and
+        // ``frame.end = true`` so it can flush any per-stream state;
+        // non-empty output goes on the wire as a final DATA frame
+        // before the trailer HEADERS.
+        if case .headers = kind {
+            if pendingMessages[streamID] != nil {
+                output.append(runScriptsAndFlush(streamID: streamID, endStream: false))
+            } else if streamingScripts[streamID] != nil {
+                output.append(flushStreamingScript(streamID: streamID))
+            }
         }
 
         var rewritten: [(name: String, value: String)]
@@ -294,33 +357,119 @@ final class MITMHTTP2Connection {
             rewritten = decoded
         }
 
-        // Decide body-buffering policy for the upcoming DATA frames on
-        // this stream. Buffer when a body-script rule applies, the
-        // codec is one we can decode (or identity), and either
-        // content-length is within the cap or absent (identity only —
-        // we cannot recover wire shape for a compressed body that
-        // overflows mid-stream). Skip on END_STREAM HEADERS because
-        // there is no body.
-        if case .headers = kind,
-           originalFlags & 0x1 == 0,
-           rewriter.hasBodyRewrite(
-               phase: phase,
-               contentType: firstHeaderValue(rewritten, name: "content-type")
-           ),
-           shouldBufferStream(headers: rewritten) {
-            let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
-            bodyBuffers[streamID] = BodyBuffer(data: Data(), codec: codec, headers: rewritten)
-            // The rewritten body's length is unknown at header emit
-            // time. RFC 9113 §8.2.1 requires the sum of DATA frame
-            // payloads to match `content-length` exactly when
-            // present, so drop it; END_STREAM is the canonical
-            // framing signal in HTTP/2.
-            rewritten.removeAll { $0.name.lowercased() == "content-length" }
-            if codec.requiresDecompression {
-                // We will emit the body decompressed (identity), so
-                // drop the codec from the outgoing header block.
-                rewritten.removeAll { $0.name.lowercased() == "content-encoding" }
+        let endStreamOnHeaders = originalFlags & 0x1 != 0
+        let contentType = firstHeaderValue(rewritten, name: "content-type")
+
+        // Pop or peek the originating request once per outbound
+        // response head, before any script-mode dispatch. Doing it
+        // here (rather than inside each script branch) ensures the
+        // streamID→record map drains for pass-through responses too —
+        // without this it leaks until connection close. Interim 1xx
+        // responses peek so the record stays live for the matching
+        // final response that follows on the same stream.
+        let originatingRequest: MITMRequestLog.Record?
+        if case .headers = kind, direction == .outbound, !isTrailer {
+            if isInterimResponse {
+                originatingRequest = rewriter.requestLog.peekHTTP2(streamID: streamID)
+            } else {
+                originatingRequest = rewriter.requestLog.popHTTP2(streamID: streamID)
             }
+        } else {
+            originatingRequest = nil
+        }
+
+        // Streaming-script mode wins over buffered-script mode when
+        // both apply. The trade-off: stream rules see DATA frames
+        // one-at-a-time without HTTP-level decompression, so the body
+        // never stalls — but they can't touch HEADERS, which we emit
+        // immediately below. Trailers and interim responses skip
+        // scripting entirely: trailers have no real "head" to mutate,
+        // and interim responses precede the actual final headers.
+        if case .headers = kind, !isTrailer, !isInterimResponse,
+           rewriter.hasStreamScriptRule(phase: phase, contentType: contentType) {
+            if rewriter.hasScriptRule(phase: phase, contentType: contentType) {
+                logger.warning("[MITM] HTTP/2 stream \(streamID): streamScript rule wins over script rule on the same Content-Type")
+            }
+
+            // Inbound HEADERS still need to land in the request log so
+            // the response-side scripts can read method/url.
+            if direction == .inbound {
+                logHTTP2Request(streamID: streamID, headers: rewritten)
+            }
+
+            // Track per-stream state so DATA frames know to run the
+            // script chain. No body buffering, no decompression. The
+            // originating request was popped once at the top of this
+            // function for outbound streams.
+            if !endStreamOnHeaders {
+                streamingScripts[streamID] = StreamingState(
+                    headers: rewritten,
+                    contentType: contentType,
+                    originatingRequest: originatingRequest,
+                    cursor: MITMScriptTransform.FrameCursor()
+                )
+            }
+
+            let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten)
+            output.append(emitHeaderBlock(
+                streamID: streamID,
+                block: reencoded,
+                endStream: endStreamOnHeaders,
+                kind: kind
+            ))
+            return output
+        }
+
+        // Buffered-script mode: defer HEADERS emission. The script may
+        // mutate any field on the message, including pseudo-headers,
+        // so the wire HEADERS frame waits until scripts have run. For
+        // bodied streams the deferral also drives body buffering; for
+        // END_STREAM-on-HEADERS streams the script runs inline against
+        // an empty body. Skipped for trailers and interim responses
+        // for the same reasons as streaming-script above.
+        if case .headers = kind, !isTrailer, !isInterimResponse,
+           rewriter.hasScriptRule(phase: phase, contentType: contentType),
+           shouldBufferStream(headers: rewritten, endStream: endStreamOnHeaders) {
+            let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
+            // Drop content-length: the post-script body size is
+            // unknown at HEADERS-defer time and HTTP/2 doesn't require
+            // it. Keep content-encoding intact for now —
+            // ``runScriptsAndFlush`` strips it on a successful
+            // decompression and, on decode failure, emits the deferred
+            // HEADERS + raw bytes verbatim so the receiver can still
+            // try to decode the original payload.
+            rewritten.removeAll { $0.name.lowercased() == "content-length" }
+
+            // ``originatingRequest`` was popped once at the top of
+            // this function for outbound streams; pass-through and
+            // PUSH_PROMISE cases see nil and ignore it.
+            pendingMessages[streamID] = PendingMessage(
+                data: Data(),
+                codec: codec,
+                headers: rewritten,
+                originatingRequest: originatingRequest
+            )
+
+            if endStreamOnHeaders {
+                // No DATA will follow — run scripts immediately on an
+                // empty body. ``runScriptsAndFlush`` emits the deferred
+                // HEADERS plus any body the script populated.
+                output.append(runScriptsAndFlush(streamID: streamID, endStream: true))
+            }
+            return output
+        }
+
+        // Pass-through path: no script applies, this is a trailer or
+        // interim response, or this is a PUSH_PROMISE. Inbound request
+        // HEADERS get logged so the response side can populate
+        // ctx.method/ctx.url even when no script touched the request —
+        // but trailer HEADERS, which carry no pseudo-headers, must be
+        // skipped here. Without this gate a request trailer would
+        // overwrite the streamID→record map with nils and the
+        // matching response-side script would lose its originating
+        // request context.
+        if case .headers = kind, direction == .inbound, !isTrailer {
+            logHTTP2Request(streamID: streamID, headers: rewritten)
         }
 
         let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten)
@@ -331,7 +480,7 @@ final class MITMHTTP2Connection {
         output.append(emitHeaderBlock(
             streamID: streamID,
             block: reencoded,
-            endStream: originalFlags & 0x1 != 0,
+            endStream: endStreamOnHeaders,
             kind: kind
         ))
         return output
@@ -347,91 +496,315 @@ final class MITMHTTP2Connection {
         let endStream = frame.flags & 0x1 != 0
         let streamID = frame.streamID
 
-        // Pass-through path: no body rewrite for this stream. Re-emit the
+        // Streaming-script path: run the script chain on this single
+        // DATA frame and emit immediately. No buffering, no
+        // decompression — gRPC and other framed-stream payloads stay
+        // streaming.
+        if var streaming = streamingScripts[streamID] {
+            return handleStreamingData(
+                streamID: streamID,
+                streaming: &streaming,
+                body: body,
+                endStream: endStream
+            )
+        }
+
+        // Pass-through path: no script for this stream. Re-emit the
         // DATA frame with the original body and END_STREAM flag, with
         // PADDED cleared.
-        guard var buffer = bodyBuffers[streamID] else {
+        guard var pending = pendingMessages[streamID] else {
             return emitDataFrames(streamID: streamID, payload: body, endStream: endStream)
         }
 
         // Abandoned path: a previous DATA frame on this stream blew
-        // through the buffer cap. The buffered prefix has already been
-        // emitted as DATA, so all we need to do is forward this frame
+        // through the buffer cap. HEADERS + buffered prefix were
+        // already emitted by the abandon transition; forward this frame
         // verbatim and clean up at END_STREAM.
-        if buffer.abandoned {
+        if pending.abandoned {
             if endStream {
-                bodyBuffers.removeValue(forKey: streamID)
+                pendingMessages.removeValue(forKey: streamID)
             } else {
-                bodyBuffers[streamID] = buffer
+                pendingMessages[streamID] = pending
             }
             return emitDataFrames(streamID: streamID, payload: body, endStream: endStream)
         }
 
         // Buffering path: accumulate until END_STREAM.
-        buffer.data.append(body)
+        pending.data.append(body)
 
         // Mid-stream cap check. Only reachable for identity bodies
         // (compressed streams are pre-gated when content-length is
-        // missing or already over the cap) so flushing the prefix as a
-        // plain DATA frame is non-lossy.
-        if !endStream, buffer.data.count > MITMBodyCodec.maxBufferedBodyBytes {
+        // missing or already over the cap). We've withheld the HEADERS
+        // frame so far, so the abandon transition emits the deferred
+        // HEADERS (without script mutations) plus the buffered prefix
+        // as DATA, then continues to forward subsequent DATA verbatim.
+        if !endStream, pending.data.count > MITMBodyCodec.maxBufferedBodyBytes {
             logger.warning("[MITM] HTTP/2 stream \(streamID) exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); abandoning rewrite")
-            let prefix = buffer.data
-            buffer.data = Data()
-            buffer.abandoned = true
-            bodyBuffers[streamID] = buffer
-            return emitDataFrames(streamID: streamID, payload: prefix, endStream: false)
+            return abandonPending(streamID: streamID, pending: &pending)
         }
 
-        bodyBuffers[streamID] = buffer
+        pendingMessages[streamID] = pending
         if !endStream {
             return Data()
         }
-        return flushBufferedBody(streamID: streamID, endStream: true)
+        return runScriptsAndFlush(streamID: streamID, endStream: true)
     }
 
-    /// Emits the buffered body for ``streamID`` as a DATA frame, after
-    /// decompressing per the recorded codec and applying body rules.
-    /// Removes the entry from ``bodyBuffers`` so the stream is settled.
-    /// Returns empty when there is no buffered body, or when the stream
-    /// was already abandoned (its prefix has already been forwarded as
-    /// raw DATA — nothing more to flush).
-    private func flushBufferedBody(streamID: UInt32, endStream: Bool) -> Data {
-        guard let buffer = bodyBuffers.removeValue(forKey: streamID) else {
+    /// Closes out a streaming-script stream when END_STREAM lands on
+    /// a trailer HEADERS frame rather than on a DATA frame. Calls the
+    /// script chain one last time with an empty body and
+    /// ``frame.end = true`` so the script can flush whatever
+    /// per-stream state it has accumulated, then drops the entry from
+    /// ``streamingScripts``. Non-empty script output is emitted as a
+    /// DATA frame without END_STREAM (the trailer carries it).
+    private func flushStreamingScript(streamID: UInt32) -> Data {
+        guard let streaming = streamingScripts.removeValue(forKey: streamID) else {
             return Data()
         }
-        if buffer.abandoned {
+        if streaming.cursor.bypass {
+            return Data()
+        }
+        var working = streaming
+        let ctx = MITMScriptEngine.FrameContext(
+            phase: phase,
+            method: working.originatingRequest?.method
+                ?? firstHeaderValue(working.headers, name: ":method"),
+            url: streamingURL(working),
+            status: parseStatus(working.headers),
+            headers: working.headers.filter { !$0.name.hasPrefix(":") },
+            frameIndex: working.frameIndex,
+            isLast: true,
+            ruleSetID: rewriter.ruleSetID
+        )
+        let result = MITMScriptTransform.applyFrame(
+            Data(),
+            rules: rewriter.rules(phase: phase),
+            contentType: working.contentType,
+            frameContext: ctx,
+            cursor: working.cursor,
+            engineProvider: rewriter.scriptEngineProvider
+        )
+        working.frameIndex += 1
+        if result.body.isEmpty {
+            return Data()
+        }
+        return emitDataFrames(streamID: streamID, payload: result.body, endStream: false)
+    }
+
+    /// Streaming-script path. Runs the script chain on one DATA
+    /// frame's payload and emits the (possibly mutated) bytes as a
+    /// single DATA frame. ``Anywhere.done`` / ``Anywhere.exit`` flip
+    /// the cursor's ``bypass`` flag so subsequent frames on the stream
+    /// pass through unchanged. The streaming entry is cleared on
+    /// END_STREAM regardless of bypass state so a follow-up message
+    /// on the same stream ID (rare under HTTP/2 stream-ID rules but
+    /// possible with PUSH_PROMISE) gets a fresh cursor.
+    private func handleStreamingData(
+        streamID: UInt32,
+        streaming: inout StreamingState,
+        body: Data,
+        endStream: Bool
+    ) -> Data {
+        let emitted: Data
+        if streaming.cursor.bypass {
+            emitted = body
+        } else {
+            let ctx = MITMScriptEngine.FrameContext(
+                phase: phase,
+                method: streaming.originatingRequest?.method
+                    ?? firstHeaderValue(streaming.headers, name: ":method"),
+                url: streamingURL(streaming),
+                status: parseStatus(streaming.headers),
+                headers: streaming.headers.filter { !$0.name.hasPrefix(":") },
+                frameIndex: streaming.frameIndex,
+                isLast: endStream,
+                ruleSetID: rewriter.ruleSetID
+            )
+            let result = MITMScriptTransform.applyFrame(
+                body,
+                rules: rewriter.rules(phase: phase),
+                contentType: streaming.contentType,
+                frameContext: ctx,
+                cursor: streaming.cursor,
+                engineProvider: rewriter.scriptEngineProvider
+            )
+            emitted = result.body
+        }
+        streaming.frameIndex += 1
+        if endStream {
+            streamingScripts.removeValue(forKey: streamID)
+        } else {
+            streamingScripts[streamID] = streaming
+        }
+        return emitDataFrames(streamID: streamID, payload: emitted, endStream: endStream)
+    }
+
+    /// URL for the streaming script's ctx. On response phase the
+    /// originating request's URL (from the request log) wins; on
+    /// request phase we synthesize from the pseudo-headers the
+    /// rewriter already emitted.
+    private func streamingURL(_ streaming: StreamingState) -> String? {
+        if phase == .httpResponse {
+            return streaming.originatingRequest?.url
+        }
+        guard let path = firstHeaderValue(streaming.headers, name: ":path") else {
+            return nil
+        }
+        let authority = firstHeaderValue(streaming.headers, name: ":authority") ?? rewriter.host
+        return "https://\(authority)\(path)"
+    }
+
+    private func parseStatus(_ headers: [(name: String, value: String)]) -> Int? {
+        guard phase == .httpResponse,
+              let raw = firstHeaderValue(headers, name: ":status"),
+              let code = Int(raw.trimmingCharacters(in: .whitespaces))
+        else { return nil }
+        return code
+    }
+
+    /// Emits the deferred HEADERS and the buffered body prefix without
+    /// running scripts, then flips the pending message to ``abandoned``
+    /// so subsequent DATA frames forward verbatim. Used when the body
+    /// overflows the buffer cap mid-stream.
+    private func abandonPending(streamID: UInt32, pending: inout PendingMessage) -> Data {
+        // Inbound HEADERS need to be logged for the response side to
+        // populate ctx.method/url even though scripts won't run.
+        if direction == .inbound {
+            logHTTP2Request(streamID: streamID, headers: pending.headers)
+        }
+        let prefix = pending.data
+        pending.data = Data()
+        pending.abandoned = true
+        let reencoded = HPACKEncoder.encodeHeaderBlock(pending.headers)
+        var out = emitHeaderBlock(
+            streamID: streamID,
+            block: reencoded,
+            endStream: false,
+            kind: .headers
+        )
+        out.append(emitDataFrames(streamID: streamID, payload: prefix, endStream: false))
+        pendingMessages[streamID] = pending
+        return out
+    }
+
+    /// Emits the deferred HEADERS + buffered raw body without running
+    /// scripts. Used by ``runScriptsAndFlush`` when decompression fails
+    /// — the original ``content-encoding`` is still present on
+    /// ``pending.headers`` so the receiver can decode the original
+    /// payload itself. Inbound request HEADERS still need to land in
+    /// the request log so the response-side ctx is populated.
+    private func emitPassthroughDeferred(
+        streamID: UInt32,
+        pending: PendingMessage,
+        endStream: Bool
+    ) -> Data {
+        if direction == .inbound {
+            logHTTP2Request(streamID: streamID, headers: pending.headers)
+        }
+        let reencoded = HPACKEncoder.encodeHeaderBlock(pending.headers)
+        let body = pending.data
+        let headersHaveEndStream = endStream && body.isEmpty
+        var out = emitHeaderBlock(
+            streamID: streamID,
+            block: reencoded,
+            endStream: headersHaveEndStream,
+            kind: .headers
+        )
+        if !body.isEmpty {
+            out.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
+        }
+        return out
+    }
+
+    /// Runs the script chain on the buffered message and emits the
+    /// final HEADERS (with script mutations) plus the rewritten body
+    /// as DATA frame(s). Removes the entry from ``pendingMessages`` so
+    /// the stream is settled. Returns empty when no pending message
+    /// exists, or when it was already abandoned.
+    private func runScriptsAndFlush(streamID: UInt32, endStream: Bool) -> Data {
+        guard let pending = pendingMessages.removeValue(forKey: streamID) else {
+            return Data()
+        }
+        if pending.abandoned {
             return Data()
         }
         let plaintext: Data
-        if buffer.codec.requiresDecompression {
-            // If decode fails, emit the original (still-compressed) bytes
-            // as identity. The peer will see corrupt content but the
-            // stream stays usable; this is the same trade-off the HTTP/1
-            // path makes.
-            plaintext = MITMBodyCodec.decompress(buffer.data, plan: buffer.codec) ?? buffer.data
+        if pending.codec.requiresDecompression {
+            // Decompression failure: skip scripts and emit the
+            // deferred HEADERS + raw bytes verbatim so the receiver
+            // can still decode the original payload. ``pending.headers``
+            // still carries `content-encoding` because we no longer
+            // strip it at deferral time. HTTP/1 takes the same
+            // approach in ``applyScriptsAndEmit``.
+            guard let decoded = MITMBodyCodec.decompress(pending.data, plan: pending.codec) else {
+                return emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream)
+            }
+            plaintext = decoded
         } else {
-            plaintext = buffer.data
+            plaintext = pending.data
         }
-        let context = makeScriptContext(headers: buffer.headers)
-        let contentType = firstHeaderValue(buffer.headers, name: "content-type")
-        let rewritten = rewriter.rewriteBody(
-            plaintext,
-            phase: phase,
-            contentType: contentType,
-            context: context
+        // On a successful decompression we're emitting identity, so
+        // hide ``content-encoding`` from the script and from the
+        // re-encoded header block. When the body wasn't compressed
+        // there's nothing to hide.
+        let scriptedHeaders: [(name: String, value: String)]
+        if pending.codec.requiresDecompression {
+            scriptedHeaders = pending.headers.filter { $0.name.lowercased() != "content-encoding" }
+        } else {
+            scriptedHeaders = pending.headers
+        }
+        let inputMessage = buildMessage(
+            headers: scriptedHeaders,
+            body: plaintext,
+            originatingRequest: pending.originatingRequest
         )
-        return emitDataFrames(streamID: streamID, payload: rewritten, endStream: endStream)
+        let result = rewriter.applyScripts(inputMessage, phase: phase)
+
+        // Re-build the HTTP/2 header block: pseudo-headers from the
+        // (possibly script-mutated) method/url/status, regular headers
+        // from result.headers (with any stale pseudo-headers stripped
+        // in case the script touched them directly).
+        let finalHeaders = rebuildHeaders(from: result, fallback: pending.headers)
+
+        if direction == .inbound {
+            logHTTP2Request(streamID: streamID, headers: finalHeaders)
+        }
+
+        let reencoded = HPACKEncoder.encodeHeaderBlock(finalHeaders)
+        let body = result.body
+        // END_STREAM lands on either HEADERS (no body case) or the last
+        // DATA frame (body case). HTTP/2 requires DATA to follow HEADERS
+        // when there's a body; an empty body is fine on HEADERS alone.
+        let headersHaveEndStream = endStream && body.isEmpty
+        var out = emitHeaderBlock(
+            streamID: streamID,
+            block: reencoded,
+            endStream: headersHaveEndStream,
+            kind: .headers
+        )
+        if !body.isEmpty {
+            out.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
+        }
+        return out
     }
 
-    // MARK: - Body-buffer policy
+    // MARK: - Deferral policy
 
-    /// Decides whether a stream's DATA frames should be buffered for
-    /// rewrite. Combines the codec and content-length gates so the
-    /// decision is made once at HEADERS time rather than rediscovered
-    /// per-frame. Content-Type filtering happens earlier, on the
-    /// rewriter side via ``MITMHTTP2Rewriter/hasBodyRewrite(phase:contentType:)``.
-    private func shouldBufferStream(headers: [(name: String, value: String)]) -> Bool {
+    /// Decides whether a stream's HEADERS (and DATA, if any) should be
+    /// deferred so the script chain can mutate the full message. The
+    /// codec and content-length gates make the decision once at HEADERS
+    /// time rather than rediscovered per-frame. Content-Type filtering
+    /// happens earlier, on the rewriter side via
+    /// ``MITMHTTP2Rewriter/hasScriptRule(phase:contentType:)``.
+    ///
+    /// An END_STREAM-on-HEADERS message has no DATA to buffer, so the
+    /// content-length / codec gates don't apply — defer unconditionally
+    /// so the script can still mutate head fields.
+    private func shouldBufferStream(
+        headers: [(name: String, value: String)],
+        endStream: Bool
+    ) -> Bool {
+        if endStream { return true }
         let codec = MITMBodyCodec.plan(for: firstHeaderValue(headers, name: "content-encoding"))
         guard codec.supported else { return false }
         if let raw = firstHeaderValue(headers, name: "content-length"),
@@ -455,28 +828,105 @@ final class MITMHTTP2Connection {
         return nil
     }
 
-    /// Builds the per-message `ctx` argument for the script's
-    /// `process(body, ctx)`. Pseudo-headers `:method`, `:authority`, and
-    /// `:path` give us method and URL on requests; responses leave both
-    /// nil. The script sees the same header list that was emitted on
-    /// the wire (pseudo-headers included).
-    private func makeScriptContext(headers: [(name: String, value: String)]) -> MITMScriptEngine.Context {
+    // MARK: - Message build / header rebuild
+
+    /// Builds the ``MITMScriptEngine/Message`` the script chain
+    /// receives. HTTP/2 pseudo-headers (`:method`, `:authority`,
+    /// `:path`, `:scheme`, `:status`) are stripped here and projected
+    /// into the scalar `method` / `url` / `status` fields so the script
+    /// sees only regular headers in `ctx.headers`. On response phase
+    /// the originating request's method/url are looked up via
+    /// ``MITMRequestLog``.
+    private func buildMessage(
+        headers: [(name: String, value: String)],
+        body: Data,
+        originatingRequest: MITMRequestLog.Record?
+    ) -> MITMScriptEngine.Message {
         var method: String?
         var url: String?
-        if phase == .httpRequest {
+        var status: Int?
+        switch phase {
+        case .httpRequest:
             method = firstHeaderValue(headers, name: ":method")
             if let path = firstHeaderValue(headers, name: ":path") {
-                let authority = firstHeaderValue(headers, name: ":authority") ?? ""
+                let authority = firstHeaderValue(headers, name: ":authority") ?? rewriter.host
                 url = "https://\(authority)\(path)"
             }
+        case .httpResponse:
+            if let raw = firstHeaderValue(headers, name: ":status"),
+               let code = Int(raw.trimmingCharacters(in: .whitespaces)) {
+                status = code
+            }
+            method = originatingRequest?.method
+            url = originatingRequest?.url
         }
-        return MITMScriptEngine.Context(
+        let regularHeaders = headers.filter { !$0.name.hasPrefix(":") }
+        return MITMScriptEngine.Message(
             phase: phase,
             method: method,
             url: url,
-            headers: headers,
+            status: status,
+            headers: regularHeaders,
+            body: body,
             ruleSetID: rewriter.ruleSetID
         )
+    }
+
+    /// Re-assembles the wire header block from a (possibly mutated)
+    /// message. Pseudo-headers are rebuilt from ``message`` fields; any
+    /// pseudo-headers the script accidentally added to
+    /// ``message.headers`` are dropped here so the HPACK encoder never
+    /// emits duplicates. ``fallback`` supplies pseudo-header values
+    /// the message lacks (e.g. ``:scheme`` on requests, original
+    /// authority when the script cleared the URL).
+    private func rebuildHeaders(
+        from message: MITMScriptEngine.Message,
+        fallback: [(name: String, value: String)]
+    ) -> [(name: String, value: String)] {
+        var pseudos: [(name: String, value: String)] = []
+        switch phase {
+        case .httpRequest:
+            let method = message.method ?? firstHeaderValue(fallback, name: ":method") ?? "GET"
+            pseudos.append((name: ":method", value: method))
+            let scheme = firstHeaderValue(fallback, name: ":scheme") ?? "https"
+            pseudos.append((name: ":scheme", value: scheme))
+            let authority: String
+            let path: String
+            if let url = message.url, let components = URLComponents(string: url) {
+                authority = components.host.map { host in
+                    if let port = components.port { return "\(host):\(port)" }
+                    return host
+                } ?? firstHeaderValue(fallback, name: ":authority") ?? rewriter.host
+                let rawPath = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+                path = components.percentEncodedQuery.map { "\(rawPath)?\($0)" } ?? rawPath
+            } else {
+                authority = firstHeaderValue(fallback, name: ":authority") ?? rewriter.host
+                path = firstHeaderValue(fallback, name: ":path") ?? "/"
+            }
+            pseudos.append((name: ":authority", value: authority))
+            pseudos.append((name: ":path", value: path))
+        case .httpResponse:
+            let status = message.status.map(String.init)
+                ?? firstHeaderValue(fallback, name: ":status")
+                ?? "200"
+            pseudos.append((name: ":status", value: status))
+        }
+        let regular = message.headers.filter { !$0.name.hasPrefix(":") }
+        return pseudos + regular
+    }
+
+    /// Records the in-flight request's method and absolute URL onto the
+    /// shared request log so the outbound (response) leg can populate
+    /// ctx.method / ctx.url. Inbound HEADERS only.
+    private func logHTTP2Request(streamID: UInt32, headers: [(name: String, value: String)]) {
+        guard direction == .inbound else { return }
+        let method = firstHeaderValue(headers, name: ":method")
+        var url: String?
+        if let path = firstHeaderValue(headers, name: ":path") {
+            let authority = firstHeaderValue(headers, name: ":authority") ?? rewriter.host
+            url = "https://\(authority)\(path)"
+        }
+        rewriter.requestLog.recordHTTP2(streamID: streamID, method: method, url: url)
     }
 
     // MARK: - Padding helpers

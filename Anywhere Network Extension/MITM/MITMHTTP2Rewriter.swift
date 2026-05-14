@@ -18,26 +18,33 @@ private let logger = AnywhereLogger(category: "MITM")
 /// rewriter applies the compiled rule list for the host.
 final class MITMHTTP2Rewriter {
 
-    private let host: String
-    private let policy: MITMRewritePolicy
+    let host: String
+    let policy: MITMRewritePolicy
     /// When set, every request's `:authority` pseudo-header is rewritten to
     /// this value. Driven by the rule set's ``rewriteTarget``; nil means
     /// "leave :authority alone".
     private let effectiveAuthority: String?
     /// Lazy JS runtime, shared with the HTTP/1 streams of the same
-    /// session. Touched only when a body-script rule fires.
-    private let scriptEngineProvider: MITMScriptEngine.Provider
+    /// session. Touched only when a script rule fires.
+    let scriptEngineProvider: MITMScriptEngine.Provider
+    /// Cross-direction request bookkeeping. The inbound HTTP/2
+    /// connection records the (post-rewrite) method/url per stream so
+    /// the outbound connection can populate `ctx.method` / `ctx.url`
+    /// on response scripts.
+    let requestLog: MITMRequestLog
 
     init(
         host: String,
         policy: MITMRewritePolicy,
         effectiveAuthority: String?,
-        scriptEngineProvider: MITMScriptEngine.Provider
+        scriptEngineProvider: MITMScriptEngine.Provider,
+        requestLog: MITMRequestLog
     ) {
         self.host = host
         self.policy = policy
         self.effectiveAuthority = effectiveAuthority
         self.scriptEngineProvider = scriptEngineProvider
+        self.requestLog = requestLog
     }
 
     // MARK: - Headers
@@ -59,18 +66,35 @@ final class MITMHTTP2Rewriter {
         applyHeaderRules(headers, phase: .httpResponse)
     }
 
-    // MARK: - Body rewrite preflight
+    // MARK: - Script preflight + application
 
-    /// Whether any body-touching rule applies for this host + phase
-    /// with the in-flight message's ``contentType``. The connection
-    /// uses this to decide whether to buffer DATA frames; a script
-    /// rule whose Content-Type filter excludes the type contributes
-    /// nothing here, so we avoid buffering for it.
-    func hasBodyRewrite(phase: MITMPhase, contentType: String?) -> Bool {
-        MITMBodyTransform.hasBodyRule(
+    /// Whether any buffered script rule applies for this host + phase
+    /// with the in-flight message's ``contentType``. Callers should
+    /// check ``hasStreamScriptRule`` first — streaming rules take
+    /// precedence and never coexist with buffered mode on the same
+    /// stream.
+    func hasScriptRule(phase: MITMPhase, contentType: String?) -> Bool {
+        MITMScriptTransform.hasScriptRule(
             in: policy.rules(for: host, phase: phase),
             contentType: contentType
         )
+    }
+
+    /// Whether any streaming-script rule applies. Streaming rules tell
+    /// the connection to emit HEADERS immediately and run scripts
+    /// per-frame instead of buffering the full body.
+    func hasStreamScriptRule(phase: MITMPhase, contentType: String?) -> Bool {
+        MITMScriptTransform.hasStreamScriptRule(
+            in: policy.rules(for: host, phase: phase),
+            contentType: contentType
+        )
+    }
+
+    /// Compiled rule list for the host/phase, exposed so the connection
+    /// can pass it into ``MITMScriptTransform.applyFrame`` without
+    /// re-resolving the policy on every DATA frame.
+    func rules(phase: MITMPhase) -> [CompiledMITMRule] {
+        policy.rules(for: host, phase: phase)
     }
 
     /// The matched rule set's ID, used as the script-store scope key.
@@ -80,23 +104,19 @@ final class MITMHTTP2Rewriter {
         policy.set(for: host)?.id
     }
 
-    /// Applies every body-touching rule for the given phase whose
-    /// Content-Type filter accepts ``contentType``. The caller is
-    /// responsible for decompressing content-encoded bodies before
-    /// passing them in, and for building ``context`` from the rewritten
-    /// header block (used by script rules; ignored otherwise).
-    func rewriteBody(
-        _ data: Data,
-        phase: MITMPhase,
-        contentType: String?,
-        context: MITMScriptEngine.Context
-    ) -> Data {
-        MITMBodyTransform.apply(
-            data,
+    /// Applies every script rule for the given phase whose Content-Type
+    /// filter accepts the message's `content-type` header. The caller
+    /// is responsible for decompressing the body before passing it in;
+    /// the returned message has the (possibly modified) body in
+    /// identity form.
+    func applyScripts(
+        _ message: MITMScriptEngine.Message,
+        phase: MITMPhase
+    ) -> MITMScriptEngine.Message {
+        MITMScriptTransform.apply(
+            message,
             rules: policy.rules(for: host, phase: phase),
-            contentType: contentType,
-            engineProvider: scriptEngineProvider,
-            context: context
+            engineProvider: scriptEngineProvider
         )
     }
 
@@ -164,7 +184,7 @@ final class MITMHTTP2Rewriter {
                     }
                     return (name: name, value: value)
                 }
-            case .bodyScript:
+            case .script, .streamScript:
                 continue
             }
         }

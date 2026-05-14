@@ -11,7 +11,7 @@ import JavaScriptCore
 private let logger = AnywhereLogger(category: "MITM")
 
 /// Per-``MITMSession`` JavaScript runtime for the
-/// ``CompiledMITMOperation/bodyScript`` rule. One ``JSContext`` is reused
+/// ``CompiledMITMOperation/script`` rule. One ``JSContext`` is reused
 /// across every script invocation on the connection; compiled functions
 /// are cached by source content so duplicate scripts share work.
 ///
@@ -22,39 +22,81 @@ private let logger = AnywhereLogger(category: "MITM")
 /// even in the worst case.
 final class MITMScriptEngine {
 
-    /// Snapshot of the in-flight HTTP message that the script may
-    /// inspect via the `ctx` argument to `function process(body, ctx)`.
-    /// `method` and `url` are nil on the response phase; `headers`
-    /// preserves duplicates and order. ``ruleSetID`` is the scope key
-    /// `Anywhere.store` uses; nil disables the store for the call.
-    struct Context {
+    /// Mutable view of the in-flight HTTP message. The runtime hands
+    /// this to `function process(ctx)` and reads each field back after
+    /// the call; the JS side may mutate any field by assignment or in
+    /// place (`ctx.body` is a Uint8Array backed by Swift-owned memory,
+    /// so element-wise writes propagate without a return value).
+    ///
+    /// `method` and `url` are populated on both request and response
+    /// phases (response carries the originating request's values, looked
+    /// up via ``MITMRequestLog``). `status` is populated on response
+    /// only. `phase` is read-only on the JS side; reassigning it is a
+    /// no-op on Swift readback.
+    struct Message {
         let phase: MITMPhase
-        let method: String?
-        let url: String?
-        let headers: [(name: String, value: String)]
+        var method: String?
+        var url: String?
+        var status: Int?
+        var headers: [(name: String, value: String)]
+        var body: Data
         let ruleSetID: UUID?
     }
 
-    /// Result of a single ``apply(_:source:requestContext:)`` call.
-    /// ``MITMBodyTransform`` branches on this to chain rules normally,
-    /// short-circuit with a final body, or roll back to the body as it
-    /// entered the rule chain.
+    /// Result of a single ``apply(_:source:)`` call. ``MITMScriptTransform``
+    /// branches on this to chain rules normally, short-circuit with the
+    /// current message, or roll back to the message as it entered the
+    /// rule chain.
     enum Outcome {
-        /// Normal return. Feed ``body`` to the next rule.
-        case modified(body: Data)
-        /// Script called `Anywhere.done(value)`. Use ``body``; skip the
+        /// Normal return. Feed ``message`` to the next rule.
+        case modified(Message)
+        /// Script called `Anywhere.done()`. Use ``message``; skip the
         /// remaining rules in the chain.
-        case done(body: Data)
-        /// Script called `Anywhere.exit()`. Revert to the body as it
+        case done(Message)
+        /// Script called `Anywhere.exit()`. Revert to the message as it
         /// entered the rule chain; skip the remaining rules.
         case exit
     }
 
+    /// Per-frame snapshot for ``applyFrame``. Mirrors ``Message`` for
+    /// the fields a streaming script can inspect, plus frame-level
+    /// metadata (index + END_STREAM flag). All ctx fields except
+    /// ``body`` are read-only on the JS side — HEADERS have already
+    /// gone on the wire by the time DATA frames flow.
+    struct FrameContext {
+        let phase: MITMPhase
+        let method: String?
+        let url: String?
+        let status: Int?
+        let headers: [(name: String, value: String)]
+        let frameIndex: Int
+        /// True when this is the last frame in the stream (HTTP/2
+        /// END_STREAM, HTTP/1 chunked terminator). Lets the script
+        /// flush any state it has been accumulating.
+        let isLast: Bool
+        let ruleSetID: UUID?
+    }
+
+    /// Result of ``applyFrame``. ``state`` is the (possibly newly
+    /// created) JSValue holding the script's persistent per-stream
+    /// state; the caller threads it back in on the next frame and
+    /// drops it at stream end.
+    enum FrameOutcome {
+        /// Normal return. Emit ``body`` as this frame's payload.
+        case modified(body: Data, state: JSValue?)
+        /// Script called `Anywhere.done()`. Emit ``body``, then pass
+        /// every subsequent frame on this stream through unchanged.
+        case done(body: Data)
+        /// Script called `Anywhere.exit()`. Emit the original frame
+        /// payload, then pass every subsequent frame through.
+        case exit
+    }
+
     /// Internal tag set by the `Anywhere.done` / `Anywhere.exit`
-    /// blocks; ``apply(_:source:requestContext:)`` reads it after the
-    /// JS function returns and converts it to ``Outcome``.
+    /// blocks; ``apply`` reads it after the JS function returns and
+    /// converts it to ``Outcome``.
     fileprivate enum Directive {
-        case done(Data)
+        case done
         case exit
     }
 
@@ -62,10 +104,9 @@ final class MITMScriptEngine {
     private var compiled: [String: JSValue] = [:]
 
     /// Scope key the `Anywhere.store` globals consult on each call.
-    /// Stashed by ``apply(_:source:requestContext:)`` immediately
-    /// before invoking the user function and cleared on return so a
-    /// stray store call from a nested or re-entrant invocation cannot
-    /// leak into the wrong scope.
+    /// Stashed by ``apply`` immediately before invoking the user
+    /// function and cleared on return so a stray store call from a
+    /// nested or re-entrant invocation cannot leak into the wrong scope.
     fileprivate var currentScope: UUID?
 
     /// Directive set by `Anywhere.done` / `Anywhere.exit`. ``apply``
@@ -82,37 +123,82 @@ final class MITMScriptEngine {
         installAnywhereGlobals()
     }
 
-    /// Runs ``source`` against ``data``. Returns the rewritten body, or
-    /// ``data`` unchanged when the script throws, returns nothing, or
-    /// the returned value cannot be coerced to bytes.
-    func apply(_ data: Data, source: String, requestContext ctx: Context) -> Outcome {
-        guard let function = compileIfNeeded(source) else { return .modified(body: data) }
+    /// Runs ``source`` against ``message``. Returns the post-script
+    /// message, or ``message`` unchanged when the script throws or
+    /// otherwise fails to compile.
+    func apply(_ message: Message, source: String) -> Outcome {
+        guard let function = compileIfNeeded(source) else { return .modified(message) }
+        currentScope = message.ruleSetID
+        currentDirective = nil
+        defer {
+            currentScope = nil
+            currentDirective = nil
+        }
+        let ctxArg = makeContextValue(message)
+        _ = function.call(withArguments: [ctxArg])
+        // The script may have replaced ctx.body with a new typed array,
+        // mutated the original in place, or done nothing — read back
+        // whatever is on the object now.
+        let updated = readBack(message, from: ctxArg)
+        if let directive = currentDirective {
+            context.exception = nil
+            switch directive {
+            case .done: return .done(updated)
+            case .exit: return .exit
+            }
+        }
+        if context.exception != nil {
+            // exceptionHandler already logged.
+            context.exception = nil
+            return .modified(message)
+        }
+        return .modified(updated)
+    }
+
+    /// Runs ``source`` against a single frame of a streaming body.
+    /// Returns the (possibly modified) frame bytes plus the persistent
+    /// state object the caller threads into the next frame. On script
+    /// failure the original ``frame`` is emitted unchanged.
+    func applyFrame(
+        _ frame: Data,
+        source: String,
+        frameContext ctx: FrameContext,
+        state: JSValue?
+    ) -> FrameOutcome {
+        guard let function = compileIfNeeded(source) else {
+            return .modified(body: frame, state: state)
+        }
         currentScope = ctx.ruleSetID
         currentDirective = nil
         defer {
             currentScope = nil
             currentDirective = nil
         }
-        let bodyArg = Self.makeUint8Array(in: context, from: data)
-        let ctxArg = makeContextValue(ctx)
-        let result = function.call(withArguments: [bodyArg, ctxArg])
-        // Directive wins over both the function's return value and any
-        // exception thrown after the directive was set — `done`/`exit`
-        // are explicit user intent.
+        let ctxArg = makeFrameContextValue(ctx, frame: frame, state: state)
+        _ = function.call(withArguments: [ctxArg])
+        // Pull the body and state back off the ctx; ignore any
+        // mutations to method/url/status/headers — HEADERS are on the
+        // wire already, so they can't take effect.
+        let body: Data
+        if let bodyVal = ctxArg.objectForKeyedSubscript("body"),
+           let bytes = Self.bytesFromValue(bodyVal, in: context) {
+            body = bytes
+        } else {
+            body = frame
+        }
+        let updatedState = ctxArg.objectForKeyedSubscript("state")
         if let directive = currentDirective {
             context.exception = nil
             switch directive {
-            case .done(let body): return .done(body: body)
-            case .exit:           return .exit
+            case .done: return .done(body: body)
+            case .exit: return .exit
             }
         }
         if context.exception != nil {
-            // exceptionHandler already logged.
             context.exception = nil
-            return .modified(body: data)
+            return .modified(body: frame, state: state)
         }
-        guard let result else { return .modified(body: data) }
-        return .modified(body: Self.bytesFromValue(result, in: context) ?? data)
+        return .modified(body: body, state: updatedState)
     }
 
     // MARK: - Compilation
@@ -129,7 +215,7 @@ final class MITMScriptEngine {
             return nil
         }
         guard let value, !value.isUndefined, !value.isNull else {
-            logger.warning("[MITM][JS] script did not define process(body, ctx)")
+            logger.warning("[MITM][JS] script did not define process(ctx)")
             return nil
         }
         compiled[source] = value
@@ -138,23 +224,114 @@ final class MITMScriptEngine {
 
     // MARK: - Context bridging
 
-    private func makeContextValue(_ ctx: Context) -> JSValue {
+    /// Builds the mutable JS ctx object exposed to `process(ctx)`. Each
+    /// scalar field is set unconditionally; missing ones (e.g. `status`
+    /// on the request phase) are JS `null` so the script can probe with
+    /// `=== null` / `=== undefined`.
+    private func makeContextValue(_ msg: Message) -> JSValue {
+        let obj = JSValue(newObjectIn: context)!
+        obj.setObject(
+            msg.phase == .httpRequest ? "request" : "response",
+            forKeyedSubscript: "phase" as NSString
+        )
+        obj.setObject(msg.method as Any, forKeyedSubscript: "method" as NSString)
+        obj.setObject(msg.url as Any, forKeyedSubscript: "url" as NSString)
+        obj.setObject(msg.status as Any, forKeyedSubscript: "status" as NSString)
+        // Headers as an array of [name, value] pairs preserves both
+        // duplicates and emit order; users can mutate it freely with
+        // standard Array methods.
+        let pairs: [[String]] = msg.headers.map { [$0.name, $0.value] }
+        obj.setObject(pairs, forKeyedSubscript: "headers" as NSString)
+        obj.setObject(Self.makeUint8Array(in: context, from: msg.body), forKeyedSubscript: "body" as NSString)
+        return obj
+    }
+
+    /// Builds the per-frame JS ctx for ``applyFrame``. Like
+    /// ``makeContextValue`` but adds a ``frame`` sub-object holding
+    /// {index, end} and a ``state`` field that the script mutates
+    /// across calls. On the first call ``state`` is nil and we install
+    /// a fresh empty object so the script can write to it without
+    /// guarding.
+    private func makeFrameContextValue(
+        _ ctx: FrameContext,
+        frame: Data,
+        state: JSValue?
+    ) -> JSValue {
         let obj = JSValue(newObjectIn: context)!
         obj.setObject(
             ctx.phase == .httpRequest ? "request" : "response",
             forKeyedSubscript: "phase" as NSString
         )
-        if let method = ctx.method {
-            obj.setObject(method, forKeyedSubscript: "method" as NSString)
-        }
-        if let url = ctx.url {
-            obj.setObject(url, forKeyedSubscript: "url" as NSString)
-        }
-        // Headers as an array of [name, value] pairs preserves both
-        // duplicates and emit order; users can build a map if they want.
+        obj.setObject(ctx.method as Any, forKeyedSubscript: "method" as NSString)
+        obj.setObject(ctx.url as Any, forKeyedSubscript: "url" as NSString)
+        obj.setObject(ctx.status as Any, forKeyedSubscript: "status" as NSString)
         let pairs: [[String]] = ctx.headers.map { [$0.name, $0.value] }
         obj.setObject(pairs, forKeyedSubscript: "headers" as NSString)
+
+        let frameInfo = JSValue(newObjectIn: context)!
+        frameInfo.setObject(ctx.frameIndex, forKeyedSubscript: "index" as NSString)
+        frameInfo.setObject(ctx.isLast, forKeyedSubscript: "end" as NSString)
+        obj.setObject(frameInfo, forKeyedSubscript: "frame" as NSString)
+
+        let stateValue = state ?? JSValue(newObjectIn: context)!
+        obj.setObject(stateValue, forKeyedSubscript: "state" as NSString)
+
+        obj.setObject(Self.makeUint8Array(in: context, from: frame), forKeyedSubscript: "body" as NSString)
         return obj
+    }
+
+    /// Reads each mutable field off the post-call ctx object and builds
+    /// an updated ``Message``. Anything the script didn't touch comes
+    /// back identical to the input; anything it cleared (assigned
+    /// `null` / `undefined`) becomes nil on Swift side.
+    private func readBack(_ original: Message, from ctx: JSValue) -> Message {
+        var msg = original
+        let method = ctx.objectForKeyedSubscript("method")
+        msg.method = stringOrNil(method)
+        let url = ctx.objectForKeyedSubscript("url")
+        msg.url = stringOrNil(url)
+        let status = ctx.objectForKeyedSubscript("status")
+        msg.status = intOrNil(status)
+        if let headers = ctx.objectForKeyedSubscript("headers"),
+           !headers.isUndefined, !headers.isNull {
+            msg.headers = Self.headersFromValue(headers)
+        }
+        if let body = ctx.objectForKeyedSubscript("body"),
+           let bytes = Self.bytesFromValue(body, in: context) {
+            msg.body = bytes
+        }
+        return msg
+    }
+
+    private func stringOrNil(_ value: JSValue?) -> String? {
+        guard let value, !value.isUndefined, !value.isNull else { return nil }
+        return value.toString()
+    }
+
+    private func intOrNil(_ value: JSValue?) -> Int? {
+        guard let value, !value.isUndefined, !value.isNull else { return nil }
+        if value.isNumber {
+            return Int(value.toInt32())
+        }
+        // A string like "418" is convertible, but ambiguous; refuse and
+        // let the script use a number literal explicitly.
+        return nil
+    }
+
+    /// Decodes a JS `[[name, value], ...]` array into the Swift header
+    /// list. Anything non-arrayish or whose entries aren't two-string
+    /// pairs is dropped silently.
+    private static func headersFromValue(_ value: JSValue) -> [(name: String, value: String)] {
+        guard let array = value.toArray() else { return [] }
+        var result: [(name: String, value: String)] = []
+        result.reserveCapacity(array.count)
+        for entry in array {
+            guard let pair = entry as? [Any], pair.count == 2 else { continue }
+            let name = (pair[0] as? String) ?? String(describing: pair[0])
+            let val = (pair[1] as? String) ?? String(describing: pair[1])
+            result.append((name: name, value: val))
+        }
+        return result
     }
 
     // MARK: - Anywhere globals
@@ -251,24 +428,15 @@ final class MITMScriptEngine {
         store.setObject(storeKeys, forKeyedSubscript: "keys" as NSString)
         anywhere.setObject(store, forKeyedSubscript: "store" as NSString)
 
-        // Anywhere.done(uint8Array) / Anywhere.exit() — short-circuit
-        // the body-rule chain. They set engine state and return
-        // undefined; the script keeps executing, so user code is
-        // expected to `return` immediately afterward to skip wasted
-        // work. ``done`` requires a Uint8Array (or any typed-array /
-        // ArrayBuffer) — strings, null, undefined, and the no-arg form
-        // raise a JS `TypeError`.
-        let doneBlock: @convention(block) (JSValue) -> Void = { [weak self] val in
-            let ctx = JSContext.current()!
-            guard let self else { return }
-            guard let bytes = Self.typedArrayBytesFromValue(val, in: ctx) else {
-                ctx.exception = JSValue(
-                    newErrorFromMessage: "Anywhere.done(value): value must be a Uint8Array",
-                    in: ctx
-                )
-                return
-            }
-            self.currentDirective = .done(bytes)
+        // Anywhere.done() / Anywhere.exit() — short-circuit the script
+        // chain. They set engine state and return undefined; the script
+        // keeps executing, so user code is expected to `return`
+        // immediately afterward to skip wasted work.
+        //
+        // ``done`` commits the current ctx state as the final message;
+        // ``exit`` reverts to the message as it entered the rule chain.
+        let doneBlock: @convention(block) () -> Void = { [weak self] in
+            self?.currentDirective = .done
         }
         let exitBlock: @convention(block) () -> Void = { [weak self] in
             self?.currentDirective = .exit
@@ -320,9 +488,9 @@ final class MITMScriptEngine {
     /// Strict typed-array / ArrayBuffer extraction — no string
     /// fallback. Returns nil for null, undefined, strings, numbers,
     /// plain objects, and anything else that isn't byte-shaped.
-    /// `Anywhere.done` uses this to enforce its Uint8Array-only
-    /// contract; the bytes-or-string helpers (utf8/base64/hex,
-    /// `process` return value) keep using ``bytesFromValue``.
+    /// Used for the utf8/base64/hex helpers' inputs, since the body
+    /// readback already accepts strings (via ``bytesFromValue``) as a
+    /// convenience.
     private static func typedArrayBytesFromValue(_ value: JSValue, in context: JSContext) -> Data? {
         if value.isNull || value.isUndefined { return nil }
         let ctxRef = context.jsGlobalContextRef
