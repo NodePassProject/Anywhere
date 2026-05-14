@@ -3062,6 +3062,7 @@
       }
     },
     "Body Script" : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -12801,6 +12802,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Tập lệnh luồng"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "流式脚本"
           }
         }
       }
