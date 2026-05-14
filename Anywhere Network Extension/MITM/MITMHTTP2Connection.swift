@@ -47,6 +47,9 @@ final class MITMHTTP2Connection {
         static let continuation: UInt8 = 0x9
     }
 
+    /// HTTP/2's mandated minimum ``SETTINGS_MAX_FRAME_SIZE`` (RFC 9113 §6.5.2).
+    private static let maxFramePayloadSize = 16_384
+
     // MARK: - Raw frame
 
     /// Format-preserving frame view — keeps the wire-level type byte so
@@ -322,37 +325,16 @@ final class MITMHTTP2Connection {
 
         let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten)
 
-        // Emit flags: keep END_STREAM and END_HEADERS (always set on
-        // re-emit since we collapse fragments into one frame); drop
-        // PADDED and PRIORITY.
-        var emittedFlags: UInt8 = 0x4 // END_HEADERS
-        if originalFlags & 0x1 != 0 { emittedFlags |= 0x1 } // END_STREAM
-
-        switch kind {
-        case .headers:
-            output.append(serializeFrame(RawFrame(
-                typeCode: FrameTypeCode.headers,
-                flags: emittedFlags,
-                streamID: streamID,
-                payload: reencoded
-            )))
-            return output
-        case .pushPromise(let promisedStreamID):
-            var payload = Data(capacity: 4 + reencoded.count)
-            let p = promisedStreamID & 0x7FFFFFFF
-            payload.append(UInt8((p >> 24) & 0xFF))
-            payload.append(UInt8((p >> 16) & 0xFF))
-            payload.append(UInt8((p >> 8) & 0xFF))
-            payload.append(UInt8(p & 0xFF))
-            payload.append(reencoded)
-            output.append(serializeFrame(RawFrame(
-                typeCode: FrameTypeCode.pushPromise,
-                flags: emittedFlags,
-                streamID: streamID,
-                payload: payload
-            )))
-            return output
-        }
+        // Encoded block emission drops PADDED and PRIORITY but preserves
+        // END_STREAM. END_HEADERS lands on the final emitted frame, which
+        // ``emitHeaderBlock`` picks based on whether splitting is required.
+        output.append(emitHeaderBlock(
+            streamID: streamID,
+            block: reencoded,
+            endStream: originalFlags & 0x1 != 0,
+            kind: kind
+        ))
+        return output
     }
 
     // MARK: - DATA
@@ -369,14 +351,7 @@ final class MITMHTTP2Connection {
         // DATA frame with the original body and END_STREAM flag, with
         // PADDED cleared.
         guard var buffer = bodyBuffers[streamID] else {
-            var emittedFlags: UInt8 = 0
-            if endStream { emittedFlags |= 0x1 }
-            return serializeFrame(RawFrame(
-                typeCode: FrameTypeCode.data,
-                flags: emittedFlags,
-                streamID: streamID,
-                payload: body
-            ))
+            return emitDataFrames(streamID: streamID, payload: body, endStream: endStream)
         }
 
         // Abandoned path: a previous DATA frame on this stream blew
@@ -389,14 +364,7 @@ final class MITMHTTP2Connection {
             } else {
                 bodyBuffers[streamID] = buffer
             }
-            var emittedFlags: UInt8 = 0
-            if endStream { emittedFlags |= 0x1 }
-            return serializeFrame(RawFrame(
-                typeCode: FrameTypeCode.data,
-                flags: emittedFlags,
-                streamID: streamID,
-                payload: body
-            ))
+            return emitDataFrames(streamID: streamID, payload: body, endStream: endStream)
         }
 
         // Buffering path: accumulate until END_STREAM.
@@ -412,12 +380,7 @@ final class MITMHTTP2Connection {
             buffer.data = Data()
             buffer.abandoned = true
             bodyBuffers[streamID] = buffer
-            return serializeFrame(RawFrame(
-                typeCode: FrameTypeCode.data,
-                flags: 0,
-                streamID: streamID,
-                payload: prefix
-            ))
+            return emitDataFrames(streamID: streamID, payload: prefix, endStream: false)
         }
 
         bodyBuffers[streamID] = buffer
@@ -458,14 +421,7 @@ final class MITMHTTP2Connection {
             contentType: contentType,
             context: context
         )
-        var flags: UInt8 = 0
-        if endStream { flags |= 0x1 }
-        return serializeFrame(RawFrame(
-            typeCode: FrameTypeCode.data,
-            flags: flags,
-            streamID: streamID,
-            payload: rewritten
-        ))
+        return emitDataFrames(streamID: streamID, payload: rewritten, endStream: endStream)
     }
 
     // MARK: - Body-buffer policy
@@ -601,6 +557,100 @@ final class MITMHTTP2Connection {
         buffer.removeFirst(total)
 
         return RawFrame(typeCode: type, flags: flags, streamID: streamID, payload: payload)
+    }
+
+    /// Emits one or more DATA frames whose payloads each fit within
+    /// ``maxFramePayloadSize``. END_STREAM lands on the last frame only.
+    /// An empty input still emits a single empty DATA frame so any
+    /// END_STREAM signal survives.
+    private func emitDataFrames(streamID: UInt32, payload: Data, endStream: Bool) -> Data {
+        if payload.isEmpty {
+            var flags: UInt8 = 0
+            if endStream { flags |= 0x1 }
+            return serializeFrame(RawFrame(
+                typeCode: FrameTypeCode.data,
+                flags: flags,
+                streamID: streamID,
+                payload: Data()
+            ))
+        }
+        var output = Data()
+        var offset = payload.startIndex
+        while offset < payload.endIndex {
+            let end = min(payload.endIndex, offset + Self.maxFramePayloadSize)
+            let isLast = end == payload.endIndex
+            var flags: UInt8 = 0
+            if isLast && endStream { flags |= 0x1 }
+            output.append(serializeFrame(RawFrame(
+                typeCode: FrameTypeCode.data,
+                flags: flags,
+                streamID: streamID,
+                payload: payload.subdata(in: offset..<end)
+            )))
+            offset = end
+        }
+        return output
+    }
+
+    /// Emits a HEADERS or PUSH_PROMISE frame, followed by CONTINUATION
+    /// frames when the encoded block does not fit in a single frame
+    /// (RFC 9113 §6.2 / §6.10). PUSH_PROMISE's 4-byte Promised Stream ID
+    /// prefix counts towards the first frame's payload, so the initial
+    /// chunk is sized accordingly. END_HEADERS lands on the final emitted
+    /// frame; END_STREAM stays on the initial frame.
+    private func emitHeaderBlock(
+        streamID: UInt32,
+        block: Data,
+        endStream: Bool,
+        kind: PendingHeaders.Kind
+    ) -> Data {
+        let firstType: UInt8
+        var firstPayload: Data
+        switch kind {
+        case .headers:
+            firstType = FrameTypeCode.headers
+            firstPayload = Data()
+        case .pushPromise(let promisedStreamID):
+            firstType = FrameTypeCode.pushPromise
+            let p = promisedStreamID & 0x7FFFFFFF
+            firstPayload = Data(capacity: 4)
+            firstPayload.append(UInt8((p >> 24) & 0xFF))
+            firstPayload.append(UInt8((p >> 16) & 0xFF))
+            firstPayload.append(UInt8((p >> 8) & 0xFF))
+            firstPayload.append(UInt8(p & 0xFF))
+        }
+
+        let firstChunkSize = min(block.count, Self.maxFramePayloadSize - firstPayload.count)
+        let firstChunkEnd = block.startIndex + firstChunkSize
+        firstPayload.append(block.subdata(in: block.startIndex..<firstChunkEnd))
+        let needsContinuation = firstChunkEnd < block.endIndex
+
+        var firstFlags: UInt8 = 0
+        if !needsContinuation { firstFlags |= 0x4 }  // END_HEADERS
+        if endStream { firstFlags |= 0x1 }           // END_STREAM
+
+        var output = Data()
+        output.append(serializeFrame(RawFrame(
+            typeCode: firstType,
+            flags: firstFlags,
+            streamID: streamID,
+            payload: firstPayload
+        )))
+
+        var offset = firstChunkEnd
+        while offset < block.endIndex {
+            let end = min(block.endIndex, offset + Self.maxFramePayloadSize)
+            let isLast = end == block.endIndex
+            let flags: UInt8 = isLast ? 0x4 : 0
+            output.append(serializeFrame(RawFrame(
+                typeCode: FrameTypeCode.continuation,
+                flags: flags,
+                streamID: streamID,
+                payload: block.subdata(in: offset..<end)
+            )))
+            offset = end
+        }
+        return output
     }
 
     private func serializeFrame(_ frame: RawFrame) -> Data {
