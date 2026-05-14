@@ -68,7 +68,7 @@ enum TunnelConstants {
     /// Maximum buffer size for queued UDP datagrams.
     static let udpMaxBufferSize = 256 * 1024
     /// Idle timeout for UDP flows (seconds).
-    static let udpIdleTimeout: CFAbsoluteTime = 60
+    static let udpIdleTimeout: CFAbsoluteTime = 300
 
     // MARK: - Log Buffer
 
