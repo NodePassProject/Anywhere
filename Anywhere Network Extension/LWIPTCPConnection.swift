@@ -569,14 +569,7 @@ class LWIPTCPConnection {
             logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
             rejectGracefully()
         case .proxy:
-            if var resolved = router.resolveConfiguration(action: action) {
-                // Preserve the ambient chain from the default configuration
-                // if the rule-targeted configuration didn't specify one.
-                if let defaultChain = configuration.chain,
-                   !defaultChain.isEmpty,
-                   resolved.chain == nil {
-                    resolved = resolved.withChain(defaultChain)
-                }
+            if let resolved = router.resolveConfiguration(action: action) {
                 configuration = resolved
             } else {
                 logger.warning("[TCP] SNI routing configuration not found for \(sni)")
