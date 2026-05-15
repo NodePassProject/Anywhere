@@ -2,7 +2,7 @@
 //  SubscriptionDomainHelper.swift
 //  Anywhere
 //
-//  Created by Argsment Limited on 4/24/26.
+//  Created by NodePassProject on 4/24/26.
 //
 
 class SubscriptionDomainHelper {

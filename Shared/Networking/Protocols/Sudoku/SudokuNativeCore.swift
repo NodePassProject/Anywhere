@@ -2,7 +2,7 @@
 //  SudokuNativeCore.swift
 //  Anywhere
 //
-//  Pure Swift Sudoku table generation, obfuscation codecs, and key recovery.
+//  Created by saba-futai on 4/23/26.
 //
 
 import Foundation

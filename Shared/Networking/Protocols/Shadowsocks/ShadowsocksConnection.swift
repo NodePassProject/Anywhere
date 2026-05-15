@@ -2,7 +2,7 @@
 //  ShadowsocksConnection.swift
 //  Anywhere
 //
-//  Created by Argsment Limited on 3/6/26.
+//  Created by NodePassProject on 3/6/26.
 //
 
 import Foundation

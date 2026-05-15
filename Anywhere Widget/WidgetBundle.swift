@@ -2,7 +2,7 @@
 //  WidgetBundle.swift
 //  Anywhere
 //
-//  Created by Argsment Limited on 4/6/26.
+//  Created by NodePassProject on 4/6/26.
 //
 
 import WidgetKit

@@ -2,7 +2,7 @@
 //  SettingsView.swift
 //  Anywhere
 //
-//  Created by Argsment Limited on 2/21/26.
+//  Created by NodePassProject on 2/21/26.
 //
 
 import SwiftUI
