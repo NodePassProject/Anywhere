@@ -116,6 +116,25 @@ if let url = URL(string: "anywhere://add-proxy?link=vless://uuid@host:443?type=t
 }
 ```
 
+## Related Projects
+
+<table>
+<tr>
+<td width="100" valign="middle">
+    <a href="https://apps.apple.com/us/app/id6766003090">
+        <img width="80" height="80" alt="Everywhere" src="https://storage.argsment.com/Everywhere-AppIcon-iOS.png" />
+    </a>
+</td>
+<td valign="middle">
+
+### [Everywhere](https://github.com/NodePassProject/Everywhere)
+
+**One app. Three networking engines. Your rules.**
+
+</td>
+</tr>
+</table>
+
 ## License
 
 Anywhere is licensed under the [GNU General Public License v3.0](LICENSE).
