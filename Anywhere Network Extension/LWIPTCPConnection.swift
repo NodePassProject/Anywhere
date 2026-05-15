@@ -523,18 +523,16 @@ class LWIPTCPConnection {
     }
 
     /// Re-evaluates routing using the hostname extracted from the TLS
-    /// ClientHello. Updates `dstHost`, `configuration`, and `bypass` in place
-    /// so the subsequent ``beginConnecting()`` sees the SNI-based decision.
+    /// ClientHello. Updates `configuration` and `bypass` in place so the
+    /// subsequent ``beginConnecting()`` sees the SNI-based decision.
     ///
-    /// Behavior:
-    ///   - Found a matching domain rule: apply it (may switch proxy, flip
-    ///     bypass, or reject the connection) and swap `dstHost` to the SNI so
-    ///     the new route resolves the name itself.
-    ///   - No rule matches: keep the IP-derived `dstHost` and configuration.
-    ///     Rewriting to the SNI hostname would force the outbound proxy to
-    ///     re-resolve via its own DNS, which can land on a different CDN IP
-    ///     than the one the caller already chose (breaks latency tests that
-    ///     pre-resolve a specific server, and risks cert/host mismatches).
+    /// ``dstHost`` is never rewritten here: the IP-derived value the
+    /// caller (or the fake-IP pool) already picked is preserved. The
+    /// caller's own DNS resolution is the authoritative source of truth
+    /// for the destination IP; rewriting to the SNI hostname would force
+    /// either the outbound proxy or our own ``getaddrinfo`` to re-resolve
+    /// and possibly land on a different CDN edge than the one the local
+    /// app picked (breaks latency tests, risks cert/host mismatches).
     ///
     /// Must be called only while in sniff phase (sniffer has just cleared).
     private func applySNI(_ sni: String) {
@@ -557,11 +555,6 @@ class LWIPTCPConnection {
             return
         }
 
-        // Rule matched: the sniffed hostname is what drives the new route,
-        // so forward the proxy CONNECT to the name rather than the tentative
-        // IP.
-        dstHost = sni
-
         switch action {
         case .direct:
             bypass = true
@@ -570,6 +563,10 @@ class LWIPTCPConnection {
             rejectGracefully()
         case .proxy:
             if let resolved = router.resolveConfiguration(action: action) {
+                // Override any IP-derived bypass: an IP-CIDR `.direct` hit on
+                // the tentative dst may have set ``bypass = true`` at accept
+                // time, but the domain rule now wins.
+                bypass = false
                 configuration = resolved
             } else {
                 logger.warning("[TCP] SNI routing configuration not found for \(sni)")

@@ -1085,7 +1085,7 @@ final class MITMHTTP2Connection {
         // accounting on the receiver. Drop the bytes here, matching
         // HTTP/1's emitScriptedHead carve-out.
         let isHeadResponse = phase == .httpResponse
-            && pending.originatingRequest?.method.uppercased() == "HEAD"
+        && pending.originatingRequest?.method?.uppercased() == "HEAD"
         let body = isHeadResponse ? Data() : result.body
         // END_STREAM lands on either HEADERS (no body case) or the last
         // DATA frame (body case). HTTP/2 requires DATA to follow HEADERS
