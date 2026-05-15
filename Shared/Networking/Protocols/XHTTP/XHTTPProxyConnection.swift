@@ -2,7 +2,7 @@
 //  XHTTPProxyConnection.swift
 //  Anywhere
 //
-//  Created by Argsment Limited on 1/26/26.
+//  Created by NodePassProject on 1/26/26.
 //
 
 import Foundation

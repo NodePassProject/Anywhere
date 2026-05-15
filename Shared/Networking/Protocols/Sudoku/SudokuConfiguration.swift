@@ -2,8 +2,7 @@
 //  SudokuConfiguration.swift
 //  Anywhere
 //
-//  Copyright (C) 2026 by saba <contact me via issue>. GPLv3.
-//  Created by saba on 4/23/26.
+//  Created by saba-futai on 4/23/26.
 //
 
 import Foundation

@@ -2,7 +2,7 @@
 //  ProxyClient+Sudoku.swift
 //  Anywhere
 //
-//  Native Swift Sudoku outbound entry points.
+//  Created by saba-futai on 4/23/26.
 //
 
 import Foundation

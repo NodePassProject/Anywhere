@@ -2,9 +2,7 @@
 //  SudokuProxyConnection.swift
 //  Anywhere
 //
-//  Native Swift Sudoku outbound. Transport, HTTPMask, KIP, record AEAD, UoT,
-//  mux, table codecs, and key recovery are implemented with platform crypto
-//  and the existing Anywhere TLS stack.
+//  Created by saba-futai on 4/23/26.
 //
 
 import Foundation
