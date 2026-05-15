@@ -91,10 +91,7 @@ extension LWIPStack {
                         logger.debug("[TCP] IP rejected by routing rule: \(dstIPString):\(dstPort)")
                         return nil
                     case .proxy(_):
-                        if var configuration = shared.domainRouter.resolveConfiguration(action: action) {
-                            if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
-                                configuration = configuration.withChain(chain)
-                            }
+                        if let configuration = shared.domainRouter.resolveConfiguration(action: action) {
                             connectionConfiguration = configuration
                         } else {
                             logger.warning("[TCP] Routing config not found for \(dstIPString)")
@@ -104,10 +101,7 @@ extension LWIPStack {
                 sniffSNI = true
             case .resolved(let domain, let configurationOverride, let bypass):
                 dstHost = domain
-                if var configuration = configurationOverride {
-                    if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
-                        configuration = configuration.withChain(chain)
-                    }
+                if let configuration = configurationOverride {
                     connectionConfiguration = configuration
                 }
                 forceBypass = bypass
@@ -262,10 +256,7 @@ extension LWIPStack {
                         )
                         return
                     case .proxy(_):
-                        if var configuration = shared.domainRouter.resolveConfiguration(action: action) {
-                            if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
-                                configuration = configuration.withChain(chain)
-                            }
+                        if let configuration = shared.domainRouter.resolveConfiguration(action: action) {
                             flowConfiguration = configuration
                         } else {
                             logger.warning("[UDP] Routing config not found for \(dstIPString)")
@@ -274,10 +265,7 @@ extension LWIPStack {
                 }
             case .resolved(let domain, let configurationOverride, let bypass):
                 dstHost = domain
-                if var configuration = configurationOverride {
-                    if let chain = defaultConfiguration.chain, !chain.isEmpty, configuration.chain == nil {
-                        configuration = configuration.withChain(chain)
-                    }
+                if let configuration = configurationOverride {
                     flowConfiguration = configuration
                 }
                 forceBypass = bypass
