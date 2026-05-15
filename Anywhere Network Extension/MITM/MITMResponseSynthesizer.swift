@@ -129,7 +129,7 @@ final class MITMResponseSynthesizer {
         if let str = String(data: lineData, encoding: .ascii) {
             // Request line: "METHOD SP request-target SP HTTP/1.x"
             let parts = str.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-            path = parts.count >= 2 ? String(parts[1]) : "/"
+            path = parts.count >= 2 ? Self.sanitizedPath(String(parts[1])) : "/"
         } else {
             path = "/"
         }
@@ -265,7 +265,7 @@ final class MITMResponseSynthesizer {
         }
         var path = "/"
         for (n, v) in headers where n == ":path" {
-            path = v
+            path = Self.sanitizedPath(v)
             break
         }
         sendResponseH2(streamID: frame.streamID, path: path)
@@ -364,7 +364,14 @@ final class MITMResponseSynthesizer {
 
     private func effectiveContentType() -> String {
         let body = target.rejectBody
-        if let override = body?.contentType, !override.isEmpty {
+        // A configured override can come from a third-party imported rule
+        // set; CR / LF / NUL in the value would split the response head
+        // on HTTP/1 (RFC 9110 §5.5) and trip strict h2 receivers
+        // (RFC 9113 §8.2.1). Fall back to the kind's default rather than
+        // splicing the unsafe value onto the wire.
+        if let override = body?.contentType,
+           !override.isEmpty,
+           Self.isValidHeaderValue(override) {
             return override
         }
         switch body?.kind ?? .text {
@@ -372,6 +379,38 @@ final class MITMResponseSynthesizer {
         case .gif:  return "image/gif"
         case .data: return "application/octet-stream"
         }
+    }
+
+    /// Strips CR / LF / NUL — and any other control byte that could
+    /// terminate an HTTP/1 header line — from a path destined for the
+    /// `Location:` response header (or the HTTP/2 `location` HPACK
+    /// literal). RFC 9112 §3.2 forbids these in a request-target, so a
+    /// request line that carries them is malformed; emitting them
+    /// verbatim into the synthesized response would response-split on
+    /// HTTP/1 (the byte ends the Location line, the rest becomes a
+    /// new header) and trip RFC 9113 §10.3's reject rule on strict h2
+    /// clients. Falling back to ``/`` keeps the synth response coherent.
+    private static func sanitizedPath(_ path: String) -> String {
+        guard !path.isEmpty else { return "/" }
+        for byte in path.utf8 {
+            // SP / HTAB / CR / LF / NUL / DEL and other CTLs.
+            if byte <= 0x20 || byte == 0x7F {
+                return "/"
+            }
+        }
+        return path
+    }
+
+    /// RFC 9110 §5.5: a header field-value must not contain CR / LF / NUL.
+    /// Used to reject a user-supplied ``contentType`` override that would
+    /// otherwise split the synthesized response head on HTTP/1.
+    private static func isValidHeaderValue(_ value: String) -> Bool {
+        for byte in value.utf8 {
+            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
+                return false
+            }
+        }
+        return true
     }
 
     /// 43-byte 1×1 transparent GIF89a — the canonical "tracking pixel"

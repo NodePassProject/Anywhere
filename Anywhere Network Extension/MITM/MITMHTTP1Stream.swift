@@ -1155,6 +1155,19 @@ final class MITMHTTP1Stream {
         let lines = raw.components(separatedBy: "\r\n")
         guard let startLine = lines.first, !startLine.isEmpty else { return nil }
         guard isHTTPStartLine(startLine) else { return nil }
+        // ``components(separatedBy: "\r\n")`` only splits on the exact
+        // CRLF sequence, so a peer that smuggled a lone CR or a lone LF
+        // inside the request-target / status line lands here intact.
+        // Re-emitting verbatim via ``serializeHead`` would then put that
+        // byte on the wire — strict receivers reject, but lax receivers
+        // (still common in the wild) may treat the lone LF as a line
+        // terminator and read the bytes that follow it as a smuggled
+        // header. Refusing the parse forces the stream into
+        // ``passthrough`` so the bytes flow unmodified to the receiver,
+        // which is the safer failure mode than us injecting a CRLF we
+        // can't take back. NUL is also rejected since it is forbidden
+        // anywhere in HTTP/1 syntax (RFC 9112 §2.2).
+        if Self.containsControlChars(startLine) { return nil }
         var headers: [Header] = []
         for line in lines.dropFirst() {
             if line.isEmpty { continue }
@@ -1162,9 +1175,34 @@ final class MITMHTTP1Stream {
             let name = String(line[..<colon])
             let value = String(line[line.index(after: colon)...])
                 .trimmingCharacters(in: CharacterSet.whitespaces)
+            // Same logic as the start-line guard above, applied per
+            // header field. CRLF terminated the field-line so the value
+            // can't legally carry one; a lone CR or LF inside the value
+            // is still smuggling and we treat the head as un-parseable.
+            // The name has narrower legal alphabet (RFC 9110 §5.6.2
+            // token chars only) — anything outside that, including the
+            // control bytes, fails the check too.
+            if Self.containsControlChars(name) || Self.containsControlChars(value) {
+                return nil
+            }
             headers.append((name: name, value: value))
         }
         return ParsedHead(startLine: startLine, headers: headers)
+    }
+
+    /// True when ``s`` contains a lone CR, lone LF, or NUL — any byte
+    /// that would split or terminate an HTTP/1 head line on the wire if
+    /// re-emitted via ``serializeHead``. Intentionally tighter than the
+    /// header-field-value rule (which only bans CR / LF / NUL): the
+    /// start line and field-name positions have no legal use for those
+    /// bytes either way.
+    private static func containsControlChars(_ s: String) -> Bool {
+        for byte in s.utf8 {
+            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
+                return true
+            }
+        }
+        return false
     }
 
     private func isHTTPStartLine(_ line: String) -> Bool {
