@@ -49,6 +49,14 @@ enum MITMOperation: Equatable {
     /// `nil` means the user did not supply a list at import time; the
     /// runtime falls back to ``MITMBodyCodec/isRewritableType``'s
     /// allowlist of textual MIME types. An empty list matches nothing.
+    ///
+    /// Runtime single-rule semantics (by design, not a limitation):
+    /// at most one ``.script`` rule fires per message even when a
+    /// rule set declares several whose filters match — the last
+    /// matching rule wins. This is a deliberate design choice to
+    /// maximize performance and efficiency; see ``MITMScriptTransform``
+    /// for the full rationale. Authors who need composed behaviour
+    /// should consolidate logic into a single `process(ctx)`.
     case script(scriptBase64: String, contentTypes: [String]?)
     /// Per-frame JavaScript transform for streaming bodies (gRPC,
     /// server-sent events, chunked APIs). Same storage shape as
@@ -63,6 +71,11 @@ enum MITMOperation: Equatable {
     /// count mid-stream would desync framing the head has already
     /// committed to. If both ``script`` and ``streamScript`` rules
     /// match the same message, ``streamScript`` wins.
+    ///
+    /// Same runtime single-rule semantics as ``script`` (by design
+    /// for performance and efficiency, not a limitation): at most one
+    /// ``.streamScript`` fires per stream — the last matching rule
+    /// wins. See ``MITMScriptTransform`` for the full rationale.
     case streamScript(scriptBase64: String, contentTypes: [String]?)
 }
 
@@ -358,6 +371,7 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case id
         case name
         case domainSuffix       // legacy: single-suffix shape predating named sets
         case domainSuffixes
@@ -367,7 +381,11 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = UUID()
+        // Persisted id keeps ``MITMScriptStore`` scope keys stable across
+        // snapshot reloads. Pre-id blobs decode with a fresh UUID; any
+        // script-store buckets written under that fresh id stay reachable
+        // for the rest of the process (and get persisted on the next save).
+        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         let legacySuffix = try c.decodeIfPresent(String.self, forKey: .domainSuffix)
         if let suffixes = try c.decodeIfPresent([String].self, forKey: .domainSuffixes) {
             self.domainSuffixes = suffixes
@@ -384,6 +402,7 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
         try c.encode(domainSuffixes, forKey: .domainSuffixes)
         try c.encodeIfPresent(rewriteTarget, forKey: .rewriteTarget)

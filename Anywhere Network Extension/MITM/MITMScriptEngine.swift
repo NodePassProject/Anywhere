@@ -199,8 +199,14 @@ final class MITMScriptEngine {
     init() {
         let vm = JSVirtualMachine()!
         self.context = JSContext(virtualMachine: vm)
-        self.context.exceptionHandler = { _, exception in
+        // JSC's default exception handler writes the thrown value to
+        // ``context.exception``; installing a custom handler REPLACES
+        // that default, so we must reinstate the write ourselves or
+        // every ``context.exception != nil`` check downstream sees
+        // nil and the watchdog / rollback paths silently never fire.
+        self.context.exceptionHandler = { context, exception in
             logger.warning("[MITM][JS] uncaught: \(exception?.toString() ?? "<unknown>")")
+            context?.exception = exception
         }
         // Arm the watchdog on this context group. The limit applies
         // to every JS call routed through ``context`` for the
@@ -266,6 +272,14 @@ final class MITMScriptEngine {
             }
         }
         if hadException {
+            // Uncaught throw without a directive: revert all ctx
+            // mutations the script made before the throw. The
+            // defensive default is to discard partial work rather than
+            // commit a half-formed rewrite onto the wire; a script
+            // that wants its mutations preserved can wrap the failing
+            // call in try/catch, or signal ``Anywhere.done()``
+            // explicitly before the throw point (the directive branch
+            // above keeps ``updated`` in that case).
             context.exception = nil
             return .modified(message)
         }
@@ -382,6 +396,22 @@ final class MITMScriptEngine {
         }
         guard let value, !value.isUndefined, !value.isNull else {
             logger.warning("[MITM][JS] script did not define process(ctx)")
+            return nil
+        }
+        // Caching a non-callable value (e.g. ``let process = 42;`` or
+        // ``var process = { run: ... };``) would have every subsequent
+        // ``function.call`` throw "not a function" forever, since the
+        // cache is sticky for the engine's lifetime. Reject up front so
+        // the failure mode is one logged line, not one warning per
+        // intercepted message.
+        guard let ref = value.jsValueRef else { return nil }
+        let ctxRef = context.jsGlobalContextRef
+        var exception: JSValueRef?
+        guard let object = JSValueToObject(ctxRef, ref, &exception),
+              exception == nil,
+              JSObjectIsFunction(ctxRef, object)
+        else {
+            logger.warning("[MITM][JS] script's `process` is not a function; declare it as `function process(ctx) { ... }`")
             return nil
         }
         compiled[key] = value
@@ -536,18 +566,32 @@ final class MITMScriptEngine {
     }
 
     /// Decodes a JS `[[name, value], ...]` array into the Swift header
-    /// list, returning nil when the input isn't array-shaped at all (so
-    /// the caller can keep the original headers instead of wiping
-    /// them). Individual entries whose name isn't a valid HTTP token
-    /// (RFC 9110 §5.6.2) or whose value contains CR / LF / NUL (§5.5)
-    /// are dropped with a warning — emitting them verbatim would split
-    /// the response head on the wire.
+    /// list, returning nil when the input isn't array-shaped at all
+    /// (so the caller can keep the original headers instead of wiping
+    /// them) or when every entry in a non-empty input failed
+    /// validation. An explicit empty input array still returns an
+    /// empty list so a script can intentionally clear all headers via
+    /// `ctx.headers = []`. Individual entries whose name isn't a valid
+    /// HTTP token (RFC 9110 §5.6.2) or whose value contains CR / LF /
+    /// NUL (§5.5) are dropped with a warning — emitting them verbatim
+    /// would split the response head on the wire.
+    ///
+    /// The "all dropped" guard rules out a common footgun: a script
+    /// that writes a flat array (``ctx.headers = ["X-Foo","bar"]``)
+    /// instead of the required pair-of-pairs shape would otherwise
+    /// silently wipe every header on the message, since every entry
+    /// fails the ``pair.count == 2`` shape check. Reverting forces the
+    /// drop warnings into the log path the caller can act on.
     private static func headersFromValue(_ value: JSValue) -> [(name: String, value: String)]? {
         guard let array = value.toArray() else { return nil }
+        if array.isEmpty { return [] }
         var result: [(name: String, value: String)] = []
         result.reserveCapacity(array.count)
         for entry in array {
-            guard let pair = entry as? [Any], pair.count == 2 else { continue }
+            guard let pair = entry as? [Any], pair.count == 2 else {
+                logger.warning("[MITM][JS] dropping ctx.headers entry that isn't a [name, value] pair")
+                continue
+            }
             let name = (pair[0] as? String) ?? String(describing: pair[0])
             let val = (pair[1] as? String) ?? String(describing: pair[1])
             guard isValidHeaderName(name) else {
@@ -559,6 +603,10 @@ final class MITMScriptEngine {
                 continue
             }
             result.append((name: name, value: val))
+        }
+        if result.isEmpty {
+            logger.warning("[MITM][JS] ctx.headers had no valid [name, value] pairs; reverting to original headers (use ``ctx.headers = []`` to intentionally clear)")
+            return nil
         }
         return result
     }
@@ -856,7 +904,10 @@ final class MITMScriptEngine {
             guard let lo = iter.next(),
                   let h = hexNibble(hi),
                   let l = hexNibble(lo)
-            else { return Data() }
+            else {
+                logger.warning("[MITM][JS] Anywhere.hex.decode: input contains non-hex characters or odd length; returning empty Data")
+                return Data()
+            }
             out.append((h << 4) | l)
         }
         return out

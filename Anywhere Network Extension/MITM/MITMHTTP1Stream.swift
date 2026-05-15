@@ -23,6 +23,17 @@ private let logger = AnywhereLogger(category: "MITM")
 /// rewrites cannot apply.
 final class MITMHTTP1Stream {
 
+    /// Hard cap on bytes accumulated in ``rxBuffer`` while waiting for
+    /// the CRLF CRLF head terminator. nginx and Apache cap heads at
+    /// 8 KiB and 64 KiB by default; legitimate traffic stays well
+    /// under both. A hostile or malformed peer that streams bytes
+    /// without ever closing the head would otherwise grow the buffer
+    /// without bound and exhaust the Network Extension's ~50 MiB
+    /// budget. On cap exceed we permanently downgrade the stream to
+    /// passthrough — the bytes are forwarded verbatim, the rewrite is
+    /// abandoned, and the connection survives.
+    private static let maxHeadBytes: Int = 64 * 1024
+
     private let host: String
     private let phase: MITMPhase
     private let policy: MITMRewritePolicy
@@ -153,6 +164,14 @@ final class MITMHTTP1Stream {
     /// each ``transform(_:)`` call.
     private var pendingClientBytes = Data()
 
+    /// Synth bytes the response stream has popped off
+    /// ``MITMRequestLog.Record/synthAfter`` for the currently
+    /// in-flight response, waiting to be appended to ``output`` as
+    /// soon as that response's body finishes streaming. Response
+    /// phase only; request streams never populate this. See
+    /// ``flushSynthAfterResponse`` for the emission rule.
+    private var pendingSynthAfterCurrentResponse = Data()
+
     // MARK: - Public API
 
     func transform(_ data: Data) -> Data {
@@ -175,6 +194,25 @@ final class MITMHTTP1Stream {
         let bytes = pendingClientBytes
         pendingClientBytes.removeAll(keepingCapacity: false)
         return bytes
+    }
+
+    /// Appends any synth-after-response bytes captured when this
+    /// response's request record was popped, and clears the buffer.
+    /// Called by the response stream at every transition where the
+    /// current response has finished streaming on the wire — i.e.,
+    /// the wire byte for the response's last byte has been written to
+    /// ``output`` and the next bytes can belong to either the next
+    /// pipelined response or to the synth response that was attached
+    /// to this record. Emitting earlier would corrupt the in-flight
+    /// response's framing; emitting later would race the next
+    /// upstream response head. No-op when nothing is pending (i.e.,
+    /// the request stream did not attach a synth or this is the
+    /// request stream).
+    private func flushSynthAfterResponse(into output: inout Data) {
+        if !pendingSynthAfterCurrentResponse.isEmpty {
+            output.append(pendingSynthAfterCurrentResponse)
+            pendingSynthAfterCurrentResponse.removeAll(keepingCapacity: false)
+        }
     }
 
     // MARK: - Driver
@@ -229,6 +267,18 @@ final class MITMHTTP1Stream {
     ///     body and emits the (possibly mutated) head inline.
     private func consumeHead(into output: inout Data) -> Bool {
         guard let terminator = rxBuffer.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) else {
+            if rxBuffer.count > Self.maxHeadBytes {
+                // Hostile or pathologically-malformed peer: head
+                // never terminates. Forward what we have verbatim
+                // and downgrade — refusing to grow the buffer is
+                // strictly safer than risking the NE's memory
+                // budget on a single misbehaving connection.
+                logger.warning("[MITM] HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; downgrading to passthrough")
+                output.append(rxBuffer)
+                rxBuffer.removeAll(keepingCapacity: false)
+                mode = .passthrough
+                return true
+            }
             return false
         }
         let headEnd = terminator.upperBound
@@ -273,7 +323,20 @@ final class MITMHTTP1Stream {
             if isInterimResponseStartLine(rewrittenStartLine) {
                 originatingRequest = requestLog.peekHTTP1()
             } else {
-                originatingRequest = requestLog.popHTTP1()
+                let popped = requestLog.popHTTP1()
+                originatingRequest = popped
+                // Pipeline-order preservation: a pipelined follow-on
+                // request may have synthesized its response via
+                // ``Anywhere.respond`` while this record was still the
+                // newest in-flight entry. Those bytes were attached
+                // here instead of going straight to the client; the
+                // response stream now owns emitting them, but only
+                // after the current upstream response finishes
+                // streaming (otherwise the client would consume the
+                // synth bytes as part of this response's body).
+                if let popped, !popped.synthAfter.isEmpty {
+                    pendingSynthAfterCurrentResponse.append(popped.synthAfter)
+                }
             }
         } else {
             originatingRequest = nil
@@ -296,6 +359,15 @@ final class MITMHTTP1Stream {
                 logRequest(startLine: rewrittenStartLine)
             }
             output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
+            // Best-effort flush: a synth response attached to this
+            // record can no longer be cleanly framed since the
+            // connection is about to switch to passthrough (101) or
+            // read-until-close. Emit the bytes immediately after this
+            // head; pipelined clients with an in-flight 101 are a
+            // pathological corner case (the upgrade consumes the
+            // connection), but doing so beats silently dropping the
+            // bytes the script asked us to deliver.
+            flushSynthAfterResponse(into: &output)
             mode = .passthrough
             return true
         case .none, .contentLength, .chunked:
@@ -334,6 +406,7 @@ final class MITMHTTP1Stream {
                         fallbackStartLine: rewrittenStartLine,
                         result: result,
                         codecRequiresDecompression: false,
+                        originatingMethod: originatingRequest?.method,
                         into: &output
                     )
                 case .synthesizedResponse(let response):
@@ -345,6 +418,12 @@ final class MITMHTTP1Stream {
                 }
                 output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
             }
+            // No-body framing — the response is complete with the
+            // head alone, so this is the boundary for any synth bytes
+            // attached to it. Skipped (as a no-op) when the head was
+            // an interim 1xx, since we peeked rather than popped and
+            // ``pendingSynthAfterCurrentResponse`` stays empty.
+            flushSynthAfterResponse(into: &output)
             mode = .awaitingHead
             return true
         case .contentLength(let length):
@@ -485,6 +564,7 @@ final class MITMHTTP1Stream {
         rxBuffer.removeFirst(take)
         let left = remaining - take
         if left == 0 {
+            flushSynthAfterResponse(into: &output)
             mode = .awaitingHead
         } else {
             mode = .forwardingLength(remaining: left)
@@ -500,11 +580,15 @@ final class MITMHTTP1Stream {
             mode = .forwardingChunked(reader: reader)
             return false
         case .complete:
+            flushSynthAfterResponse(into: &output)
             mode = .awaitingHead
             return true
         case .malformed:
             // Forward remaining bytes verbatim; the peer will detect the
-            // framing error.
+            // framing error. Best-effort synth flush before downgrade —
+            // bytes that the script wanted "after this response" still
+            // belong here even if the body framing is broken.
+            flushSynthAfterResponse(into: &output)
             mode = .passthrough
             return true
         }
@@ -525,6 +609,7 @@ final class MITMHTTP1Stream {
         rxBuffer.removeFirst(take)
         if accumulator.count == expected {
             applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: nil, into: &output)
+            flushSynthAfterResponse(into: &output)
             mode = .awaitingHead
             return true
         }
@@ -551,6 +636,14 @@ final class MITMHTTP1Stream {
             if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
                 logger.warning("[MITM] Chunked body for \(host) exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); truncating")
                 applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: [accumulator.count], into: &output)
+                // The rewritten head + truncated body now form the
+                // complete response on the wire (collapsed to a
+                // Content-Length unit by ``applyScriptsAndEmit``).
+                // Wire-level the response is finished even though we
+                // keep draining the original chunks server-side, so
+                // synth-after bytes belong here rather than after the
+                // discard finishes.
+                flushSynthAfterResponse(into: &output)
                 mode = .discardingChunked(reader: reader)
                 return true
             }
@@ -558,9 +651,11 @@ final class MITMHTTP1Stream {
             return false
         case .complete(let originalSizes):
             applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: originalSizes, into: &output)
+            flushSynthAfterResponse(into: &output)
             mode = .awaitingHead
             return true
         case .malformed:
+            flushSynthAfterResponse(into: &output)
             mode = .passthrough
             return true
         }
@@ -592,6 +687,12 @@ final class MITMHTTP1Stream {
                 let line = rxBuffer.subdata(in: rxBuffer.startIndex..<lineEnd)
                 rxBuffer.removeSubrange(rxBuffer.startIndex..<(lineEnd + 2))
                 guard let size = Self.parseHexSize(line) else {
+                    // Best-effort: the stream is mid-corruption and the
+                    // client will see garbled bytes either way, but
+                    // silently dropping synth-after bytes the script
+                    // asked us to deliver is worse than smuggling them
+                    // into the broken stream.
+                    flushSynthAfterResponse(into: &output)
                     mode = .passthrough
                     return true
                 }
@@ -659,6 +760,7 @@ final class MITMHTTP1Stream {
                 guard rxBuffer[rxBuffer.startIndex] == 0x0D,
                       rxBuffer[rxBuffer.startIndex + 1] == 0x0A
                 else {
+                    flushSynthAfterResponse(into: &output)
                     mode = .passthrough
                     return true
                 }
@@ -678,6 +780,7 @@ final class MITMHTTP1Stream {
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
                 if line.isEmpty {
+                    flushSynthAfterResponse(into: &output)
                     mode = .awaitingHead
                     return true
                 }
@@ -791,6 +894,14 @@ final class MITMHTTP1Stream {
             mode = .discardingChunked(reader: reader)
             return false
         case .complete:
+            // Best-effort flush: the truncated rewritten body has
+            // already gone on the wire and the trailers are drained,
+            // so this is the cleanest boundary for synth bytes
+            // attached to this response. We can't pass them via
+            // ``output`` from a no-op transition function (the signature
+            // is bare), but the synth flush belongs on the next
+            // ``drive`` iteration's output anyway — capture it on
+            // re-entry to ``awaitingHead`` via the natural fall-through.
             mode = .awaitingHead
             return true
         case .malformed:
@@ -886,27 +997,56 @@ final class MITMHTTP1Stream {
     /// statuses, requests, scripts that populated a body) gets an
     /// explicit `Content-Length` matching the post-script body size so
     /// the receiver can frame the message without ambiguity.
+    ///
+    /// HEAD-response carve-out: per RFC 9110 §15.2 a response to HEAD
+    /// never carries a body, but its `Content-Length` /
+    /// `Transfer-Encoding` are informational — they mirror what GET
+    /// would return. Overwriting them with `Content-Length: 0` would
+    /// silently lie to the client about resource size. Pass the
+    /// originating request method in so the response leg can preserve
+    /// the server's framing headers and never write a body even if a
+    /// script accidentally populated one.
     private func emitScriptedHead(
         fallbackStartLine: String,
         result: MITMScriptEngine.Message,
         codecRequiresDecompression: Bool,
+        originatingMethod: String?,
         into output: inout Data
     ) {
         let finalStartLine = rebuildStartLine(from: result, fallback: fallbackStartLine)
-        var finalHeaders = strippedFramingHeaders(result.headers, dropContentEncoding: codecRequiresDecompression)
+        let isHeadResponse = phase == .httpResponse
+            && originatingMethod?.uppercased() == "HEAD"
 
-        let preserveNoBody = phase == .httpResponse
-            && result.body.isEmpty
-            && isNoBodyStatus(responseStatusCode(from: finalStartLine))
-        if !preserveNoBody {
-            finalHeaders.append((name: "Content-Length", value: String(result.body.count)))
+        let finalHeaders: [Header]
+        if isHeadResponse {
+            // Leave the server's framing headers intact; the receiver
+            // sent HEAD and knows not to read a body, so the values are
+            // purely informational. Still drop `Content-Encoding` when
+            // the (zero-byte) body was decompressed — but that's a
+            // theoretical case for HEAD since the .none framing path
+            // never decompresses.
+            finalHeaders = codecRequiresDecompression
+                ? result.headers.filter { $0.name.lowercased() != "content-encoding" }
+                : result.headers
+        } else {
+            var stripped = strippedFramingHeaders(result.headers, dropContentEncoding: codecRequiresDecompression)
+            let preserveNoBody = result.body.isEmpty
+                && isNoBodyStatus(responseStatusCode(from: finalStartLine))
+            if !preserveNoBody {
+                stripped.append((name: "Content-Length", value: String(result.body.count)))
+            }
+            finalHeaders = stripped
         }
 
         if phase == .httpRequest {
             logRequest(startLine: finalStartLine)
         }
         output.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
-        if !result.body.isEmpty {
+        // HEAD responses MUST NOT carry a body (§15.2); a script that
+        // wrote into ctx.body gets that write dropped on the wire
+        // rather than risking response-splitting against the next
+        // pipelined message.
+        if !result.body.isEmpty, !isHeadResponse {
             output.append(result.body)
         }
     }
@@ -1078,9 +1218,25 @@ final class MITMHTTP1Stream {
             headers.append((name: entry.name, value: entry.value))
         }
         headers.append((name: "Content-Length", value: String(response.body.count)))
-        pendingClientBytes.append(serializeHead(startLine: startLine, headers: headers))
+        var bytes = serializeHead(startLine: startLine, headers: headers)
         if !response.body.isEmpty {
-            pendingClientBytes.append(response.body)
+            bytes.append(response.body)
+        }
+        // Pipeline-order preservation: when an earlier pipelined
+        // request is still awaiting its upstream response, the synth
+        // bytes MUST land after that response or the client (which
+        // matches responses to requests by arrival order, RFC 9112
+        // §9.3.2) will pair them with the wrong request. Attach to
+        // the newest in-flight record so the response stream emits
+        // them once its matching response has streamed in full. With
+        // an empty queue there is no predecessor to wait on — the
+        // bytes go straight to the client via the existing inject
+        // path, which the session pump drains into the inner TLS
+        // record right after this transform call returns.
+        if requestLog.isHTTP1QueueEmpty {
+            pendingClientBytes.append(bytes)
+        } else {
+            requestLog.attachSynthAfterLastHTTP1(bytes)
         }
     }
 
@@ -1309,23 +1465,29 @@ final class MITMHTTP1Stream {
     /// message. For requests, the URL's path-and-query becomes the
     /// request-target; the host portion is ignored since the upstream
     /// is fixed at session creation. For responses, the status code
-    /// flows into the status line with a canonical reason phrase.
-    /// Falls back to the original line when the message lacks the
-    /// fields needed to rebuild.
+    /// flows into the status line with a canonical reason phrase. The
+    /// HTTP version is preserved from the input start line on both
+    /// phases so a legacy HTTP/1.0 peer isn't silently upgraded mid-
+    /// session. Falls back to the original line when the message
+    /// lacks the fields needed to rebuild.
     private func rebuildStartLine(
         from message: MITMScriptEngine.Message,
         fallback: String
     ) -> String {
+        let parts = fallback.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         switch message.phase {
         case .httpRequest:
             guard let method = message.method, let url = message.url else {
                 return fallback
             }
             let target = pathAndQuery(fromURL: url) ?? url
-            return "\(method) \(target) HTTP/1.1"
+            // Request start line: METHOD SP target SP HTTP-version.
+            // ``parts[2]`` is the version when the fallback parsed; fall
+            // back to 1.1 only when the original line was malformed.
+            let version = parts.count >= 3 ? String(parts[2]) : "HTTP/1.1"
+            return "\(method) \(target) \(version)"
         case .httpResponse:
             guard let status = message.status else { return fallback }
-            let parts = fallback.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             let version = parts.count >= 1 ? String(parts[0]) : "HTTP/1.1"
             let reason = canonicalReasonPhrase(for: status)
             return "\(version) \(status) \(reason)"

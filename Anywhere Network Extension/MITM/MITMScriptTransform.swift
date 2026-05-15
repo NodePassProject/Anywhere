@@ -12,16 +12,25 @@ import JavaScriptCore
 /// decompressed HTTP message. The HTTP/1.1 and HTTP/2 rewriters share
 /// this entry point so the rule-application loop lives in one place.
 ///
-/// **Single-rule semantics.** At most one ``.script`` and at most one
-/// ``.streamScript`` may fire on a given message. When multiple rules
-/// of the same kind match the in-flight Content-Type, the last one in
-/// rule order wins — later definitions overwrite earlier ones. This
-/// avoids state-collision hazards a chain would create: the JS
-/// engine's ``Anywhere.store`` keys are scoped to the rule set (not
-/// the rule), and the per-stream ``FrameCursor.state`` slot for
-/// ``streamScript`` is single-valued, so chaining two scripts on the
-/// same content type would have them stomping each other's persistent
-/// state on every frame.
+/// **Single-rule semantics — by design, not a limitation.** At most
+/// one ``.script`` and at most one ``.streamScript`` may fire on a
+/// given message. When multiple rules of the same kind match the
+/// in-flight Content-Type, the last one in rule order wins — later
+/// definitions overwrite earlier ones.
+///
+/// Capping the script chain at one rule per kind is a deliberate
+/// design choice to maximize performance and efficiency, not a
+/// missing feature. It keeps the hot path lean — no chain
+/// orchestration, no repeated Swift↔JS ctx round-trips per rule, no
+/// intermediate message copies between rules — and rules out
+/// state-collision hazards a chain would create: the JS engine's
+/// ``Anywhere.store`` keys are scoped to the rule set (not the rule),
+/// and the per-stream ``FrameCursor.state`` slot for ``streamScript``
+/// is single-valued, so chaining two scripts on the same content type
+/// would have them stomping each other's persistent state on every
+/// frame. Authors who need composed behaviour should consolidate
+/// logic into a single `process(ctx)` function rather than splitting
+/// across multiple rules.
 ///
 /// Each script rule carries its own ``BodyContentTypeFilter``; the
 /// message's `Content-Type` is checked at the entry point so rules

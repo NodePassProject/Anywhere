@@ -136,6 +136,25 @@ final class MITMHTTP2Connection {
         let originatingRequest: MITMRequestLog.Record?
         var frameIndex: Int = 0
         let cursor: MITMScriptTransform.FrameCursor
+        /// Running `emitted - consumed` byte total for the script's
+        /// effect on this stream. Tripping ``maxStreamingRewriteGrowthBytes``
+        /// flips the cursor to ``bypass`` so subsequent frames pass
+        /// through unchanged. See the flow-control note on the
+        /// constant for why we cap.
+        var cumulativeGrowth: Int = 0
+        /// Single-frame lookahead so the script's ``frame.end = true``
+        /// call coincides with the body of the actual last DATA
+        /// frame. Without it, an h2 stream that terminates via
+        /// trailer HEADERS (END_STREAM on trailer, not on the last
+        /// DATA) would deliver the last DATA payload with
+        /// ``frame.end = false`` and then a separate empty-body call
+        /// with ``frame.end = true``, breaking scripts written
+        /// against HTTP/1 semantics where the final call always
+        /// carries the last chunk's bytes. The held frame is
+        /// released as non-final when the next DATA arrives (we know
+        /// it wasn't last), and as final on END_STREAM-bearing DATA
+        /// or by ``flushStreamingScript`` on trailer arrival.
+        var pendingFrame: Data?
     }
     private var streamingScripts: [UInt32: StreamingState] = [:]
 
@@ -156,7 +175,27 @@ final class MITMHTTP2Connection {
     /// stream as idle, so forwarding stream frames can trigger a
     /// connection-level PROTOCOL_ERROR and take down every other
     /// in-flight stream on the same h2 connection. Inbound leg only.
+    ///
+    /// Eviction: RST_STREAM clears the entry, the swallow path clears
+    /// it when it sees an END_STREAM on a DATA / HEADERS frame, and a
+    /// FIFO cap (see ``synthRespondedMaxStreams``) evicts the oldest
+    /// entry when neither happens. Clients are not required to RST
+    /// after consuming a synthesized response — most just stop sending
+    /// — so without the cap the set would grow unbounded for the
+    /// connection's lifetime on every script that fires
+    /// ``Anywhere.respond``.
     private var synthRespondedStreams: Set<UInt32> = []
+    /// Insertion order mirror of ``synthRespondedStreams`` so the cap's
+    /// eviction picks the oldest streamID without losing the O(1)
+    /// membership test on the hot frame-dispatch path.
+    private var synthRespondedOrder: [UInt32] = []
+
+    /// Upper bound on ``synthRespondedStreams`` per connection. Sized
+    /// well above the spec-default ``SETTINGS_MAX_CONCURRENT_STREAMS``
+    /// (100) so a fully-saturated h2 connection doesn't trip eviction
+    /// against streams that may still be live. Worst-case memory cost
+    /// is ~1 KiB of UInt32s + array overhead.
+    private static let synthRespondedMaxStreams = 256
 
     // MARK: - Init
 
@@ -222,6 +261,17 @@ final class MITMHTTP2Connection {
         if frame.streamID != 0,
            synthRespondedStreams.contains(frame.streamID),
            frame.typeCode != FrameTypeCode.rstStream {
+            // Evict the streamID when the swallowed frame carries
+            // END_STREAM (bit 0x1 of DATA or HEADERS flags). The
+            // client is done with the stream on its side, so pinning
+            // the ID in the set for the connection's lifetime is
+            // wasted memory and pressures the FIFO cap.
+            let endStream = frame.flags & 0x1 != 0
+            let endStreamBearing = frame.typeCode == FrameTypeCode.data
+                || frame.typeCode == FrameTypeCode.headers
+            if endStream, endStreamBearing {
+                clearSynthResponded(frame.streamID)
+            }
             return Data()
         }
         switch frame.typeCode {
@@ -261,7 +311,7 @@ final class MITMHTTP2Connection {
         // 9113 §5.4.1 (RST_STREAM on an idle stream → connection-level
         // error), which the upstream answers with GOAWAY and kills
         // every other stream on the connection.
-        if synthRespondedStreams.remove(frame.streamID) != nil {
+        if clearSynthResponded(frame.streamID) {
             return Data()
         }
         return serializeFrame(frame)
@@ -629,59 +679,109 @@ final class MITMHTTP2Connection {
     }
 
     /// Closes out a streaming-script stream when END_STREAM lands on
-    /// a trailer HEADERS frame rather than on a DATA frame. Calls the
-    /// script chain one last time with an empty body and
-    /// ``frame.end = true`` so the script can flush whatever
-    /// per-stream state it has accumulated, then drops the entry from
-    /// ``streamingScripts``. Non-empty script output is emitted as a
-    /// DATA frame without END_STREAM (the trailer carries it).
+    /// a trailer HEADERS frame rather than on a DATA frame. Emits
+    /// the held-back final DATA frame (if any) with
+    /// ``frame.end = true`` so the script's last invocation carries
+    /// the actual last frame's bytes — matching HTTP/1's chunked
+    /// streaming contract. When no frame was held (no DATA on the
+    /// stream at all), the script still gets one empty-body
+    /// ``isLast=true`` call as a flush opportunity. The wire
+    /// END_STREAM bit lives on the upcoming trailer HEADERS, so the
+    /// DATA frame we emit here carries ``endStream=false``.
     private func flushStreamingScript(streamID: UInt32) -> Data {
-        guard let streaming = streamingScripts.removeValue(forKey: streamID) else {
+        guard var streaming = streamingScripts.removeValue(forKey: streamID) else {
             return Data()
         }
-        if streaming.cursor.bypass {
-            return Data()
-        }
-        var working = streaming
-        let ctx = MITMScriptEngine.FrameContext(
-            phase: phase,
-            method: working.originatingRequest?.method
-                ?? firstHeaderValue(working.headers, name: ":method"),
-            url: streamingURL(working),
-            status: parseStatus(working.headers),
-            headers: working.headers.filter { !$0.name.hasPrefix(":") },
-            frameIndex: working.frameIndex,
+        let body = streaming.pendingFrame ?? Data()
+        streaming.pendingFrame = nil
+        return processStreamingFrame(
+            streamID: streamID,
+            streaming: &streaming,
+            body: body,
             isLast: true,
-            ruleSetID: rewriter.ruleSetID
+            wireEndStream: false
         )
-        let result = MITMScriptTransform.applyFrame(
-            Data(),
-            rules: rewriter.rules(phase: phase),
-            contentType: working.contentType,
-            frameContext: ctx,
-            cursor: working.cursor,
-            engineProvider: rewriter.scriptEngineProvider
-        )
-        working.frameIndex += 1
-        if result.body.isEmpty {
-            return Data()
-        }
-        return emitDataFrames(streamID: streamID, payload: result.body, endStream: false)
     }
 
-    /// Streaming-script path. Runs the script chain on one DATA
-    /// frame's payload and emits the (possibly mutated) bytes as a
-    /// single DATA frame. ``Anywhere.done`` / ``Anywhere.exit`` flip
-    /// the cursor's ``bypass`` flag so subsequent frames on the stream
-    /// pass through unchanged. The streaming entry is cleared on
-    /// END_STREAM regardless of bypass state so a follow-up message
-    /// on the same stream ID (rare under HTTP/2 stream-ID rules but
-    /// possible with PUSH_PROMISE) gets a fresh cursor.
+    /// Streaming-script path. ``Anywhere.done`` / ``Anywhere.exit``
+    /// flip the cursor's ``bypass`` flag so subsequent frames on the
+    /// stream pass through unchanged. The streaming entry is cleared
+    /// on END_STREAM regardless of bypass state so a follow-up
+    /// message on the same stream ID (rare under HTTP/2 stream-ID
+    /// rules but possible with PUSH_PROMISE) gets a fresh cursor.
+    ///
+    /// Lookahead: each DATA frame is held for one event so the script
+    /// call with ``frame.end = true`` always carries the last frame's
+    /// actual bytes (rather than firing on an empty body after the
+    /// last DATA already went out — the old behaviour, which
+    /// diverged from HTTP/1 chunked semantics). When the next DATA
+    /// arrives, the held one is released as non-final; when this
+    /// frame's END_STREAM bit is set, the held one is released as
+    /// non-final and the current one is processed as final.
     private func handleStreamingData(
         streamID: UInt32,
         streaming: inout StreamingState,
         body: Data,
         endStream: Bool
+    ) -> Data {
+        var output = Data()
+
+        // Release the previously held frame, if any. Its mere
+        // presence here means the stream did not end on it (a
+        // subsequent DATA frame has arrived), so the script's
+        // ``frame.end`` is false. Bypass is honoured inside
+        // ``processStreamingFrame``: held frames are still emitted,
+        // just verbatim.
+        if let held = streaming.pendingFrame {
+            streaming.pendingFrame = nil
+            output.append(processStreamingFrame(
+                streamID: streamID,
+                streaming: &streaming,
+                body: held,
+                isLast: false,
+                wireEndStream: false
+            ))
+        }
+
+        if endStream {
+            // END_STREAM on this DATA frame: this IS the last frame
+            // on the stream, no trailers can follow. Process inline
+            // with ``isLast=true`` so the script sees the actual
+            // last-frame bytes (HTTP/1 chunked parity).
+            output.append(processStreamingFrame(
+                streamID: streamID,
+                streaming: &streaming,
+                body: body,
+                isLast: true,
+                wireEndStream: true
+            ))
+            streamingScripts.removeValue(forKey: streamID)
+        } else {
+            // Defer: we don't yet know whether this is the last DATA
+            // (a trailer HEADERS could follow). Stash it; the next
+            // event — another DATA frame or trailer — will release
+            // it with the correct ``frame.end`` value.
+            streaming.pendingFrame = body
+            streamingScripts[streamID] = streaming
+        }
+
+        return output
+    }
+
+    /// Runs one buffered frame through the streaming-script chain and
+    /// serializes the (possibly mutated) bytes as DATA frames.
+    /// ``isLast`` is what the script sees on ``ctx.frame.end``;
+    /// ``wireEndStream`` is the END_STREAM bit on the emitted DATA
+    /// frame — the two diverge for the held frame released on
+    /// trailer flush (``isLast=true`` so the script knows it's the
+    /// last call, ``wireEndStream=false`` because the trailer
+    /// HEADERS will carry END_STREAM on the wire).
+    private func processStreamingFrame(
+        streamID: UInt32,
+        streaming: inout StreamingState,
+        body: Data,
+        isLast: Bool,
+        wireEndStream: Bool
     ) -> Data {
         let emitted: Data
         if streaming.cursor.bypass {
@@ -695,7 +795,7 @@ final class MITMHTTP2Connection {
                 status: parseStatus(streaming.headers),
                 headers: streaming.headers.filter { !$0.name.hasPrefix(":") },
                 frameIndex: streaming.frameIndex,
-                isLast: endStream,
+                isLast: isLast,
                 ruleSetID: rewriter.ruleSetID
             )
             let result = MITMScriptTransform.applyFrame(
@@ -706,30 +806,47 @@ final class MITMHTTP2Connection {
                 cursor: streaming.cursor,
                 engineProvider: rewriter.scriptEngineProvider
             )
-            emitted = result.body
+            // Track cumulative wire-byte growth across the stream's
+            // frames. The receiver's flow-control window was budgeted
+            // for the original sender's bytes; any growth we add eats
+            // unaccounted into that window. Once the *projected*
+            // total would exceed the cap, both this frame and every
+            // subsequent one fall back to the original payload — we
+            // never emit a frame that would push us past the budget,
+            // even partially.
+            let growth = result.body.count - body.count
+            let projected = streaming.cumulativeGrowth + growth
+            if projected > Self.maxStreamingRewriteGrowthBytes {
+                logger.warning("[MITM] HTTP/2 stream \(streamID): streamScript projected growth \(projected) B exceeded cap \(Self.maxStreamingRewriteGrowthBytes) B; bypassing this frame and remaining frames to avoid FLOW_CONTROL_ERROR")
+                streaming.cursor.bypass = true
+                emitted = body
+            } else {
+                streaming.cumulativeGrowth = projected
+                emitted = result.body
+            }
         }
         streaming.frameIndex += 1
-        if endStream {
-            streamingScripts.removeValue(forKey: streamID)
-        } else {
-            streamingScripts[streamID] = streaming
-        }
         // Skip emitting an empty mid-stream DATA frame so that a script
         // returning `Data()` for a frame "swallows" it cleanly — same
         // semantics as the HTTP/1 chunked path, which simply doesn't
         // append a chunk on empty output. END_STREAM still has to land
         // somewhere though, so empty + endStream collapses to one
         // zero-length DATA frame carrying the flag.
-        if emitted.isEmpty, !endStream {
+        if emitted.isEmpty, !wireEndStream {
             return Data()
         }
-        return emitDataFrames(streamID: streamID, payload: emitted, endStream: endStream)
+        return emitDataFrames(streamID: streamID, payload: emitted, endStream: wireEndStream)
     }
 
     /// URL for the streaming script's ctx. On response phase the
     /// originating request's URL (from the request log) wins; on
-    /// request phase we synthesize from the pseudo-headers the
-    /// rewriter already emitted.
+    /// request phase we synthesize the URL using the connection's
+    /// destination host so the script sees what the client requested,
+    /// not the rewritten ``:authority`` an authority-rewrite rule may
+    /// have substituted. Matches HTTP/1's behaviour (which uses the
+    /// connection's ``host`` rather than the rewritten ``Host`` header)
+    /// so a script written against ``ctx.url`` behaves the same on
+    /// both protocols.
     private func streamingURL(_ streaming: StreamingState) -> String? {
         if phase == .httpResponse {
             return streaming.originatingRequest?.url
@@ -737,8 +854,7 @@ final class MITMHTTP2Connection {
         guard let path = firstHeaderValue(streaming.headers, name: ":path") else {
             return nil
         }
-        let authority = firstHeaderValue(streaming.headers, name: ":authority") ?? rewriter.host
-        return "https://\(authority)\(path)"
+        return "https://\(rewriter.host)\(path)"
     }
 
     private func parseStatus(_ headers: [(name: String, value: String)]) -> Int? {
@@ -860,6 +976,33 @@ final class MITMHTTP2Connection {
             return Data()
         }
 
+        // Flow-control safeguard. The wire-level body bytes the
+        // original sender put on this stream were already budgeted by
+        // its flow-control accounting; we can pass those through
+        // safely. Any script-introduced *growth* is unaccounted: the
+        // receiver decrements its window by what we send, not by what
+        // the original sender intended, so a script that grows the
+        // body past the default initial window risks a
+        // FLOW_CONTROL_ERROR + connection-wide GOAWAY.
+        //
+        // The comparison baseline is the *decompressed* plaintext, not
+        // the compressed wire bytes — decompression itself is not
+        // "growth" from the script's perspective, and using
+        // ``pending.data.count`` (compressed) as the baseline would
+        // make every script with a non-trivial compression ratio
+        // (typical gzip JSON is ~5×) trip the cap as a no-op and fall
+        // back to passthrough. ``plaintext.count`` is what the script
+        // saw on input; ``result.body.count`` is what it produced.
+        // Their delta is the user-introduced wire-level growth, which
+        // is the value the receiver's flow-control window cares about.
+        let originalIdentityBytes = plaintext.count
+        let rewrittenWireBytes = result.body.count
+        if rewrittenWireBytes > originalIdentityBytes,
+           rewrittenWireBytes - originalIdentityBytes > Self.maxBufferedRewriteGrowthBytes {
+            logger.warning("[MITM] HTTP/2 stream \(streamID): script grew body by \(rewrittenWireBytes - originalIdentityBytes) B (cap \(Self.maxBufferedRewriteGrowthBytes) B = default initial window); emitting original payload to avoid FLOW_CONTROL_ERROR")
+            return emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream)
+        }
+
         // Re-build the HTTP/2 header block: pseudo-headers from the
         // (possibly script-mutated) method/url/status, regular headers
         // from result.headers (with any stale pseudo-headers stripped
@@ -938,6 +1081,35 @@ final class MITMHTTP2Connection {
     /// would enforce anyway.
     private static let maxSynthesizedResponseBodyBytes: Int = 65_535
 
+    /// Per-stream cap on how many bytes a buffered ``.script`` rewrite
+    /// may add to the original body before the rewrite is abandoned in
+    /// favour of emitting the unmodified payload. Original bytes are
+    /// already budgeted by the original sender's flow-control accounting
+    /// — those can't trip ``FLOW_CONTROL_ERROR``. Extra bytes can, since
+    /// the receiver's window decrements by what *we* send, not by what
+    /// the original sender intended. Without per-stream window tracking
+    /// in the MITM the safest cap is the spec-default initial window
+    /// (RFC 9113 §6.9.2 = 65,535 B), so a single rewrite emission stays
+    /// within one worst-case window's worth of unaccounted growth. A
+    /// script that grows further falls back to the original payload via
+    /// ``emitPassthroughDeferred`` rather than risking a GOAWAY that
+    /// would tear down every other stream on the connection.
+    private static let maxBufferedRewriteGrowthBytes: Int = 65_535
+
+    /// Cumulative per-stream cap on the wire-byte growth a
+    /// ``.streamScript`` may introduce before subsequent frames are
+    /// bypassed. Same rationale as ``maxBufferedRewriteGrowthBytes``:
+    /// the receiver's flow-control window only budgeted the original
+    /// sender's wire bytes, so introduced growth eats into the window
+    /// without any matching WINDOW_UPDATE we can observe. The cap is
+    /// cumulative across frames on the same stream — a script that
+    /// grows each of a hundred frames by 1 KB exhausts the budget just
+    /// as surely as one that grows a single frame by 100 KB. When the
+    /// cap trips, we flip ``FrameCursor.bypass`` so the rest of the
+    /// stream forwards verbatim instead of risking a connection-level
+    /// GOAWAY.
+    private static let maxStreamingRewriteGrowthBytes: Int = 65_535
+
     /// Serializes a request-phase `Anywhere.respond(...)` payload as an
     /// HTTP/2 HEADERS (+ optional DATA) frame sequence ending with
     /// END_STREAM, and appends it to ``pendingClientBytes`` for the
@@ -1004,7 +1176,38 @@ final class MITMHTTP2Connection {
         // didn't expect to get on their own initiative) aren't forwarded
         // upstream on an idle stream. See ``handleFrame`` /
         // ``handleRSTStream``.
-        synthRespondedStreams.insert(streamID)
+        markSynthResponded(streamID)
+    }
+
+    /// Inserts ``streamID`` into ``synthRespondedStreams`` and the
+    /// matching FIFO. Evicts the oldest entry when the FIFO is at the
+    /// cap so a long-lived connection that repeatedly synthesizes
+    /// responses can't grow the set without bound. The eviction is
+    /// best-effort — if a client happens to send a late RST_STREAM for
+    /// the evicted ID it'll be forwarded to upstream as if from an
+    /// idle stream and may trigger GOAWAY, but that risk is bounded by
+    /// the cap and unlikely in practice (clients RST promptly or not
+    /// at all).
+    private func markSynthResponded(_ streamID: UInt32) {
+        guard synthRespondedStreams.insert(streamID).inserted else { return }
+        synthRespondedOrder.append(streamID)
+        if synthRespondedOrder.count > Self.synthRespondedMaxStreams {
+            let evicted = synthRespondedOrder.removeFirst()
+            synthRespondedStreams.remove(evicted)
+        }
+    }
+
+    /// Removes ``streamID`` from both ``synthRespondedStreams`` and the
+    /// FIFO. Returns true iff the streamID was present — callers use
+    /// the return value to gate frame swallowing (the set membership
+    /// and the swallow decision are the same predicate).
+    @discardableResult
+    private func clearSynthResponded(_ streamID: UInt32) -> Bool {
+        guard synthRespondedStreams.remove(streamID) != nil else { return false }
+        if let idx = synthRespondedOrder.firstIndex(of: streamID) {
+            synthRespondedOrder.remove(at: idx)
+        }
+        return true
     }
 
     /// RFC 9110 §5.6.2: header field-name is a `token` — one or more of
@@ -1062,8 +1265,13 @@ final class MITMHTTP2Connection {
         case .httpRequest:
             method = firstHeaderValue(headers, name: ":method")
             if let path = firstHeaderValue(headers, name: ":path") {
-                let authority = firstHeaderValue(headers, name: ":authority") ?? rewriter.host
-                url = "https://\(authority)\(path)"
+                // Use the connection's destination host (the SNI/host
+                // the client opened the leg with) rather than the
+                // possibly-rewritten ``:authority``, so ``ctx.url``
+                // mirrors what the client requested. HTTP/1 does the
+                // same with its session-level ``host`` field, keeping
+                // the two protocols' script semantics aligned.
+                url = "https://\(rewriter.host)\(path)"
             }
         case .httpResponse:
             if let raw = firstHeaderValue(headers, name: ":status"),
@@ -1110,7 +1318,13 @@ final class MITMHTTP2Connection {
                     if let port = components.port { return "\(host):\(port)" }
                     return host
                 } ?? firstHeaderValue(fallback, name: ":authority") ?? rewriter.host
-                let rawPath = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+                // RFC 9113 §8.3.1: ``:path`` MUST start with ``/`` for
+                // non-CONNECT, non-OPTIONS-asterisk requests. A script
+                // that wrote a relative URL like ``api/foo`` would
+                // otherwise produce ``:path: api/foo``, which strict
+                // h2 stacks reject with PROTOCOL_ERROR + GOAWAY.
+                var rawPath = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+                if !rawPath.hasPrefix("/") { rawPath = "/" + rawPath }
                 path = components.percentEncodedQuery.map { "\(rawPath)?\($0)" } ?? rawPath
             } else {
                 authority = firstHeaderValue(fallback, name: ":authority") ?? rewriter.host
@@ -1136,8 +1350,13 @@ final class MITMHTTP2Connection {
         let method = firstHeaderValue(headers, name: ":method")
         var url: String?
         if let path = firstHeaderValue(headers, name: ":path") {
-            let authority = firstHeaderValue(headers, name: ":authority") ?? rewriter.host
-            url = "https://\(authority)\(path)"
+            // Use the connection's destination host so the recorded
+            // URL — surfaced as ``ctx.url`` on response-phase scripts —
+            // matches what request-phase scripts saw and what HTTP/1
+            // records. Authority-rewrite rules change ``:authority``
+            // on the wire, but the script-facing URL should remain the
+            // client's original target for consistency across protocols.
+            url = "https://\(rewriter.host)\(path)"
         }
         rewriter.requestLog.recordHTTP2(streamID: streamID, method: method, url: url)
     }

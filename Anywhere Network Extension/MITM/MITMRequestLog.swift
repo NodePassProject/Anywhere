@@ -25,6 +25,18 @@ final class MITMRequestLog {
     struct Record {
         let method: String?
         let url: String?
+        /// Bytes (a serialized response head + optional body) that the
+        /// request stream synthesized via ``Anywhere.respond`` for a
+        /// PIPELINED follow-on request while this record was the
+        /// newest in-flight entry. They must be written to the client
+        /// *after* the upstream response that matches this record so
+        /// the client's pipeline-order assumption holds (RFC 9112
+        /// §9.3.2: responses come back in the same order as requests).
+        /// Drained by the response stream when the matching response
+        /// body finishes streaming. See
+        /// ``MITMRequestLog/attachSynthAfterLastHTTP1`` for the push
+        /// side.
+        var synthAfter: Data = Data()
     }
 
     /// HTTP/1 pipeline. Request-stream pushes on each request head;
@@ -63,6 +75,29 @@ final class MITMRequestLog {
     /// follows and is the one that should pop.
     func peekHTTP1() -> Record? {
         http1Queue.first
+    }
+
+    /// True when no HTTP/1 requests are awaiting a response. The
+    /// request stream uses this to decide whether a freshly
+    /// synthesized response can go straight to the client (queue
+    /// empty: no pipelined predecessor, emit now) or must be deferred
+    /// behind an in-flight response (queue non-empty: attach to the
+    /// newest record via ``attachSynthAfterLastHTTP1``).
+    var isHTTP1QueueEmpty: Bool {
+        http1Queue.isEmpty
+    }
+
+    /// Appends ``bytes`` to the ``synthAfter`` buffer on the most
+    /// recently pushed HTTP/1 request record. Used when a request
+    /// short-circuits via ``Anywhere.respond`` while earlier
+    /// pipelined requests are still waiting on upstream responses —
+    /// the synthesized bytes are held until the response stream
+    /// finishes emitting that earlier request's response, preserving
+    /// pipeline order. No-op when the queue is empty (callers in that
+    /// case emit immediately via ``pendingClientBytes`` instead).
+    func attachSynthAfterLastHTTP1(_ bytes: Data) {
+        guard !http1Queue.isEmpty else { return }
+        http1Queue[http1Queue.count - 1].synthAfter.append(bytes)
     }
 
     // MARK: - HTTP/2

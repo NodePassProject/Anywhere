@@ -9,8 +9,17 @@ import Foundation
 
 /// In-memory key/value store backing `Anywhere.store` in script rules.
 /// Keyed by ``CompiledMITMRuleSet/id`` so each imported rule set has
-/// its own namespace; deletion of a rule set drops its bucket the next
-/// time the store is consulted (we never reach in to clean it).
+/// its own namespace. Buckets for deleted rule sets are reclaimed by
+/// ``purgeExcept(activeIDs:)``, which ``MITMRewritePolicy/load`` calls
+/// after every rule-set reload.
+///
+/// Scoping is per-rule-set (not per-rule) by design: the runtime fires
+/// at most one ``.script`` and one ``.streamScript`` rule per message
+/// in any given rule set — a deliberate performance/efficiency
+/// decision (see ``MITMScriptTransform``), not a limitation — so a
+/// single shared bucket per set is the natural unit. Authors who need
+/// to compose multiple effects do so inside one `process(ctx)`, and
+/// that one function gets the whole bucket without contention.
 ///
 /// Lifetime: process-singleton, no disk persistence. The Network
 /// Extension process exits when the user stops the tunnel, taking the
@@ -90,5 +99,25 @@ final class MITMScriptStore {
     func keys(scope: UUID) -> [String] {
         lock.lock(); defer { lock.unlock() }
         return buckets[scope].map { Array($0.keys) } ?? []
+    }
+
+    /// Drops every bucket whose scope is not in ``activeIDs``. Called
+    /// from ``MITMRewritePolicy/load`` when the user edits their rule
+    /// set list; without this, the buckets of deleted rule sets
+    /// persist for the Network Extension's lifetime since the store
+    /// has no other GC trigger. With the 1 MiB per-scope cap that
+    /// adds up — a user who churns rule sets while debugging can
+    /// pile on hundreds of MiB of dead scopes before the NE recycles.
+    /// Returns the number of buckets dropped so the caller can log
+    /// the reclaim.
+    @discardableResult
+    func purgeExcept(activeIDs: Set<UUID>) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let stale = buckets.keys.filter { !activeIDs.contains($0) }
+        for id in stale {
+            buckets.removeValue(forKey: id)
+            bucketSizes.removeValue(forKey: id)
+        }
+        return stale.count
     }
 }

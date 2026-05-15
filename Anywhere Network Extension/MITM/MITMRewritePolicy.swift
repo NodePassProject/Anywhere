@@ -33,6 +33,12 @@ enum CompiledMITMOperation {
     /// 100 KB) since ``[String: JSValue]`` walks every byte on lookup.
     /// Computed once at rule-load time via ``Hasher`` so identical
     /// sources share the same cache entry within a process.
+    ///
+    /// Although the policy compiles every script rule a user declares,
+    /// only one ``.script`` (and one ``.streamScript``) fires per
+    /// message — this is a deliberate design choice for performance
+    /// and efficiency, not a limitation. The runtime selection lives
+    /// in ``MITMScriptTransform``.
     case script(source: String, sourceKey: Int, contentTypes: BodyContentTypeFilter)
     /// Per-frame JavaScript transform. Same runtime contract as
     /// ``script`` for ctx fields the script reads, but the function is
@@ -40,6 +46,9 @@ enum CompiledMITMOperation {
     /// chunked) and only ``ctx.body`` is read back. Used to keep
     /// streaming-style bodies flowing without buffering the entire
     /// response.
+    ///
+    /// Single-rule runtime semantics apply (see ``.script`` above):
+    /// at most one ``.streamScript`` runs per stream by design.
     case streamScript(source: String, sourceKey: Int, contentTypes: BodyContentTypeFilter)
 }
 
@@ -127,7 +136,19 @@ final class MITMRewritePolicy {
         for set in ruleSets {
             insert(set)
         }
-        logger.debug("[MITM] Loaded \(ruleSets.count) rule set(s)")
+        // Drop ``MITMScriptStore`` buckets for rule sets the user has
+        // deleted since the last load. Without this every removed
+        // rule set leaks up to ``MITMScriptStore.maxBytesPerScope``
+        // (1 MiB) of script-store contents until the Network
+        // Extension is recycled — a real drift for users who iterate
+        // on rule sets during development.
+        let activeIDs = Set(ruleSets.map { $0.id })
+        let purged = MITMScriptStore.shared.purgeExcept(activeIDs: activeIDs)
+        if purged > 0 {
+            logger.debug("[MITM] Loaded \(ruleSets.count) rule set(s); purged \(purged) stale script-store bucket(s)")
+        } else {
+            logger.debug("[MITM] Loaded \(ruleSets.count) rule set(s)")
+        }
     }
 
     private func insert(_ set: MITMRuleSet) {
