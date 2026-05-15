@@ -162,8 +162,39 @@ final class MITMScriptEngine {
     /// Directive set by `Anywhere.done` / `Anywhere.exit` /
     /// `Anywhere.respond`. ``apply`` inspects this after the JS function
     /// returns; when set, the directive wins over whatever the function
-    /// returned.
+    /// returned — including over a tail-end exception. This is
+    /// intentional: a script that already signalled its decision
+    /// before stumbling into a throw (typically an
+    /// ``Anywhere.store.set`` over the per-scope cap) has expressed
+    /// the result it wanted, and rolling back to ``.modified(message)``
+    /// would discard that decision.
     fileprivate var currentDirective: Directive?
+
+    /// Consecutive watchdog-timeout count per ``sourceKey``. Bumped on
+    /// every timed-out call, reset on any successful call. Lets the
+    /// engine notice a script that always burns the per-call cap (an
+    /// infinite-loop import, a regex backtracking explosion) and stop
+    /// running it.
+    private var timeoutCount: [Int: Int] = [:]
+
+    /// Sources the engine has stopped invoking entirely after they
+    /// reached ``timeoutCircuitBreakerThreshold`` timeouts. The
+    /// ``apply`` / ``applyFrame`` entry points return a no-op outcome
+    /// when the sourceKey is in here. Reset only on engine teardown
+    /// (i.e., when the session ends) so a misbehaving script can't
+    /// resurrect itself within the same session.
+    private var disabledSources: Set<Int> = []
+
+    /// Consecutive-timeout count at which a script is considered
+    /// pathological and stops being called. The whole MITM pipeline
+    /// (every TCP / UDP flow in the tunnel) shares one lwIP queue —
+    /// each watchdog-terminated call blocks the queue for
+    /// ``executionTimeLimit`` seconds, so an infinite-loop script
+    /// running on a busy connection would stall every other flow.
+    /// Five is generous enough that a few thermally-throttled spikes
+    /// don't disable a legitimate script, while small enough to cap
+    /// the worst-case lwIP-queue damage at 5 seconds per session.
+    private static let timeoutCircuitBreakerThreshold: Int = 5
 
     init() {
         let vm = JSVirtualMachine()!
@@ -184,6 +215,9 @@ final class MITMScriptEngine {
     /// otherwise fails to compile. ``sourceKey`` is the cache key
     /// computed at rule-compile time; equal keys imply equal sources.
     func apply(_ message: Message, source: String, sourceKey: Int) -> Outcome {
+        if disabledSources.contains(sourceKey) {
+            return .modified(message)
+        }
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(message)
         }
@@ -194,13 +228,28 @@ final class MITMScriptEngine {
             currentDirective = nil
         }
         let ctxArg = makeContextValue(message)
+        let started = DispatchTime.now()
         _ = function.call(withArguments: [ctxArg])
+        let elapsed = Self.elapsedSeconds(since: started)
         // The script may have replaced ctx.body with a new typed array,
         // mutated the original in place, or done nothing — read back
         // whatever is on the object now.
         let updated = readBack(message, from: ctxArg)
+        let hadException = context.exception != nil
+        if hadException, elapsed >= Self.executionTimeLimit {
+            // The exceptionHandler already logged the JS-side message,
+            // but a watchdog termination ("JavaScript execution
+            // terminated.") is indistinguishable from a regular throw
+            // there. Surface it explicitly so the user can tell a slow
+            // script apart from a buggy one, and trip the circuit
+            // breaker even when a directive wins the returned outcome.
+            trackTimeout(sourceKey: sourceKey, where: "\(message.phase == .httpRequest ? "request" : "response") \(message.url ?? "<no url>")")
+        }
         if let directive = currentDirective {
             context.exception = nil
+            if !hadException {
+                timeoutCount.removeValue(forKey: sourceKey)
+            }
             switch directive {
             case .done: return .done(updated)
             case .exit: return .exit
@@ -216,11 +265,14 @@ final class MITMScriptEngine {
                 return .modified(updated)
             }
         }
-        if context.exception != nil {
-            // exceptionHandler already logged.
+        if hadException {
             context.exception = nil
             return .modified(message)
         }
+        // Successful call — reset the consecutive-timeout counter so a
+        // transient slow stretch doesn't drift toward a permanent
+        // disable on later runs.
+        timeoutCount.removeValue(forKey: sourceKey)
         return .modified(updated)
     }
 
@@ -235,6 +287,9 @@ final class MITMScriptEngine {
         frameContext ctx: FrameContext,
         state: JSValue?
     ) -> FrameOutcome {
+        if disabledSources.contains(sourceKey) {
+            return .modified(body: frame, state: state)
+        }
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(body: frame, state: state)
         }
@@ -245,7 +300,9 @@ final class MITMScriptEngine {
             currentDirective = nil
         }
         let ctxArg = makeFrameContextValue(ctx, frame: frame, state: state)
+        let started = DispatchTime.now()
         _ = function.call(withArguments: [ctxArg])
+        let elapsed = Self.elapsedSeconds(since: started)
         // Pull the body and state back off the ctx; ignore any
         // mutations to method/url/status/headers — HEADERS are on the
         // wire already, so they can't take effect.
@@ -257,8 +314,15 @@ final class MITMScriptEngine {
             body = frame
         }
         let updatedState = ctxArg.objectForKeyedSubscript("state")
+        let hadException = context.exception != nil
+        if hadException, elapsed >= Self.executionTimeLimit {
+            trackTimeout(sourceKey: sourceKey, where: "\(ctx.phase == .httpRequest ? "request" : "response") \(ctx.url ?? "<no url>") frame \(ctx.frameIndex)")
+        }
         if let directive = currentDirective {
             context.exception = nil
+            if !hadException {
+                timeoutCount.removeValue(forKey: sourceKey)
+            }
             switch directive {
             case .done: return .done(body: body)
             case .exit: return .exit
@@ -270,11 +334,37 @@ final class MITMScriptEngine {
                 return .modified(body: body, state: updatedState)
             }
         }
-        if context.exception != nil {
+        if hadException {
             context.exception = nil
             return .modified(body: frame, state: state)
         }
+        timeoutCount.removeValue(forKey: sourceKey)
         return .modified(body: body, state: updatedState)
+    }
+
+    /// Bumps the consecutive-timeout counter for ``sourceKey`` and
+    /// trips the circuit breaker when it reaches the threshold. The
+    /// log line names the offending phase / URL / frame so a session
+    /// log can be traced back to the rule.
+    private func trackTimeout(sourceKey: Int, where context: String) {
+        let count = (timeoutCount[sourceKey] ?? 0) + 1
+        if count >= Self.timeoutCircuitBreakerThreshold {
+            disabledSources.insert(sourceKey)
+            timeoutCount.removeValue(forKey: sourceKey)
+            logger.warning("[MITM][JS] script hit \(count) consecutive timeouts; disabling for the rest of this session (each call burns \(Self.executionTimeLimit)s of the shared lwIP queue)")
+        } else {
+            timeoutCount[sourceKey] = count
+            logger.warning("[MITM][JS] script timed out (>= \(Self.executionTimeLimit)s) on \(context) [\(count)/\(Self.timeoutCircuitBreakerThreshold)]; rule did not run")
+        }
+    }
+
+    /// Wall-clock seconds since ``start``. Used to tell a watchdog-
+    /// terminated script apart from a script that threw on its own —
+    /// the JSC exception handler shows both as "uncaught" exceptions
+    /// with different messages, but a separate log line is easier for
+    /// users to spot.
+    private static func elapsedSeconds(since start: DispatchTime) -> Double {
+        Double(DispatchTime.now().uptimeNanoseconds &- start.uptimeNanoseconds) / 1_000_000_000
     }
 
     // MARK: - Compilation
@@ -360,17 +450,35 @@ final class MITMScriptEngine {
     /// an updated ``Message``. Anything the script didn't touch comes
     /// back identical to the input; anything it cleared (assigned
     /// `null` / `undefined`) becomes nil on Swift side.
+    ///
+    /// Hostile / buggy scripts can write CR / LF / NUL into ``method``,
+    /// ``url``, header names, or header values. The HTTP/1 serializer
+    /// emits those bytes verbatim, which would split the wire framing
+    /// (request smuggling / response splitting); HTTP/2 receivers
+    /// reject any CR / LF / NUL in a HEADERS block per RFC 9113 §8.2.1
+    /// and drop the stream. To make either outcome impossible from a
+    /// rule set, this method validates each field before adopting it:
+    /// fields that fail validation revert to the ``original`` input,
+    /// invalid header entries are dropped, and a non-array
+    /// ``ctx.headers`` is treated as "leave headers alone" rather than
+    /// silently wiping every header (a common typo footgun).
     private func readBack(_ original: Message, from ctx: JSValue) -> Message {
         var msg = original
-        let method = ctx.objectForKeyedSubscript("method")
-        msg.method = stringOrNil(method)
-        let url = ctx.objectForKeyedSubscript("url")
-        msg.url = stringOrNil(url)
-        let status = ctx.objectForKeyedSubscript("status")
-        msg.status = intOrNil(status)
-        if let headers = ctx.objectForKeyedSubscript("headers"),
-           !headers.isUndefined, !headers.isNull {
-            msg.headers = Self.headersFromValue(headers)
+        let methodVal = ctx.objectForKeyedSubscript("method")
+        msg.method = validatedMethod(methodVal, original: original.method)
+        let urlVal = ctx.objectForKeyedSubscript("url")
+        msg.url = validatedURL(urlVal, original: original.url)
+        let statusVal = ctx.objectForKeyedSubscript("status")
+        msg.status = validatedStatus(statusVal, original: original.status)
+        if let headersVal = ctx.objectForKeyedSubscript("headers"),
+           !headersVal.isUndefined, !headersVal.isNull {
+            if let validated = Self.headersFromValue(headersVal) {
+                msg.headers = validated
+            }
+            // else: ctx.headers isn't array-shaped — keep ``original.headers``
+            //       rather than wiping them. A script doing
+            //       ``ctx.headers = "Foo: bar"`` shouldn't strip every
+            //       header from the message.
         }
         if let body = ctx.objectForKeyedSubscript("body"),
            let bytes = Self.bytesFromValue(body, in: context) {
@@ -379,35 +487,128 @@ final class MITMScriptEngine {
         return msg
     }
 
-    private func stringOrNil(_ value: JSValue?) -> String? {
+    /// Pulls ``ctx.method`` back. ``undefined`` / ``null`` clears the
+    /// field; a value that's a non-empty RFC 9110 §9.1 token (same
+    /// charset as a header field-name) is adopted; anything else
+    /// reverts to ``original`` with a warning. The token check rules
+    /// out SP / HTAB / CR / LF / NUL, all of which would smuggle bytes
+    /// onto the request line.
+    private func validatedMethod(_ value: JSValue?, original: String?) -> String? {
         guard let value, !value.isUndefined, !value.isNull else { return nil }
-        return value.toString()
+        guard let str = value.toString() else { return original }
+        if Self.isValidHeaderName(str) { return str }
+        logger.warning("[MITM][JS] ctx.method contains invalid characters; reverting")
+        return original
     }
 
-    private func intOrNil(_ value: JSValue?) -> Int? {
+    /// Pulls ``ctx.url`` back. Same cleared-vs-adopted semantics as
+    /// ``validatedMethod``; the validation rejects empty strings and
+    /// anything containing SP / HTAB / CTLs. We don't try to fully
+    /// validate URL syntax — ``rebuildStartLine`` already falls back to
+    /// the original request-target when the URL fails to parse — but
+    /// stripping HTTP/1 start-line delimiters keeps a malicious or
+    /// buggy script from corrupting the request line.
+    private func validatedURL(_ value: JSValue?, original: String?) -> String? {
         guard let value, !value.isUndefined, !value.isNull else { return nil }
-        if value.isNumber {
-            return Int(value.toInt32())
+        guard let str = value.toString() else { return original }
+        if Self.isValidRequestTargetValue(str) { return str }
+        logger.warning("[MITM][JS] ctx.url is empty or contains whitespace/control characters; reverting")
+        return original
+    }
+
+    /// Pulls ``ctx.status`` back. ``undefined`` / ``null`` clears the
+    /// status (response-phase scripts can use this to drop a value);
+    /// a number in the 100…599 wire range is adopted; out-of-range
+    /// numbers and non-numeric values revert to ``original`` with a
+    /// warning. Strings convertible to numbers (`"200"`) are refused
+    /// rather than silently coerced — the failure mode of accidentally
+    /// stringifying the status is hard enough to debug already.
+    private func validatedStatus(_ value: JSValue?, original: Int?) -> Int? {
+        guard let value, !value.isUndefined, !value.isNull else { return nil }
+        guard value.isNumber else {
+            logger.warning("[MITM][JS] ctx.status is not a number; reverting (script may have assigned a string — use a numeric literal)")
+            return original
         }
-        // A string like "418" is convertible, but ambiguous; refuse and
-        // let the script use a number literal explicitly.
-        return nil
+        let n = Int(value.toInt32())
+        if (100...599).contains(n) { return n }
+        logger.warning("[MITM][JS] ctx.status \(n) outside 100…599; reverting")
+        return original
     }
 
     /// Decodes a JS `[[name, value], ...]` array into the Swift header
-    /// list. Anything non-arrayish or whose entries aren't two-string
-    /// pairs is dropped silently.
-    private static func headersFromValue(_ value: JSValue) -> [(name: String, value: String)] {
-        guard let array = value.toArray() else { return [] }
+    /// list, returning nil when the input isn't array-shaped at all (so
+    /// the caller can keep the original headers instead of wiping
+    /// them). Individual entries whose name isn't a valid HTTP token
+    /// (RFC 9110 §5.6.2) or whose value contains CR / LF / NUL (§5.5)
+    /// are dropped with a warning — emitting them verbatim would split
+    /// the response head on the wire.
+    private static func headersFromValue(_ value: JSValue) -> [(name: String, value: String)]? {
+        guard let array = value.toArray() else { return nil }
         var result: [(name: String, value: String)] = []
         result.reserveCapacity(array.count)
         for entry in array {
             guard let pair = entry as? [Any], pair.count == 2 else { continue }
             let name = (pair[0] as? String) ?? String(describing: pair[0])
             let val = (pair[1] as? String) ?? String(describing: pair[1])
+            guard isValidHeaderName(name) else {
+                logger.warning("[MITM][JS] dropping header with invalid name: \(name)")
+                continue
+            }
+            guard isValidHeaderValue(val) else {
+                logger.warning("[MITM][JS] dropping header \(name) with CR/LF/NUL in value")
+                continue
+            }
             result.append((name: name, value: val))
         }
         return result
+    }
+
+    /// RFC 9110 §5.6.2: header field-name and method token alphabet.
+    /// Duplicated from ``MITMHTTP1Stream`` / ``MITMHTTP2Connection``
+    /// rather than shared via a helper type so the engine stays
+    /// dependency-free of the wire layers.
+    private static func isValidHeaderName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        for byte in name.utf8 {
+            switch byte {
+            case 0x21, 0x23, 0x24, 0x25, 0x26, 0x27,
+                 0x2A, 0x2B, 0x2D, 0x2E,
+                 0x5E, 0x5F, 0x60, 0x7C, 0x7E:
+                continue
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A:
+                continue
+            default:
+                return false
+            }
+        }
+        return true
+    }
+
+    /// RFC 9110 §5.5: header field-value must not contain CR / LF /
+    /// NUL. Same rule applies to anything we splice onto an HTTP/1
+    /// start line — those characters are exactly what splits a wire
+    /// message into two.
+    private static func isValidHeaderValue(_ value: String) -> Bool {
+        for byte in value.utf8 {
+            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// HTTP/1 request-targets are delimited by SP in the start line, so a
+    /// script-provided URL / relative target cannot safely contain SP,
+    /// HTAB, or any control byte. Absolute URLs are still allowed; the
+    /// serializers will project them down to path + query where needed.
+    private static func isValidRequestTargetValue(_ value: String) -> Bool {
+        guard !value.isEmpty else { return false }
+        for byte in value.utf8 {
+            if byte <= 0x20 || byte == 0x7F {
+                return false
+            }
+        }
+        return true
     }
 
     // MARK: - Anywhere globals
@@ -537,17 +738,29 @@ final class MITMScriptEngine {
                 )
                 return
             }
+            // Clamp the status to the 100…599 range a real HTTP
+            // response can occupy. A negative or out-of-range value
+            // would either emit ``HTTP/1.1 -1`` on the wire (HTTP/1) or
+            // an ``:status: -1`` HPACK literal the receiver rejects as
+            // malformed (HTTP/2). 200 is the obvious fallback.
             let status: Int
             if let statusVal = spec.objectForKeyedSubscript("status"),
                statusVal.isNumber {
-                status = Int(statusVal.toInt32())
+                let raw = Int(statusVal.toInt32())
+                if (100...599).contains(raw) {
+                    status = raw
+                } else {
+                    logger.warning("[MITM][JS] Anywhere.respond status \(raw) out of 100…599; using 200")
+                    status = 200
+                }
             } else {
                 status = 200
             }
             var headers: [(name: String, value: String)] = []
             if let headersVal = spec.objectForKeyedSubscript("headers"),
-               !headersVal.isUndefined, !headersVal.isNull {
-                headers = Self.headersFromValue(headersVal)
+               !headersVal.isUndefined, !headersVal.isNull,
+               let parsed = Self.headersFromValue(headersVal) {
+                headers = parsed
             }
             let body: Data
             if let bodyVal = spec.objectForKeyedSubscript("body"),

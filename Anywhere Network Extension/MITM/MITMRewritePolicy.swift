@@ -141,6 +141,16 @@ final class MITMRewritePolicy {
             return CompiledMITMRule(phase: rule.phase, operation: op)
         }
 
+        // Synthesize-response actions (reject_200 / redirect_302) bypass
+        // the rewriter pipeline entirely and write a canned reply on the
+        // inner leg, so any header / URL / script rules in the same set
+        // never fire. Flag the mismatch at load time so users notice
+        // before debugging "why isn't my script running"; the rule set
+        // is still installed (the synthesize action remains useful).
+        if let target = set.rewriteTarget, target.action.synthesizesResponse, !set.rules.isEmpty {
+            logger.warning("[MITM] Rule set \"\(set.name)\" combines action=\(target.action.rawValue) with \(set.rules.count) rule(s); rules will not fire (action synthesizes the response)")
+        }
+
         for suffix in suffixes {
             let labels = suffix.split(separator: ".").map(String.init).reversed()
             var node = root

@@ -147,6 +147,17 @@ final class MITMHTTP2Connection {
     /// immediately after each ``process(_:)`` call.
     private var pendingClientBytes = Data()
 
+    /// Stream IDs whose request was synthesized via
+    /// `Anywhere.respond(...)` and never reached the upstream. The
+    /// outer leg has no record of these stream IDs, so the inner
+    /// client's follow-up frames on them (trailers, DATA, WINDOW_UPDATE,
+    /// or typically a RST_STREAM after consuming the response) MUST be
+    /// swallowed here rather than forwarded. The upstream sees the
+    /// stream as idle, so forwarding stream frames can trigger a
+    /// connection-level PROTOCOL_ERROR and take down every other
+    /// in-flight stream on the same h2 connection. Inbound leg only.
+    private var synthRespondedStreams: Set<UInt32> = []
+
     // MARK: - Init
 
     init(direction: Direction, rewriter: MITMHTTP2Rewriter) {
@@ -208,6 +219,11 @@ final class MITMHTTP2Connection {
         // same stream is legal (§6.10). Anything else here would be a
         // protocol violation by the peer; we still pass it through
         // since detecting + reporting the error is the receiver's job.
+        if frame.streamID != 0,
+           synthRespondedStreams.contains(frame.streamID),
+           frame.typeCode != FrameTypeCode.rstStream {
+            return Data()
+        }
         switch frame.typeCode {
         case FrameTypeCode.headers:
             return handleHeaders(frame)
@@ -238,6 +254,16 @@ final class MITMHTTP2Connection {
         pendingMessages.removeValue(forKey: frame.streamID)
         streamingScripts.removeValue(forKey: frame.streamID)
         _ = rewriter.requestLog.popHTTP2(streamID: frame.streamID)
+        // Swallow RST_STREAMs for streams the upstream never saw — the
+        // request was synthesized on the inner leg via Anywhere.respond
+        // and no HEADERS / DATA ever went on the wire upstream.
+        // Forwarding the RST in that case is a PROTOCOL_ERROR per RFC
+        // 9113 §5.4.1 (RST_STREAM on an idle stream → connection-level
+        // error), which the upstream answers with GOAWAY and kills
+        // every other stream on the connection.
+        if synthRespondedStreams.remove(frame.streamID) != nil {
+            return Data()
+        }
         return serializeFrame(frame)
     }
 
@@ -379,6 +405,9 @@ final class MITMHTTP2Connection {
         if case .headers = kind {
             if pendingMessages[streamID] != nil {
                 output.append(runScriptsAndFlush(streamID: streamID, endStream: false))
+                if synthRespondedStreams.contains(streamID) {
+                    return output
+                }
             } else if streamingScripts[streamID] != nil {
                 output.append(flushStreamingScript(streamID: streamID))
             }
@@ -685,6 +714,15 @@ final class MITMHTTP2Connection {
         } else {
             streamingScripts[streamID] = streaming
         }
+        // Skip emitting an empty mid-stream DATA frame so that a script
+        // returning `Data()` for a frame "swallows" it cleanly — same
+        // semantics as the HTTP/1 chunked path, which simply doesn't
+        // append a chunk on empty output. END_STREAM still has to land
+        // somewhere though, so empty + endStream collapses to one
+        // zero-length DATA frame carrying the flag.
+        if emitted.isEmpty, !endStream {
+            return Data()
+        }
         return emitDataFrames(streamID: streamID, payload: emitted, endStream: endStream)
     }
 
@@ -961,6 +999,12 @@ final class MITMHTTP2Connection {
             out.append(emitDataFrames(streamID: streamID, payload: body, endStream: true))
         }
         pendingClientBytes.append(out)
+        // Record so follow-up frames from the client (trailers, DATA, or
+        // the RST some clients send after consuming a response they
+        // didn't expect to get on their own initiative) aren't forwarded
+        // upstream on an idle stream. See ``handleFrame`` /
+        // ``handleRSTStream``.
+        synthRespondedStreams.insert(streamID)
     }
 
     /// RFC 9110 §5.6.2: header field-name is a `token` — one or more of
