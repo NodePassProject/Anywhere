@@ -140,9 +140,17 @@ nonisolated final class RawUDPSocket {
             return .failure(.connectionFailed("inet_pton failed for \(ip)"))
         }
 
-        let fd = Darwin.socket(endpoint.family, SOCK_DGRAM, 0)
-        guard fd >= 0 else {
-            return .failure(.socketCreationFailed("socket() errno=\(errno)"))
+        var fd = Darwin.socket(endpoint.family, SOCK_DGRAM, 0)
+        if fd < 0 {
+            let err = errno
+            if FDPressureRelief.isFDExhaustion(err), FDPressureRelief.relieve(for: .udp) {
+                // Relief evicted an idle UDP flow; retry once. Failure of
+                // the retry falls through with the latest errno.
+                fd = Darwin.socket(endpoint.family, SOCK_DGRAM, 0)
+            }
+            guard fd >= 0 else {
+                return .failure(.socketCreationFailed("socket() errno=\(errno)"))
+            }
         }
 
         guard SocketHelpers.makeNonBlocking(fd) else {
@@ -295,26 +303,52 @@ nonisolated final class RawUDPSocket {
     /// Latches cancelled state and tears down the socket on `ioQueue`.
     /// Safe to call from any thread; idempotent.
     func cancel() {
-        let alreadyCancelled: Bool = stateLock.withLock {
-            if case .cancelled = _state { return true }
-            _state = .cancelled
-            return false
-        }
-        if alreadyCancelled { return }
-
+        guard latchCancelled() else { return }
         ioQueue.async { [weak self] in
-            guard let self else { return }
-            if let source = self.readSource {
-                source.cancel()
-                self.readSource = nil
-            }
-            if self.socketFD >= 0 {
-                _ = Darwin.close(self.socketFD)
-                self.socketFD = -1
-            }
-            self.receiveHandler = nil
-            self.receiveErrorHandler = nil
-            self.receiveHandlerQueue = nil
+            self?.performTeardownOnIOQueue()
         }
+    }
+
+    /// Synchronous variant of ``cancel``. Closes the socket FD before
+    /// returning, so callers can rely on the FD being freed — used by the
+    /// FD-pressure relief path so an evicted flow's FD is actually back in
+    /// the table before the caller retries `socket(2)`.
+    ///
+    /// MUST NOT be called from this socket's `ioQueue` (would deadlock on
+    /// the `ioQueue.sync` below). The relief path is invoked from other
+    /// sockets' I/O queues and from `LWIPStack.lwipQueue`, never from this
+    /// socket's own `ioQueue`.
+    func cancelSync() {
+        guard latchCancelled() else { return }
+        ioQueue.sync { [weak self] in
+            self?.performTeardownOnIOQueue()
+        }
+    }
+
+    /// Atomically transitions the socket to `.cancelled`. Returns `true` if
+    /// the caller was the one that transitioned it (and therefore owns the
+    /// teardown), `false` if it was already cancelled.
+    private func latchCancelled() -> Bool {
+        stateLock.withLock {
+            if case .cancelled = _state { return false }
+            _state = .cancelled
+            return true
+        }
+    }
+
+    /// Tears down the read source and closes the socket FD. Must run on
+    /// `ioQueue`.
+    private func performTeardownOnIOQueue() {
+        if let source = readSource {
+            source.cancel()
+            readSource = nil
+        }
+        if socketFD >= 0 {
+            _ = Darwin.close(socketFD)
+            socketFD = -1
+        }
+        receiveHandler = nil
+        receiveErrorHandler = nil
+        receiveHandlerQueue = nil
     }
 }

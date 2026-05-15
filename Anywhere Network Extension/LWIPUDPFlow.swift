@@ -519,15 +519,36 @@ class LWIPUDPFlow {
         }
     }
 
+    /// True if this flow currently owns a direct-bypass POSIX UDP FD that
+    /// can be cleanly released. Direct flows are the only flows eligible
+    /// for FD-pressure eviction — proxied flows either hold TCP FDs (kept
+    /// under the TCP-first relief policy) or share mux/SS sockets where
+    /// closing the flow doesn't free a per-flow FD.
+    ///
+    /// Mid-connect flows (`proxyConnecting == true`) are excluded: their
+    /// `RawUDPSocket.ioQueue` may be blocked inside `getaddrinfo`, which
+    /// would stall the relief path's synchronous `cancelSync` cross-hop.
+    var holdsDirectFD: Bool { directSocket != nil && !proxyConnecting }
+
     // MARK: - Close
 
     func close() {
         guard !closed else { return }
         closed = true
-        releaseProxy()
+        releaseProxy(syncSocket: false)
     }
 
-    private func releaseProxy() {
+    /// Synchronous variant of ``close`` used by the FD-pressure relief
+    /// path: closes the underlying direct UDP socket before returning so
+    /// the FD is actually freed (not just `async`-scheduled for close) by
+    /// the time the caller retries `socket(2)`.
+    func closeSync() {
+        guard !closed else { return }
+        closed = true
+        releaseProxy(syncSocket: true)
+    }
+
+    private func releaseProxy(syncSocket: Bool) {
         let socket = directSocket
         let ssSession = ssUDPSession
         let ssToken = ssUDPSessionToken
@@ -543,7 +564,11 @@ class LWIPUDPFlow {
         proxyConnecting = false
         pendingData.removeAll()
         pendingBufferSize = 0
-        socket?.cancel()
+        if syncSocket {
+            socket?.cancelSync()
+        } else {
+            socket?.cancel()
+        }
         // The SS session is owned by LWIPStack and shared across every flow
         // for this configuration; unregister but never cancel the session.
         if let ssSession, let ssToken {

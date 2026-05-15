@@ -44,6 +44,7 @@ extension LWIPStack {
             startOutputDrainSource()
             startTimeoutTimer()
             startUDPCleanupTimer()
+            installFDPressureReliefHandler()
             startReadingPackets()
             logger.debug("[LWIPStack] Started, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), ipv6dns=\(ipv6DNSEnabled), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
         }
@@ -55,6 +56,7 @@ extension LWIPStack {
     /// Stops the lwIP stack and closes all active flows.
     func stop() {
         stopObservingSettings()
+        clearFDPressureReliefHandler()
         lwipQueue.sync { [self] in
             running = false
             deferredRestart?.cancel()
