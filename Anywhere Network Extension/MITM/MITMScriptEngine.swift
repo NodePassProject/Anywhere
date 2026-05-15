@@ -10,43 +10,26 @@ import JavaScriptCore
 
 private let logger = AnywhereLogger(category: "MITM")
 
-/// Trampoline to ``JSContextGroupSetExecutionTimeLimit``.
-///
-/// A nil callback tells JSC to terminate the offending script without
-/// asking. The terminated execution throws into the context's
-/// exception handler, which ``MITMScriptEngine.apply`` already drains
-/// and treats as a no-op rewrite — exactly the behaviour we want for
-/// runaway scripts.
-@_silgen_name("JSContextGroupSetExecutionTimeLimit")
-private func _JSContextGroupSetExecutionTimeLimit(
-    _ group: JSContextGroupRef,
-    _ limit: Double,
-    _ callback: (@convention(c) (JSContextRef?, UnsafeMutableRawPointer?) -> Bool)?,
-    _ context: UnsafeMutableRawPointer?
-)
-
 /// Per-``MITMSession`` JavaScript runtime for the
 /// ``CompiledMITMOperation/script`` rule. One ``JSContext`` is reused
 /// across every script invocation on the connection; compiled functions
 /// are cached by source content so duplicate scripts share work.
 ///
-/// Watchdog: the engine sets a per-call execution time limit at init
-/// via ``JSContextGroupSetExecutionTimeLimit`` (see the
-/// ``_JSContextGroupSetExecutionTimeLimit`` trampoline above). A
-/// script that exceeds ``executionTimeLimit`` seconds is terminated by
-/// JSC and surfaces as a context exception — ``apply`` then leaves the
-/// in-flight message unchanged. Without this an infinite-loop script
-/// would wedge the lwIP queue for every MITM connection in the
-/// extension.
+/// No execution-time watchdog. Preempting a runaway JS call from
+/// another thread requires ``JSContextGroupSetExecutionTimeLimit``,
+/// which lives in WebKit's ``JSContextRefPrivate.h`` — SPI that App
+/// Review's automated scan flags on sight (the symbol name appears
+/// verbatim in the Mach-O import table no matter how the call site
+/// is wrapped), with no public-API substitute that preempts a
+/// synchronous call already running in JSC. We accept the
+/// consequence by design: a user-authored ``process(ctx)`` that
+/// loops forever, recurses without bound, or backtracks a
+/// pathological regex will wedge the calling MITM connection and,
+/// because the pipeline shares one lwIP queue, every other flow in
+/// the tunnel along with it. Mitigation is on the authoring side —
+/// keep scripts simple and bounded; the engine still reverts uncaught
+/// throws so a script that fails partway leaves the wire untouched.
 final class MITMScriptEngine {
-
-    /// Wall-clock cap on a single `process(ctx)` invocation. JSC
-    /// counts from each call's entry, so a script gets the full budget
-    /// per request even when it's the same script running back-to-back.
-    /// 1 s is generous for legitimate transforms (which finish in
-    /// milliseconds) while still cutting runaway loops off before they
-    /// pile up against the next inbound packet.
-    private static let executionTimeLimit: Double = 1.0
 
     /// Mutable view of the in-flight HTTP message. The runtime hands
     /// this to `function process(ctx)` and reads each field back after
@@ -170,32 +153,6 @@ final class MITMScriptEngine {
     /// would discard that decision.
     fileprivate var currentDirective: Directive?
 
-    /// Consecutive watchdog-timeout count per ``sourceKey``. Bumped on
-    /// every timed-out call, reset on any successful call. Lets the
-    /// engine notice a script that always burns the per-call cap (an
-    /// infinite-loop import, a regex backtracking explosion) and stop
-    /// running it.
-    private var timeoutCount: [Int: Int] = [:]
-
-    /// Sources the engine has stopped invoking entirely after they
-    /// reached ``timeoutCircuitBreakerThreshold`` timeouts. The
-    /// ``apply`` / ``applyFrame`` entry points return a no-op outcome
-    /// when the sourceKey is in here. Reset only on engine teardown
-    /// (i.e., when the session ends) so a misbehaving script can't
-    /// resurrect itself within the same session.
-    private var disabledSources: Set<Int> = []
-
-    /// Consecutive-timeout count at which a script is considered
-    /// pathological and stops being called. The whole MITM pipeline
-    /// (every TCP / UDP flow in the tunnel) shares one lwIP queue —
-    /// each watchdog-terminated call blocks the queue for
-    /// ``executionTimeLimit`` seconds, so an infinite-loop script
-    /// running on a busy connection would stall every other flow.
-    /// Five is generous enough that a few thermally-throttled spikes
-    /// don't disable a legitimate script, while small enough to cap
-    /// the worst-case lwIP-queue damage at 5 seconds per session.
-    private static let timeoutCircuitBreakerThreshold: Int = 5
-
     init() {
         let vm = JSVirtualMachine()!
         self.context = JSContext(virtualMachine: vm)
@@ -203,16 +160,11 @@ final class MITMScriptEngine {
         // ``context.exception``; installing a custom handler REPLACES
         // that default, so we must reinstate the write ourselves or
         // every ``context.exception != nil`` check downstream sees
-        // nil and the watchdog / rollback paths silently never fire.
+        // nil and the rollback path silently never fires.
         self.context.exceptionHandler = { context, exception in
             logger.warning("[MITM][JS] uncaught: \(exception?.toString() ?? "<unknown>")")
             context?.exception = exception
         }
-        // Arm the watchdog on this context group. The limit applies
-        // to every JS call routed through ``context`` for the
-        // engine's lifetime; we don't unset it.
-        let group = JSContextGetGroup(context.jsGlobalContextRef)
-        _JSContextGroupSetExecutionTimeLimit(group!, Self.executionTimeLimit, nil, nil)
         installAnywhereGlobals()
     }
 
@@ -221,9 +173,6 @@ final class MITMScriptEngine {
     /// otherwise fails to compile. ``sourceKey`` is the cache key
     /// computed at rule-compile time; equal keys imply equal sources.
     func apply(_ message: Message, source: String, sourceKey: Int) -> Outcome {
-        if disabledSources.contains(sourceKey) {
-            return .modified(message)
-        }
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(message)
         }
@@ -234,28 +183,14 @@ final class MITMScriptEngine {
             currentDirective = nil
         }
         let ctxArg = makeContextValue(message)
-        let started = DispatchTime.now()
         _ = function.call(withArguments: [ctxArg])
-        let elapsed = Self.elapsedSeconds(since: started)
         // The script may have replaced ctx.body with a new typed array,
         // mutated the original in place, or done nothing — read back
         // whatever is on the object now.
         let updated = readBack(message, from: ctxArg)
         let hadException = context.exception != nil
-        if hadException, elapsed >= Self.executionTimeLimit {
-            // The exceptionHandler already logged the JS-side message,
-            // but a watchdog termination ("JavaScript execution
-            // terminated.") is indistinguishable from a regular throw
-            // there. Surface it explicitly so the user can tell a slow
-            // script apart from a buggy one, and trip the circuit
-            // breaker even when a directive wins the returned outcome.
-            trackTimeout(sourceKey: sourceKey, where: "\(message.phase == .httpRequest ? "request" : "response") \(message.url ?? "<no url>")")
-        }
         if let directive = currentDirective {
             context.exception = nil
-            if !hadException {
-                timeoutCount.removeValue(forKey: sourceKey)
-            }
             switch directive {
             case .done: return .done(updated)
             case .exit: return .exit
@@ -283,10 +218,6 @@ final class MITMScriptEngine {
             context.exception = nil
             return .modified(message)
         }
-        // Successful call — reset the consecutive-timeout counter so a
-        // transient slow stretch doesn't drift toward a permanent
-        // disable on later runs.
-        timeoutCount.removeValue(forKey: sourceKey)
         return .modified(updated)
     }
 
@@ -301,9 +232,6 @@ final class MITMScriptEngine {
         frameContext ctx: FrameContext,
         state: JSValue?
     ) -> FrameOutcome {
-        if disabledSources.contains(sourceKey) {
-            return .modified(body: frame, state: state)
-        }
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(body: frame, state: state)
         }
@@ -314,9 +242,7 @@ final class MITMScriptEngine {
             currentDirective = nil
         }
         let ctxArg = makeFrameContextValue(ctx, frame: frame, state: state)
-        let started = DispatchTime.now()
         _ = function.call(withArguments: [ctxArg])
-        let elapsed = Self.elapsedSeconds(since: started)
         // Pull the body and state back off the ctx; ignore any
         // mutations to method/url/status/headers — HEADERS are on the
         // wire already, so they can't take effect.
@@ -329,14 +255,8 @@ final class MITMScriptEngine {
         }
         let updatedState = ctxArg.objectForKeyedSubscript("state")
         let hadException = context.exception != nil
-        if hadException, elapsed >= Self.executionTimeLimit {
-            trackTimeout(sourceKey: sourceKey, where: "\(ctx.phase == .httpRequest ? "request" : "response") \(ctx.url ?? "<no url>") frame \(ctx.frameIndex)")
-        }
         if let directive = currentDirective {
             context.exception = nil
-            if !hadException {
-                timeoutCount.removeValue(forKey: sourceKey)
-            }
             switch directive {
             case .done: return .done(body: body)
             case .exit: return .exit
@@ -352,33 +272,7 @@ final class MITMScriptEngine {
             context.exception = nil
             return .modified(body: frame, state: state)
         }
-        timeoutCount.removeValue(forKey: sourceKey)
         return .modified(body: body, state: updatedState)
-    }
-
-    /// Bumps the consecutive-timeout counter for ``sourceKey`` and
-    /// trips the circuit breaker when it reaches the threshold. The
-    /// log line names the offending phase / URL / frame so a session
-    /// log can be traced back to the rule.
-    private func trackTimeout(sourceKey: Int, where context: String) {
-        let count = (timeoutCount[sourceKey] ?? 0) + 1
-        if count >= Self.timeoutCircuitBreakerThreshold {
-            disabledSources.insert(sourceKey)
-            timeoutCount.removeValue(forKey: sourceKey)
-            logger.warning("[MITM][JS] script hit \(count) consecutive timeouts; disabling for the rest of this session (each call burns \(Self.executionTimeLimit)s of the shared lwIP queue)")
-        } else {
-            timeoutCount[sourceKey] = count
-            logger.warning("[MITM][JS] script timed out (>= \(Self.executionTimeLimit)s) on \(context) [\(count)/\(Self.timeoutCircuitBreakerThreshold)]; rule did not run")
-        }
-    }
-
-    /// Wall-clock seconds since ``start``. Used to tell a watchdog-
-    /// terminated script apart from a script that threw on its own —
-    /// the JSC exception handler shows both as "uncaught" exceptions
-    /// with different messages, but a separate log line is easier for
-    /// users to spot.
-    private static func elapsedSeconds(since start: DispatchTime) -> Double {
-        Double(DispatchTime.now().uptimeNanoseconds &- start.uptimeNanoseconds) / 1_000_000_000
     }
 
     // MARK: - Compilation
