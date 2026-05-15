@@ -241,14 +241,38 @@ final class MITMRewritePolicy {
                 logger.warning("[MITM] urlReplace pattern failed to compile (suffix=\(suffix)): \(pattern)")
                 return nil
             }
+            guard Self.isValidRequestTargetTemplate(replacement) else {
+                logger.warning("[MITM] urlReplace dropped: replacement contains whitespace or control bytes (suffix=\(suffix))")
+                return nil
+            }
             return .urlReplace(regex: regex, replacement: replacement)
         case .headerAdd(let name, let value):
+            guard Self.isValidHeaderName(name) else {
+                logger.warning("[MITM] headerAdd dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
+                return nil
+            }
+            guard Self.isValidHeaderValue(value) else {
+                logger.warning("[MITM] headerAdd dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
+                return nil
+            }
             return .headerAdd(name: name, value: value)
         case .headerDelete(let name):
+            guard Self.isValidHeaderName(name) else {
+                logger.warning("[MITM] headerDelete dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
+                return nil
+            }
             return .headerDelete(nameLower: name.lowercased())
         case .headerReplace(let pattern, let name, let value):
             guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
                 logger.warning("[MITM] headerReplace pattern failed to compile (suffix=\(suffix)): \(pattern)")
+                return nil
+            }
+            guard Self.isValidHeaderName(name) else {
+                logger.warning("[MITM] headerReplace dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
+                return nil
+            }
+            guard Self.isValidHeaderValue(value) else {
+                logger.warning("[MITM] headerReplace dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
             return .headerReplace(regex: regex, name: name, value: value)
@@ -304,5 +328,69 @@ final class MITMRewritePolicy {
             return .exact(Set(contentTypes.map { $0.lowercased() }))
         }
         return .defaultAllowlist
+    }
+
+    // MARK: - Static-rule validation
+    //
+    // Rule sets imported from third-party URLs (see ``ImportMITMRuleSetView``)
+    // are untrusted input by the time they reach this policy. The wire
+    // serializers — both HTTP/1's ``MITMHTTP1Stream.serializeHead`` and
+    // HTTP/2's HPACK encoder — emit header bytes verbatim, so a rule
+    // with CR/LF in a header value would split the response head
+    // (response-splitting) on HTTP/1 or trip the receiver's HPACK
+    // validator on HTTP/2. Validation lives here, at rule-compile
+    // time, so an offending rule is dropped once with a logged
+    // diagnostic rather than checked again on every intercepted
+    // message. The script-side helpers (``Anywhere.respond``,
+    // ``ctx.headers``) already do the same check inside
+    // ``MITMScriptEngine``; this closes the gap for statically-
+    // configured rules.
+
+    /// RFC 9110 §5.6.2: header field-name and method token alphabet.
+    /// Duplicated from the wire layers rather than shared via a helper
+    /// type so the policy stays dependency-free of them.
+    private static func isValidHeaderName(_ name: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        for byte in name.utf8 {
+            switch byte {
+            case 0x21, 0x23, 0x24, 0x25, 0x26, 0x27,
+                 0x2A, 0x2B, 0x2D, 0x2E,
+                 0x5E, 0x5F, 0x60, 0x7C, 0x7E:
+                continue
+            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A:
+                continue
+            default:
+                return false
+            }
+        }
+        return true
+    }
+
+    /// RFC 9110 §5.5: header field-value must not contain CR / LF /
+    /// NUL — those bytes are exactly what splits a wire message into
+    /// two.
+    private static func isValidHeaderValue(_ value: String) -> Bool {
+        for byte in value.utf8 {
+            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Conservative check for an ``urlReplace`` replacement template.
+    /// The template becomes the new request-target (HTTP/1 start line
+    /// or HTTP/2 ``:path``) once regex substitution runs; allowing
+    /// SP / HTAB / CR / LF / NUL / DEL would either break HTTP/1's
+    /// SP-delimited start line or be rejected by HTTP/2 receivers.
+    /// Empty replacements pass — deleting a matched substring is
+    /// legitimate.
+    private static func isValidRequestTargetTemplate(_ replacement: String) -> Bool {
+        for byte in replacement.utf8 {
+            if byte <= 0x20 || byte == 0x7F {
+                return false
+            }
+        }
+        return true
     }
 }

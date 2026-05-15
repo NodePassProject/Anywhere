@@ -51,6 +51,33 @@ final class MITMHTTP2Connection {
     /// HTTP/2's mandated minimum ``SETTINGS_MAX_FRAME_SIZE`` (RFC 9113 §6.5.2).
     private static let maxFramePayloadSize = 16_384
 
+    /// Cap on cumulative bytes accumulated in
+    /// ``PendingHeaders.fragments`` across a HEADERS / PUSH_PROMISE
+    /// frame plus its CONTINUATION chain. RFC 9113 has no spec-level
+    /// limit, so a peer can chain CONTINUATIONs without bound and
+    /// exhaust the Network Extension's ~50 MiB memory budget. 256 KiB
+    /// fits the largest real-world request heads (JWT-bearing tokens,
+    /// multi-kilobyte cookies) with margin while leaving no
+    /// per-stream pressure path open. On overflow the pending state
+    /// is dropped and no HEADERS reach the peer's decoder — the same
+    /// failure mode as an HPACK decode error, which the connection
+    /// recovers from by GOAWAY.
+    private static let maxHeaderBlockFragmentBytes: Int = 256 * 1024
+
+    /// Cap on the wire-level payload of a single received frame.
+    /// ``SETTINGS_MAX_FRAME_SIZE`` (RFC 9113 §6.5.2) allows up to
+    /// 2^24-1 (~16 MiB) via SETTINGS negotiation, but the MITM does
+    /// not track either peer's setting and the Network Extension's
+    /// ~50 MiB budget cannot sustain a single 16 MiB allocation.
+    /// 1 MiB sits well above the 16 KiB default that nginx, Apache,
+    /// and Chrome stick to in practice while keeping the worst-case
+    /// per-frame allocation bounded. A frame exceeding this cap flips
+    /// ``parseError`` and stops further processing — recovering
+    /// requires finding the next valid frame boundary in a stream of
+    /// arbitrary bytes, which is undecidable, so the peer sees a
+    /// stalled half of the connection and eventually GOAWAYs.
+    private static let maxReceivedFramePayloadSize: Int = 1 * 1024 * 1024
+
     // MARK: - Raw frame
 
     /// Format-preserving frame view — keeps the wire-level type byte so
@@ -86,6 +113,15 @@ final class MITMHTTP2Connection {
     /// followed by CONTINUATION frames. RFC 9113 §6.10 forbids any
     /// other frame on the connection until END_HEADERS arrives.
     private var pending: PendingHeaders?
+
+    /// Sticky flag set when ``parseFrame`` rejects a frame whose wire
+    /// length exceeds ``maxReceivedFramePayloadSize``. Once set,
+    /// ``process(_:)`` returns nothing and ``rxBuffer`` stays cleared
+    /// — resuming parse would require finding the next valid frame
+    /// boundary in a stream of arbitrary bytes, which is undecidable.
+    /// The peer sees a stalled half of the connection and GOAWAYs
+    /// after its timeout.
+    private var parseError: Bool = false
 
     private struct PendingHeaders {
         let streamID: UInt32
@@ -213,6 +249,10 @@ final class MITMHTTP2Connection {
     /// Streaming-safe: callers may invoke this with arbitrarily small
     /// or large chunks.
     func process(_ data: Data) -> Data {
+        // Once an oversized frame has broken the parse state, stay
+        // broken — dropping further bytes on the floor is strictly
+        // safer than misparsing them as a new frame's preamble.
+        if parseError { return Data() }
         var output = Data()
         var input = data
 
@@ -326,6 +366,15 @@ final class MITMHTTP2Connection {
             return Data()
         }
 
+        // Single-frame HEADERS cap. ``handleContinuation`` enforces
+        // the same bound on chained CONTINUATIONs; without this check
+        // a peer can put the entire ``maxHeaderBlockFragmentBytes``
+        // budget into one frame and bypass the chain-side guard.
+        if body.count > Self.maxHeaderBlockFragmentBytes {
+            logger.warning("[MITM] HTTP/2 stream \(frame.streamID): HEADERS payload \(body.count) B exceeded cap \(Self.maxHeaderBlockFragmentBytes); dropping")
+            return Data()
+        }
+
         if frame.flags & 0x4 != 0 { // END_HEADERS
             return finalizeHeaderBlock(
                 streamID: frame.streamID,
@@ -351,6 +400,15 @@ final class MITMHTTP2Connection {
             return serializeFrame(frame)
         }
 
+        // Project the post-append size and reject *before* allocating.
+        // Otherwise a single 16 MiB CONTINUATION blows through the cap
+        // on the append itself; the existing variable ``p`` shares
+        // ``pending``'s storage by COW until the first mutation.
+        if p.fragments.count + frame.payload.count > Self.maxHeaderBlockFragmentBytes {
+            logger.warning("[MITM] HTTP/2 stream \(frame.streamID): header block fragments would be \(p.fragments.count + frame.payload.count) B, over cap \(Self.maxHeaderBlockFragmentBytes); dropping")
+            pending = nil
+            return Data()
+        }
         p.fragments.append(frame.payload)
 
         if frame.flags & 0x4 != 0 { // END_HEADERS
@@ -374,6 +432,11 @@ final class MITMHTTP2Connection {
         //   Header Block Fragment
         //   [Padding]
         guard let (promisedStreamID, body) = stripPushPromisePadding(frame: frame) else {
+            return Data()
+        }
+
+        if body.count > Self.maxHeaderBlockFragmentBytes {
+            logger.warning("[MITM] HTTP/2 stream \(frame.streamID): PUSH_PROMISE payload \(body.count) B exceeded cap \(Self.maxHeaderBlockFragmentBytes); dropping")
             return Data()
         }
 
@@ -1014,7 +1077,16 @@ final class MITMHTTP2Connection {
         }
 
         let reencoded = HPACKEncoder.encodeHeaderBlock(finalHeaders)
-        let body = result.body
+        // RFC 9110 §15.2: a response to HEAD never carries a body even
+        // when the same resource fetched with GET would. A script that
+        // wrote into ctx.body would otherwise have us emit DATA frames
+        // the client didn't expect — strict h2 clients ignore them, but
+        // emitting them is still spec-violating and can confuse stream
+        // accounting on the receiver. Drop the bytes here, matching
+        // HTTP/1's emitScriptedHead carve-out.
+        let isHeadResponse = phase == .httpResponse
+            && pending.originatingRequest?.method.uppercased() == "HEAD"
+        let body = isHeadResponse ? Data() : result.body
         // END_STREAM lands on either HEADERS (no body case) or the last
         // DATA frame (body case). HTTP/2 requires DATA to follow HEADERS
         // when there's a body; an empty body is fine on HEADERS alone.
@@ -1425,6 +1497,12 @@ final class MITMHTTP2Connection {
         guard buffer.count >= 9 else { return nil }
         let s = buffer.startIndex
         let length = (Int(buffer[s]) << 16) | (Int(buffer[s + 1]) << 8) | Int(buffer[s + 2])
+        if length > Self.maxReceivedFramePayloadSize {
+            logger.warning("[MITM] HTTP/2: frame length \(length) B exceeded receive cap \(Self.maxReceivedFramePayloadSize); breaking connection state")
+            parseError = true
+            buffer.removeAll(keepingCapacity: false)
+            return nil
+        }
         let total = 9 + length
         guard buffer.count >= total else { return nil }
 

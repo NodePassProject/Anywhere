@@ -34,6 +34,19 @@ final class MITMHTTP1Stream {
     /// abandoned, and the connection survives.
     private static let maxHeadBytes: Int = 64 * 1024
 
+    /// Cap on the body size that ``Anywhere.respond`` may emit on the
+    /// HTTP/1.1 path. HTTP/1 has no flow-control window so the
+    /// constraint here is purely about memory: a script that asks for
+    /// a 1 GB synthesized response would otherwise force multiple
+    /// gigabyte-scale ``Data`` copies (JS → Swift, queue, TLS send
+    /// buffer) through a Network Extension limited to ~50 MiB.
+    /// Matches ``MITMBodyCodec/maxBufferedBodyBytes`` so mocked
+    /// responses sit inside the same memory envelope buffered-script
+    /// bodies already use. Oversized bodies are truncated rather than
+    /// rejected — a partial mock is more useful for debugging than a
+    /// dropped one.
+    private static let maxSynthesizedResponseBodyBytes: Int = MITMBodyCodec.maxBufferedBodyBytes
+
     private let host: String
     private let phase: MITMPhase
     private let policy: MITMRewritePolicy
@@ -1217,10 +1230,18 @@ final class MITMHTTP1Stream {
             }
             headers.append((name: entry.name, value: entry.value))
         }
-        headers.append((name: "Content-Length", value: String(response.body.count)))
+        let body: Data
+        if response.body.count > Self.maxSynthesizedResponseBodyBytes {
+            logger.warning("[MITM][JS] Anywhere.respond body \(response.body.count) B exceeds memory cap \(Self.maxSynthesizedResponseBodyBytes) B; truncating")
+            let end = response.body.startIndex + Self.maxSynthesizedResponseBodyBytes
+            body = response.body.subdata(in: response.body.startIndex..<end)
+        } else {
+            body = response.body
+        }
+        headers.append((name: "Content-Length", value: String(body.count)))
         var bytes = serializeHead(startLine: startLine, headers: headers)
-        if !response.body.isEmpty {
-            bytes.append(response.body)
+        if !body.isEmpty {
+            bytes.append(body)
         }
         // Pipeline-order preservation: when an earlier pipelined
         // request is still awaiting its upstream response, the synth
@@ -1405,12 +1426,6 @@ final class MITMHTTP1Stream {
                     guard regex.firstMatch(in: literal, options: [], range: range) != nil else {
                         return entry
                     }
-                    _ = regex.stringByReplacingMatches(
-                        in: literal,
-                        options: [],
-                        range: range,
-                        withTemplate: "\(name): \(value)"
-                    )
                     return (name: name, value: value)
                 }
             case .urlReplace, .script, .streamScript:
