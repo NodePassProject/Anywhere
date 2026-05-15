@@ -100,6 +100,7 @@
 				Models/MITMRule.swift,
 				Models/RoutingRule.swift,
 				Models/TunnelMessage.swift,
+				Networking/FDPressureRelief.swift,
 				Networking/LatencyTester.swift,
 				Networking/ngtcp2/ngtcp2_acktr.c,
 				Networking/ngtcp2/ngtcp2_addr.c,

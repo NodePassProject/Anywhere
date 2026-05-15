@@ -542,9 +542,18 @@ nonisolated class QUICConnection {
 
     private func createSocket() throws {
         let family = Int32(remoteAddr.ss_family)
-        let fd = socket(family, SOCK_DGRAM, 0)
-        guard fd >= 0 else {
-            throw QUICError.connectionFailed("socket() failed errno=\(errno)")
+        var fd = socket(family, SOCK_DGRAM, 0)
+        if fd < 0 {
+            let err = errno
+            if FDPressureRelief.isFDExhaustion(err), FDPressureRelief.relieve(for: .tcp) {
+                // QUIC here carries Hysteria / HTTP3 to the proxy, so it's
+                // treated as TCP-class transport: relief evicts idle direct
+                // UDP flows on our behalf and we retry once.
+                fd = socket(family, SOCK_DGRAM, 0)
+            }
+            guard fd >= 0 else {
+                throw QUICError.connectionFailed("socket() failed errno=\(errno)")
+            }
         }
 
         // Non-blocking so `recv(2)` / `send(2)` return EAGAIN instead of

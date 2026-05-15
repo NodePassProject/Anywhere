@@ -527,11 +527,19 @@ nonisolated class RawTCPSocket: RawTransport {
             return
         }
 
-        let fd = Darwin.socket(endpoint.family, SOCK_STREAM, IPPROTO_TCP)
-        guard fd >= 0 else {
-            logger.debug("[TCP] socket() failed: \(String(cString: strerror(errno)))")
-            tryConnectNext()
-            return
+        var fd = Darwin.socket(endpoint.family, SOCK_STREAM, IPPROTO_TCP)
+        if fd < 0 {
+            let err = errno
+            if FDPressureRelief.isFDExhaustion(err), FDPressureRelief.relieve(for: .tcp) {
+                // Relief evicted idle UDP flow(s); retry once before
+                // moving on to the next address.
+                fd = Darwin.socket(endpoint.family, SOCK_STREAM, IPPROTO_TCP)
+            }
+            if fd < 0 {
+                logger.debug("[TCP] socket() failed: \(String(cString: strerror(errno)))")
+                tryConnectNext()
+                return
+            }
         }
 
         applyTCPSocketOptions(fd: fd)
