@@ -153,9 +153,19 @@ final class MITMScriptEngine {
     /// would discard that decision.
     fileprivate var currentDirective: Directive?
 
+    /// Process-wide JSC heap shared by every ``MITMScriptEngine``. Each
+    /// session still owns its own ``JSContext`` so script-set globals
+    /// stay per-session, but the underlying heap, GC, and allocator
+    /// are shared — the previous one-VM-per-engine layout multiplied
+    /// JSC's multi-MiB per-VM cost by every active MITM session, which
+    /// the Network Extension's ~50 MiB budget can't sustain under even
+    /// modest concurrency. JSC serializes access to the heap with an
+    /// internal mutex, so multiple sessions on independent queues are
+    /// safe without an external lock.
+    private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
+
     init() {
-        let vm = JSVirtualMachine()!
-        self.context = JSContext(virtualMachine: vm)
+        self.context = JSContext(virtualMachine: Self.sharedVM)
         // JSC's default exception handler writes the thrown value to
         // ``context.exception``; installing a custom handler REPLACES
         // that default, so we must reinstate the write ourselves or

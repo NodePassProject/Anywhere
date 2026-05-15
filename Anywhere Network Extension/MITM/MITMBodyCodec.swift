@@ -252,7 +252,16 @@ enum MITMBodyCodec {
     // MARK: - Streaming decoder
 
     /// Wraps `compression_stream_*` for unknown output sizes. Pulls
-    /// 64 KiB at a time until the stream finalises or errors.
+    /// 64 KiB at a time until the stream finalises or errors. Returns
+    /// nil if the cumulative decompressed output would exceed
+    /// ``maxBufferedBodyBytes`` — without the cap a 1 MiB gzip of
+    /// zeros decompresses to ~1 GiB and exhausts the Network
+    /// Extension's ~50 MiB budget (decompression-bomb DoS). The cap
+    /// matches the rewriter's buffer limit so a body the rest of the
+    /// pipeline couldn't act on anyway never gets fully materialised
+    /// in memory; callers that hit the cap fall back to forwarding the
+    /// original compressed bytes verbatim, same as a malformed-payload
+    /// decode failure.
     private static func streamDecode(_ data: Data, algorithm: compression_algorithm) -> Data? {
         guard !data.isEmpty else { return Data() }
         let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
@@ -283,6 +292,10 @@ enum MITMBodyCodec {
                 case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
                     let written = bufferSize - stream.pointee.dst_size
                     if written > 0 {
+                        if output.count + written > maxBufferedBodyBytes {
+                            logger.warning("[MITM] decompress output would exceed cap \(maxBufferedBodyBytes) B; aborting (likely decompression bomb)")
+                            return nil
+                        }
                         output.append(buffer, count: written)
                     }
                     if status == COMPRESSION_STATUS_END {

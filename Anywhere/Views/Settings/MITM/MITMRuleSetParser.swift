@@ -177,12 +177,42 @@ enum MITMRuleSetParser {
         return (key, value)
     }
 
-    /// Parses `host` or `host:port` for the transparent and 302 redirect
-    /// modes. Returns nil only when the value is empty after trimming.
+    /// Parses `host`, `host:port`, `[ipv6]`, or `[ipv6]:port` for the
+    /// transparent and 302 redirect modes. Bracketed IPv6 is the
+    /// canonical URI form (RFC 3986 §3.2.2); unbracketed strings with
+    /// more than one `:` are treated as bare IPv6 hosts with no port,
+    /// since splitting on the last colon would otherwise eat the final
+    /// hextet (``2001:db8::1`` → ``host=2001:db8:`` + ``port=1``).
+    /// Returns nil only when the value is empty after trimming.
     private static func parseAuthority(_ value: String, action: MITMRewriteAction) -> MITMRewriteTarget? {
         let trimmed = value.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return nil }
-        if let colon = trimmed.lastIndex(of: ":") {
+
+        // Bracketed IPv6: ``[::1]`` or ``[::1]:443``. The brackets are
+        // URI syntax only; the stored host loses them so it matches the
+        // form upstream resolvers expect.
+        if trimmed.hasPrefix("[") {
+            if let closeBracket = trimmed.firstIndex(of: "]") {
+                let hostStart = trimmed.index(after: trimmed.startIndex)
+                let host = String(trimmed[hostStart..<closeBracket])
+                let afterBracket = trimmed[trimmed.index(after: closeBracket)...]
+                if afterBracket.isEmpty {
+                    return MITMRewriteTarget(action: action, host: host, port: nil)
+                }
+                if afterBracket.hasPrefix(":"),
+                   let port = UInt16(afterBracket.dropFirst()) {
+                    return MITMRewriteTarget(action: action, host: host, port: port)
+                }
+            }
+            // Malformed bracketed input — keep as-is rather than guessing.
+            return MITMRewriteTarget(action: action, host: trimmed, port: nil)
+        }
+
+        // Unbracketed. Exactly one ``:`` means ``host:port``; more than
+        // one means an IPv6 literal the user wrote without brackets.
+        var colonCount = 0
+        for ch in trimmed where ch == ":" { colonCount += 1 }
+        if colonCount == 1, let colon = trimmed.lastIndex(of: ":") {
             let hostPart = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
             let portPart = String(trimmed[trimmed.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
             if !hostPart.isEmpty, let port = UInt16(portPart) {
