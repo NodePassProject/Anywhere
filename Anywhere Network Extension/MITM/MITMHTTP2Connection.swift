@@ -877,8 +877,22 @@ final class MITMHTTP2Connection {
             // subsequent one fall back to the original payload — we
             // never emit a frame that would push us past the budget,
             // even partially.
+            //
+            // Clamp at zero rather than carrying negative growth from a
+            // shrink: the receiver's per-stream window refills only via
+            // WINDOW_UPDATE, which the MITM cannot observe. Banking
+            // headroom from an earlier shrink would let a later frame
+            // emit a large grow under the cumulative cap, but the
+            // receiver's window at that moment may still be smaller
+            // than what we projected — net result, FLOW_CONTROL_ERROR +
+            // GOAWAY tearing the whole connection down. Treating
+            // shrinks as "free" (no future credit) is the conservative
+            // play: we never emit more than ``maxStreamingRewriteGrowthBytes``
+            // unaccounted bytes ahead of the original sender's wire
+            // total, even on a stream the script chose to compress
+            // earlier.
             let growth = result.body.count - body.count
-            let projected = streaming.cumulativeGrowth + growth
+            let projected = max(0, streaming.cumulativeGrowth + growth)
             if projected > Self.maxStreamingRewriteGrowthBytes {
                 logger.warning("[MITM] HTTP/2 stream \(streamID): streamScript projected growth \(projected) B exceeded cap \(Self.maxStreamingRewriteGrowthBytes) B; bypassing this frame and remaining frames to avoid FLOW_CONTROL_ERROR")
                 streaming.cursor.bypass = true

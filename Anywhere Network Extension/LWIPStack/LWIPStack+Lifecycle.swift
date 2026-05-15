@@ -242,10 +242,20 @@ extension LWIPStack {
     // 2. "routingChanged" — posted by RuleSetListView when routing rule assignments change.
     //
     // 3. "mitmChanged" — posted by MITMSnapshot.save() when the MITM toggle or
-    //    rules change. Does NOT restart the stack: established connections
-    //    (already past their TLS handshake) keep running unaffected, and we
-    //    rebuild the in-memory hostname matcher on lwipQueue so it serializes
-    //    against new accept callbacks.
+    //    rules change. Does NOT restart the stack: connections in flight keep
+    //    their TLS legs and lwIP state. The in-memory hostname matcher is
+    //    rebuilt in place on lwipQueue so it serializes against new accept
+    //    callbacks. Note that the policy is shared by reference with every
+    //    live MITMSession, so active sessions DO pick up the new rules on
+    //    their next request head (the rewriters re-query
+    //    ``MITMRewritePolicy.rules(for:phase:)`` per message), and the
+    //    MITMScriptStore buckets for rule sets the user just deleted are
+    //    purged immediately — any active scripts on those sets lose their
+    //    in-memory ``Anywhere.store`` state. We accept this drift over the
+    //    alternative (snapshotting the policy per session) because the
+    //    expected use case is short-lived connections plus deliberate edits
+    //    during script development, where seeing the new rules apply
+    //    promptly is the desired behaviour.
 
     /// Registers Darwin notification observers for cross-process settings changes.
     private func startObservingSettings() {
@@ -355,10 +365,12 @@ extension LWIPStack {
 
     /// Handles the "mitmChanged" notification (MITM toggle or rules changed).
     ///
-    /// MITM only affects connection establishment, so existing connections
-    /// finish on their old policy and new connections see the new one. No
-    /// stack restart is needed — we rebuild the matcher in place on
-    /// `lwipQueue` to serialize against connection accept callbacks.
+    /// No stack restart is needed — we rebuild the matcher in place on
+    /// `lwipQueue` to serialize against connection accept callbacks. Live
+    /// sessions share the policy object by reference, so they pick up the
+    /// new rules on their next request head; rule-set deletions also drop
+    /// the corresponding ``MITMScriptStore`` buckets. See the
+    /// ``startObservingSettings`` comment for the full picture.
     fileprivate func handleMITMChanged() {
         lwipQueue.async { [self] in
             guard running else { return }

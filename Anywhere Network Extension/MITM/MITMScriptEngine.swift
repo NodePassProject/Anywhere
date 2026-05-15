@@ -805,11 +805,12 @@ final class MITMScriptEngine {
         var out = Data()
         var iter = str.unicodeScalars.makeIterator()
         while let hi = iter.next() {
-            guard let lo = iter.next(),
-                  let h = hexNibble(hi),
-                  let l = hexNibble(lo)
-            else {
-                logger.warning("[MITM][JS] Anywhere.hex.decode: input contains non-hex characters or odd length; returning empty Data")
+            guard let lo = iter.next() else {
+                logger.warning("[MITM][JS] Anywhere.hex.decode: odd-length input; returning empty Data")
+                return Data()
+            }
+            guard let h = hexNibble(hi), let l = hexNibble(lo) else {
+                logger.warning("[MITM][JS] Anywhere.hex.decode: non-hex character in input; returning empty Data")
                 return Data()
             }
             out.append((h << 4) | l)
