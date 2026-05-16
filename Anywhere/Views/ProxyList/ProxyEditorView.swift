@@ -17,23 +17,23 @@ struct ProxyEditorView: View {
     @State private var name = ""
     @State private var serverAddress = ""
     @State private var serverPort = ""
+    
+    // Security layer fields
+    @State private var tlsSNI = ""
+    @State private var tlsALPN = ""
+    @State private var realitySNI = ""
+    @State private var realityPublicKey = ""
+    @State private var realityShortId = ""
+    @State private var fingerprint: TLSFingerprint = .chrome133
+    
+    // VLESS fields
     @State private var uuid = ""
     @State private var encryption = "none"
     @State private var transport = "tcp"
     @State private var flow = ""
     @State private var security = "none"
-    
-    // TLS fields
-    @State private var tlsSNI = ""
-    @State private var tlsALPN = ""
-
-    // Reality fields
-    @State private var sni = ""
-    @State private var publicKey = ""
-    @State private var shortId = ""
-    
-    // TLS/Reality fields
-    @State private var fingerprint: TLSFingerprint = .chrome133
+    @State private var muxEnabled = true
+    @State private var xudpEnabled = true
 
     // VLESS WebSocket fields
     @State private var wsHost = ""
@@ -54,10 +54,6 @@ struct ProxyEditorView: View {
     @State private var xhttpPath = "/"
     @State private var xhttpMode = "auto"
     @State private var xhttpExtra = ""
-    
-    // VLESS Mux + XUDP
-    @State private var muxEnabled = true
-    @State private var xudpEnabled = true
     
     // Hysteria fields
     @State private var hysteriaPassword = ""
@@ -110,6 +106,9 @@ struct ProxyEditorView: View {
 
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
+        if isVLESS {
+            return UUID(xrayString: uuid) != nil && (!isReality || (!realitySNI.isEmpty && !realityPublicKey.isEmpty))
+        }
         if isHysteria {
             if hysteriaPassword.isEmpty { return false }
             guard let v = Int(hysteriaUploadMbpsText),
@@ -136,7 +135,7 @@ struct ProxyEditorView: View {
         if isNaive {
             return !naiveUsername.isEmpty && !naivePassword.isEmpty
         }
-        return UUID(xrayString: uuid) != nil && (!isReality || (!sni.isEmpty && !publicKey.isEmpty))
+        return false
     }
 
     init(configuration: ProxyConfiguration? = nil, onSave: @escaping (ProxyConfiguration) -> Void) {
@@ -536,7 +535,7 @@ struct ProxyEditorView: View {
                         }
                         if isReality {
                             LabeledContent {
-                                TextField("SNI", text: $sni)
+                                TextField("SNI", text: $realitySNI)
                                     .keyboardType(.URL)
                                     .autocorrectionDisabled()
                                     .textInputAutocapitalization(.never)
@@ -545,7 +544,7 @@ struct ProxyEditorView: View {
                                 TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
                             }
                             LabeledContent {
-                                TextField("Public Key", text: $publicKey)
+                                TextField("Public Key", text: $realityPublicKey)
                                     .autocorrectionDisabled()
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
@@ -553,7 +552,7 @@ struct ProxyEditorView: View {
                                 TextWithColorfulIcon(title: "Public Key", comment: "Public Key for Reality security layer", systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .green)
                             }
                             LabeledContent {
-                                TextField("Short ID", text: $shortId)
+                                TextField("Short ID", text: $realityShortId)
                                     .autocorrectionDisabled()
                                     .textInputAutocapitalization(.never)
                                     .multilineTextAlignment(.trailing)
@@ -706,9 +705,9 @@ struct ProxyEditorView: View {
         }
 
         if let reality = configuration.reality {
-            sni = reality.serverName
-            publicKey = reality.publicKey.base64URLEncodedString()
-            shortId = reality.shortId.hexEncodedString()
+            realitySNI = reality.serverName
+            realityPublicKey = reality.publicKey.base64URLEncodedString()
+            realityShortId = reality.shortId.hexEncodedString()
             fingerprint = reality.fingerprint
         }
 
@@ -819,10 +818,10 @@ struct ProxyEditorView: View {
         
         var realityConfiguration: RealityConfiguration?
         if isReality {
-            guard let pk = Data(base64URLEncoded: publicKey) else { return }
-            let sid = Data(hexString: shortId) ?? Data()
+            guard let pk = Data(base64URLEncoded: realityPublicKey) else { return }
+            let sid = Data(hexString: realityShortId) ?? Data()
             realityConfiguration = RealityConfiguration(
-                serverName: sni,
+                serverName: realitySNI,
                 publicKey: pk,
                 shortId: sid,
                 fingerprint: fingerprint

@@ -184,6 +184,10 @@ struct RuleSetListView: View {
                 return
             }
             let parsed = RoutingRuleSetParser.parse(body)
+            guard parsed.rules.count <= CustomRoutingRuleSet.maxRuleCount else {
+                importError = String(localized: "Rule set is too large.")
+                return
+            }
             let name = parsed.name.isEmpty
                 ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Imported" : url.deletingPathExtension().lastPathComponent)
                 : parsed.name
@@ -213,6 +217,10 @@ struct RuleSetListView: View {
                     return
                 }
                 let parsed = RoutingRuleSetParser.parse(body)
+                guard parsed.rules.count <= CustomRoutingRuleSet.maxRuleCount else {
+                    subscribeError = String(localized: "Rule set exceeds the maximum of \(CustomRoutingRuleSet.maxRules) rules.")
+                    return
+                }
                 let name = parsed.name.isEmpty
                     ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Subscription" : url.deletingPathExtension().lastPathComponent)
                     : parsed.name

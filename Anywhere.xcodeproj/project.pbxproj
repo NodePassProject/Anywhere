@@ -295,6 +295,13 @@
 			);
 			target = CB71CDC22F837D11002B9E1D /* Anywhere Widget */;
 		};
+		CB8632442FB83C1600059EFE /* Exceptions for "Anywhere" folder in "Anywhere TV" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Views/Settings/RuleSets/RoutingRuleParser.swift,
+			);
+			target = CB2B549B2F6C3E2700F24AC2 /* Anywhere TV */;
+		};
 		CBE5B8662F62E736003CECEF /* Exceptions for "Anywhere" folder in "Anywhere" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -316,6 +323,7 @@
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				CBE5B8662F62E736003CECEF /* Exceptions for "Anywhere" folder in "Anywhere" target */,
+				CB8632442FB83C1600059EFE /* Exceptions for "Anywhere" folder in "Anywhere TV" target */,
 			);
 			path = Anywhere;
 			sourceTree = "<group>";
@@ -818,6 +826,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Anywhere need your camera permission to scan QR Code.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -863,6 +872,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = Anywhere;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
 				INFOPLIST_KEY_NSCameraUsageDescription = "Anywhere need your camera permission to scan QR Code.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

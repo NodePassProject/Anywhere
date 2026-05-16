@@ -18,6 +18,8 @@ struct RoutingRuleSet: Identifiable, Equatable {
 }
 
 struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
+    static let maxRuleCount = 10000
+
     let id: UUID
     var name: String
     var rules: [RoutingRule]
@@ -212,6 +214,9 @@ class RoutingRuleSetStore: ObservableObject {
         }
 
         let parsed = RoutingRuleSetParser.parse(body)
+        guard parsed.rules.count <= CustomRoutingRuleSet.maxRuleCount else {
+            throw CustomRoutingRuleSetRefreshError.tooManyRules
+        }
         customRuleSets[index].rules = parsed.rules
         saveCustomRuleSets()
         rebuildRuleSets()
@@ -384,6 +389,7 @@ enum CustomRoutingRuleSetRefreshError: LocalizedError {
     case missingSubscriptionURL
     case invalidStatusCode(Int)
     case undecodableBody
+    case tooManyRules
 
     var errorDescription: String? {
         switch self {
@@ -393,6 +399,8 @@ enum CustomRoutingRuleSetRefreshError: LocalizedError {
             return "HTTP \(code)"
         case .undecodableBody:
             return String(localized: "Unknown content.")
+        case .tooManyRules:
+            return String(localized: "Rule set is too large.")
         }
     }
 }

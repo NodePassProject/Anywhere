@@ -13,44 +13,68 @@ class TVProxyEditorViewController: UITableViewController {
 
     private let existingConfiguration: ProxyConfiguration?
     private let onSave: (ProxyConfiguration) -> Void
-
-    // Form state
+    
     private var selectedProtocol: OutboundProtocol = .vless
     private var name = ""
     private var serverAddress = ""
     private var serverPort = ""
+    
+    // Security layer fields
+    private var tlsSNI = ""
+    private var tlsALPN = ""
+    private var realitySNI = ""
+    private var realityPublicKey = ""
+    private var realityShortId = ""
+    private var fingerprint: TLSFingerprint = .chrome133
+    
+    // VLESS fields
     private var uuid = ""
     private var encryption = "none"
     private var transport = "tcp"
     private var flow = ""
     private var security = "none"
+    private var muxEnabled = true
+    private var xudpEnabled = true
+    
+    // VLESS WebSocket fields
     private var wsHost = ""
     private var wsPath = "/"
+    
+    // VLESS HTTPUpgrade fields
     private var huHost = ""
     private var huPath = "/"
+    
+    // VLESS gRPC fields
     private var grpcServiceName = ""
     private var grpcAuthority = ""
     private var grpcMode = "gun"
     private var grpcUserAgent = ""
+    
+    // VLESS XHTTP fields
     private var xhttpHost = ""
     private var xhttpPath = "/"
     private var xhttpMode = "auto"
     private var xhttpExtra = ""
-    private var tlsSNI = ""
-    private var tlsALPN = ""
-    private var muxEnabled = true
-    private var xudpEnabled = true
-    private var sni = ""
-    private var publicKey = ""
-    private var shortId = ""
-    private var fingerprint: TLSFingerprint = .chrome133
-    private var ssPassword = ""
-    private var ssMethod = "aes-128-gcm"
+    
+    // Hysteria fields
     private var hysteriaPassword = ""
     private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
+    
+    // Trojan fields
     private var trojanPassword = ""
+    
+    // AnyTLS fields
+    private var anytlsPassword = ""
+    
+    // Shadowsocks fields
+    private var ssPassword = ""
+    private var ssMethod = "aes-128-gcm"
+    
+    // SOCKS5 fields
     private var socks5Username = ""
     private var socks5Password = ""
+    
+    // Sudoku fields
     private var sudokuKey = ""
     private var sudokuAEADMethod: SudokuAEADMethod = .chacha20Poly1305
     private var sudokuPaddingMinText = "5"
@@ -64,12 +88,15 @@ class TVProxyEditorViewController: UITableViewController {
     private var sudokuHTTPMaskHost = ""
     private var sudokuHTTPMaskPathRoot = ""
     private var sudokuHTTPMaskMultiplex: SudokuHTTPMaskMultiplex = .off
+    
+    // Shared credential fields for HTTPS/HTTP2/QUIC
     private var naiveUsername = ""
     private var naivePassword = ""
 
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
     private var isTrojan: Bool { selectedProtocol == .trojan }
+    private var isAnyTLS: Bool { selectedProtocol == .anytls }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isSudoku: Bool { selectedProtocol == .sudoku }
@@ -94,9 +121,10 @@ class TVProxyEditorViewController: UITableViewController {
         case grpcServiceName, grpcAuthority, grpcMode, grpcUserAgent
         case xhttpHost, xhttpPath, xhttpMode
         case tlsSNI, tlsALPN, fingerprint
-        case realitySNI, publicKey, shortId
+        case realitySNI, realityPublicKey, realityShortId
         case hysteriaPassword, hysteriaUploadMbps
         case trojanPassword
+        case anytlsPassword
         case ssPassword, ssMethod
         case sudokuKey, sudokuAEADMethod, sudokuPaddingMin, sudokuPaddingMax
         case sudokuASCIIMode, sudokuCustomTables
@@ -120,6 +148,7 @@ class TVProxyEditorViewController: UITableViewController {
             ("VLESS", "vless"),
             ("Hysteria", "hysteria"),
             ("Trojan", "trojan"),
+            ("AnyTLS", "anytls"),
             ("Shadowsocks", "shadowsocks"),
             ("SOCKS5", "socks5"),
             ("Sudoku", "sudoku"),
@@ -149,6 +178,8 @@ class TVProxyEditorViewController: UITableViewController {
             serverRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
         } else if isTrojan {
             serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword, secure: true))
+        } else if isAnyTLS {
+            serverRows.append(.text(label: String(localized: "Password"), value: anytlsPassword, placeholder: String(localized: "Password"), key: .anytlsPassword, secure: true))
         } else if isShadowsocks {
             serverRows.append(.text(label: String(localized: "Password"), value: ssPassword, placeholder: String(localized: "Password"), key: .ssPassword, secure: true))
             let methods: [(String, String)] = [
@@ -225,7 +256,7 @@ class TVProxyEditorViewController: UITableViewController {
             sections.append((String(localized: "Transport"), transportRows))
         }
         
-        if isVLESS || isTrojan {
+        if isVLESS || isTrojan || isAnyTLS {
             var tlsRows: [RowType] = []
             if isVLESS {
                 tlsRows.append(.selection(label: String(localized: "Security", comment: "Security for VLESS protocol"), value: securityDisplayValue, options: [
@@ -234,15 +265,15 @@ class TVProxyEditorViewController: UITableViewController {
                     ("Reality", "reality"),
                 ], key: .security))
             }
-            if isTLS || isTrojan {
+            if isTLS || isTrojan || isAnyTLS {
                 tlsRows.append(.text(label: String(localized: "SNI"), value: tlsSNI, placeholder: String(localized: "SNI"), key: .tlsSNI))
                 tlsRows.append(.text(label: String(localized: "ALPN"), value: tlsALPN, placeholder: String(localized: "h2,http/1.1"), key: .tlsALPN))
                 tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: fingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .fingerprint))
             }
             if isReality {
-                tlsRows.append(.text(label: String(localized: "SNI"), value: sni, placeholder: String(localized: "SNI"), key: .realitySNI))
-                tlsRows.append(.text(label: String(localized: "Public Key", comment: "Public Key for Reality security layer"), value: publicKey, placeholder: String(localized: "Public Key", comment: "Public Key for Reality security layer"), key: .publicKey))
-                tlsRows.append(.text(label: String(localized: "Short ID", comment: "Short ID for Reality security layer"), value: shortId, placeholder: String(localized: "Short ID", comment: "Short ID for Reality security layer"), key: .shortId))
+                tlsRows.append(.text(label: String(localized: "SNI"), value: realitySNI, placeholder: String(localized: "SNI"), key: .realitySNI))
+                tlsRows.append(.text(label: String(localized: "Public Key", comment: "Public Key for Reality security layer"), value: realityPublicKey, placeholder: String(localized: "Public Key", comment: "Public Key for Reality security layer"), key: .realityPublicKey))
+                tlsRows.append(.text(label: String(localized: "Short ID", comment: "Short ID for Reality security layer"), value: realityShortId, placeholder: String(localized: "Short ID", comment: "Short ID for Reality security layer"), key: .realityShortId))
                 tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: fingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .fingerprint))
             }
             sections.append((String(localized: "TLS"), tlsRows))
@@ -325,6 +356,9 @@ class TVProxyEditorViewController: UITableViewController {
 
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
+        if isVLESS {
+            return UUID(uuidString: uuid) != nil && (!isReality || (!realitySNI.isEmpty && !realityPublicKey.isEmpty))
+        }
         if isHysteria {
             if hysteriaPassword.isEmpty { return false }
             guard let v = Int(hysteriaUploadMbpsText),
@@ -332,6 +366,7 @@ class TVProxyEditorViewController: UITableViewController {
             return true
         }
         if isTrojan { return !trojanPassword.isEmpty }
+        if isAnyTLS { return !anytlsPassword.isEmpty }
         if isShadowsocks { return !ssPassword.isEmpty }
         if isSOCKS5 { return true }
         if isSudoku {
@@ -340,7 +375,7 @@ class TVProxyEditorViewController: UITableViewController {
             return (0...100).contains(min) && min <= max && max <= 100
         }
         if isNaive { return !naiveUsername.isEmpty && !naivePassword.isEmpty }
-        return UUID(uuidString: uuid) != nil && (!isReality || (!sni.isEmpty && !publicKey.isEmpty))
+        return false
     }
 
     // MARK: - Init
@@ -492,7 +527,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .outboundProtocol:
             if let proto = OutboundProtocol(rawValue: value) {
                 selectedProtocol = proto
-                if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+                if isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
                     flow = ""
                     if security == "reality" { security = "none" }
                 }
@@ -522,12 +557,13 @@ class TVProxyEditorViewController: UITableViewController {
         case .tlsALPN: tlsALPN = value
         case .fingerprint:
             if let fp = TLSFingerprint(rawValue: value) { fingerprint = fp }
-        case .realitySNI: sni = value
-        case .publicKey: publicKey = value
-        case .shortId: shortId = value
+        case .realitySNI: realitySNI = value
+        case .realityPublicKey: realityPublicKey = value
+        case .realityShortId: realityShortId = value
         case .hysteriaPassword: hysteriaPassword = value
         case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
         case .trojanPassword: trojanPassword = value
+        case .anytlsPassword: anytlsPassword = value
         case .ssPassword: ssPassword = value
         case .ssMethod: ssMethod = value
         case .socks5Username: socks5Username = value
@@ -595,9 +631,9 @@ class TVProxyEditorViewController: UITableViewController {
             fingerprint = tls.fingerprint
         }
         if let reality = configuration.reality {
-            sni = reality.serverName
-            publicKey = reality.publicKey.base64URLEncodedString()
-            shortId = reality.shortId.hexEncodedString()
+            realitySNI = reality.serverName
+            realityPublicKey = reality.publicKey.base64URLEncodedString()
+            realityShortId = reality.shortId.hexEncodedString()
             fingerprint = reality.fingerprint
         }
 
@@ -609,6 +645,11 @@ class TVProxyEditorViewController: UITableViewController {
             hysteriaUploadMbpsText = String(uploadMbps)
         case .trojan(let password, let tls):
             trojanPassword = password
+            tlsSNI = tls.serverName
+            tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
+            fingerprint = tls.fingerprint
+        case .anytls(let password, _, _, _, let tls):
+            anytlsPassword = password
             tlsSNI = tls.serverName
             tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
             fingerprint = tls.fingerprint
@@ -694,7 +735,7 @@ class TVProxyEditorViewController: UITableViewController {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+        if isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = existingConfiguration?.uuid ?? UUID()
         } else {
             guard let uuid = UUID(uuidString: uuid) else { return }
@@ -710,9 +751,9 @@ class TVProxyEditorViewController: UITableViewController {
 
         var realityConfiguration: RealityConfiguration?
         if isReality {
-            guard let pk = Data(base64URLEncoded: publicKey) else { return }
-            let sid = Data(hexString: shortId) ?? Data()
-            realityConfiguration = RealityConfiguration(serverName: sni, publicKey: pk, shortId: sid, fingerprint: fingerprint)
+            guard let pk = Data(base64URLEncoded: realityPublicKey) else { return }
+            let sid = Data(hexString: realityShortId) ?? Data()
+            realityConfiguration = RealityConfiguration(serverName: realitySNI, publicKey: pk, shortId: sid, fingerprint: fingerprint)
         }
 
         var wsConfig: WebSocketConfiguration?
@@ -785,6 +826,19 @@ class TVProxyEditorViewController: UITableViewController {
             let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
             outbound = .trojan(
                 password: trojanPassword,
+                tls: TLSConfiguration(serverName: sniValue, alpn: alpn, fingerprint: fingerprint)
+            )
+        case .anytls:
+            let sniValue = tlsSNI.isEmpty ? bareAddress : tlsSNI
+            let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
+            let ici = existingConfiguration?.anytlsIdleCheckInterval ?? 30
+            let it  = existingConfiguration?.anytlsIdleTimeout       ?? 30
+            let mis = existingConfiguration?.anytlsMinIdleSession    ?? 0
+            outbound = .anytls(
+                password: anytlsPassword,
+                idleCheckInterval: ici,
+                idleTimeout: it,
+                minIdleSession: mis,
                 tls: TLSConfiguration(serverName: sniValue, alpn: alpn, fingerprint: fingerprint)
             )
         case .shadowsocks:
