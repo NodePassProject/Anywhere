@@ -214,9 +214,17 @@ nonisolated class RealityClient {
         }
         #endif
 
-        // Build ClientHello with zero SessionId for AAD (matching Xray-core)
+        // Build the ClientHello once with a zero-sessionId placeholder. The
+        // sessionId field is the only byte range that differs between the
+        // AAD and final forms (same fingerprint / random / public keys /
+        // ALPN / extensions), so ``buildFingerprintedParts`` would produce
+        // identical cipher suites, extensions, and padding either way. We
+        // hand the buffer to AES-GCM as AAD (matching Xray-core's protocol,
+        // which expects AAD = ClientHello with the zero placeholder) and
+        // then overwrite the placeholder bytes with the encrypted sessionId
+        // in place — saving an entire duplicate build pass.
         let zeroSessionId = Data(count: 32)
-        let rawClientHelloForAAD = TLSClientHelloBuilder.buildRawClientHello(
+        var rawClientHello = TLSClientHelloBuilder.buildRawClientHello(
             fingerprint: configuration.fingerprint,
             random: random,
             sessionId: zeroSessionId,
@@ -225,7 +233,9 @@ nonisolated class RealityClient {
             mlkemEncapsulationKey: mlkemEncapsulationKey
         )
 
-        // Encrypt first 16 bytes of SessionId using AES-GCM
+        // Encrypt first 16 bytes of SessionId using AES-GCM. Output is
+        // ciphertext (16 B) + tag (16 B) = 32 B, exactly the size of the
+        // sessionId field.
         let nonce = random.suffix(12)
         let plaintext = sessionId.prefix(16)
 
@@ -233,20 +243,22 @@ nonisolated class RealityClient {
             plaintext: Data(plaintext),
             key: SymmetricKey(data: authKey),
             nonce: Data(nonce),
-            aad: rawClientHelloForAAD
+            aad: rawClientHello
         )
 
-        // Build final ClientHello with encrypted sessionId
-        let finalClientHello = TLSClientHelloBuilder.buildRawClientHello(
-            fingerprint: configuration.fingerprint,
-            random: random,
-            sessionId: encryptedSessionId,
-            serverName: configuration.serverName,
-            publicKey: privateKey.publicKey.rawRepresentation,
-            mlkemEncapsulationKey: mlkemEncapsulationKey
-        )
+        // Patch the encrypted sessionId into the raw ClientHello body at the
+        // fixed offset. Layout up to the sessionId field:
+        //   1 byte  handshake type (0x01)
+        //   3 bytes length
+        //   2 bytes legacy version (0x0303)
+        //   32 bytes random
+        //   1 byte session_id length (always 0x20 here)
+        //   32 bytes session_id  ← offset 39
+        let sessionIdOffset = 1 + 3 + 2 + 32 + 1
+        precondition(encryptedSessionId.count == 32, "Reality encryptedSessionId must be 32 bytes")
+        rawClientHello.replaceSubrange(sessionIdOffset..<(sessionIdOffset + 32), with: encryptedSessionId)
 
-        return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: finalClientHello)
+        return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: rawClientHello)
     }
 
     // MARK: - Server Response Processing
