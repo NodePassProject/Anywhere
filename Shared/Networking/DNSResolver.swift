@@ -165,7 +165,8 @@ nonisolated final class DNSResolver {
         guard status == 0, let res = result else { return [] }
         defer { freeaddrinfo(res) }
 
-        var ips: [String] = []
+        var ipv4: [String] = []
+        var ipv6: [String] = []
         var current: UnsafeMutablePointer<addrinfo>? = res
         while let info = current {
             if info.pointee.ai_family == AF_INET {
@@ -173,18 +174,18 @@ nonisolated final class DNSResolver {
                 var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
                 if inet_ntop(AF_INET, &addr.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil {
                     let ip = String(cString: buf)
-                    if !ips.contains(ip) { ips.append(ip) }
+                    if !ipv4.contains(ip) { ipv4.append(ip) }
                 }
             } else if info.pointee.ai_family == AF_INET6 {
                 var addr = info.pointee.ai_addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
                 var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
                 if inet_ntop(AF_INET6, &addr.sin6_addr, &buf, socklen_t(INET6_ADDRSTRLEN)) != nil {
                     let ip = String(cString: buf)
-                    if !ips.contains(ip) { ips.append(ip) }
+                    if !ipv6.contains(ip) { ipv6.append(ip) }
                 }
             }
             current = info.pointee.ai_next
         }
-        return ips
+        return ipv4 + ipv6
     }
 }
