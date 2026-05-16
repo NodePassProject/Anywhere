@@ -46,13 +46,15 @@ extension LWIPStack {
             )
             proto = Self.ipv4Proto
         }
-        outputPackets.append(packet)
-        outputProtocols.append(proto)
-        if !outputFlushScheduled {
-            outputFlushScheduled = true
-            lwipQueue.async { [self] in
-                flushOutputPackets()
-            }
+        let needsKick: Bool = outputBufferLock.withLock {
+            outputPackets.append(packet)
+            outputProtocols.append(proto)
+            if outputDrainInFlight { return false }
+            outputDrainInFlight = true
+            return true
+        }
+        if needsKick {
+            outputQueue.async { [self] in drainOutputLoop() }
         }
     }
 
