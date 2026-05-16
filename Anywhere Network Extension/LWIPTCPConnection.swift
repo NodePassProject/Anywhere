@@ -368,6 +368,13 @@ class LWIPTCPConnection {
                     self.abort()
                     return
                 }
+                // Successful proxy-side accept counts as uplink activity. The
+                // lwIP-ingress update in ``handleReceivedData`` fires only when
+                // new bytes arrive from the local app; a long upload that
+                // backpressures the app (no new ingress) but keeps draining
+                // through the proxy would otherwise look idle to the activity
+                // timer and get closed mid-stream.
+                self.activityTimer?.update()
                 // Acknowledge this chunk to lwIP and flush any resulting
                 // window update so the local TCP peer can feed us the next
                 // batch without an extra output-queue hop.

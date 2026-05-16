@@ -17,9 +17,17 @@ class FakeIPPool {
 
     // IPv4: 198.18.0.0/15 → offsets 1..131071 available; we cap LRU at a
     // much smaller size (see ``TunnelConstants/fakeIPPoolSize``).
-    // IPv6: fc00::/96 → offset packed into low 32 bits, bytes 0-1 = 0xFC00
-    // and bytes 2-11 must be zero (the strict check is in `ipv6ToOffset`).
-    // Range used in practice: fc00::1 through fc00::<fakeIPPoolSize-as-hex>.
+    // IPv6: 2001:db8::/96 (RFC 3849 documentation prefix) → offset packed
+    // into low 32 bits, bytes 0-3 = 0x2001:0db8 and bytes 4-11 must be zero
+    // (the strict check is in `ipv6ToOffset`). Range used in practice:
+    // 2001:db8::1 through 2001:db8::<fakeIPPoolSize-as-hex>.
+    //
+    // The fake-IPv6 prefix must not fall inside any route excluded from
+    // the tunnel (see ``PacketTunnelProvider.bypassIPv6Routes``), or the
+    // kernel will hand fake packets to the physical interface and they
+    // will black-hole. ULA (fc00::/7) is excluded for local-network access,
+    // so fake addresses must live outside it — the documentation prefix
+    // is non-routable on the public internet and not on any bypass list.
 
     /// Protects all mutable state (maps, LRU list, nextOffset).
     private let lock = UnfairLock()
@@ -43,9 +51,11 @@ class FakeIPPool {
 
     // MARK: - Static Helpers
 
-    /// Fast check: is this IP in the fake IPv4 (198.18.0.0/15) or IPv6 (fc00::/18) range?
+    /// Fast check: is this IP in the fake IPv4 (198.18.0.0/15) or IPv6
+    /// (2001:db8::/96) range? Fakes within /96 always collapse to the
+    /// `2001:db8::` prefix in lwIP's canonical ntoa output.
     static func isFakeIP(_ ip: String) -> Bool {
-        ip.hasPrefix("198.18.") || ip.hasPrefix("198.19.") || ip.hasPrefix("fc00::")
+        ip.hasPrefix("198.18.") || ip.hasPrefix("198.19.") || ip.hasPrefix("2001:db8::")
     }
 
     /// Convert an offset to 4-byte IPv4 address.
@@ -59,12 +69,12 @@ class FakeIPPool {
         )
     }
 
-    /// Convert an offset to 16-byte IPv6 address (fc00:: + offset).
+    /// Convert an offset to 16-byte IPv6 address (2001:db8:: + offset).
     static func ipv6Bytes(offset: Int) -> [UInt8] {
-        // fc00:0000:0000:0000:0000:0000:XXXX:XXXX
+        // 2001:0db8:0000:0000:0000:0000:XXXX:XXXX
         return [
-            0xFC, 0x00,  // fc00
-            0x00, 0x00,  // :0000
+            0x20, 0x01,  // 2001
+            0x0D, 0xB8,  // :0db8
             0x00, 0x00,  // :0000
             0x00, 0x00,  // :0000
             0x00, 0x00,  // :0000
@@ -179,9 +189,10 @@ class FakeIPPool {
             let bytes = raw.bindMemory(to: UInt8.self)
             guard bytes.count == 16 else { return nil }
 
-            // Verify fc00:: prefix (bytes 0-1 = 0xFC00, bytes 2-11 = 0)
-            guard bytes[0] == 0xFC, bytes[1] == 0x00 else { return nil }
-            for i in 2...11 {
+            // Verify 2001:db8:: prefix (bytes 0-3 = 0x2001:0db8, bytes 4-11 = 0)
+            guard bytes[0] == 0x20, bytes[1] == 0x01,
+                  bytes[2] == 0x0D, bytes[3] == 0xB8 else { return nil }
+            for i in 4...11 {
                 guard bytes[i] == 0 else { return nil }
             }
 
