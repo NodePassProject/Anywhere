@@ -230,16 +230,29 @@ extension LWIPStack {
 
     // MARK: - Settings Observation
     //
-    // Three Darwin notifications are observed. The first two trigger a full
-    // stack restart (shutdownInternal → restartStack), which closes all
-    // TCP/UDP connections and re-reads settings. FakeIPPool is preserved —
-    // routing decisions are made at connection time, so rule changes take
-    // effect immediately.
+    // Three Darwin notifications are observed. Only "tunnelSettingsChanged"
+    // triggers a full stack restart; the other two reload in place to avoid
+    // tearing down active connections for edits that don't invalidate them.
     //
     // 1. "tunnelSettingsChanged" — posted by SettingsView when IPv6/Encrypted DNS/Country Bypass toggles change.
-    //    IPv6 additionally re-applies tunnel network settings (routes + DNS servers).
+    //    Triggers a full stack restart (shutdownInternal → restartStack),
+    //    which closes all TCP/UDP connections and re-reads settings.
+    //    FakeIPPool is preserved. IPv6 additionally re-applies tunnel
+    //    network settings (routes + DNS servers).
     //
-    // 2. "routingChanged" — posted by RuleSetListView when routing rule assignments change.
+    // 2. "routingChanged" — posted whenever routing rules or rule-set
+    //    assignments change. Does NOT restart the stack: routing decisions
+    //    are made at connection accept time, so already-established flows
+    //    remain valid under any rule edit. The DomainRouter rule tiers and
+    //    configuration map are rebuilt in place on lwipQueue so the reload
+    //    serializes against new accept callbacks. New connections pick up
+    //    the new rules immediately; existing connections keep running over
+    //    their already-chosen proxy (or DIRECT path) until they close
+    //    naturally. This means an assignment change from Proxy A to Proxy B
+    //    only affects future connections — active flows on Proxy A continue
+    //    until they end. We accept this drift because the alternative
+    //    (killing every connection on every rule edit) is the very
+    //    disruption this change exists to eliminate.
     //
     // 3. "mitmChanged" — posted by MITMSnapshot.save() when the MITM toggle or
     //    rules change. Does NOT restart the stack: connections in flight keep
@@ -349,17 +362,25 @@ extension LWIPStack {
         }
     }
 
-    /// Handles the "routingChanged" notification (routing rule assignments changed).
-    /// Restarts the stack to close all connections using outdated proxy configurations,
-    /// rebuilds the FakeIPPool, and reloads DomainRouter rules from routing.json.
-    /// Note: Do NOT call onTunnelSettingsNeedReapply here — setTunnelNetworkSettings
-    /// should only be triggered by IPv6 changes (which affect tunnel routes and DNS servers).
-    /// Routing changes do not alter NEPacketTunnelNetworkSettings.
+    /// Handles the "routingChanged" notification (routing rules or rule-set assignments changed).
+    ///
+    /// Reloads DomainRouter rules and configurations in place — no stack
+    /// restart, no FakeIPPool rebuild, no connection teardown. In global
+    /// mode the router is unused, so the notification is a no-op. Routing
+    /// decisions are made at connection accept time, so active flows stay
+    /// valid under any rule edit and new flows pick up the new rules on
+    /// their next accept callback (serialized by lwipQueue).
+    ///
+    /// Do NOT call onTunnelSettingsNeedReapply here — setTunnelNetworkSettings
+    /// should only be triggered by IPv6 changes (which affect tunnel routes
+    /// and DNS servers). Routing changes do not alter
+    /// NEPacketTunnelNetworkSettings.
     private func handleRoutingChanged() {
         lwipQueue.async { [self] in
-            guard running, let configuration else { return }
-            logger.info("[VPN] Routing changed; reconnecting active connections")
-            restartStack(configuration: configuration)
+            guard running else { return }
+            guard proxyMode != .global else { return }
+            logger.info("[VPN] Routing changed; reloading rules in place")
+            domainRouter.loadRoutingConfiguration()
         }
     }
 
