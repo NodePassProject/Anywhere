@@ -109,8 +109,9 @@ extension LWIPStack {
                 muxManager = nil
             }
             
-            purgeShadowsocksUDPSessions()
             HysteriaClient.closeAll()
+            AnyTLSManager.shared.closeAll()
+            purgeShadowsocksUDPSessions()
             HTTP3SessionPool.shared.closeAll()
 
             for (_, flow) in udpFlows {

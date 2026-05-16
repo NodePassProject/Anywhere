@@ -26,6 +26,8 @@ extension ProxyConfiguration {
             return toHysteriaURL()
         case .trojan:
             return toTrojanURL()
+        case .anytls:
+            return toAnyTLSURL()
         case .shadowsocks:
             return toShadowsocksURL()
         case .socks5:
@@ -123,6 +125,31 @@ extension ProxyConfiguration {
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         return "trojan://\(password)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
+    }
+
+    private func toAnyTLSURL() -> String {
+        let password = (anytlsPassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        var params: [String] = []
+        if let tls = anytlsTLS {
+            if tls.serverName != serverAddress {
+                params.append("sni=\(tls.serverName)")
+            }
+            if let alpn = tls.alpn, !alpn.isEmpty {
+                let joined = alpn.joined(separator: ",")
+                params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
+            }
+            if tls.fingerprint != .chrome133 {
+                params.append("fp=\(tls.fingerprint.rawValue)")
+            }
+        }
+        // Only emit pool tuners when they differ from the sing-anytls defaults
+        // so most exported share links stay short.
+        if let v = anytlsIdleCheckInterval, v != 30 { params.append("ici=\(v)") }
+        if let v = anytlsIdleTimeout,        v != 30 { params.append("it=\(v)") }
+        if let v = anytlsMinIdleSession,     v != 0  { params.append("mis=\(v)") }
+        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        return "anytls://\(password)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
     private func toShadowsocksURL() -> String {

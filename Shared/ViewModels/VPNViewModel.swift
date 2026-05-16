@@ -804,6 +804,16 @@ class VPNViewModel: ObservableObject {
                 configurationDict["trojanALPN"] = alpn.joined(separator: ",")
             }
             configurationDict["trojanFingerprint"] = tls.fingerprint.rawValue
+        case .anytls(let password, let ici, let it, let mis, let tls):
+            configurationDict["anytlsPassword"] = password
+            configurationDict["anytlsIdleCheckInterval"] = ici
+            configurationDict["anytlsIdleTimeout"] = it
+            configurationDict["anytlsMinIdleSession"] = mis
+            configurationDict["anytlsSNI"] = tls.serverName
+            if let alpn = tls.alpn, !alpn.isEmpty {
+                configurationDict["anytlsALPN"] = alpn.joined(separator: ",")
+            }
+            configurationDict["anytlsFingerprint"] = tls.fingerprint.rawValue
         case .shadowsocks(let password, let method):
             configurationDict["ssPassword"] = password
             configurationDict["ssMethod"] = method

@@ -22,48 +22,53 @@ struct ProxyEditorView: View {
     @State private var transport = "tcp"
     @State private var flow = ""
     @State private var security = "none"
-
-    // WebSocket fields
-    @State private var wsHost = ""
-    @State private var wsPath = "/"
-
-    // HTTPUpgrade fields
-    @State private var huHost = ""
-    @State private var huPath = "/"
     
-    // gRPC fields
-    @State private var grpcServiceName = ""
-    @State private var grpcAuthority = ""
-    @State private var grpcMode = "gun"
-    @State private var grpcUserAgent = ""
-
-    // XHTTP fields
-    @State private var xhttpHost = ""
-    @State private var xhttpPath = "/"
-    @State private var xhttpMode = "auto"
-    @State private var xhttpExtra = ""
-
     // TLS fields
     @State private var tlsSNI = ""
     @State private var tlsALPN = ""
-
-    // Mux + XUDP
-    @State private var muxEnabled = true
-    @State private var xudpEnabled = true
 
     // Reality fields
     @State private var sni = ""
     @State private var publicKey = ""
     @State private var shortId = ""
+    
+    // TLS/Reality fields
     @State private var fingerprint: TLSFingerprint = .chrome133
+
+    // VLESS WebSocket fields
+    @State private var wsHost = ""
+    @State private var wsPath = "/"
+
+    // VLESS HTTPUpgrade fields
+    @State private var huHost = ""
+    @State private var huPath = "/"
+    
+    // VLESS gRPC fields
+    @State private var grpcServiceName = ""
+    @State private var grpcAuthority = ""
+    @State private var grpcMode = "gun"
+    @State private var grpcUserAgent = ""
+
+    // VLESS XHTTP fields
+    @State private var xhttpHost = ""
+    @State private var xhttpPath = "/"
+    @State private var xhttpMode = "auto"
+    @State private var xhttpExtra = ""
+    
+    // VLESS Mux + XUDP
+    @State private var muxEnabled = true
+    @State private var xudpEnabled = true
     
     // Hysteria fields
     @State private var hysteriaPassword = ""
     @State private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
     @State private var hysteriaSNI = ""
 
-    // Trojan fields (TLS knobs reuse the VLESS tlsSNI/tlsALPN/fingerprint state).
+    // Trojan fields
     @State private var trojanPassword = ""
+
+    // AnyTLS fields
+    @State private var anytlsPassword = ""
 
     // Shadowsocks fields
     @State private var ssPassword = ""
@@ -88,13 +93,14 @@ struct ProxyEditorView: View {
     @State private var sudokuHTTPMaskPathRoot = ""
     @State private var sudokuHTTPMaskMultiplex: SudokuHTTPMaskMultiplex = .off
 
-    // Shared credential fields for HTTPS/HTTP2/QUIC (persisted per-protocol at save time)
+    // Shared credential fields for HTTPS/HTTP2/QUIC
     @State private var naiveUsername = ""
     @State private var naivePassword = ""
 
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
     private var isTrojan: Bool { selectedProtocol == .trojan }
+    private var isAnyTLS: Bool { selectedProtocol == .anytls }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isSudoku: Bool { selectedProtocol == .sudoku }
@@ -112,6 +118,9 @@ struct ProxyEditorView: View {
         }
         if isTrojan {
             return !trojanPassword.isEmpty
+        }
+        if isAnyTLS {
+            return !anytlsPassword.isEmpty
         }
         if isShadowsocks {
             return !ssPassword.isEmpty
@@ -154,6 +163,7 @@ struct ProxyEditorView: View {
                         Text(String("VLESS")).tag(OutboundProtocol.vless)
                         Text(String("Hysteria")).tag(OutboundProtocol.hysteria)
                         Text(String("Trojan")).tag(OutboundProtocol.trojan)
+                        Text(String("AnyTLS")).tag(OutboundProtocol.anytls)
                         Text(String("Shadowsocks")).tag(OutboundProtocol.shadowsocks)
                         Text(String("SOCKS5")).tag(OutboundProtocol.socks5)
                         Text(String("Sudoku")).tag(OutboundProtocol.sudoku)
@@ -164,7 +174,7 @@ struct ProxyEditorView: View {
                         TextWithColorfulIcon(title: "Protocol", comment: nil, systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
                     .onChange(of: selectedProtocol) {
-                        if isTrojan || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+                        if isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
                             flow = ""
                             security = security == "reality" ? "none" : security
                         }
@@ -228,6 +238,15 @@ struct ProxyEditorView: View {
                    } else if isTrojan {
                         LabeledContent {
                             SecureField("Password", text: $trojanPassword)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                    } else if isAnyTLS {
+                        LabeledContent {
+                            SecureField("Password", text: $anytlsPassword)
                                 .autocorrectionDisabled()
                                 .textInputAutocapitalization(.never)
                                 .multilineTextAlignment(.trailing)
@@ -478,7 +497,7 @@ struct ProxyEditorView: View {
                     }
                 }
 
-                if isVLESS || isTrojan {
+                if isVLESS || isTrojan || isAnyTLS {
                     Section("TLS") {
                         if isVLESS {
                             Picker(selection: $security) {
@@ -489,7 +508,7 @@ struct ProxyEditorView: View {
                                 TextWithColorfulIcon(title: "Security", comment: "Security for VLESS protocol", systemName: "shield.lefthalf.filled", foregroundColor: .white, backgroundColor: .blue)
                             }
                         }
-                        if isTLS || isTrojan {
+                        if isTLS || isTrojan || isAnyTLS {
                             LabeledContent {
                                 TextField("SNI", text: $tlsSNI)
                                     .keyboardType(.URL)
@@ -705,6 +724,11 @@ struct ProxyEditorView: View {
             tlsSNI = tls.serverName
             tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
             fingerprint = tls.fingerprint
+        case .anytls(let password, _, _, _, let tls):
+            anytlsPassword = password
+            tlsSNI = tls.serverName
+            tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
+            fingerprint = tls.fingerprint
         case .shadowsocks(let password, let method):
             ssPassword = password
             ssMethod = method
@@ -775,7 +799,7 @@ struct ProxyEditorView: View {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isHysteria || isTrojan || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+        if isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = self.configuration?.uuid ?? UUID()
         } else {
             guard let u = UUID(xrayString: uuid) else { return }
@@ -886,6 +910,22 @@ struct ProxyEditorView: View {
             let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
             outbound = .trojan(
                 password: trojanPassword,
+                tls: TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
+            )
+        case .anytls:
+            let sni = tlsSNI.isEmpty ? bareAddress : tlsSNI
+            let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
+            // Pool-tuning knobs are not editable in the UI — preserve any
+            // values the original config carried (URL/dict imports may set
+            // them), or fall back to sing-anytls's defaults.
+            let ici = self.configuration?.anytlsIdleCheckInterval ?? 30
+            let it  = self.configuration?.anytlsIdleTimeout       ?? 30
+            let mis = self.configuration?.anytlsMinIdleSession    ?? 0
+            outbound = .anytls(
+                password: anytlsPassword,
+                idleCheckInterval: ici,
+                idleTimeout: it,
+                minIdleSession: mis,
                 tls: TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
             )
         case .shadowsocks:

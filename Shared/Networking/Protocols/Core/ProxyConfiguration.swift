@@ -12,6 +12,7 @@ enum OutboundProtocol: String, Codable {
     case vless
     case hysteria
     case trojan
+    case anytls
     case shadowsocks
     case socks5
     case sudoku
@@ -42,7 +43,7 @@ enum OutboundProtocol: String, Codable {
             return true
         case .sudoku:
             return true
-        case .hysteria, .trojan, .shadowsocks, .socks5, .http11, .http2, .http3:
+        case .hysteria, .trojan, .anytls, .shadowsocks, .socks5, .http11, .http2, .http3:
             return false
         }
     }
@@ -63,6 +64,8 @@ enum OutboundProtocol: String, Codable {
             "Hysteria"
         case .trojan:
             "Trojan"
+        case .anytls:
+            "AnyTLS"
         case .shadowsocks:
             "Shadowsocks"
         case .socks5:
@@ -105,6 +108,18 @@ enum Outbound: Hashable {
     /// top of mandatory TLS. The TLS knobs (SNI/ALPN/fingerprint) live in the
     /// associated `TLSConfiguration`; there is no plaintext variant.
     case trojan(password: String, tls: TLSConfiguration)
+    /// AnyTLS multiplexes streams over one TLS connection per pooled session,
+    /// authenticating with SHA256(password) and obfuscating with a server-driven
+    /// padding scheme. `idleCheckInterval` / `idleTimeout` (seconds) and
+    /// `minIdleSession` tune the warm-pool behaviour; mirrors sing-anytls's
+    /// `ClientConfig` knobs and clamps to the same minimums (≥30s/≥30s/≥0).
+    case anytls(
+        password: String,
+        idleCheckInterval: Int,
+        idleTimeout: Int,
+        minIdleSession: Int,
+        tls: TLSConfiguration
+    )
     /// Shadowsocks runs over bare TCP with AEAD / 2022 wire encryption.
     case shadowsocks(password: String, method: String)
     /// SOCKS5 runs over bare TCP in the clear.
@@ -253,6 +268,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case muxEnabled, xudpEnabled
         case hysteriaPassword, hysteriaUploadMbps, hysteriaSNI
         case trojanPassword, trojanTLS
+        case anytlsPassword, anytlsIdleCheckInterval, anytlsIdleTimeout, anytlsMinIdleSession, anytlsTLS
         case ssPassword, ssMethod
         case socks5Username, socks5Password
         case sudoku
@@ -344,6 +360,24 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             let legacyTLS = try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)
             let tls = trojanTLS ?? legacyTLS ?? TLSConfiguration(serverName: serverAddress)
             outbound = .trojan(password: password, tls: tls)
+
+        case .anytls:
+            let password = try container.decodeIfPresent(String.self, forKey: .anytlsPassword) ?? ""
+            // sing-anytls clamps to ≥30s/≥30s/≥0; we store the raw value and
+            // let `AnyTLSClient` clamp at use time so the JSON round-trips.
+            let ici = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleCheckInterval) ?? 30
+            let it  = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleTimeout) ?? 30
+            let mis = try container.decodeIfPresent(Int.self, forKey: .anytlsMinIdleSession) ?? 0
+            let anytlsTLS = try container.decodeIfPresent(TLSConfiguration.self, forKey: .anytlsTLS)
+            let legacyTLS = try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)
+            let tls = anytlsTLS ?? legacyTLS ?? TLSConfiguration(serverName: serverAddress)
+            outbound = .anytls(
+                password: password,
+                idleCheckInterval: ici,
+                idleTimeout: it,
+                minIdleSession: mis,
+                tls: tls
+            )
 
         case .shadowsocks:
             outbound = .shadowsocks(
@@ -458,6 +492,14 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .trojanPassword)
             try container.encode(tls, forKey: .trojanTLS)
+        case .anytls(let password, let ici, let it, let mis, let tls):
+            try container.encode(id, forKey: .uuid)
+            try container.encode("none", forKey: .encryption)
+            try container.encode(password, forKey: .anytlsPassword)
+            try container.encode(ici, forKey: .anytlsIdleCheckInterval)
+            try container.encode(it, forKey: .anytlsIdleTimeout)
+            try container.encode(mis, forKey: .anytlsMinIdleSession)
+            try container.encode(tls, forKey: .anytlsTLS)
         case .shadowsocks(let password, let method):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
@@ -533,6 +575,7 @@ extension ProxyConfiguration {
         case .vless:        .vless
         case .hysteria:     .hysteria
         case .trojan:       .trojan
+        case .anytls:       .anytls
         case .shadowsocks:  .shadowsocks
         case .socks5:       .socks5
         case .sudoku:       .sudoku
@@ -590,6 +633,36 @@ extension ProxyConfiguration {
     /// Trojan's mandatory TLS configuration. `nil` for non-Trojan.
     var trojanTLS: TLSConfiguration? {
         if case .trojan(_, let tls) = outbound { return tls }
+        return nil
+    }
+
+    /// AnyTLS password. `nil` for non-AnyTLS.
+    var anytlsPassword: String? {
+        if case .anytls(let password, _, _, _, _) = outbound { return password }
+        return nil
+    }
+
+    /// Idle session check interval in seconds (sing-anytls clamps to ≥30).
+    var anytlsIdleCheckInterval: Int? {
+        if case .anytls(_, let v, _, _, _) = outbound { return v }
+        return nil
+    }
+
+    /// Idle session timeout in seconds (sing-anytls clamps to ≥30).
+    var anytlsIdleTimeout: Int? {
+        if case .anytls(_, _, let v, _, _) = outbound { return v }
+        return nil
+    }
+
+    /// Minimum number of warm idle sessions to keep in the pool.
+    var anytlsMinIdleSession: Int? {
+        if case .anytls(_, _, _, let v, _) = outbound { return v }
+        return nil
+    }
+
+    /// AnyTLS's mandatory TLS configuration. `nil` for non-AnyTLS.
+    var anytlsTLS: TLSConfiguration? {
+        if case .anytls(_, _, _, _, let tls) = outbound { return tls }
         return nil
     }
 

@@ -2465,6 +2465,9 @@
         }
       }
     },
+    "AnyTLS" : {
+      "shouldTranslate" : false
+    },
     "Anywhere" : {
       "shouldTranslate" : false
     },
@@ -3057,59 +3060,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "阻止 QUIC"
-          }
-        }
-      }
-    },
-    "Body Script" : {
-      "extractionState" : "stale",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "سكربت النص"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Script de cuerpo"
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "اسکریپت بدنه"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Скрипт тела"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Body skript"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Gövde Betiği"
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tập lệnh thân"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "体脚本"
           }
         }
       }

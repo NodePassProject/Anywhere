@@ -20,7 +20,7 @@ final class DeepLinkManager: ObservableObject {
         switch url.scheme?.lowercased() {
         case "anywhere":
             handleAnywhereScheme(url)
-        case "vless", "hysteria2", "hy2", "trojan", "ss", "quic", "sudoku":
+        case "vless", "hysteria2", "hy2", "trojan", "anytls", "ss", "quic", "sudoku":
             self.url = url.absoluteString
         default:
             break

@@ -12,7 +12,7 @@ import Foundation
 extension ProxyConfiguration {
 
     /// URL scheme prefixes that ``parse(url:)`` can handle.
-    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "trojan://", "ss://", "socks5://", "socks://", "sudoku://", "https://", "quic://"]
+    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://", "https://", "quic://"]
 
     /// Whether the given string starts with a URL scheme that ``parse(url:)`` can handle.
     static func canParseURL(_ string: String) -> Bool {
@@ -32,6 +32,9 @@ extension ProxyConfiguration {
         if url.hasPrefix("trojan://") {
             return try parseTrojan(url: url)
         }
+        if url.hasPrefix("anytls://") {
+            return try parseAnyTLS(url: url)
+        }
         if url.hasPrefix("ss://") {
             return try parseShadowsocks(url: url)
         }
@@ -45,7 +48,7 @@ extension ProxyConfiguration {
             return try parseNaive(url: url, protocolOverride: naiveProtocol)
         }
         guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless://, trojan://, ss://, socks5://, sudoku://, https://, or quic://")
+            throw ProxyError.invalidURL("URL must start with vless://, trojan://, anytls://, ss://, socks5://, sudoku://, https://, or quic://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -261,6 +264,78 @@ extension ProxyConfiguration {
             serverAddress: host,
             serverPort: port,
             outbound: .trojan(password: password, tls: tls)
+        )
+    }
+
+    /// Parse an AnyTLS URL.
+    /// Format: `anytls://password@host:port?sni=…&alpn=h2%2Chttp%2F1.1&fp=chrome_133[&ici=30&it=30&mis=0]#name`
+    /// TLS is mandatory; the pool tuning knobs (`ici`/`it`/`mis`) are optional
+    /// and default to sing-anytls's recommended values when missing.
+    private static func parseAnyTLS(url: String) throws -> ProxyConfiguration {
+        var remaining = String(url.dropFirst("anytls://".count))
+
+        // 1) Strip fragment
+        var fragmentName: String?
+        if let hashIndex = remaining.lastIndex(of: "#") {
+            fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
+            remaining = String(remaining[..<hashIndex])
+        }
+        DeviceCensorship.deCensor(&fragmentName)
+
+        // 2) Strip query
+        var queryString: String?
+        if let questionIndex = remaining.firstIndex(of: "?") {
+            queryString = String(remaining[remaining.index(after: questionIndex)...])
+            remaining = String(remaining[..<questionIndex])
+        }
+
+        // 3) Require @
+        guard let atIndex = remaining.lastIndex(of: "@") else {
+            throw ProxyError.invalidURL("Missing @ separator in anytls URL")
+        }
+        let userInfo = String(remaining[..<atIndex])
+        var serverPart = String(remaining[remaining.index(after: atIndex)...])
+
+        if serverPart.hasSuffix("/") { serverPart.removeLast() }
+        if let slashIndex = serverPart.firstIndex(of: "/") {
+            serverPart = String(serverPart[..<slashIndex])
+        }
+
+        // Whole userinfo is the password (mirrors Trojan).
+        let password = userInfo.removingPercentEncoding ?? userInfo
+
+        let (host, port) = try parseHostPort(serverPart)
+        let params = parseQueryParams(queryString)
+
+        let sni = (params["sni"]?.isEmpty == false ? params["sni"] : nil)
+            ?? (params["peer"]?.isEmpty == false ? params["peer"] : nil)
+            ?? host
+
+        var alpn: [String]? = nil
+        if let alpnString = params["alpn"], !alpnString.isEmpty {
+            alpn = alpnString.split(separator: ",").map { String($0) }
+        }
+
+        let fpString = params["fp"] ?? "chrome_133"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+
+        let ici = params["ici"].flatMap { Int($0) } ?? 30
+        let it  = params["it"].flatMap  { Int($0) } ?? 30
+        let mis = params["mis"].flatMap { Int($0) } ?? 0
+
+        let tls = TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
+
+        return ProxyConfiguration(
+            name: fragmentName ?? "Untitled",
+            serverAddress: host,
+            serverPort: port,
+            outbound: .anytls(
+                password: password,
+                idleCheckInterval: ici,
+                idleTimeout: it,
+                minIdleSession: mis,
+                tls: tls
+            )
         )
     }
 

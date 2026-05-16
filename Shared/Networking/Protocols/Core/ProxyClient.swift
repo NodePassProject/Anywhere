@@ -356,6 +356,17 @@ nonisolated class ProxyClient {
             return
         }
 
+        if configuration.outboundProtocol == .anytls {
+            connectWithAnyTLS(
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                initialData: initialData,
+                completion: completion
+            )
+            return
+        }
+
         if isShadowsocks {
             connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
             return

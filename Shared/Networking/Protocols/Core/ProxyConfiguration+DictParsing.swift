@@ -76,6 +76,19 @@ extension ProxyConfiguration {
             let password = (configurationDict["trojanPassword"] as? String) ?? ""
             let tls = parseTrojanTLS(from: configurationDict, serverAddress: serverAddress)
             outbound = .trojan(password: password, tls: tls)
+        case .anytls:
+            let password = (configurationDict["anytlsPassword"] as? String) ?? ""
+            let ici = (configurationDict["anytlsIdleCheckInterval"] as? Int) ?? 30
+            let it  = (configurationDict["anytlsIdleTimeout"] as? Int) ?? 30
+            let mis = (configurationDict["anytlsMinIdleSession"] as? Int) ?? 0
+            let tls = parseAnyTLSTLS(from: configurationDict, serverAddress: serverAddress)
+            outbound = .anytls(
+                password: password,
+                idleCheckInterval: ici,
+                idleTimeout: it,
+                minIdleSession: mis,
+                tls: tls
+            )
         case .shadowsocks:
             let password = (configurationDict["ssPassword"] as? String) ?? ""
             let method = (configurationDict["ssMethod"] as? String) ?? ""
@@ -277,6 +290,23 @@ extension ProxyConfiguration {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
         let fpString = (dict["trojanFingerprint"] as? String)
+            ?? (dict["tlsFingerprint"] as? String)
+            ?? "chrome_133"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+        return TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
+    }
+
+    /// Reconstructs the AnyTLS mandatory TLS configuration from serialized dict keys.
+    private static func parseAnyTLSTLS(
+        from dict: [String: Any],
+        serverAddress: String
+    ) -> TLSConfiguration {
+        let sni = (dict["anytlsSNI"] as? String) ?? (dict["tlsServerName"] as? String) ?? serverAddress
+        var alpn: [String]? = nil
+        if let alpnString = (dict["anytlsALPN"] as? String) ?? (dict["tlsAlpn"] as? String), !alpnString.isEmpty {
+            alpn = alpnString.split(separator: ",").map { String($0) }
+        }
+        let fpString = (dict["anytlsFingerprint"] as? String)
             ?? (dict["tlsFingerprint"] as? String)
             ?? "chrome_133"
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
