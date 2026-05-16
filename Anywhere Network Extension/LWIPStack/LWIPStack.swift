@@ -270,12 +270,6 @@ class LWIPStack {
         loadBlockQUICSetting()
         loadMITMSetting()
 
-        // The first hop is the only domain the NE itself re-resolves frequently
-        // (subsequent chain hops are resolved by upstream proxy servers). Mark
-        // it active so ProxyDNSCache returns stale IPs immediately on TTL
-        // expiry and refreshes in the background, keeping reconnects snappy.
-        ProxyDNSResolver.shared.setActiveProxyDomain(Self.firstHopAddress(for: configuration))
-
         if Self.shouldUseVisionMux(configuration) {
             muxManager = MuxManager(configuration: configuration, lwipQueue: lwipQueue)
         } else {
@@ -287,12 +281,6 @@ class LWIPStack {
         } else {
             domainRouter.reset()
         }
-    }
-
-    /// The serverAddress of the first proxy the NE dials directly. For chain
-    /// configurations that's `chain[0]`; otherwise it's the exit proxy itself.
-    private static func firstHopAddress(for configuration: ProxyConfiguration) -> String {
-        configuration.chain?.first?.serverAddress ?? configuration.serverAddress
     }
 
     static func shouldUseVisionMux(_ configuration: ProxyConfiguration) -> Bool {

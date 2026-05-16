@@ -114,8 +114,12 @@ enum DNSPacket {
                 p[ans + 2] = UInt8(ansType >> 8)               // TYPE
                 p[ans + 3] = UInt8(ansType & 0xFF)
                 p[ans + 4] = 0x00; p[ans + 5] = 0x01          // CLASS = IN
-                p[ans + 6] = 0x00; p[ans + 7] = 0x00          // TTL = 1 second
-                p[ans + 8] = 0x00; p[ans + 9] = 0x01
+                // TTL = 300 seconds. Routing decisions are made at connection
+                // time (not from the DNS response), so caching fake IPs longer
+                // doesn't impede rule changes — those take effect on the next
+                // connect regardless of cache age.
+                p[ans + 6] = 0x00; p[ans + 7] = 0x00
+                p[ans + 8] = 0x01; p[ans + 9] = 0x2C
                 p[ans + 10] = UInt8(rdLength >> 8)             // RDLENGTH
                 p[ans + 11] = UInt8(rdLength & 0xFF)
 

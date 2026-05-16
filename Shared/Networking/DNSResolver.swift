@@ -1,5 +1,5 @@
 //
-//  ProxyDNSResolver.swift
+//  DNSResolver.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/8/26.
@@ -7,19 +7,22 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "ProxyDNSResolver")
+private let logger = AnywhereLogger(category: "DNSResolver")
 
-// MARK: - ProxyDNSResolver
+// MARK: - DNSResolver
 
-/// Thread-safe DNS cache for proxy server domains. Always resolves through the
-/// physical network interface using `DNSServiceGetAddrInfo`, bypassing the VPN
-/// tunnel to avoid routing loops.
+/// Thread-safe DNS cache for hostnames resolved outside the VPN tunnel — used
+/// for both upstream proxy servers and direct-routed destinations. Always
+/// resolves through the physical network interface via `getaddrinfo`, bypassing
+/// the VPN tunnel to avoid routing loops.
 ///
-/// The active proxy domain (set via ``setActiveProxyDomain(_:)``) returns stale
-/// cached IPs on TTL expiry (to avoid blocking connections) while refreshing in
-/// the background. Non-active domains refresh synchronously.
-nonisolated final class ProxyDNSResolver {
-    static let shared = ProxyDNSResolver()
+/// Stale entries are returned immediately on TTL expiry and refreshed in the
+/// background, so connect paths never block on DNS for previously-seen hosts.
+/// Concurrent stale hits on the same hostname coalesce into one background
+/// refresh. `forceFresh: true` overrides the stale-fast path for callers that
+/// need accuracy (e.g. latency tests).
+nonisolated final class DNSResolver {
+    static let shared = DNSResolver()
 
     /// Default TTL for cached entries (seconds).
     static let defaultTTL: TimeInterval = 120
@@ -32,34 +35,29 @@ nonisolated final class ProxyDNSResolver {
     private var cache: [String: CacheEntry] = [:]
     private let lock = ReadWriteLock()
 
-    /// The currently active proxy domain (returns stale IPs on expiry instead of blocking).
-    private var activeProxyDomain: String?
+    /// Hostnames currently being refreshed in the background. Guards against
+    /// duplicate concurrent `getaddrinfo` calls when many callers hit the
+    /// stale-fast path for the same key at once.
+    private var inFlightRefreshes: Set<String> = []
 
     private init() {}
 
-    /// Set the currently active proxy domain. It gets stale-IP treatment on TTL
-    /// expiry (returns cached IPs immediately, refreshes in background).
-    func setActiveProxyDomain(_ domain: String?) {
-        lock.withWriteLock {
-            activeProxyDomain = domain.map { Self.stripBrackets($0).lowercased() }
-        }
-    }
-
     // MARK: - Public API
 
-    /// Resolves a proxy server hostname to IP address strings, using the cache
-    /// when available. Always resolves via local DNS (physical interface),
-    /// bypassing the VPN tunnel.
+    /// Resolves a hostname to IP address strings, using the cache when
+    /// available. Always resolves via local DNS (physical interface), bypassing
+    /// the VPN tunnel.
     ///
     /// - If `host` is already an IP, returns it directly without caching.
-    /// - If `host` is the active proxy domain and cache is expired, returns stale
-    ///   IPs immediately and refreshes in the background — unless `forceFresh`
-    ///   is set, in which case the call always blocks for a fresh lookup.
-    /// - Otherwise, resolves synchronously and caches the result.
+    /// - If the cache entry is fresh, returns it.
+    /// - If the cache entry is stale and `forceFresh` is false, returns the
+    ///   stale IPs immediately and triggers a background refresh.
+    /// - Otherwise, resolves synchronously and caches the result; on synchronous
+    ///   failure, falls back to stale IPs if any exist.
     ///
-    /// - Parameter forceFresh: Bypass the active-proxy stale-fast path and always
-    ///   resolve synchronously when the cache is missing or expired. Use this
-    ///   for latency tests and other flows where stale IPs would skew results.
+    /// - Parameter forceFresh: Bypass the stale-fast path and always resolve
+    ///   synchronously when the cache is missing or expired. Use this for
+    ///   latency tests and other flows where stale IPs would skew results.
     /// - Returns: All resolved IP addresses (IPv4 and IPv6), or empty on failure.
     func resolveAll(_ host: String, forceFresh: Bool = false) -> [String] {
         let bare = Self.stripBrackets(host)
@@ -69,39 +67,22 @@ nonisolated final class ProxyDNSResolver {
 
         let key = bare.lowercased()
 
-        let isActive: Bool = lock.withReadLock { activeProxyDomain == key }
-
-        // Check cache
-        let (cached, expired): ([String]?, Bool) = lock.withReadLock {
-            if let entry = cache[key] {
-                if entry.expiry > Date() {
-                    return (entry.ips, false)
-                } else {
-                    return (entry.ips, true)
-                }
-            }
-            return (nil, false)
-        }
+        let entry: CacheEntry? = lock.withReadLock { cache[key] }
+        let cached = entry?.ips
+        let expired = entry.map { $0.expiry <= Date() } ?? false
 
         // Cache hit — not expired
         if let cached, !expired { return cached }
 
-        // Active proxy with stale cache — return stale, refresh in background.
-        // Skipped under forceFresh so callers that need accuracy (latency tests)
-        // always block for a fresh lookup.
-        if let cached, expired, isActive, !forceFresh {
-            DispatchQueue.global(qos: .utility).async { [self] in
-                let ips = Self.resolveViaGetaddrinfo(bare)
-                if !ips.isEmpty {
-                    self.lock.withWriteLock {
-                        self.cache[key] = CacheEntry(ips: ips, expiry: Date() + Self.defaultTTL)
-                    }
-                }
-            }
+        // Stale entry, not forceFresh — return stale, refresh in background.
+        // forceFresh skips this path so callers that need accuracy (latency
+        // tests) always block for a fresh lookup.
+        if let cached, expired, !forceFresh {
+            scheduleBackgroundRefresh(key: key, host: bare)
             return cached
         }
 
-        // Cache miss, expired non-active entry, or forceFresh — resolve synchronously
+        // Cache miss, or forceFresh — resolve synchronously
         let ips = Self.resolveViaGetaddrinfo(bare)
         guard !ips.isEmpty else {
             // If we have stale IPs, return them as fallback
@@ -137,6 +118,27 @@ nonisolated final class ProxyDNSResolver {
     }
 
     // MARK: - Internal
+
+    /// Fires a background refresh for `key` if one isn't already in flight.
+    /// The lock-guarded set ensures duplicate concurrent stale-cache hits for
+    /// the same hostname coalesce into one `getaddrinfo` call.
+    private func scheduleBackgroundRefresh(key: String, host: String) {
+        let shouldFire: Bool = lock.withWriteLock {
+            if inFlightRefreshes.contains(key) { return false }
+            inFlightRefreshes.insert(key)
+            return true
+        }
+        guard shouldFire else { return }
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let ips = Self.resolveViaGetaddrinfo(host)
+            self.lock.withWriteLock {
+                if !ips.isEmpty {
+                    self.cache[key] = CacheEntry(ips: ips, expiry: Date() + Self.defaultTTL)
+                }
+                self.inFlightRefreshes.remove(key)
+            }
+        }
+    }
 
     private static func stripBrackets(_ host: String) -> String {
         host.hasPrefix("[") && host.hasSuffix("]")

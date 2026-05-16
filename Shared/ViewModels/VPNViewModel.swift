@@ -394,7 +394,7 @@ class VPNViewModel: ObservableObject {
     //                     The extension dials the proxy directly (independent
     //                     of the active tunnel) and replies with the RTT.
     //                     Going through the NE here means the test reuses the
-    //                     in-tunnel ``ProxyDNSCache`` and avoids dialing
+    //                     in-tunnel ``DNSResolver`` and avoids dialing
     //                     interception fake-IPs from the main app.
     //   - VPN off:        Dial the proxy from the main-app process directly
     //                     via the shared ``LatencyTester``.
@@ -544,7 +544,7 @@ class VPNViewModel: ObservableObject {
     }
 
     /// Returns `configuration` with `resolvedIP` set, preferring an existing
-    /// value, then `fallback`, then a ``ProxyDNSCache`` lookup.
+    /// value, then `fallback`, then a ``DNSResolver`` lookup.
     nonisolated static func withResolvedIP(
         _ configuration: ProxyConfiguration,
         fallback: String? = nil
@@ -751,11 +751,11 @@ class VPNViewModel: ObservableObject {
     // MARK: - DNS Resolution
 
     /// Resolves a server address to an IP string. Returns the input unchanged if
-    /// it's already an IP literal. Delegates to ``ProxyDNSCache`` so every proxy
+    /// it's already an IP literal. Delegates to ``DNSResolver`` so every proxy
     /// hostname resolution shares the same cache (and stale-fast wake-recovery
     /// path) as the transport layers.
     nonisolated static func resolveServerAddress(_ address: String) -> String? {
-        ProxyDNSResolver.shared.resolveHost(address)
+        DNSResolver.shared.resolveHost(address)
     }
 
     // MARK: - Routing Sync

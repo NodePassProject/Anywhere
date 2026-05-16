@@ -86,7 +86,7 @@ nonisolated enum LatencyTester {
             name: configuration.name,
             serverAddress: configuration.serverAddress,
             serverPort: configuration.serverPort,
-            resolvedIP: ProxyDNSResolver.shared.resolveHost(configuration.serverAddress, forceFresh: true),
+            resolvedIP: DNSResolver.shared.resolveHost(configuration.serverAddress, forceFresh: true),
             subscriptionId: configuration.subscriptionId,
             outbound: configuration.outbound,
             chain: resolvedChain
@@ -96,10 +96,10 @@ nonisolated enum LatencyTester {
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
         // Pre-warm DNS cache so resolution is excluded from timing.
         // forceFresh: tests must measure against a fresh address, never a stale one.
-        ProxyDNSResolver.shared.prewarm(configuration.serverAddress, forceFresh: true)
+        DNSResolver.shared.prewarm(configuration.serverAddress, forceFresh: true)
         if let chain = configuration.chain {
             for proxy in chain {
-                ProxyDNSResolver.shared.prewarm(proxy.serverAddress, forceFresh: true)
+                DNSResolver.shared.prewarm(proxy.serverAddress, forceFresh: true)
             }
         }
 

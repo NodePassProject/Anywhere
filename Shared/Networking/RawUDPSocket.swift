@@ -14,7 +14,7 @@ private let logger = AnywhereLogger(category: "RawUDPSocket")
 
 /// UDP transport over a connected non-blocking POSIX `SOCK_DGRAM`.
 ///
-/// DNS goes through ``ProxyDNSCache``. Reads are driven by a
+/// DNS goes through ``DNSResolver``. Reads are driven by a
 /// `DispatchSourceRead` that loops `recv(2)` until `EAGAIN`, so one
 /// wake-up drains a burst of packets. Sends are non-blocking `send(2)`;
 /// `EAGAIN` drops the datagram (the upper layer retransmits).
@@ -84,7 +84,7 @@ nonisolated final class RawUDPSocket {
 
     // MARK: - Connect
 
-    /// Resolves `host` via ``ProxyDNSCache`` and creates a connected
+    /// Resolves `host` via ``DNSResolver`` and creates a connected
     /// non-blocking UDP socket to `port`.
     ///
     /// - Parameters:
@@ -105,7 +105,7 @@ nonisolated final class RawUDPSocket {
                 return
             }
 
-            let ips = ProxyDNSResolver.shared.resolveAll(host)
+            let ips = DNSResolver.shared.resolveAll(host)
             guard !ips.isEmpty else {
                 completionQueue.async {
                     completion(SocketError.resolutionFailed("DNS resolution failed for \(host)"))

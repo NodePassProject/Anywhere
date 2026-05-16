@@ -65,7 +65,6 @@ extension LWIPStack {
             fakeIPPool.reset()
         }
 
-        ProxyDNSResolver.shared.setActiveProxyDomain(nil)
         AnywhereLogger.logSink = nil
         packetFlow = nil
         configuration = nil

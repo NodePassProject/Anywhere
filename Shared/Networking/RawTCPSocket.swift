@@ -170,7 +170,7 @@ enum SocketHelpers {
 /// All callers reach this through the ``RawTransport`` protocol.
 ///
 /// ### DNS
-/// DNS resolution is performed via ``ProxyDNSCache`` to avoid tunnel routing
+/// DNS resolution is performed via ``DNSResolver`` to avoid tunnel routing
 /// loops, and the resolved IP address strings are fed directly into the socket
 /// via `inet_pton`. This bypasses the system resolver at connect time.
 ///
@@ -321,9 +321,10 @@ nonisolated class RawTCPSocket: RawTransport {
 
     /// Connects to a remote host asynchronously.
     ///
-    /// DNS resolution runs synchronously on the internal `ioQueue` via
-    /// ``ProxyDNSCache``. Each resolved IP address is tried in order; on
-    /// failure we fall through to the next address.
+    /// DNS resolution runs on the internal `ioQueue` via ``DNSResolver`` —
+    /// returns immediately on a fresh or stale cache hit (stale entries
+    /// refresh in the background); blocks only on a cold miss. Each resolved
+    /// IP address is tried in order; on failure we fall through to the next.
     ///
     /// When `initialData` is non-empty, it is enqueued for send as soon as the
     /// socket becomes writable (after connect completes).
@@ -345,7 +346,7 @@ nonisolated class RawTCPSocket: RawTransport {
                 return
             }
 
-            let ips = ProxyDNSResolver.shared.resolveAll(host)
+            let ips = DNSResolver.shared.resolveAll(host)
             guard !ips.isEmpty else {
                 let err = SocketError.resolutionFailed("DNS resolution failed for \(host)")
                 // Move to .failed if still in setup; keep .cancelled if already

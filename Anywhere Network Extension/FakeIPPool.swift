@@ -17,8 +17,9 @@ class FakeIPPool {
 
     // IPv4: 198.18.0.0/15 → offsets 1..131071 available; we cap LRU at a
     // much smaller size (see ``TunnelConstants/fakeIPPoolSize``).
-    // IPv6: fc00:: + offset (same offset range as IPv4)
-    // fc00::1 through fc00::1:ffff
+    // IPv6: fc00::/96 → offset packed into low 32 bits, bytes 0-1 = 0xFC00
+    // and bytes 2-11 must be zero (the strict check is in `ipv6ToOffset`).
+    // Range used in practice: fc00::1 through fc00::<fakeIPPoolSize-as-hex>.
 
     /// Protects all mutable state (maps, LRU list, nextOffset).
     private let lock = UnfairLock()

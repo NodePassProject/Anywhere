@@ -697,12 +697,12 @@ nonisolated class QUICConnection {
         }
 
         // Cache-backed resolution. A direct getaddrinfo() would block the QUIC
-        // queue on a cold system resolver (notably post-wake); ProxyDNSCache
-        // returns stale IPs immediately for the active proxy domain and refreshes
-        // in the background.
+        // queue on a cold system resolver (notably post-wake); DNSResolver
+        // returns stale IPs immediately on TTL expiry and refreshes in the
+        // background, so only a cold cache miss can block here.
         var found4: in_addr?
         var found6: in6_addr?
-        for ip in ProxyDNSResolver.shared.resolveAll(host) {
+        for ip in DNSResolver.shared.resolveAll(host) {
             if found4 == nil {
                 var a4 = in_addr()
                 if inet_pton(AF_INET, ip, &a4) == 1 {
