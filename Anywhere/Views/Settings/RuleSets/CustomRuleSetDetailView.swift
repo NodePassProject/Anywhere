@@ -16,6 +16,9 @@ struct CustomRuleSetDetailView: View {
     @State private var showRenameAlert = false
     @State private var renameText = ""
 
+    @State private var isUpdating = false
+    @State private var updateError: String?
+
     private var customRuleSet: CustomRoutingRuleSet? {
         ruleSetStore.customRuleSet(for: customRuleSetId)
     }
@@ -32,12 +35,17 @@ struct CustomRuleSetDetailView: View {
                 }
             }
 
+            if let subscriptionURL = customRuleSet?.subscriptionURL {
+                subscriptionSection(url: subscriptionURL)
+            }
+
             if let customRuleSet, !customRuleSet.rules.isEmpty {
                 Section("Rules") {
                     ForEach(Array(customRuleSet.rules.enumerated()), id: \.offset) { _, rule in
                         ruleRow(rule)
                     }
                     .onDelete { offsets in
+                        guard customRuleSet.subscriptionURL == nil else { return }
                         ruleSetStore.removeRules(from: customRuleSetId, at: Array(offsets))
                         Task { await viewModel.syncRoutingConfigurationToNE() }
                     }
@@ -74,6 +82,51 @@ struct CustomRuleSetDetailView: View {
                 ruleSetStore.updateCustomRuleSet(customRuleSetId, name: name)
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .alert("Update Failed", isPresented: Binding(
+            get: { updateError != nil },
+            set: { if !$0 { updateError = nil } }
+        )) {
+            Button("OK") { updateError = nil }
+        } message: {
+            Text(updateError ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private func subscriptionSection(url: URL) -> some View {
+        Section("Subscription") {
+            Text(url.absoluteString)
+                .font(.system(size: 14).monospaced())
+                .foregroundStyle(.secondary)
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button {
+                refresh()
+            } label: {
+                HStack {
+                    Label("Update", systemImage: "arrow.clockwise")
+                    if isUpdating {
+                        Spacer()
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(isUpdating)
+        }
+    }
+
+    private func refresh() {
+        isUpdating = true
+        Task {
+            defer { isUpdating = false }
+            do {
+                try await ruleSetStore.refreshCustomRuleSet(customRuleSetId)
+                await viewModel.syncRoutingConfigurationToNE()
+            } catch {
+                updateError = error.localizedDescription
+            }
         }
     }
 

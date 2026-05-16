@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RuleSetListView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
@@ -14,13 +15,20 @@ struct RuleSetListView: View {
         AWCore.getExperimentalEnabled()
     }
 
+    private static let importAllowedContentTypes: [UTType] = [UTType(filenameExtension: "arrs") ?? .data]
+
     @State var builtInServiceRuleSets: [RoutingRuleSet] = RoutingRuleSetStore.shared.builtInServiceRuleSets
     @State var customRuleSets: [CustomRoutingRuleSet] = RoutingRuleSetStore.shared.customRuleSets
-    
+
     @State private var showAddSheet = false
     @State private var newRuleSetName = ""
-    
-    @State private var showImportSheet = false
+
+    @State private var showFileImporter = false
+    @State private var importError: String?
+
+    @State private var showSubscribeAlert = false
+    @State private var subscribeURL = ""
+    @State private var subscribeError: String?
     
     var body: some View {
         List {
@@ -80,9 +88,16 @@ struct RuleSetListView: View {
                         }
                     }
                     Button {
-                        showImportSheet = true
+                        importError = nil
+                        showFileImporter = true
                     } label: {
                         Label("Import Rule Set", systemImage: "square.and.arrow.down")
+                    }
+                    Button {
+                        subscribeURL = ""
+                        showSubscribeAlert = true
+                    } label: {
+                        Label("Subscribe Rule Set", systemImage: "link")
                     }
                     Button {
                         RoutingRuleSetStore.shared.resetAssignments()
@@ -107,6 +122,12 @@ struct RuleSetListView: View {
             builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
             customRuleSets = RoutingRuleSetStore.shared.customRuleSets
         }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: Self.importAllowedContentTypes
+        ) { result in
+            handleFileImport(result)
+        }
         .alert("Add Rule Set", isPresented: $showAddSheet) {
             TextField("Name", text: $newRuleSetName)
             Button("Add") {
@@ -120,11 +141,87 @@ struct RuleSetListView: View {
                 newRuleSetName = ""
             }
         }
-        .sheet(isPresented: $showImportSheet) {
-            ImportRoutingRuleSetView { ruleSet in
+        .alert("Import Failed", isPresented: Binding(
+            get: { importError != nil },
+            set: { if !$0 { importError = nil } }
+        )) {
+            Button("OK") { importError = nil }
+        } message: {
+            Text(importError ?? "")
+        }
+        .alert("Subscribe Rule Set", isPresented: $showSubscribeAlert) {
+            TextField("Anywhere Routing Rule Set URL", text: $subscribeURL)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+            Button("Subscribe") {
+                subscribe(to: subscribeURL)
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Subscription Failed", isPresented: Binding(
+            get: { subscribeError != nil },
+            set: { if !$0 { subscribeError = nil } }
+        )) {
+            Button("OK") { subscribeError = nil }
+        } message: {
+            Text(subscribeError ?? "")
+        }
+    }
+
+    private func handleFileImport(_ result: Result<URL, Error>) {
+        do {
+            let url = try result.get()
+            guard url.pathExtension.lowercased() == "arrs" else {
+                importError = String(localized: "Invalid Anywhere Routing Rule Set File.")
+                return
+            }
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: url)
+            guard let body = String(data: data, encoding: .utf8) else {
+                importError = String(localized: "Unknown content.")
+                return
+            }
+            let parsed = RoutingRuleSetParser.parse(body)
+            let name = parsed.name.isEmpty
+                ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Imported" : url.deletingPathExtension().lastPathComponent)
+                : parsed.name
+            let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules)
+            RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet)
+            customRuleSets = RoutingRuleSetStore.shared.customRuleSets
+            Task { await viewModel.syncRoutingConfigurationToNE() }
+        } catch {
+            importError = error.localizedDescription
+        }
+    }
+
+    private func subscribe(to rawValue: String) {
+        guard let url = CustomRoutingRuleSet.validSubscriptionURL(from: rawValue) else {
+            subscribeError = String(localized: "Invalid Anywhere Routing Rule Set URL.")
+            return
+        }
+        Task {
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                    subscribeError = "HTTP \(http.statusCode)"
+                    return
+                }
+                guard let body = String(data: data, encoding: .utf8) else {
+                    subscribeError = String(localized: "Unknown content.")
+                    return
+                }
+                let parsed = RoutingRuleSetParser.parse(body)
+                let name = parsed.name.isEmpty
+                    ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Subscription" : url.deletingPathExtension().lastPathComponent)
+                    : parsed.name
+                let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url)
                 RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet)
                 customRuleSets = RoutingRuleSetStore.shared.customRuleSets
-                Task { await viewModel.syncRoutingConfigurationToNE() }
+                await viewModel.syncRoutingConfigurationToNE()
+            } catch {
+                subscribeError = error.localizedDescription
             }
         }
     }

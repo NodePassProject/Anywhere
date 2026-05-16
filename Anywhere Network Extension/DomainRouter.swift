@@ -27,26 +27,123 @@ class DomainRouter {
     //
     // Priority (highest first): User > ADBlock > Built-in > Country Bypass.
 
-    private final class TrieNode {
-        var children: [String: TrieNode] = [:]
+    // MARK: - Suffix trie
+
+    /// Reverse-label trie for `domainSuffix` matching. Each node is one
+    /// dot-separated label; walking deeper matches a more-specific suffix.
+    private final class SuffixTrieNode {
+        var children: [String: SuffixTrieNode] = [:]
         var action: RouteAction?
     }
 
-    private struct KeywordRule {
-        let pattern: String
-        let action: RouteAction
-        let patternLength: Int
+    // MARK: - Keyword automaton
 
-        init(pattern: String, action: RouteAction) {
-            self.pattern = pattern
-            self.action = action
-            self.patternLength = pattern.utf8.count
+    /// Aho–Corasick automaton for `domainKeyword` matching: finds the
+    /// longest pattern occurring as a substring of the input in a single
+    /// O(D) walk, independent of the number of patterns. Replaces the
+    /// previous O(N·D) per-pattern `String.contains` loop.
+    ///
+    /// Build the automaton by calling ``insert(_:action:)`` for each
+    /// pattern, then ``finalize()`` exactly once before any
+    /// ``lookup(_:)``. Re-inserting after ``finalize()`` marks the
+    /// automaton dirty; the next ``finalize()`` rebuilds the failure
+    /// links. Lookups before the first ``finalize()`` return nil.
+    private final class KeywordAutomaton {
+        private final class Node {
+            var children: [UInt8: Node] = [:]
+            var failure: Node?
+            /// Nearest accepting ancestor reachable via failure links —
+            /// lets ``lookup`` enumerate all patterns ending at a state
+            /// without walking the full failure chain each step.
+            var dictSuffix: Node?
+            var action: RouteAction?
+            var patternLength = 0
+            var insertionOrder = 0
+        }
+
+        private let root = Node()
+        private var insertionCounter = 0
+        private var finalized = false
+
+        func insert(_ pattern: String, action: RouteAction) {
+            guard !pattern.isEmpty else { return }
+            let bytes = Array(pattern.utf8)
+            var node = root
+            for b in bytes {
+                if let child = node.children[b] {
+                    node = child
+                } else {
+                    let child = Node()
+                    node.children[b] = child
+                    node = child
+                }
+            }
+            insertionCounter += 1
+            node.action = action
+            node.patternLength = bytes.count
+            node.insertionOrder = insertionCounter
+            finalized = false
+        }
+
+        func finalize() {
+            guard !finalized else { return }
+            var queue: [Node] = []
+            for child in root.children.values {
+                child.failure = root
+                queue.append(child)
+            }
+            var head = 0
+            while head < queue.count {
+                let u = queue[head]; head += 1
+                for (byte, v) in u.children {
+                    queue.append(v)
+                    var f = u.failure
+                    while let cur = f, cur.children[byte] == nil, cur !== root {
+                        f = cur.failure
+                    }
+                    if let cur = f, let next = cur.children[byte], next !== v {
+                        v.failure = next
+                    } else {
+                        v.failure = root
+                    }
+                    v.dictSuffix = (v.failure?.action != nil) ? v.failure : v.failure?.dictSuffix
+                }
+            }
+            finalized = true
+        }
+
+        func lookup(_ domain: String) -> RouteAction? {
+            guard finalized else { return nil }
+            var bestAction: RouteAction? = nil
+            var bestLength = 0
+            var bestOrder = -1
+            var node = root
+            for byte in domain.utf8 {
+                while node !== root, node.children[byte] == nil {
+                    node = node.failure ?? root
+                }
+                if let next = node.children[byte] { node = next }
+                var hit: Node? = node
+                while let h = hit {
+                    if h.action != nil,
+                       h.patternLength > bestLength ||
+                        (h.patternLength == bestLength && h.insertionOrder > bestOrder) {
+                        bestAction = h.action
+                        bestLength = h.patternLength
+                        bestOrder = h.insertionOrder
+                    }
+                    hit = h.dictSuffix
+                }
+            }
+            return bestAction
         }
     }
 
+    // MARK: - Tier state
+
     private struct TierMatchers {
-        var trieRoot = TrieNode()
-        var keywordRules: [KeywordRule] = []
+        var suffixTrieRoot = SuffixTrieNode()
+        var keywordAutomaton = KeywordAutomaton()
         var ipv4Trie = CIDRTrie()
         var ipv6Trie = CIDRTrie()
         var domainRuleCount = 0
@@ -55,13 +152,13 @@ class DomainRouter {
         var isEmpty: Bool { domainRuleCount == 0 && ipRuleCount == 0 }
 
         mutating func insertSuffix(_ suffix: String, action: RouteAction) {
-            var node = trieRoot
+            var node = suffixTrieRoot
             for label in suffix.split(separator: ".").reversed() {
                 let key = String(label)
                 if let child = node.children[key] {
                     node = child
                 } else {
-                    let child = TrieNode()
+                    let child = SuffixTrieNode()
                     node.children[key] = child
                     node = child
                 }
@@ -72,12 +169,7 @@ class DomainRouter {
 
         mutating func insertKeyword(_ pattern: String, action: RouteAction) {
             guard !pattern.isEmpty else { return }
-            let rule = KeywordRule(pattern: pattern, action: action)
-            if let index = keywordRules.firstIndex(where: { $0.pattern == pattern }) {
-                keywordRules[index] = rule
-            } else {
-                keywordRules.append(rule)
-            }
+            keywordAutomaton.insert(pattern, action: action)
             domainRuleCount += 1
         }
 
@@ -91,12 +183,21 @@ class DomainRouter {
             ipRuleCount += 1
         }
 
+        /// Builds the keyword automaton's failure links. Call once per
+        /// tier after all inserts; lookups before this return nil for
+        /// any keyword pattern.
+        func finalize() {
+            keywordAutomaton.finalize()
+        }
+
+        /// Domain Suffix wins over Domain Keyword: only fall back to the
+        /// keyword automaton when the suffix trie does not match.
         func lookupDomain(_ domain: String) -> RouteAction? {
-            lookupSuffix(domain) ?? lookupKeyword(domain)
+            lookupSuffix(domain) ?? keywordAutomaton.lookup(domain)
         }
 
         private func lookupSuffix(_ domain: String) -> RouteAction? {
-            var node = trieRoot
+            var node = suffixTrieRoot
             var deepestAction: RouteAction? = nil
             for label in domain.split(separator: ".").reversed() {
                 guard let child = node.children[String(label)] else { break }
@@ -104,18 +205,6 @@ class DomainRouter {
                 if let action = node.action { deepestAction = action }
             }
             return deepestAction
-        }
-
-        private func lookupKeyword(_ domain: String) -> RouteAction? {
-            var bestAction: RouteAction? = nil
-            var bestLength = -1
-            for rule in keywordRules where domain.contains(rule.pattern) {
-                if rule.patternLength >= bestLength {
-                    bestAction = rule.action
-                    bestLength = rule.patternLength
-                }
-            }
-            return bestAction
         }
     }
 
@@ -176,6 +265,8 @@ class DomainRouter {
         if let entries = json["bypassRules"] as? [[String: Any]] {
             loadBypassEntries(entries, into: .bypass)
         }
+
+        for i in tiers.indices { tiers[i].finalize() }
 
         logger.debug("[DomainRouter] Loaded tiers — user: \(self.tiers[Tier.user.rawValue].domainRuleCount)+\(self.tiers[Tier.user.rawValue].ipRuleCount), adBlock: \(self.tiers[Tier.adBlock.rawValue].domainRuleCount)+\(self.tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(self.tiers[Tier.builtIn.rawValue].domainRuleCount)+\(self.tiers[Tier.builtIn.rawValue].ipRuleCount), bypass: \(self.tiers[Tier.bypass.rawValue].domainRuleCount)+\(self.tiers[Tier.bypass.rawValue].ipRuleCount); \(self.configurationMap.count) configurations")
     }

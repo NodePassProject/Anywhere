@@ -7464,6 +7464,26 @@
         }
       }
     },
+    "Invalid Anywhere Routing Rule Set File." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无效 Anywhere 路由规则列表 URL"
+          }
+        }
+      }
+    },
+    "Invalid Anywhere Routing Rule Set URL." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无效 Anywhere 路由规则列表文件"
+          }
+        }
+      }
+    },
     "Invalid chain — some proxies are missing" : {
       "localizations" : {
         "ar" : {
@@ -12765,6 +12785,26 @@
     "Stream Up" : {
       "shouldTranslate" : false
     },
+    "Subscribe" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "订阅"
+          }
+        }
+      }
+    },
+    "Subscribe Rule Set" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "订阅规则集"
+          }
+        }
+      }
+    },
     "Subscription" : {
       "localizations" : {
         "ar" : {
@@ -12819,6 +12859,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "订阅"
+          }
+        }
+      }
+    },
+    "Subscription Failed" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "订阅失败"
           }
         }
       }
@@ -13234,6 +13284,9 @@
           }
         }
       }
+    },
+    "This rule set has no subscription URL." : {
+
     },
     "This will skip TLS certificate validation, making your connections vulnerable to MITM attacks." : {
       "localizations" : {

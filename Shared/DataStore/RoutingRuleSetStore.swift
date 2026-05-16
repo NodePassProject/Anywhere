@@ -21,15 +21,18 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
     var rules: [RoutingRule]
+    /// When set, rules are sourced from a remote `.arrs` file and replaced on refresh.
+    var subscriptionURL: URL?
 
-    init(name: String, rules: [RoutingRule] = []) {
+    init(name: String, rules: [RoutingRule] = [], subscriptionURL: URL? = nil) {
         self.id = UUID()
         self.name = name
         self.rules = rules
+        self.subscriptionURL = subscriptionURL
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, rules
+        case id, name, rules, subscriptionURL
     }
 
     init(from decoder: Decoder) throws {
@@ -38,6 +41,7 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
         self.name = try c.decode(String.self, forKey: .name)
         // A single corrupt rule shouldn't take down the whole set.
         self.rules = try c.decodeSkippingInvalid([RoutingRule].self, forKey: .rules)
+        self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -45,6 +49,17 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
         try c.encode(rules, forKey: .rules)
+        try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+    }
+
+    /// Returns a parsed http(s) URL whose path ends with `.arrs` (case-insensitive), or nil.
+    static func validSubscriptionURL(from rawValue: String) -> URL? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.path.lowercased().hasSuffix(".arrs") else { return nil }
+        return url
     }
 }
 
@@ -175,6 +190,29 @@ class RoutingRuleSetStore: ObservableObject {
         guard let index = customRuleSets.firstIndex(where: { $0.id == id }) else { return }
         if let name { customRuleSets[index].name = name }
         if let rules { customRuleSets[index].rules = rules }
+        saveCustomRuleSets()
+        rebuildRuleSets()
+    }
+
+    /// Fetches the subscription URL, parses the response as an `.arrs` rule set, and
+    /// replaces the rules of the existing custom set. The user-given `name` is
+    /// preserved across refreshes so renames stick.
+    func refreshCustomRuleSet(_ id: UUID) async throws {
+        guard let index = customRuleSets.firstIndex(where: { $0.id == id }),
+              let url = customRuleSets[index].subscriptionURL else {
+            throw CustomRoutingRuleSetRefreshError.missingSubscriptionURL
+        }
+
+        let (data, response) = try await URLSession.shared.data(from: url)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw CustomRoutingRuleSetRefreshError.invalidStatusCode(http.statusCode)
+        }
+        guard let body = String(data: data, encoding: .utf8) else {
+            throw CustomRoutingRuleSetRefreshError.undecodableBody
+        }
+
+        let parsed = RoutingRuleSetParser.parse(body)
+        customRuleSets[index].rules = parsed.rules
         saveCustomRuleSets()
         rebuildRuleSets()
     }
@@ -338,6 +376,23 @@ class RoutingRuleSetStore: ObservableObject {
     private func saveCustomRuleSets() {
         if let data = try? JSONEncoder().encode(customRuleSets) {
             JSONBlobStore.shared.save(.customRuleSets, data: data)
+        }
+    }
+}
+
+enum CustomRoutingRuleSetRefreshError: LocalizedError {
+    case missingSubscriptionURL
+    case invalidStatusCode(Int)
+    case undecodableBody
+
+    var errorDescription: String? {
+        switch self {
+        case .missingSubscriptionURL:
+            return "This rule set has no subscription URL."
+        case .invalidStatusCode(let code):
+            return "HTTP \(code)"
+        case .undecodableBody:
+            return String(localized: "Unknown content.")
         }
     }
 }

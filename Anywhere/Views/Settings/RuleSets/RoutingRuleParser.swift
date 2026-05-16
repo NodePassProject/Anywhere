@@ -39,6 +39,11 @@ import Foundation
 /// | `1` | IPv6 CIDR      | `2001:db8::/32` (`/128` appended if no prefix) |
 /// | `2` | Domain Suffix  | `example.com`                                 |
 /// | `3` | Domain Keyword | `example`                                     |
+///
+/// Domain Keyword (ID `3`) substring-matches every hostname the router
+/// sees, so it is both slower and more prone to false positives than
+/// Domain Suffix (ID `2`), which anchors to the right of the hostname.
+/// Prefer ID `2` whenever a suffix match can express the intent.
 enum RoutingRuleSetParser {
     static func parse(_ text: String) -> CustomRoutingRuleSet {
         var name = ""
