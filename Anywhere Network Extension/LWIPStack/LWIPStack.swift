@@ -35,22 +35,20 @@ class LWIPStack {
 
     static let ipv4Proto = NSNumber(value: AF_INET)
     static let ipv6Proto = NSNumber(value: AF_INET6)
-    var outputPackets: [Data] = []
-    var outputProtocols: [NSNumber] = []
-    var outputFlushScheduled = false
-    /// True while a writePackets call is executing on outputQueue.
-    /// Prevents piling up multiple writes that overwhelm the TUN device buffer.
-    var outputWriteInFlight = false
 
-    /// Coalescing signal that runs the post-`writePackets` re-flush check on
-    /// `lwipQueue`. Replaces a per-write `lwipQueue.async` back-hop with a
-    /// `DispatchSource` whose handler invocation count is naturally bounded
-    /// by `lwipQueue` availability — under sustained upload (an ACK
-    /// `writePackets` per send completion × N connections), several signals
-    /// land while `lwipQueue` is busy on input/completion/timer work and
-    /// collapse into one handler call. Created in ``start`` /
-    /// ``restartStackNow`` and cancelled in ``shutdownInternal``.
-    var outputDrainSource: DispatchSourceUserDataAdd?
+    /// Guards ``outputPackets``, ``outputProtocols``, and
+    /// ``outputDrainInFlight``. Held briefly during appends from lwIP output
+    /// callbacks on ``lwipQueue`` and during batch pulls by the drain loop on
+    /// ``outputQueue``. `UnfairLock` keeps the per-packet append cost in the
+    /// tens of nanoseconds.
+    let outputBufferLock = UnfairLock()
+    /// Pending IP packets to ship to utun. Protected by ``outputBufferLock``.
+    var outputPackets: [Data] = []
+    /// Per-packet protocol family (AF_INET / AF_INET6). Protected by ``outputBufferLock``.
+    var outputProtocols: [NSNumber] = []
+    /// True while a drain loop is running on ``outputQueue``. lwIP callbacks
+    /// only dispatch a new loop when this is false. Protected by ``outputBufferLock``.
+    var outputDrainInFlight = false
 
     // --- Settings (read from App Group UserDefaults) ---
     // These are loaded at start/restart and live-reloaded via Darwin notification.

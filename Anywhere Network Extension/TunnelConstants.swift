@@ -49,10 +49,12 @@ enum TunnelConstants {
     /// Maximum packets handed to a single ``NEPacketTunnelFlow/writePackets``
     /// call. Each call is forwarded to utun as a sequence of `write(2)` syscalls;
     /// when the batch outruns utun's input queue the kernel drops the tail with
-    /// ENOSPC ("User Tunnel write error: No space left on device"). Capping the
-    /// batch keeps each call inside the queue and lets the queue-hop between
-    /// successive flushes give utun time to drain.
-    static let tunnelMaxPacketsPerWrite = 64
+    /// ENOSPC ("User Tunnel write error: No space left on device"). 128 is the
+    /// empirical safe ceiling on iOS — 256 trips ENOSPC and induces lwIP
+    /// per-PCB queue saturation because the dropped ACKs never reach the peer.
+    /// The drain loop issues back-to-back calls at this cap until the buffer
+    /// is empty, so the cap controls per-call ENOSPC risk but not throughput.
+    static let tunnelMaxPacketsPerWrite = 128
 
     /// Low-water mark for the per-connection downlink backlog (`pendingWrite`).
     /// When the backlog drops below this we prefetch the next proxy receive in

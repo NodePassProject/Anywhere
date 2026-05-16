@@ -41,7 +41,6 @@ extension LWIPStack {
             configureRuntime(for: configuration)
             registerCallbacks()
             lwip_bridge_init()
-            startOutputDrainSource()
             startTimeoutTimer()
             startUDPCleanupTimer()
             installFDPressureReliefHandler()
@@ -152,13 +151,12 @@ extension LWIPStack {
         timeoutTimer = nil
         udpCleanupTimer?.cancel()
         udpCleanupTimer = nil
-        outputDrainSource?.cancel()
-        outputDrainSource = nil
 
-        outputPackets.removeAll(keepingCapacity: true)
-        outputProtocols.removeAll(keepingCapacity: true)
-        outputFlushScheduled = false
-        outputWriteInFlight = false
+        outputBufferLock.withLock {
+            outputPackets.removeAll(keepingCapacity: true)
+            outputProtocols.removeAll(keepingCapacity: true)
+            outputDrainInFlight = false
+        }
 
         muxManager?.closeAll()
         muxManager = nil
@@ -220,7 +218,6 @@ extension LWIPStack {
         configureRuntime(for: configuration)
         registerCallbacks()
         lwip_bridge_init()
-        startOutputDrainSource()
         startTimeoutTimer()
         startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop

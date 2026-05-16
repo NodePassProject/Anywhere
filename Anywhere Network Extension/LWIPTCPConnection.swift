@@ -402,8 +402,10 @@ class LWIPTCPConnection {
             remaining -= Int(part)
             lwip_bridge_tcp_recved(pcb, part)
         }
+        // `tcp_output` synchronously fires lwIP's output_fn for any pending
+        // segments, which appends to ``outputPackets`` and kicks
+        // ``drainOutputLoop`` on ``outputQueue``.
         lwip_bridge_tcp_output(pcb)
-        LWIPStack.shared?.flushOutputInline()
     }
 
     /// Removes and returns a `take`-byte head slice of the pipeline buffer.
@@ -966,7 +968,9 @@ class LWIPTCPConnection {
                     pendingWriteOffset = 0
                 }
                 lwip_bridge_tcp_output(pcb)
-                LWIPStack.shared?.flushOutputInline()
+                // tcp_output above generates output packets via lwIP's output_fn,
+                // which kicks ``drainOutputLoop`` on ``outputQueue`` — no explicit
+                // inline flush needed.
             } else {
                 // Nothing drained (ERR_MEM / zero window) — schedule a delayed
                 // retry. Skip `tryArmReceive` on purpose: piling more upstream
