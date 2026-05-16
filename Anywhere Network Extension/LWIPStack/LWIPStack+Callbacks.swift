@@ -50,13 +50,21 @@ extension LWIPStack {
             let packet = Data(bytesNoCopy: mutableData, count: byteCount, deallocator: .custom({ _, _ in
                 capturedQueue.async { capturedRelease(capturedCtx) }
             }))
-            shared.outputPackets.append(packet)
-            shared.outputProtocols.append(isIPv6 != 0 ? LWIPStack.ipv6Proto : LWIPStack.ipv4Proto)
-            if !shared.outputFlushScheduled {
-                shared.outputFlushScheduled = true
-                shared.lwipQueue.async {
-                    shared.flushOutputPackets()
-                }
+            let proto: NSNumber = isIPv6 != 0 ? LWIPStack.ipv6Proto : LWIPStack.ipv4Proto
+            // Append under the buffer lock and decide whether to start a
+            // drain on ``outputQueue``. The drain loop owns the writePackets
+            // calls and pulls subsequent batches under the same lock — no
+            // round-trip via ``lwipQueue`` between batches, so the drain
+            // cadence is no longer gated by lwIP work on ``lwipQueue``.
+            let needsKick: Bool = shared.outputBufferLock.withLock {
+                shared.outputPackets.append(packet)
+                shared.outputProtocols.append(proto)
+                if shared.outputDrainInFlight { return false }
+                shared.outputDrainInFlight = true
+                return true
+            }
+            if needsKick {
+                shared.outputQueue.async { shared.drainOutputLoop() }
             }
         }
 
