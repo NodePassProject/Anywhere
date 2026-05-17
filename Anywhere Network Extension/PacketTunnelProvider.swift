@@ -191,11 +191,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             settings.ipv6Settings = ipv6Settings
         }
 
-        let dnsServers: [String]
+        // Plain DNS is intercepted by lwIP on UDP/53 regardless of destination IP,
+        // so we point it at the tunnel's own peer address. Using an in-tunnel
+        // address keeps queries reachable only through utun — they cannot leak
+        // even if a future bypass-route change would otherwise expose a public IP.
+        let plainDNSServers: [String]
         if ipv6DNSEnabled {
-            dnsServers = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
+            plainDNSServers = ["10.8.0.1", "fd00::1"]
         } else {
-            dnsServers = ["1.1.1.1", "1.0.0.1"]
+            plainDNSServers = ["10.8.0.1"]
+        }
+
+        // Fallback when the user's encrypted-DNS hostname fails to resolve at
+        // tunnel start. The OS opens a real TLS connection to these IPs, so
+        // they must speak DoT/DoH — internal tunnel addresses would not work.
+        let encryptedDNSFallbackServers: [String]
+        if ipv6DNSEnabled {
+            encryptedDNSFallbackServers = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
+        } else {
+            encryptedDNSFallbackServers = ["1.1.1.1", "1.0.0.1"]
         }
 
         let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
@@ -205,22 +219,22 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if encryptedDNSEnabled, !encryptedDNSServer.isEmpty {
             if encryptedDNSProtocol == "dot" {
                 let serverIPs = Self.resolveEncryptedDNSHostname(encryptedDNSServer, includeIPv6: ipv6DNSEnabled)
-                let dnsSettings = NEDNSOverTLSSettings(servers: serverIPs ?? dnsServers)
+                let dnsSettings = NEDNSOverTLSSettings(servers: serverIPs ?? encryptedDNSFallbackServers)
                 dnsSettings.serverName = encryptedDNSServer
                 settings.dnsSettings = dnsSettings
                 logger.info("[VPN] DNS: DoT \(encryptedDNSServer)")
             } else if let serverURL = URL(string: encryptedDNSServer) {
                 let serverIPs = serverURL.host.flatMap { Self.resolveEncryptedDNSHostname($0, includeIPv6: ipv6DNSEnabled) }
-                let dnsSettings = NEDNSOverHTTPSSettings(servers: serverIPs ?? dnsServers)
+                let dnsSettings = NEDNSOverHTTPSSettings(servers: serverIPs ?? encryptedDNSFallbackServers)
                 dnsSettings.serverURL = serverURL
                 settings.dnsSettings = dnsSettings
                 logger.info("[VPN] DNS: DoH \(encryptedDNSServer)")
             } else {
-                settings.dnsSettings = NEDNSSettings(servers: dnsServers)
+                settings.dnsSettings = NEDNSSettings(servers: plainDNSServers)
                 logger.warning("[VPN] Invalid DoH URL, falling back to plain DNS")
             }
         } else {
-            settings.dnsSettings = NEDNSSettings(servers: dnsServers)
+            settings.dnsSettings = NEDNSSettings(servers: plainDNSServers)
         }
         settings.mtu = 1500
 

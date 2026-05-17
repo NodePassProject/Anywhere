@@ -166,19 +166,26 @@ extension LWIPStack {
 
             let payload = Data(bytes: data, count: Int(len))
 
-            // DNS interception: intercept port-53 A/AAAA queries with fake-IP responses
+            // DNS interception: fake-IP responses for queries targeting our own
+            // resolver (the tunnel peer address). Queries to any other resolver
+            // fall through and are proxied to the real server,
             if dstPort == 53 {
-                if shared.handleDNSQuery(
-                    payload: payload,
-                    srcIP: srcIP,
-                    srcPort: srcPort,
-                    dstIP: dstIP,
-                    dstPort: dstPort,
-                    isIPv6: isIPv6 != 0
-                ) {
-                    return  // Fake response sent, no flow needed
+                let dstIPString = LWIPStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
+                if let destination = LWIPStack.dnsDestination(for: dstIPString) {
+                    if shared.handleDNSQuery(
+                        payload: payload,
+                        srcIP: srcIP,
+                        srcPort: srcPort,
+                        dstIP: dstIP,
+                        dstPort: dstPort,
+                        isIPv6: isIPv6 != 0,
+                        destination: destination
+                    ) {
+                        return  // Fake response sent, no flow needed
+                    }
+                    // `.publicResolver` non-A/AAAA — fall through, proxy MX/SRV/TXT to real server
                 }
-                // Non-A/AAAA query — fall through, create normal UDP flow to proxy DNS
+                // Non-intercepted DNS server — fall through to ordinary UDP flow
             }
 
             // QUIC blocking: drop UDP/443 with ICMP port-unreachable so HTTP/3

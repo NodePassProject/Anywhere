@@ -11,19 +11,64 @@ extension LWIPStack {
 
     // MARK: - DNS Interception (Fake-IP)
     //
-    // DNS queries arriving on UDP port 53 are intercepted here before creating any flow.
-    // Two types of interception:
+    // DNS queries on UDP/53 are intercepted only when the destination IP is on
+    // ``interceptedDNSServers`` — every other resolver (NextDNS, AdGuard, Quad9,
+    // user-chosen public DNS) is treated as ordinary UDP and proxied to its real
+    // server. Two destinations qualify:
     //
-    // 1. DDR blocking: When encrypted DNS is disabled, queries for "_dns.resolver.arpa"
-    //    (RFC 9462) get a NODATA response. This prevents the system from discovering
-    //    that the DNS server supports DoH/DoT and auto-upgrading, which would bypass
-    //    our port-53 interception entirely.
+    // - ``DNSDestination/ours`` — `10.8.0.1` / `fd00::1`, the tunnel peer
+    //   addresses configured in ``PacketTunnelProvider/buildTunnelSettings``.
+    //   This is where the system resolver sends plain DNS. There is no real
+    //   upstream behind these IPs, so every query must be answered locally
+    //   (A/AAAA with fake IP; everything else with NODATA).
     //
-    // 2. Fake-IP for ALL A/AAAA queries: Every domain gets a synthetic fake IP response.
-    //    When TCP/UDP connections later arrive at the fake IP, we look up the original
-    //    domain and make routing decisions (direct/proxy) at connection time by checking
-    //    DomainRouter. This ensures routing rule changes take effect immediately without
+    // - ``DNSDestination/publicResolver`` — Google Public DNS (`8.8.8.8`,
+    //   `8.8.4.4`, and IPv6 equivalents). Several Google products hardcode
+    //   these and ignore the system DNS configuration, so we fake-IP A/AAAA
+    //   to keep routing working. Other query types (MX/SRV/TXT) are allowed
+    //   to fall through and get proxied to the real Google resolver.
+    //
+    // Two additional behaviours run for any intercepted destination:
+    //
+    // 1. DDR blocking: When encrypted DNS is disabled, queries for
+    //    "_dns.resolver.arpa" (RFC 9462) get a NODATA response. This stops
+    //    the system from discovering that the resolver supports DoH/DoT and
+    //    auto-upgrading, which would bypass our port-53 interception.
+    //
+    // 2. Fake-IP for ALL A/AAAA queries: Every domain gets a synthetic fake
+    //    IP response. When TCP/UDP connections later arrive at the fake IP we
+    //    look up the original domain and make routing decisions
+    //    (direct/proxy) at connection time by checking DomainRouter. This
+    //    ensures routing rule changes take effect immediately without
     //    waiting for OS DNS cache expiry.
+
+    /// Classifies a DNS destination IP for interception.
+    enum DNSDestination {
+        /// Anywhere resolver (tunnel peer address). No real upstream, so every
+        /// query must be answered locally.
+        case anywhereResolver
+        /// A public resolver an app pointed at directly (e.g., Google Public
+        /// DNS). Fake-IP A/AAAA; let other query types pass through to be
+        /// proxied to the real server.
+        case publicResolver
+    }
+
+    /// Destinations whose UDP/53 traffic we intercept. Any other destination
+    /// is left alone and proxied as an ordinary UDP flow.
+    static let interceptedDNSServers: [String: DNSDestination] = [
+        "10.8.0.1": .anywhereResolver,
+        "fd00::1": .anywhereResolver,
+        "8.8.8.8": .publicResolver,
+        "8.8.4.4": .publicResolver,
+        "2001:4860:4860::8888": .publicResolver,
+        "2001:4860:4860::8844": .publicResolver,
+    ]
+
+    /// Returns the interception mode for `dstIP`, or `nil` if the destination
+    /// is not on the intercept list.
+    static func dnsDestination(for dstIP: String) -> DNSDestination? {
+        interceptedDNSServers[dstIP]
+    }
 
     /// Intercepts a DNS query. Returns true if handled (no UDP flow needed).
     func handleDNSQuery(
@@ -32,7 +77,8 @@ extension LWIPStack {
         srcPort: UInt16,
         dstIP: UnsafeRawPointer,
         dstPort: UInt16,
-        isIPv6: Bool
+        isIPv6: Bool,
+        destination: DNSDestination
     ) -> Bool {
         // Parse domain + QTYPE
         guard let parsed = payload.withUnsafeBytes({ ptr -> (domain: String, qtype: UInt16)? in
@@ -78,8 +124,26 @@ extension LWIPStack {
             )
         }
 
-        // Only intercept A (1) and AAAA (28) queries; let MX/SRV/etc. pass through
-        guard qtype == 1 || qtype == 28 else { return false }
+        // Only fake-IP A (1) and AAAA (28) queries.
+        // Other query types (MX/SRV/TXT/...):
+        //   - `.anywhereResolver`: no upstream exists behind the tunnel peer
+        //     address, so we must answer locally. NODATA is the safest reply.
+        //   - `.publicResolver`: return false so the caller falls through to
+        //     a normal UDP flow, which proxies the query to the real server.
+        guard qtype == 1 || qtype == 28 else {
+            if destination == .anywhereResolver {
+                return sendNODATA(
+                    payload: payload,
+                    srcIP: srcIP,
+                    srcPort: srcPort,
+                    dstIP: dstIP,
+                    dstPort: dstPort,
+                    isIPv6: isIPv6,
+                    qtype: qtype
+                )
+            }
+            return false
+        }
 
         // Intercept ALL A/AAAA queries with fake IPs — including rejected domains.
         // Routing decisions (direct/reject/proxy) are all made at connection time
