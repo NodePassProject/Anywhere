@@ -148,3 +148,76 @@ hundred extra ~40-byte ACK packets per second at 1 MB/s upload.
 
 **Upgrade notes:** When bumping lwIP, re-apply. Search for
 `#define tcp_ack(pcb)` in `src/include/lwip/priv/tcp_priv.h`.
+
+---
+
+### 3. `src/core/tcp_in.c` + `src/include/lwip/priv/tcp_priv.h` — defer per-segment `tcp_output` during input batch
+
+**What:** At the end of `tcp_input()`, the implicit `tcp_output(pcb)`
+that flushes queued ACKs / `pcb->unsent` is gated on a global flag:
+
+```c
+/* before */
+tcp_output(pcb);
+
+/* after */
+if (!lwip_anywhere_input_batch_mode) {
+  tcp_output(pcb);
+}
+```
+
+The flag is declared in `tcp_priv.h` (`extern int lwip_anywhere_input_batch_mode;`)
+and defined in `lwip_bridge.c`. The bridge sets it to 1 around each
+kernel `readPackets` batch — see `lwip_bridge_input_batch_begin/end` —
+and `_end` then issues `tcp_output(pcb)` once per active PCB.
+
+**Why:** Patch 2 forces immediate ACK on every received segment
+(`TF_ACK_NOW`). Combined with the `tcp_output` call at the bottom of
+`tcp_input`, this produces one ACK packet per input segment. The bridge
+processes one kernel `readPackets` callback as a tight loop of
+`lwip_bridge_input` calls (typical batch under bulk upload is 10-22
+packets, observed maximum 64). One ACK per segment in that loop emits
+N ACK packets where 1 would convey the same cumulative acknowledgement
+number to the peer.
+
+Before the patch, on a saturated upload we observed ~980 ACK packets
+per 1000 received segments and an average input batch of 22 packets —
+i.e. ~22 ACK packets where 1 would have sufficed (22× coalescing
+potential).
+
+After the patch, `TF_ACK_NOW` accumulates per PCB through the batch
+(the flag is idempotent — multiple sets are no-ops) and `_end` collapses
+to one ACK packet per PCB. For a typical upload that concentrates on a
+single connection, that drops ACK rate from ~1900/s to ~85/s at the
+same throughput, with all the per-packet machinery (netif_output,
+outputBufferLock, drainOutputLoop, writePackets, batched release)
+scaled down proportionally.
+
+**What is unaffected:**
+
+- ACK semantics: `TF_ACK_NOW` is still set per segment. The peer sees
+  exactly the same cumulative ACK number, just delivered in fewer
+  packets. RFC 1122's "ACK within 500 ms" is met easily — a batch
+  completes in microseconds.
+- Patch 2's original motivation (no 250 ms delayed-ACK tail on
+  download): preserved. The deferral is bounded by one input batch
+  duration, not by `tcp_fasttmr`.
+- `tcp_send_empty_ack`, `tcp_rst`, and the zero-window-probe response
+  in `tcp_input` itself remain direct calls; they don't go through the
+  end-of-loop `tcp_output` gate.
+- Retransmission, RTO, persist timer, Nagle: unchanged.
+- Pending payload (`pcb->unsent`) deferred from "mid-batch" to
+  "end-of-batch" — sub-millisecond additional latency under load,
+  recovered by larger `tcp_output` segments since more snd_buf has
+  been freed by the accumulated ACKs.
+
+**Upgrade notes:** When bumping the vendored lwIP version, re-apply
+both halves:
+
+- `src/core/tcp_in.c`: search for `/* Try to send something out. */`
+  near the bottom of `tcp_input()`.
+- `src/include/lwip/priv/tcp_priv.h`: search for `lwip_anywhere_input_batch_mode`.
+
+The flag definition (`int lwip_anywhere_input_batch_mode = 0;`) and the
+begin/end functions live in `lwip/lwip_bridge.c` outside vendored lwIP
+and don't need re-applying.

@@ -564,8 +564,25 @@ tcp_input(struct pbuf *p, struct netif *inp)
         if (tcp_input_delayed_close(pcb)) {
           goto aborted;
         }
-        /* Try to send something out. */
-        tcp_output(pcb);
+        /* --- BEGIN Anywhere Patch: defer per-segment tcp_output during input batch ---
+         * Original: tcp_output(pcb);
+         *
+         * The bridge processes a kernel readPackets batch as a tight
+         * loop of `lwip_bridge_input()` calls. Combined with Patch 2's
+         * immediate-ACK, the per-call flush emits one ACK packet per
+         * input segment. In batch mode, skip the implicit flush; the
+         * bridge calls `tcp_output` once per active PCB in
+         * `lwip_bridge_input_batch_end()`, collapsing accumulated
+         * TF_ACK_NOW flags into one ACK per PCB and shipping any
+         * pcb->unsent that the freed snd_buf opened up. TF_ACK_NOW is
+         * idempotent, so no ACK is dropped — only deferred by the
+         * (sub-ms) duration of one input batch.
+         * See lwip/ANYWHERE_PATCHES.md.
+         */
+        if (!lwip_anywhere_input_batch_mode) {
+          tcp_output(pcb);
+        }
+        /* --- END Anywhere Patch --- */
 #if TCP_INPUT_DEBUG
 #if TCP_DEBUG
         tcp_debug_print_state(pcb->state);

@@ -155,6 +155,13 @@ extension LWIPStack {
         outputBufferLock.withLock {
             outputPackets.removeAll(keepingCapacity: true)
             outputProtocols.removeAll(keepingCapacity: true)
+            // Data deallocator is .none, so the release fns are the only
+            // way to free the pbufs/buffers. Synchronous calls are safe:
+            // shutdownInternal runs inside ``lwipQueue.sync``.
+            for r in pendingReleases {
+                r.fn(r.ctx)
+            }
+            pendingReleases.removeAll(keepingCapacity: true)
             outputDrainInFlight = false
         }
 

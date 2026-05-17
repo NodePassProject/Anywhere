@@ -43,6 +43,7 @@ extension LWIPStack {
         while true {
             var packets: [Data] = []
             var protocols: [NSNumber] = []
+            var releases: [PendingRelease] = []
 
             outputBufferLock.withLock {
                 let pending = outputPackets.count
@@ -53,20 +54,36 @@ extension LWIPStack {
                 if pending <= cap {
                     packets = outputPackets
                     protocols = outputProtocols
+                    releases = pendingReleases
                     outputPackets = []
                     outputProtocols = []
+                    pendingReleases = []
                     outputPackets.reserveCapacity(cap)
                     outputProtocols.reserveCapacity(cap)
+                    pendingReleases.reserveCapacity(cap)
                 } else {
                     packets = Array(outputPackets.prefix(cap))
                     protocols = Array(outputProtocols.prefix(cap))
+                    releases = Array(pendingReleases.prefix(cap))
                     outputPackets.removeFirst(cap)
                     outputProtocols.removeFirst(cap)
+                    pendingReleases.removeFirst(cap)
                 }
             }
 
             if packets.isEmpty { return }
             packetFlow?.writePackets(packets, withProtocols: protocols)
+
+            // Free the whole batch in one ``lwipQueue.async``. ``writePackets``
+            // copies into the kernel synchronously, so the underlying memory is
+            // no longer referenced by the time we get here.
+            if !releases.isEmpty {
+                lwipQueue.async {
+                    for r in releases {
+                        r.fn(r.ctx)
+                    }
+                }
+            }
         }
     }
 
@@ -84,12 +101,16 @@ extension LWIPStack {
 
             self.lwipQueue.async {
                 self.totalBytesOut += uploadBytes
+                // begin/end coalesces per-segment ACKs into one per PCB
+                // for this batch. See `lwip_bridge_input_batch_begin`.
+                lwip_bridge_input_batch_begin()
                 for packet in packets {
                     packet.withUnsafeBytes { buffer in
                         guard let baseAddress = buffer.baseAddress else { return }
                         lwip_bridge_input(baseAddress, Int32(buffer.count))
                     }
                 }
+                lwip_bridge_input_batch_end()
                 self.startReadingPackets()
             }
         }

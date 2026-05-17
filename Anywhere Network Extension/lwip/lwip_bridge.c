@@ -388,6 +388,28 @@ void lwip_bridge_shutdown(void) {
  *  Packet Input
  * ======================================================================== */
 
+/* Storage for the input-batch flag declared in `lwip/priv/tcp_priv.h`.
+ * Single-threaded under NO_SYS=1, so a plain int is fine. */
+int lwip_anywhere_input_batch_mode = 0;
+
+void lwip_bridge_input_batch_begin(void) {
+    lwip_anywhere_input_batch_mode = 1;
+}
+
+void lwip_bridge_input_batch_end(void) {
+    lwip_anywhere_input_batch_mode = 0;
+    /* One tcp_output per PCB flushes the per-segment TF_ACK_NOW flags
+     * accumulated during the batch (and any pcb->unsent unlocked by
+     * those ACKs). Capture `next` before tcp_output in case a callback
+     * it triggers aborts the PCB and unlinks it from the list. */
+    struct tcp_pcb *pcb = tcp_active_pcbs;
+    while (pcb != NULL) {
+        struct tcp_pcb *next = pcb->next;
+        tcp_output(pcb);
+        pcb = next;
+    }
+}
+
 void lwip_bridge_input(const void *data, int len) {
     if (!data || len <= 0) return;
 

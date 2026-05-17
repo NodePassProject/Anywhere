@@ -36,19 +36,33 @@ class LWIPStack {
     static let ipv4Proto = NSNumber(value: AF_INET)
     static let ipv6Proto = NSNumber(value: AF_INET6)
 
-    /// Guards ``outputPackets``, ``outputProtocols``, and
-    /// ``outputDrainInFlight``. Held briefly during appends from lwIP output
-    /// callbacks on ``lwipQueue`` and during batch pulls by the drain loop on
-    /// ``outputQueue``. `UnfairLock` keeps the per-packet append cost in the
-    /// tens of nanoseconds.
+    /// Guards ``outputPackets``, ``outputProtocols``, ``pendingReleases``,
+    /// and ``outputDrainInFlight``. Held briefly during appends from lwIP
+    /// output callbacks on ``lwipQueue`` and during batch pulls by the drain
+    /// loop on ``outputQueue``. `UnfairLock` keeps the per-packet append
+    /// cost in the tens of nanoseconds.
     let outputBufferLock = UnfairLock()
     /// Pending IP packets to ship to utun. Protected by ``outputBufferLock``.
     var outputPackets: [Data] = []
     /// Per-packet protocol family (AF_INET / AF_INET6). Protected by ``outputBufferLock``.
     var outputProtocols: [NSNumber] = []
+    /// Owning references to the pbufs / heap buffers backing the queued
+    /// output packets, kept in lockstep with ``outputPackets``. The per-packet
+    /// ``Data`` uses a `.none` deallocator; this list is the actual owner.
+    /// ``drainOutputLoop`` swaps it out together with the packet batch and
+    /// fires every release in a single ``lwipQueue.async`` per iteration.
+    /// Protected by ``outputBufferLock``.
+    var pendingReleases: [PendingRelease] = []
     /// True while a drain loop is running on ``outputQueue``. lwIP callbacks
     /// only dispatch a new loop when this is false. Protected by ``outputBufferLock``.
     var outputDrainInFlight = false
+
+    /// ``fn(ctx)`` must run on ``lwipQueue``: `pbuf_free` and `mem_free`
+    /// mutate per-pool freelists with no locking under NO_SYS=1.
+    struct PendingRelease {
+        let ctx: UnsafeMutableRawPointer?
+        let fn: @convention(c) (UnsafeMutableRawPointer?) -> Void
+    }
 
     // --- Settings (read from App Group UserDefaults) ---
     // These are loaded at start/restart and live-reloaded via Darwin notification.
