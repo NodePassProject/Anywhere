@@ -25,6 +25,8 @@ class VPNViewModel: ObservableObject {
                 selectedChainId = nil
                 AWCore.setSelectedChainId(nil)
                 AWCore.setSelectedConfigurationId(selectedConfiguration?.id)
+                // Tell NE to re-filter routing rules against the new default.
+                AWCore.notifyRoutingChanged()
             }
             // If VPN is connected, push new configuration to the tunnel
             if vpnStatus == .connected, let selectedConfiguration {
@@ -239,6 +241,8 @@ class VPNViewModel: ObservableObject {
         AWCore.setSelectedChainId(chain.id)
         AWCore.setSelectedConfigurationId(nil)
         withoutSelectionPersistence { selectedConfiguration = resolved }
+        // Tell NE to re-filter routing rules against the new default.
+        AWCore.notifyRoutingChanged()
     }
 
     /// Resolves a chain into a composite ProxyConfiguration.
