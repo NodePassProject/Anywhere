@@ -459,6 +459,16 @@ struct tcp_seg *tcp_seg_copy(struct tcp_seg *seg);
 #define tcp_ack(pcb)  tcp_set_flags(pcb, TF_ACK_NOW)
 /* --- END Anywhere Patch --- */
 
+/* --- BEGIN Anywhere Patch: input batch mode flag ---
+ * Set to 1 by the bridge around a kernel readPackets batch. Read by the
+ * tcp_input gating patch (`src/core/tcp_in.c`) to suppress the implicit
+ * per-segment `tcp_output(pcb)` flush at the bottom of the input loop,
+ * collapsing N per-segment ACKs to one end-of-batch ACK per PCB.
+ * See lwip/ANYWHERE_PATCHES.md.
+ */
+extern int lwip_anywhere_input_batch_mode;
+/* --- END Anywhere Patch --- */
+
 #define tcp_ack_now(pcb)                           \
   tcp_set_flags(pcb, TF_ACK_NOW)
 

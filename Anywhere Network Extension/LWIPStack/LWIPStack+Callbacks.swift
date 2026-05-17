@@ -27,30 +27,20 @@ extension LWIPStack {
         // so writePackets reads directly from lwIP's memory — saving one
         // payload-sized memcpy per packet vs. the previous `Data(bytes:count:)`.
         //
-        // The deallocator MUST run the release fn on lwipQueue because
-        // `pbuf_free` ends in `memp_free`, which mutates a per-pool freelist
-        // with no locking under NO_SYS=1 + SYS_LIGHTWEIGHT_PROT=0. The Data is
-        // commonly dropped on outputQueue after writePackets returns (and
-        // could in principle drop on any queue), so we capture lwipQueue at
-        // construction time and dispatch through it. The DispatchQueue's
-        // strong reference lives in the deallocator's environment, so even
-        // if `LWIPStack.shared` is nilled (stop, restart) before the
-        // deallocator fires, the original queue stays alive long enough to
-        // serialize the release with any other lwIP work that's still
-        // draining on it. We never call the release fn directly off-queue.
+        // The `Data` deallocator is `.none`; ``pendingReleases`` (appended
+        // under the same lock) is the actual owner of the pbuf/heap buffer
+        // and is fired in a single ``lwipQueue.async`` per drain iteration.
+        // Releases must stay on lwipQueue because `pbuf_free` / `mem_free`
+        // mutate per-pool freelists with no locking under NO_SYS=1.
         lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
             guard let shared = LWIPStack.shared, let data, let release else { return }
             let byteCount = Int(len)
             shared.totalBytesIn += Int64(byteCount)
 
             let mutableData = UnsafeMutableRawPointer(mutating: data)
-            let capturedCtx = releaseCtx
-            let capturedRelease = release
-            let capturedQueue = shared.lwipQueue
-            let packet = Data(bytesNoCopy: mutableData, count: byteCount, deallocator: .custom({ _, _ in
-                capturedQueue.async { capturedRelease(capturedCtx) }
-            }))
+            let packet = Data(bytesNoCopy: mutableData, count: byteCount, deallocator: .none)
             let proto: NSNumber = isIPv6 != 0 ? LWIPStack.ipv6Proto : LWIPStack.ipv4Proto
+            let pending = LWIPStack.PendingRelease(ctx: releaseCtx, fn: release)
             // Append under the buffer lock and decide whether to start a
             // drain on ``outputQueue``. The drain loop owns the writePackets
             // calls and pulls subsequent batches under the same lock — no
@@ -59,6 +49,7 @@ extension LWIPStack {
             let needsKick: Bool = shared.outputBufferLock.withLock {
                 shared.outputPackets.append(packet)
                 shared.outputProtocols.append(proto)
+                shared.pendingReleases.append(pending)
                 if shared.outputDrainInFlight { return false }
                 shared.outputDrainInFlight = true
                 return true

@@ -62,7 +62,15 @@ void lwip_bridge_shutdown(void);
  * the kernel killed during sleep without a full stack rebuild. */
 void lwip_bridge_abort_all_tcp(void);
 
-/* --- Packet input (from TUN) --- */
+/* --- Packet input (from TUN) ---
+ *
+ * Bracket a kernel readPackets batch with `_batch_begin` / `_batch_end`.
+ * While open, the vendored tcp_in.c patch suppresses the per-segment
+ * `tcp_output(pcb)` flush; `_end` then calls `tcp_output` once per
+ * active PCB, coalescing accumulated TF_ACK_NOW flags into one ACK
+ * per PCB. See lwip/ANYWHERE_PATCHES.md (Patch 3). */
+void lwip_bridge_input_batch_begin(void);
+void lwip_bridge_input_batch_end(void);
 void lwip_bridge_input(const void *data, int len);
 
 /* --- TCP operations (called from Swift on lwipQueue) --- */
