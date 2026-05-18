@@ -19,7 +19,18 @@ private let logger = AnywhereLogger(category: "MITM")
 final class MITMHTTP2Rewriter {
 
     let host: String
-    let policy: MITMRewritePolicy
+    /// Compiled rules for this rewriter's host, split by phase and
+    /// captured once at init. ``MITMRewritePolicy.rules(for:phase:)``
+    /// lowercases the host, walks the suffix trie, and allocates a
+    /// fresh filtered array on every call — none of which changes
+    /// between messages on the same session. The same rationale
+    /// applies as in ``MITMHTTP1Stream``: every HEADERS frame would
+    /// otherwise pay that cost twice (script preflight + scripting),
+    /// and DATA frames on streaming-script rules would re-resolve on
+    /// every frame.
+    private let requestRules: [CompiledMITMRule]
+    private let responseRules: [CompiledMITMRule]
+    private let cachedRuleSetID: UUID?
     /// When set, every request's `:authority` pseudo-header is rewritten to
     /// this value. Driven by the rule set's ``rewriteTarget``; nil means
     /// "leave :authority alone".
@@ -41,7 +52,9 @@ final class MITMHTTP2Rewriter {
         requestLog: MITMRequestLog
     ) {
         self.host = host
-        self.policy = policy
+        self.requestRules = policy.rules(for: host, phase: .httpRequest)
+        self.responseRules = policy.rules(for: host, phase: .httpResponse)
+        self.cachedRuleSetID = policy.set(for: host)?.id
         self.effectiveAuthority = effectiveAuthority
         self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
@@ -75,7 +88,7 @@ final class MITMHTTP2Rewriter {
     /// stream.
     func hasScriptRule(phase: MITMPhase, contentType: String?) -> Bool {
         MITMScriptTransform.hasScriptRule(
-            in: policy.rules(for: host, phase: phase),
+            in: rules(phase: phase),
             contentType: contentType
         )
     }
@@ -85,7 +98,7 @@ final class MITMHTTP2Rewriter {
     /// per-frame instead of buffering the full body.
     func hasStreamScriptRule(phase: MITMPhase, contentType: String?) -> Bool {
         MITMScriptTransform.hasStreamScriptRule(
-            in: policy.rules(for: host, phase: phase),
+            in: rules(phase: phase),
             contentType: contentType
         )
     }
@@ -94,15 +107,13 @@ final class MITMHTTP2Rewriter {
     /// can pass it into ``MITMScriptTransform.applyFrame`` without
     /// re-resolving the policy on every DATA frame.
     func rules(phase: MITMPhase) -> [CompiledMITMRule] {
-        policy.rules(for: host, phase: phase)
+        phase == .httpRequest ? requestRules : responseRules
     }
 
     /// The matched rule set's ID, used as the script-store scope key.
     /// Stable for the rewriter's lifetime since ``host`` is fixed at
     /// init time.
-    var ruleSetID: UUID? {
-        policy.set(for: host)?.id
-    }
+    var ruleSetID: UUID? { cachedRuleSetID }
 
     /// Applies every script rule for the given phase whose Content-Type
     /// filter accepts the message's `content-type` header. The caller
@@ -119,7 +130,7 @@ final class MITMHTTP2Rewriter {
     ) -> MITMScriptTransform.Outcome {
         MITMScriptTransform.apply(
             message,
-            rules: policy.rules(for: host, phase: phase),
+            rules: rules(phase: phase),
             engineProvider: scriptEngineProvider
         )
     }
@@ -153,11 +164,11 @@ final class MITMHTTP2Rewriter {
         _ headers: [(name: String, value: String)],
         phase: MITMPhase
     ) -> [(name: String, value: String)] {
-        let rules = policy.rules(for: host, phase: phase)
-        guard !rules.isEmpty else { return headers }
+        let rulesForPhase = rules(phase: phase)
+        guard !rulesForPhase.isEmpty else { return headers }
 
         var current = headers
-        for rule in rules {
+        for rule in rulesForPhase {
             switch rule.operation {
             case .urlReplace(let regex, let replacement):
                 guard phase == .httpRequest else { continue }
@@ -178,7 +189,7 @@ final class MITMHTTP2Rewriter {
             case .headerAdd(let name, let value):
                 current.append((name: name, value: value))
             case .headerDelete(let nameLower):
-                current.removeAll { $0.name.lowercased() == nameLower }
+                current.removeAll { $0.name.equalsIgnoringASCIICase(nameLower) }
             case .headerReplace(let regex, let name, let value):
                 current = current.map { entry in
                     let literal = "\(entry.name): \(entry.value)"

@@ -223,8 +223,7 @@ enum MITMScriptTransform {
     }
 
     private static func firstHeaderValue(_ headers: [(name: String, value: String)], name: String) -> String? {
-        let target = name.lowercased()
-        for (n, v) in headers where n.lowercased() == target {
+        for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
             return v
         }
         return nil

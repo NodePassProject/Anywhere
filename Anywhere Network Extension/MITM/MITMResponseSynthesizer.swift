@@ -41,7 +41,12 @@ final class MITMResponseSynthesizer {
     private let queue: DispatchQueue
     private let onComplete: (Error?) -> Void
 
-    private var rxBuffer = Data()
+    /// Cursor-style buffer so prefix consumption is O(1); see
+    /// ``MITMByteBuffer``. The synthesizer runs only briefly per
+    /// session, but it shares the same parse patterns as
+    /// ``MITMHTTP2Connection`` so it gets the same treatment for
+    /// consistency.
+    private var rxBuffer = MITMByteBuffer()
     private var responded = false
     private var torn = false
 
@@ -124,7 +129,7 @@ final class MITMResponseSynthesizer {
         guard let crlf = rxBuffer.range(of: Data([0x0D, 0x0A])) else {
             return
         }
-        let lineData = rxBuffer.subdata(in: rxBuffer.startIndex..<crlf.lowerBound)
+        let lineData = rxBuffer.subdata(in: 0..<crlf.lowerBound)
         let path: String
         if let str = String(data: lineData, encoding: .ascii) {
             // Request line: "METHOD SP request-target SP HTTP/1.x"
@@ -204,19 +209,18 @@ final class MITMResponseSynthesizer {
 
     private func parseH2Frame() -> H2Frame? {
         guard rxBuffer.count >= 9 else { return nil }
-        let s = rxBuffer.startIndex
-        let length = (Int(rxBuffer[s]) << 16)
-            | (Int(rxBuffer[s + 1]) << 8)
-            | Int(rxBuffer[s + 2])
+        let length = (Int(rxBuffer[0]) << 16)
+            | (Int(rxBuffer[1]) << 8)
+            | Int(rxBuffer[2])
         let total = 9 + length
         guard rxBuffer.count >= total else { return nil }
-        let typeCode = rxBuffer[s + 3]
-        let flags = rxBuffer[s + 4]
-        let streamID = (UInt32(rxBuffer[s + 5]) << 24
-                      | UInt32(rxBuffer[s + 6]) << 16
-                      | UInt32(rxBuffer[s + 7]) << 8
-                      | UInt32(rxBuffer[s + 8])) & 0x7FFFFFFF
-        let payload = rxBuffer.subdata(in: (s + 9)..<(s + total))
+        let typeCode = rxBuffer[3]
+        let flags = rxBuffer[4]
+        let streamID = (UInt32(rxBuffer[5]) << 24
+                      | UInt32(rxBuffer[6]) << 16
+                      | UInt32(rxBuffer[7]) << 8
+                      | UInt32(rxBuffer[8])) & 0x7FFFFFFF
+        let payload = rxBuffer.subdata(in: 9..<total)
         rxBuffer.removeFirst(total)
         return H2Frame(typeCode: typeCode, flags: flags, streamID: streamID, payload: payload)
     }

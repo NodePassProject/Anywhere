@@ -49,7 +49,18 @@ final class MITMHTTP1Stream {
 
     private let host: String
     private let phase: MITMPhase
-    private let policy: MITMRewritePolicy
+    /// Compiled rules for this stream's host + phase, captured once at
+    /// init. ``MITMRewritePolicy.rules(for:phase:)`` lowercases the host,
+    /// walks the suffix trie, and filters the matched set into a fresh
+    /// array — none of which changes between messages on the same
+    /// session. Resolving once avoids repeating that work on every head,
+    /// every body chunk, and every script invocation.
+    private let rules: [CompiledMITMRule]
+    /// ID of the rule set the host matched (or nil when no set
+    /// applies). Used as the per-rule-set scope key for
+    /// ``Anywhere.store`` and the ctx's ``ruleSetID`` field; same
+    /// lifetime + same caching rationale as ``rules``.
+    private let ruleSetID: UUID?
     /// When set, every request's `Host:` header is rewritten to this value
     /// so the upstream sees a consistent authority. Driven by the rule set's
     /// ``rewriteTarget``; nil means "leave Host alone". Used only on request
@@ -74,7 +85,8 @@ final class MITMHTTP1Stream {
     ) {
         self.host = host
         self.phase = phase
-        self.policy = policy
+        self.rules = policy.rules(for: host, phase: phase)
+        self.ruleSetID = policy.set(for: host)?.id
         self.effectiveAuthority = effectiveAuthority
         self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
@@ -167,7 +179,11 @@ final class MITMHTTP1Stream {
     }
 
     private var mode: Mode = .awaitingHead
-    private var rxBuffer = Data()
+    /// Cursor-style buffer so prefix consumption is O(1). Chunked
+    /// bodies streaming many small chunks would otherwise pay
+    /// `O(remaining)` per ``Data.removeFirst`` shift; see
+    /// ``MITMByteBuffer``.
+    private var rxBuffer = MITMByteBuffer()
 
     /// Bytes the request stream has synthesized in response to a
     /// `Anywhere.respond(...)` call and wants written straight back to
@@ -236,7 +252,7 @@ final class MITMHTTP1Stream {
         // calls to avoid overlapping access to ``mode``.
         switch mode {
         case .passthrough:
-            output.append(rxBuffer)
+            output.append(rxBuffer.prefix(rxBuffer.count))
             rxBuffer.removeAll(keepingCapacity: false)
             return false
 
@@ -287,7 +303,7 @@ final class MITMHTTP1Stream {
                 // strictly safer than risking the NE's memory
                 // budget on a single misbehaving connection.
                 logger.warning("[MITM] HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; downgrading to passthrough")
-                output.append(rxBuffer)
+                output.append(rxBuffer.prefix(rxBuffer.count))
                 rxBuffer.removeAll(keepingCapacity: false)
                 mode = .passthrough
                 return true
@@ -295,8 +311,8 @@ final class MITMHTTP1Stream {
             return false
         }
         let headEnd = terminator.upperBound
-        let headData = rxBuffer.subdata(in: rxBuffer.startIndex..<headEnd)
-        rxBuffer.removeSubrange(rxBuffer.startIndex..<headEnd)
+        let headData = rxBuffer.subdata(in: 0..<headEnd)
+        rxBuffer.removeFirst(headEnd)
 
         guard let parsed = parseHead(headData) else {
             // If the head is not HTTP/1.x, stop rewriting and forward the
@@ -388,7 +404,6 @@ final class MITMHTTP1Stream {
         }
 
         let contentType = firstHeaderValue(rewrittenHeaders, name: "content-type")
-        let rules = policy.rules(for: host, phase: phase)
         let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, contentType: contentType)
 
         switch framing {
@@ -693,12 +708,12 @@ final class MITMHTTP1Stream {
         while true {
             switch currentInner {
             case .sizeLine:
-                guard let lineEnd = Self.findCRLF(in: rxBuffer) else {
+                guard let lineEnd = rxBuffer.firstCRLF() else {
                     mode = .streamingChunked(streaming: streaming, inner: .sizeLine)
                     return false
                 }
-                let line = rxBuffer.subdata(in: rxBuffer.startIndex..<lineEnd)
-                rxBuffer.removeSubrange(rxBuffer.startIndex..<(lineEnd + 2))
+                let line = rxBuffer.subdata(in: 0..<lineEnd)
+                rxBuffer.removeFirst(lineEnd + 2)
                 guard let size = Self.parseHexSize(line) else {
                     // Best-effort: the stream is mid-corruption and the
                     // client will see garbled bytes either way, but
@@ -770,8 +785,8 @@ final class MITMHTTP1Stream {
                     mode = .streamingChunked(streaming: streaming, inner: .dataCRLF)
                     return false
                 }
-                guard rxBuffer[rxBuffer.startIndex] == 0x0D,
-                      rxBuffer[rxBuffer.startIndex + 1] == 0x0A
+                guard rxBuffer[0] == 0x0D,
+                      rxBuffer[1] == 0x0A
                 else {
                     flushSynthAfterResponse(into: &output)
                     mode = .passthrough
@@ -784,12 +799,12 @@ final class MITMHTTP1Stream {
                 // field-lines terminated by an empty line. Forward each
                 // line verbatim (we don't rewrite trailers) and stop
                 // once we hit the empty terminator.
-                guard let lineEnd = Self.findCRLF(in: rxBuffer) else {
+                guard let lineEnd = rxBuffer.firstCRLF() else {
                     mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
                     return false
                 }
-                let line = rxBuffer.subdata(in: rxBuffer.startIndex..<lineEnd)
-                rxBuffer.removeSubrange(rxBuffer.startIndex..<(lineEnd + 2))
+                let line = rxBuffer.subdata(in: 0..<lineEnd)
+                rxBuffer.removeFirst(lineEnd + 2)
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
                 if line.isEmpty {
@@ -824,11 +839,11 @@ final class MITMHTTP1Stream {
                 headers: streaming.headers,
                 frameIndex: streaming.frameIndex,
                 isLast: isLast,
-                ruleSetID: policy.set(for: host)?.id
+                ruleSetID: ruleSetID
             )
             let result = MITMScriptTransform.applyFrame(
                 chunk,
-                rules: policy.rules(for: host, phase: phase),
+                rules: rules,
                 contentType: streaming.contentType,
                 frameContext: frameCtx,
                 cursor: streaming.cursor,
@@ -868,20 +883,6 @@ final class MITMHTTP1Stream {
         let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2 else { return nil }
         return Int(parts[1])
-    }
-
-    /// Finds the first CRLF in ``buffer`` and returns the index of the
-    /// CR. nil when no CRLF is present.
-    fileprivate static func findCRLF(in buffer: Data) -> Int? {
-        guard buffer.count >= 2 else { return nil }
-        var i = buffer.startIndex
-        while i < buffer.endIndex - 1 {
-            if buffer[i] == 0x0D, buffer[i + 1] == 0x0A {
-                return i
-            }
-            i += 1
-        }
-        return nil
     }
 
     /// Parses the hex size from a chunked size line (ignoring any
@@ -956,7 +957,6 @@ final class MITMHTTP1Stream {
             body = rawBody
         }
 
-        let rules = policy.rules(for: host, phase: phase)
         let message = buildMessage(
             startLine: pending.startLine,
             headers: pending.headers,
@@ -1039,7 +1039,7 @@ final class MITMHTTP1Stream {
             // theoretical case for HEAD since the .none framing path
             // never decompresses.
             finalHeaders = codecRequiresDecompression
-                ? result.headers.filter { $0.name.lowercased() != "content-encoding" }
+                ? result.headers.filter { !$0.name.equalsIgnoringASCIICase("content-encoding") }
                 : result.headers
         } else {
             var stripped = strippedFramingHeaders(result.headers, dropContentEncoding: codecRequiresDecompression)
@@ -1094,9 +1094,13 @@ final class MITMHTTP1Stream {
         dropContentEncoding: Bool
     ) -> [Header] {
         headers.filter { entry in
-            let n = entry.name.lowercased()
-            if n == "content-length" || n == "transfer-encoding" { return false }
-            if dropContentEncoding, n == "content-encoding" { return false }
+            if entry.name.equalsIgnoringASCIICase("content-length")
+                || entry.name.equalsIgnoringASCIICase("transfer-encoding") {
+                return false
+            }
+            if dropContentEncoding, entry.name.equalsIgnoringASCIICase("content-encoding") {
+                return false
+            }
             return true
         }
     }
@@ -1225,7 +1229,15 @@ final class MITMHTTP1Stream {
     }
 
     private func serializeHead(startLine: String, headers: [Header]) -> Data {
-        var out = Data()
+        // Total bytes: start line + CRLF, then each header as
+        // `name: value` + CRLF, then a final CRLF. Reserving up front
+        // skips the `Data` reallocation chain a head with many
+        // headers would otherwise trigger.
+        var size = startLine.utf8.count + 4
+        for (name, value) in headers {
+            size += name.utf8.count + 2 + value.utf8.count + 2
+        }
+        var out = Data(capacity: size)
         out.append(contentsOf: startLine.utf8)
         out.append(0x0D); out.append(0x0A)
         for (name, value) in headers {
@@ -1258,8 +1270,10 @@ final class MITMHTTP1Stream {
         var headers: [Header] = []
         headers.reserveCapacity(response.headers.count + 1)
         for entry in response.headers {
-            let n = entry.name.lowercased()
-            if n == "content-length" || n == "transfer-encoding" { continue }
+            if entry.name.equalsIgnoringASCIICase("content-length")
+                || entry.name.equalsIgnoringASCIICase("transfer-encoding") {
+                continue
+            }
             guard Self.isValidHeaderName(entry.name),
                   Self.isValidHeaderValue(entry.value)
             else {
@@ -1368,13 +1382,25 @@ final class MITMHTTP1Stream {
                 if status >= 100 && status < 200 { return .none }
             }
         }
-        for (name, value) in headers where name.lowercased() == "transfer-encoding" {
-            if value.lowercased().contains("chunked") {
-                return .chunked
+        // Single-pass scan: Transfer-Encoding takes precedence over
+        // Content-Length per RFC 9112 §6.3, but both can appear on the
+        // same head. Capturing one value of each in a single loop is
+        // strictly cheaper than two header walks with per-entry
+        // case-folding.
+        var transferEncoding: String?
+        var contentLength: String?
+        for (name, value) in headers {
+            if name.equalsIgnoringASCIICase("transfer-encoding") {
+                transferEncoding = value
+            } else if name.equalsIgnoringASCIICase("content-length") {
+                contentLength = value
             }
         }
-        for (name, value) in headers where name.lowercased() == "content-length" {
-            let trimmed = value.trimmingCharacters(in: CharacterSet.whitespaces)
+        if let te = transferEncoding, te.containsIgnoringASCIICase("chunked") {
+            return .chunked
+        }
+        if let cl = contentLength {
+            let trimmed = cl.trimmingCharacters(in: CharacterSet.whitespaces)
             if let length = Int(trimmed), length >= 0 {
                 return length == 0 ? .none : .contentLength(length)
             }
@@ -1383,8 +1409,7 @@ final class MITMHTTP1Stream {
     }
 
     private func firstHeaderValue(_ headers: [Header], name: String) -> String? {
-        let target = name.lowercased()
-        for (n, v) in headers where n.lowercased() == target {
+        for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
             return v
         }
         return nil
@@ -1399,7 +1424,7 @@ final class MITMHTTP1Stream {
         guard phase == .httpRequest, let authority = effectiveAuthority else {
             return headers
         }
-        var result = headers.filter { $0.name.lowercased() != "host" }
+        var result = headers.filter { !$0.name.equalsIgnoringASCIICase("host") }
         result.append((name: "Host", value: authority))
         return result
     }
@@ -1410,7 +1435,6 @@ final class MITMHTTP1Stream {
     /// to the path-and-query, not the method or HTTP-version.
     private func applyURLRules(_ startLine: String) -> String {
         guard phase == .httpRequest else { return startLine }
-        let rules = policy.rules(for: host, phase: phase)
         guard rules.contains(where: {
             if case .urlReplace = $0.operation { return true }
             return false
@@ -1448,7 +1472,6 @@ final class MITMHTTP1Stream {
     }
 
     private func applyHeaderRules(_ headers: [Header]) -> [Header] {
-        let rules = policy.rules(for: host, phase: phase)
         guard !rules.isEmpty else { return headers }
         var current = headers
         for rule in rules {
@@ -1456,7 +1479,7 @@ final class MITMHTTP1Stream {
             case .headerAdd(let name, let value):
                 current.append((name: name, value: value))
             case .headerDelete(let nameLower):
-                current.removeAll { $0.name.lowercased() == nameLower }
+                current.removeAll { $0.name.equalsIgnoringASCIICase(nameLower) }
             case .headerReplace(let regex, let name, let value):
                 current = current.map { entry in
                     let literal = "\(entry.name): \(entry.value)"
@@ -1510,7 +1533,7 @@ final class MITMHTTP1Stream {
             status: status,
             headers: headers,
             body: body,
-            ruleSetID: policy.set(for: host)?.id
+            ruleSetID: ruleSetID
         )
     }
 
@@ -1656,15 +1679,15 @@ private final class ChunkedReader {
         case malformed
     }
 
-    func consumeForward(_ buffer: inout Data, into output: inout Data) -> ForwardResult {
+    func consumeForward(_ buffer: inout MITMByteBuffer, into output: inout Data) -> ForwardResult {
         while !buffer.isEmpty {
             switch state {
             case .sizeLine:
-                guard let lineEnd = findCRLF(in: buffer) else { return .needMore }
-                let line = buffer.subdata(in: buffer.startIndex..<lineEnd)
+                guard let lineEnd = buffer.firstCRLF() else { return .needMore }
+                let line = buffer.subdata(in: 0..<lineEnd)
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
-                buffer.removeSubrange(buffer.startIndex..<(lineEnd + 2))
+                buffer.removeFirst(lineEnd + 2)
                 guard let size = parseHexSize(line) else { return .malformed }
                 if size == 0 {
                     state = .trailerOrEnd
@@ -1684,7 +1707,7 @@ private final class ChunkedReader {
                 }
             case .dataCRLF(let originalSize):
                 guard buffer.count >= 2 else { return .needMore }
-                guard buffer[buffer.startIndex] == 0x0D, buffer[buffer.startIndex + 1] == 0x0A else {
+                guard buffer[0] == 0x0D, buffer[1] == 0x0A else {
                     return .malformed
                 }
                 output.append(0x0D); output.append(0x0A)
@@ -1694,11 +1717,11 @@ private final class ChunkedReader {
             case .trailerOrEnd:
                 // Forward the trailer block (zero or more lines + CRLF)
                 // verbatim until the empty-line terminator.
-                guard let lineEnd = findCRLF(in: buffer) else { return .needMore }
-                let line = buffer.subdata(in: buffer.startIndex..<lineEnd)
+                guard let lineEnd = buffer.firstCRLF() else { return .needMore }
+                let line = buffer.subdata(in: 0..<lineEnd)
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
-                buffer.removeSubrange(buffer.startIndex..<(lineEnd + 2))
+                buffer.removeFirst(lineEnd + 2)
                 if line.isEmpty {
                     return .complete
                 }
@@ -1707,13 +1730,13 @@ private final class ChunkedReader {
         return .needMore
     }
 
-    func consumeBuffered(_ buffer: inout Data, into output: inout Data) -> BufferedResult {
+    func consumeBuffered(_ buffer: inout MITMByteBuffer, into output: inout Data) -> BufferedResult {
         while !buffer.isEmpty {
             switch state {
             case .sizeLine:
-                guard let lineEnd = findCRLF(in: buffer) else { return .needMore }
-                let line = buffer.subdata(in: buffer.startIndex..<lineEnd)
-                buffer.removeSubrange(buffer.startIndex..<(lineEnd + 2))
+                guard let lineEnd = buffer.firstCRLF() else { return .needMore }
+                let line = buffer.subdata(in: 0..<lineEnd)
+                buffer.removeFirst(lineEnd + 2)
                 guard let size = parseHexSize(line) else { return .malformed }
                 if size == 0 {
                     state = .trailerOrEnd
@@ -1733,7 +1756,7 @@ private final class ChunkedReader {
                 }
             case .dataCRLF(let originalSize):
                 guard buffer.count >= 2 else { return .needMore }
-                guard buffer[buffer.startIndex] == 0x0D, buffer[buffer.startIndex + 1] == 0x0A else {
+                guard buffer[0] == 0x0D, buffer[1] == 0x0A else {
                     return .malformed
                 }
                 buffer.removeFirst(2)
@@ -1742,27 +1765,15 @@ private final class ChunkedReader {
             case .trailerOrEnd:
                 // Rewritten bodies are re-chunked with empty trailers, so
                 // consume and discard any original trailers here.
-                guard let lineEnd = findCRLF(in: buffer) else { return .needMore }
-                let line = buffer.subdata(in: buffer.startIndex..<lineEnd)
-                buffer.removeSubrange(buffer.startIndex..<(lineEnd + 2))
+                guard let lineEnd = buffer.firstCRLF() else { return .needMore }
+                let line = buffer.subdata(in: 0..<lineEnd)
+                buffer.removeFirst(lineEnd + 2)
                 if line.isEmpty {
                     return .complete(sizes: sizes)
                 }
             }
         }
         return .needMore
-    }
-
-    private func findCRLF(in buffer: Data) -> Int? {
-        guard buffer.count >= 2 else { return nil }
-        var i = buffer.startIndex
-        while i < buffer.endIndex - 1 {
-            if buffer[i] == 0x0D, buffer[i + 1] == 0x0A {
-                return i
-            }
-            i += 1
-        }
-        return nil
     }
 
     private func parseHexSize(_ data: Data) -> Int? {
