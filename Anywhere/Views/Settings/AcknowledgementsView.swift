@@ -23,7 +23,6 @@ struct AcknowledgementsView: View {
         ("TikTok", "ByteDance Ltd."),
         ("ChatGPT", "OpenAI, Inc."),
         ("Claude", "Anthropic, PBC"),
-        ("Gemini", "Google LLC"),
     ]
 
     private static let libraries: [OpenSourceLibrary] = [
