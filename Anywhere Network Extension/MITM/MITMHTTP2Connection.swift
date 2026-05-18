@@ -106,8 +106,11 @@ final class MITMHTTP2Connection {
     private var prefaceRemaining: Int
 
     /// Buffer of decrypted plaintext that hasn't yet yielded a complete
-    /// frame.
-    private var rxBuffer = Data()
+    /// frame. Cursor-style so per-frame ``removeFirst`` is O(1); on a
+    /// high-throughput stream that ships hundreds of DATA frames the
+    /// ``Data.removeFirst`` shift cost would otherwise quadratic with
+    /// the buffer occupancy.
+    private var rxBuffer = MITMByteBuffer()
 
     /// Set while a HEADERS / PUSH_PROMISE without END_HEADERS is being
     /// followed by CONTINUATION frames. RFC 9113 §6.10 forbids any
@@ -629,7 +632,7 @@ final class MITMHTTP2Connection {
             // decompression and, on decode failure, emits the deferred
             // HEADERS + raw bytes verbatim so the receiver can still
             // try to decode the original payload.
-            rewritten.removeAll { $0.name.lowercased() == "content-length" }
+            rewritten.removeAll { $0.name.equalsIgnoringASCIICase("content-length") }
 
             // ``originatingRequest`` was popped once at the top of
             // this function for outbound streams; pass-through and
@@ -1029,7 +1032,7 @@ final class MITMHTTP2Connection {
         // there's nothing to hide.
         let scriptedHeaders: [(name: String, value: String)]
         if pending.codec.requiresDecompression {
-            scriptedHeaders = pending.headers.filter { $0.name.lowercased() != "content-encoding" }
+            scriptedHeaders = pending.headers.filter { !$0.name.equalsIgnoringASCIICase("content-encoding") }
         } else {
             scriptedHeaders = pending.headers
         }
@@ -1150,8 +1153,7 @@ final class MITMHTTP2Connection {
     /// Returns the first header value matching ``name`` (case-insensitive),
     /// or nil when absent.
     private func firstHeaderValue(_ headers: [(name: String, value: String)], name: String) -> String? {
-        let target = name.lowercased()
-        for (n, v) in headers where n.lowercased() == target {
+        for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
             return v
         }
         return nil
@@ -1507,10 +1509,9 @@ final class MITMHTTP2Connection {
 
     /// Reads one complete frame from `buffer`, removing the consumed
     /// bytes. Returns nil if more bytes are needed.
-    private func parseFrame(from buffer: inout Data) -> RawFrame? {
+    private func parseFrame(from buffer: inout MITMByteBuffer) -> RawFrame? {
         guard buffer.count >= 9 else { return nil }
-        let s = buffer.startIndex
-        let length = (Int(buffer[s]) << 16) | (Int(buffer[s + 1]) << 8) | Int(buffer[s + 2])
+        let length = (Int(buffer[0]) << 16) | (Int(buffer[1]) << 8) | Int(buffer[2])
         if length > Self.maxReceivedFramePayloadSize {
             logger.warning("[MITM] HTTP/2: frame length \(length) B exceeded receive cap \(Self.maxReceivedFramePayloadSize); breaking connection state")
             parseError = true
@@ -1520,14 +1521,14 @@ final class MITMHTTP2Connection {
         let total = 9 + length
         guard buffer.count >= total else { return nil }
 
-        let type = buffer[s + 3]
-        let flags = buffer[s + 4]
-        let streamID = (UInt32(buffer[s + 5]) << 24
-                      | UInt32(buffer[s + 6]) << 16
-                      | UInt32(buffer[s + 7]) << 8
-                      | UInt32(buffer[s + 8])) & 0x7FFFFFFF
+        let type = buffer[3]
+        let flags = buffer[4]
+        let streamID = (UInt32(buffer[5]) << 24
+                      | UInt32(buffer[6]) << 16
+                      | UInt32(buffer[7]) << 8
+                      | UInt32(buffer[8])) & 0x7FFFFFFF
 
-        let payload = buffer.subdata(in: (s + 9)..<(s + total))
+        let payload = buffer.subdata(in: 9..<total)
         buffer.removeFirst(total)
 
         return RawFrame(typeCode: type, flags: flags, streamID: streamID, payload: payload)
@@ -1536,31 +1537,42 @@ final class MITMHTTP2Connection {
     /// Emits one or more DATA frames whose payloads each fit within
     /// ``maxFramePayloadSize``. END_STREAM lands on the last frame only.
     /// An empty input still emits a single empty DATA frame so any
-    /// END_STREAM signal survives.
+    /// END_STREAM signal survives. Writes frame headers directly into
+    /// ``output`` and appends payload slices in place — avoids the
+    /// per-frame intermediate ``Data`` and ``subdata`` copy that the
+    /// older ``serializeFrame`` round-trip incurred (256 frames for a
+    /// 4 MiB body = 256 throwaway allocations on the previous path).
     private func emitDataFrames(streamID: UInt32, payload: Data, endStream: Bool) -> Data {
         if payload.isEmpty {
+            var output = Data(capacity: 9)
             var flags: UInt8 = 0
             if endStream { flags |= 0x1 }
-            return serializeFrame(RawFrame(
+            appendFrameHeader(
                 typeCode: FrameTypeCode.data,
                 flags: flags,
                 streamID: streamID,
-                payload: Data()
-            ))
+                payloadLength: 0,
+                into: &output
+            )
+            return output
         }
-        var output = Data()
+        let frameCount = (payload.count + Self.maxFramePayloadSize - 1) / Self.maxFramePayloadSize
+        var output = Data(capacity: payload.count + frameCount * 9)
         var offset = payload.startIndex
         while offset < payload.endIndex {
             let end = min(payload.endIndex, offset + Self.maxFramePayloadSize)
             let isLast = end == payload.endIndex
             var flags: UInt8 = 0
             if isLast && endStream { flags |= 0x1 }
-            output.append(serializeFrame(RawFrame(
+            let length = end - offset
+            appendFrameHeader(
                 typeCode: FrameTypeCode.data,
                 flags: flags,
                 streamID: streamID,
-                payload: payload.subdata(in: offset..<end)
-            )))
+                payloadLength: length,
+                into: &output
+            )
+            output.append(payload[offset..<end])
             offset = end
         }
         return output
@@ -1579,67 +1591,110 @@ final class MITMHTTP2Connection {
         kind: PendingHeaders.Kind
     ) -> Data {
         let firstType: UInt8
-        var firstPayload: Data
+        let firstPrefixSize: Int
+        let promisedStreamID: UInt32
         switch kind {
         case .headers:
             firstType = FrameTypeCode.headers
-            firstPayload = Data()
-        case .pushPromise(let promisedStreamID):
+            firstPrefixSize = 0
+            promisedStreamID = 0
+        case .pushPromise(let p):
             firstType = FrameTypeCode.pushPromise
-            let p = promisedStreamID & 0x7FFFFFFF
-            firstPayload = Data(capacity: 4)
-            firstPayload.append(UInt8((p >> 24) & 0xFF))
-            firstPayload.append(UInt8((p >> 16) & 0xFF))
-            firstPayload.append(UInt8((p >> 8) & 0xFF))
-            firstPayload.append(UInt8(p & 0xFF))
+            firstPrefixSize = 4
+            promisedStreamID = p & 0x7FFFFFFF
         }
 
-        let firstChunkSize = min(block.count, Self.maxFramePayloadSize - firstPayload.count)
+        let firstChunkSize = min(block.count, Self.maxFramePayloadSize - firstPrefixSize)
         let firstChunkEnd = block.startIndex + firstChunkSize
-        firstPayload.append(block.subdata(in: block.startIndex..<firstChunkEnd))
         let needsContinuation = firstChunkEnd < block.endIndex
 
         var firstFlags: UInt8 = 0
         if !needsContinuation { firstFlags |= 0x4 }  // END_HEADERS
         if endStream { firstFlags |= 0x1 }           // END_STREAM
 
-        var output = Data()
-        output.append(serializeFrame(RawFrame(
+        let continuationCount: Int
+        if needsContinuation {
+            let rest = block.count - firstChunkSize
+            continuationCount = (rest + Self.maxFramePayloadSize - 1) / Self.maxFramePayloadSize
+        } else {
+            continuationCount = 0
+        }
+        let totalCapacity = (9 + firstPrefixSize) + firstChunkSize
+            + continuationCount * 9 + (block.count - firstChunkSize)
+        var output = Data(capacity: totalCapacity)
+
+        appendFrameHeader(
             typeCode: firstType,
             flags: firstFlags,
             streamID: streamID,
-            payload: firstPayload
-        )))
+            payloadLength: firstPrefixSize + firstChunkSize,
+            into: &output
+        )
+        if firstPrefixSize == 4 {
+            output.append(UInt8((promisedStreamID >> 24) & 0xFF))
+            output.append(UInt8((promisedStreamID >> 16) & 0xFF))
+            output.append(UInt8((promisedStreamID >> 8) & 0xFF))
+            output.append(UInt8(promisedStreamID & 0xFF))
+        }
+        output.append(block[block.startIndex..<firstChunkEnd])
 
         var offset = firstChunkEnd
         while offset < block.endIndex {
             let end = min(block.endIndex, offset + Self.maxFramePayloadSize)
             let isLast = end == block.endIndex
             let flags: UInt8 = isLast ? 0x4 : 0
-            output.append(serializeFrame(RawFrame(
+            appendFrameHeader(
                 typeCode: FrameTypeCode.continuation,
                 flags: flags,
                 streamID: streamID,
-                payload: block.subdata(in: offset..<end)
-            )))
+                payloadLength: end - offset,
+                into: &output
+            )
+            output.append(block[offset..<end])
             offset = end
         }
         return output
     }
 
-    private func serializeFrame(_ frame: RawFrame) -> Data {
-        var out = Data(capacity: 9 + frame.payload.count)
-        let len = frame.payload.count
-        out.append(UInt8((len >> 16) & 0xFF))
-        out.append(UInt8((len >> 8) & 0xFF))
-        out.append(UInt8(len & 0xFF))
-        out.append(frame.typeCode)
-        out.append(frame.flags)
-        let sid = frame.streamID & 0x7FFFFFFF
+    /// Writes the 9-byte HTTP/2 frame header in place. Used by the
+    /// emit paths instead of ``serializeFrame`` so a length-prefixed
+    /// payload can be appended directly to the running output buffer
+    /// without the intermediate ``Data`` copy.
+    private func appendFrameHeader(
+        typeCode: UInt8,
+        flags: UInt8,
+        streamID: UInt32,
+        payloadLength: Int,
+        into out: inout Data
+    ) {
+        out.append(UInt8((payloadLength >> 16) & 0xFF))
+        out.append(UInt8((payloadLength >> 8) & 0xFF))
+        out.append(UInt8(payloadLength & 0xFF))
+        out.append(typeCode)
+        out.append(flags)
+        let sid = streamID & 0x7FFFFFFF
         out.append(UInt8((sid >> 24) & 0xFF))
         out.append(UInt8((sid >> 16) & 0xFF))
         out.append(UInt8((sid >> 8) & 0xFF))
         out.append(UInt8(sid & 0xFF))
+    }
+
+    /// Whole-frame serializer kept for the pass-through path where we
+    /// receive a ``RawFrame`` from ``parseFrame`` and emit it verbatim
+    /// (unknown frame types: SETTINGS, WINDOW_UPDATE, PING, GOAWAY,
+    /// RST_STREAM, PRIORITY, future types). The emit-side hot paths
+    /// (DATA / HEADERS / CONTINUATION) use ``appendFrameHeader`` so
+    /// they can write into the running output buffer without going
+    /// through this intermediate ``Data``.
+    private func serializeFrame(_ frame: RawFrame) -> Data {
+        var out = Data(capacity: 9 + frame.payload.count)
+        appendFrameHeader(
+            typeCode: frame.typeCode,
+            flags: frame.flags,
+            streamID: frame.streamID,
+            payloadLength: frame.payload.count,
+            into: &out
+        )
         out.append(frame.payload)
         return out
     }
