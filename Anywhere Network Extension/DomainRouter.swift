@@ -27,14 +27,7 @@ class DomainRouter {
     //
     // Priority (highest first): User > ADBlock > Built-in > Country Bypass.
 
-    // MARK: - Suffix trie
-
-    /// Reverse-label trie for `domainSuffix` matching. Each node is one
-    /// dot-separated label; walking deeper matches a more-specific suffix.
-    private final class SuffixTrieNode {
-        var children: [String: SuffixTrieNode] = [:]
-        var action: RouteAction?
-    }
+    // MARK: - Action interning (see fileprivate `ActionTable` below)
 
     // MARK: - Keyword automaton
 
@@ -43,60 +36,128 @@ class DomainRouter {
     /// O(D) walk, independent of the number of patterns. Replaces the
     /// previous O(N·D) per-pattern `String.contains` loop.
     ///
-    /// Build the automaton by calling ``insert(_:action:)`` for each
-    /// pattern, then ``finalize()`` exactly once before any
-    /// ``lookup(_:)``. Re-inserting after ``finalize()`` marks the
-    /// automaton dirty; the next ``finalize()`` rebuilds the failure
-    /// links. Lookups before the first ``finalize()`` return nil.
+    /// Memory model: a class-per-node tree is built during ``insert`` (so
+    /// the wide branching factor at the root stays cheap to mutate), then
+    /// at ``finalize()`` time the structure is BFS-laid-out across flat
+    /// columns — failure / dictSuffix / actionID / patternLength /
+    /// insertionOrder — plus CSR-style edges. The scratch tree is dropped
+    /// after finalize; the frozen form has no per-node heap allocation
+    /// and no per-node Dictionary, which is the dominant cost of the
+    /// class-based form.
+    ///
+    /// Lifecycle:
+    ///   1. Build: call ``insert(_:actionID:)`` for each rule.
+    ///   2. Finalize: call ``finalize()`` once after all inserts.
+    ///   3. Lookup: call ``lookup(_:)``. Read-only after finalize.
+    ///
+    /// Inserting after ``finalize()`` traps. Lookup before ``finalize()``
+    /// returns `ActionTable.noneID`. Build-once-read-many by design.
     private final class KeywordAutomaton {
-        private final class Node {
-            var children: [UInt8: Node] = [:]
-            var failure: Node?
+
+        // MARK: Build state (dropped on finalize)
+
+        private final class BuildNode {
+            var children: [UInt8: BuildNode] = [:]
+            var failure: BuildNode?
             /// Nearest accepting ancestor reachable via failure links —
             /// lets ``lookup`` enumerate all patterns ending at a state
             /// without walking the full failure chain each step.
-            var dictSuffix: Node?
-            var action: RouteAction?
-            var patternLength = 0
-            var insertionOrder = 0
+            var dictSuffix: BuildNode?
+            var actionID: Int16 = ActionTable.noneID
+            var patternLength: UInt16 = 0
+            var insertionOrder: Int32 = 0
+            /// Assigned during BFS layout; -1 until then.
+            var nodeID: Int32 = -1
         }
 
-        private let root = Node()
-        private var insertionCounter = 0
+        private var buildRoot: BuildNode? = BuildNode()
+        private var insertionCounter: Int32 = 0
         private var finalized = false
 
-        func insert(_ pattern: String, action: RouteAction) {
+        // MARK: Frozen state (populated by finalize)
+
+        /// Per-node columns. Indexed by `0..<failure.count`; root is index 0.
+        /// `dictSuffix[i] == -1` means "no accepting ancestor".
+        private var failure: ContiguousArray<Int32> = []
+        private var dictSuffix: ContiguousArray<Int32> = []
+        private var actionID: ContiguousArray<Int16> = []
+        private var patternLength: ContiguousArray<UInt16> = []
+        private var insertionOrder: ContiguousArray<Int32> = []
+
+        /// CSR edges. Node `i`'s outgoing edges live at indices
+        /// `[edgeStart[i], edgeStart[i + 1])`, sorted by byte. Length of
+        /// `edgeStart` is `nodeCount + 1` once finalized.
+        private var edgeStart: ContiguousArray<Int32> = []
+        private var edgeByte: ContiguousArray<UInt8> = []
+        private var edgeTarget: ContiguousArray<Int32> = []
+
+        // MARK: Build API
+
+        func insert(_ pattern: String, actionID: Int16) {
+            precondition(buildRoot != nil, "KeywordAutomaton: insert after finalize")
             guard !pattern.isEmpty else { return }
             let bytes = Array(pattern.utf8)
-            var node = root
+            // Domain patterns are bounded by 253 octets per RFC 1035; UInt16
+            // is comfortable headroom. Anything bigger is almost certainly
+            // garbage input — drop silently rather than truncate.
+            guard bytes.count <= Int(UInt16.max) else { return }
+
+            var node = buildRoot!
             for b in bytes {
                 if let child = node.children[b] {
                     node = child
                 } else {
-                    let child = Node()
+                    let child = BuildNode()
                     node.children[b] = child
                     node = child
                 }
             }
             insertionCounter += 1
-            node.action = action
-            node.patternLength = bytes.count
+            node.actionID = actionID
+            node.patternLength = UInt16(bytes.count)
             node.insertionOrder = insertionCounter
-            finalized = false
         }
 
+        // MARK: Finalize
+
+        /// Builds failure / dictSuffix links and flattens the trie into the
+        /// frozen columns above. Idempotent; subsequent inserts trap.
         func finalize() {
             guard !finalized else { return }
-            var queue: [Node] = []
-            for child in root.children.values {
-                child.failure = root
-                queue.append(child)
+            guard let root = buildRoot else {
+                finalized = true
+                return
             }
+
+            // Single BFS pass: at each node we (a) compute failure for each
+            // child using the standard AC formula — safe because failure
+            // links always point at strictly shallower depth, which BFS has
+            // already laid out — and (b) emit the child's row into the flat
+            // columns. Children are visited in sorted-byte order so each
+            // node's CSR edge row is sorted, enabling early-exit lookup.
+            var queue: [BuildNode] = []
+            queue.reserveCapacity(64)
+            root.nodeID = 0
+            queue.append(root)
+
+            var nFailure: [Int32] = [0]                       // root's failure is itself
+            var nDictSuffix: [Int32] = [-1]
+            var nActionID: [Int16] = [root.actionID]
+            var nPatternLength: [UInt16] = [root.patternLength]
+            var nInsertionOrder: [Int32] = [root.insertionOrder]
+            var edgeStarts: [Int32] = [0]
+            var edgeBytes: [UInt8] = []
+            var edgeTargets: [Int32] = []
+
             var head = 0
             while head < queue.count {
                 let u = queue[head]; head += 1
-                for (byte, v) in u.children {
-                    queue.append(v)
+
+                let sortedChildren = u.children.sorted { $0.key < $1.key }
+                for (byte, v) in sortedChildren {
+                    // AC failure: walk u.failure ancestors until one has a child
+                    // for `byte` (and isn't `v` itself), else fall back to root.
+                    // u.failure is nil only for root; treat that as "stay at root".
                     var f = u.failure
                     while let cur = f, cur.children[byte] == nil, cur !== root {
                         f = cur.failure
@@ -106,105 +167,166 @@ class DomainRouter {
                     } else {
                         v.failure = root
                     }
-                    v.dictSuffix = (v.failure?.action != nil) ? v.failure : v.failure?.dictSuffix
+                    v.dictSuffix = (v.failure?.actionID ?? ActionTable.noneID) != ActionTable.noneID
+                        ? v.failure
+                        : v.failure?.dictSuffix
+
+                    let childID = Int32(nFailure.count)
+                    v.nodeID = childID
+                    queue.append(v)
+
+                    // `v.failure` is set above and has a nodeID because BFS
+                    // already visited it (depth strictly shallower than v).
+                    nFailure.append(v.failure!.nodeID)
+                    nDictSuffix.append(v.dictSuffix?.nodeID ?? -1)
+                    nActionID.append(v.actionID)
+                    nPatternLength.append(v.patternLength)
+                    nInsertionOrder.append(v.insertionOrder)
+
+                    edgeBytes.append(byte)
+                    edgeTargets.append(childID)
                 }
+                edgeStarts.append(Int32(edgeBytes.count))
             }
+
+            failure = ContiguousArray(nFailure)
+            dictSuffix = ContiguousArray(nDictSuffix)
+            actionID = ContiguousArray(nActionID)
+            patternLength = ContiguousArray(nPatternLength)
+            insertionOrder = ContiguousArray(nInsertionOrder)
+            edgeStart = ContiguousArray(edgeStarts)
+            edgeByte = ContiguousArray(edgeBytes)
+            edgeTarget = ContiguousArray(edgeTargets)
+
+            buildRoot = nil
             finalized = true
         }
 
-        func lookup(_ domain: String) -> RouteAction? {
-            guard finalized else { return nil }
-            var bestAction: RouteAction? = nil
-            var bestLength = 0
-            var bestOrder = -1
-            var node = root
+        // MARK: Read API
+
+        /// Returns the best-matching action ID, or `ActionTable.noneID` if
+        /// no pattern in the automaton occurs as a substring of `domain`.
+        func lookup(_ domain: String) -> Int16 {
+            guard finalized, !actionID.isEmpty else { return ActionTable.noneID }
+
+            var bestID: Int16 = ActionTable.noneID
+            var bestLength: UInt16 = 0
+            var bestOrder: Int32 = -1
+            var nodeID: Int32 = 0
+
             for byte in domain.utf8 {
-                while node !== root, node.children[byte] == nil {
-                    node = node.failure ?? root
+                // Walk failure links until either a child for `byte` exists
+                // or we land at root with no match.
+                var nextID = childTarget(nodeID: nodeID, byte: byte)
+                while nextID < 0 && nodeID != 0 {
+                    nodeID = failure[Int(nodeID)]
+                    nextID = childTarget(nodeID: nodeID, byte: byte)
                 }
-                if let next = node.children[byte] { node = next }
-                var hit: Node? = node
-                while let h = hit {
-                    if h.action != nil,
-                       h.patternLength > bestLength ||
-                        (h.patternLength == bestLength && h.insertionOrder > bestOrder) {
-                        bestAction = h.action
-                        bestLength = h.patternLength
-                        bestOrder = h.insertionOrder
+                if nextID >= 0 { nodeID = nextID }
+
+                // Enumerate accepting nodes reachable via the dictSuffix chain.
+                var hit: Int32 = nodeID
+                while hit >= 0 {
+                    let aid = actionID[Int(hit)]
+                    if aid != ActionTable.noneID {
+                        let plen = patternLength[Int(hit)]
+                        let pord = insertionOrder[Int(hit)]
+                        if plen > bestLength || (plen == bestLength && pord > bestOrder) {
+                            bestID = aid
+                            bestLength = plen
+                            bestOrder = pord
+                        }
                     }
-                    hit = h.dictSuffix
+                    hit = dictSuffix[Int(hit)]
                 }
             }
-            return bestAction
+            return bestID
+        }
+
+        /// Returns the target nodeID for an edge `byte` from `nodeID`, or
+        /// -1 if no such edge exists. Rows are sorted by byte, so the scan
+        /// exits early once `edgeByte > byte`.
+        private func childTarget(nodeID: Int32, byte: UInt8) -> Int32 {
+            let start = Int(edgeStart[Int(nodeID)])
+            let end = Int(edgeStart[Int(nodeID) + 1])
+            var i = start
+            while i < end {
+                let eb = edgeByte[i]
+                if eb == byte { return edgeTarget[i] }
+                if eb > byte { return -1 }
+                i += 1
+            }
+            return -1
         }
     }
 
     // MARK: - Tier state
 
     private struct TierMatchers {
-        var suffixTrieRoot = SuffixTrieNode()
+        /// Per-tier interner. Every matcher in this tier stores `Int16`
+        /// IDs into this table and resolves back at the tier boundary
+        /// (see `lookupDomain` / `lookupIPv4` / `lookupIPv6`).
+        var actionTable = ActionTable()
+
+        /// Reverse-label trie for `domainSuffix` matching. Each edge is
+        /// one dot-separated label; walking deeper matches a
+        /// more-specific suffix.
+        var suffixTrie = FlatLabelTrie<Int16>()
         var keywordAutomaton = KeywordAutomaton()
-        var ipv4Trie = CIDRTrie()
-        var ipv6Trie = CIDRTrie()
+        var ipv4Trie = CIDRv4Trie()
+        var ipv6Trie = CIDRv6Trie()
         var domainRuleCount = 0
         var ipRuleCount = 0
 
         var isEmpty: Bool { domainRuleCount == 0 && ipRuleCount == 0 }
 
         mutating func insertSuffix(_ suffix: String, action: RouteAction) {
-            var node = suffixTrieRoot
-            for label in suffix.split(separator: ".").reversed() {
-                let key = String(label)
-                if let child = node.children[key] {
-                    node = child
-                } else {
-                    let child = SuffixTrieNode()
-                    node.children[key] = child
-                    node = child
-                }
-            }
-            node.action = action
+            suffixTrie.insert(suffix: suffix, payload: actionTable.intern(action))
             domainRuleCount += 1
         }
 
         mutating func insertKeyword(_ pattern: String, action: RouteAction) {
             guard !pattern.isEmpty else { return }
-            keywordAutomaton.insert(pattern, action: action)
+            keywordAutomaton.insert(pattern, actionID: actionTable.intern(action))
             domainRuleCount += 1
         }
 
         mutating func insertIPv4(network: UInt32, prefixLen: Int, action: RouteAction) {
-            ipv4Trie.insert(network: network, prefixLen: prefixLen, action: action)
+            ipv4Trie.insert(network: network, prefixLen: prefixLen, actionID: actionTable.intern(action))
             ipRuleCount += 1
         }
 
         mutating func insertIPv6(network: [UInt8], prefixLen: Int, action: RouteAction) {
-            ipv6Trie.insert(network: network, prefixLen: prefixLen, action: action)
+            ipv6Trie.insert(network: network, prefixLen: prefixLen, actionID: actionTable.intern(action))
             ipRuleCount += 1
         }
 
-        /// Builds the keyword automaton's failure links. Call once per
-        /// tier after all inserts; lookups before this return nil for
-        /// any keyword pattern.
-        func finalize() {
+        /// Builds the keyword automaton's failure links and freezes
+        /// the suffix trie. Call once per tier after all inserts;
+        /// lookups before this return nil.
+        mutating func finalize() {
             keywordAutomaton.finalize()
+            suffixTrie.freeze()
         }
 
         /// Domain Suffix wins over Domain Keyword: only fall back to the
         /// keyword automaton when the suffix trie does not match.
         func lookupDomain(_ domain: String) -> RouteAction? {
-            lookupSuffix(domain) ?? keywordAutomaton.lookup(domain)
+            if let id = suffixTrie.lookup(domain) {
+                return actionTable.resolve(id)
+            }
+            let kid = keywordAutomaton.lookup(domain)
+            return kid == ActionTable.noneID ? nil : actionTable.resolve(kid)
         }
 
-        private func lookupSuffix(_ domain: String) -> RouteAction? {
-            var node = suffixTrieRoot
-            var deepestAction: RouteAction? = nil
-            for label in domain.split(separator: ".").reversed() {
-                guard let child = node.children[String(label)] else { break }
-                node = child
-                if let action = node.action { deepestAction = action }
-            }
-            return deepestAction
+        func lookupIPv4(_ ip: UInt32) -> RouteAction? {
+            let id = ipv4Trie.lookup(ip)
+            return id == ActionTable.noneID ? nil : actionTable.resolve(id)
+        }
+
+        func lookupIPv6(_ bytes: UnsafeBufferPointer<UInt8>) -> RouteAction? {
+            let id = ipv6Trie.lookup(bytes)
+            return id == ActionTable.noneID ? nil : actionTable.resolve(id)
         }
     }
 
@@ -386,14 +508,14 @@ class DomainRouter {
             return withUnsafeBytes(of: &addr) { raw in
                 let buf = raw.bindMemory(to: UInt8.self)
                 for tier in tiers {
-                    if let action = tier.ipv6Trie.lookup(buf) { return action }
+                    if let action = tier.lookupIPv6(buf) { return action }
                 }
                 return nil
             }
         } else {
             guard let ip32 = Self.parseIPv4(ip) else { return nil }
             for tier in tiers {
-                if let action = tier.ipv4Trie.lookup(ip32) { return action }
+                if let action = tier.lookupIPv4(ip32) { return action }
             }
             return nil
         }
@@ -465,94 +587,418 @@ class DomainRouter {
     }
 }
 
-// MARK: - CIDR Binary Trie
+// MARK: - Action interning
 //
-// Binary trie for longest-prefix-match on IP addresses.
-// Each bit of the address selects a child (0 = left, 1 = right).
-// One trie per tier; cross-tier priority is handled by DomainRouter.
-// Lookup walks all address bits, tracking the deepest match — O(W) where
-// W = address width (32 for IPv4, 128 for IPv6), independent of rule count.
+// Each matcher node used to carry an `Optional<RouteAction>` (~32 B due
+// to the `UUID` payload in `.proxy`). For tiers with thousands of CIDR
+// nodes this dominates the per-node footprint. `ActionTable` interns
+// distinct actions into a small `Int16` ID so nodes only need to store
+// a 2-byte handle, and resolves IDs back to `RouteAction` at the tier
+// boundary. `.direct`/`.reject` are reserved IDs so they cost no table
+// space; `.proxy(UUID)` entries dedupe by UUID. `noneID` is the "no
+// action at this node" sentinel.
+//
+// Scoped `fileprivate` (not nested in `DomainRouter`) so the CIDR
+// trie value types below can refer to its sentinel constants without
+// crossing a `private` lexical boundary.
+fileprivate struct ActionTable {
+    static let noneID: Int16 = -1
+    static let directID: Int16 = 0
+    static let rejectID: Int16 = 1
+    private static let firstProxyID: Int16 = 2
 
-struct CIDRTrie {
-    private final class Node {
-        var left: Node?       // bit 0
-        var right: Node?      // bit 1
-        var action: RouteAction?
+    private var proxyUUIDs: [UUID] = []
+    private var proxyIndex: [UUID: Int16] = [:]
+
+    mutating func intern(_ action: RouteAction) -> Int16 {
+        switch action {
+        case .direct: return Self.directID
+        case .reject: return Self.rejectID
+        case .proxy(let uuid):
+            if let id = proxyIndex[uuid] { return id }
+            let id = Self.firstProxyID + Int16(proxyUUIDs.count)
+            proxyUUIDs.append(uuid)
+            proxyIndex[uuid] = id
+            return id
+        }
     }
 
-    private var root = Node()
+    func resolve(_ id: Int16) -> RouteAction? {
+        switch id {
+        case Self.noneID: return nil
+        case Self.directID: return .direct
+        case Self.rejectID: return .reject
+        default:
+            let idx = Int(id) - Int(Self.firstProxyID)
+            guard idx >= 0, idx < proxyUUIDs.count else { return nil }
+            return .proxy(proxyUUIDs[idx])
+        }
+    }
+}
 
-    /// Inserts a CIDR rule. More-specific prefixes override less-specific ones.
-    mutating func insert(network: UInt32, prefixLen: Int, action: RouteAction) {
-        let node = walkOrCreate(network, depth: prefixLen)
-        node.action = action
+// MARK: - CIDR Patricia tries
+//
+// Path-compressed binary tries for longest-prefix-match on IP addresses.
+// Each non-root node owns the bit-string of the edge from its parent;
+// runs of single-child nodes collapse into one. Compared with a bit-
+// per-node binary trie, a /24 rule contributes 1–2 nodes instead of
+// 24, and for sparse CIDR sets the total node count drops from
+// O(prefix-length × rules) to O(rules). One trie per tier; cross-tier
+// priority is handled by DomainRouter. Lookup is O(W) in the address
+// width (32 for IPv4, 128 for IPv6), independent of rule count.
+//
+// Storage: nodes are value types stored in a single contiguous `[Node]`
+// arena per trie; children are 4-byte indices instead of 8-byte class
+// references, and there is no per-node Swift class header / refcount.
+// Each node carries an `Int16` action ID into the tier's `ActionTable`
+// rather than a fat `Optional<RouteAction>`. The result is 16 B/node
+// for IPv4 and 32 B/node for IPv6, vs. ~80 B before.
+//
+// The v4 and v6 tries are deliberately separate types: IPv4 edges only
+// need 32 bits of storage, so the v4 node stays at half the size of
+// the v6 node and the v4 hot loop becomes a tight `UInt32` walk with
+// no 128-bit shifts.
+
+struct CIDRv4Trie {
+    /// 4 + 4 + 4 + 2 + 1 + 1 padding = 16 bytes, 4-byte aligned.
+    private struct Node {
+        var bits: UInt32 = 0        // MSB-aligned edge bits; bits past `bitLen` are zero
+        var left: Int32 = -1        // index into `nodes`, or -1 for none
+        var right: Int32 = -1
+        var actionID: Int16 = ActionTable.noneID
+        var bitLen: UInt8 = 0       // 0…32
     }
 
-    /// Inserts a CIDR rule from IPv6 network bytes.
-    mutating func insert(network: [UInt8], prefixLen: Int, action: RouteAction) {
-        let node = walkOrCreateIPv6(network, depth: prefixLen)
-        node.action = action
+    private var nodes: [Node] = [Node()]
+
+    // MARK: - Insert
+
+    /// Inserts a CIDR rule. More-specific prefixes override less-specific
+    /// ones during lookup; duplicate prefixes overwrite (last-write-wins).
+    mutating func insert(network: UInt32, prefixLen: Int, actionID: Int16) {
+        let len = UInt8(prefixLen)
+        let bits = Self.maskTop(network, len)
+        insertCore(bits: bits, bitLen: len, actionID: actionID)
     }
 
-    /// Looks up an IPv4 address. Returns the deepest action along the path. O(32).
-    func lookup(_ ip: UInt32) -> RouteAction? {
-        var node = root
-        var deepestAction: RouteAction? = node.action
+    // MARK: - Lookup
 
-        for i in 0..<32 {
-            let bit = (ip >> (31 - i)) & 1
-            guard let next = bit == 0 ? node.left : node.right else { break }
-            node = next
-            if let action = node.action { deepestAction = action }
+    /// Looks up an IPv4 address. Returns the deepest action along the path,
+    /// or `ActionTable.noneID` if no rule matches.
+    func lookup(_ ip: UInt32) -> Int16 {
+        var bits = ip
+        var remaining: UInt8 = 32
+        var nodeID: Int32 = 0
+        var deepest = nodes[0].actionID
+
+        while remaining > 0 {
+            let firstBit = UInt8(bits >> 31)
+            let childID = (firstBit == 0) ? nodes[Int(nodeID)].left : nodes[Int(nodeID)].right
+            if childID < 0 { return deepest }
+
+            let childBits = nodes[Int(childID)].bits
+            let childBitLen = nodes[Int(childID)].bitLen
+            let lcp = Self.lcp(bits, childBits, cap: min(remaining, childBitLen))
+            if lcp < childBitLen { return deepest }
+
+            bits = Self.shiftLeft(bits, childBitLen)
+            remaining -= childBitLen
+            nodeID = childID
+            let act = nodes[Int(childID)].actionID
+            if act != ActionTable.noneID { deepest = act }
         }
 
-        return deepestAction
+        return deepest
     }
 
-    /// Looks up an IPv6 address from a byte buffer. O(128).
-    func lookup(_ bytes: UnsafeBufferPointer<UInt8>) -> RouteAction? {
-        var node = root
-        var deepestAction: RouteAction? = node.action
+    // MARK: - Patricia core
 
-        for i in 0..<128 {
-            let bit = (bytes[i >> 3] >> (7 - (i & 7))) & 1
-            guard let next = bit == 0 ? node.left : node.right else { break }
-            node = next
-            if let action = node.action { deepestAction = action }
-        }
+    private mutating func insertCore(bits: UInt32, bitLen: UInt8, actionID: Int16) {
+        var b = bits
+        var remaining = bitLen
+        var nodeID: Int32 = 0
 
-        return deepestAction
-    }
+        while remaining > 0 {
+            let firstBit = UInt8(b >> 31)
+            let childID = (firstBit == 0) ? nodes[Int(nodeID)].left : nodes[Int(nodeID)].right
 
-    // MARK: - Private
+            if childID < 0 {
+                let leafID = makeLeaf(bits: b, bitLen: remaining, actionID: actionID)
+                if firstBit == 0 { nodes[Int(nodeID)].left = leafID }
+                else { nodes[Int(nodeID)].right = leafID }
+                return
+            }
 
-    private func walkOrCreate(_ network: UInt32, depth: Int) -> Node {
-        var node = root
-        for i in 0..<depth {
-            let bit = (network >> (31 - i)) & 1
-            if bit == 0 {
-                if node.left == nil { node.left = Node() }
-                node = node.left!
+            let childBits = nodes[Int(childID)].bits
+            let childBitLen = nodes[Int(childID)].bitLen
+            let lcp = Self.lcp(b, childBits, cap: min(remaining, childBitLen))
+
+            if lcp == childBitLen {
+                // Existing edge fully matched; descend.
+                b = Self.shiftLeft(b, lcp)
+                remaining -= lcp
+                nodeID = childID
+                continue
+            }
+
+            // Partial match: split `child`'s edge at position `lcp`.
+            let midBits = Self.maskTop(childBits, lcp)
+            let existingNewBits = Self.shiftLeft(childBits, lcp)
+
+            // Allocate the mid node first so subsequent appends don't shift
+            // its index.
+            var mid = Node()
+            mid.bits = midBits
+            mid.bitLen = lcp
+            let midID = Int32(nodes.count)
+            nodes.append(mid)
+
+            // Rewrite the existing child to carry only the tail of its edge.
+            nodes[Int(childID)].bits = existingNewBits
+            nodes[Int(childID)].bitLen = childBitLen - lcp
+
+            if UInt8(existingNewBits >> 31) == 0 { nodes[Int(midID)].left = childID }
+            else { nodes[Int(midID)].right = childID }
+
+            let newBits = Self.shiftLeft(b, lcp)
+            let newRemaining = remaining - lcp
+            if newRemaining == 0 {
+                nodes[Int(midID)].actionID = actionID
             } else {
-                if node.right == nil { node.right = Node() }
-                node = node.right!
+                let leafID = makeLeaf(bits: newBits, bitLen: newRemaining, actionID: actionID)
+                if UInt8(newBits >> 31) == 0 { nodes[Int(midID)].left = leafID }
+                else { nodes[Int(midID)].right = leafID }
+            }
+
+            if firstBit == 0 { nodes[Int(nodeID)].left = midID }
+            else { nodes[Int(nodeID)].right = midID }
+            return
+        }
+
+        // Key fully consumed; payload attaches to the current node.
+        nodes[Int(nodeID)].actionID = actionID
+    }
+
+    private mutating func makeLeaf(bits: UInt32, bitLen: UInt8, actionID: Int16) -> Int32 {
+        var leaf = Node()
+        leaf.bits = bits
+        leaf.bitLen = bitLen
+        leaf.actionID = actionID
+        let id = Int32(nodes.count)
+        nodes.append(leaf)
+        return id
+    }
+
+    // MARK: - 32-bit bit ops
+
+    /// Shift left, capped at 32 bits (returns 0 when `n >= 32`).
+    private static func shiftLeft(_ bits: UInt32, _ n: UInt8) -> UInt32 {
+        if n == 0 { return bits }
+        if n >= 32 { return 0 }
+        return bits << n
+    }
+
+    /// Keep only the top `n` bits; zero the rest. Used both to canonicalize
+    /// incoming rules and to extract the shared prefix when splitting an edge.
+    private static func maskTop(_ bits: UInt32, _ n: UInt8) -> UInt32 {
+        if n == 0 { return 0 }
+        if n >= 32 { return bits }
+        return bits & (~UInt32(0) << (32 - n))
+    }
+
+    /// Longest common prefix of two MSB-aligned 32-bit edges, capped at `cap`.
+    private static func lcp(_ a: UInt32, _ b: UInt32, cap: UInt8) -> UInt8 {
+        if cap == 0 { return 0 }
+        let d = a ^ b
+        if d == 0 { return cap }
+        return min(cap, UInt8(d.leadingZeroBitCount))
+    }
+}
+
+struct CIDRv6Trie {
+    /// 8 + 8 + 4 + 4 + 2 + 1 + 5 padding = 32 bytes, 8-byte aligned.
+    /// Edges are MSB-first packed into a 128-bit window split across two
+    /// `UInt64`s; bits past `bitLen` are kept zero by invariant.
+    private struct Node {
+        var bitsHi: UInt64 = 0
+        var bitsLo: UInt64 = 0
+        var left: Int32 = -1
+        var right: Int32 = -1
+        var actionID: Int16 = ActionTable.noneID
+        var bitLen: UInt8 = 0       // 0…128
+    }
+
+    private var nodes: [Node] = [Node()]
+
+    // MARK: - Insert
+
+    mutating func insert(network: [UInt8], prefixLen: Int, actionID: Int16) {
+        let (hi, lo) = network.withUnsafeBufferPointer { Self.pack16($0) }
+        let len = UInt8(prefixLen)
+        let (mHi, mLo) = Self.maskTop(hi, lo, len)
+        insertCore(bitsHi: mHi, bitsLo: mLo, bitLen: len, actionID: actionID)
+    }
+
+    // MARK: - Lookup
+
+    func lookup(_ bytes: UnsafeBufferPointer<UInt8>) -> Int16 {
+        let (hi0, lo0) = Self.pack16(bytes)
+        var hi = hi0
+        var lo = lo0
+        var remaining: UInt8 = 128
+        var nodeID: Int32 = 0
+        var deepest = nodes[0].actionID
+
+        while remaining > 0 {
+            let firstBit = UInt8(hi >> 63)
+            let childID = (firstBit == 0) ? nodes[Int(nodeID)].left : nodes[Int(nodeID)].right
+            if childID < 0 { return deepest }
+
+            let childBitLen = nodes[Int(childID)].bitLen
+            let lcp = Self.lcp(
+                aHi: hi, aLo: lo, aLen: remaining,
+                bHi: nodes[Int(childID)].bitsHi,
+                bLo: nodes[Int(childID)].bitsLo,
+                bLen: childBitLen
+            )
+            if lcp < childBitLen { return deepest }
+
+            (hi, lo) = Self.shiftLeft(hi, lo, childBitLen)
+            remaining -= childBitLen
+            nodeID = childID
+            let act = nodes[Int(childID)].actionID
+            if act != ActionTable.noneID { deepest = act }
+        }
+
+        return deepest
+    }
+
+    // MARK: - Patricia core
+
+    private mutating func insertCore(bitsHi: UInt64, bitsLo: UInt64, bitLen: UInt8, actionID: Int16) {
+        var hi = bitsHi
+        var lo = bitsLo
+        var remaining = bitLen
+        var nodeID: Int32 = 0
+
+        while remaining > 0 {
+            let firstBit = UInt8(hi >> 63)
+            let childID = (firstBit == 0) ? nodes[Int(nodeID)].left : nodes[Int(nodeID)].right
+
+            if childID < 0 {
+                let leafID = makeLeaf(bitsHi: hi, bitsLo: lo, bitLen: remaining, actionID: actionID)
+                if firstBit == 0 { nodes[Int(nodeID)].left = leafID }
+                else { nodes[Int(nodeID)].right = leafID }
+                return
+            }
+
+            let childBitsHi = nodes[Int(childID)].bitsHi
+            let childBitsLo = nodes[Int(childID)].bitsLo
+            let childBitLen = nodes[Int(childID)].bitLen
+            let lcp = Self.lcp(
+                aHi: hi, aLo: lo, aLen: remaining,
+                bHi: childBitsHi, bLo: childBitsLo, bLen: childBitLen
+            )
+
+            if lcp == childBitLen {
+                (hi, lo) = Self.shiftLeft(hi, lo, lcp)
+                remaining -= lcp
+                nodeID = childID
+                continue
+            }
+
+            let (midHi, midLo) = Self.maskTop(childBitsHi, childBitsLo, lcp)
+            let (existingNewHi, existingNewLo) = Self.shiftLeft(childBitsHi, childBitsLo, lcp)
+
+            var mid = Node()
+            mid.bitsHi = midHi
+            mid.bitsLo = midLo
+            mid.bitLen = lcp
+            let midID = Int32(nodes.count)
+            nodes.append(mid)
+
+            nodes[Int(childID)].bitsHi = existingNewHi
+            nodes[Int(childID)].bitsLo = existingNewLo
+            nodes[Int(childID)].bitLen = childBitLen - lcp
+
+            if UInt8(existingNewHi >> 63) == 0 { nodes[Int(midID)].left = childID }
+            else { nodes[Int(midID)].right = childID }
+
+            let (newHi, newLo) = Self.shiftLeft(hi, lo, lcp)
+            let newRemaining = remaining - lcp
+            if newRemaining == 0 {
+                nodes[Int(midID)].actionID = actionID
+            } else {
+                let leafID = makeLeaf(bitsHi: newHi, bitsLo: newLo, bitLen: newRemaining, actionID: actionID)
+                if UInt8(newHi >> 63) == 0 { nodes[Int(midID)].left = leafID }
+                else { nodes[Int(midID)].right = leafID }
+            }
+
+            if firstBit == 0 { nodes[Int(nodeID)].left = midID }
+            else { nodes[Int(nodeID)].right = midID }
+            return
+        }
+
+        nodes[Int(nodeID)].actionID = actionID
+    }
+
+    private mutating func makeLeaf(bitsHi: UInt64, bitsLo: UInt64, bitLen: UInt8, actionID: Int16) -> Int32 {
+        var leaf = Node()
+        leaf.bitsHi = bitsHi
+        leaf.bitsLo = bitsLo
+        leaf.bitLen = bitLen
+        leaf.actionID = actionID
+        let id = Int32(nodes.count)
+        nodes.append(leaf)
+        return id
+    }
+
+    // MARK: - 128-bit bit ops
+
+    private static func shiftLeft(_ hi: UInt64, _ lo: UInt64, _ amount: UInt8) -> (UInt64, UInt64) {
+        let n = Int(amount)
+        if n == 0 { return (hi, lo) }
+        if n >= 128 { return (0, 0) }
+        if n >= 64 { return (lo << (n - 64), 0) }
+        return ((hi << n) | (lo >> (64 - n)), lo << n)
+    }
+
+    private static func maskTop(_ hi: UInt64, _ lo: UInt64, _ n: UInt8) -> (UInt64, UInt64) {
+        let count = Int(n)
+        if count == 0 { return (0, 0) }
+        if count >= 128 { return (hi, lo) }
+        if count <= 64 {
+            let mask: UInt64 = (count == 64) ? ~0 : ~UInt64(0) << (64 - count)
+            return (hi & mask, 0)
+        }
+        let mask = ~UInt64(0) << (128 - count)
+        return (hi, lo & mask)
+    }
+
+    private static func lcp(aHi: UInt64, aLo: UInt64, aLen: UInt8,
+                            bHi: UInt64, bLo: UInt64, bLen: UInt8) -> UInt8 {
+        let cap = min(aLen, bLen)
+        if cap == 0 { return 0 }
+        let dHi = aHi ^ bHi
+        if dHi != 0 { return min(cap, UInt8(dHi.leadingZeroBitCount)) }
+        let dLo = aLo ^ bLo
+        if dLo != 0 { return min(cap, 64 + UInt8(dLo.leadingZeroBitCount)) }
+        return cap
+    }
+
+    /// Pack up to 16 big-endian bytes into a (hi, lo) 128-bit pair.
+    private static func pack16(_ buf: UnsafeBufferPointer<UInt8>) -> (UInt64, UInt64) {
+        var hi: UInt64 = 0
+        var lo: UInt64 = 0
+        let count = min(16, buf.count)
+        for i in 0..<count {
+            let byte = UInt64(buf[i])
+            if i < 8 {
+                hi |= byte << ((7 - i) * 8)
+            } else {
+                lo |= byte << ((7 - (i - 8)) * 8)
             }
         }
-        return node
-    }
-
-    private func walkOrCreateIPv6(_ network: [UInt8], depth: Int) -> Node {
-        var node = root
-        for i in 0..<depth {
-            let bit = (network[i >> 3] >> (7 - (i & 7))) & 1
-            if bit == 0 {
-                if node.left == nil { node.left = Node() }
-                node = node.left!
-            } else {
-                if node.right == nil { node.right = Node() }
-                node = node.right!
-            }
-        }
-        return node
+        return (hi, lo)
     }
 }

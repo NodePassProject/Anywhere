@@ -1,35 +1,32 @@
 //
-//  LogsModel.swift
+//  RequestsModel.swift
 //  Anywhere
 //
-//  Created by NodePassProject on 3/30/26.
+//  Created by NodePassProject on 5/18/26.
 //
 
 import Foundation
 import NetworkExtension
 import Combine
 
-/// Polls the network extension for recent error log entries.
-///
-/// Fetches logs every second while polling is active.
+/// Polls the network extension for the recent per-connection routing
+/// decision log. Mirrors ``LogsModel``: fetches once per second while
+/// polling is active.
 @MainActor
-class LogsModel: ObservableObject {
-    static let shared = LogsModel()
+class RequestsModel: ObservableObject {
+    static let shared = RequestsModel()
 
-    enum LogLevel: String {
-        case info
-        case warning
-        case error
-    }
-
-    struct LogEntry: Identifiable, Equatable {
+    struct Entry: Identifiable, Equatable {
         let id: UUID
         let timestamp: Date
-        let level: LogLevel
-        let message: String
+        let proto: String
+        let host: String
+        let port: UInt16
+        let action: TunnelRequestAction
+        let configurationName: String?
     }
 
-    @Published private(set) var logs: [LogEntry] = []
+    @Published private(set) var requests: [Entry] = []
 
     private var pollingTask: Task<Void, Never>?
 
@@ -38,17 +35,17 @@ class LogsModel: ObservableObject {
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, !Task.isCancelled else { break }
-                await self.pollLogs()
+                await self.pollRequests()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
     }
 
-    func stopPolling(clearLogs: Bool = true) {
+    func stopPolling(clearRequests: Bool = true) {
         pollingTask?.cancel()
         pollingTask = nil
-        if clearLogs {
-            logs = []
+        if clearRequests {
+            requests = []
         }
     }
 
@@ -59,9 +56,9 @@ class LogsModel: ObservableObject {
         return connection
     }
 
-    private func pollLogs() async {
+    private func pollRequests() async {
         guard let session = await resolveSession() else { return }
-        guard let data = try? JSONEncoder().encode(TunnelMessage.fetchLogs) else { return }
+        guard let data = try? JSONEncoder().encode(TunnelMessage.fetchRequests) else { return }
 
         let response: Data? = await withCheckedContinuation { continuation in
             do {
@@ -74,14 +71,17 @@ class LogsModel: ObservableObject {
         }
 
         guard let response,
-              let payload = try? JSONDecoder().decode(LogsResponse.self, from: response) else { return }
+              let payload = try? JSONDecoder().decode(RequestsResponse.self, from: response) else { return }
 
-        self.logs = payload.logs.map { entry in
-            LogEntry(
+        self.requests = payload.requests.map { entry in
+            Entry(
                 id: entry.id,
                 timestamp: Date(timeIntervalSinceReferenceDate: entry.timestamp),
-                level: LogLevel(rawValue: entry.level.rawValue) ?? .info,
-                message: entry.message
+                proto: entry.proto,
+                host: entry.host,
+                port: entry.port,
+                action: entry.action,
+                configurationName: entry.configurationName
             )
         }
     }

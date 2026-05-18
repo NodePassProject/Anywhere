@@ -32,6 +32,10 @@ enum TunnelMessage: Codable, Sendable {
 
     /// Query the recent log buffer. Reply: ``LogsResponse``.
     case fetchLogs
+
+    /// Query the recent request log (per-connection routing decisions).
+    /// Reply: ``RequestsResponse``.
+    case fetchRequests
 }
 
 // MARK: - Responses
@@ -43,6 +47,10 @@ struct StatsResponse: Codable, Sendable {
 
 struct LogsResponse: Codable, Sendable {
     var logs: [TunnelLogEntry]
+}
+
+struct RequestsResponse: Codable, Sendable {
+    var requests: [TunnelRequestEntry]
 }
 
 struct LatencyTestResponse: Codable, Sendable {
@@ -81,6 +89,7 @@ extension LatencyTestResponse {
 
 /// Wire-format log entry. Also the in-memory record kept by ``LWIPStack``.
 struct TunnelLogEntry: Codable, Sendable, Hashable {
+    var id: UUID = UUID()
     /// Seconds since CFAbsoluteTime reference date (Jan 1 2001 UTC).
     var timestamp: TimeInterval
     var level: TunnelLogLevel
@@ -91,4 +100,37 @@ enum TunnelLogLevel: String, Codable, Sendable, Hashable {
     case info
     case warning
     case error
+}
+
+/// Wire-format record of one routing decision. Also the in-memory record
+/// kept by the extension's request log.
+struct TunnelRequestEntry: Codable, Sendable, Hashable {
+    var id: UUID = UUID()
+    /// Seconds since CFAbsoluteTime reference date (Jan 1 2001 UTC).
+    var timestamp: TimeInterval
+    /// Transport: "TCP" or "UDP".
+    var proto: String
+    /// Destination host. The resolved domain when a fake-IP entry or SNI
+    /// is known; otherwise the literal IP address.
+    var host: String
+    /// Destination port.
+    var port: UInt16
+    /// Final routing action for this connection.
+    var action: TunnelRequestAction
+    /// Optional display name of the proxy configuration used. Set for
+    /// ``proxy`` and ``default`` actions when a chain/configuration is
+    /// involved; nil for ``direct`` / ``reject``.
+    var configurationName: String?
+}
+
+enum TunnelRequestAction: String, Codable, Sendable, Hashable {
+    /// Matched a routing rule with the `.direct` action.
+    case direct
+    /// Matched a routing rule with the `.reject` action.
+    case reject
+    /// Matched a routing rule with the `.proxy(...)` action.
+    case proxy
+    /// No routing rule matched; the user-selected default chain handled
+    /// this connection.
+    case `default`
 }

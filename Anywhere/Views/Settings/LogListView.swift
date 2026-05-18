@@ -51,6 +51,7 @@ struct LogListView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(entry.message)
                             .font(.system(size: 10).monospaced())
+                            .lineLimit(3)
                         Text(entry.timestamp, format: .dateTime.hour().minute().second())
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -63,6 +64,7 @@ struct LogListView: View {
                 }
             }
             .environment(\.editMode, $editMode)
+            .animation(.default, value: logsModel.logs)
             .onChange(of: editMode) {
                 if editMode == .active {
                     logsModel.stopPolling(clearLogs: false)

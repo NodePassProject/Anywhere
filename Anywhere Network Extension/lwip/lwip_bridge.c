@@ -27,8 +27,20 @@ static lwip_tcp_sent_fn   s_tcp_sent_fn   = NULL;
 static lwip_tcp_err_fn    s_tcp_err_fn    = NULL;
 static lwip_udp_recv_fn   s_udp_recv_fn   = NULL;
 
+/* Storage for the SYN filter pointer declared in `lwip/priv/tcp_priv.h`.
+ * The vendored `tcp_listen_input` patch calls this directly — keeping it
+ * a function pointer (instead of going through a setter that copies to a
+ * bridge-local) lets the patch live entirely inside lwIP's translation
+ * unit without an extra accessor call per SYN. */
+int (*lwip_anywhere_tcp_syn_filter)(const void *src_ip, u16_t src_port,
+                                     const void *dst_ip, u16_t dst_port,
+                                     int is_ipv6) = NULL;
+
 void lwip_bridge_set_output_fn(lwip_output_fn fn)     { s_output_fn = fn; }
 void lwip_bridge_set_tcp_accept_fn(lwip_tcp_accept_fn fn) { s_tcp_accept_fn = fn; }
+void lwip_bridge_set_tcp_syn_filter_fn(lwip_tcp_syn_filter_fn fn) {
+    lwip_anywhere_tcp_syn_filter = fn;
+}
 void lwip_bridge_set_tcp_recv_fn(lwip_tcp_recv_fn fn)   { s_tcp_recv_fn = fn; }
 void lwip_bridge_set_tcp_sent_fn(lwip_tcp_sent_fn fn)   { s_tcp_sent_fn = fn; }
 void lwip_bridge_set_tcp_err_fn(lwip_tcp_err_fn fn)     { s_tcp_err_fn = fn; }

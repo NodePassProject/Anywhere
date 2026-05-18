@@ -201,6 +201,10 @@ class LWIPStack {
     /// Domain-based DNS routing (loaded from App Group routing.json).
     let domainRouter = DomainRouter()
 
+    /// Recent per-connection routing decisions, surfaced in the main
+    /// app under Advanced Settings → Requests.
+    let requestLog = RequestLog()
+
     /// Fake-IP pool for mapping domains to synthetic IPs.
     let fakeIPPool = FakeIPPool()
 

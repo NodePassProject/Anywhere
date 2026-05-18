@@ -469,6 +469,21 @@ struct tcp_seg *tcp_seg_copy(struct tcp_seg *seg);
 extern int lwip_anywhere_input_batch_mode;
 /* --- END Anywhere Patch --- */
 
+/* --- BEGIN Anywhere Patch: SYN filter ---
+ * Hook called from `tcp_listen_input` when a SYN arrives, before the
+ * new pcb is allocated and SYN-ACK is enqueued. Lets routing rules
+ * (IP-CIDR / fake-IP) decide to drop or RST the connection at the SYN
+ * stage so we never complete the 3WHS for a connection that will be
+ * rejected anyway. See lwip/ANYWHERE_PATCHES.md.
+ */
+extern int (*lwip_anywhere_tcp_syn_filter)(const void *src_ip, u16_t src_port,
+                                            const void *dst_ip, u16_t dst_port,
+                                            int is_ipv6);
+#define LWIP_ANYWHERE_SYN_PASS  0
+#define LWIP_ANYWHERE_SYN_DROP  1
+#define LWIP_ANYWHERE_SYN_RESET 2
+/* --- END Anywhere Patch --- */
+
 #define tcp_ack_now(pcb)                           \
   tcp_set_flags(pcb, TF_ACK_NOW)
 

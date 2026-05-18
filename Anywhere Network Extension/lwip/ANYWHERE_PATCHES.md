@@ -221,3 +221,80 @@ both halves:
 The flag definition (`int lwip_anywhere_input_batch_mode = 0;`) and the
 begin/end functions live in `lwip/lwip_bridge.c` outside vendored lwIP
 and don't need re-applying.
+
+---
+
+### 4. `src/core/tcp_in.c` + `src/include/lwip/priv/tcp_priv.h` — SYN-level reject filter
+
+**What:** In `tcp_listen_input`, immediately after the `TCP_SYN` flag
+check, call a host-provided filter that returns one of
+`PASS` / `DROP` / `RESET`. `DROP` returns silently (the SYN goes
+unanswered, client times out); `RESET` responds with a RST
+(`tcp_rst_netif(netif, 0, seqno + tcplen, ...)`); `PASS` falls
+through to the normal allocation + SYN-ACK path.
+
+```c
+} else if (flags & TCP_SYN) {
+  if (lwip_anywhere_tcp_syn_filter != NULL) {
+    /* extract src/dst bytes from ip_current_*_addr() */
+    int verdict = lwip_anywhere_tcp_syn_filter(...);
+    if (verdict == LWIP_ANYWHERE_SYN_DROP)  { return; }
+    if (verdict == LWIP_ANYWHERE_SYN_RESET) {
+      tcp_rst_netif(ip_data.current_input_netif, 0, seqno + tcplen,
+                    ip_current_dest_addr(), ip_current_src_addr(),
+                    tcphdr->dest, tcphdr->src);
+      return;
+    }
+  }
+  /* original code path: tcp_alloc, send SYN-ACK, etc. */
+```
+
+The filter pointer is declared in `tcp_priv.h`
+(`extern int (*lwip_anywhere_tcp_syn_filter)(...)`) and defined in
+`lwip_bridge.c`; Swift registers it via
+`lwip_bridge_set_tcp_syn_filter_fn`.
+
+**Why:** Without this patch, every rejected connection still completes
+the 3-way handshake (lwIP's `tcp_accept_cb` fires only after the
+final ACK). The host then has to close — and a close in the middle of
+a still-fresh ESTABLISHED state is ambiguous to TLS / HTTP clients
+(they treat it as a transient peer drop and retry aggressively). It
+also wastes a SYN-ACK + final ACK + an accept_cb dispatch on every
+rejected SYN, which is significant for misbehaving apps that retry in
+tight loops on blocked hostnames.
+
+By short-circuiting at SYN we get the same semantics as `sing-tun`'s
+system stack / gvisor `Complete(sendReset=true)`: the client sees a
+plain TCP `ECONNREFUSED` for `RESET` or a connect timeout for `DROP`,
+which is the natural "server doesn't exist / refuses" signal that
+client TCP stacks and apps already know how to handle without
+retrying.
+
+**What is unaffected:**
+
+- SNI-based rejects are not visible at SYN time (the ClientHello
+  arrives later), so they keep landing in `LWIPTCPConnection` and
+  emit a fatal TLS Alert post-handshake (`rejectWithTLSAlert`).
+- If the filter pointer is `NULL` (e.g. Swift hasn't registered yet),
+  the patch is a no-op — `tcp_listen_input` proceeds exactly as
+  upstream lwIP.
+- `LISTEN`/`SYN_RCVD`/`ESTABLISHED` state machine, retransmission,
+  backlog accounting: all unchanged.
+- IPv4 and IPv6 are handled symmetrically via `IP_IS_V6` and
+  `ip_2_ip4` / `ip_2_ip6`.
+
+**RST argument note:** `seqno + tcplen` follows the same convention
+the function uses a few lines above for the "ACK in LISTEN" RST
+response. For a SYN with no payload `tcplen` is 1 (SYN counts as one
+byte), giving the standard `ack = client_seq + 1` RST. For a SYN
+carrying TFO data it correctly covers the payload as well.
+
+**Upgrade notes:** When bumping the vendored lwIP version, re-apply:
+
+- `src/core/tcp_in.c`: search for `else if (flags & TCP_SYN)` in
+  `tcp_listen_input`.
+- `src/include/lwip/priv/tcp_priv.h`: search for
+  `lwip_anywhere_tcp_syn_filter`.
+
+The pointer storage and bridge setter live in `lwip/lwip_bridge.c` and
+don't need re-applying.
