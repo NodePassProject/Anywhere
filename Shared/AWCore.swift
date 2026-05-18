@@ -72,7 +72,7 @@ final class AWCore {
         static let hideVPNIcon = "hideVPNIcon"
         static let lastConfigurationData = "lastConfigurationData"
         static let identifier = "identifier"
-        static let ipv6DNSEnabled = "ipv6DNSEnabled"
+        static let advertiseIPv6ToApps = "advertiseIPv6ToApps"
         static let onboardingCompleted = "onboardingCompleted"
         static let proxyMode = "proxyMode"
         static let remnawaveHWIDEnabled = "remnawaveHWIDEnabled"
@@ -231,12 +231,12 @@ final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.blockQUICEnabled)
     }
     
-    static func getIPv6DNSEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.ipv6DNSEnabled)
+    static func getAdvertiseIPv6ToApps() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.advertiseIPv6ToApps)
     }
 
-    static func setIPv6DNSEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.ipv6DNSEnabled)
+    static func setAdvertiseIPv6ToApps(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.advertiseIPv6ToApps)
     }
 
     static func getEncryptedDNSEnabled() -> Bool {

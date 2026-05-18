@@ -183,8 +183,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         // Claiming IPv6 tunnel settings makes iOS show the VPN icon on cellular,
         // so we drop IPv6 entirely when hideVPNIcon is enabled.
-        let ipv6DNSEnabled = AWCore.getIPv6DNSEnabled() && !hideVPNIcon
-        if ipv6DNSEnabled {
+        let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps() && !hideVPNIcon
+        if advertiseIPv6ToApps {
             let ipv6Settings = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
             ipv6Settings.includedRoutes = [NEIPv6Route.default()]
             ipv6Settings.excludedRoutes = Self.bypassIPv6Routes
@@ -196,7 +196,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // address keeps queries reachable only through utun — they cannot leak
         // even if a future bypass-route change would otherwise expose a public IP.
         let plainDNSServers: [String]
-        if ipv6DNSEnabled {
+        if advertiseIPv6ToApps {
             plainDNSServers = ["10.8.0.1", "fd00::1"]
         } else {
             plainDNSServers = ["10.8.0.1"]
@@ -206,7 +206,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // tunnel start. The OS opens a real TLS connection to these IPs, so
         // they must speak DoT/DoH — internal tunnel addresses would not work.
         let encryptedDNSFallbackServers: [String]
-        if ipv6DNSEnabled {
+        if advertiseIPv6ToApps {
             encryptedDNSFallbackServers = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
         } else {
             encryptedDNSFallbackServers = ["1.1.1.1", "1.0.0.1"]
@@ -218,13 +218,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if encryptedDNSEnabled, !encryptedDNSServer.isEmpty {
             if encryptedDNSProtocol == "dot" {
-                let serverIPs = Self.resolveEncryptedDNSHostname(encryptedDNSServer, includeIPv6: ipv6DNSEnabled)
+                let serverIPs = Self.resolveEncryptedDNSHostname(encryptedDNSServer, includeIPv6: advertiseIPv6ToApps)
                 let dnsSettings = NEDNSOverTLSSettings(servers: serverIPs ?? encryptedDNSFallbackServers)
                 dnsSettings.serverName = encryptedDNSServer
                 settings.dnsSettings = dnsSettings
                 logger.info("[VPN] DNS: DoT \(encryptedDNSServer)")
             } else if let serverURL = URL(string: encryptedDNSServer) {
-                let serverIPs = serverURL.host.flatMap { Self.resolveEncryptedDNSHostname($0, includeIPv6: ipv6DNSEnabled) }
+                let serverIPs = serverURL.host.flatMap { Self.resolveEncryptedDNSHostname($0, includeIPv6: advertiseIPv6ToApps) }
                 let dnsSettings = NEDNSOverHTTPSSettings(servers: serverIPs ?? encryptedDNSFallbackServers)
                 dnsSettings.serverURL = serverURL
                 settings.dnsSettings = dnsSettings

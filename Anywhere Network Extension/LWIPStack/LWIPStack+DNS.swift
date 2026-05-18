@@ -158,7 +158,7 @@ extension LWIPStack {
             // A query → fake IPv4
             let ipv4 = FakeIPPool.ipv4Bytes(offset: offset)
             fakeIPBytes = [ipv4.0, ipv4.1, ipv4.2, ipv4.3]
-        } else if qtype == 28, ipv6DNSEnabled {
+        } else if qtype == 28, advertiseIPv6ToApps {
             // AAAA query + IPv6 enabled → fake IPv6
             fakeIPBytes = FakeIPPool.ipv6Bytes(offset: offset)
         }

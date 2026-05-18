@@ -70,7 +70,7 @@ class LWIPStack {
     // Setting                 │ Where it takes effect               │ On change
     // ────────────────────────┼─────────────────────────────────────┼──────────────────────────────
     // bypassCountryEnabled    │ DomainRouter bypass rules gate      │ Stack restart
-    // ipv6DNSEnabled          │ lwIP DNS interception (AAAA fake IP)│ Stack restart
+    // advertiseIPv6ToApps     │ lwIP DNS interception (AAAA fake IP)│ Stack restart
     // encryptedDNSEnabled     │ lwIP DNS interception (DDR block),  │ Reapply tunnel settings +
     //                         │ tunnel DNS settings (DoH/DoT)       │ stack restart
     // routingRules            │ DomainRouter (connection-time)      │ Stack restart (closes connections
@@ -79,7 +79,7 @@ class LWIPStack {
     var proxyMode: ProxyMode = .rule
     var hideVPNIcon: Bool = false
     var blockQUICEnabled: Bool = true
-    var ipv6DNSEnabled: Bool = false
+    var advertiseIPv6ToApps: Bool = false
     var encryptedDNSEnabled: Bool = false
     var encryptedDNSProtocol: String = "doh"
     var encryptedDNSServer: String = ""
@@ -307,7 +307,7 @@ class LWIPStack {
 
     /// Reads IPv6 settings from app group UserDefaults.
     private func loadIPv6Settings() {
-        ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
+        advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
     }
 
     /// Reads the bypass country code from app group UserDefaults.
