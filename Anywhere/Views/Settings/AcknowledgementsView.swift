@@ -16,12 +16,10 @@ private struct OpenSourceLibrary: Identifiable {
 
 struct AcknowledgementsView: View {
     private static let trademarks: [(name: String, owner: String)] = [
-        ("Apple", "Apple Inc."),
         ("Google", "Google LLC"),
         ("Telegram", "Telegram FZ-LLC"),
         ("Netflix", "Netflix, Inc."),
         ("YouTube", "Google LLC"),
-        ("Disney+", "The Walt Disney Company"),
         ("TikTok", "ByteDance Ltd."),
         ("ChatGPT", "OpenAI, Inc."),
         ("Claude", "Anthropic, PBC"),
