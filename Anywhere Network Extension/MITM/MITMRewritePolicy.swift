@@ -106,12 +106,7 @@ struct CompiledMITMRuleSet {
 /// A trie of reversed labels enforces that ordering.
 final class MITMRewritePolicy {
 
-    private final class TrieNode {
-        var children: [String: TrieNode] = [:]
-        var ruleSet: CompiledMITMRuleSet?
-    }
-
-    private var root = TrieNode()
+    private var trie = FlatLabelTrie<CompiledMITMRuleSet>()
     private var setCount: Int = 0
 
     /// Whether any rule sets have been loaded. Used by the lwIP path so
@@ -119,7 +114,7 @@ final class MITMRewritePolicy {
     var hasRules: Bool { setCount > 0 }
 
     func reset() {
-        root = TrieNode()
+        trie = FlatLabelTrie<CompiledMITMRuleSet>()
         setCount = 0
     }
 
@@ -136,6 +131,7 @@ final class MITMRewritePolicy {
         for set in ruleSets {
             insert(set)
         }
+        trie.freeze()
         // Drop ``MITMScriptStore`` buckets for rule sets the user has
         // deleted since the last load. Without this every removed
         // rule set leaks up to ``MITMScriptStore.maxBytesPerScope``
@@ -173,25 +169,15 @@ final class MITMRewritePolicy {
         }
 
         for suffix in suffixes {
-            let labels = suffix.split(separator: ".").map(String.init).reversed()
-            var node = root
-            for label in labels {
-                if let child = node.children[label] {
-                    node = child
-                } else {
-                    let child = TrieNode()
-                    node.children[label] = child
-                    node = child
-                }
-            }
-
-            if node.ruleSet == nil { setCount += 1 }
-            node.ruleSet = CompiledMITMRuleSet(
+            let payload = CompiledMITMRuleSet(
                 id: set.id,
                 domainSuffix: suffix,
                 rewriteTarget: set.rewriteTarget,
                 rules: compiledRules
             )
+            if trie.insert(suffix: suffix, payload: payload) {
+                setCount += 1
+            }
         }
     }
 
@@ -206,16 +192,7 @@ final class MITMRewritePolicy {
     /// terminal reached during descent is the most-specific match.
     func set(for host: String) -> CompiledMITMRuleSet? {
         guard !host.isEmpty, setCount > 0 else { return nil }
-        var node = root
-        var deepest: CompiledMITMRuleSet? = nil
-        for label in host.lowercased().split(separator: ".").reversed() {
-            guard let child = node.children[String(label)] else { break }
-            node = child
-            if let set = node.ruleSet {
-                deepest = set
-            }
-        }
-        return deepest
+        return trie.lookup(host.lowercased())
     }
 
     /// Convenience for the rewriters: rules from the most-specific set

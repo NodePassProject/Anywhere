@@ -567,9 +567,11 @@ class LWIPTCPConnection {
         switch action {
         case .direct:
             bypass = true
+            stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, action: .direct)
         case .reject:
+            stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, action: .reject)
             logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
-            rejectGracefully()
+            rejectWithTLSAlert()
         case .proxy:
             if let resolved = router.resolveConfiguration(action: action) {
                 // Override any IP-derived bypass: an IP-CIDR `.direct` hit on
@@ -577,8 +579,10 @@ class LWIPTCPConnection {
                 // time, but the domain rule now wins.
                 bypass = false
                 configuration = resolved
+                stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, action: .proxy, configurationName: resolved.name)
             } else {
                 logger.warning("[TCP] SNI routing configuration not found for \(sni)")
+                stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, action: .proxy, configurationName: nil)
             }
         }
     }
@@ -1037,6 +1041,29 @@ class LWIPTCPConnection {
             lwip_bridge_tcp_recved(pcb, chunk)
         }
         close()
+    }
+
+    /// Writes a fatal TLS Alert (`access_denied`) before the FIN.
+    ///
+    /// Used after a TLS ClientHello has been sniffed and the routing rule
+    /// rejected the SNI. A bare FIN mid-handshake is ambiguous: many TLS
+    /// clients surface it as a transient `connection closed by peer` and
+    /// retry. A fatal Alert is the protocol-level "do not retry" signal —
+    /// the client's TLS stack reports a definitive handshake failure with
+    /// the alert code and the calling app stops trying. The alert sits
+    /// before any keys are negotiated, so it goes out as plaintext on the
+    /// wire — no MITM cert is required.
+    private func rejectWithTLSAlert() {
+        guard !closed else { return }
+        // type=21 (alert), legacy_record_version=0x0303 (TLS 1.2),
+        // length=2, level=2 (fatal), description=49 (access_denied)
+        let alert: [UInt8] = [0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x31]
+        alert.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            _ = feedLWIP(UnsafeRawPointer(base), count: alert.count, retryOnEmpty: true)
+            lwip_bridge_tcp_output(pcb)
+        }
+        rejectGracefully()
     }
 
     func abort() {

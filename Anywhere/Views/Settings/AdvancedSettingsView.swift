@@ -75,6 +75,9 @@ struct AdvancedSettingsView: View {
                 NavigationLink("Logs") {
                     LogListView()
                 }
+                NavigationLink("Requests") {
+                    RequestsView()
+                }
             }
         }
         .navigationTitle("Advanced Settings")

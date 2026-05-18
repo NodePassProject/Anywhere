@@ -297,6 +297,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case .fetchLogs:
             let response = LogsResponse(logs: lwipStack.fetchLogs())
             completionHandler?(try? JSONEncoder().encode(response))
+
+        case .fetchRequests:
+            let response = RequestsResponse(requests: lwipStack.requestLog.snapshot())
+            completionHandler?(try? JSONEncoder().encode(response))
         }
     }
 

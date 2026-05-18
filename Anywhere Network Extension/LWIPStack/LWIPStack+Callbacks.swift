@@ -9,6 +9,38 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "LWIPStack")
 
+/// Tracks recent rejects per destination so a misbehaving app that
+/// retries a blocked host in a tight loop downgrades from RST-on-SYN
+/// to silent drop. RST every SYN burns CPU and packets on both sides
+/// for no benefit; a timeout drives the app's retry back-off faster.
+/// Mirrors sing-box's `RuleActionReject` flood guard (50 rejects in
+/// 30 s → drop). Accessed from the SYN filter callback which runs on
+/// `lwipQueue`, so no internal locking is needed.
+private final class RejectFloodTracker {
+    private let threshold: Int
+    private let window: CFAbsoluteTime
+    private var timestamps: [String: [CFAbsoluteTime]] = [:]
+
+    init(threshold: Int = 50, window: CFAbsoluteTime = 30) {
+        self.threshold = threshold
+        self.window = window
+    }
+
+    /// Records a reject for `host` and returns `true` if the host has
+    /// crossed the flood threshold within the window.
+    func shouldDrop(host: String) -> Bool {
+        let now = CFAbsoluteTimeGetCurrent()
+        let cutoff = now - window
+        var times = timestamps[host, default: []]
+        times.removeAll { $0 < cutoff }
+        times.append(now)
+        timestamps[host] = times
+        return times.count > threshold
+    }
+}
+
+private let rejectFloodTracker = RejectFloodTracker()
+
 extension LWIPStack {
 
     // MARK: - Callback Registration
@@ -59,7 +91,52 @@ extension LWIPStack {
             }
         }
 
-        // TCP accept: create a new LWIPTCPConnection for each incoming connection
+        // TCP SYN filter: reject `.reject`-classified destinations at SYN
+        // time so we never complete the 3WHS for them. Saves the SYN-ACK +
+        // final ACK + accept_cb path for every rejected connection and
+        // gives the client a clean ECONNREFUSED instead of a closed
+        // post-handshake connection. SNI-based rejects are not visible
+        // here (no ClientHello yet) and still land in `LWIPTCPConnection`.
+        lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, dstPort, isIPv6 in
+            guard let shared = LWIPStack.shared, let dstIP else {
+                return Int32(LWIP_BRIDGE_SYN_PASS)
+            }
+            let dstIPString = LWIPStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
+
+            // Helper: log + record + return DROP if the host is flooding,
+            // RESET otherwise. The tracker keys on the human-readable host
+            // (domain for fake-IP rejects, IP literal for IP-CIDR rejects),
+            // matching what the user sees in the request log.
+            func reject(host: String, reason: String) -> Int32 {
+                shared.requestLog.record(proto: "TCP", host: host, port: dstPort, action: .reject)
+                if rejectFloodTracker.shouldDrop(host: host) {
+                    logger.debug("[TCP] SYN dropped (flood) by \(reason): \(host):\(dstPort)")
+                    return Int32(LWIP_BRIDGE_SYN_DROP)
+                }
+                logger.debug("[TCP] SYN rejected by \(reason): \(host):\(dstPort)")
+                return Int32(LWIP_BRIDGE_SYN_RESET)
+            }
+
+            switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
+            case .passthrough:
+                if case .reject = shared.domainRouter.matchIP(dstIPString) {
+                    return reject(host: dstIPString, reason: "IP rule")
+                }
+                return Int32(LWIP_BRIDGE_SYN_PASS)
+            case .resolved:
+                return Int32(LWIP_BRIDGE_SYN_PASS)
+            case .drop(let domain):
+                return reject(host: domain, reason: "fake-IP domain rule")
+            case .unreachable:
+                // Stale fake-IP pool entry — drop silently rather than RST.
+                logger.debug("[TCP] SYN dropped (stale fake-IP): \(dstIPString):\(dstPort)")
+                return Int32(LWIP_BRIDGE_SYN_DROP)
+            }
+        }
+
+        // TCP accept: create a new LWIPTCPConnection for each incoming connection.
+        // `.reject` cases were already handled at SYN by the filter above and
+        // never reach this callback. SNI-based rejects are decided later.
         lwip_bridge_set_tcp_accept_fn { srcIP, srcPort, dstIP, dstPort, isIPv6, pcb in
             guard let shared = LWIPStack.shared,
                   let pcb, let dstIP,
@@ -79,21 +156,31 @@ extension LWIPStack {
             // if the SNI disagrees with the DNS-resolved name).
             var sniffSNI = false
 
+            // Tracks the action/configuration to surface in the request log.
+            // Set on each routing branch below; recorded once after the switch.
+            var requestAction: TunnelRequestAction = .default
+            var requestConfigName: String? = defaultConfiguration.name
+
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
             case .passthrough:
-                // Real IP — check IP CIDR rules
+                // Real IP — check IP CIDR rules. `.reject` was filtered at SYN.
                 if let action = shared.domainRouter.matchIP(dstIPString) {
                     switch action {
                     case .direct:
                         forceBypass = true
+                        requestAction = .direct
+                        requestConfigName = nil
                     case .reject:
-                        logger.debug("[TCP] IP rejected by routing rule: \(dstIPString):\(dstPort)")
+                        // Should be unreachable — handled by the SYN filter.
                         return nil
                     case .proxy(_):
+                        requestAction = .proxy
                         if let configuration = shared.domainRouter.resolveConfiguration(action: action) {
                             connectionConfiguration = configuration
+                            requestConfigName = configuration.name
                         } else {
                             logger.warning("[TCP] Routing config not found for \(dstIPString)")
+                            requestConfigName = nil
                         }
                     }
                 }
@@ -102,11 +189,25 @@ extension LWIPStack {
                 dstHost = domain
                 if let configuration = configurationOverride {
                     connectionConfiguration = configuration
+                    requestAction = .proxy
+                    requestConfigName = configuration.name
+                } else if bypass {
+                    requestAction = .direct
+                    requestConfigName = nil
                 }
                 forceBypass = bypass
             case .drop, .unreachable:
+                // Both were handled by the SYN filter; defensive return.
                 return nil
             }
+
+            shared.requestLog.record(
+                proto: "TCP",
+                host: dstHost,
+                port: dstPort,
+                action: requestAction,
+                configurationName: requestConfigName
+            )
 
             // Fake-IP MITM: domain is known at accept time, but we still
             // need the ClientHello bytes to drive ``TLSServer``. Force
@@ -243,6 +344,9 @@ extension LWIPStack {
             var flowConfiguration = defaultConfiguration
             var forceBypass = false
 
+            var requestAction: TunnelRequestAction = .default
+            var requestConfigName: String? = defaultConfiguration.name
+
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "UDP") {
             case .passthrough:
                 // Real IP — check IP CIDR rules
@@ -250,7 +354,10 @@ extension LWIPStack {
                     switch action {
                     case .direct:
                         forceBypass = true
+                        requestAction = .direct
+                        requestConfigName = nil
                     case .reject:
+                        shared.requestLog.record(proto: "UDP", host: dstIPString, port: dstPort, action: .reject)
                         logger.debug("[UDP] IP rejected by routing rule: \(dstIPString):\(dstPort)")
                         shared.sendICMPPortUnreachable(
                             srcIP: srcIP,
@@ -262,10 +369,13 @@ extension LWIPStack {
                         )
                         return
                     case .proxy(_):
+                        requestAction = .proxy
                         if let configuration = shared.domainRouter.resolveConfiguration(action: action) {
                             flowConfiguration = configuration
+                            requestConfigName = configuration.name
                         } else {
                             logger.warning("[UDP] Routing config not found for \(dstIPString)")
+                            requestConfigName = nil
                         }
                     }
                 }
@@ -273,9 +383,25 @@ extension LWIPStack {
                 dstHost = domain
                 if let configuration = configurationOverride {
                     flowConfiguration = configuration
+                    requestAction = .proxy
+                    requestConfigName = configuration.name
+                } else if bypass {
+                    requestAction = .direct
+                    requestConfigName = nil
                 }
                 forceBypass = bypass
-            case .drop, .unreachable:
+            case .drop(let domain):
+                shared.requestLog.record(proto: "UDP", host: domain, port: dstPort, action: .reject)
+                shared.sendICMPPortUnreachable(
+                    srcIP: srcIP,
+                    srcPort: srcPort,
+                    dstIP: dstIP,
+                    dstPort: dstPort,
+                    isIPv6: isIPv6 != 0,
+                    udpPayloadLength: Int(len)
+                )
+                return
+            case .unreachable:
                 shared.sendICMPPortUnreachable(
                     srcIP: srcIP,
                     srcPort: srcPort,
@@ -286,6 +412,14 @@ extension LWIPStack {
                 )
                 return
             }
+
+            shared.requestLog.record(
+                proto: "UDP",
+                host: dstHost,
+                port: dstPort,
+                action: requestAction,
+                configurationName: requestConfigName
+            )
 
             let addrSize = isIPv6 != 0 ? 16 : 4
             let srcIPData = Data(bytes: srcIP, count: addrSize)
@@ -317,8 +451,9 @@ extension LWIPStack {
         case passthrough
         /// Resolved to a domain with optional config override and bypass flag.
         case resolved(domain: String, configurationOverride: ProxyConfiguration?, forceBypass: Bool)
-        /// Connection should be dropped (rejected by rule).
-        case drop
+        /// Connection should be dropped (rejected by rule). Carries the
+        /// resolved domain so the request log can record the rejected host.
+        case drop(domain: String)
         /// Fake IP not in pool (stale from previous session) — drop and signal unreachable.
         case unreachable
     }
@@ -339,7 +474,7 @@ extension LWIPStack {
                 return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: true)
             case .reject:
                 logger.debug("[\(proto)] Domain rejected by routing rule: \(entry.domain) (\(ip):\(dstPort))")
-                return .drop
+                return .drop(domain: entry.domain)
             case .proxy(_):
                 let configuration = domainRouter.resolveConfiguration(action: action)
                 if configuration == nil {

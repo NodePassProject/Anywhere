@@ -24,11 +24,27 @@ typedef void (*lwip_release_fn)(void *release_ctx);
 typedef void (*lwip_output_fn)(const void *data, int len, int is_ipv6,
                                 void *release_ctx, lwip_release_fn release);
 
-/* TCP accept: new TCP connection accepted (returns opaque pointer stored as PCB arg)
- * IP addresses are raw bytes: 4 bytes for IPv4, 16 bytes for IPv6 */
+/* TCP accept: new TCP connection accepted. Returning a non-NULL pointer
+ * stores it as the PCB's tcp_arg; returning NULL aborts (RST). Rule-based
+ * rejects that can be classified before the handshake (IP-CIDR / fake-IP)
+ * are handled by `lwip_tcp_syn_filter_fn` at SYN time so they never reach
+ * this callback. SNI-based rejects, which require the ClientHello, are
+ * still handled inside the connection after it is accepted.
+ *
+ * IP addresses are raw bytes: 4 bytes for IPv4, 16 bytes for IPv6. */
 typedef void *(*lwip_tcp_accept_fn)(const void *src_ip, uint16_t src_port,
                                      const void *dst_ip, uint16_t dst_port,
                                      int is_ipv6, void *pcb);
+
+/* SYN filter: lets the host decide drop/reset/passthrough for an incoming
+ * SYN before lwIP allocates a pcb or sends SYN-ACK. Returns one of the
+ * `LWIP_BRIDGE_SYN_*` verdicts below. */
+#define LWIP_BRIDGE_SYN_PASS  0
+#define LWIP_BRIDGE_SYN_DROP  1
+#define LWIP_BRIDGE_SYN_RESET 2
+typedef int (*lwip_tcp_syn_filter_fn)(const void *src_ip, uint16_t src_port,
+                                       const void *dst_ip, uint16_t dst_port,
+                                       int is_ipv6);
 
 /* TCP recv: data received on a TCP connection */
 typedef void (*lwip_tcp_recv_fn)(void *conn, const void *data, int len);
@@ -48,6 +64,7 @@ typedef void (*lwip_udp_recv_fn)(const void *src_ip, uint16_t src_port,
 /* --- Callback registration --- */
 void lwip_bridge_set_output_fn(lwip_output_fn fn);
 void lwip_bridge_set_tcp_accept_fn(lwip_tcp_accept_fn fn);
+void lwip_bridge_set_tcp_syn_filter_fn(lwip_tcp_syn_filter_fn fn);
 void lwip_bridge_set_tcp_recv_fn(lwip_tcp_recv_fn fn);
 void lwip_bridge_set_tcp_sent_fn(lwip_tcp_sent_fn fn);
 void lwip_bridge_set_tcp_err_fn(lwip_tcp_err_fn fn);

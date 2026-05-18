@@ -681,6 +681,48 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
     tcp_rst_netif(ip_data.current_input_netif, ackno, seqno + tcplen, ip_current_dest_addr(),
             ip_current_src_addr(), tcphdr->dest, tcphdr->src);
   } else if (flags & TCP_SYN) {
+    /* --- BEGIN Anywhere Patch: rule-based reject at SYN ---
+     * Skip the 3WHS for connections the routing rules have already
+     * classified as `.reject`. The filter sees the dest IP+port, so
+     * everything resolvable pre-handshake (IP-CIDR / fake-IP -> domain)
+     * can be decided here — saves a SYN-ACK + final ACK + accept_cb
+     * for the rejected case. SNI-based rejects still happen later in
+     * `LWIPTCPConnection` since the SNI isn't visible until the
+     * ClientHello arrives.
+     *
+     * Filter verdicts:
+     *   PASS  — passthrough, fall through to the normal code path
+     *   DROP  — return silently, no SYN-ACK; client times out
+     *   RESET — send RST in response to SYN; client gets ECONNREFUSED
+     */
+    if (lwip_anywhere_tcp_syn_filter != NULL) {
+      u8_t src_bytes[16], dst_bytes[16];
+      int is_ipv6 = 0;
+#if LWIP_IPV6
+      if (IP_IS_V6(ip_current_dest_addr())) {
+        SMEMCPY(src_bytes, ip_2_ip6(ip_current_src_addr()), 16);
+        SMEMCPY(dst_bytes, ip_2_ip6(ip_current_dest_addr()), 16);
+        is_ipv6 = 1;
+      } else
+#endif /* LWIP_IPV6 */
+      {
+        SMEMCPY(src_bytes, ip_2_ip4(ip_current_src_addr()), 4);
+        SMEMCPY(dst_bytes, ip_2_ip4(ip_current_dest_addr()), 4);
+      }
+      int verdict = lwip_anywhere_tcp_syn_filter(src_bytes, tcphdr->src,
+                                                  dst_bytes, tcphdr->dest,
+                                                  is_ipv6);
+      if (verdict == LWIP_ANYWHERE_SYN_DROP) {
+        return;
+      }
+      if (verdict == LWIP_ANYWHERE_SYN_RESET) {
+        tcp_rst_netif(ip_data.current_input_netif, 0, seqno + tcplen,
+                      ip_current_dest_addr(), ip_current_src_addr(),
+                      tcphdr->dest, tcphdr->src);
+        return;
+      }
+    }
+    /* --- END Anywhere Patch --- */
     LWIP_DEBUGF(TCP_DEBUG, ("TCP connection request %"U16_F" -> %"U16_F".\n", tcphdr->src, tcphdr->dest));
 #if TCP_LISTEN_BACKLOG
     if (pcb->accepts_pending >= pcb->backlog) {

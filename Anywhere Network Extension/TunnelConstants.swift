@@ -81,6 +81,15 @@ enum TunnelConstants {
     /// Time window (seconds) to attribute connection errors to a recent tunnel interruption.
     static let recentTunnelInterruptionWindow: CFAbsoluteTime = 8
 
+    // MARK: - Request Log
+
+    /// Retention interval for request log entries (seconds). Matches the
+    /// log buffer's window so "recent" has the same meaning across both
+    /// diagnostics views.
+    static let requestLogRetentionInterval: CFAbsoluteTime = 300
+    /// Maximum number of request log entries in the buffer.
+    static let requestLogMaxEntries = 50
+
     // MARK: - Timer Intervals
 
     /// lwIP periodic timeout interval (milliseconds).

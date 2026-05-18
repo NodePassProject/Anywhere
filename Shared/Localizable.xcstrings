@@ -9229,6 +9229,64 @@
         }
       }
     },
+    "No Recent Requests" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "لا توجد طلبات حديثة"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No Recent Requests"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sin solicitudes recientes"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "درخواست اخیری وجود ندارد"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нет недавних запросов"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Soňky soraglar ýok"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Son İstekler Yok"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Không có yêu cầu gần đây"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无最近请求"
+          }
+        }
+      }
+    },
     "No trusted certificates" : {
       "localizations" : {
         "ar" : {
@@ -10579,7 +10637,6 @@
       }
     },
     "Proxy" : {
-      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
@@ -11448,6 +11505,64 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "İstek"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Yêu cầu"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请求"
+          }
+        }
+      }
+    },
+    "Requests" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الطلبات"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Requests"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Solicitudes"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "درخواست‌ها"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Запросы"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Soraglar"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "İstekler"
           }
         },
         "vi" : {
