@@ -11,10 +11,6 @@ import UniformTypeIdentifiers
 struct RuleSetListView: View {
     @ObservedObject private var viewModel = VPNViewModel.shared
 
-    private var experimentalEnabled: Bool {
-        AWCore.getExperimentalEnabled()
-    }
-
     private static let importAllowedContentTypes: [UTType] = [UTType(filenameExtension: "arrs") ?? .data]
 
     @State var builtInServiceRuleSets: [RoutingRuleSet] = RoutingRuleSetStore.shared.builtInServiceRuleSets
@@ -80,12 +76,10 @@ struct RuleSetListView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Menu("More", systemImage: "ellipsis") {
-                    if experimentalEnabled {
-                        Button {
-                            showAddSheet = true
-                        } label: {
-                            Label("Add Rule Set", systemImage: "plus")
-                        }
+                    Button {
+                        showAddSheet = true
+                    } label: {
+                        Label("Add Rule Set", systemImage: "plus")
                     }
                     Button {
                         importError = nil
