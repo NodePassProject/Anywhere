@@ -45,7 +45,7 @@ extension LWIPStack {
             startUDPCleanupTimer()
             installFDPressureReliefHandler()
             startReadingPackets()
-            logger.debug("[LWIPStack] Started, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), ipv6dns=\(ipv6DNSEnabled), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+            logger.debug("[LWIPStack] Started, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
         }
 
         startObservingSettings()
@@ -229,7 +229,7 @@ extension LWIPStack {
         startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.debug("[LWIPStack] Restarted, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), ipv6dns=\(ipv6DNSEnabled), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+        logger.debug("[LWIPStack] Restarted, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
     }
 
     // MARK: - Settings Observation
@@ -334,7 +334,7 @@ extension LWIPStack {
             let bypassCountryCode = AWCore.getBypassCountryCode()
             let hideVPNIcon = AWCore.getHideVPNIcon()
             let blockQUICEnabled = AWCore.getBlockQUICEnabled()
-            let ipv6DNSEnabled = AWCore.getIPv6DNSEnabled()
+            let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
             let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
             let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
             let encryptedDNSServer = AWCore.getEncryptedDNSServer()
@@ -343,12 +343,12 @@ extension LWIPStack {
             let bypassCountryChanged = bypassCountryCode != self.bypassCountryCode
             let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
             let blockQUICEnabledChanged = blockQUICEnabled != self.blockQUICEnabled
-            let ipv6DNSEnabledChanged = ipv6DNSEnabled != self.ipv6DNSEnabled
+            let advertiseIPv6ToAppsChanged = advertiseIPv6ToApps != self.advertiseIPv6ToApps
             let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
             let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
             let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer
 
-            guard proxyModeChanged || bypassCountryChanged || hideVPNIconChanged || blockQUICEnabledChanged || ipv6DNSEnabledChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else {
+            guard proxyModeChanged || bypassCountryChanged || hideVPNIconChanged || blockQUICEnabledChanged || advertiseIPv6ToAppsChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else {
                 return
             }
             
@@ -358,7 +358,7 @@ extension LWIPStack {
             // Encrypted DNS changes also affect tunnel settings (NEDNSOverHTTPSSettings / NEDNSOverTLSSettings).
             // Hide VPN Icon toggles IPv4 route shape and IPv6 claim, also tunnel settings.
             // Must re-apply via PacketTunnelProvider before restarting the stack.
-            if ipv6DNSEnabledChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || hideVPNIconChanged {
+            if advertiseIPv6ToAppsChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || hideVPNIconChanged {
                 onTunnelSettingsNeedReapply?()
             }
 

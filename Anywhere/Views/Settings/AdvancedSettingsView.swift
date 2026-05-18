@@ -93,7 +93,7 @@ struct AdvancedSettingsView: View {
             Button("Enable Anyway", role: .destructive) {
                 hideVPNIcon = true
                 AWCore.setHideVPNIcon(true)
-                AWCore.setIPv6DNSEnabled(false)
+                AWCore.setAdvertiseIPv6ToApps(false)
                 AWCore.notifyTunnelSettingsChanged()
             }
             Button("Cancel", role: .cancel) {}
