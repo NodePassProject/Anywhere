@@ -41,6 +41,9 @@ struct AdvancedSettingsView: View {
                         }
                     }
                 ))
+                NavigationLink("Tunnel") {
+                    TunnelSettingsView()
+                }
             }
 
             Section("Network") {

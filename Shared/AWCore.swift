@@ -81,6 +81,10 @@ final class AWCore {
         static let selectedConfigurationId = "selectedConfigurationId"
         static let selectedChainId = "selectedChainId"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
+        static let tunnelIncludeAllNetworks = "tunnelIncludeAllNetworks"
+        static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
+        static let tunnelIncludeAPNs = "tunnelIncludeAPNs"
+        static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
     }
 
     /// One-time migration of a JSON file from the per-app documents directory
@@ -265,6 +269,38 @@ final class AWCore {
 
     static func setRemnawaveHWIDEnabled(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.remnawaveHWIDEnabled)
+    }
+
+    static func getTunnelIncludeAllNetworks() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
+    }
+
+    static func setTunnelIncludeAllNetworks(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAllNetworks)
+    }
+
+    static func getTunnelIncludeLocalNetworks() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
+    }
+
+    static func setTunnelIncludeLocalNetworks(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeLocalNetworks)
+    }
+
+    static func getTunnelIncludeAPNs() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeAPNs)
+    }
+
+    static func setTunnelIncludeAPNs(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeAPNs)
+    }
+
+    static func getTunnelIncludeCellularServices() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.tunnelIncludeCellularServices)
+    }
+
+    static func setTunnelIncludeCellularServices(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeCellularServices)
     }
     
     // MARK: - Darwin Notification Names

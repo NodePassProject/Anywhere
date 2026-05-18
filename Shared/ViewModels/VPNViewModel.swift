@@ -650,6 +650,10 @@ class VPNViewModel: ObservableObject {
             let tunnelProtocol = NETunnelProviderProtocol()
             tunnelProtocol.providerBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
             tunnelProtocol.serverAddress = "Anywhere"
+            tunnelProtocol.includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()
+            tunnelProtocol.excludeLocalNetworks = !AWCore.getTunnelIncludeLocalNetworks()
+            tunnelProtocol.excludeAPNs = !AWCore.getTunnelIncludeAPNs()
+            tunnelProtocol.excludeCellularServices = !AWCore.getTunnelIncludeCellularServices()
 
             manager.protocolConfiguration = tunnelProtocol
             manager.localizedDescription = "Anywhere"
