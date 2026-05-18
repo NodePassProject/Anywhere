@@ -13,7 +13,7 @@ struct IPv6SettingsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle("IPv6 DNS Lookup", isOn: $ipv6DNSEnabled)
+                Toggle("Advertise IPv6 to Apps", isOn: $ipv6DNSEnabled)
             }
         }
         .navigationTitle("IPv6")
