@@ -21,6 +21,7 @@ nonisolated final class VLESSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     override var isConnected: Bool { inner.isConnected }
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    override var deliversDatagrams: Bool { true }
 
     // MARK: - Send: frame payload then hand off to the TCP-style inner.
 

@@ -60,6 +60,10 @@ nonisolated class QUICConnection {
     private let alpn: [String]
     private let tuning: QUICTuning
 
+    /// Optional datagram transport; when set, ngtcp2 rides it instead of a
+    /// kernel socket. Used to route QUIC through a proxy chain's UDP relay.
+    private let transport: QUICDatagramTransport?
+
     fileprivate var state: State = .idle
     let queue: DispatchQueue
     private static let queueKey = DispatchSpecificKey<Bool>()
@@ -188,13 +192,15 @@ nonisolated class QUICConnection {
     var isOnQueue: Bool { DispatchQueue.getSpecific(key: Self.queueKey) == true }
 
     init(host: String, port: UInt16, serverName: String? = nil, alpn: [String] = ["h3"],
-         datagramsEnabled: Bool = false, tuning: QUICTuning) {
+         datagramsEnabled: Bool = false, tuning: QUICTuning,
+         transport: QUICDatagramTransport? = nil) {
         self.host = host
         self.port = port
         self.serverName = serverName ?? host
         self.alpn = alpn
         self.datagramsEnabled = datagramsEnabled
         self.tuning = tuning
+        self.transport = transport
         self.queue = DispatchQueue(label: "com.argsment.Anywhere.quic")
         queue.setSpecific(key: Self.queueKey, value: true)
     }
@@ -583,6 +589,7 @@ nonisolated class QUICConnection {
                 ngtcp2_conn_del(conn)
                 self.conn = nil
             }
+            self.transport?.cancel()
             self.closeSocket()
             self.state = .closed
             // Fail any pending writes; fail pending datagrams' completions.
@@ -609,6 +616,14 @@ nonisolated class QUICConnection {
     // MARK: UDP
 
     private func setupUDP(completion: @escaping (Error?) -> Void) {
+        if let transport {
+            setupTunnelTransport(transport: transport, completion: completion)
+        } else {
+            setupRawSocket(completion: completion)
+        }
+    }
+
+    private func setupRawSocket(completion: @escaping (Error?) -> Void) {
         // Non-blocking SOCK_DGRAM driven by a DispatchSource for reads.
         do {
             populateRemoteAddr()
@@ -625,6 +640,71 @@ nonisolated class QUICConnection {
             state = .closed
             closeSocket()
             completion(error)
+        }
+    }
+
+    /// Wires ngtcp2 to a ``QUICDatagramTransport`` (used for chained QUIC
+    /// dials). Placeholder addrs are safe because callers set
+    /// `disable_active_migration`, so ngtcp2 never inspects them.
+    private func setupTunnelTransport(
+        transport: QUICDatagramTransport,
+        completion: @escaping (Error?) -> Void
+    ) {
+        do {
+            configurePlaceholderAddrs()
+            try initializeNgtcp2()
+            state = .handshaking
+            // Hop to our queue: ngtcp2 must only be touched from `queue`.
+            // Even if the inner relay already has buffered datagrams,
+            // `handleReceivedPacket` runs via `queue.async` and can't
+            // preempt the rest of this synchronous setup block — so the
+            // arm-before-`writeToUDP` order matches the raw-socket path
+            // and is race-free.
+            transport.startReceiving { [weak self] data in
+                self?.queue.async {
+                    self?.handleReceivedPacket(data)
+                }
+            } errorHandler: { [weak self] error in
+                self?.queue.async {
+                    guard let self else { return }
+                    let err = error ?? QUICError.closed
+                    if let cb = self.connectCompletion {
+                        self.connectCompletion = nil
+                        cb(err)
+                    }
+                    self.close(error: err)
+                }
+            }
+            writeToUDP()    // send client initial
+            rescheduleTimer()
+        } catch {
+            state = .closed
+            transport.cancel()
+            completion(error)
+        }
+    }
+
+    /// Synthesises stable placeholder addrs for `ngtcp2_path`. Values are
+    /// unused for routing (the transport delivers packets) but must be
+    /// consistent so ngtcp2's path identity check passes.
+    private func configurePlaceholderAddrs() {
+        addrLen = MemoryLayout<sockaddr_in>.size
+        withUnsafeMutablePointer(to: &remoteAddr) { storage in
+            storage.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
+                sin.pointee = sockaddr_in()
+                sin.pointee.sin_len = UInt8(addrLen)
+                sin.pointee.sin_family = sa_family_t(AF_INET)
+                sin.pointee.sin_port = port.bigEndian
+                sin.pointee.sin_addr.s_addr = UInt32(0x7f000001).bigEndian  // 127.0.0.1
+            }
+        }
+        withUnsafeMutablePointer(to: &localAddr) { storage in
+            storage.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
+                sin.pointee = sockaddr_in()
+                sin.pointee.sin_len = UInt8(addrLen)
+                sin.pointee.sin_family = sa_family_t(AF_INET)
+                sin.pointee.sin_addr.s_addr = INADDR_ANY
+            }
         }
     }
 
@@ -855,11 +935,19 @@ nonisolated class QUICConnection {
         }
     }
 
-    /// Sends a single datagram of `length` bytes from `txBuf` via the
-    /// connected socket. EAGAIN drops the packet — ngtcp2's loss
-    /// recovery handles the retransmit.
+    /// Sends one datagram of `length` bytes from `txBuf`. EAGAIN / transport
+    /// errors drop the packet; ngtcp2's loss recovery handles the retransmit.
     private func sendTxBuf(length: Int) {
-        guard socketFD >= 0, length > 0 else { return }
+        guard length > 0 else { return }
+        if let transport {
+            // Detach from `txBuf` — the next ngtcp2 write reuses it.
+            let datagram = txBuf.withUnsafeBufferPointer { buf -> Data in
+                Data(bytes: buf.baseAddress!, count: length)
+            }
+            transport.sendDatagram(datagram)
+            return
+        }
+        guard socketFD >= 0 else { return }
         while true {
             let n = txBuf.withUnsafeBufferPointer { buf -> Int in
                 Darwin.send(socketFD, buf.baseAddress, length, 0)

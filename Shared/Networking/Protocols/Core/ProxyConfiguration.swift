@@ -56,6 +56,26 @@ enum OutboundProtocol: String, Codable {
         self == .vless
     }
 
+    /// Transport this protocol needs from the chain hop below it to service
+    /// `downstreamCommand`. `nil` when the protocol can't carry the command.
+    func upstreamCommand(for downstreamCommand: ProxyCommand) -> ProxyCommand? {
+        switch self {
+        case .vless, .trojan, .anytls:
+            return .tcp
+        case .shadowsocks:
+            return downstreamCommand == .udp ? .udp : .tcp
+        case .socks5:
+            // The UDP-ASSOCIATE relay socket is opened separately
+            // (see `openSOCKS5UDPRelay`); the link below only carries
+            // the TCP control channel.
+            return .tcp
+        case .hysteria:
+            return .udp
+        case .sudoku, .http11, .http2, .http3:
+            return downstreamCommand == .tcp ? .tcp : nil
+        }
+    }
+
     var name: String {
         switch self {
         case .vless:

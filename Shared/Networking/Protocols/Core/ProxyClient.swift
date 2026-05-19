@@ -40,7 +40,7 @@ private final class TeardownCounter: @unchecked Sendable {
 /// (TLS, Reality). For the XTLS Vision flow, the connection is wrapped in a ``VLESSVisionConnection``.
 nonisolated class ProxyClient {
     let configuration: ProxyConfiguration
-    private let useResolvedAddressForDirectDial: Bool
+    let useResolvedAddressForDirectDial: Bool
     var connection: RawTCPSocket?
     private var realityClient: RealityClient?
     private var realityConnection: TLSRecordConnection?
@@ -57,6 +57,11 @@ nonisolated class ProxyClient {
     /// Intermediate chain proxy clients (retained for lifecycle management).
     private var chainClients: [ProxyClient] = []
 
+    /// For a chain link, the prefix `chain[0..<index]` that brought traffic to
+    /// this link's server. Lets the link rebuild that prefix for an extra dial
+    /// (e.g. SOCKS5 opening its UDP-ASSOCIATE relay socket). Empty otherwise.
+    let parentChain: [ProxyConfiguration]
+
     /// Creates a new proxy client with the given configuration.
     ///
     /// - Parameters:
@@ -64,14 +69,17 @@ nonisolated class ProxyClient {
     ///   - tunnel: Optional tunnel from a previous chain link (for proxy chaining).
     ///   - useResolvedAddressForDirectDial: Whether direct first-hop transports should
     ///     prefer `resolvedIP` over `serverAddress`. Intended for latency testing only.
+    ///   - parentChain: Chain prefix leading to this link's server. Empty for non-chain-link clients.
     init(
         configuration: ProxyConfiguration,
         tunnel: ProxyConnection? = nil,
-        useResolvedAddressForDirectDial: Bool = false
+        useResolvedAddressForDirectDial: Bool = false,
+        parentChain: [ProxyConfiguration] = []
     ) {
         self.configuration = configuration
         self.tunnel = tunnel
         self.useResolvedAddressForDirectDial = useResolvedAddressForDirectDial
+        self.parentChain = parentChain
     }
 
     /// Host used for direct first-hop transport dials when not already tunneled through
@@ -148,8 +156,32 @@ nonisolated class ProxyClient {
             return
         }
 
-        // Build chain tunnel: connect through each proxy in the chain to reach this proxy's server
-        buildChainTunnel(chain: chain, index: 0, currentTunnel: nil) { [weak self] result in
+        // Chained Hysteria pools its chain + QUIC session in `HysteriaClient`;
+        // route through `connectWithHysteria` instead of building a chain here.
+        if configuration.outboundProtocol == .hysteria {
+            connectWithCommand(
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                initialData: initialData,
+                completion: completion
+            )
+            return
+        }
+
+        let hopCommands: [ProxyCommand]
+        switch Self.computeChainHopCommands(chain: chain, outerProtocol: configuration.outboundProtocol, outerCommand: command) {
+        case .success(let computed):
+            hopCommands = computed
+        case .failure(let error):
+            completion(.failure(error))
+            return
+        }
+
+        buildChainTunnel(
+            chain: chain, index: 0, currentTunnel: nil,
+            hopCommands: hopCommands
+        ) { [weak self] result in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
@@ -170,54 +202,173 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Recursively builds a chain tunnel by connecting through each proxy in the chain.
+    /// Per-hop transport commands for a chain wrapped by `outerProtocol`.
+    /// Walks backwards from the outer protocol's required upstream command.
+    /// Fails when any link can't service what the link above it demands.
+    static func computeChainHopCommands(
+        chain: [ProxyConfiguration],
+        outerProtocol: OutboundProtocol,
+        outerCommand: ProxyCommand
+    ) -> Result<[ProxyCommand], Error> {
+        guard !chain.isEmpty else { return .success([]) }
+
+        guard let lastDeliver = outerProtocol.upstreamCommand(for: outerCommand) else {
+            return .failure(ProxyError.protocolError(
+                "\(outerProtocol.name) doesn't support \(outerCommand)"
+            ))
+        }
+
+        return computeChainHopCommands(chain: chain, lastDeliver: lastDeliver)
+    }
+
+    /// Variant for chains that don't sit under a wrapping outer protocol;
+    /// the caller specifies the last hop's required output transport.
+    static func computeChainHopCommands(
+        chain: [ProxyConfiguration],
+        lastDeliver: ProxyCommand
+    ) -> Result<[ProxyCommand], Error> {
+        guard !chain.isEmpty else { return .success([]) }
+
+        var commands = [ProxyCommand](repeating: .tcp, count: chain.count)
+        commands[chain.count - 1] = lastDeliver
+
+        if chain.count > 1 {
+            for i in stride(from: chain.count - 2, through: 0, by: -1) {
+                let nextHopProto = chain[i + 1].outboundProtocol
+                let downstreamCmd = commands[i + 1]
+                guard let req = nextHopProto.upstreamCommand(for: downstreamCmd) else {
+                    return .failure(ProxyError.protocolError(
+                        "Chain hop \(nextHopProto.name) doesn't support \(downstreamCmd) downstream — needed by the hop above it"
+                    ))
+                }
+                commands[i] = req
+            }
+        }
+        return .success(commands)
+    }
+
+    /// Builds a chain tunnel by connecting through each proxy in the chain.
+    /// Thin wrapper that supplies instance-state defaults to the self-free
+    /// recursive helper.
     ///
     /// - Parameters:
     ///   - chain: The ordered list of chain proxies (outermost first).
     ///   - index: The current chain link index being connected.
     ///   - currentTunnel: The tunnel from the previous chain link (nil for the first).
-    ///   - completion: Called with the final tunnel connection to this proxy's server.
-    private func buildChainTunnel(
+    ///   - hopCommands: Per-hop transport command (`.tcp` or `.udp`) for each chain link.
+    ///   - finalDestination: Overrides the last hop's target (defaults to this proxy's server).
+    ///   - track: If set, takes ownership of each created chain-hop client
+    ///     instead of appending to `self.chainClients`.
+    ///   - completion: Called with the final tunnel connection.
+    func buildChainTunnel(
         chain: [ProxyConfiguration],
         index: Int,
         currentTunnel: ProxyConnection?,
+        hopCommands: [ProxyCommand],
+        finalDestination: (host: String, port: UInt16)? = nil,
+        track: ((ProxyClient) -> Void)? = nil,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        let resolvedDestination: (host: String, port: UInt16) = finalDestination
+            ?? (host: configuration.serverAddress, port: configuration.serverPort)
+        let resolvedTrack: (ProxyClient) -> Void = track ?? { [weak self] client in
+            self?.chainClients.append(client)
+        }
+        Self.dispatchChainHop(
+            chain: chain,
+            index: index,
+            currentTunnel: currentTunnel,
+            hopCommands: hopCommands,
+            finalDestination: resolvedDestination,
+            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
+            track: resolvedTrack,
+            completion: completion
+        )
+    }
+
+    /// Self-free chain build for callers that don't anchor hops in a
+    /// `ProxyClient`'s `chainClients` (e.g. the pooled chained Hysteria
+    /// path, where ``HysteriaClient`` retains the hops). Surviving the
+    /// first caller's lifetime matters because the build is shared across
+    /// concurrent `acquireChained` waiters.
+    static func buildDetachedChainTunnel(
+        chain: [ProxyConfiguration],
+        hopCommands: [ProxyCommand],
+        finalDestination: (host: String, port: UInt16),
+        useResolvedAddressForDirectDial: Bool,
+        track: @escaping (ProxyClient) -> Void,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        dispatchChainHop(
+            chain: chain,
+            index: 0,
+            currentTunnel: nil,
+            hopCommands: hopCommands,
+            finalDestination: finalDestination,
+            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
+            track: track,
+            completion: completion
+        )
+    }
+
+    /// Self-free recursive hop dispatch. Shared by ``buildChainTunnel``
+    /// (instance) and ``buildDetachedChainTunnel`` (static).
+    private static func dispatchChainHop(
+        chain: [ProxyConfiguration],
+        index: Int,
+        currentTunnel: ProxyConnection?,
+        hopCommands: [ProxyCommand],
+        finalDestination: (host: String, port: UInt16),
+        useResolvedAddressForDirectDial: Bool,
+        track: @escaping (ProxyClient) -> Void,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let chainConfig = chain[index]
+        let isLastHop = (index + 1 == chain.count)
 
-        // Target for this chain link: next link's server, or this proxy's server
         let nextHost: String
         let nextPort: UInt16
-        if index + 1 < chain.count {
+        if !isLastHop {
             nextHost = chain[index + 1].serverAddress
             nextPort = chain[index + 1].serverPort
         } else {
-            nextHost = configuration.serverAddress
-            nextPort = configuration.serverPort
+            nextHost = finalDestination.host
+            nextPort = finalDestination.port
         }
-        
+
         let chainClient = ProxyClient(
             configuration: chainConfig,
             tunnel: currentTunnel,
-            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial
+            useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
+            parentChain: Array(chain[0..<index])
         )
-        chainClients.append(chainClient)
+        track(chainClient)
 
-        chainClient.connect(to: nextHost, port: nextPort) { [weak self] result in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
+        let hopCompletion: (Result<ProxyConnection, Error>) -> Void = { result in
             switch result {
             case .success(let connection):
-                if index + 1 < chain.count {
-                    self.buildChainTunnel(chain: chain, index: index + 1, currentTunnel: connection, completion: completion)
+                if !isLastHop {
+                    dispatchChainHop(
+                        chain: chain, index: index + 1, currentTunnel: connection,
+                        hopCommands: hopCommands,
+                        finalDestination: finalDestination,
+                        useResolvedAddressForDirectDial: useResolvedAddressForDirectDial,
+                        track: track,
+                        completion: completion
+                    )
                 } else {
                     completion(.success(connection))
                 }
             case .failure(let error):
                 completion(.failure(error))
             }
+        }
+
+        let hopCommand = hopCommands[index]
+        if hopCommand == .udp {
+            chainClient.connectUDP(to: nextHost, port: nextPort, completion: hopCompletion)
+        } else {
+            chainClient.connect(to: nextHost, port: nextPort, completion: hopCompletion)
         }
     }
 
@@ -368,6 +519,14 @@ nonisolated class ProxyClient {
         }
 
         if isShadowsocks {
+            if command == .udp {
+                connectShadowsocksRealUDP(
+                    destinationHost: destinationHost,
+                    destinationPort: destinationPort,
+                    completion: completion
+                )
+                return
+            }
             connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
             return
         }
@@ -1141,8 +1300,9 @@ nonisolated class ProxyClient {
     /// For chained connections, builds a new chain tunnel for the upload.
     private func createUploadTransport(_ factoryCompletion: @escaping (Result<TransportClosures, Error>) -> Void) {
         if let chain = configuration.chain, !chain.isEmpty {
-            // Build a new chain tunnel for the upload connection
-            buildChainTunnel(chain: chain, index: 0, currentTunnel: nil) { result in
+            // XHTTP requires a TCP stream end-to-end.
+            let hopCommands = [ProxyCommand](repeating: .tcp, count: chain.count)
+            buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { result in
                 switch result {
                 case .success(let uploadTunnel):
                     factoryCompletion(.success(TransportClosures(tunnel: uploadTunnel)))
@@ -1225,7 +1385,8 @@ nonisolated class ProxyClient {
                         }
                         let uploadTLSClient = TLSClient(configuration: tlsConfiguration)
                         if let chain = self.configuration.chain, !chain.isEmpty {
-                            self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil) { tunnelResult in
+                            let hopCommands = [ProxyCommand](repeating: .tcp, count: chain.count)
+                            self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { tunnelResult in
                                 switch tunnelResult {
                                 case .success(let uploadTunnel):
                                     uploadTLSClient.connect(overTunnel: uploadTunnel) { result in

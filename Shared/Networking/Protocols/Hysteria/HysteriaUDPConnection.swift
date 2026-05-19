@@ -75,6 +75,7 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     }
 
     override var outerTLSVersion: TLSVersion? { .tls13 }
+    override var deliversDatagrams: Bool { true }
 
     // MARK: - Open
 

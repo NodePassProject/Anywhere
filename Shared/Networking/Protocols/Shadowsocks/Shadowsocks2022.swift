@@ -485,11 +485,13 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
     }
 
     override var isConnected: Bool { inner.isConnected }
+    override var deliversDatagrams: Bool { true }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         do {
             let encrypted = try encryptPacket(payload: data)
-            inner.sendRaw(data: encrypted, completion: completion)
+            // `inner.send` so any UoT framing wraps each encrypted datagram.
+            inner.send(data: encrypted, completion: completion)
         } catch {
             completion(error)
         }
@@ -500,7 +502,7 @@ nonisolated class Shadowsocks2022AESUDPConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveRaw { [weak self] data, error in
+        inner.receive { [weak self] data, error in
             guard let self else {
                 completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return
@@ -699,11 +701,13 @@ nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
     }
 
     override var isConnected: Bool { inner.isConnected }
+    override var deliversDatagrams: Bool { true }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         do {
             let encrypted = try encryptPacket(payload: data)
-            inner.sendRaw(data: encrypted, completion: completion)
+            // `inner.send` so any UoT framing wraps each encrypted datagram.
+            inner.send(data: encrypted, completion: completion)
         } catch {
             completion(error)
         }
@@ -714,7 +718,7 @@ nonisolated class Shadowsocks2022ChaChaUDPConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        inner.receiveRaw { [weak self] data, error in
+        inner.receive { [weak self] data, error in
             guard let self else {
                 completion(nil, ProxyError.connectionFailed("Connection deallocated"))
                 return

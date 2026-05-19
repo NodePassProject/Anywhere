@@ -468,36 +468,30 @@ nonisolated class TLSRecordTransport: RawTransport {
 
 // MARK: - SOCKS5UDPProxyConnection
 
-/// ProxyConnection subclass for SOCKS5 UDP ASSOCIATE relay.
-///
-/// Wraps a ``RawUDPSocket`` to the relay address, encoding outgoing packets with the
-/// SOCKS5 UDP header and decoding incoming packets by stripping the header.
-/// Also retains the TCP control connection to keep the UDP session alive.
+/// SOCKS5 UDP ASSOCIATE relay. The `relay` connection is pre-connected to
+/// the relay address (kernel UDP or chain-built); outgoing packets get the
+/// SOCKS5 UDP header prepended, incoming have it stripped. The TCP control
+/// connection is retained because closing it ends the SOCKS5 UDP session.
 nonisolated class SOCKS5UDPProxyConnection: ProxyConnection {
     private let tcpTransport: any RawTransport
     private let tlsClient: TLSClient?
     private let tlsConnection: TLSRecordConnection?
-    private let socket = RawUDPSocket()
+    private let relay: ProxyConnection
     private let udpHeader: Data
     private var cancelled = false
-
-    /// Bridges the socket's continuous receive loop to the one-shot
-    /// `receiveRaw` contract: each incoming datagram either satisfies a
-    /// pending completion or queues up for the next `receiveRaw` call.
-    private let stateLock = UnfairLock()
-    private var inbox: [Data] = []
-    private var pendingReceive: ((Data?, Error?) -> Void)?
 
     init(
         tcpTransport: any RawTransport,
         tlsClient: TLSClient?,
         tlsConnection: TLSRecordConnection?,
+        relay: ProxyConnection,
         destinationHost: String,
         destinationPort: UInt16
     ) {
         self.tcpTransport = tcpTransport
         self.tlsClient = tlsClient
         self.tlsConnection = tlsConnection
+        self.relay = relay
 
         // Pre-build the SOCKS5 UDP header: RSV(2) + FRAG(1) + ATYP + DST.ADDR + DST.PORT
         var header = Data([0x00, 0x00, 0x00])
@@ -509,28 +503,8 @@ nonisolated class SOCKS5UDPProxyConnection: ProxyConnection {
         super.init()
     }
 
-    /// Connects the UDP socket to the relay endpoint and waits for it to become ready.
-    func connectRelay(relayHost: String, relayPort: UInt16, completion: @escaping (Error?) -> Void) {
-        socket.connect(host: relayHost, port: relayPort,
-                       completionQueue: .global()) { [weak self] error in
-            guard let self else {
-                completion(ProxyError.connectionFailed("SOCKS5 UDP relay deallocated"))
-                return
-            }
-            if let error {
-                completion(ProxyError.connectionFailed("SOCKS5 UDP relay failed: \(error.localizedDescription)"))
-                return
-            }
-            self.socket.startReceiving { [weak self] data in
-                self?.handleIncoming(data)
-            }
-            completion(nil)
-        }
-    }
-
-    override var isConnected: Bool {
-        socket.isReady
-    }
+    override var isConnected: Bool { relay.isConnected }
+    override var deliversDatagrams: Bool { true }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         guard !cancelled else {
@@ -539,14 +513,15 @@ nonisolated class SOCKS5UDPProxyConnection: ProxyConnection {
         }
         var packet = udpHeader
         packet.append(data)
-        socket.send(data: packet, completion: completion)
+        // `relay.send` so any chain-level framing wraps each datagram.
+        relay.send(data: packet, completion: completion)
     }
 
     override func sendRaw(data: Data) {
         guard !cancelled else { return }
         var packet = udpHeader
         packet.append(data)
-        socket.send(data: packet)
+        relay.send(data: packet)
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
@@ -554,44 +529,33 @@ nonisolated class SOCKS5UDPProxyConnection: ProxyConnection {
             completion(nil, ProxyError.connectionFailed("SOCKS5 UDP not connected"))
             return
         }
-        let ready: Data? = stateLock.withLock {
-            if !inbox.isEmpty { return inbox.removeFirst() }
-            pendingReceive = completion
-            return nil
-        }
-        if let ready {
-            completion(ready, nil)
+        relay.receive { [weak self] data, error in
+            if let error {
+                completion(nil, error)
+                return
+            }
+            guard let self, let data, !data.isEmpty else {
+                completion(nil, nil)
+                return
+            }
+            if let payload = self.stripUDPHeader(data) {
+                completion(payload, nil)
+            } else {
+                // Async re-issue: `relay.receive` can deliver inline from an
+                // inbox-buffered datagram, so direct recursion would grow the
+                // stack under a malformed burst.
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    self?.receiveRaw(completion: completion)
+                }
+            }
         }
     }
 
     override func cancel() {
         guard !cancelled else { return }
         cancelled = true
-        socket.cancel()
+        relay.cancel()
         tcpTransport.forceCancel()
-
-        // Fail any pending `receiveRaw` so the upper layer doesn't hang.
-        let pending: ((Data?, Error?) -> Void)? = stateLock.withLock {
-            let cb = pendingReceive
-            pendingReceive = nil
-            inbox.removeAll()
-            return cb
-        }
-        pending?(nil, ProxyError.connectionFailed("SOCKS5 UDP cancelled"))
-    }
-
-    private func handleIncoming(_ data: Data) {
-        if cancelled { return }
-        guard let payload = stripUDPHeader(data) else { return }
-        let pending: ((Data?, Error?) -> Void)? = stateLock.withLock {
-            if let cb = pendingReceive {
-                pendingReceive = nil
-                return cb
-            }
-            inbox.append(payload)
-            return nil
-        }
-        pending?(payload, nil)
     }
 
     /// Strips the SOCKS5 UDP header from a received packet, returning the payload.

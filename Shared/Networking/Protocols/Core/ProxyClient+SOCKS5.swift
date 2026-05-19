@@ -75,21 +75,32 @@ extension ProxyClient {
                 username: configuration.socks5Username,
                 password: configuration.socks5Password,
                 serverAddress: configuration.serverAddress
-            ) { result in
+            ) { [weak self] result in
+                guard let self else {
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                    return
+                }
                 switch result {
                 case .success(let relay):
-                    let udpConnection = SOCKS5UDPProxyConnection(
-                        tcpTransport: transport,
-                        tlsClient: nil,
-                        tlsConnection: nil,
-                        destinationHost: destinationHost,
-                        destinationPort: destinationPort
-                    )
-                    udpConnection.connectRelay(relayHost: relay.host, relayPort: relay.port) { error in
-                        if let error {
-                            completion(.failure(error))
-                        } else {
+                    // For chained outbounds, the relay socket must ride the
+                    // same chain as the control channel.
+                    self.openSOCKS5UDPRelay(
+                        relayHost: relay.host,
+                        relayPort: relay.port
+                    ) { relayResult in
+                        switch relayResult {
+                        case .success(let relayConn):
+                            let udpConnection = SOCKS5UDPProxyConnection(
+                                tcpTransport: transport,
+                                tlsClient: nil,
+                                tlsConnection: nil,
+                                relay: relayConn,
+                                destinationHost: destinationHost,
+                                destinationPort: destinationPort
+                            )
                             completion(.success(udpConnection))
+                        case .failure(let error):
+                            completion(.failure(error))
                         }
                     }
                 case .failure(let error):
@@ -117,6 +128,49 @@ extension ProxyClient {
                 }
                 let proxyConnection = DirectProxyConnection(connection: wrappedTransport)
                 completion(.success(proxyConnection))
+            }
+        }
+    }
+
+    /// Opens a UDP-shaped `ProxyConnection` aimed at the SOCKS5 relay address.
+    /// Rebuilds the chain (outer chain or inherited `parentChain`) so the
+    /// relay rides the proxied path; falls back to a kernel UDP socket
+    /// otherwise.
+    func openSOCKS5UDPRelay(
+        relayHost: String,
+        relayPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        let effectiveChain: [ProxyConfiguration]
+        if let outerChain = configuration.chain, !outerChain.isEmpty {
+            effectiveChain = outerChain
+        } else if !parentChain.isEmpty {
+            effectiveChain = parentChain
+        } else {
+            effectiveChain = []
+        }
+        if !effectiveChain.isEmpty {
+            let chain = effectiveChain
+            switch Self.computeChainHopCommands(chain: chain, lastDeliver: .udp) {
+            case .success(let hopCommands):
+                buildChainTunnel(
+                    chain: chain, index: 0, currentTunnel: nil,
+                    hopCommands: hopCommands,
+                    finalDestination: (relayHost, relayPort),
+                    completion: completion
+                )
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        } else {
+            let socket = RawUDPSocket()
+            socket.connect(host: relayHost, port: relayPort,
+                           completionQueue: .global()) { error in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                completion(.success(DirectUDPProxyConnection(socket: socket)))
             }
         }
     }
