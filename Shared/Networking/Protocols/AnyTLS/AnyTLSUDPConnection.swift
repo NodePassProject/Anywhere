@@ -28,6 +28,7 @@ nonisolated final class AnyTLSUDPConnection: ProxyConnection, UDPFramingCapable 
 
     override var isConnected: Bool { inner.isConnected }
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    override var deliversDatagrams: Bool { true }
 
     // MARK: - Send
 

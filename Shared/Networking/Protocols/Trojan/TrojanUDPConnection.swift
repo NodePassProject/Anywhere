@@ -39,6 +39,7 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
 
     override var isConnected: Bool { inner.isConnected }
     override var outerTLSVersion: TLSVersion? { inner.outerTLSVersion }
+    override var deliversDatagrams: Bool { true }
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         inner.sendRaw(data: frame(data), completion: completion)

@@ -7,18 +7,14 @@
 
 import Foundation
 
-/// Reconnectable wrapper around `HysteriaSession`, mirroring the reference
-/// Hysteria client's `reconnectableClientImpl` (`core/client/reconnect.go`).
+/// Reconnectable wrapper around `HysteriaSession`. One active session per
+/// pool entry; dead sessions clear themselves via `onClose` and direct
+/// callers reconnect on the next acquire. Chained entries are removed on
+/// close since their transport is one-shot.
 ///
-/// Semantics:
-/// - At most one active `HysteriaSession` per unique server configuration.
-/// - Lazy reconnect: a dead session clears itself via the `onClose` hook;
-///   the next `openTCP`/`openUDP` call establishes a fresh one.
-/// - No in-wrapper retries: an operation that hits a dying session returns
-///   the error to the caller, matching the reference behavior.
-///
-/// Instances are shared via ``shared(for:)`` keyed by
-/// `(host, port, SNI, password)`. Callers should not construct directly.
+/// Use ``shared(for:)`` for direct dials, ``acquireChained(...)`` for
+/// pooled chained dials, ``chained(configuration:transport:)`` for a
+/// chain-link Hysteria handed a per-flow inbound tunnel.
 nonisolated final class HysteriaClient {
 
     private struct Key: Hashable {
@@ -26,32 +22,127 @@ nonisolated final class HysteriaClient {
         let port: UInt16
         let sni: String
         let password: String
+        /// Empty for direct entries; colon-joined chain hop IDs otherwise.
+        let chainSignature: String
     }
 
     private static let registryLock = UnfairLock()
     private static var registry: [Key: HysteriaClient] = [:]
+    /// Coalesces concurrent first-time builds for the same key.
+    private static var pending: [Key: [(Result<HysteriaClient, Error>) -> Void]] = [:]
 
     static func shared(for configuration: HysteriaConfiguration) -> HysteriaClient {
         let key = Key(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             sni: configuration.sni,
-            password: configuration.password
+            password: configuration.password,
+            chainSignature: ""
         )
         registryLock.lock()
         defer { registryLock.unlock() }
         if let existing = registry[key] { return existing }
-        let client = HysteriaClient(configuration: configuration)
+        let client = HysteriaClient(
+            configuration: configuration,
+            transport: nil,
+            chainHolders: [],
+            poolKey: key
+        )
         registry[key] = client
         return client
     }
 
+    /// Non-pooled client bound to a per-flow UDP-relay transport (used when
+    /// Hysteria is itself a chain link).
+    static func chained(
+        configuration: HysteriaConfiguration,
+        transport: QUICDatagramTransport
+    ) -> HysteriaClient {
+        HysteriaClient(
+            configuration: configuration,
+            transport: transport,
+            chainHolders: [],
+            poolKey: nil
+        )
+    }
+
+    /// Pooled chained dial. Shares one client per `(server, chainSignature)`.
+    /// On cache miss `builder` produces the chain's transport and the chain
+    /// hop ProxyClients that the new entry takes ownership of. Concurrent
+    /// misses coalesce to a single build.
+    static func acquireChained(
+        configuration: HysteriaConfiguration,
+        chainSignature: String,
+        builder: @escaping (@escaping (Result<(QUICDatagramTransport, [ProxyClient]), Error>) -> Void) -> Void,
+        completion: @escaping (Result<HysteriaClient, Error>) -> Void
+    ) {
+        let key = Key(
+            host: configuration.proxyHost,
+            port: configuration.proxyPort,
+            sni: configuration.sni,
+            password: configuration.password,
+            chainSignature: chainSignature
+        )
+
+        registryLock.lock()
+        if let existing = registry[key] {
+            registryLock.unlock()
+            completion(.success(existing))
+            return
+        }
+        if pending[key] != nil {
+            // Build already in flight — queue this completion for the same result.
+            pending[key]?.append(completion)
+            registryLock.unlock()
+            return
+        }
+        pending[key] = [completion]
+        registryLock.unlock()
+
+        builder { builderResult in
+            Self.registryLock.lock()
+            let queued = Self.pending.removeValue(forKey: key) ?? []
+            let outcome: Result<HysteriaClient, Error>
+            switch builderResult {
+            case .success(let (transport, holders)):
+                let client = HysteriaClient(
+                    configuration: configuration,
+                    transport: transport,
+                    chainHolders: holders,
+                    poolKey: key
+                )
+                Self.registry[key] = client
+                outcome = .success(client)
+            case .failure(let error):
+                outcome = .failure(error)
+            }
+            Self.registryLock.unlock()
+            for cb in queued { cb(outcome) }
+        }
+    }
+
     private let configuration: HysteriaConfiguration
+    /// Set for chained clients; `nil` for direct dials that use a kernel socket.
+    private let transport: QUICDatagramTransport?
+    /// Chain hop ProxyClients retained by a pooled chained entry.
+    private var chainHolders: [ProxyClient]
+    /// Pool-registry key. `nil` for per-call chained clients.
+    private let poolKey: Key?
     private let lock = UnfairLock()
     private var session: HysteriaSession?
+    /// `true` once a session has consumed the one-shot chained transport.
+    private var transportConsumed: Bool = false
 
-    private init(configuration: HysteriaConfiguration) {
+    private init(
+        configuration: HysteriaConfiguration,
+        transport: QUICDatagramTransport?,
+        chainHolders: [ProxyClient],
+        poolKey: Key?
+    ) {
         self.configuration = configuration
+        self.transport = transport
+        self.chainHolders = chainHolders
+        self.poolKey = poolKey
     }
 
     private func acquireSession(completion: @escaping (Result<HysteriaSession, Error>) -> Void) {
@@ -65,17 +156,33 @@ nonisolated final class HysteriaClient {
             return
         }
 
-        let newSession = HysteriaSession(configuration: configuration)
+        // Chained transport is one-shot; once consumed, drop the pool
+        // entry inline so subsequent `acquireChained` calls cache-miss
+        // and build a fresh chain. Without this, the entry lingers until
+        // `handleSessionClose` fires async, and acquires landing in that
+        // window all hand out this dead client. Lock order is instance →
+        // registry, matching `handleSessionClose`.
+        if transport != nil && transportConsumed {
+            if let key = poolKey {
+                Self.registryLock.lock()
+                if Self.registry[key] === self {
+                    Self.registry.removeValue(forKey: key)
+                }
+                Self.registryLock.unlock()
+            }
+            lock.unlock()
+            completion(.failure(HysteriaError.streamClosed))
+            return
+        }
+
+        let newSession = HysteriaSession(configuration: configuration, transport: transport)
         session = newSession
+        if transport != nil { transportConsumed = true }
         lock.unlock()
 
         newSession.onClose = { [weak self, weak newSession] in
             guard let self, let newSession else { return }
-            self.lock.lock()
-            if self.session === newSession {
-                self.session = nil
-            }
-            self.lock.unlock()
+            self.handleSessionClose(newSession)
         }
 
         newSession.ensureReady { [weak newSession] error in
@@ -85,6 +192,34 @@ nonisolated final class HysteriaClient {
             }
             if let error { completion(.failure(error)) }
             else { completion(.success(newSession)) }
+        }
+    }
+
+    /// Handles a session closing. Chained entries also drop chain holders
+    /// and unregister from the pool. The registry removal happens under the
+    /// per-instance lock so concurrent `acquireChained` never sees an entry
+    /// whose per-instance state has already been cleared. Lock order is
+    /// instance → registry; no other path takes them in the reverse order.
+    private func handleSessionClose(_ closedSession: HysteriaSession) {
+        lock.lock()
+        guard session === closedSession else {
+            lock.unlock()
+            return
+        }
+        session = nil
+        let holders = chainHolders
+        chainHolders = []
+        if transport != nil, let key = poolKey {
+            Self.registryLock.lock()
+            if Self.registry[key] === self {
+                Self.registry.removeValue(forKey: key)
+            }
+            Self.registryLock.unlock()
+        }
+        lock.unlock()
+
+        for client in holders {
+            client.cancel()
         }
     }
 
@@ -167,16 +302,29 @@ nonisolated final class HysteriaClient {
         }
     }
 
-    /// Drops the cached session so the next acquire reconnects. Unlike
-    /// waiting for `onClose`, this takes effect synchronously — racing
-    /// callers won't observe the stale session between now and when
-    /// `close()` finally runs on the session queue.
+    /// Synchronously drops the cached session (used by `closeAll` on device
+    /// wake). Chained entries also drop chain holders and unregister. See
+    /// `handleSessionClose` for the lock-order rationale.
     private func invalidateSession() {
         lock.lock()
         let current = session
         session = nil
+        let holders = chainHolders
+        chainHolders = []
+        if transport != nil, let key = poolKey {
+            Self.registryLock.lock()
+            if Self.registry[key] === self {
+                Self.registry.removeValue(forKey: key)
+            }
+            Self.registryLock.unlock()
+        }
         lock.unlock()
+
         current?.close()
+
+        for client in holders {
+            client.cancel()
+        }
     }
 
     /// Invalidates every pooled session. Used on device wake to drop

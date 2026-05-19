@@ -99,7 +99,9 @@ nonisolated final class HysteriaSession {
 
     // MARK: - Init
 
-    init(configuration: HysteriaConfiguration) {
+    /// - Parameter transport: Optional UDP-relay transport for chained
+    ///   Hysteria; when set, QUIC rides it instead of a kernel socket.
+    init(configuration: HysteriaConfiguration, transport: QUICDatagramTransport? = nil) {
         self.configuration = configuration
         self.quic = QUICConnection(
             host: configuration.proxyHost,
@@ -107,7 +109,8 @@ nonisolated final class HysteriaSession {
             serverName: configuration.sni,
             alpn: ["h3"],
             datagramsEnabled: true,
-            tuning: .hysteria(uploadMbps: configuration.uploadMbps)
+            tuning: .hysteria(uploadMbps: configuration.uploadMbps),
+            transport: transport
         )
     }
 

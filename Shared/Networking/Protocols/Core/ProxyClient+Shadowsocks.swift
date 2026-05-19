@@ -33,6 +33,52 @@ extension ProxyClient {
         ))
     }
 
+    /// Opens a real-UDP path to the SS server (via a UDP-shaped chain tunnel
+    /// or a kernel `SOCK_DGRAM`) and wraps with SS UDP encryption keyed for
+    /// the final destination.
+    func connectShadowsocksRealUDP(
+        destinationHost: String,
+        destinationPort: UInt16,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        let wrapAndComplete: (ProxyConnection) -> Void = { [weak self] udpInner in
+            guard let self else {
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                return
+            }
+            completion(self.wrapWithShadowsocks(
+                inner: udpInner,
+                command: .udp,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort
+            ))
+        }
+
+        if let tunnel = self.tunnel {
+            // Standard SS UDP only runs over real datagrams. A TCP tunnel here
+            // is a configuration error — fail rather than silently truncate.
+            guard tunnel.deliversDatagrams else {
+                completion(.failure(ProxyError.protocolError(
+                    "Shadowsocks UDP requires the chain link above it to deliver UDP datagrams."
+                )))
+                return
+            }
+            self.tunnel = nil
+            wrapAndComplete(tunnel)
+        } else {
+            let socket = RawUDPSocket()
+            socket.connect(host: directDialHost,
+                           port: configuration.serverPort,
+                           completionQueue: .global()) { error in
+                if let error {
+                    completion(.failure(error))
+                    return
+                }
+                wrapAndComplete(DirectUDPProxyConnection(socket: socket))
+            }
+        }
+    }
+
     /// Wraps a bare transport connection with Shadowsocks AEAD encryption.
     fileprivate func wrapWithShadowsocks(
         inner: ProxyConnection,

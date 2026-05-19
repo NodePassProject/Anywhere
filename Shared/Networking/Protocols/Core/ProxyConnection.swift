@@ -39,6 +39,11 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
     /// Subclasses should override to report their actual TLS version.
     var outerTLSVersion: TLSVersion? { nil }
 
+    /// Whether each `send`/`receive` call preserves one UDP datagram
+    /// boundary. Subclasses that frame UDP traffic (UoT or native UDP)
+    /// override to `true`.
+    var deliversDatagrams: Bool { false }
+
     // MARK: Traffic Statistics
 
     private var _bytesSent: Int64 = 0
