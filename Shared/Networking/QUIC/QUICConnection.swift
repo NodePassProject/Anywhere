@@ -172,6 +172,21 @@ nonisolated class QUICConnection {
 
     static let maxUDPPayload = 1452
 
+    /// Per-packet UDP payload ceiling when QUIC rides a
+    /// `QUICDatagramTransport` instead of a kernel socket. Sized to the
+    /// RFC 9000 §14 initial PMTU floor (1200 B) so every outer packet
+    /// fits in any conformant inner UDP transport — the inner can deliver
+    /// 1200 B as one DATAGRAM (its own MTU is at least the same floor,
+    /// typically 1408 B after QUIC overhead). At the previous 1452 B the
+    /// outer routinely needed the inner to fragment, costing one extra
+    /// inner-Hysteria header per packet (~16 B per fragment, plus a
+    /// second inner-QUIC packet's worth of header per outer packet); and
+    /// when the inner's path collapsed below the outer's static size,
+    /// loss recovery looped at the same too-large size forever (PMTUD is
+    /// disabled for chained transports so the outer can't naturally
+    /// shrink). 1200 is the smallest size that can never be too large.
+    static let chainedMaxUDPPayload = 1200
+
     /// Reusable per-packet buffers. ngtcp2 is single-threaded on `queue`
     /// so a single slot for each direction is sufficient; bursts are
     /// amortised at the dispatch-source level (drain the kernel queue
@@ -300,7 +315,10 @@ nonisolated class QUICConnection {
     func writeStream(_ streamId: Int64, data: Data, fin: Bool = false,
                      completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
-            guard let self, let conn = self.conn, self.state == .connected else {
+            // See `writeDatagram` — split the guards so the user's
+            // completion fires once even when `self` is gone.
+            guard let self else { completion(QUICError.closed); return }
+            guard let conn = self.conn, self.state == .connected else {
                 completion(QUICError.closed)
                 return
             }
@@ -323,7 +341,12 @@ nonisolated class QUICConnection {
     /// exceeds the remote's max_datagram_frame_size).
     func writeDatagram(_ data: Data, completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
-            guard let self, self.conn != nil, self.state == .connected else {
+            // Two-stage guard so the user's completion always fires once,
+            // even when the connection has gone away. A single combined
+            // `guard let self, …` would silently abandon the completion
+            // (and any batch tracker it carries) on the `self == nil` arm.
+            guard let self else { completion(QUICError.closed); return }
+            guard self.conn != nil, self.state == .connected else {
                 completion(QUICError.closed)
                 return
             }
@@ -344,7 +367,12 @@ nonisolated class QUICConnection {
     /// payload at a smaller MTU on `datagramTooLarge`).
     func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
-            guard let self, self.conn != nil, self.state == .connected else {
+            // See `writeDatagram` for why the guards are split — the batch
+            // tracker holds the caller's completion, and dropping it on
+            // self == nil would strand the caller (and any further
+            // datagrams it intended to send).
+            guard let self else { completion(QUICError.closed); return }
+            guard self.conn != nil, self.state == .connected else {
                 completion(QUICError.closed)
                 return
             }
@@ -398,16 +426,24 @@ nonisolated class QUICConnection {
     ///
     /// Two ceilings apply and we take the lower:
     /// - **Remote frame ceiling**: the peer's `max_datagram_frame_size`, minus
-    ///   the DATAGRAM frame's own overhead (1 byte type + up to 8 bytes length
-    ///   varint). A frame larger than this gets rejected by ngtcp2 with
-    ///   `NGTCP2_ERR_INVALID_ARGUMENT`.
+    ///   the DATAGRAM frame's own overhead (1 byte type + length varint). For
+    ///   payloads up to 16383 bytes the varint is 2 bytes, so 3 bytes total —
+    ///   matches sing-quic's `udpMTU = 1200 - 3`. A frame larger than this
+    ///   gets rejected by ngtcp2 with `NGTCP2_ERR_INVALID_ARGUMENT`.
     /// - **Path-MTU ceiling**: the maximum UDP payload ngtcp2 will currently
     ///   emit on this path, minus the QUIC packet headers wrapping the frame
-    ///   (short-header bytes, packet number, AEAD tag, DATAGRAM frame header).
-    ///   A frame larger than this leaves `write_datagram` returning
-    ///   `nwrite=0, accepted=0` indefinitely — which would wedge the queue
-    ///   without this clamp. 64 bytes is a conservative bound that covers all
-    ///   four header components with slack.
+    ///   (short-header byte, dest-CID, packet number, AEAD tag, DATAGRAM frame
+    ///   header). The worst case is: 1 (flags) + 20 (max DCID per ngtcp2) +
+    ///   4 (largest packet-number encoding) + 16 (AES-GCM tag) + 3 (DATAGRAM
+    ///   frame header with 2-byte length varint) = 44 bytes. Must be the
+    ///   worst case, not the typical case: an under-estimate leaves
+    ///   `write_datagram` returning `nwrite=0, accepted=0` indefinitely, and
+    ///   the `writeToUDP` loop's `dgram.count > bound` check treats that
+    ///   payload as CW-blocked rather than too-large — wedging the head of
+    ///   the queue against the same condition every retry until something
+    ///   else changes the path MTU. 44 ensures that any payload we hand to
+    ///   ngtcp2 will actually fit on the wire, or trip the `> bound` branch
+    ///   so the upper layer can re-fragment.
     ///
     /// Must be called on `queue` — reads ngtcp2 state that is only mutated
     /// there (transport params, current path MTU). Off-queue calls would
@@ -419,9 +455,9 @@ nonisolated class QUICConnection {
         guard let params = ngtcp2_swift_conn_get_remote_transport_params(conn) else { return 0 }
         let maxFrame = Int(params.pointee.max_datagram_frame_size)
         guard maxFrame > 0 else { return 0 }
-        let frameLimit = max(0, maxFrame - 9)
+        let frameLimit = max(0, maxFrame - 3)
         let pathBytes = ngtcp2_conn_get_path_max_tx_udp_payload_size(conn)
-        let pathLimit = max(0, Int(pathBytes) - 64)
+        let pathLimit = max(0, Int(pathBytes) - 44)
         return min(frameLimit, pathLimit)
     }
 
@@ -598,6 +634,19 @@ nonisolated class QUICConnection {
             let dgrams = self.pendingDatagrams
             self.pendingDatagrams.removeAll()
             let closeError = error ?? QUICError.closed
+            // Surface the close to a still-pending connect callback. Most
+            // close paths (DRAINING in handleReceivedPacket, handshake
+            // crypto failure, timer expiry, transport errorHandler) clear
+            // and fire `connectCompletion` themselves before reaching
+            // here, but `drainSocketReads` on a non-EAGAIN recv errno
+            // calls `close(error:)` directly — without this the connect
+            // callback would leak and any caller that hadn't installed
+            // `connectionClosedHandler` first would hang on a dropped
+            // socket during the handshake window.
+            if let cb = self.connectCompletion {
+                self.connectCompletion = nil
+                cb(closeError)
+            }
             for pw in writes { pw.completion(closeError) }
             for d in dgrams { d.completion?(closeError) }
             self.connectionClosedHandler?(closeError)
@@ -637,8 +686,12 @@ nonisolated class QUICConnection {
             writeToUDP()    // send client initial
             rescheduleTimer()
         } catch {
+            // Clear `connectCompletion` before firing so any later async
+            // path (e.g. a stray expiry/recv that slipped past closeSocket)
+            // can't double-fire it.
             state = .closed
             closeSocket()
+            connectCompletion = nil
             completion(error)
         }
     }
@@ -678,8 +731,10 @@ nonisolated class QUICConnection {
             writeToUDP()    // send client initial
             rescheduleTimer()
         } catch {
+            // See `setupRawSocket` for why we nil this before firing.
             state = .closed
             transport.cancel()
+            connectCompletion = nil
             completion(error)
         }
     }
@@ -995,7 +1050,13 @@ nonisolated class QUICConnection {
         var settings = ngtcp2_settings()
         ngtcp2_swift_settings_default(&settings)
         settings.initial_ts = currentTimestamp()
-        settings.max_tx_udp_payload_size = Self.maxUDPPayload
+        // Clamp the outer's per-packet UDP payload when riding a chained
+        // transport: PMTUD is disabled (see below), so this value never
+        // shrinks at runtime — and a static 1452 was larger than typical
+        // inner Hysteria DATAGRAM payloads (~1408 B), so every outer
+        // packet forced an inner fragmentation cycle. 1200 B is the
+        // RFC 9000 §14 PMTU floor and fits in one inner DATAGRAM end-to-end.
+        settings.max_tx_udp_payload_size = (transport != nil) ? Self.chainedMaxUDPPayload : Self.maxUDPPayload
         settings.cc_algo = tuning.ngtcp2CCAlgo
         settings.max_stream_window = tuning.maxStreamWindow
         settings.max_window = tuning.maxWindow
@@ -1032,10 +1093,23 @@ nonisolated class QUICConnection {
             return Unmanaged<QUICConnection>.fromOpaque(ud).takeUnretainedValue().conn
         }
 
+        // PMTU discovery only makes sense over a real kernel socket. When
+        // we're riding a `QUICDatagramTransport` (chained QUIC over a UDP
+        // relay), the "path" is virtualized: probes are carried inside the
+        // inner protocol, which has its own framing/MTU rules. Successful
+        // probes don't prove anything about the wire — they only confirm
+        // the inner can carry that size today — and a probe failure trips
+        // ngtcp2's blackhole detection on what is, on the wire, a routine
+        // inner drop. Skip probes for chained transports; matches the
+        // reference's approach of disabling PMTUD when the QUIC layer
+        // sits over a non-direct PacketConn.
+        let usePMTUD = (transport == nil)
         var connPtr: OpaquePointer?
         let rv = Self.pmtudProbes.withUnsafeBufferPointer { probes -> Int32 in
-            settings.pmtud_probes = probes.baseAddress
-            settings.pmtud_probeslen = probes.count
+            if usePMTUD {
+                settings.pmtud_probes = probes.baseAddress
+                settings.pmtud_probeslen = probes.count
+            }
             return ngtcp2_swift_conn_client_new(
                 &connPtr, &dcid, &scid, &path, NGTCP2_PROTO_VER_V1,
                 &callbacks, &settings, &params, nil, &connRefStorage
@@ -1080,6 +1154,28 @@ nonisolated class QUICConnection {
         }
     }
 
+    /// Uninstalls Brutal and reverts to ngtcp2's CUBIC. Used when the
+    /// Hysteria server responds with `Hysteria-CC-RX: auto`, which the
+    /// reference client interprets as "drop Brutal and let your own pacer
+    /// adapt". No-op if Brutal isn't installed. Safe to call off-queue.
+    ///
+    /// The Brutal registry entry is dropped BEFORE the CC table is rewired
+    /// so any in-flight trampoline that loses the race finds no entry and
+    /// no-ops (rather than touching a half-initialized CUBIC struct). After
+    /// the CC swap, ngtcp2 only calls the new CUBIC callbacks, so the
+    /// Brutal trampolines become unreachable.
+    func uninstallBrutalCC() {
+        queue.async { [weak self] in
+            guard let self, let conn = self.conn else { return }
+            if let key = self.brutalCCKey {
+                brutalRegistryRemove(cc: key)
+                self.brutalCCKey = nil
+                self.brutalCC = nil
+            }
+            ngtcp2_swift_uninstall_brutal(conn)
+        }
+    }
+
     // MARK: Packet Processing
 
     fileprivate func handleReceivedPacket(_ data: Data) {
@@ -1107,25 +1203,31 @@ nonisolated class QUICConnection {
         }
 
         if rv != 0 {
-            if rv == NGTCP2_ERR_DRAINING || rv == NGTCP2_ERR_CLOSING {
-                let error = QUICError.closed
-                if let cb = connectCompletion {
-                    connectCompletion = nil
-                    cb(error)
-                }
-                close(error: error)
-                return
+            // Every non-zero return from `read_pkt` is terminal. ngtcp2
+            // either entered DRAINING/CLOSING explicitly, or one of its
+            // callbacks (recv_crypto_data, recv_stream_data, …) bubbled up
+            // a fatal code — PROTO, TRANSPORT_PARAM, NOMEM, VERSION_NEGO,
+            // CALLBACK_FAILURE, CRYPTO, etc. None of these are recoverable
+            // from the application's side; the previous behavior of falling
+            // through to writeToUDP() worked only because a follow-up read
+            // eventually surfaced CLOSING — but a UDP-only workload has no
+            // organic read pressure and can sit on a torn-down connection
+            // for the full keep-alive window (~10 s) before noticing.
+            let error: Error
+            switch rv {
+            case NGTCP2_ERR_DRAINING, NGTCP2_ERR_CLOSING:
+                error = QUICError.closed
+            case NGTCP2_ERR_CALLBACK_FAILURE, NGTCP2_ERR_CRYPTO:
+                error = QUICError.handshakeFailed("ngtcp2 error: \(rv)")
+            default:
+                error = QUICError.connectionFailed("ngtcp2 read_pkt: \(rv)")
             }
-            // Fatal errors (e.g. TLS callback failure) — close and notify
-            if rv == NGTCP2_ERR_CALLBACK_FAILURE || rv == NGTCP2_ERR_CRYPTO {
-                let error = QUICError.handshakeFailed("ngtcp2 error: \(rv)")
-                if let cb = connectCompletion {
-                    connectCompletion = nil
-                    cb(error)
-                }
-                close(error: error)
-                return
+            if let cb = connectCompletion {
+                connectCompletion = nil
+                cb(error)
             }
+            close(error: error)
+            return
         }
         writeToUDP()
         // Incoming packets may contain MAX_STREAM_DATA, extending the send
@@ -1488,7 +1590,18 @@ private let quicRecvDatagramCB: @convention(c) (
     OpaquePointer?, UInt32, UnsafePointer<UInt8>?, Int, UnsafeMutableRawPointer?
 ) -> Int32 = { _, _, data, datalen, ud in
     guard let data, datalen > 0, let qc = qcFromUserData(ud) else { return 0 }
-    let d = Data(bytes: data, count: datalen)
-    qc.datagramHandler?(d)
+    // Wrap ngtcp2's receive buffer without copying — mirrors the stream-data
+    // path. `datagramHandler` (HysteriaSession.handleDatagram →
+    // HysteriaProtocol.decodeUDPMessage) detaches the bytes it actually keeps
+    // via `subdata(in:)` before returning, so the no-copy view only needs to
+    // be valid for this synchronous call. Saves ~1.2 KB allocation per
+    // datagram — meaningful under bulk UDP through Hysteria where this
+    // fires thousands of times/s.
+    let view = Data(
+        bytesNoCopy: UnsafeMutableRawPointer(mutating: data),
+        count: datalen,
+        deallocator: .none
+    )
+    qc.datagramHandler?(view)
     return 0
 }

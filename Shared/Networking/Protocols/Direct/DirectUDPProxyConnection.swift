@@ -73,11 +73,18 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
             return
         }
 
-        // Single-pending discipline — overlapping receives would silently drop
-        // the earlier completion when this assignment overwrites it.
+        // Single-pending discipline — overlapping receives are an API
+        // violation. The assert catches it in debug, but in release the
+        // previous overwrite-and-forget behavior silently leaked the
+        // earlier completion (a closure capturing the LWIPUDPFlow's
+        // receive loop, which would then hang forever waiting on a result
+        // that never came). Swap the stale completion out under the lock
+        // and surface a defined error to it so the caller learns.
         assert(pendingReceive == nil, "DirectUDPProxyConnection: overlapping receiveRaw call")
+        let stale = pendingReceive
         pendingReceive = completion
         recvLock.unlock()
+        stale?(nil, ProxyError.protocolError("overlapping receiveRaw on Direct UDP"))
     }
 
     override func cancel() {

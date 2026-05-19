@@ -52,7 +52,17 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     }
     private var defragSlots: [UInt16: DefragSlot] = [:]
     private static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
-    private static let maxDefragSlots = 8
+    /// Concurrent in-progress reassembly cap. sing-quic's `cache.LruCache`
+    /// (hysteria2/packet.go) has no count cap — only the 10 s TTL — so a
+    /// tight value here drops legitimate in-progress assemblies under
+    /// concurrent fragmented UDP load (DoQ + WebRTC + QUIC-tunneled video
+    /// all running through one Hysteria session). 32 keeps the worst-case
+    /// memory bounded (32 × 255 × ~1.4 KB ≈ 11 MB if every slot held the
+    /// largest possible fragmented payload — in practice slots hold a
+    /// handful of fragments and turn over quickly) while leaving enough
+    /// headroom that the LRU only evicts under genuinely pathological
+    /// concurrency.
+    private static let maxDefragSlots = 32
 
     /// Monotonic per-connection PacketID counter. Wraps from 0xFFFF back to
     /// 1, skipping 0 (reserved as "unfragmented" by some Hysteria servers).
@@ -97,6 +107,11 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
 
     func handleIncomingDatagram(_ msg: HysteriaProtocol.UDPMessage) {
         // On session queue.
+        // `cancel()` clears packetQueue/defragSlots inline but defers
+        // `releaseUDPSession` to the next queue cycle; datagrams arriving
+        // in that window would otherwise repopulate state on a dead
+        // connection. Bail early so the frag-slot churn is also skipped.
+        if state == .closed { return }
         let assembled: Data?
         if msg.fragCount <= 1 {
             assembled = msg.data
@@ -131,19 +146,38 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         let now = DispatchTime.now()
         let nowNs = now.uptimeNanoseconds
 
-        if !defragSlots.isEmpty {
-            defragSlots = defragSlots.filter { _, slot in
-                nowNs &- slot.createdAt.uptimeNanoseconds <= Self.defragSlotTTLNanos
-            }
-        }
+        // TTL eviction is lazy: we only check the slot we're about to
+        // touch, plus the LRU eviction walk we do at the cap. A full-dict
+        // rebuild on every fragment was O(n) per packet (matters at the
+        // raised cap of 32 under bursty fragmented UDP — DoQ + media).
+        let existing = defragSlots[msg.packetID]
+        let existingIsExpired = existing.map {
+            nowNs &- $0.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
+        } ?? false
 
         var slot: DefragSlot
-        if let existing = defragSlots[msg.packetID], existing.fragmentCount == Int(msg.fragCount) {
+        if let existing, !existingIsExpired,
+           existing.fragmentCount == Int(msg.fragCount) {
             slot = existing
         } else {
-            if defragSlots[msg.packetID] == nil, defragSlots.count >= Self.maxDefragSlots,
-               let oldestKey = defragSlots.min(by: { $0.value.createdAt < $1.value.createdAt })?.key {
-                defragSlots.removeValue(forKey: oldestKey)
+            // We're allocating a new slot. If at cap, evict the oldest —
+            // and roll TTL eviction into the same walk so we don't drop a
+            // live slot when an expired one is sitting right there.
+            if existing == nil || existingIsExpired,
+               defragSlots.count >= Self.maxDefragSlots {
+                let victim: UInt16? = defragSlots
+                    .lazy
+                    .map { (key: $0.key, slot: $0.value) }
+                    .min { lhs, rhs in
+                        // Prefer expired slots over live ones, then oldest.
+                        let lhsExpired = nowNs &- lhs.slot.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
+                        let rhsExpired = nowNs &- rhs.slot.createdAt.uptimeNanoseconds > Self.defragSlotTTLNanos
+                        if lhsExpired != rhsExpired { return lhsExpired }
+                        return lhs.slot.createdAt < rhs.slot.createdAt
+                    }?.key
+                if let victim {
+                    defragSlots.removeValue(forKey: victim)
+                }
             }
             slot = DefragSlot(
                 fragments: Array(repeating: nil, count: Int(msg.fragCount)),
@@ -179,13 +213,24 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     /// payload in a Hysteria UDP datagram, fragmenting when the QUIC
     /// DATAGRAM MTU would be exceeded.
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
+        // Zero-byte payloads survive fragmentation but the server rejects
+        // them — the reference Hysteria's `ParseUDPMessage` requires at
+        // least one byte of data after the address (we mirror that in
+        // `HysteriaProtocol.decodeUDPMessage`). Sending one wastes a
+        // QUIC DATAGRAM frame and leaves the caller with a misleading
+        // "send succeeded" log line for a packet that's actually
+        // discarded server-side. Drop early; mirrors UDP's lossy contract.
+        guard !data.isEmpty else {
+            completion(nil)
+            return
+        }
         session.queue.async { [weak self] in
             guard let self else { completion(HysteriaError.streamClosed); return }
             guard self.state == .ready else {
                 completion(self.state == .closed ? HysteriaError.streamClosed : HysteriaError.notReady)
                 return
             }
-            self.attemptSend(data: data, retriesLeft: 1, completion: completion)
+            self.attemptSend(data: data, maxSizeOverride: nil, retriesLeft: 1, completion: completion)
         }
     }
 
@@ -196,12 +241,16 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     /// Fragments `data` against the current path MTU and submits the
     /// fragments to the QUIC layer. On a `datagramTooLarge` outcome
     /// (PMTU shrank between fragmentation and `writeToUDP`), retries once
-    /// at the now-reported smaller bound — re-fragmentation uses a fresh
-    /// `packetID`, so the receiver's defrag slot for the orphaned attempt
-    /// times out independently and doesn't mix with the retry.
+    /// using the bound carried in the error — refragmenting against
+    /// `session.maxDatagramPayloadSize` would reproduce the same value
+    /// that just failed because QUIC's tooLarge classifier uses that same
+    /// getter. Re-fragmentation also uses a fresh `packetID`, so the
+    /// receiver's defrag slot for the orphaned attempt times out
+    /// independently and doesn't mix with the retry.
     /// Must be called on `session.queue`.
     private func attemptSend(
         data: Data,
+        maxSizeOverride: Int?,
         retriesLeft: Int,
         completion: @escaping (Error?) -> Void
     ) {
@@ -211,13 +260,15 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         // collapsed below the Hysteria UDP header floor. Either case
         // makes every subsequent fragmentation attempt fail with a
         // misleading "too large to fragment" error; surface a dedicated
-        // error so the consumer's log shows the real reason once instead
-        // of one "too large" line per send.
-        let maxSize = self.session.maxDatagramPayloadSize
+        // terminal error so the LWIP layer closes the flow once instead
+        // of logging one transient line per send forever — the
+        // destination address is fixed, so the header size is fixed, so
+        // this outcome is permanent for this flow.
+        let maxSize = maxSizeOverride ?? self.session.maxDatagramPayloadSize
         let headerSize = HysteriaProtocol.udpHeaderSize(address: self.destination)
         guard maxSize > headerSize else {
-            completion(HysteriaError.connectionFailed(
-                "Datagram path unusable (peer max \(maxSize) ≤ header \(headerSize))"
+            completion(HysteriaError.destinationTooLargeForDatagram(
+                maxFrame: maxSize, headerSize: headerSize
             ))
             return
         }
@@ -239,10 +290,11 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
             // `session.queue` (== `quic.queue`), so we're safe to mutate
             // state and recurse into `attemptSend` directly.
             // `datagramTooLarge` means PMTU shrank under us between
-            // fragmentation and send — re-attempt once with a fresh
-            // `maxDatagramPayloadSize` read.
+            // fragmentation and send — re-attempt once at the bound the
+            // QUIC layer reports, not at `maxDatagramPayloadSize` (which
+            // would return the same already-failing value).
             if let qErr = error as? QUICConnection.QUICError,
-               case .datagramTooLarge = qErr,
+               case .datagramTooLarge(let maxBound) = qErr,
                retriesLeft > 0,
                let self = self {
                 guard self.state == .ready else {
@@ -253,6 +305,7 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
                 }
                 self.attemptSend(
                     data: data,
+                    maxSizeOverride: maxBound,
                     retriesLeft: retriesLeft - 1,
                     completion: completion
                 )
@@ -294,7 +347,19 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
                 completion(nil, nil)
                 return
             }
+            // Single-pending discipline — overlapping receives are an API
+            // violation. The contract from `ProxyConnection.receiveLoop` is
+            // strictly serial, so in normal use this never trips. But the
+            // previous overwrite-and-forget behavior silently leaked the
+            // earlier completion (capturing `LWIPUDPFlow.startReceiving`'s
+            // loop, which would then hang on a result that never came).
+            // Mirrors `DirectUDPProxyConnection.receiveRaw`. The assert
+            // catches it in debug; in release we surface a defined error
+            // to the stale completion so the caller learns.
+            assert(self.pendingReceive == nil, "HysteriaUDPConnection: overlapping receiveRaw call")
+            let stale = self.pendingReceive
             self.pendingReceive = completion
+            stale?(nil, HysteriaError.connectionFailed("overlapping receiveRaw on Hysteria UDP"))
         }
     }
 
@@ -333,6 +398,7 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     /// Returns the next PacketID in monotonic order, skipping 0. Must be
     /// called on `session.queue`.
     private func newPacketID() -> UInt16 {
+        dispatchPrecondition(condition: .onQueue(session.queue))
         let pid = nextPacketID
         nextPacketID = nextPacketID == UInt16.max ? 1 : nextPacketID + 1
         return pid
