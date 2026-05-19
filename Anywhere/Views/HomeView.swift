@@ -38,8 +38,14 @@ struct HomeView: View {
 
     var body: some View {
         ZStack {
-            backgroundGradient
-                .ignoresSafeArea()
+            if #available(iOS 26.0, *) {
+                backgroundGradient
+                    .ignoresSafeArea()
+            } else {
+                backgroundGradient
+                    .ignoresSafeArea(edges: .horizontal)
+                    .ignoresSafeArea(edges: .top)
+            }
 
             GeometryReader { geometry in
                 ScrollView {
