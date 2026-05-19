@@ -66,6 +66,19 @@ nonisolated final class HysteriaSession {
     private var udpSessions: [UInt32: HysteriaUDPConnection] = [:]
     private var nextUDPSessionID: UInt32 = 1
 
+    /// Scheduled close fired when the session has held zero TCP streams and
+    /// zero UDP sessions for `idleCloseDelay`. Without this, the QUIC
+    /// connection (UDP socket, ngtcp2 state, 4 MiB kernel buffers, 10 s
+    /// keep-alive PING) stays resident forever after the last consumer goes
+    /// away. Accessed only on `queue`.
+    private var idleCloseWorkItem: DispatchWorkItem?
+    /// How long the session waits idle (no active streams, no active UDP
+    /// sessions) before closing itself. 60 s is short enough to free
+    /// resources promptly on burst-y workloads, long enough that the
+    /// session survives back-to-back UDP queries that close their flows
+    /// before the next opens.
+    private static let idleCloseDelay: DispatchTimeInterval = .seconds(60)
+
     /// Server-advertised UDP support.
     private(set) var udpSupported = false
     /// Server-advertised RX budget (bytes/sec). 0 = unlimited.
@@ -109,7 +122,10 @@ nonisolated final class HysteriaSession {
             case .ready:
                 completion(nil)
             case .closed:
-                completion(HysteriaError.connectionFailed("Session closed"))
+                // Distinguishable from a connect failure so the
+                // `HysteriaClient` retry shim can reconnect when the idle
+                // timer closed the session between acquire and use.
+                completion(HysteriaError.streamClosed)
             case .connecting, .authenticating:
                 self.readyCallbacks.append(completion)
             case .idle:
@@ -345,6 +361,7 @@ nonisolated final class HysteriaSession {
         _poolLock.lock()
         _poolTCPCount = max(0, _poolTCPCount - 1)
         _poolLock.unlock()
+        updateIdleCloseTimer()
         conn.handleStreamTermination(error: error)
     }
 
@@ -376,6 +393,7 @@ nonisolated final class HysteriaSession {
             self._poolLock.lock()
             self._poolTCPCount += 1
             self._poolLock.unlock()
+            self.updateIdleCloseTimer()
             completion(sid, nil)
         }
     }
@@ -399,28 +417,45 @@ nonisolated final class HysteriaSession {
                 self._poolLock.lock()
                 self._poolTCPCount = max(0, self._poolTCPCount - 1)
                 self._poolLock.unlock()
+                self.updateIdleCloseTimer()
             }
         }
     }
 
     // MARK: - UDP session API (called by HysteriaUDPConnection)
 
-    /// Registers a new UDP session. Invokes `completion` with the assigned
-    /// session ID, or nil if the server didn't advertise UDP support.
-    /// Completion runs on the session queue.
-    func registerUDPSession(_ conn: HysteriaUDPConnection, completion: @escaping (UInt32?) -> Void) {
+    /// Registers a new UDP session. Completion runs on the session queue
+    /// and carries a distinct error per failure mode so the caller (and
+    /// the `HysteriaClient` retry shim) can tell `udpNotSupported` apart
+    /// from a transient `notReady`.
+    func registerUDPSession(_ conn: HysteriaUDPConnection, completion: @escaping (Result<UInt32, Error>) -> Void) {
         let body = { [weak self] in
-            guard let self else { completion(nil); return }
-            guard self.state == .ready, self.udpSupported else {
-                completion(nil); return
+            guard let self else {
+                completion(.failure(HysteriaError.streamClosed)); return
             }
-            let sid = self.nextUDPSessionID
-            self.nextUDPSessionID = self.nextUDPSessionID == UInt32.max ? 1 : self.nextUDPSessionID + 1
+            guard self.state == .ready else {
+                completion(.failure(HysteriaError.notReady)); return
+            }
+            guard self.udpSupported else {
+                completion(.failure(HysteriaError.udpNotSupported)); return
+            }
+            // Step past occupied slots after UInt32.max rollover; guard the
+            // impossible-but-defensive full-table case explicitly.
+            guard self.udpSessions.count < Int(UInt32.max) else {
+                completion(.failure(HysteriaError.connectionFailed("UDP session pool exhausted")))
+                return
+            }
+            var sid = self.nextUDPSessionID
+            while self.udpSessions[sid] != nil {
+                sid = sid == UInt32.max ? 1 : sid + 1
+            }
+            self.nextUDPSessionID = sid == UInt32.max ? 1 : sid + 1
             self.udpSessions[sid] = conn
             self._poolLock.lock()
             self._poolUDPCount += 1
             self._poolLock.unlock()
-            completion(sid)
+            self.updateIdleCloseTimer()
+            completion(.success(sid))
         }
         if isOnQueue { body() } else { queue.async(execute: body) }
     }
@@ -432,8 +467,37 @@ nonisolated final class HysteriaSession {
                 self._poolLock.lock()
                 self._poolUDPCount = max(0, self._poolUDPCount - 1)
                 self._poolLock.unlock()
+                self.updateIdleCloseTimer()
             }
         }
+    }
+
+    /// Arms or cancels the idle-close timer based on current pool counts.
+    /// Must be called on `queue`. Cancels any prior pending close; when the
+    /// session currently holds no streams or UDP sessions and is still in
+    /// `ready` state, schedules a delayed close that re-checks counts at
+    /// fire time so a flurry of "release then open" doesn't tear down the
+    /// QUIC connection.
+    private func updateIdleCloseTimer() {
+        idleCloseWorkItem?.cancel()
+        idleCloseWorkItem = nil
+
+        guard state == .ready else { return }
+        _poolLock.lock()
+        let total = _poolTCPCount + _poolUDPCount
+        _poolLock.unlock()
+        guard total == 0 else { return }
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self._poolLock.lock()
+            let liveCount = self._poolTCPCount + self._poolUDPCount
+            self._poolLock.unlock()
+            guard liveCount == 0, self.state == .ready else { return }
+            self.close()
+        }
+        idleCloseWorkItem = work
+        queue.asyncAfter(deadline: .now() + Self.idleCloseDelay, execute: work)
     }
 
     func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
@@ -447,12 +511,22 @@ nonisolated final class HysteriaSession {
     // MARK: - Close
 
     func close() {
-        queue.async { [weak self] in
+        let work = { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
 
+            self.idleCloseWorkItem?.cancel()
+            self.idleCloseWorkItem = nil
+
+            // Zero counters under the same lock that flips `poolIsClosed`.
+            // The dictionaries are drained below, so the counters were about
+            // to be stale otherwise — and any caller that reads
+            // `hasActiveConnections` without also checking `poolIsClosed`
+            // would see a phantom live count for an already-dead session.
             self._poolLock.lock()
             self.poolIsClosed = true
+            self._poolTCPCount = 0
+            self._poolUDPCount = 0
             self._poolLock.unlock()
 
             let tcp = Array(self.tcpStreams.values)
@@ -466,6 +540,11 @@ nonisolated final class HysteriaSession {
             self.quic.close()
             self.onClose?()
         }
+        if isOnQueue {
+            work()
+        } else {
+            queue.async(execute: work)
+        }
     }
 
     private func failSession(_ error: Error) {
@@ -473,8 +552,14 @@ nonisolated final class HysteriaSession {
             guard let self, self.state != .closed else { return }
             self.state = .closed
 
+            self.idleCloseWorkItem?.cancel()
+            self.idleCloseWorkItem = nil
+
+            // See `close()` for why the counters are zeroed here too.
             self._poolLock.lock()
             self.poolIsClosed = true
+            self._poolTCPCount = 0
+            self._poolUDPCount = 0
             self._poolLock.unlock()
 
             let callbacks = self.readyCallbacks

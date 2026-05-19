@@ -89,16 +89,33 @@ nonisolated final class HysteriaClient {
     }
 
     func openTCP(destination: String, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        acquireSession { result in
+        openTCP(destination: destination, retriesLeft: 1, completion: completion)
+    }
+
+    private func openTCP(destination: String, retriesLeft: Int, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
+        // The idle-close timer can fire between `acquireSession` checking
+        // `poolIsClosed` and the stream actually opening, so a single retry
+        // with a fresh session covers the race window. Errors from both
+        // `ensureReady` (caught here) and `conn.open` (caught below) can
+        // surface the race.
+        acquireSession { [weak self] result in
             switch result {
             case .failure(let error):
-                completion(.failure(error))
+                if retriesLeft > 0, Self.isStaleSessionError(error), let self {
+                    self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, completion: completion)
+                } else {
+                    completion(.failure(error))
+                }
             case .success(let session):
                 let conn = HysteriaConnection(session: session, destination: destination)
                 conn.open { error in
                     if let error {
                         conn.cancel()
-                        completion(.failure(error))
+                        if retriesLeft > 0, Self.isStaleSessionError(error), let self {
+                            self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, completion: completion)
+                        } else {
+                            completion(.failure(error))
+                        }
                     } else {
                         completion(.success(conn))
                     }
@@ -108,21 +125,45 @@ nonisolated final class HysteriaClient {
     }
 
     func openUDP(destination: String, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        acquireSession { result in
+        openUDP(destination: destination, retriesLeft: 1, completion: completion)
+    }
+
+    private func openUDP(destination: String, retriesLeft: Int, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
+        // See `openTCP(retriesLeft:)` for the race rationale.
+        acquireSession { [weak self] result in
             switch result {
             case .failure(let error):
-                completion(.failure(error))
+                if retriesLeft > 0, Self.isStaleSessionError(error), let self {
+                    self.openUDP(destination: destination, retriesLeft: retriesLeft - 1, completion: completion)
+                } else {
+                    completion(.failure(error))
+                }
             case .success(let session):
                 let conn = HysteriaUDPConnection(session: session, destination: destination)
                 conn.open { error in
                     if let error {
                         conn.cancel()
-                        completion(.failure(error))
+                        if retriesLeft > 0, Self.isStaleSessionError(error), let self {
+                            self.openUDP(destination: destination, retriesLeft: retriesLeft - 1, completion: completion)
+                        } else {
+                            completion(.failure(error))
+                        }
                     } else {
                         completion(.success(conn))
                     }
                 }
             }
+        }
+    }
+
+    /// True for failures that indicate the cached session went away between
+    /// the `poolIsClosed` check and the stream-open. `udpNotSupported` is
+    /// excluded because it's a permanent server-side property.
+    private static func isStaleSessionError(_ error: Error) -> Bool {
+        guard let hErr = error as? HysteriaError else { return false }
+        switch hErr {
+        case .notReady, .streamClosed: return true
+        default: return false
         }
     }
 

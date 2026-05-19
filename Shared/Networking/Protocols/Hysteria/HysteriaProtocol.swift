@@ -198,8 +198,15 @@ enum HysteriaProtocol {
         let fragCount = data[data.index(data.startIndex, offsetBy: offset)]
         offset += 1
 
+        // Match the reference Hysteria server's `ParseUDPMessage`
+        // (core/internal/protocol/proxy.go): reject addrLen == 0, but allow
+        // a zero-byte payload after the address — the reference does
+        // `m.Data = bs[lAddr:]` which is a legal empty slice. The
+        // application-layer empty-data drop in `handleIncomingDatagram`
+        // still defends `receiveLoop`'s EOF-on-empty contract, so being
+        // stricter than the wire here only buys interop pain.
         guard let (addrLen, addrLenLen) = decodeVarInt(from: data, offset: offset),
-              addrLen <= UInt64(maxAddressLength) else { return nil }
+              addrLen > 0, addrLen <= UInt64(maxAddressLength) else { return nil }
         offset += addrLenLen
         guard offset + Int(addrLen) <= data.count else { return nil }
         let addrStart = data.index(data.startIndex, offsetBy: offset)

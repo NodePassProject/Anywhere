@@ -31,6 +31,10 @@ nonisolated class QUICConnection {
         /// the peer sent a terminating frame with a non-zero code or the
         /// local endpoint shut the stream down with one.
         case streamClosedWithError(appErrorCode: UInt64)
+        /// A queued DATAGRAM exceeded the path's current maximum frame
+        /// size and was dropped. `maxBound` is the size the upper layer
+        /// should re-fragment to for a retry.
+        case datagramTooLarge(maxBound: Int)
         case timeout
         case closed
 
@@ -41,6 +45,7 @@ nonisolated class QUICConnection {
             case .streamError(let m): return "QUIC stream: \(m)"
             case .streamReset(let c): return "QUIC stream reset (app code \(c))"
             case .streamClosedWithError(let c): return "QUIC stream closed (app code \(c))"
+            case .datagramTooLarge(let b): return "QUIC datagram exceeds path MTU (max \(b) B)"
             case .timeout: return "QUIC timeout"
             case .closed: return "QUIC closed"
             }
@@ -141,7 +146,25 @@ nonisolated class QUICConnection {
 
     /// Pending datagrams waiting to be sent. Drained in `writeToUDP()` where
     /// they get first priority for congestion window space.
-    private var pendingDatagrams: [Data] = []
+    ///
+    /// Bounded at `maxPendingDatagrams` with drop-oldest semantics when the
+    /// congestion window can't keep up — preserves UDP's lossy contract
+    /// rather than letting memory grow without bound under a backed-up path.
+    /// Matches the receive side's `HysteriaUDPConnection.maxQueuedPackets`.
+    ///
+    /// Each entry carries an optional per-datagram completion. The
+    /// completion fires on the final outcome (sent, dropped due to MTU,
+    /// dropped due to queue overflow, dropped on close) so the upper layer
+    /// can react to a `datagramTooLarge` outcome by re-fragmenting at the
+    /// reported bound — without it, PMTU changes between fragmentation and
+    /// send would silently lose data with no signal to the caller.
+    private struct PendingDatagram {
+        let data: Data
+        let completion: ((Error?) -> Void)?
+    }
+    private var pendingDatagrams: [PendingDatagram] = []
+    private static let maxPendingDatagrams = 1024
+    private var didWarnDatagramOverflow = false
 
     static let maxUDPPayload = 1452
 
@@ -298,9 +321,8 @@ nonisolated class QUICConnection {
                 completion(QUICError.closed)
                 return
             }
-            self.pendingDatagrams.append(data)
+            self.enqueueDatagrams([PendingDatagram(data: data, completion: completion)])
             self.writeToUDP()
-            completion(nil)
         }
     }
 
@@ -308,29 +330,93 @@ nonisolated class QUICConnection {
     ///
     /// All datagrams are appended to the pending queue before a single
     /// `writeToUDP()` cycle, preventing interleaving with datagrams from
-    /// other concurrent callers.
+    /// other concurrent callers. `completion` fires once, after every
+    /// datagram in the batch has reached a terminal state — with the first
+    /// error observed across the batch, or `nil` if all were accepted.
+    /// This lets a caller that fragmented one upper-layer packet into N
+    /// datagrams react to the aggregate outcome (e.g. retry the whole
+    /// payload at a smaller MTU on `datagramTooLarge`).
     func writeDatagrams(_ datagrams: [Data], completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
             guard let self, self.conn != nil, self.state == .connected else {
                 completion(QUICError.closed)
                 return
             }
-            self.pendingDatagrams.append(contentsOf: datagrams)
+            if datagrams.isEmpty {
+                completion(nil)
+                return
+            }
+            // Shared per-batch tracker. `onEach` runs on `queue` (all
+            // datagram completions are fired from `writeToUDP` or `close`,
+            // both on queue), so the unsynchronised counter/error capture
+            // is safe.
+            var remaining = datagrams.count
+            var firstError: Error?
+            let onEach: ((Error?) -> Void) = { err in
+                if let err, firstError == nil { firstError = err }
+                remaining -= 1
+                if remaining == 0 { completion(firstError) }
+            }
+            let pending = datagrams.map {
+                PendingDatagram(data: $0, completion: onEach)
+            }
+            self.enqueueDatagrams(pending)
             self.writeToUDP()
-            completion(nil)
         }
     }
 
-    /// Maximum datagram payload size the remote endpoint can receive.
-    /// Returns 0 if datagrams are not supported or the connection isn't ready.
-    /// This accounts for the DATAGRAM frame overhead (up to 9 bytes).
+    /// Appends datagrams to `pendingDatagrams`, enforcing the
+    /// `maxPendingDatagrams` cap by dropping oldest entries when a sender
+    /// outruns the congestion window. Dropped entries have their per-datagram
+    /// completion fired with `QUICError.closed`-style overflow signal —
+    /// without that, a backed-up path would silently strand the caller's
+    /// completion and the upper layer could never observe the drop.
+    private func enqueueDatagrams(_ datagrams: [PendingDatagram]) {
+        pendingDatagrams.append(contentsOf: datagrams)
+        let overflow = pendingDatagrams.count - Self.maxPendingDatagrams
+        guard overflow > 0 else { return }
+        let dropped = Array(pendingDatagrams.prefix(overflow))
+        pendingDatagrams.removeFirst(overflow)
+        if !didWarnDatagramOverflow {
+            didWarnDatagramOverflow = true
+            logger.warning("[QUIC] Datagram send queue overflowed (cap \(Self.maxPendingDatagrams)); dropping oldest")
+        }
+        let overflowError = QUICError.connectionFailed("Datagram send queue overflowed")
+        for d in dropped { d.completion?(overflowError) }
+    }
+
+    /// Maximum datagram payload size we can both encode and ship in one UDP
+    /// packet to the remote endpoint. Returns 0 when datagrams aren't
+    /// supported, the connection isn't ready, or the path MTU has collapsed
+    /// below the QUIC packet-header floor.
+    ///
+    /// Two ceilings apply and we take the lower:
+    /// - **Remote frame ceiling**: the peer's `max_datagram_frame_size`, minus
+    ///   the DATAGRAM frame's own overhead (1 byte type + up to 8 bytes length
+    ///   varint). A frame larger than this gets rejected by ngtcp2 with
+    ///   `NGTCP2_ERR_INVALID_ARGUMENT`.
+    /// - **Path-MTU ceiling**: the maximum UDP payload ngtcp2 will currently
+    ///   emit on this path, minus the QUIC packet headers wrapping the frame
+    ///   (short-header bytes, packet number, AEAD tag, DATAGRAM frame header).
+    ///   A frame larger than this leaves `write_datagram` returning
+    ///   `nwrite=0, accepted=0` indefinitely — which would wedge the queue
+    ///   without this clamp. 64 bytes is a conservative bound that covers all
+    ///   four header components with slack.
+    ///
+    /// Must be called on `queue` — reads ngtcp2 state that is only mutated
+    /// there (transport params, current path MTU). Off-queue calls would
+    /// race with the read loop's `read_pkt` cycle and any of ngtcp2's path
+    /// validation / PMTUD updates.
     var maxDatagramPayloadSize: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
         guard let conn else { return 0 }
         guard let params = ngtcp2_swift_conn_get_remote_transport_params(conn) else { return 0 }
         let maxFrame = Int(params.pointee.max_datagram_frame_size)
         guard maxFrame > 0 else { return 0 }
-        // NGTCP2_DATAGRAM_OVERHEAD = 1 (type) + 8 (length varint max) = 9
-        return max(0, maxFrame - 9)
+        let frameLimit = max(0, maxFrame - 9)
+        let pathBytes = ngtcp2_conn_get_path_max_tx_udp_payload_size(conn)
+        let pathLimit = max(0, Int(pathBytes) - 64)
+        return min(frameLimit, pathLimit)
     }
 
     /// Writes stream data, queuing any remainder that can't be sent due to
@@ -499,12 +585,14 @@ nonisolated class QUICConnection {
             }
             self.closeSocket()
             self.state = .closed
-            // Fail any pending writes; drop pending datagrams
+            // Fail any pending writes; fail pending datagrams' completions.
             let writes = self.pendingWrites
             self.pendingWrites.removeAll()
+            let dgrams = self.pendingDatagrams
             self.pendingDatagrams.removeAll()
             let closeError = error ?? QUICError.closed
             for pw in writes { pw.completion(closeError) }
+            for d in dgrams { d.completion?(closeError) }
             self.connectionClosedHandler?(closeError)
             self.connectionClosedHandler = nil
         }
@@ -962,12 +1050,22 @@ nonisolated class QUICConnection {
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
 
-        // Drain pending datagrams first: `write_datagram` coalesces
-        // ACKs/retransmits/control frames into the same packet, so the
-        // datagram gets fair access to the congestion window.
+        // Per-datagram completions are collected and fired after all ngtcp2
+        // work is done: ngtcp2.h forbids calling other ngtcp2 API functions
+        // between a WRITE_MORE return and the next write_datagram, and a
+        // synchronous completion could re-enter ngtcp2 (e.g. via a caller
+        // that opens a stream from its send completion).
+        var pendingCompletions: [(((Error?) -> Void)?, Error?)] = []
+
+        // Drain pending datagrams first for fair CW access. WRITE_MORE packs
+        // multiple datagrams into one UDP packet.
         while !pendingDatagrams.isEmpty {
             var accepted: Int32 = 0
-            let dgram = pendingDatagrams[0]
+            let head = pendingDatagrams[0]
+            let dgram = head.data
+            let flags: UInt32 = pendingDatagrams.count > 1
+                ? UInt32(NGTCP2_WRITE_DATAGRAM_FLAG_MORE)
+                : 0
 
             let nwrite: ngtcp2_ssize = dgram.withUnsafeBytes { rawBuf in
                 guard let srcPtr = rawBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
@@ -976,25 +1074,53 @@ nonisolated class QUICConnection {
                 return txBuf.withUnsafeMutableBufferPointer { dest -> ngtcp2_ssize in
                     ngtcp2_swift_conn_write_datagram(
                         conn, nil, &pi, dest.baseAddress, dest.count,
-                        &accepted, 0, 0, srcPtr, dgram.count, ts
+                        &accepted, flags, 0, srcPtr, dgram.count, ts
                     )
                 }
             }
 
+            // WRITE_MORE: ngtcp2 committed this datagram to an in-progress
+            // packet (paccepted is always nonzero on WRITE_MORE per ngtcp2.h).
+            if nwrite == ngtcp2_ssize(NGTCP2_ERR_WRITE_MORE) {
+                let popped = pendingDatagrams.removeFirst()
+                pendingCompletions.append((popped.completion, nil))
+                continue
+            }
             if nwrite < 0 {
-                // Fatal (too large, unsupported) — drop this datagram.
-                pendingDatagrams.removeFirst()
+                // Fatal (exceeds remote's max_datagram_frame_size,
+                // datagrams unsupported, …) — drop this datagram.
+                logger.warning("[QUIC] Dropping \(dgram.count)-byte datagram: ngtcp2 err \(nwrite)")
+                let popped = pendingDatagrams.removeFirst()
+                pendingCompletions.append((popped.completion, QUICError.connectionFailed("ngtcp2 write_datagram err \(nwrite)")))
                 continue
             }
             if nwrite > 0 {
                 sendTxBuf(length: Int(nwrite))
             }
             if accepted != 0 {
-                pendingDatagrams.removeFirst()
-            } else {
-                // Congestion window full; retry on the next writeToUDP.
-                break
+                let popped = pendingDatagrams.removeFirst()
+                pendingCompletions.append((popped.completion, nil))
+                continue
             }
+            if nwrite > 0 {
+                // Packet emitted (with prior WRITE_MORE'd content) but the
+                // current head didn't fit. Retry on the next iteration with
+                // a fresh packet.
+                continue
+            }
+            // nwrite == 0 && accepted == 0: CW full, doesn't fit, or
+            // amplification limit. Distinguish via path-MTU bound — when
+            // bound is 0 (MTU collapsed or peer doesn't support datagrams)
+            // nothing further can be sent, so we drop rather than wedge.
+            let bound = maxDatagramPayloadSize
+            if dgram.count > bound {
+                logger.warning("[QUIC] Dropping \(dgram.count)-byte datagram: exceeds path-MTU bound (\(bound) B)")
+                let popped = pendingDatagrams.removeFirst()
+                pendingCompletions.append((popped.completion, QUICError.datagramTooLarge(maxBound: bound)))
+                continue
+            }
+            // Congestion window full; retry on the next writeToUDP.
+            break
         }
 
         // Drain remaining control/stream packets.
@@ -1013,6 +1139,10 @@ nonisolated class QUICConnection {
 
         // Any ngtcp2 op may shift the next deadline.
         rescheduleTimer()
+
+        // Fire per-datagram completions now that no ngtcp2 sequence is
+        // in flight; safe for a completion to re-enter ngtcp2.
+        for (cb, err) in pendingCompletions { cb?(err) }
     }
 
     // MARK: Timer

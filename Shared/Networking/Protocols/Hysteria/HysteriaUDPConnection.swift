@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import Security
 
 private let logger = AnywhereLogger(category: "Hysteria-UDP")
 
@@ -19,27 +18,51 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     private var state: State = .idle
     private var sessionID: UInt32 = 0
 
-    /// Per-datagram FIFO. Hysteria delivers one UDP packet per QUIC DATAGRAM,
-    /// so the packet boundary is already preserved on the wire — no
-    /// stream-style length framing is involved.
-    ///
-    /// Bounded at `maxQueuedPackets` with drop-oldest semantics when the
-    /// receiver can't keep up — matches the reference Go client's 1024-slot
-    /// `ReceiveCh` (core/client/udp.go:18) and preserves UDP's lossy
-    /// contract instead of growing memory without bound.
+    /// Per-datagram FIFO. Bounded at `maxQueuedPackets` with drop-oldest
+    /// semantics — matches the reference Go client's 1024-slot `ReceiveCh`
+    /// and preserves UDP's lossy contract.
+    /// All `packetQueue` / `pendingReceive` / `closureError` mutation runs
+    /// on `session.queue` (producer, consumer, and teardown all funnel
+    /// through it); consumer delivery hops through the queue once so the
+    /// completion never fires from inside ngtcp2's `recv_datagram` stack.
     private var packetQueue: [Data] = []
-    private let packetLock = UnfairLock()
     private static let maxQueuedPackets = 1024
 
     private var pendingReceive: ((Data?, Error?) -> Void)?
 
-    /// Single-packet defragmenter. Hysteria guarantees that a new PacketID
-    /// invalidates any partial state from a previous PacketID — matches the
-    /// reference Defragger implementation.
-    private var pendingPacketID: UInt16 = 0
-    private var pendingFragments: [Data?] = []
-    private var pendingFragmentsReceived = 0
-    private var pendingFragmentCount: UInt8 = 0
+    /// Closure error stashed when the session tears down between receive
+    /// calls (no `pendingReceive` set at the moment `handleSessionError`
+    /// fires). Surfaced on the next `receiveRaw` so the consumer learns the
+    /// connection is gone and closes its flow — without this, the upstream
+    /// `LWIPUDPFlow` would sit on a dead connection until the 300 s idle
+    /// timer reaped it.
+    private var closureError: Error?
+
+    /// Per-PacketID reassembly slots. Multiple fragmented packets can be in
+    /// flight concurrently and arrive interleaved (the QUIC DATAGRAM frame
+    /// gives no ordering guarantee), so each PacketID owns an independent
+    /// slot — matches sing-quic's `udpDefragger` (hysteria2/packet.go).
+    /// Slots evict on completion, on TTL expiry (`defragSlotTTLNanos`), or
+    /// when the concurrent-slot cap (`maxDefragSlots`) forces oldest-out.
+    private struct DefragSlot {
+        var fragments: [Data?]
+        var received: Int
+        let fragmentCount: Int
+        let createdAt: DispatchTime
+    }
+    private var defragSlots: [UInt16: DefragSlot] = [:]
+    private static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
+    private static let maxDefragSlots = 8
+
+    /// Monotonic per-connection PacketID counter. Wraps from 0xFFFF back to
+    /// 1, skipping 0 (reserved as "unfragmented" by some Hysteria servers).
+    /// A monotonic counter avoids defrag-slot corruption from ID collisions
+    /// inside the 16-bit space — `assembleFragment` reuses a slot when the
+    /// fragment count matches, so two upper-layer packets that draw the
+    /// same random ID would merge into one corrupt payload. Matches
+    /// sing-quic's `packetId.Add(1) % math.MaxUint16` (hysteria2/packet.go).
+    /// Only mutated on `session.queue` (the only call site is `sendRaw`).
+    private var nextPacketID: UInt16 = 1
 
     init(session: HysteriaSession, destination: String) {
         self.session = session
@@ -56,15 +79,16 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     // MARK: - Open
 
     func open(completion: @escaping (Error?) -> Void) {
-        session.registerUDPSession(self) { [weak self] sid in
+        session.registerUDPSession(self) { [weak self] result in
             guard let self else { completion(HysteriaError.streamClosed); return }
-            guard let sid else {
-                completion(HysteriaError.udpNotSupported)
-                return
+            switch result {
+            case .failure(let error):
+                completion(error)
+            case .success(let sid):
+                self.sessionID = sid
+                self.state = .ready
+                completion(nil)
             }
-            self.sessionID = sid
-            self.state = .ready
-            completion(nil)
         }
     }
 
@@ -78,46 +102,72 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         } else {
             assembled = assembleFragment(msg)
         }
-        guard let payload = assembled else { return }
+        // Drop empty payloads. The default `ProxyConnection.receiveLoop`
+        // treats empty `Data` as EOF (it differs from `nil` only in
+        // type), so passing a zero-byte datagram through would close the
+        // flow on the consumer side. Skipping silently matches UDP's
+        // lossy contract and also defends against an attacker sending an
+        // all-empty fragment chain to terminate the session.
+        guard let payload = assembled, !payload.isEmpty else { return }
 
-        packetLock.lock()
         if let cb = pendingReceive {
             pendingReceive = nil
-            packetLock.unlock()
-            cb(payload, nil)
+            // Hop through `session.queue` so the completion never fires from
+            // the same call stack as ngtcp2's `recv_datagram` callback.
+            session.queue.async { cb(payload, nil) }
             return
         }
         if packetQueue.count >= Self.maxQueuedPackets {
             packetQueue.removeFirst()
         }
         packetQueue.append(payload)
-        packetLock.unlock()
     }
 
     private func assembleFragment(_ msg: HysteriaProtocol.UDPMessage) -> Data? {
         // Drop fragments with invalid indices.
         guard msg.fragID < msg.fragCount, msg.fragCount > 0 else { return nil }
 
-        if msg.packetID != pendingPacketID || pendingFragmentCount != msg.fragCount {
-            pendingPacketID = msg.packetID
-            pendingFragmentCount = msg.fragCount
-            pendingFragments = Array(repeating: nil, count: Int(msg.fragCount))
-            pendingFragmentsReceived = 0
-        }
-        if pendingFragments[Int(msg.fragID)] == nil {
-            pendingFragments[Int(msg.fragID)] = msg.data
-            pendingFragmentsReceived += 1
-        }
-        guard pendingFragmentsReceived == Int(pendingFragmentCount) else { return nil }
+        let now = DispatchTime.now()
+        let nowNs = now.uptimeNanoseconds
 
+        if !defragSlots.isEmpty {
+            defragSlots = defragSlots.filter { _, slot in
+                nowNs &- slot.createdAt.uptimeNanoseconds <= Self.defragSlotTTLNanos
+            }
+        }
+
+        var slot: DefragSlot
+        if let existing = defragSlots[msg.packetID], existing.fragmentCount == Int(msg.fragCount) {
+            slot = existing
+        } else {
+            if defragSlots[msg.packetID] == nil, defragSlots.count >= Self.maxDefragSlots,
+               let oldestKey = defragSlots.min(by: { $0.value.createdAt < $1.value.createdAt })?.key {
+                defragSlots.removeValue(forKey: oldestKey)
+            }
+            slot = DefragSlot(
+                fragments: Array(repeating: nil, count: Int(msg.fragCount)),
+                received: 0,
+                fragmentCount: Int(msg.fragCount),
+                createdAt: now
+            )
+        }
+
+        if slot.fragments[Int(msg.fragID)] == nil {
+            slot.fragments[Int(msg.fragID)] = msg.data
+            slot.received += 1
+        }
+
+        if slot.received < slot.fragmentCount {
+            defragSlots[msg.packetID] = slot
+            return nil
+        }
+
+        defragSlots.removeValue(forKey: msg.packetID)
         var full = Data()
-        for part in pendingFragments {
+        for part in slot.fragments {
             guard let part else { return nil }
             full.append(part)
         }
-        pendingFragments.removeAll(keepingCapacity: false)
-        pendingFragmentsReceived = 0
-        pendingFragmentCount = 0
         return full
     }
 
@@ -134,21 +184,7 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
                 completion(self.state == .closed ? HysteriaError.streamClosed : HysteriaError.notReady)
                 return
             }
-            let maxSize = max(1, self.session.maxDatagramPayloadSize)
-            let packetID = HysteriaUDPConnection.newPacketID()
-            let fragments = HysteriaProtocol.fragmentUDP(
-                sessionID: self.sessionID,
-                packetID: packetID,
-                address: self.destination,
-                data: data,
-                maxDatagramSize: maxSize
-            )
-            guard !fragments.isEmpty else {
-                completion(HysteriaError.connectionFailed("UDP payload too large to fragment"))
-                return
-            }
-            let encoded = fragments.map { HysteriaProtocol.encodeUDPMessage($0) }
-            self.session.writeDatagrams(encoded, completion: completion)
+            self.attemptSend(data: data, retriesLeft: 1, completion: completion)
         }
     }
 
@@ -156,18 +192,103 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         sendRaw(data: data) { _ in }
     }
 
-    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        packetLock.lock()
-        if !packetQueue.isEmpty {
-            let packet = packetQueue.removeFirst()
-            packetLock.unlock()
-            completion(packet, nil)
+    /// Fragments `data` against the current path MTU and submits the
+    /// fragments to the QUIC layer. On a `datagramTooLarge` outcome
+    /// (PMTU shrank between fragmentation and `writeToUDP`), retries once
+    /// at the now-reported smaller bound — re-fragmentation uses a fresh
+    /// `packetID`, so the receiver's defrag slot for the orphaned attempt
+    /// times out independently and doesn't mix with the retry.
+    /// Must be called on `session.queue`.
+    private func attemptSend(
+        data: Data,
+        retriesLeft: Int,
+        completion: @escaping (Error?) -> Void
+    ) {
+        // `maxDatagramPayloadSize` returns 0 when the peer didn't advertise
+        // DATAGRAM support (shouldn't happen because `registerUDPSession`
+        // already gates on `udpSupported`) or when the path MTU has
+        // collapsed below the Hysteria UDP header floor. Either case
+        // makes every subsequent fragmentation attempt fail with a
+        // misleading "too large to fragment" error; surface a dedicated
+        // error so the consumer's log shows the real reason once instead
+        // of one "too large" line per send.
+        let maxSize = self.session.maxDatagramPayloadSize
+        let headerSize = HysteriaProtocol.udpHeaderSize(address: self.destination)
+        guard maxSize > headerSize else {
+            completion(HysteriaError.connectionFailed(
+                "Datagram path unusable (peer max \(maxSize) ≤ header \(headerSize))"
+            ))
             return
         }
-        packetLock.unlock()
+        let packetID = self.newPacketID()
+        let fragments = HysteriaProtocol.fragmentUDP(
+            sessionID: self.sessionID,
+            packetID: packetID,
+            address: self.destination,
+            data: data,
+            maxDatagramSize: maxSize
+        )
+        guard !fragments.isEmpty else {
+            completion(HysteriaError.connectionFailed("UDP payload too large to fragment"))
+            return
+        }
+        let encoded = fragments.map { HysteriaProtocol.encodeUDPMessage($0) }
+        self.session.writeDatagrams(encoded) { [weak self] error in
+            // `writeDatagrams` always fires this completion on
+            // `session.queue` (== `quic.queue`), so we're safe to mutate
+            // state and recurse into `attemptSend` directly.
+            // `datagramTooLarge` means PMTU shrank under us between
+            // fragmentation and send — re-attempt once with a fresh
+            // `maxDatagramPayloadSize` read.
+            if let qErr = error as? QUICConnection.QUICError,
+               case .datagramTooLarge = qErr,
+               retriesLeft > 0,
+               let self = self {
+                guard self.state == .ready else {
+                    completion(self.state == .closed
+                        ? HysteriaError.streamClosed
+                        : HysteriaError.notReady)
+                    return
+                }
+                self.attemptSend(
+                    data: data,
+                    retriesLeft: retriesLeft - 1,
+                    completion: completion
+                )
+                return
+            }
+            completion(error)
+        }
+    }
 
+    override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
+        // Always hop to session.queue so reads of `packetQueue` /
+        // `pendingReceive` / `closureError` happen on the owning queue.
         session.queue.async { [weak self] in
-            guard let self else { completion(nil, HysteriaError.streamClosed); return }
+            guard let self else {
+                completion(nil, HysteriaError.streamClosed)
+                return
+            }
+            // Drain buffered packets first, even after the session has
+            // errored or closed — those packets were received before the
+            // failure and represent good data. `handleSessionError`
+            // intentionally leaves `packetQueue` populated; surfacing the
+            // stashed `closureError` ahead of the queue would silently
+            // discard them and trip the consumer's errorHandler with
+            // outstanding data in the buffer.
+            if !self.packetQueue.isEmpty {
+                let packet = self.packetQueue.removeFirst()
+                completion(packet, nil)
+                return
+            }
+            // Buffer empty: now surface any stashed error from a session
+            // teardown that happened between calls.
+            if let err = self.closureError {
+                self.closureError = nil
+                completion(nil, err)
+                return
+            }
+            // No buffered data, no stashed error, already closed → EOF.
             if self.state == .closed {
                 completion(nil, nil)
                 return
@@ -181,13 +302,11 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
             guard let self, self.state != .closed else { return }
             self.state = .closed
             self.session.releaseUDPSession(self.sessionID)
-            if let cb = self.pendingReceive {
-                self.pendingReceive = nil
-                cb(nil, HysteriaError.streamClosed)
-            }
-            self.packetLock.lock()
+            let cb = self.pendingReceive
+            self.pendingReceive = nil
             self.packetQueue.removeAll()
-            self.packetLock.unlock()
+            self.defragSlots.removeAll()
+            cb?(nil, HysteriaError.streamClosed)
         }
     }
 
@@ -195,23 +314,26 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         session.queue.async { [weak self] in
             guard let self, self.state != .closed else { return }
             self.state = .closed
-            if let cb = self.pendingReceive {
-                self.pendingReceive = nil
-                cb(nil, error)
+            let cb = self.pendingReceive
+            self.pendingReceive = nil
+            // If no consumer was waiting, the receive loop is between calls
+            // (handler running, next receiveRaw not yet scheduled). Stash
+            // the error so the next call surfaces it instead of finding a
+            // silent queue-empty state and re-arming.
+            if cb == nil {
+                self.closureError = error
             }
+            cb?(nil, error)
         }
     }
 
     // MARK: - Helpers
 
-    /// PacketID: 1...0xFFFF. 0 is reserved for "not fragmented" signalling
-    /// by some Hysteria servers — stay away from it.
-    private static func newPacketID() -> UInt16 {
-        var v: UInt16 = 0
-        _ = withUnsafeMutableBytes(of: &v) { buf in
-            SecRandomCopyBytes(kSecRandomDefault, buf.count, buf.baseAddress!)
-        }
-        let candidate = UInt16(v & 0xFFFF)
-        return candidate == 0 ? 1 : candidate
+    /// Returns the next PacketID in monotonic order, skipping 0. Must be
+    /// called on `session.queue`.
+    private func newPacketID() -> UInt16 {
+        let pid = nextPacketID
+        nextPacketID = nextPacketID == UInt16.max ? 1 : nextPacketID + 1
+        return pid
     }
 }
