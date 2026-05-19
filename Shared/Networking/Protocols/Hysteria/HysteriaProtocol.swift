@@ -177,6 +177,12 @@ enum HysteriaProtocol {
     }
 
     /// Parses a UDP datagram payload received from the server.
+    ///
+    /// `data` may be a zero-copy view into the QUIC receive buffer (see
+    /// `quicRecvDatagramCB`). The returned `UDPMessage.data` is deep-copied
+    /// via `subdata(in:)` so it remains valid past the recv-datagram callback
+    /// — `Data(slice)` would share storage with the caller's buffer and
+    /// dangle the moment ngtcp2 reuses the recv buffer for the next packet.
     static func decodeUDPMessage(_ data: Data) -> UDPMessage? {
         guard data.count >= udpHeaderFixedSize else { return nil }
         var offset = 0
@@ -199,22 +205,36 @@ enum HysteriaProtocol {
         offset += 1
 
         // Match the reference Hysteria server's `ParseUDPMessage`
-        // (core/internal/protocol/proxy.go): reject addrLen == 0, but allow
-        // a zero-byte payload after the address — the reference does
-        // `m.Data = bs[lAddr:]` which is a legal empty slice. The
-        // application-layer empty-data drop in `handleIncomingDatagram`
-        // still defends `receiveLoop`'s EOF-on-empty contract, so being
-        // stricter than the wire here only buys interop pain.
+        // (core/internal/protocol/proxy.go):
+        //
+        //   if len(bs) <= int(lAddr) {
+        //       // We use <= instead of < here as we expect at
+        //       // least one byte of data after the address
+        //       return nil, errors.ProtocolError{...}
+        //   }
+        //
+        // The reference rejects empty payloads (`<=`, not `<`). The
+        // application-layer drop in `handleIncomingDatagram` still
+        // defends `receiveLoop`'s EOF-on-empty contract, but mirroring
+        // the wire-level rule here also defends `assembleFragment`
+        // against an attacker feeding a stream of zero-byte fragments
+        // to churn defrag slots.
         guard let (addrLen, addrLenLen) = decodeVarInt(from: data, offset: offset),
               addrLen > 0, addrLen <= UInt64(maxAddressLength) else { return nil }
         offset += addrLenLen
-        guard offset + Int(addrLen) <= data.count else { return nil }
+        guard offset + Int(addrLen) < data.count else { return nil }
         let addrStart = data.index(data.startIndex, offsetBy: offset)
         let addrEnd = data.index(addrStart, offsetBy: Int(addrLen))
         guard let address = String(data: data[addrStart..<addrEnd], encoding: .utf8) else { return nil }
         offset += Int(addrLen)
 
-        let payload = Data(data[data.index(data.startIndex, offsetBy: offset)...])
+        // Deep-copy via `subdata(in:)`: when `data` is the QUIC recv-datagram
+        // zero-copy view (`Data(bytesNoCopy:..., deallocator: .none)`), the
+        // bytes ngtcp2 backs it with are reused for the next packet the moment
+        // we return from the callback. `Data(slice)` would share that storage
+        // and dangle; `subdata(in:)` always allocates fresh storage.
+        let payloadStart = data.index(data.startIndex, offsetBy: offset)
+        let payload = data.subdata(in: payloadStart..<data.endIndex)
         return UDPMessage(
             sessionID: sid, packetID: pid, fragID: fragID, fragCount: fragCount,
             address: address, data: payload

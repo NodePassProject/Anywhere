@@ -45,3 +45,16 @@ ngtcp2_cc *ngtcp2_swift_install_brutal(ngtcp2_conn *conn) {
   cc->on_persistent_congestion = NULL;
   return cc;
 }
+
+/* Restores the CUBIC callbacks on `conn->cc`, used when the Hysteria server
+ * returns `Hysteria-CC-RX: auto` and the reference client demotes to BBR.
+ * ngtcp2 v1.x in this tree doesn't ship BBR2-with-pacing, so CUBIC is the
+ * closest match — and it's the algo `ngtcp2CCAlgo` was already initialized
+ * with for the `.brutal` tuning case, so the cstat fields (cwnd, ssthresh,
+ * bytes_in_flight) carry over from Brutal cleanly. `ngtcp2_cc_cubic_init`
+ * re-zeros the cubic-internal struct (which shared union memory with the
+ * Brutal callbacks) and resets `cstat`'s pacing rate — that's the intended
+ * effect since Brutal was driving the pacer with its own interval. */
+void ngtcp2_swift_uninstall_brutal(ngtcp2_conn *conn) {
+  ngtcp2_cc_cubic_init(&conn->cubic, &conn->log, &conn->cstat, &conn->rst);
+}

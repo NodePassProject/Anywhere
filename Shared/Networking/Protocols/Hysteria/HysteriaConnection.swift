@@ -206,8 +206,19 @@ nonisolated final class HysteriaConnection: ProxyConnection {
             fail(error)
             return
         }
-        // Clean termination. Flush any pending receive with EOF rather than
-        // an error — the stream ended in good order.
+        // Clean termination before the TCP response landed (peer FIN'd the
+        // stream cleanly without sending a Hysteria TCP response): fail open
+        // so the caller doesn't sit on `openCompletion` forever. Without this
+        // a server that drops the stream as its rejection mechanism would
+        // leak the flow into `proxyConnecting` until the whole app exited —
+        // the only other open-completion path runs through `handleStreamData`
+        // and only fires when at least one data byte arrived first.
+        if state != .ready {
+            fail(HysteriaError.connectionFailed("Stream closed before TCP response"))
+            return
+        }
+        // Post-`ready` clean close: peer FIN'd in good order. Flush any
+        // pending receive with EOF.
         readClosed = true
         state = .closed
         if let cb = pendingReceive {

@@ -125,4 +125,12 @@ extern void ngtcp2_swift_brutal_reset(
 /// bridged into Swift.
 ngtcp2_cc *ngtcp2_swift_install_brutal(ngtcp2_conn *conn);
 
+/// Restores `conn->cc` to the CUBIC callbacks. Used when the Hysteria
+/// server returns `Hysteria-CC-RX: auto`, asking the client to defer
+/// pacing to its own bandwidth estimator. After this returns, the Swift
+/// caller MUST clear its `brutalCC` and remove its registry entry — the
+/// Brutal trampolines are no longer reachable from ngtcp2 anyway, but the
+/// Swift instance otherwise leaks.
+void ngtcp2_swift_uninstall_brutal(ngtcp2_conn *conn);
+
 #endif /* NGTCP2_SWIFT_BRIDGE_H */

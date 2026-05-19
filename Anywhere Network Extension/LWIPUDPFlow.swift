@@ -88,6 +88,62 @@ class LWIPUDPFlow {
         )
     }
 
+    /// Routes a send-side error from the proxy connection: terminal errors
+    /// (connection gone for good — peer rejected, session closed, outer QUIC
+    /// torn down) close the flow so the consumer doesn't keep funneling
+    /// packets into a black hole until the receive side independently
+    /// discovers the break. Transient errors (per-packet MTU collapses,
+    /// queue overflows, fragmentation refusals) just log; UDP is lossy and
+    /// the flow stays alive.
+    ///
+    /// Must be called on `lwipQueue`.
+    private func handleProxySendError(_ error: Error, connection: ProxyConnection) {
+        if Self.isTerminalProxySendError(error, connection: connection) {
+            reportFailure("Send", error: error)
+            close()
+            LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
+        } else {
+            logTransientSendFailure(error)
+        }
+    }
+
+    /// Classifies a proxy-connection send error. Terminal = the connection
+    /// is gone for good (matches the receive-side teardown path the inner
+    /// connection's error handler will eventually trip too). Transient =
+    /// this datagram didn't fit / didn't make it, but the connection is
+    /// still usable.
+    private static func isTerminalProxySendError(_ error: Error, connection: ProxyConnection) -> Bool {
+        if let hErr = error as? HysteriaError {
+            switch hErr {
+            case .streamClosed, .authRejected, .udpNotSupported,
+                 .destinationTooLargeForDatagram:
+                // `destinationTooLargeForDatagram` is permanent for the
+                // flow's destination — the address (and therefore the
+                // header size) never shrinks. Closing the flow here
+                // surfaces the failure as one log line; otherwise the
+                // send-side classifier would log "transient" on every
+                // packet until the receive side independently failed.
+                return true
+            case .notReady, .connectionFailed, .tunnelFailed:
+                return false
+            }
+        }
+        if let qErr = error as? QUICConnection.QUICError {
+            switch qErr {
+            case .closed, .streamReset, .streamClosedWithError, .handshakeFailed:
+                return true
+            case .datagramTooLarge, .connectionFailed, .streamError, .timeout:
+                return false
+            }
+        }
+        // Unknown error types: fall back to the connection's own liveness
+        // signal. `isConnected` is cheap on the protocols we care about
+        // (HysteriaUDPConnection is a direct read of state on its session
+        // queue; the others read in-memory flags). When the connection
+        // says it's gone, treat the send error as terminal.
+        return !connection.isConnected
+    }
+
     // MARK: - Data Handling (called on lwipQueue)
 
     func handleReceivedData(_ data: Data, payloadLength: Int) {
@@ -141,8 +197,10 @@ class LWIPUDPFlow {
         // QUIC DATAGRAM, …).
         if let connection = proxyConnection {
             connection.send(data: payload) { [weak self] error in
-                if let error {
-                    self?.logTransientSendFailure(error)
+                guard let self, let error else { return }
+                self.lwipQueue.async {
+                    guard !self.closed else { return }
+                    self.handleProxySendError(error, connection: connection)
                 }
             }
             return
@@ -300,8 +358,10 @@ class LWIPUDPFlow {
                     // own wire framing.
                     for payload in self.pendingData {
                         proxyConnection.send(data: payload) { [weak self] error in
-                            if let error {
-                                self?.logTransientSendFailure(error)
+                            guard let self, let error else { return }
+                            self.lwipQueue.async {
+                                guard !self.closed else { return }
+                                self.handleProxySendError(error, connection: proxyConnection)
                             }
                         }
                     }

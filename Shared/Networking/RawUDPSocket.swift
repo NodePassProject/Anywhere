@@ -78,6 +78,23 @@ nonisolated final class RawUDPSocket {
     private var receiveHandlerQueue: DispatchQueue?
     private var rxBuffer = [UInt8](repeating: 0, count: RawUDPSocket.receiveBufferSize)
 
+    /// Datagrams that arrived after the socket was connected but before
+    /// the upper layer called `startReceiving`. Mostly empty for
+    /// UDP-connected sockets (server only sends after we send first), but
+    /// real when this socket is reused under chained QUIC: the QUIC client
+    /// initial races with the wrapper's lazy `startReceiving` install, so
+    /// without a tiny pre-handler buffer the server's response Initial can
+    /// land on `drainReads` while `receiveHandler == nil` and get dropped.
+    /// Bounded so a malformed peer that fires a burst before we arm the
+    /// handler can't OOM us; matches `DirectUDPProxyConnection`'s cap.
+    private var pendingDatagrams: [Data] = []
+    private static let maxPendingDatagrams = 1024
+    /// One-shot warn latch — when the pre-handler buffer fills before the
+    /// upper layer arms `startReceiving`, we lose the head-of-queue. Stays
+    /// silent in the common case (handler arms in tens of µs); only a
+    /// chained-dial that stalls before arming will trip this.
+    private var didWarnPendingOverflow = false
+
     // MARK: - Lifecycle
 
     init() {}
@@ -192,6 +209,9 @@ nonisolated final class RawUDPSocket {
     /// source stops, so callers should treat this as a terminal event and
     /// close the flow — otherwise the socket sits dead until the next send
     /// surfaces ``SocketError/notConnected``.
+    ///
+    /// Drains any datagrams that arrived between `connect` and this call
+    /// so they reach the new handler instead of being silently dropped.
     func startReceiving(queue handlerQueue: DispatchQueue? = nil,
                         handler: @escaping (Data) -> Void,
                         errorHandler: ((Error) -> Void)? = nil) {
@@ -200,6 +220,15 @@ nonisolated final class RawUDPSocket {
             self.receiveHandler = handler
             self.receiveErrorHandler = errorHandler
             self.receiveHandlerQueue = handlerQueue
+            let drained = self.pendingDatagrams
+            self.pendingDatagrams.removeAll()
+            for data in drained {
+                if let hq = handlerQueue {
+                    hq.async { handler(data) }
+                } else {
+                    handler(data)
+                }
+            }
         }
     }
 
@@ -244,18 +273,28 @@ nonisolated final class RawUDPSocket {
                 return
             }
             if n == 0 { return }
-            guard let handler = receiveHandler else {
-                // No handler installed yet; drop but keep draining so the
-                // dispatch source stops firing.
-                continue
-            }
             let data = rxBuffer.withUnsafeBufferPointer { buf -> Data in
                 Data(bytes: buf.baseAddress!, count: n)
             }
-            if let hq = receiveHandlerQueue {
-                hq.async { handler(data) }
+            if let handler = receiveHandler {
+                if let hq = receiveHandlerQueue {
+                    hq.async { handler(data) }
+                } else {
+                    handler(data)
+                }
             } else {
-                handler(data)
+                // Handler not yet installed (lazy `startReceiving` from
+                // the wrapper). Buffer the datagram so it reaches the
+                // handler when it eventually arms; cap so a burst before
+                // install can't grow unbounded.
+                if pendingDatagrams.count >= Self.maxPendingDatagrams {
+                    pendingDatagrams.removeFirst()
+                    if !didWarnPendingOverflow {
+                        didWarnPendingOverflow = true
+                        logger.warning("[UDP] Pre-handler buffer overflowed (cap \(Self.maxPendingDatagrams)); dropping oldest until startReceiving arms")
+                    }
+                }
+                pendingDatagrams.append(data)
             }
         }
     }
@@ -350,5 +389,7 @@ nonisolated final class RawUDPSocket {
         receiveHandler = nil
         receiveErrorHandler = nil
         receiveHandlerQueue = nil
+        pendingDatagrams.removeAll()
+        didWarnPendingOverflow = false
     }
 }
