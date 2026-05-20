@@ -210,6 +210,12 @@ nonisolated class WebSocketConnection {
         transportCancel()
     }
 
+    deinit {
+        // Reclaim the heartbeat timer if dropped without cancel() (same pattern
+        // as AnyTLSClient). `DispatchSource.cancel()` is thread-safe.
+        heartbeatTimer?.cancel()
+    }
+
     // MARK: - Heartbeat (Ping Sender)
 
     /// Starts a periodic ping sender matching Xray-core's heartbeat behavior.

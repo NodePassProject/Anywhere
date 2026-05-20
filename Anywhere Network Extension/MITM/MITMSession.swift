@@ -363,6 +363,15 @@ final class MITMSession {
         onTeardown?(error)
     }
 
+#if DEBUG
+    /// Leak tripwire: a session must be torn down via `cancel()` — which
+    /// cancels both TLS legs and `forceCancel`s the inner transport — before
+    /// being freed. DEBUG-only.
+    deinit {
+        assert(torn, "MITMSession leaked: freed without cancel()")
+    }
+#endif
+
     // MARK: - Synthesize-Response Mode
 
     /// Starts the response synthesizer once the inner TLS handshake has

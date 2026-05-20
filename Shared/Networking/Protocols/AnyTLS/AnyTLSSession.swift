@@ -463,6 +463,13 @@ nonisolated final class AnyTLSSession {
         onClose?()
     }
 
+    deinit {
+        // Reclaim the SYN-done watchdog if the session was dropped without
+        // close(). `DispatchSource.cancel()` is thread-safe; the inner
+        // transport leak (if any) is surfaced by the leaf socket's tripwire.
+        synDoneTimer?.cancel()
+    }
+
     // MARK: - SynDone watchdog
 
     private func armSynDoneTimerLocked() {
