@@ -808,6 +808,40 @@ final class MITMHTTP1Stream {
                 accumulator.append(rxBuffer.prefix(take))
                 rxBuffer.removeFirst(take)
                 let left = remaining - take
+                // Per-chunk buffer cap. The buffered-script path bounds
+                // its accumulator at ``maxBufferedBodyBytes``; the
+                // streaming path must too. A single declared chunk size
+                // can be arbitrarily large (sizes up to ``Int.max``
+                // parse), so without a bound a hostile or buggy upstream
+                // could grow this accumulator past the NE's ~50 MiB
+                // budget mid-chunk and OOM-kill the extension (taking
+                // down every tunneled flow). On overflow we stop trying
+                // to hand the script whole frames: flush any held chunk,
+                // switch the stream to bypass, and emit the buffered
+                // bytes verbatim as their own wire chunk. Re-chunking is
+                // transparent to the receiver (it concatenates chunk
+                // data), so the framing the head already promised holds
+                // and no body bytes are lost — unlike the buffered path,
+                // which truncates.
+                if left != 0, accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
+                    logger.warning("[MITM] HTTP/1 \(host): streaming chunk exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing script and forwarding remainder verbatim")
+                    if let held = streaming.pendingChunk {
+                        streaming.pendingChunk = nil
+                        emitStreamingChunk(
+                            streaming: &streaming,
+                            chunk: held,
+                            isLast: false,
+                            into: &output
+                        )
+                    }
+                    streaming.cursor.bypass = true
+                    appendChunk(accumulator, into: &output)
+                    mode = .streamingChunked(
+                        streaming: streaming,
+                        inner: .chunkData(remaining: left, accumulator: Data())
+                    )
+                    return false
+                }
                 if left == 0 {
                     // Chunk is complete. Flush the previous held chunk
                     // (with isLast=false now that we know more chunks
@@ -946,7 +980,17 @@ final class MITMHTTP1Stream {
         guard let raw = String(data: data, encoding: .ascii) else { return nil }
         let head = raw.split(separator: ";", maxSplits: 1).first.map(String.init) ?? raw
         let trimmed = head.trimmingCharacters(in: CharacterSet.whitespaces)
-        return Int(trimmed, radix: 16)
+        // RFC 9112 §7.1: chunk-size is `1*HEXDIG` — an unsigned count.
+        // ``Int(_:radix:)`` also accepts a leading `-`, so a hostile or
+        // buggy peer's `-1\r\n` size line would parse to a negative
+        // ``remaining`` and drive ``min(remaining, count)`` negative,
+        // trapping the whole Network Extension in ``MITMByteBuffer``'s
+        // ``prefix``/``subdata`` range math. Reject negatives; nil flows
+        // to the caller's malformed-chunk handling (synthesize the
+        // terminator, drop to passthrough), the same as any other
+        // unparseable size line.
+        guard let size = Int(trimmed, radix: 16), size >= 0 else { return nil }
+        return size
     }
 
     /// Drains the remaining wire chunks of an over-cap rewriting body.
@@ -2020,6 +2064,12 @@ private final class ChunkedReader {
         // "size" or "size;ext..."; only the leading hex is needed.
         let head = raw.split(separator: ";", maxSplits: 1).first.map(String.init) ?? raw
         let trimmed = head.trimmingCharacters(in: CharacterSet.whitespaces)
-        return Int(trimmed, radix: 16)
+        // RFC 9112 §7.1: chunk-size is unsigned. ``Int(_:radix:)`` admits
+        // a leading `-`, so a `-1` size line would yield a negative
+        // ``remaining`` and a negative ``min(remaining, count)`` ->
+        // inverted ``Range`` trap in ``MITMByteBuffer``. Reject negatives
+        // (nil maps to ``.malformed`` in both consumers above).
+        guard let size = Int(trimmed, radix: 16), size >= 0 else { return nil }
+        return size
     }
 }
