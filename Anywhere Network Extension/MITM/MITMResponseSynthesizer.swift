@@ -235,11 +235,32 @@ final class MITMResponseSynthesizer {
         var payload: Data
     }
 
+    /// Cap on a single received frame's wire payload. Mirrors
+    /// ``MITMHTTP2Connection``'s receive cap: the inner client is local
+    /// but not necessarily trustworthy (a buggy or hostile on-device app
+    /// drives this leg), and the NE's ~50 MiB budget cannot absorb the
+    /// 16 MiB frame the wire format otherwise permits. It also bounds
+    /// ``rxBuffer`` — only one frame is ever in-flight at the buffer
+    /// head, so an over-cap or never-completing frame can pin at most
+    /// this many bytes before the synthesizer tears down (the
+    /// pre-handshake ``maxPendingClientBytes`` guard no longer applies
+    /// once the inner handshake has completed).
+    private static let maxReceivedFramePayloadSize = 1 * 1024 * 1024
+
     private func parseH2Frame() -> H2Frame? {
         guard rxBuffer.count >= 9 else { return nil }
         let length = (Int(rxBuffer[0]) << 16)
             | (Int(rxBuffer[1]) << 8)
             | Int(rxBuffer[2])
+        // Reject an oversized declared length before waiting to buffer
+        // it. The synthesizer is one-shot with no frame-resync path, so
+        // an over-cap frame is unrecoverable: finish closes the inner
+        // record and the surrounding session.
+        if length > Self.maxReceivedFramePayloadSize {
+            logger.warning("[MITM] synth-h2: frame length \(length) B exceeds cap \(Self.maxReceivedFramePayloadSize) B; failing")
+            finish(error: nil)
+            return nil
+        }
         let total = 9 + length
         guard rxBuffer.count >= total else { return nil }
         let typeCode = rxBuffer[3]
