@@ -745,6 +745,7 @@ final class MITMScriptEngine {
         installCodecGlobals(on: anywhere)
         installCryptoGlobals(on: anywhere)
         installJWTGlobals(on: anywhere)
+        installJSONGlobals(on: anywhere)
         installStoreGlobals(on: anywhere)
         installLogGlobals(on: anywhere)
         installControlGlobals(on: anywhere)
@@ -1308,6 +1309,413 @@ final class MITMScriptEngine {
         jwt.setObject(jwtDecodeBlock, forKeyedSubscript: "decode" as NSString)
         jwt.setObject(jwtEncodeBlock, forKeyedSubscript: "encode" as NSString)
         anywhere.setObject(jwt, forKeyedSubscript: "jwt" as NSString)
+    }
+
+    /// One step of a parsed JSONPath. Only the two shapes the path
+    /// helpers actually need: an object member (``.key``) and an array
+    /// element (``.index``). No wildcards or ``..`` descent — recursive
+    /// matching is a separate concern handled by ``replaceRecursive`` /
+    /// ``deleteRecursive``, which take a bare key name instead of a path.
+    private enum JSONPathSegment {
+        case key(String)
+        case index(Int)
+    }
+
+    /// What ``applyAtPath`` does to the addressed leaf.
+    private enum JSONLeafMode { case add, replace, delete }
+
+    /// Installs ``Anywhere.json`` — byte-oriented JSON body editing.
+    ///
+    /// Every method is bytes-in / bytes-out: the first argument is the
+    /// body (``Uint8Array``, ``ArrayBuffer``, or string), the return is
+    /// a fresh ``Uint8Array`` of the re-serialized JSON. The document is
+    /// parsed once per call and emitted compact (no pretty-printing —
+    /// it's going on the wire); callers that chain several edits just
+    /// feed one result into the next.
+    ///
+    /// The contract is deliberately total: a body that isn't JSON, a
+    /// path that doesn't resolve, a type mismatch (e.g. an object key
+    /// addressed into an array), or a value that can't be re-serialized
+    /// all yield the body **unchanged** rather than throwing. A rewrite
+    /// rule routinely fires on responses whose shape it doesn't fully
+    /// control, and a thrown error there would abort the whole script
+    /// for the connection; a silent pass-through degrades to a no-op
+    /// instead.
+    ///
+    /// Path methods (``add`` / ``replace`` / ``delete``) take a JSONPath
+    /// like ``"$.data.items[0].id"`` (leading ``$`` optional; dotted
+    /// keys and ``[index]`` / ``["key"]`` brackets). The recursive
+    /// methods take a **bare key name** matched at every depth, not a
+    /// path. The ``removeWhere…`` methods take a path to an array and
+    /// drop the elements that match.
+    private func installJSONGlobals(on anywhere: JSValue) {
+        let json = JSValue(newObjectIn: context)!
+
+        // add(body, path, value) — upsert. Creates the addressed member
+        // (or overwrites it if already present); for an array index it
+        // sets in range or appends when the index equals the length.
+        let addBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, path, value in
+            let ctx = JSContext.current()!
+            guard let v = Self.jsonValue(from: value, in: ctx) else {
+                logger.warning("[MITM][JS] Anywhere.json.add: value is undefined; use delete() to remove a field. Body unchanged.")
+                return Self.jsonPassthrough(body, in: ctx)
+            }
+            guard let segments = Self.parseJSONPath(path) else {
+                logger.warning("[MITM][JS] Anywhere.json.add: malformed path \"\(path)\"; body unchanged")
+                return Self.jsonPassthrough(body, in: ctx)
+            }
+            return Self.runJSONOp(body, in: ctx) { root in
+                root = Self.applyAtPath(root, segments: segments, mode: .add, value: v)
+            }
+        }
+
+        // replace(body, path, value) — modify-in-place. Unlike add, does
+        // nothing when the addressed member/index doesn't already exist,
+        // so it can't accidentally introduce fields.
+        let replaceBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, path, value in
+            let ctx = JSContext.current()!
+            guard let v = Self.jsonValue(from: value, in: ctx) else {
+                logger.warning("[MITM][JS] Anywhere.json.replace: value is undefined; body unchanged")
+                return Self.jsonPassthrough(body, in: ctx)
+            }
+            guard let segments = Self.parseJSONPath(path) else {
+                logger.warning("[MITM][JS] Anywhere.json.replace: malformed path \"\(path)\"; body unchanged")
+                return Self.jsonPassthrough(body, in: ctx)
+            }
+            return Self.runJSONOp(body, in: ctx) { root in
+                root = Self.applyAtPath(root, segments: segments, mode: .replace, value: v)
+            }
+        }
+
+        // replaceRecursive(body, key, value) — replace the value of every
+        // property named `key`, at any depth. The second argument is a
+        // literal key name, NOT a path: existing occurrences are
+        // overwritten in place; the key is never created where absent.
+        let replaceRecursiveBlock: @convention(block) (JSValue, String, JSValue) -> JSValue = { body, key, value in
+            let ctx = JSContext.current()!
+            guard let v = Self.jsonValue(from: value, in: ctx) else {
+                logger.warning("[MITM][JS] Anywhere.json.replaceRecursive: value is undefined; body unchanged")
+                return Self.jsonPassthrough(body, in: ctx)
+            }
+            return Self.runJSONOp(body, in: ctx) { root in
+                Self.replaceKeyRecursive(root, key: key, value: v)
+            }
+        }
+
+        // delete(body, path) — remove the addressed member/element.
+        let deleteBlock: @convention(block) (JSValue, String) -> JSValue = { body, path in
+            let ctx = JSContext.current()!
+            guard let segments = Self.parseJSONPath(path) else {
+                logger.warning("[MITM][JS] Anywhere.json.delete: malformed path \"\(path)\"; body unchanged")
+                return Self.jsonPassthrough(body, in: ctx)
+            }
+            return Self.runJSONOp(body, in: ctx) { root in
+                root = Self.applyAtPath(root, segments: segments, mode: .delete, value: nil)
+            }
+        }
+
+        // deleteRecursive(body, key) — remove every property named `key`,
+        // at any depth. Bare key name, not a path (mirror of
+        // replaceRecursive).
+        let deleteRecursiveBlock: @convention(block) (JSValue, String) -> JSValue = { body, key in
+            let ctx = JSContext.current()!
+            return Self.runJSONOp(body, in: ctx) { root in
+                Self.deleteKeyRecursive(root, key: key)
+            }
+        }
+
+        // removeWhereKeyExists(body, path, key) — at the array addressed
+        // by `path`, drop every element that is an object containing
+        // `key`. Non-object elements (and objects lacking the key) are
+        // kept. No-op if the path doesn't resolve to an array.
+        let removeWhereKeyExistsBlock: @convention(block) (JSValue, String, String) -> JSValue = { body, path, key in
+            let ctx = JSContext.current()!
+            guard let segments = Self.parseJSONPath(path) else {
+                logger.warning("[MITM][JS] Anywhere.json.removeWhereKeyExists: malformed path \"\(path)\"; body unchanged")
+                return Self.jsonPassthrough(body, in: ctx)
+            }
+            return Self.runJSONOp(body, in: ctx) { root in
+                guard let array = Self.resolveNode(root, segments: segments) as? NSMutableArray else { return }
+                let kept = array.filter { ($0 as? NSDictionary)?.object(forKey: key) == nil }
+                array.setArray(kept)
+            }
+        }
+
+        // removeWhereFieldIn(body, path, field, values) — at the array
+        // addressed by `path`, drop every element that is an object whose
+        // `field` equals one of `values` (JSON-value equality; `values`
+        // may be an array or a lone scalar). Elements without `field` are
+        // kept. No-op if the path doesn't resolve to an array.
+        let removeWhereFieldInBlock: @convention(block) (JSValue, String, String, JSValue) -> JSValue = { body, path, field, valuesVal in
+            let ctx = JSContext.current()!
+            guard let segments = Self.parseJSONPath(path) else {
+                logger.warning("[MITM][JS] Anywhere.json.removeWhereFieldIn: malformed path \"\(path)\"; body unchanged")
+                return Self.jsonPassthrough(body, in: ctx)
+            }
+            let needles = Self.jsonArrayValues(from: valuesVal, in: ctx)
+            return Self.runJSONOp(body, in: ctx) { root in
+                guard let array = Self.resolveNode(root, segments: segments) as? NSMutableArray else { return }
+                let kept = array.filter { element in
+                    guard let object = element as? NSDictionary,
+                          let fieldValue = object.object(forKey: field) else { return true }
+                    return !needles.contains { Self.jsonValueEquals($0, fieldValue) }
+                }
+                array.setArray(kept)
+            }
+        }
+
+        json.setObject(addBlock, forKeyedSubscript: "add" as NSString)
+        json.setObject(replaceBlock, forKeyedSubscript: "replace" as NSString)
+        json.setObject(replaceRecursiveBlock, forKeyedSubscript: "replaceRecursive" as NSString)
+        json.setObject(deleteBlock, forKeyedSubscript: "delete" as NSString)
+        json.setObject(deleteRecursiveBlock, forKeyedSubscript: "deleteRecursive" as NSString)
+        json.setObject(removeWhereKeyExistsBlock, forKeyedSubscript: "removeWhereKeyExists" as NSString)
+        json.setObject(removeWhereFieldInBlock, forKeyedSubscript: "removeWhereFieldIn" as NSString)
+        anywhere.setObject(json, forKeyedSubscript: "json" as NSString)
+    }
+
+    // MARK: - Anywhere.json internals (static so the JSC closures above
+    // don't capture self)
+
+    /// Bytes → parsed JSON → ``mutate`` → bytes. The single choke point
+    /// every ``Anywhere.json`` method routes through, so the
+    /// parse-once / emit-compact / pass-through-on-failure contract lives
+    /// in exactly one place. ``mutate`` receives the root as ``inout`` so
+    /// an op can both edit a container in place (the common case) and
+    /// swap the root wholesale (a ``$``-targeted replace).
+    private static func runJSONOp(_ body: JSValue, in ctx: JSContext, _ mutate: (inout Any) -> Void) -> JSValue {
+        let original = bytesFromValue(body, in: ctx) ?? Data()
+        guard var root = jsonParse(original) else {
+            return makeUint8Array(in: ctx, from: original)
+        }
+        mutate(&root)
+        guard let out = jsonSerialize(root) else {
+            logger.warning("[MITM][JS] Anywhere.json: edited value is not serializable; body unchanged")
+            return makeUint8Array(in: ctx, from: original)
+        }
+        return makeUint8Array(in: ctx, from: out)
+    }
+
+    /// Returns the body bytes verbatim as a fresh ``Uint8Array`` — used
+    /// for the early-out paths (undefined value, malformed path) so a
+    /// rejected edit leaves even the byte layout untouched, rather than
+    /// silently re-emitting a body we never actually changed.
+    private static func jsonPassthrough(_ body: JSValue, in ctx: JSContext) -> JSValue {
+        makeUint8Array(in: ctx, from: bytesFromValue(body, in: ctx) ?? Data())
+    }
+
+    /// ``JSON.parse`` via Foundation, with mutable containers so the ops
+    /// can edit nodes in place and ``.fragmentsAllowed`` so a top-level
+    /// scalar body (``42``, ``"x"``, ``true``) still parses. Returns nil
+    /// for empty or malformed input.
+    private static func jsonParse(_ data: Data) -> Any? {
+        guard !data.isEmpty else { return nil }
+        return try? JSONSerialization.jsonObject(with: data, options: [.mutableContainers, .fragmentsAllowed])
+    }
+
+    /// ``JSON.stringify`` via Foundation. Compact, slashes left
+    /// unescaped to match how servers actually emit URLs in JSON, and
+    /// ``.fragmentsAllowed`` to round-trip a scalar root. Returns nil
+    /// when the graph can't be represented as JSON (a NaN/∞
+    /// ``NSNumber``, a stray ``NSDate`` from a value conversion, a
+    /// non-string dictionary key), which the caller turns into a
+    /// body-unchanged pass-through.
+    private static func jsonSerialize(_ object: Any) -> Data? {
+        return try? JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+    }
+
+    /// Converts a script-supplied value into its Foundation JSON form.
+    /// ``undefined`` maps to nil (the caller treats that as "no value
+    /// given"); ``null`` maps to ``NSNull``. Everything else rides
+    /// ``JSValue/toObject`` — JSON-shaped inputs become
+    /// ``NSNumber`` / ``NSString`` / ``NSArray`` / ``NSDictionary``;
+    /// anything exotic survives only until ``jsonSerialize`` rejects it.
+    private static func jsonValue(from value: JSValue, in ctx: JSContext) -> Any? {
+        if value.isUndefined { return nil }
+        if value.isNull { return NSNull() }
+        return value.toObject()
+    }
+
+    /// Normalizes the ``values`` argument of ``removeWhereFieldIn`` into
+    /// a Swift array: a JS array becomes its elements, a lone scalar
+    /// becomes a one-element array (so ``removeWhereFieldIn(b, p, f, "x")``
+    /// works as well as the array form), undefined/null becomes empty.
+    private static func jsonArrayValues(from value: JSValue, in ctx: JSContext) -> [Any] {
+        if value.isUndefined || value.isNull { return [] }
+        if value.isArray, let array = value.toArray() { return array }
+        if let single = jsonValue(from: value, in: ctx) { return [single] }
+        return []
+    }
+
+    /// JSON-value equality for the ``removeWhere…`` predicates. Both
+    /// sides are Foundation JSON leaves (``NSNumber`` / ``NSString`` /
+    /// ``NSNull``), so ``isEqual`` is exactly right — and it treats ``1``
+    /// and ``1.0`` as equal, which is what a script comparing against a
+    /// numeric literal expects.
+    private static func jsonValueEquals(_ lhs: Any, _ rhs: Any) -> Bool {
+        return (lhs as AnyObject).isEqual(rhs)
+    }
+
+    /// Splits a JSONPath into segments. Tolerant by design: a leading
+    /// ``$`` is optional, brackets accept a bare or quoted key or a
+    /// numeric index, and a path written without the ``$.`` prefix
+    /// (``"data.items"``) still parses. Returns nil only for genuinely
+    /// malformed input — an empty dotted segment (``"a..b"``, a trailing
+    /// ``"."``) or an empty ``"[]"`` — so the caller can warn instead of
+    /// silently addressing the wrong node. An empty result (``"$"`` or
+    /// ``""``) means "the document root".
+    private static func parseJSONPath(_ raw: String) -> [JSONPathSegment]? {
+        var segments: [JSONPathSegment] = []
+        var chars = Substring(raw)
+        if chars.first == "$" { chars = chars.dropFirst() }
+        while let c = chars.first {
+            if c == "." {
+                chars = chars.dropFirst()
+                var name = ""
+                while let d = chars.first, d != ".", d != "[" {
+                    name.append(d)
+                    chars = chars.dropFirst()
+                }
+                if name.isEmpty { return nil }
+                segments.append(.key(name))
+            } else if c == "[" {
+                chars = chars.dropFirst()
+                var inner = ""
+                while let d = chars.first, d != "]" {
+                    inner.append(d)
+                    chars = chars.dropFirst()
+                }
+                guard chars.first == "]" else { return nil }
+                chars = chars.dropFirst()
+                let token = inner.trimmingCharacters(in: .whitespaces)
+                if token.count >= 2,
+                   (token.first == "\"" && token.last == "\"") || (token.first == "'" && token.last == "'") {
+                    segments.append(.key(String(token.dropFirst().dropLast())))
+                } else if let index = Int(token) {
+                    segments.append(.index(index))
+                } else if !token.isEmpty {
+                    segments.append(.key(token))
+                } else {
+                    return nil
+                }
+            } else {
+                var name = ""
+                while let d = chars.first, d != ".", d != "[" {
+                    name.append(d)
+                    chars = chars.dropFirst()
+                }
+                if name.isEmpty { return nil }
+                segments.append(.key(name))
+            }
+        }
+        return segments
+    }
+
+    /// Descends one segment. Object keys index a dictionary; numeric
+    /// segments index an array (bounds-checked). Any other pairing — a
+    /// key into an array, an index into an object, a step off the end, a
+    /// step into a scalar — returns nil, which unwinds the whole walk to
+    /// a no-op.
+    private static func childNode(_ node: Any?, _ segment: JSONPathSegment) -> Any? {
+        guard let node else { return nil }
+        switch segment {
+        case .key(let key):
+            return (node as? NSDictionary)?.object(forKey: key)
+        case .index(let index):
+            guard let array = node as? NSArray, index >= 0, index < array.count else { return nil }
+            return array[index]
+        }
+    }
+
+    /// Resolves a full path to its node (or nil). Empty segments means
+    /// the root. Used by the ``removeWhere…`` ops to find the target
+    /// array.
+    private static func resolveNode(_ root: Any, segments: [JSONPathSegment]) -> Any? {
+        var node: Any? = root
+        for segment in segments {
+            node = childNode(node, segment)
+        }
+        return node
+    }
+
+    /// Applies add/replace/delete at the leaf of ``segments``. Walks to
+    /// the leaf's parent container, then acts per ``mode``. Returns the
+    /// root — usually the same object mutated in place, except an
+    /// empty-path add/replace which swaps the root for ``value``. Every
+    /// miss (absent parent, wrong container type, out-of-range index) is
+    /// a no-op.
+    private static func applyAtPath(_ root: Any, segments: [JSONPathSegment], mode: JSONLeafMode, value: Any?) -> Any {
+        if segments.isEmpty {
+            switch mode {
+            case .add, .replace: return value ?? root
+            case .delete: return root
+            }
+        }
+        var node: Any? = root
+        for segment in segments.dropLast() {
+            node = childNode(node, segment)
+        }
+        guard let parent = node, let leaf = segments.last else { return root }
+        switch leaf {
+        case .key(let key):
+            guard let dictionary = parent as? NSMutableDictionary else { return root }
+            switch mode {
+            case .add:
+                if let value { dictionary.setObject(value, forKey: key as NSString) }
+            case .replace:
+                if dictionary.object(forKey: key) != nil, let value {
+                    dictionary.setObject(value, forKey: key as NSString)
+                }
+            case .delete:
+                dictionary.removeObject(forKey: key)
+            }
+        case .index(let index):
+            guard let array = parent as? NSMutableArray else { return root }
+            let count = array.count
+            switch mode {
+            case .add:
+                if let value {
+                    if index >= 0, index < count { array.replaceObject(at: index, with: value) }
+                    else if index == count { array.add(value) }
+                }
+            case .replace:
+                if let value, index >= 0, index < count { array.replaceObject(at: index, with: value) }
+            case .delete:
+                if index >= 0, index < count { array.removeObject(at: index) }
+            }
+        }
+        return root
+    }
+
+    /// Overwrites every ``key`` member at any depth with ``value``.
+    /// Children are visited before the key is set so the replacement is
+    /// never itself descended into; the key is only overwritten where it
+    /// already exists (recursive replace, not recursive insert).
+    private static func replaceKeyRecursive(_ node: Any?, key: String, value: Any) {
+        if let dictionary = node as? NSMutableDictionary {
+            for k in dictionary.allKeys {
+                guard let ks = k as? String, ks != key else { continue }
+                replaceKeyRecursive(dictionary.object(forKey: ks), key: key, value: value)
+            }
+            if dictionary.object(forKey: key) != nil {
+                dictionary.setObject(value, forKey: key as NSString)
+            }
+        } else if let array = node as? NSMutableArray {
+            for element in array { replaceKeyRecursive(element, key: key, value: value) }
+        }
+    }
+
+    /// Removes every ``key`` member at any depth, then recurses into what
+    /// remains.
+    private static func deleteKeyRecursive(_ node: Any?, key: String) {
+        if let dictionary = node as? NSMutableDictionary {
+            dictionary.removeObject(forKey: key)
+            for k in dictionary.allKeys {
+                if let ks = k as? String { deleteKeyRecursive(dictionary.object(forKey: ks), key: key) }
+            }
+        } else if let array = node as? NSMutableArray {
+            for element in array { deleteKeyRecursive(element, key: key) }
+        }
     }
 
     /// Installs ``Anywhere.store`` — per-rule-set persistent key/value
