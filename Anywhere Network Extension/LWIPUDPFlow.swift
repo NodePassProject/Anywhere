@@ -584,6 +584,15 @@ class LWIPUDPFlow {
 
     // MARK: - Close
 
+#if DEBUG
+    /// Leak tripwire: a flow must be torn down via `close()`/`closeSync()`
+    /// (which cancels its direct socket and proxy/session) before being freed.
+    /// DEBUG-only.
+    deinit {
+        assert(closed, "LWIPUDPFlow leaked: freed without close()")
+    }
+#endif
+
     func close() {
         guard !closed else { return }
         closed = true

@@ -176,14 +176,26 @@ nonisolated class HTTP3Connection: NaiveTunnel {
     }
 
     func close() {
-        queue.async { [weak self] in
-            guard let self else { return }
+        // Strong `self`, not `[weak self]`: this connection owns its
+        // `QUICConnection`, so dropping it (last reference) before this block
+        // ran would skip `quic.close()` and leak the QUIC socket + ngtcp2 state
+        // (see CloseOnce).
+        queue.async {
             self.state = .closed
             self.quic.close()
             self.pendingReceiveCompletion?(nil, HTTP3Error.streamClosed)
             self.pendingReceiveCompletion = nil
         }
     }
+
+#if DEBUG
+    /// Leak tripwire: a connection must reach `.closed` before being freed.
+    /// (Its `QUICConnection` has its own tripwire that catches any teardown
+    /// path which set `.closed` without closing `quic`.) DEBUG-only.
+    deinit {
+        assert(state == .closed, "HTTP3Connection leaked: freed without close()")
+    }
+#endif
 
     // MARK: - Control Stream
 

@@ -311,6 +311,13 @@ nonisolated class GRPCConnection {
         for r in waiters { r() }
         transportCancel()
     }
+
+    deinit {
+        // Reclaim the keepalive timer if the connection was dropped without
+        // cancel(). `DispatchSource.cancel()` is thread-safe; a still-live
+        // transport (if any) is surfaced by the leaf socket's own tripwire.
+        keepaliveTimer?.cancel()
+    }
 }
 
 // MARK: - HTTP/2 constants
