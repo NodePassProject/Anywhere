@@ -19,28 +19,44 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var pathMonitor: NWPathMonitor?
     private var lastPathSnapshot: PathSnapshot?
 
-    private struct PathSnapshot: Equatable {
+    /// Snapshot of the connection-relevant facts about a network path. The
+    /// `primaryInterface` (first available — the egress the OS prefers) is what
+    /// determines whether established outbound sockets are still valid: when it
+    /// changes, every leg is stranded on a dead source address. The
+    /// IPv4/IPv6/expensive/constrained flags are tracked only so the classifier
+    /// can tell an *additive* capability change (e.g. IPv6 arriving on the same
+    /// Wi-Fi) — which leaves connections valid — apart from a real egress move.
+    private struct PathSnapshot {
         let status: Network.NWPath.Status
         let unsatisfiedReason: String?
+        let primaryInterface: PrimaryInterface?
         let interfaceSummary: String
-        let primaryInterfaceName: String?
         let supportsIPv4: Bool
         let supportsIPv6: Bool
         let isExpensive: Bool
         let isConstrained: Bool
 
-        // Equality intentionally excludes supportsIPv4/supportsIPv6/isExpensive/isConstrained.
-        // Those flags can flip on the same interface (Low Data Mode toggles, IPv6 RA arriving late)
-        // without invalidating existing connections — restarting on them is wasted work.
-        // The primary interface name (e.g., en0, pdp_ip0) is included so genuine interface swaps
-        // are caught even when the summary string collapses to the same type (e.g., Wi-Fi → Wi-Fi).
-        // Only the primary (satisfied) interface is tracked — standby interfaces in
-        // availableInterfaces can appear/disappear without affecting the active route.
-        static func == (lhs: PathSnapshot, rhs: PathSnapshot) -> Bool {
-            lhs.status == rhs.status &&
-            lhs.unsatisfiedReason == rhs.unsatisfiedReason &&
-            lhs.interfaceSummary == rhs.interfaceSummary &&
-            lhs.primaryInterfaceName == rhs.primaryInterfaceName
+        /// Identity of the egress interface: name + BSD index + type. A change
+        /// in any of these means the OS moved the default route onto a
+        /// different interface (Wi-Fi⇄cellular, reattach), invalidating every
+        /// socket bound to the old one.
+        struct PrimaryInterface: Equatable, CustomStringConvertible {
+            let name: String
+            let index: Int
+            let type: NWInterface.InterfaceType
+
+            var description: String {
+                let typeName: String
+                switch type {
+                case .wifi: typeName = "Wi-Fi"
+                case .cellular: typeName = "cellular"
+                case .wiredEthernet: typeName = "Ethernet"
+                case .loopback: typeName = "loopback"
+                case .other: typeName = "other"
+                @unknown default: typeName = "unknown"
+                }
+                return "\(name)/\(typeName)"
+            }
         }
 
         var summary: String {
@@ -327,38 +343,74 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         lastPathSnapshot = nil
     }
 
+    /// What changed between two *satisfied* paths, and whether it strands
+    /// existing outbound sockets.
+    private enum SatisfiedChange {
+        /// Nothing connection-relevant changed.
+        case unchanged
+        /// The egress interface moved (Wi-Fi⇄cellular, reattach, index change).
+        /// Every outbound socket is bound to the old interface — recover.
+        case interfaceChanged(String)
+        /// Same interface, but IPv4 reachability dropped (e.g. dual-stack →
+        /// IPv6-only). IPv4 proxy legs can no longer send — recover.
+        case ipv4EgressLost
+        /// Same interface and IPv4 egress, only additive/orthogonal attributes
+        /// changed (IPv6 arriving/leaving, Low Data Mode, constrained). Existing
+        /// connections stay valid — do nothing.
+        case capabilityOnly(String)
+    }
+
     private func handlePathUpdate(_ path: Network.NWPath) {
         let snapshot = Self.makePathSnapshot(from: path)
         let previous = lastPathSnapshot
         lastPathSnapshot = snapshot
 
-        guard previous != snapshot else { return }
-
-        if previous == nil {
+        // First update after start: record the baseline. Connections being set
+        // up are already dialing over this path — nothing to recover.
+        guard let previous else {
             logger.info("[VPN] Network path ready: \(snapshot.summary)")
             return
         }
 
         switch snapshot.status {
         case .satisfied:
-            if previous?.status == .satisfied {
-                logger.info("[VPN] Network path changed to \(snapshot.summary); restarting connections on new interface")
-                lwipStack.handleNetworkPathChange(summary: "network interface change")
-            } else {
-                logger.info("[VPN] Network path restored: \(snapshot.summary); restarting connections")
+            if previous.status != .satisfied {
+                // Restored after a drop: any leg that outlived the gap is stale.
+                logger.info("[VPN] Network path restored: \(snapshot.summary); recovering connections")
                 lwipStack.handleNetworkPathChange(summary: "network path restored")
+            } else {
+                // Still satisfied — recover only when the egress actually moved.
+                // Additive changes (notably IPv6 arriving on the same Wi-Fi)
+                // leave established connections valid, so they must NOT tear the
+                // stack down.
+                switch Self.classifySatisfiedChange(from: previous, to: snapshot) {
+                case .interfaceChanged(let detail):
+                    logger.info("[VPN] Egress interface changed (\(detail)); recovering connections")
+                    lwipStack.handleNetworkPathChange(summary: "interface change")
+                case .ipv4EgressLost:
+                    logger.info("[VPN] IPv4 egress lost (\(snapshot.summary)); recovering connections")
+                    lwipStack.handleNetworkPathChange(summary: "IPv4 egress lost")
+                case .capabilityOnly(let what):
+                    logger.debug("[VPN] Path attributes changed (\(what)); connections unaffected")
+                case .unchanged:
+                    break
+                }
             }
-            // Signal the system that the tunnel has recovered from any prior interruption
+            // We have a usable path again; clear any prior reasserting state.
             if reasserting {
                 reasserting = false
             }
 
         case .requiresConnection:
+            // Dedupe repeated callbacks in the same state so we don't re-log;
+            // there is no network to recover onto yet, so we only flag reasserting.
+            guard previous.status != .requiresConnection else { return }
             let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
             logger.warning("[VPN] Network path waiting for attachment\(reasonSuffix); active connections may pause")
             reasserting = true
 
         case .unsatisfied:
+            guard previous.status != .unsatisfied else { return }
             let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
             logger.warning("[VPN] Network path unavailable\(reasonSuffix); active connections interrupted")
             reasserting = true
@@ -366,6 +418,33 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         @unknown default:
             logger.warning("[VPN] Network path changed unexpectedly; active connections may reconnect")
         }
+    }
+
+    /// Classifies a satisfied→satisfied transition. The egress interface is the
+    /// decisive signal: an established outbound socket is pinned to the
+    /// interface/source address it was opened on, so it survives anything that
+    /// doesn't move the egress. We deliberately treat IPv6 (and other additive
+    /// capability) changes on an unchanged interface as no-ops — tearing
+    /// connections down for them is the wasted, disruptive work this avoids.
+    private static func classifySatisfiedChange(from prev: PathSnapshot, to cur: PathSnapshot) -> SatisfiedChange {
+        if prev.primaryInterface != cur.primaryInterface {
+            let from = prev.primaryInterface?.description ?? "none"
+            let to = cur.primaryInterface?.description ?? "none"
+            return .interfaceChanged("\(from) → \(to)")
+        }
+
+        if prev.supportsIPv4 && !cur.supportsIPv4 {
+            return .ipv4EgressLost
+        }
+
+        var deltas: [String] = []
+        if prev.supportsIPv6 != cur.supportsIPv6 { deltas.append(cur.supportsIPv6 ? "+IPv6" : "-IPv6") }
+        if !prev.supportsIPv4 && cur.supportsIPv4 { deltas.append("+IPv4") }
+        if prev.isExpensive != cur.isExpensive { deltas.append(cur.isExpensive ? "+expensive" : "-expensive") }
+        if prev.isConstrained != cur.isConstrained { deltas.append(cur.isConstrained ? "+constrained" : "-constrained") }
+        if !deltas.isEmpty { return .capabilityOnly(deltas.joined(separator: ", ")) }
+
+        return .unchanged
     }
 
     private func logTunnelStop(reason: NEProviderStopReason) {
@@ -472,11 +551,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             unsatisfiedReason = nil
         }
 
+        // The first available interface is the egress the OS prefers for this
+        // path (availableInterfaces is ordered by preference). Its identity is
+        // what we diff to detect a genuine interface move.
+        let primaryInterface = path.availableInterfaces.first.map {
+            PathSnapshot.PrimaryInterface(name: $0.name, index: $0.index, type: $0.type)
+        }
+
         return PathSnapshot(
             status: path.status,
             unsatisfiedReason: unsatisfiedReason,
+            primaryInterface: primaryInterface,
             interfaceSummary: interfaceTypes.isEmpty ? "no interface" : interfaceTypes.joined(separator: "+"),
-            primaryInterfaceName: path.availableInterfaces.first?.name,
             supportsIPv4: path.supportsIPv4,
             supportsIPv6: path.supportsIPv6,
             isExpensive: path.isExpensive,

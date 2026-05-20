@@ -110,6 +110,16 @@ enum TunnelConstants {
     /// back-to-back (e.g., user toggling a setting while Wi-Fi is handing off).
     static let restartThrottleInterval: CFAbsoluteTime = 2.0
 
+    /// Debounce window for network-path-change recovery (seconds).
+    /// A real Wi-Fi⇄cellular handoff emits several NWPath updates within a
+    /// second or two; this collapses the burst into a single recovery while
+    /// still reacting to the leading edge immediately. Kept far shorter than
+    /// ``restartThrottleInterval`` because path-change recovery is now a
+    /// lightweight outbound-state invalidation (no netif/listener rebuild),
+    /// so reacting promptly costs little and stale connections otherwise sit
+    /// on a dead path until protocol idle timeouts (30–300s) fire.
+    static let networkRecoveryDebounceInterval: CFAbsoluteTime = 0.4
+
     // MARK: - TLS Sniffer
 
     /// Maximum bytes buffered while parsing a TLS ClientHello for SNI.

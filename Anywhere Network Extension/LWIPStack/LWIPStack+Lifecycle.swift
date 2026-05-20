@@ -60,6 +60,8 @@ extension LWIPStack {
             running = false
             deferredRestart?.cancel()
             deferredRestart = nil
+            pendingNetworkRecovery?.cancel()
+            pendingNetworkRecovery = nil
             shutdownInternal()
             fakeIPPool.reset()
         }
@@ -99,40 +101,91 @@ extension LWIPStack {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
             logger.info("[VPN] Device wake: invalidating outbound proxy state")
-
-            muxManager?.closeAll()
-            if Self.shouldUseVisionMux(configuration) {
-                muxManager = MuxManager(configuration: configuration, lwipQueue: lwipQueue)
-            } else {
-                muxManager = nil
-            }
-            
-            HysteriaClient.closeAll()
-            AnyTLSManager.shared.closeAll()
-            purgeShadowsocksUDPSessions()
-            HTTP3SessionPool.shared.closeAll()
-
-            for (_, flow) in udpFlows {
-                flow.close()
-            }
-            udpFlows.removeAll()
-
-            isTearingDown = true
-            lwip_bridge_abort_all_tcp()
-            isTearingDown = false
+            invalidateOutboundState(configuration: configuration)
         }
     }
 
-    /// Tears down all active connections and restarts the stack on the current
-    /// configuration. Called when the network path changes significantly
-    /// (interface switch or restored from unavailable) so that stale
-    /// connections bound to the old interface are replaced immediately.
+    /// Recovers active connections after the network path changes (interface
+    /// switch, restored from unavailable, Wi-Fi roam, NAT rebind). Like device
+    /// wake, the lwIP netif, listeners, and timers all survive — only the
+    /// outbound sockets are stranded on network state that no longer exists —
+    /// so this runs the same lightweight ``invalidateOutboundState`` rather
+    /// than a full stack restart. Apps see a RST on their aborted TCP flows and
+    /// reconnect immediately over the new path.
+    ///
+    /// Debounced by ``TunnelConstants/networkRecoveryDebounceInterval``: the
+    /// leading edge fires immediately, and a burst of updates within the window
+    /// (typical of a handoff) coalesces into a single trailing recovery. Only
+    /// the last deferred request runs.
     func handleNetworkPathChange(summary: String) {
         lwipQueue.async { [self] in
-            guard running, let configuration else { return }
-            logger.warning("[VPN] Restarting stack after \(summary)")
-            restartStack(configuration: configuration)
+            guard running, configuration != nil else { return }
+
+            let now = CFAbsoluteTimeGetCurrent()
+            let elapsed = now - lastNetworkRecoveryTime
+
+            if elapsed < TunnelConstants.networkRecoveryDebounceInterval {
+                pendingNetworkRecovery?.cancel()
+                let delay = TunnelConstants.networkRecoveryDebounceInterval - elapsed
+                let work = DispatchWorkItem { [self] in
+                    pendingNetworkRecovery = nil
+                    guard running else { return }
+                    performNetworkRecovery(summary: summary)
+                }
+                pendingNetworkRecovery = work
+                lwipQueue.asyncAfter(deadline: .now() + delay, execute: work)
+                logger.debug("[LWIPStack] Network recovery debounced, deferred by \(String(format: "%.0f", delay * 1000))ms")
+                return
+            }
+
+            performNetworkRecovery(summary: summary)
         }
+    }
+
+    /// Runs the outbound-state invalidation for a settled network path and
+    /// stamps the debounce clock. Must be called on `lwipQueue`.
+    private func performNetworkRecovery(summary: String) {
+        pendingNetworkRecovery?.cancel()
+        pendingNetworkRecovery = nil
+        lastNetworkRecoveryTime = CFAbsoluteTimeGetCurrent()
+        guard let configuration else { return }
+        logger.warning("[VPN] Recovering connections after \(summary)")
+        invalidateOutboundState(configuration: configuration)
+    }
+
+    /// Invalidates all outbound proxy state — the Vision mux, QUIC/Hysteria/
+    /// HTTP3/AnyTLS sessions, Shadowsocks UDP sessions, per-flow UDP proxy
+    /// connections, and every active TCP leg — while leaving the lwIP netif,
+    /// listeners, and timers running. Must be called on `lwipQueue`.
+    ///
+    /// Shared by device-wake and network-path-change recovery: both face the
+    /// same problem (the kernel's outbound sockets are bound to network state
+    /// that no longer exists) and neither needs the local stack rebuilt.
+    /// TCP flows are aborted via ``lwip_bridge_abort_all_tcp`` so each PCB's
+    /// err callback releases its Swift side and the app receives a RST; the
+    /// netif and listener PCBs stay up, so new client activity is served
+    /// without waiting on a netif rebuild.
+    private func invalidateOutboundState(configuration: ProxyConfiguration) {
+        muxManager?.closeAll()
+        if Self.shouldUseVisionMux(configuration) {
+            muxManager = MuxManager(configuration: configuration, lwipQueue: lwipQueue)
+        } else {
+            muxManager = nil
+        }
+
+        HysteriaClient.closeAll()
+        AnyTLSManager.shared.closeAll()
+        purgeShadowsocksUDPSessions()
+        HTTP3SessionPool.shared.closeAll()
+
+        for (_, flow) in udpFlows {
+            flow.close()
+        }
+        udpFlows.removeAll()
+
+        isTearingDown = true
+        lwip_bridge_abort_all_tcp()
+        isTearingDown = false
     }
 
     /// Shuts down the lwIP stack and all active flows. Must be called on `lwipQueue`.

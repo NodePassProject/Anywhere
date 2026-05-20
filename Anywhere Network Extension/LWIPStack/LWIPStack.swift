@@ -112,6 +112,13 @@ class LWIPStack {
     /// Pending deferred restart when throttled. Cancelled and replaced on each new request.
     var deferredRestart: DispatchWorkItem?
 
+    /// Timestamp of the last network-path-change recovery (used for debouncing).
+    var lastNetworkRecoveryTime: CFAbsoluteTime = 0
+
+    /// Pending debounced network recovery. Cancelled and replaced on each new
+    /// path update that lands inside the debounce window.
+    var pendingNetworkRecovery: DispatchWorkItem?
+
     /// lwIP periodic timeout timer
     var timeoutTimer: DispatchSourceTimer?
 
