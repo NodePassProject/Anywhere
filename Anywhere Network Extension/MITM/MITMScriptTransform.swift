@@ -15,7 +15,7 @@ import JavaScriptCore
 /// **Single-rule semantics — by design, not a limitation.** At most
 /// one ``.script`` and at most one ``.streamScript`` may fire on a
 /// given message. When multiple rules of the same kind match the
-/// in-flight Content-Type, the last one in rule order wins — later
+/// request's URL pattern, the last one in rule order wins — later
 /// definitions overwrite earlier ones.
 ///
 /// Capping the script chain at one rule per kind is a deliberate
@@ -26,16 +26,11 @@ import JavaScriptCore
 /// state-collision hazards a chain would create: the JS engine's
 /// ``Anywhere.store`` keys are scoped to the rule set (not the rule),
 /// and the per-stream ``FrameCursor.state`` slot for ``streamScript``
-/// is single-valued, so chaining two scripts on the same content type
+/// is single-valued, so chaining two scripts on the same URL
 /// would have them stomping each other's persistent state on every
 /// frame. Authors who need composed behaviour should consolidate
 /// logic into a single `process(ctx)` function rather than splitting
 /// across multiple rules.
-///
-/// Each script rule carries its own ``BodyContentTypeFilter``; the
-/// message's `Content-Type` is checked at the entry point so rules
-/// whose filter doesn't match the in-flight payload are skipped
-/// without entering the JS engine.
 enum MITMScriptTransform {
 
     /// Result of running a buffered ``.script`` rule on a message.
@@ -54,18 +49,18 @@ enum MITMScriptTransform {
     }
 
     /// True when at least one ``.script`` rule in ``rules`` would fire
-    /// for a message with the given ``contentType``. Rewriters consult
-    /// this at head-completion time to decide whether to defer head
-    /// emission (and, for bodied messages, buffer the body).
+    /// for the given request-target. Rewriters consult this at
+    /// head-completion time to decide whether to defer head emission
+    /// (and, for bodied messages, buffer the body).
     ///
     /// Streaming rules win when both apply (see ``hasStreamScriptRule``)
     /// so callers should check the streaming variant first and only
     /// fall through to the buffered path when no stream rule matches.
-    static func hasScriptRule(in rules: [CompiledMITMRule], pathAndQuery: String?, contentType: String?) -> Bool {
+    static func hasScriptRule(in rules: [CompiledMITMRule], pathAndQuery: String?) -> Bool {
         rules.contains { rule in
             switch rule.operation {
-            case .script(_, _, let filter):
-                return filter.matches(contentType) && rule.matchesURL(pathAndQuery)
+            case .script:
+                return rule.matchesURL(pathAndQuery)
             case .streamScript, .urlReplace, .headerAdd, .headerDelete, .headerReplace:
                 return false
             }
@@ -73,27 +68,27 @@ enum MITMScriptTransform {
     }
 
     /// True when at least one ``.streamScript`` rule in ``rules``
-    /// would fire for a message with the given ``contentType``. Both
-    /// rewriters consult this at head-completion time to decide
-    /// whether to enter per-frame streaming mode (emit head
-    /// immediately, no body buffering, no HTTP-level decompression).
-    static func hasStreamScriptRule(in rules: [CompiledMITMRule], pathAndQuery: String?, contentType: String?) -> Bool {
+    /// would fire for the given request-target. Both rewriters
+    /// consult this at head-completion time to decide whether to
+    /// enter per-frame streaming mode (emit head immediately, no
+    /// body buffering, no HTTP-level decompression).
+    static func hasStreamScriptRule(in rules: [CompiledMITMRule], pathAndQuery: String?) -> Bool {
         rules.contains { rule in
             switch rule.operation {
-            case .streamScript(_, _, let filter):
-                return filter.matches(contentType) && rule.matchesURL(pathAndQuery)
+            case .streamScript:
+                return rule.matchesURL(pathAndQuery)
             case .script, .urlReplace, .headerAdd, .headerDelete, .headerReplace:
                 return false
             }
         }
     }
 
-    /// Runs the single ``.script`` rule whose filter matches the
-    /// message's `Content-Type`, picking the last matching rule when
-    /// several would qualify (overwrite semantics; see the type-level
-    /// note). Header-only rules are no-ops here (they ran at head
-    /// time). Returns ``Outcome/message`` carrying the input unchanged
-    /// when no rule matches or ``engineProvider`` is nil; returns
+    /// Runs the single ``.script`` rule whose URL pattern matches the
+    /// request-target, picking the last matching rule when several
+    /// would qualify (overwrite semantics; see the type-level note).
+    /// Header-only rules are no-ops here (they ran at head time).
+    /// Returns ``Outcome/message`` carrying the input unchanged when
+    /// no rule matches or ``engineProvider`` is nil; returns
     /// ``Outcome/synthesizedResponse`` when a request-phase script
     /// called `Anywhere.respond(...)`.
     static func apply(
@@ -102,8 +97,7 @@ enum MITMScriptTransform {
         engineProvider: MITMScriptEngine.Provider? = nil
     ) -> Outcome {
         let pathAndQuery = MITMRequestURL.pathAndQuery(from: message.url)
-        let contentType = firstHeaderValue(message.headers, name: "content-type")
-        guard let match = lastMatchingScriptSource(in: rules, pathAndQuery: pathAndQuery, contentType: contentType),
+        guard let match = lastMatchingScriptSource(in: rules, pathAndQuery: pathAndQuery),
               let engineProvider
         else { return .message(message) }
         let outcome = engineProvider.get().apply(
@@ -127,7 +121,7 @@ enum MITMScriptTransform {
     ///
     /// With single-rule semantics the ``state`` slot has unambiguous
     /// ownership: it belongs to the one ``.streamScript`` rule that
-    /// matched the stream's Content-Type at head time. Earlier
+    /// matched the stream's request-target at head time. Earlier
     /// matching rules don't run on this stream and so can't trample
     /// the slot.
     final class FrameCursor {
@@ -154,13 +148,12 @@ enum MITMScriptTransform {
     static func applyFrame(
         _ frame: Data,
         rules: [CompiledMITMRule],
-        contentType: String?,
         frameContext: MITMScriptEngine.FrameContext,
         cursor: FrameCursor,
         engineProvider: MITMScriptEngine.Provider?
     ) -> StreamFrameResult {
         let pathAndQuery = MITMRequestURL.pathAndQuery(from: frameContext.url)
-        guard let match = lastMatchingStreamScriptSource(in: rules, pathAndQuery: pathAndQuery, contentType: contentType),
+        guard let match = lastMatchingStreamScriptSource(in: rules, pathAndQuery: pathAndQuery),
               let engineProvider
         else { return StreamFrameResult(body: frame, bypass: false) }
         let outcome = engineProvider.get().applyFrame(
@@ -193,17 +186,16 @@ enum MITMScriptTransform {
         let sourceKey: Int
     }
 
-    /// Returns the source of the last ``.script`` rule whose filter
-    /// matches ``contentType``, or nil when none match. Walks rules
-    /// back-to-front so the first hit is the winner.
+    /// Returns the source of the last ``.script`` rule whose URL
+    /// pattern matches the request-target, or nil when none match.
+    /// Walks rules back-to-front so the first hit is the winner.
     private static func lastMatchingScriptSource(
         in rules: [CompiledMITMRule],
-        pathAndQuery: String?,
-        contentType: String?
+        pathAndQuery: String?
     ) -> ScriptMatch? {
         for rule in rules.reversed() {
-            if case .script(let source, let sourceKey, let filter) = rule.operation,
-               filter.matches(contentType), rule.matchesURL(pathAndQuery) {
+            if case .script(let source, let sourceKey) = rule.operation,
+               rule.matchesURL(pathAndQuery) {
                 return ScriptMatch(source: source, sourceKey: sourceKey)
             }
         }
@@ -211,24 +203,16 @@ enum MITMScriptTransform {
     }
 
     /// Returns the source of the last ``.streamScript`` rule whose
-    /// filter matches ``contentType``, or nil when none match.
+    /// URL pattern matches the request-target, or nil when none match.
     private static func lastMatchingStreamScriptSource(
         in rules: [CompiledMITMRule],
-        pathAndQuery: String?,
-        contentType: String?
+        pathAndQuery: String?
     ) -> ScriptMatch? {
         for rule in rules.reversed() {
-            if case .streamScript(let source, let sourceKey, let filter) = rule.operation,
-               filter.matches(contentType), rule.matchesURL(pathAndQuery) {
+            if case .streamScript(let source, let sourceKey) = rule.operation,
+               rule.matchesURL(pathAndQuery) {
                 return ScriptMatch(source: source, sourceKey: sourceKey)
             }
-        }
-        return nil
-    }
-
-    private static func firstHeaderValue(_ headers: [(name: String, value: String)], name: String) -> String? {
-        for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
-            return v
         }
         return nil
     }

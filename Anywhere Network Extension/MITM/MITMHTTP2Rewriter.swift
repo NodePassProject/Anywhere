@@ -94,26 +94,23 @@ final class MITMHTTP2Rewriter {
     // MARK: - Script preflight + application
 
     /// Whether any buffered script rule applies for this host + phase
-    /// with the in-flight message's ``contentType``. Callers should
-    /// check ``hasStreamScriptRule`` first — streaming rules take
-    /// precedence and never coexist with buffered mode on the same
-    /// stream.
-    func hasScriptRule(phase: MITMPhase, pathAndQuery: String?, contentType: String?) -> Bool {
+    /// and request-target. Callers should check ``hasStreamScriptRule``
+    /// first — streaming rules take precedence and never coexist with
+    /// buffered mode on the same stream.
+    func hasScriptRule(phase: MITMPhase, pathAndQuery: String?) -> Bool {
         MITMScriptTransform.hasScriptRule(
             in: rules(phase: phase),
-            pathAndQuery: pathAndQuery,
-            contentType: contentType
+            pathAndQuery: pathAndQuery
         )
     }
 
     /// Whether any streaming-script rule applies. Streaming rules tell
     /// the connection to emit HEADERS immediately and run scripts
     /// per-frame instead of buffering the full body.
-    func hasStreamScriptRule(phase: MITMPhase, pathAndQuery: String?, contentType: String?) -> Bool {
+    func hasStreamScriptRule(phase: MITMPhase, pathAndQuery: String?) -> Bool {
         MITMScriptTransform.hasStreamScriptRule(
             in: rules(phase: phase),
-            pathAndQuery: pathAndQuery,
-            contentType: contentType
+            pathAndQuery: pathAndQuery
         )
     }
 
@@ -129,9 +126,9 @@ final class MITMHTTP2Rewriter {
     /// init time.
     var ruleSetID: UUID? { cachedRuleSetID }
 
-    /// Applies every script rule for the given phase whose Content-Type
-    /// filter accepts the message's `content-type` header. The caller
-    /// is responsible for decompressing the body before passing it in;
+    /// Applies the script rule for the given phase whose URL pattern
+    /// matches the request-target. The caller is responsible for
+    /// decompressing the body before passing it in;
     /// on the ``.message`` branch the returned message has the
     /// (possibly modified) body in identity form. The
     /// ``.synthesizedResponse`` branch fires only on request phase when

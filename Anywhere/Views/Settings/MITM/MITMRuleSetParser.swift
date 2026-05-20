@@ -56,8 +56,8 @@ import JavaScriptCore
 /// | `1` | header-add     | both            | pattern, name, value     |
 /// | `2` | header-delete  | both            | pattern, name            |
 /// | `3` | header-replace | both            | pattern, name, value     |
-/// | `4` | script         | both            | pattern, types, base64   |
-/// | `5` | stream-script  | both            | pattern, types, base64   |
+/// | `4` | script         | both            | pattern, base64          |
+/// | `5` | stream-script  | both            | pattern, base64          |
 ///
 /// Fields are separated by `,`. Whitespace around unquoted fields is
 /// trimmed. A field that begins with `"` is read until the matching `"`,
@@ -90,16 +90,9 @@ import JavaScriptCore
 /// hook that drops the upstream request and writes a synthesized
 /// response straight back to the client.
 ///
-/// `script` rules require a comma-separated list of exact
-/// `Content-Type` primary values between the `pattern` and the base64.
-/// Wrap the field in double quotes so the inner commas are not
-/// interpreted as CSV separators:
+/// A `script` rule's only fields are the `pattern` and the base64:
 ///
-///     1, 4, ^/api/, "text/html, application/json", <base64>
-///
-/// Matching is case-insensitive and ignores parameters (everything
-/// from `;` onward). An empty types field (an empty quoted string)
-/// disables the rule entirely — no Content-Type matches.
+///     1, 4, ^/api/, <base64>
 ///
 /// `stream-script` (op `5`) uses the same field shape as `script` but
 /// invokes the script once per HTTP/2 DATA frame or HTTP/1 chunked
@@ -297,28 +290,28 @@ enum MITMRuleSetParser {
             guard !pattern.isEmpty, isValidRegex(pattern), !name.isEmpty else { return nil }
             return MITMRule(phase: phase, pattern: pattern, operation: .headerReplace(name: name, value: args[2]))
 
-        case 4:  // script — fields: pattern, types, base64
-            guard args.count == 3 else { return nil }
+        case 4:  // script — fields: pattern, base64
+            guard args.count == 2 else { return nil }
             let pattern = args[0]
             guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
-            let b64 = args[2]
+            let b64 = args[1]
             guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
             return MITMRule(
                 phase: phase,
                 pattern: pattern,
-                operation: .script(contentTypes: parseContentTypes(args[1]), scriptBase64: b64)
+                operation: .script(scriptBase64: b64)
             )
 
-        case 5:  // stream-script — fields: pattern, types, base64
-            guard args.count == 3 else { return nil }
+        case 5:  // stream-script — fields: pattern, base64
+            guard args.count == 2 else { return nil }
             let pattern = args[0]
             guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
-            let b64 = args[2]
+            let b64 = args[1]
             guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
             return MITMRule(
                 phase: phase,
                 pattern: pattern,
-                operation: .streamScript(contentTypes: parseContentTypes(args[1]), scriptBase64: b64)
+                operation: .streamScript(scriptBase64: b64)
             )
 
         default:
@@ -384,17 +377,6 @@ enum MITMRuleSetParser {
 
     private static func isValidRegex(_ pattern: String) -> Bool {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
-    }
-
-    /// Parses the `script` Content-Type list. Splits on `,`,
-    /// lowercases, trims, and drops empties. An empty or all-whitespace
-    /// field produces an empty array, which matches nothing — the way
-    /// to disable a script rule.
-    private static func parseContentTypes(_ field: String) -> [String] {
-        field
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-            .filter { !$0.isEmpty }
     }
 
     /// Validates a `script` field: base64 → UTF-8 → JavaScript parse.

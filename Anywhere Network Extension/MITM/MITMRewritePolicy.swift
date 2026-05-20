@@ -61,8 +61,6 @@ enum CompiledMITMOperation {
     /// JavaScript transform. ``source`` is the decoded UTF-8 source of
     /// `function process(ctx)`. Compilation/execution belongs to
     /// ``MITMScriptEngine`` so the policy stays free of JSContext.
-    /// ``contentTypes`` gates the rule against the message's
-    /// `Content-Type`; see ``BodyContentTypeFilter``.
     ///
     /// ``sourceKey`` is a precomputed identifier the engine uses as
     /// the compile cache key. Hashing the full source on every JS call
@@ -76,7 +74,7 @@ enum CompiledMITMOperation {
     /// message — this is a deliberate design choice for performance
     /// and efficiency, not a limitation. The runtime selection lives
     /// in ``MITMScriptTransform``.
-    case script(source: String, sourceKey: Int, contentTypes: BodyContentTypeFilter)
+    case script(source: String, sourceKey: Int)
     /// Per-frame JavaScript transform. Same runtime contract as
     /// ``script`` for ctx fields the script reads, but the function is
     /// invoked once per DATA frame (HTTP/2) or per chunk (HTTP/1
@@ -86,28 +84,7 @@ enum CompiledMITMOperation {
     ///
     /// Single-rule runtime semantics apply (see ``.script`` above):
     /// at most one ``.streamScript`` runs per stream by design.
-    case streamScript(source: String, sourceKey: Int, contentTypes: BodyContentTypeFilter)
-}
-
-/// Resolved Content-Type filter for a script rule. Built once at
-/// rule-compilation time so the per-message check stays a constant-time
-/// set lookup.
-struct BodyContentTypeFilter: Equatable {
-    /// Exact-match primary `Content-Type` values, lowercased and
-    /// trimmed at parse time. An empty set matches nothing — the
-    /// import-time choice to pass an empty types field, which disables
-    /// the rule.
-    let allowed: Set<String>
-
-    /// Whether ``contentType`` is in-scope for the rule this filter
-    /// belongs to. Parameters (everything from `;` onward) are stripped
-    /// before comparison; matching is case-insensitive.
-    func matches(_ contentType: String?) -> Bool {
-        guard let primary = MITMBodyCodec.primaryContentType(contentType) else {
-            return false
-        }
-        return allowed.contains(primary)
-    }
+    case streamScript(source: String, sourceKey: Int)
 }
 
 /// Compiled view of a rule set at one trie terminal: the specific suffix
@@ -278,24 +255,16 @@ final class MITMRewritePolicy {
                 return nil
             }
             return .headerReplace(name: name, value: value)
-        case .script(let contentTypes, let scriptBase64):
+        case .script(let scriptBase64):
             guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "script") else {
                 return nil
             }
-            return .script(
-                source: source,
-                sourceKey: sourceCacheKey(source),
-                contentTypes: scriptFilter(contentTypes)
-            )
-        case .streamScript(let contentTypes, let scriptBase64):
+            return .script(source: source, sourceKey: sourceCacheKey(source))
+        case .streamScript(let scriptBase64):
             guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "streamScript") else {
                 return nil
             }
-            return .streamScript(
-                source: source,
-                sourceKey: sourceCacheKey(source),
-                contentTypes: scriptFilter(contentTypes)
-            )
+            return .streamScript(source: source, sourceKey: sourceCacheKey(source))
         }
     }
 
@@ -323,10 +292,6 @@ final class MITMRewritePolicy {
             return nil
         }
         return source
-    }
-
-    private func scriptFilter(_ contentTypes: [String]) -> BodyContentTypeFilter {
-        BodyContentTypeFilter(allowed: Set(contentTypes.map { $0.lowercased() }))
     }
 
     // MARK: - Static-rule validation

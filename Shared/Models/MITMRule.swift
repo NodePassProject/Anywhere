@@ -51,19 +51,14 @@ enum MITMOperation: Equatable {
     /// message-context object. Stored base64-encoded so rule-set text
     /// import/export survives newlines and quoting.
     ///
-    /// ``contentTypes`` gates which messages the script runs on by exact
-    /// Content-Type primary value (case-insensitive, parameters stripped).
-    /// The list is required; an empty list matches nothing (a way to
-    /// disable the rule).
-    ///
     /// Runtime single-rule semantics (by design, not a limitation):
     /// at most one ``.script`` rule fires per message even when a
-    /// rule set declares several whose filters match — the last
+    /// rule set declares several whose URL pattern matches — the last
     /// matching rule wins. This is a deliberate design choice to
     /// maximize performance and efficiency; see ``MITMScriptTransform``
     /// for the full rationale. Authors who need composed behaviour
     /// should consolidate logic into a single `process(ctx)`.
-    case script(contentTypes: [String], scriptBase64: String)
+    case script(scriptBase64: String)
     /// Per-frame JavaScript transform for streaming bodies (gRPC,
     /// server-sent events, chunked APIs). Same storage shape as
     /// ``script`` but the runtime invokes the function once per DATA
@@ -82,7 +77,7 @@ enum MITMOperation: Equatable {
     /// for performance and efficiency, not a limitation): at most one
     /// ``.streamScript`` fires per stream — the last matching rule
     /// wins. See ``MITMScriptTransform`` for the full rationale.
-    case streamScript(contentTypes: [String], scriptBase64: String)
+    case streamScript(scriptBase64: String)
 }
 
 extension MITMOperation: CustomStringConvertible {
@@ -120,7 +115,6 @@ extension MITMOperation: Codable {
         case value
         case replacement
         case script
-        case contentTypes
     }
 
     init(from decoder: Decoder) throws {
@@ -142,15 +136,9 @@ extension MITMOperation: Codable {
                 value: try c.decode(String.self, forKey: .value)
             )
         case .script:
-            self = .script(
-                contentTypes: try c.decode([String].self, forKey: .contentTypes),
-                scriptBase64: try c.decode(String.self, forKey: .script)
-            )
+            self = .script(scriptBase64: try c.decode(String.self, forKey: .script))
         case .streamScript:
-            self = .streamScript(
-                contentTypes: try c.decode([String].self, forKey: .contentTypes),
-                scriptBase64: try c.decode(String.self, forKey: .script)
-            )
+            self = .streamScript(scriptBase64: try c.decode(String.self, forKey: .script))
         }
     }
 
@@ -171,14 +159,12 @@ extension MITMOperation: Codable {
             try c.encode(Kind.headerReplace, forKey: .kind)
             try c.encode(name, forKey: .name)
             try c.encode(value, forKey: .value)
-        case .script(let contentTypes, let scriptBase64):
+        case .script(let scriptBase64):
             try c.encode(Kind.script, forKey: .kind)
             try c.encode(scriptBase64, forKey: .script)
-            try c.encode(contentTypes, forKey: .contentTypes)
-        case .streamScript(let contentTypes, let scriptBase64):
+        case .streamScript(let scriptBase64):
             try c.encode(Kind.streamScript, forKey: .kind)
             try c.encode(scriptBase64, forKey: .script)
-            try c.encode(contentTypes, forKey: .contentTypes)
         }
     }
 }

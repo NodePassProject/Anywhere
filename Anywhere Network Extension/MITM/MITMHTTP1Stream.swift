@@ -119,7 +119,6 @@ final class MITMHTTP1Stream {
     /// ``frame.end = true``.
     private struct StreamingState {
         let headers: [Header]
-        let contentType: String?
         let originatingRequest: MITMRequestLog.Record?
         let startLine: String
         var frameIndex: Int = 0
@@ -436,8 +435,7 @@ final class MITMHTTP1Stream {
             break
         }
 
-        let contentType = firstHeaderValue(rewrittenHeaders, name: "content-type")
-        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, pathAndQuery: gatePathAndQuery, contentType: contentType)
+        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, pathAndQuery: gatePathAndQuery)
 
         switch framing {
         case .none:
@@ -527,8 +525,7 @@ final class MITMHTTP1Stream {
         // the head has already committed to a byte count we can't
         // change. Warn and fall through to either buffered-script or
         // passthrough.
-        let contentType = firstHeaderValue(rewrittenHeaders, name: "content-type")
-        if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery, contentType: contentType) {
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery) {
             logger.warning("[MITM] HTTP/1 \(host): streamScript skipped for Content-Length body (chunked encoding required)")
         }
 
@@ -572,15 +569,13 @@ final class MITMHTTP1Stream {
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
-        let contentType = firstHeaderValue(rewrittenHeaders, name: "content-type")
-
         // Streaming-script wins over buffered-script. Emit head
         // immediately and switch to per-chunk script mode. Stream
         // scripts can't mutate head fields, so head emission is
         // straightforward here.
-        if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery, contentType: contentType) {
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery) {
             if scriptsApply {
-                logger.warning("[MITM] HTTP/1 \(host): streamScript wins over script on the same Content-Type")
+                logger.warning("[MITM] HTTP/1 \(host): streamScript wins over script")
             }
             if phase == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
@@ -588,7 +583,6 @@ final class MITMHTTP1Stream {
             output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
             let streaming = StreamingState(
                 headers: rewrittenHeaders,
-                contentType: contentType,
                 originatingRequest: originatingRequest,
                 startLine: rewrittenStartLine,
                 cursor: MITMScriptTransform.FrameCursor()
@@ -933,7 +927,6 @@ final class MITMHTTP1Stream {
             let result = MITMScriptTransform.applyFrame(
                 chunk,
                 rules: rules,
-                contentType: streaming.contentType,
                 frameContext: frameCtx,
                 cursor: streaming.cursor,
                 engineProvider: scriptEngineProvider

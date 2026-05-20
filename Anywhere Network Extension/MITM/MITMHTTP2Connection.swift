@@ -177,13 +177,12 @@ final class MITMHTTP2Connection {
     private var pendingMessages: [UInt32: PendingMessage] = [:]
 
     /// Per-stream state for streaming-script mode. Set at HEADERS time
-    /// when a ``streamScript`` rule matches the message Content-Type;
+    /// when a ``streamScript`` rule matches the request-target;
     /// drives per-DATA-frame script invocation. Mutually exclusive
     /// with ``pendingMessages`` — a stream is either buffered (full
     /// script) or streamed (per-frame script), never both.
     private struct StreamingState {
         let headers: [(name: String, value: String)]
-        let contentType: String?
         let originatingRequest: MITMRequestLog.Record?
         var frameIndex: Int = 0
         let cursor: MITMScriptTransform.FrameCursor
@@ -769,7 +768,6 @@ final class MITMHTTP2Connection {
         let gatePathAndQuery = (direction == .inbound)
             ? MITMHTTP2Rewriter.requestPath(in: rewritten)
             : responsePathAndQuery
-        let contentType = firstHeaderValue(rewritten, name: "content-type")
 
         // Streaming-script mode wins over buffered-script mode when
         // both apply. The trade-off: stream rules see DATA frames
@@ -785,12 +783,12 @@ final class MITMHTTP2Connection {
         // buffered-script path (which handles an empty body) or to
         // pass-through. Without this gate, a request/response with no
         // body would silently bypass any buffered script that also
-        // matched the same Content-Type.
+        // matched.
         if case .headers = kind, !isTrailer, !isInterimResponse,
            !endStreamOnHeaders,
-           rewriter.hasStreamScriptRule(phase: phase, pathAndQuery: gatePathAndQuery, contentType: contentType) {
-            if rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery, contentType: contentType) {
-                logger.warning("[MITM] HTTP/2 stream \(streamID): streamScript rule wins over script rule on the same Content-Type")
+           rewriter.hasStreamScriptRule(phase: phase, pathAndQuery: gatePathAndQuery) {
+            if rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery) {
+                logger.warning("[MITM] HTTP/2 stream \(streamID): streamScript rule wins over script rule")
             }
 
             // Inbound HEADERS still need to land in the request log so
@@ -805,7 +803,6 @@ final class MITMHTTP2Connection {
             // function for outbound streams.
             streamingScripts[streamID] = StreamingState(
                 headers: rewritten,
-                contentType: contentType,
                 originatingRequest: originatingRequest,
                 cursor: MITMScriptTransform.FrameCursor()
             )
@@ -828,7 +825,7 @@ final class MITMHTTP2Connection {
         // an empty body. Skipped for trailers and interim responses
         // for the same reasons as streaming-script above.
         if case .headers = kind, !isTrailer, !isInterimResponse,
-           rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery, contentType: contentType),
+           rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery),
            shouldBufferStream(headers: rewritten, endStream: endStreamOnHeaders) {
             let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
             // Drop content-length: the post-script body size is
@@ -1084,7 +1081,6 @@ final class MITMHTTP2Connection {
             let result = MITMScriptTransform.applyFrame(
                 body,
                 rules: rewriter.rules(phase: phase),
-                contentType: streaming.contentType,
                 frameContext: ctx,
                 cursor: streaming.cursor,
                 engineProvider: rewriter.scriptEngineProvider
@@ -1342,9 +1338,9 @@ final class MITMHTTP2Connection {
     /// Decides whether a stream's HEADERS (and DATA, if any) should be
     /// deferred so the script chain can mutate the full message. The
     /// codec and content-length gates make the decision once at HEADERS
-    /// time rather than rediscovered per-frame. Content-Type filtering
-    /// happens earlier, on the rewriter side via
-    /// ``MITMHTTP2Rewriter/hasScriptRule(phase:contentType:)``.
+    /// time rather than rediscovered per-frame. Rule matching happens
+    /// earlier, on the rewriter side via
+    /// ``MITMHTTP2Rewriter/hasScriptRule(phase:pathAndQuery:)``.
     ///
     /// An END_STREAM-on-HEADERS message has no DATA to buffer, so the
     /// content-length / codec gates don't apply — defer unconditionally

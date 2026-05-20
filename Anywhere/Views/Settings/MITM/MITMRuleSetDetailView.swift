@@ -349,8 +349,8 @@ enum MITMRuleSummary {
             return name
         case .headerReplace(let name, _):
             return name
-        case .script(_, let scriptBase64),
-             .streamScript(_, let scriptBase64):
+        case .script(let scriptBase64),
+             .streamScript(let scriptBase64):
             let bytes = Data(base64Encoded: scriptBase64)?.count ?? 0
             return String(localized: "\(bytes) byte(s)")
         }

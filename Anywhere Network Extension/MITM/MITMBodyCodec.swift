@@ -29,18 +29,6 @@ enum MITMBodyCodec {
     /// else the extension is doing concurrently.
     static let maxBufferedBodyBytes: Int = 4 * 1024 * 1024
 
-    /// Lowercased primary `Content-Type` (everything before `;`) with
-    /// surrounding whitespace stripped. `nil` when the header is
-    /// absent. Used by ``BodyContentTypeFilter`` to compare an
-    /// incoming message's type against a user-supplied exact list.
-    static func primaryContentType(_ contentType: String?) -> String? {
-        guard let raw = contentType else { return nil }
-        let primary = raw
-            .split(separator: ";").first
-            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
-        return primary.isEmpty ? nil : primary
-    }
-
     /// One token in a `Content-Encoding` chain. The wire order is the
     /// order the server applied codings; decoding walks this list in
     /// reverse.
