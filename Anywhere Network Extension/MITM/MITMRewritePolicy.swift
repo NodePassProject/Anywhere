@@ -13,14 +13,51 @@ private let logger = AnywhereLogger(category: "MITM")
 /// names case-folded.
 struct CompiledMITMRule {
     let phase: MITMPhase
+    /// Pre-compiled URL gate: a regex over the request-target's
+    /// path-and-query. The ``operation`` only fires when this matches;
+    /// for ``CompiledMITMOperation/urlReplace`` it is also the
+    /// substitution regex.
+    let patternRegex: NSRegularExpression
     let operation: CompiledMITMOperation
 }
 
+extension CompiledMITMRule {
+    /// Whether this rule's URL gate matches the given request-target
+    /// (path-and-query). A nil target — the URL could not be determined
+    /// — fails closed, so the rule is skipped rather than applied blind.
+    func matchesURL(_ pathAndQuery: String?) -> Bool {
+        guard let pathAndQuery else { return false }
+        let range = NSRange(pathAndQuery.startIndex..., in: pathAndQuery)
+        return patternRegex.firstMatch(in: pathAndQuery, options: [], range: range) != nil
+    }
+}
+
+/// Path-and-query extraction for rule gating, shared by the HTTP/1 and
+/// HTTP/2 paths and the script transform.
+enum MITMRequestURL {
+    /// Extracts the request-target (path-and-query) from an absolute URL
+    /// string — the same string ``MITMScriptEngine/Message`` exposes as
+    /// `ctx.url`. Returns nil for relative or unparseable input so the
+    /// gate fails closed.
+    static func pathAndQuery(from url: String?) -> String? {
+        guard let url, let components = URLComponents(string: url) else { return nil }
+        if components.scheme == nil && components.host == nil { return nil }
+        var target = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+        if let query = components.percentEncodedQuery {
+            target += "?\(query)"
+        }
+        return target
+    }
+}
+
 enum CompiledMITMOperation {
-    case urlReplace(regex: NSRegularExpression, replacement: String)
+    case urlReplace(replacement: String)
     case headerAdd(name: String, value: String)
     case headerDelete(nameLower: String)
-    case headerReplace(regex: NSRegularExpression, name: String, value: String)
+    /// Overwrites the value of every header named ``name`` (matched
+    /// case-insensitively) with ``value``; headers that are absent are
+    /// left untouched.
+    case headerReplace(name: String, value: String)
     /// JavaScript transform. ``source`` is the decoded UTF-8 source of
     /// `function process(ctx)`. Compilation/execution belongs to
     /// ``MITMScriptEngine`` so the policy stays free of JSContext.
@@ -54,30 +91,22 @@ enum CompiledMITMOperation {
 
 /// Resolved Content-Type filter for a script rule. Built once at
 /// rule-compilation time so the per-message check stays a constant-time
-/// set lookup (or a fixed allowlist walk).
-enum BodyContentTypeFilter: Equatable {
-    /// User did not supply a Content-Type list at import time. The
-    /// runtime falls back to ``MITMBodyCodec/isRewritableType``'s
-    /// textual MIME allowlist.
-    case defaultAllowlist
-    /// User-supplied exact-match list, lowercased and trimmed at parse
-    /// time. An empty set matches nothing — the import-time choice to
-    /// pass a `""` field is preserved instead of collapsing to default.
-    case exact(Set<String>)
+/// set lookup.
+struct BodyContentTypeFilter: Equatable {
+    /// Exact-match primary `Content-Type` values, lowercased and
+    /// trimmed at parse time. An empty set matches nothing — the
+    /// import-time choice to pass an empty types field, which disables
+    /// the rule.
+    let allowed: Set<String>
 
     /// Whether ``contentType`` is in-scope for the rule this filter
     /// belongs to. Parameters (everything from `;` onward) are stripped
     /// before comparison; matching is case-insensitive.
     func matches(_ contentType: String?) -> Bool {
-        switch self {
-        case .defaultAllowlist:
-            return MITMBodyCodec.isRewritableType(contentType)
-        case .exact(let set):
-            guard let primary = MITMBodyCodec.primaryContentType(contentType) else {
-                return false
-            }
-            return set.contains(primary)
+        guard let primary = MITMBodyCodec.primaryContentType(contentType) else {
+            return false
         }
+        return allowed.contains(primary)
     }
 }
 
@@ -154,8 +183,12 @@ final class MITMRewritePolicy {
         guard !suffixes.isEmpty else { return }
 
         let compiledRules = set.rules.compactMap { rule -> CompiledMITMRule? in
+            guard let regex = try? NSRegularExpression(pattern: rule.pattern, options: []) else {
+                logger.warning("[MITM] rule pattern failed to compile (suffix=\(set.name)): \(rule.pattern)")
+                return nil
+            }
             guard let op = compile(rule.operation, suffix: set.name) else { return nil }
-            return CompiledMITMRule(phase: rule.phase, operation: op)
+            return CompiledMITMRule(phase: rule.phase, patternRegex: regex, operation: op)
         }
 
         // Synthesize-response actions (reject_200 / redirect_302) bypass
@@ -213,16 +246,12 @@ final class MITMRewritePolicy {
 
     private func compile(_ operation: MITMOperation, suffix: String) -> CompiledMITMOperation? {
         switch operation {
-        case .urlReplace(let pattern, let replacement):
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-                logger.warning("[MITM] urlReplace pattern failed to compile (suffix=\(suffix)): \(pattern)")
-                return nil
-            }
+        case .urlReplace(let replacement):
             guard Self.isValidRequestTargetTemplate(replacement) else {
                 logger.warning("[MITM] urlReplace dropped: replacement contains whitespace or control bytes (suffix=\(suffix))")
                 return nil
             }
-            return .urlReplace(regex: regex, replacement: replacement)
+            return .urlReplace(replacement: replacement)
         case .headerAdd(let name, let value):
             guard Self.isValidHeaderName(name) else {
                 logger.warning("[MITM] headerAdd dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
@@ -239,11 +268,7 @@ final class MITMRewritePolicy {
                 return nil
             }
             return .headerDelete(nameLower: name.lowercased())
-        case .headerReplace(let pattern, let name, let value):
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
-                logger.warning("[MITM] headerReplace pattern failed to compile (suffix=\(suffix)): \(pattern)")
-                return nil
-            }
+        case .headerReplace(let name, let value):
             guard Self.isValidHeaderName(name) else {
                 logger.warning("[MITM] headerReplace dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
                 return nil
@@ -252,8 +277,8 @@ final class MITMRewritePolicy {
                 logger.warning("[MITM] headerReplace dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
-            return .headerReplace(regex: regex, name: name, value: value)
-        case .script(let scriptBase64, let contentTypes):
+            return .headerReplace(name: name, value: value)
+        case .script(let contentTypes, let scriptBase64):
             guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "script") else {
                 return nil
             }
@@ -262,7 +287,7 @@ final class MITMRewritePolicy {
                 sourceKey: sourceCacheKey(source),
                 contentTypes: scriptFilter(contentTypes)
             )
-        case .streamScript(let scriptBase64, let contentTypes):
+        case .streamScript(let contentTypes, let scriptBase64):
             guard let source = decodeScript(scriptBase64, suffix: suffix, kind: "streamScript") else {
                 return nil
             }
@@ -300,11 +325,8 @@ final class MITMRewritePolicy {
         return source
     }
 
-    private func scriptFilter(_ contentTypes: [String]?) -> BodyContentTypeFilter {
-        if let contentTypes {
-            return .exact(Set(contentTypes.map { $0.lowercased() }))
-        }
-        return .defaultAllowlist
+    private func scriptFilter(_ contentTypes: [String]) -> BodyContentTypeFilter {
+        BodyContentTypeFilter(allowed: Set(contentTypes.map { $0.lowercased() }))
     }
 
     // MARK: - Static-rule validation

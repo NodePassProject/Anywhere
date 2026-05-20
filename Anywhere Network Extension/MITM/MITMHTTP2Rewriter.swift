@@ -68,15 +68,27 @@ final class MITMHTTP2Rewriter {
     ) -> [(name: String, value: String)] {
         // :authority rewrite runs first so configured headerReplace rules
         // see the canonical post-redirect value and can override it.
+        // Request rules gate on the live ``:path`` (read per-rule inside
+        // applyHeaderRules), so no path is threaded in here.
         let withAuthority = applyAuthorityRewrite(headers)
-        return applyHeaderRules(withAuthority, phase: .httpRequest)
+        return applyHeaderRules(withAuthority, phase: .httpRequest, pathAndQuery: nil)
     }
 
+    /// ``pathAndQuery`` is the originating request's path, the URL gate
+    /// for response-phase rules (response headers carry no ``:path``).
     func transformResponseHeaders(
         _ headers: [(name: String, value: String)],
-        streamID: UInt32
+        streamID: UInt32,
+        pathAndQuery: String?
     ) -> [(name: String, value: String)] {
-        applyHeaderRules(headers, phase: .httpResponse)
+        applyHeaderRules(headers, phase: .httpResponse, pathAndQuery: pathAndQuery)
+    }
+
+    /// The `:path` pseudo-header (request-target) from a decoded header
+    /// list, or nil if absent.
+    static func requestPath(in headers: [(name: String, value: String)]) -> String? {
+        for (name, value) in headers where name == ":path" { return value }
+        return nil
     }
 
     // MARK: - Script preflight + application
@@ -86,9 +98,10 @@ final class MITMHTTP2Rewriter {
     /// check ``hasStreamScriptRule`` first — streaming rules take
     /// precedence and never coexist with buffered mode on the same
     /// stream.
-    func hasScriptRule(phase: MITMPhase, contentType: String?) -> Bool {
+    func hasScriptRule(phase: MITMPhase, pathAndQuery: String?, contentType: String?) -> Bool {
         MITMScriptTransform.hasScriptRule(
             in: rules(phase: phase),
+            pathAndQuery: pathAndQuery,
             contentType: contentType
         )
     }
@@ -96,9 +109,10 @@ final class MITMHTTP2Rewriter {
     /// Whether any streaming-script rule applies. Streaming rules tell
     /// the connection to emit HEADERS immediately and run scripts
     /// per-frame instead of buffering the full body.
-    func hasStreamScriptRule(phase: MITMPhase, contentType: String?) -> Bool {
+    func hasStreamScriptRule(phase: MITMPhase, pathAndQuery: String?, contentType: String?) -> Bool {
         MITMScriptTransform.hasStreamScriptRule(
             in: rules(phase: phase),
+            pathAndQuery: pathAndQuery,
             contentType: contentType
         )
     }
@@ -177,23 +191,26 @@ final class MITMHTTP2Rewriter {
 
     private func applyHeaderRules(
         _ headers: [(name: String, value: String)],
-        phase: MITMPhase
+        phase: MITMPhase,
+        pathAndQuery: String?
     ) -> [(name: String, value: String)] {
         let rulesForPhase = rules(phase: phase)
         guard !rulesForPhase.isEmpty else { return headers }
 
         var current = headers
         for rule in rulesForPhase {
+            // Request rules gate on the live ``:path`` — an earlier
+            // url-replace in this same list may have rewritten it.
+            // Response rules gate on the originating request's path.
+            let gatePath = (phase == .httpRequest) ? Self.requestPath(in: current) : pathAndQuery
+            guard rule.matchesURL(gatePath) else { continue }
             switch rule.operation {
-            case .urlReplace(let regex, let replacement):
+            case .urlReplace(let replacement):
                 guard phase == .httpRequest else { continue }
                 current = current.map { entry in
                     guard entry.name == ":path" else { return entry }
                     let range = NSRange(entry.value.startIndex..., in: entry.value)
-                    guard regex.firstMatch(in: entry.value, options: [], range: range) != nil else {
-                        return entry
-                    }
-                    let rewritten = regex.stringByReplacingMatches(
+                    let rewritten = rule.patternRegex.stringByReplacingMatches(
                         in: entry.value,
                         options: [],
                         range: range,
@@ -205,14 +222,9 @@ final class MITMHTTP2Rewriter {
                 current.append((name: name, value: value))
             case .headerDelete(let nameLower):
                 current.removeAll { $0.name.equalsIgnoringASCIICase(nameLower) }
-            case .headerReplace(let regex, let name, let value):
+            case .headerReplace(let name, let value):
                 current = current.map { entry in
-                    let literal = "\(entry.name): \(entry.value)"
-                    let range = NSRange(literal.startIndex..., in: literal)
-                    guard regex.firstMatch(in: literal, options: [], range: range) != nil else {
-                        return entry
-                    }
-                    return (name: name, value: value)
+                    entry.name.equalsIgnoringASCIICase(name) ? (name: name, value: value) : entry
                 }
             case .script, .streamScript:
                 continue

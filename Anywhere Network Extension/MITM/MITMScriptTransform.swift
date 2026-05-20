@@ -61,11 +61,11 @@ enum MITMScriptTransform {
     /// Streaming rules win when both apply (see ``hasStreamScriptRule``)
     /// so callers should check the streaming variant first and only
     /// fall through to the buffered path when no stream rule matches.
-    static func hasScriptRule(in rules: [CompiledMITMRule], contentType: String?) -> Bool {
+    static func hasScriptRule(in rules: [CompiledMITMRule], pathAndQuery: String?, contentType: String?) -> Bool {
         rules.contains { rule in
             switch rule.operation {
             case .script(_, _, let filter):
-                return filter.matches(contentType)
+                return filter.matches(contentType) && rule.matchesURL(pathAndQuery)
             case .streamScript, .urlReplace, .headerAdd, .headerDelete, .headerReplace:
                 return false
             }
@@ -77,11 +77,11 @@ enum MITMScriptTransform {
     /// rewriters consult this at head-completion time to decide
     /// whether to enter per-frame streaming mode (emit head
     /// immediately, no body buffering, no HTTP-level decompression).
-    static func hasStreamScriptRule(in rules: [CompiledMITMRule], contentType: String?) -> Bool {
+    static func hasStreamScriptRule(in rules: [CompiledMITMRule], pathAndQuery: String?, contentType: String?) -> Bool {
         rules.contains { rule in
             switch rule.operation {
             case .streamScript(_, _, let filter):
-                return filter.matches(contentType)
+                return filter.matches(contentType) && rule.matchesURL(pathAndQuery)
             case .script, .urlReplace, .headerAdd, .headerDelete, .headerReplace:
                 return false
             }
@@ -101,8 +101,9 @@ enum MITMScriptTransform {
         rules: [CompiledMITMRule],
         engineProvider: MITMScriptEngine.Provider? = nil
     ) -> Outcome {
+        let pathAndQuery = MITMRequestURL.pathAndQuery(from: message.url)
         let contentType = firstHeaderValue(message.headers, name: "content-type")
-        guard let match = lastMatchingScriptSource(in: rules, contentType: contentType),
+        guard let match = lastMatchingScriptSource(in: rules, pathAndQuery: pathAndQuery, contentType: contentType),
               let engineProvider
         else { return .message(message) }
         let outcome = engineProvider.get().apply(
@@ -158,7 +159,8 @@ enum MITMScriptTransform {
         cursor: FrameCursor,
         engineProvider: MITMScriptEngine.Provider?
     ) -> StreamFrameResult {
-        guard let match = lastMatchingStreamScriptSource(in: rules, contentType: contentType),
+        let pathAndQuery = MITMRequestURL.pathAndQuery(from: frameContext.url)
+        guard let match = lastMatchingStreamScriptSource(in: rules, pathAndQuery: pathAndQuery, contentType: contentType),
               let engineProvider
         else { return StreamFrameResult(body: frame, bypass: false) }
         let outcome = engineProvider.get().applyFrame(
@@ -196,11 +198,12 @@ enum MITMScriptTransform {
     /// back-to-front so the first hit is the winner.
     private static func lastMatchingScriptSource(
         in rules: [CompiledMITMRule],
+        pathAndQuery: String?,
         contentType: String?
     ) -> ScriptMatch? {
         for rule in rules.reversed() {
             if case .script(let source, let sourceKey, let filter) = rule.operation,
-               filter.matches(contentType) {
+               filter.matches(contentType), rule.matchesURL(pathAndQuery) {
                 return ScriptMatch(source: source, sourceKey: sourceKey)
             }
         }
@@ -211,11 +214,12 @@ enum MITMScriptTransform {
     /// filter matches ``contentType``, or nil when none match.
     private static func lastMatchingStreamScriptSource(
         in rules: [CompiledMITMRule],
+        pathAndQuery: String?,
         contentType: String?
     ) -> ScriptMatch? {
         for rule in rules.reversed() {
             if case .streamScript(let source, let sourceKey, let filter) = rule.operation,
-               filter.matches(contentType) {
+               filter.matches(contentType), rule.matchesURL(pathAndQuery) {
                 return ScriptMatch(source: source, sourceKey: sourceKey)
             }
         }

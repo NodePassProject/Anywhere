@@ -721,27 +721,11 @@ final class MITMHTTP2Connection {
             }
         }
 
-        var rewritten: [(name: String, value: String)]
-        switch kind {
-        case .headers:
-            // RFC 9113 section 8.1: client-to-server is a request and
-            // server-to-client is a response. Pick the matching hook.
-            rewritten = (direction == .inbound)
-                ? rewriter.transformRequestHeaders(decoded, streamID: streamID)
-                : rewriter.transformResponseHeaders(decoded, streamID: streamID)
-        case .pushPromise:
-            // PUSH_PROMISE carries the synthesized request that goes
-            // with the soon-to-be-pushed response. The rewriter has no
-            // dedicated hook; just pass the headers through.
-            rewritten = decoded
-        }
-
-        let endStreamOnHeaders = originalFlags & 0x1 != 0
-        let contentType = firstHeaderValue(rewritten, name: "content-type")
-
         // Pop or peek the originating request once per outbound
-        // response head, before any script-mode dispatch. Doing it
-        // here (rather than inside each script branch) ensures the
+        // response head, before the header transform (so a response
+        // rule's URL gate can be tested against the originating
+        // request's path) and before any script-mode dispatch. Doing
+        // it here (rather than inside each script branch) ensures the
         // streamID→record map drains for pass-through responses too —
         // without this it leaks until connection close. Interim 1xx
         // responses peek so the record stays live for the matching
@@ -756,6 +740,36 @@ final class MITMHTTP2Connection {
         } else {
             originatingRequest = nil
         }
+        // Response headers carry no ``:path``, so response-phase rules
+        // gate on the originating request's path. Request-phase rules
+        // read the live ``:path`` inside the rewriter instead.
+        let responsePathAndQuery = (direction == .outbound)
+            ? MITMRequestURL.pathAndQuery(from: originatingRequest?.url)
+            : nil
+
+        var rewritten: [(name: String, value: String)]
+        switch kind {
+        case .headers:
+            // RFC 9113 section 8.1: client-to-server is a request and
+            // server-to-client is a response. Pick the matching hook.
+            rewritten = (direction == .inbound)
+                ? rewriter.transformRequestHeaders(decoded, streamID: streamID)
+                : rewriter.transformResponseHeaders(decoded, streamID: streamID, pathAndQuery: responsePathAndQuery)
+        case .pushPromise:
+            // PUSH_PROMISE carries the synthesized request that goes
+            // with the soon-to-be-pushed response. The rewriter has no
+            // dedicated hook; just pass the headers through.
+            rewritten = decoded
+        }
+
+        let endStreamOnHeaders = originalFlags & 0x1 != 0
+        // Request-target the script preflights gate on: the live
+        // (post-url-replace) ``:path`` on inbound requests; the
+        // originating request's path on outbound responses.
+        let gatePathAndQuery = (direction == .inbound)
+            ? MITMHTTP2Rewriter.requestPath(in: rewritten)
+            : responsePathAndQuery
+        let contentType = firstHeaderValue(rewritten, name: "content-type")
 
         // Streaming-script mode wins over buffered-script mode when
         // both apply. The trade-off: stream rules see DATA frames
@@ -774,8 +788,8 @@ final class MITMHTTP2Connection {
         // matched the same Content-Type.
         if case .headers = kind, !isTrailer, !isInterimResponse,
            !endStreamOnHeaders,
-           rewriter.hasStreamScriptRule(phase: phase, contentType: contentType) {
-            if rewriter.hasScriptRule(phase: phase, contentType: contentType) {
+           rewriter.hasStreamScriptRule(phase: phase, pathAndQuery: gatePathAndQuery, contentType: contentType) {
+            if rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery, contentType: contentType) {
                 logger.warning("[MITM] HTTP/2 stream \(streamID): streamScript rule wins over script rule on the same Content-Type")
             }
 
@@ -814,7 +828,7 @@ final class MITMHTTP2Connection {
         // an empty body. Skipped for trailers and interim responses
         // for the same reasons as streaming-script above.
         if case .headers = kind, !isTrailer, !isInterimResponse,
-           rewriter.hasScriptRule(phase: phase, contentType: contentType),
+           rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery, contentType: contentType),
            shouldBufferStream(headers: rewritten, endStream: endStreamOnHeaders) {
             let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
             // Drop content-length: the post-script body size is

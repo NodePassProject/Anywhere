@@ -25,19 +25,26 @@ extension MITMPhase: CustomStringConvertible {
     }
 }
 
-/// A single rewrite operation. The associated values carry only the fields
-/// that operation needs, keeping the editor UI and runtime engine from
-/// threading optional fields around.
+/// A single rewrite operation. The associated values carry only the
+/// fields that operation needs; the URL-match ``pattern`` that gates
+/// every rule lives one level up on ``MITMRule`` so it is uniform across
+/// operations and the editor/runtime never thread it through each case.
 ///
-/// Note: ``urlReplace`` rewrites only the path-and-query. The
-/// destination of the upstream connection lives on ``MITMRuleSet`` as
-/// ``rewriteTarget``, so a single rule set always has a coherent
-/// upstream.
+/// Note: ``urlReplace`` rewrites only the path-and-query, reusing the
+/// rule's ``MITMRule/pattern`` as both the gate and the substitution
+/// regex. The destination of the upstream connection lives on
+/// ``MITMRuleSet`` as ``rewriteTarget``, so a single rule set always has
+/// a coherent upstream.
 enum MITMOperation: Equatable {
-    case urlReplace(pattern: String, path: String)
+    /// Substitutes the rule's ``MITMRule/pattern`` in the request-target
+    /// with this replacement template. Request phase only.
+    case urlReplace(path: String)
     case headerAdd(name: String, value: String)
     case headerDelete(name: String)
-    case headerReplace(pattern: String, name: String, value: String)
+    /// Sets the value of every header named ``name`` (case-insensitive)
+    /// to ``value``, regardless of the header's current value. Headers
+    /// that are absent are left untouched (nothing is added).
+    case headerReplace(name: String, value: String)
     /// JavaScript transform. ``scriptBase64`` is the base64-encoded
     /// UTF-8 source of a script that defines `function process(ctx)`;
     /// the runtime decodes, compiles, and invokes it on a mutable
@@ -46,9 +53,8 @@ enum MITMOperation: Equatable {
     ///
     /// ``contentTypes`` gates which messages the script runs on by exact
     /// Content-Type primary value (case-insensitive, parameters stripped).
-    /// `nil` means the user did not supply a list at import time; the
-    /// runtime falls back to ``MITMBodyCodec/isRewritableType``'s
-    /// allowlist of textual MIME types. An empty list matches nothing.
+    /// The list is required; an empty list matches nothing (a way to
+    /// disable the rule).
     ///
     /// Runtime single-rule semantics (by design, not a limitation):
     /// at most one ``.script`` rule fires per message even when a
@@ -57,7 +63,7 @@ enum MITMOperation: Equatable {
     /// maximize performance and efficiency; see ``MITMScriptTransform``
     /// for the full rationale. Authors who need composed behaviour
     /// should consolidate logic into a single `process(ctx)`.
-    case script(scriptBase64: String, contentTypes: [String]?)
+    case script(contentTypes: [String], scriptBase64: String)
     /// Per-frame JavaScript transform for streaming bodies (gRPC,
     /// server-sent events, chunked APIs). Same storage shape as
     /// ``script`` but the runtime invokes the function once per DATA
@@ -76,7 +82,7 @@ enum MITMOperation: Equatable {
     /// for performance and efficiency, not a limitation): at most one
     /// ``.streamScript`` fires per stream — the last matching rule
     /// wins. See ``MITMScriptTransform`` for the full rationale.
-    case streamScript(scriptBase64: String, contentTypes: [String]?)
+    case streamScript(contentTypes: [String], scriptBase64: String)
 }
 
 extension MITMOperation: CustomStringConvertible {
@@ -112,7 +118,6 @@ extension MITMOperation: Codable {
         case kind
         case name
         case value
-        case pattern
         case replacement
         case script
         case contentTypes
@@ -123,10 +128,7 @@ extension MITMOperation: Codable {
         let kind = try c.decode(Kind.self, forKey: .kind)
         switch kind {
         case .urlReplace:
-            self = .urlReplace(
-                pattern: try c.decode(String.self, forKey: .pattern),
-                path: try c.decode(String.self, forKey: .replacement)
-            )
+            self = .urlReplace(path: try c.decode(String.self, forKey: .replacement))
         case .headerAdd:
             self = .headerAdd(
                 name: try c.decode(String.self, forKey: .name),
@@ -136,19 +138,18 @@ extension MITMOperation: Codable {
             self = .headerDelete(name: try c.decode(String.self, forKey: .name))
         case .headerReplace:
             self = .headerReplace(
-                pattern: try c.decode(String.self, forKey: .pattern),
                 name: try c.decode(String.self, forKey: .name),
                 value: try c.decode(String.self, forKey: .value)
             )
         case .script:
             self = .script(
-                scriptBase64: try c.decode(String.self, forKey: .script),
-                contentTypes: try c.decodeIfPresent([String].self, forKey: .contentTypes)
+                contentTypes: try c.decode([String].self, forKey: .contentTypes),
+                scriptBase64: try c.decode(String.self, forKey: .script)
             )
         case .streamScript:
             self = .streamScript(
-                scriptBase64: try c.decode(String.self, forKey: .script),
-                contentTypes: try c.decodeIfPresent([String].self, forKey: .contentTypes)
+                contentTypes: try c.decode([String].self, forKey: .contentTypes),
+                scriptBase64: try c.decode(String.self, forKey: .script)
             )
         }
     }
@@ -156,10 +157,9 @@ extension MITMOperation: Codable {
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .urlReplace(let pattern, let replacement):
+        case .urlReplace(let path):
             try c.encode(Kind.urlReplace, forKey: .kind)
-            try c.encode(pattern, forKey: .pattern)
-            try c.encode(replacement, forKey: .replacement)
+            try c.encode(path, forKey: .replacement)
         case .headerAdd(let name, let value):
             try c.encode(Kind.headerAdd, forKey: .kind)
             try c.encode(name, forKey: .name)
@@ -167,19 +167,18 @@ extension MITMOperation: Codable {
         case .headerDelete(let name):
             try c.encode(Kind.headerDelete, forKey: .kind)
             try c.encode(name, forKey: .name)
-        case .headerReplace(let pattern, let name, let value):
+        case .headerReplace(let name, let value):
             try c.encode(Kind.headerReplace, forKey: .kind)
-            try c.encode(pattern, forKey: .pattern)
             try c.encode(name, forKey: .name)
             try c.encode(value, forKey: .value)
-        case .script(let scriptBase64, let contentTypes):
+        case .script(let contentTypes, let scriptBase64):
             try c.encode(Kind.script, forKey: .kind)
             try c.encode(scriptBase64, forKey: .script)
-            try c.encodeIfPresent(contentTypes, forKey: .contentTypes)
-        case .streamScript(let scriptBase64, let contentTypes):
+            try c.encode(contentTypes, forKey: .contentTypes)
+        case .streamScript(let contentTypes, let scriptBase64):
             try c.encode(Kind.streamScript, forKey: .kind)
             try c.encode(scriptBase64, forKey: .script)
-            try c.encodeIfPresent(contentTypes, forKey: .contentTypes)
+            try c.encode(contentTypes, forKey: .contentTypes)
         }
     }
 }
@@ -187,20 +186,29 @@ extension MITMOperation: Codable {
 struct MITMRule: Codable, Equatable, Identifiable {
     var id = UUID()
     var phase: MITMPhase
+    /// NSRegularExpression tested against the request-target
+    /// (path-and-query). The rule's ``operation`` only fires when this
+    /// matches; for ``MITMOperation/urlReplace`` it doubles as the
+    /// substitution regex. The rule set's domain suffixes already gate
+    /// the host, so this refines by path.
+    var pattern: String
     var operation: MITMOperation
 
     init(
         id: UUID = UUID(),
         phase: MITMPhase,
+        pattern: String,
         operation: MITMOperation
     ) {
         self.id = id
         self.phase = phase
+        self.pattern = pattern
         self.operation = operation
     }
 
     private enum CodingKeys: String, CodingKey {
         case phase
+        case pattern
         case operation
     }
 
@@ -208,12 +216,14 @@ struct MITMRule: Codable, Equatable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.id = UUID()
         self.phase = try c.decode(MITMPhase.self, forKey: .phase)
+        self.pattern = try c.decode(String.self, forKey: .pattern)
         self.operation = try c.decode(MITMOperation.self, forKey: .operation)
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(phase, forKey: .phase)
+        try c.encode(pattern, forKey: .pattern)
         try c.encode(operation, forKey: .operation)
     }
 }

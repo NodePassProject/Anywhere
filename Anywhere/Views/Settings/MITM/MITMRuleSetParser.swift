@@ -18,8 +18,8 @@ import JavaScriptCore
 ///     name     = My Rule Set
 ///     hostname = example.com, *.api.example.com
 ///     redirect = upstream.example.com:443
-///     0, 0, ^https://example\.com/old, https://example.com/new
-///     1, 1, X-Powered-By, Anywhere
+///     0, 0, ^/old, /new
+///     1, 1, ^/api/, X-Powered-By, Anywhere
 ///
 /// Recognized keys:
 ///
@@ -50,21 +50,31 @@ import JavaScriptCore
 ///
 /// Operations and their trailing fields:
 ///
-/// | ID | Operation       | Phase           | Fields                |
-/// | -- | --------------- | --------------- | --------------------- |
-/// | `0` | url-replace    | request only    | pattern, replacement  |
-/// | `1` | header-add     | both            | name, value           |
-/// | `2` | header-delete  | both            | name                  |
-/// | `3` | header-replace | both            | pattern, name, value  |
-/// | `4` | script         | both            | [types,] base64       |
-/// | `5` | stream-script  | both            | [types,] base64       |
+/// | ID | Operation       | Phase           | Fields                   |
+/// | -- | --------------- | --------------- | ------------------------ |
+/// | `0` | url-replace    | request only    | pattern, replacement     |
+/// | `1` | header-add     | both            | pattern, name, value     |
+/// | `2` | header-delete  | both            | pattern, name            |
+/// | `3` | header-replace | both            | pattern, name, value     |
+/// | `4` | script         | both            | pattern, types, base64   |
+/// | `5` | stream-script  | both            | pattern, types, base64   |
 ///
 /// Fields are separated by `,`. Whitespace around unquoted fields is
 /// trimmed. A field that begins with `"` is read until the matching `"`,
 /// with `""` inside a quoted field producing a literal `"` — so values
-/// containing commas can be wrapped in double quotes. Patterns for
-/// `url-replace` and `header-replace` are NSRegularExpression with the
-/// usual Unicode semantics.
+/// containing commas can be wrapped in double quotes.
+///
+/// Every rule leads with a `pattern`: an NSRegularExpression (usual
+/// Unicode semantics) tested against the request-target's
+/// path-and-query. The operation only fires when the pattern matches;
+/// the rule set's `hostname` already scopes the host, so the pattern
+/// refines by path. Use `.*` to match every request. For `url-replace`
+/// the same pattern is also the substitution regex.
+///
+/// `header-replace` matches the target header by `name`
+/// (case-insensitive) and overwrites its value with `value`, ignoring
+/// the header's current value; a header that is not present is left
+/// alone.
 ///
 /// `script` carries a base64-encoded UTF-8 JavaScript source defining
 /// `function process(ctx)`. The runtime invokes it with a mutable
@@ -80,18 +90,16 @@ import JavaScriptCore
 /// hook that drops the upstream request and writes a synthesized
 /// response straight back to the client.
 ///
-/// `script` lines optionally lead the base64 with a comma-separated
-/// list of exact `Content-Type` primary values that the script
-/// applies to. Wrap the field in double quotes so the inner commas
-/// are not interpreted as CSV separators:
+/// `script` rules require a comma-separated list of exact
+/// `Content-Type` primary values between the `pattern` and the base64.
+/// Wrap the field in double quotes so the inner commas are not
+/// interpreted as CSV separators:
 ///
-///     1, 4, "text/html, application/json", <base64>
+///     1, 4, ^/api/, "text/html, application/json", <base64>
 ///
 /// Matching is case-insensitive and ignores parameters (everything
-/// from `;` onward). When the types field is omitted (single trailing
-/// argument), the runtime falls back to the default textual-MIME
-/// allowlist in ``MITMBodyCodec/isRewritableType``. An empty quoted
-/// types field disables the rule entirely (no Content-Type matches).
+/// from `;` onward). An empty types field (an empty quoted string)
+/// disables the rule entirely — no Content-Type matches.
 ///
 /// `stream-script` (op `5`) uses the same field shape as `script` but
 /// invokes the script once per HTTP/2 DATA frame or HTTP/1 chunked
@@ -257,52 +265,60 @@ enum MITMRuleSetParser {
         guard let opInt = Int(fields[1]) else { return nil }
         let args = Array(fields.dropFirst(2))
 
+        // Every rule leads with a URL pattern (a regex over the
+        // request-target's path-and-query) that gates whether the
+        // operation fires. For url-replace it doubles as the
+        // substitution regex.
         switch opInt {
         case 0:  // url-replace, request-only regardless of phase column
             guard args.count == 2 else { return nil }
             let pattern = args[0]
             guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
-            return MITMRule(phase: .httpRequest, operation: .urlReplace(pattern: pattern, path: args[1]))
+            return MITMRule(phase: .httpRequest, pattern: pattern, operation: .urlReplace(path: args[1]))
 
         case 1:  // header-add
-            guard args.count == 2 else { return nil }
-            let name = args[0]
-            guard !name.isEmpty else { return nil }
-            return MITMRule(phase: phase, operation: .headerAdd(name: name, value: args[1]))
-
-        case 2:  // header-delete
-            guard args.count == 1 else { return nil }
-            let name = args[0]
-            guard !name.isEmpty else { return nil }
-            return MITMRule(phase: phase, operation: .headerDelete(name: name))
-
-        case 3:  // header-replace
             guard args.count == 3 else { return nil }
             let pattern = args[0]
             let name = args[1]
-            guard !pattern.isEmpty, !name.isEmpty, isValidRegex(pattern) else { return nil }
-            return MITMRule(phase: phase, operation: .headerReplace(pattern: pattern, name: name, value: args[2]))
+            guard !pattern.isEmpty, isValidRegex(pattern), !name.isEmpty else { return nil }
+            return MITMRule(phase: phase, pattern: pattern, operation: .headerAdd(name: name, value: args[2]))
 
-        case 4:  // script
-            guard args.count == 1 || args.count == 2 else { return nil }
-            // 1 arg: base64 only (default allowlist).
-            // 2 args: types, base64.
-            let b64 = args.last ?? ""
+        case 2:  // header-delete
+            guard args.count == 2 else { return nil }
+            let pattern = args[0]
+            let name = args[1]
+            guard !pattern.isEmpty, isValidRegex(pattern), !name.isEmpty else { return nil }
+            return MITMRule(phase: phase, pattern: pattern, operation: .headerDelete(name: name))
+
+        case 3:  // header-replace, by name (the old header-value pattern is gone)
+            guard args.count == 3 else { return nil }
+            let pattern = args[0]
+            let name = args[1]
+            guard !pattern.isEmpty, isValidRegex(pattern), !name.isEmpty else { return nil }
+            return MITMRule(phase: phase, pattern: pattern, operation: .headerReplace(name: name, value: args[2]))
+
+        case 4:  // script — fields: pattern, types, base64
+            guard args.count == 3 else { return nil }
+            let pattern = args[0]
+            guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
+            let b64 = args[2]
             guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
-            let contentTypes: [String]? = args.count == 2 ? parseContentTypes(args[0]) : nil
             return MITMRule(
                 phase: phase,
-                operation: .script(scriptBase64: b64, contentTypes: contentTypes)
+                pattern: pattern,
+                operation: .script(contentTypes: parseContentTypes(args[1]), scriptBase64: b64)
             )
 
-        case 5:  // stream-script
-            guard args.count == 1 || args.count == 2 else { return nil }
-            let b64 = args.last ?? ""
+        case 5:  // stream-script — fields: pattern, types, base64
+            guard args.count == 3 else { return nil }
+            let pattern = args[0]
+            guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
+            let b64 = args[2]
             guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
-            let contentTypes: [String]? = args.count == 2 ? parseContentTypes(args[0]) : nil
             return MITMRule(
                 phase: phase,
-                operation: .streamScript(scriptBase64: b64, contentTypes: contentTypes)
+                pattern: pattern,
+                operation: .streamScript(contentTypes: parseContentTypes(args[1]), scriptBase64: b64)
             )
 
         default:
@@ -370,11 +386,10 @@ enum MITMRuleSetParser {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
     }
 
-    /// Parses the optional `script` Content-Type list. Splits on
-    /// `,`, lowercases, trims, and drops empties. An all-whitespace
-    /// field still produces a non-nil empty array so the rule honors
-    /// the user's "match nothing" intent rather than silently reverting
-    /// to the default allowlist.
+    /// Parses the `script` Content-Type list. Splits on `,`,
+    /// lowercases, trims, and drops empties. An empty or all-whitespace
+    /// field produces an empty array, which matches nothing — the way
+    /// to disable a script rule.
     private static func parseContentTypes(_ field: String) -> [String] {
         field
             .split(separator: ",")

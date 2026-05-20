@@ -78,16 +78,17 @@ struct MITMRuleEditorView: View {
             }
 
             Section {
+                LabeledContent {
+                    TextField(String("^\\/anywhere$"), text: $pattern)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Pattern", comment: nil, systemName: "asterisk", foregroundColor: .white, backgroundColor: .gray)
+                }
+
                 switch operationKind {
                 case .urlReplace:
-                    LabeledContent {
-                        TextField(String("^\\/anywhere$"), text: $pattern)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Pattern", comment: nil, systemName: "asterisk", foregroundColor: .white, backgroundColor: .gray)
-                    }
                     LabeledContent {
                         TextField(String("/everywhere"), text: $replacement)
                             .autocorrectionDisabled()
@@ -123,14 +124,6 @@ struct MITMRuleEditorView: View {
                         TextWithColorfulIcon(title: "Header Name", comment: nil, systemName: "tag.fill", foregroundColor: .white, backgroundColor: .gray)
                     }
                 case .headerReplace:
-                    LabeledContent {
-                        TextField(String("^(?i)User-Agent: Anywhere$"), text: $pattern)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Pattern", comment: nil, systemName: "asterisk", foregroundColor: .white, backgroundColor: .gray)
-                    }
                     LabeledContent {
                         TextField(String("User-Agent"), text: $headerName)
                             .autocorrectionDisabled()
@@ -176,18 +169,21 @@ struct MITMRuleEditorView: View {
     // MARK: - Save
 
     private func save() {
+        // The URL pattern gates every operation, so validate it once up
+        // front.
+        guard !pattern.isEmpty else {
+            validationError = String(localized: "Pattern is required.")
+            return
+        }
+        guard (try? NSRegularExpression(pattern: pattern, options: [])) != nil else {
+            validationError = String(localized: "Pattern is not a valid regular expression.")
+            return
+        }
+
         let operation: MITMOperation
         switch operationKind {
         case .urlReplace:
-            guard !pattern.isEmpty else {
-                validationError = String(localized: "Pattern is required.")
-                return
-            }
-            guard (try? NSRegularExpression(pattern: pattern, options: [])) != nil else {
-                validationError = String(localized: "Pattern is not a valid regular expression.")
-                return
-            }
-            operation = .urlReplace(pattern: pattern, path: replacement)
+            operation = .urlReplace(path: replacement)
         case .headerAdd:
             let headerName = self.headerName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !headerName.isEmpty else {
@@ -203,25 +199,18 @@ struct MITMRuleEditorView: View {
             }
             operation = .headerDelete(name: name)
         case .headerReplace:
-            guard !pattern.isEmpty else {
-                validationError = String(localized: "Pattern is required.")
-                return
-            }
-            guard (try? NSRegularExpression(pattern: pattern, options: [])) != nil else {
-                validationError = String(localized: "Pattern is not a valid regular expression.")
-                return
-            }
             let headerName = self.headerName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !headerName.isEmpty else {
                 validationError = String(localized: "Header name is required.")
                 return
             }
-            operation = .headerReplace(pattern: pattern, name: headerName, value: headerValue)
+            operation = .headerReplace(name: headerName, value: headerValue)
         }
 
         let result = MITMRule(
             id: rule?.id ?? UUID(),
             phase: operationKind.requestPhaseOnly ? .httpRequest : phase,
+            pattern: pattern,
             operation: operation
         )
         onCommit(result)
@@ -233,10 +222,10 @@ struct MITMRuleEditorView: View {
     private func loadInitial() {
         guard let rule else { return }
         phase = rule.phase
+        pattern = rule.pattern
         switch rule.operation {
-        case .urlReplace(let pattern, let replacement):
+        case .urlReplace(let replacement):
             operationKind = .urlReplace
-            self.pattern = pattern
             self.replacement = replacement
         case .headerAdd(let name, let value):
             operationKind = .headerAdd
@@ -245,9 +234,8 @@ struct MITMRuleEditorView: View {
         case .headerDelete(let name):
             operationKind = .headerDelete
             headerName = name
-        case .headerReplace(let pattern, let name, let value):
+        case .headerReplace(let name, let value):
             operationKind = .headerReplace
-            self.pattern = pattern
             self.headerName = name
             self.headerValue = value
         case .script, .streamScript:

@@ -326,13 +326,7 @@ final class MITMHTTP1Stream {
         // start line (request phase only); header rules touch the
         // header block. Content-Length is recomputed below if scripts
         // run.
-        //
-        // Auto Host rewrite runs first so configured headerReplace rules
-        // see the canonical post-redirect Host and can still override
-        // it.
         let rewrittenStartLine = applyURLRules(parsed.startLine)
-        let withAuthority = applyAuthorityRewrite(parsed.headers)
-        let rewrittenHeaders = applyHeaderRules(withAuthority)
 
         // On the response side, every well-formed final message
         // corresponds to one request previously pushed by the request
@@ -342,6 +336,10 @@ final class MITMHTTP1Stream {
         // scripts fire, and so ``bodyFraming`` can see the originating
         // method (HEAD responses carry Content-Length / Transfer-
         // Encoding values that must not be followed by a body).
+        //
+        // It also has to land before header rules so a response-phase
+        // rule's URL gate can be tested against the originating
+        // request's path.
         //
         // Interim responses (1xx other than 101) are not the final
         // response: more headers follow on the same request. They
@@ -370,6 +368,21 @@ final class MITMHTTP1Stream {
         } else {
             originatingRequest = nil
         }
+
+        // The request-target every rule's URL gate is tested against:
+        // the (already url-replaced) start-line target on requests, the
+        // originating request's path on responses — so request and
+        // response rules in a set gate on the same URL the client asked
+        // for. nil fails the gate closed.
+        let gatePathAndQuery = requestTargetForGating(
+            startLine: rewrittenStartLine,
+            originatingRequest: originatingRequest
+        )
+
+        // Auto Host rewrite runs first so a headerReplace targeting Host
+        // still overrides the canonical post-redirect value.
+        let withAuthority = applyAuthorityRewrite(parsed.headers)
+        let rewrittenHeaders = applyHeaderRules(withAuthority, pathAndQuery: gatePathAndQuery)
 
         let framing = bodyFraming(
             startLine: rewrittenStartLine,
@@ -424,7 +437,7 @@ final class MITMHTTP1Stream {
         }
 
         let contentType = firstHeaderValue(rewrittenHeaders, name: "content-type")
-        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, contentType: contentType)
+        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, pathAndQuery: gatePathAndQuery, contentType: contentType)
 
         switch framing {
         case .none:
@@ -481,6 +494,7 @@ final class MITMHTTP1Stream {
                 length: length,
                 scriptsApply: scriptsApply,
                 rules: rules,
+                pathAndQuery: gatePathAndQuery,
                 originatingRequest: originatingRequest,
                 into: &output
             )
@@ -490,6 +504,7 @@ final class MITMHTTP1Stream {
                 rewrittenHeaders: rewrittenHeaders,
                 scriptsApply: scriptsApply,
                 rules: rules,
+                pathAndQuery: gatePathAndQuery,
                 originatingRequest: originatingRequest,
                 into: &output
             )
@@ -504,6 +519,7 @@ final class MITMHTTP1Stream {
         length: Int,
         scriptsApply: Bool,
         rules: [CompiledMITMRule],
+        pathAndQuery: String?,
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
@@ -512,7 +528,7 @@ final class MITMHTTP1Stream {
         // change. Warn and fall through to either buffered-script or
         // passthrough.
         let contentType = firstHeaderValue(rewrittenHeaders, name: "content-type")
-        if MITMScriptTransform.hasStreamScriptRule(in: rules, contentType: contentType) {
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery, contentType: contentType) {
             logger.warning("[MITM] HTTP/1 \(host): streamScript skipped for Content-Length body (chunked encoding required)")
         }
 
@@ -552,6 +568,7 @@ final class MITMHTTP1Stream {
         rewrittenHeaders: [Header],
         scriptsApply: Bool,
         rules: [CompiledMITMRule],
+        pathAndQuery: String?,
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
@@ -561,7 +578,7 @@ final class MITMHTTP1Stream {
         // immediately and switch to per-chunk script mode. Stream
         // scripts can't mutate head fields, so head emission is
         // straightforward here.
-        if MITMScriptTransform.hasStreamScriptRule(in: rules, contentType: contentType) {
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery, contentType: contentType) {
             if scriptsApply {
                 logger.warning("[MITM] HTTP/1 \(host): streamScript wins over script on the same Content-Type")
             }
@@ -1612,11 +1629,11 @@ final class MITMHTTP1Stream {
 
         var changed = false
         for rule in rules {
-            guard case .urlReplace(let regex, let replacement) = rule.operation else {
+            guard case .urlReplace(let replacement) = rule.operation else {
                 continue
             }
             let range = NSRange(target.startIndex..., in: target)
-            let mutated = regex.stringByReplacingMatches(
+            let mutated = rule.patternRegex.stringByReplacingMatches(
                 in: target,
                 options: [],
                 range: range,
@@ -1646,29 +1663,48 @@ final class MITMHTTP1Stream {
         return changed ? "\(method) \(target) \(version)" : startLine
     }
 
-    private func applyHeaderRules(_ headers: [Header]) -> [Header] {
+    /// ``pathAndQuery`` is the request-target the URL gate is tested
+    /// against; a rule whose pattern doesn't match it is skipped.
+    private func applyHeaderRules(_ headers: [Header], pathAndQuery: String?) -> [Header] {
         guard !rules.isEmpty else { return headers }
         var current = headers
         for rule in rules {
+            guard rule.matchesURL(pathAndQuery) else { continue }
             switch rule.operation {
             case .headerAdd(let name, let value):
                 current.append((name: name, value: value))
             case .headerDelete(let nameLower):
                 current.removeAll { $0.name.equalsIgnoringASCIICase(nameLower) }
-            case .headerReplace(let regex, let name, let value):
+            case .headerReplace(let name, let value):
                 current = current.map { entry in
-                    let literal = "\(entry.name): \(entry.value)"
-                    let range = NSRange(literal.startIndex..., in: literal)
-                    guard regex.firstMatch(in: literal, options: [], range: range) != nil else {
-                        return entry
-                    }
-                    return (name: name, value: value)
+                    entry.name.equalsIgnoringASCIICase(name) ? (name: name, value: value) : entry
                 }
             case .urlReplace, .script, .streamScript:
                 continue
             }
         }
         return current
+    }
+
+    /// The request-target (path-and-query) used to gate every rule's
+    /// URL pattern. Request phase: the (already url-replaced) start-line
+    /// target. Response phase: the path-and-query of the originating
+    /// request's URL, so a response rule gates on the URL the client
+    /// asked for. nil — indeterminate — fails the gate closed.
+    private func requestTargetForGating(
+        startLine: String,
+        originatingRequest: MITMRequestLog.Record?
+    ) -> String? {
+        switch phase {
+        case .httpRequest:
+            let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+            guard parts.count >= 2 else { return nil }
+            let target = String(parts[1])
+            // Asterisk-form (OPTIONS *) is not a path to match against.
+            return target == "*" ? nil : target
+        case .httpResponse:
+            return MITMRequestURL.pathAndQuery(from: originatingRequest?.url)
+        }
     }
 
     // MARK: - Message build / head rebuild

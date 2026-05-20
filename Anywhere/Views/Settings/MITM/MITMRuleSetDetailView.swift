@@ -341,16 +341,16 @@ enum MITMRuleSummary {
 
     static func subtitle(for rule: MITMRule) -> String {
         switch rule.operation {
-        case .urlReplace(let pattern, _):
-            return pattern
+        case .urlReplace:
+            return rule.pattern
         case .headerAdd(let name, _):
             return name
         case .headerDelete(let name):
             return name
-        case .headerReplace(let pattern, _, _):
-            return pattern
-        case .script(let scriptBase64, _),
-             .streamScript(let scriptBase64, _):
+        case .headerReplace(let name, _):
+            return name
+        case .script(_, let scriptBase64),
+             .streamScript(_, let scriptBase64):
             let bytes = Data(base64Encoded: scriptBase64)?.count ?? 0
             return String(localized: "\(bytes) byte(s)")
         }
