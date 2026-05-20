@@ -77,6 +77,20 @@ nonisolated class QUICConnection {
     /// tail-flush at the end of `handleReceivedPacket` covers it.
     private var inReadPkt = false
 
+    /// True while a `conn`-holding ngtcp2 batch is executing on `queue`
+    /// (`read_pkt`, `writeToUDP`, `flushPendingWrites`, `handle_expiry`). Each
+    /// of these keeps a local `conn` pointer live across app callbacks /
+    /// completions it fires synchronously. A `close()` requested from inside
+    /// one — e.g. a `pendingWrites` completion in `flushPendingWrites`, or a
+    /// per-datagram completion fired by `writeToUDP` — must NOT run
+    /// `ngtcp2_conn_del` now: the batch above us still holds that `conn` and
+    /// dereferences it again, so freeing it strands the pointer and the next
+    /// ngtcp2 call faults inside `ngtcp2_cpymem` (memcpy on freed conn state).
+    /// When set, `close()` defers its teardown one queue cycle, by which point
+    /// the batch has unwound. Saved/restored rather than plain-set so nested
+    /// batches (flushPendingWrites → writeStreamSync → writeToUDP) compose.
+    private var ngtcp2Busy = false
+
     /// Set when an operation (e.g. `extendStreamOffset`) has queued a
     /// MAX_STREAM_DATA/MAX_DATA update that needs to go out but we don't
     /// want to flush synchronously on the hot path.  Drained at the end
@@ -590,6 +604,14 @@ nonisolated class QUICConnection {
     /// Called after processing incoming packets which may contain MAX_STREAM_DATA.
     private func flushPendingWrites() {
         guard !pendingWrites.isEmpty, let conn else { return }
+        // Each `pw.completion(nil)` in the loop below runs app code synchronously
+        // and may request a close. Keep `conn` alive for the whole loop: without
+        // this guard a completion that tore the connection down would free the
+        // `conn` captured above, and the next iteration's `writeStreamSync` would
+        // fault in ngtcp2's `ngtcp2_cpymem`. `close()` defers while this is set.
+        let prevBusy = ngtcp2Busy
+        ngtcp2Busy = true
+        defer { ngtcp2Busy = prevBusy }
         guard state == .connected else {
             let writes = pendingWrites
             pendingWrites.removeAll()
@@ -618,6 +640,19 @@ nonisolated class QUICConnection {
     // MARK: Close
 
     func close(error: Error? = nil) {
+        // If a close is requested while a `conn`-holding ngtcp2 batch is on the
+        // stack (a callback during read_pkt, or a completion fired by
+        // writeToUDP / flushPendingWrites), the batch above us still holds and
+        // will reuse the `conn` pointer. Running `ngtcp2_conn_del` synchronously
+        // here would dangle it — the next ngtcp2 call faults in `ngtcp2_cpymem`.
+        // Defer the teardown one queue cycle (strong `self`, like `CloseOnce`,
+        // so the last-reference case can't skip it); by then the batch has
+        // returned and no local `conn` is live. Off-queue closes already defer
+        // through `CloseOnce`, so this only covers the on-queue reentrant case.
+        if ngtcp2Busy && isOnQueue {
+            queue.async { self.close(error: error) }
+            return
+        }
         // `CloseOnce` runs this once on `queue`, strong-capturing `self` so the
         // ngtcp2 conn / UDP socket / dispatch sources are always freed — even
         // when `close()` is the connection's last reference (e.g. dispatched
@@ -1202,6 +1237,10 @@ nonisolated class QUICConnection {
         inReadPkt = true
         defer { inReadPkt = false }
 
+        // Bracket the read_pkt window: a callback that requests close() must not
+        // free `conn` while ngtcp2 is still on the stack below this call.
+        let prevBusy = ngtcp2Busy
+        ngtcp2Busy = true
         let rv: Int32 = data.withUnsafeBytes { raw in
             guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
             var path = ngtcp2_path()
@@ -1217,6 +1256,7 @@ nonisolated class QUICConnection {
             }
             return ngtcp2_swift_conn_read_pkt(conn, &path, &pi, ptr, data.count, ts)
         }
+        ngtcp2Busy = prevBusy
 
         if rv != 0 {
             // Every non-zero return from `read_pkt` is terminal. ngtcp2
@@ -1253,6 +1293,13 @@ nonisolated class QUICConnection {
 
     fileprivate func writeToUDP() {
         guard let conn else { return }
+        // Hold off a reentrant teardown: the per-datagram completions fired at
+        // the tail of this function, and any caller that keeps using `conn`
+        // after we return (e.g. `flushPendingWrites`' loop), need `conn` to stay
+        // valid. `close()` defers while this is set; restored on the way out.
+        let prevBusy = ngtcp2Busy
+        ngtcp2Busy = true
+        defer { ngtcp2Busy = prevBusy }
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()
 
@@ -1374,7 +1421,13 @@ nonisolated class QUICConnection {
                 guard let self, let conn = self.conn else { return }
                 self.lastScheduledExpiry = 0
                 let ts = self.currentTimestamp()
+                // Loss detection inside handle_expiry can fire CC callbacks;
+                // bracket it so a close requested under it is deferred, not run
+                // on top of the live `conn`.
+                let prevBusy = self.ngtcp2Busy
+                self.ngtcp2Busy = true
                 let rv = ngtcp2_conn_handle_expiry(conn, ts)
+                self.ngtcp2Busy = prevBusy
                 if rv != 0 {
                     let error = QUICError.connectionFailed("expiry error: \(rv)")
                     if let cb = self.connectCompletion {
