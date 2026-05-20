@@ -7,6 +7,8 @@
 
 import Foundation
 import JavaScriptCore
+import CryptoKit
+import Security
 
 private let logger = AnywhereLogger(category: "MITM")
 
@@ -567,6 +569,22 @@ final class MITMScriptEngine {
 
     private func installAnywhereGlobals() {
         let anywhere = JSValue(newObjectIn: context)!
+        installCodecGlobals(on: anywhere)
+        installCryptoGlobals(on: anywhere)
+        installJWTGlobals(on: anywhere)
+        installStoreGlobals(on: anywhere)
+        installLogGlobals(on: anywhere)
+        installControlGlobals(on: anywhere)
+        context.setObject(anywhere, forKeyedSubscript: "Anywhere" as NSString)
+    }
+
+    /// Installs ``Anywhere.codec`` — every paired encoder/decoder
+    /// (byte-level + wire-format) lives here so scripts pull from a
+    /// single place. Crypto, JWT, store, log, and the control
+    /// directives stay top-level on ``Anywhere`` because they aren't
+    /// encode/decode pairs.
+    private func installCodecGlobals(on anywhere: JSValue) {
+        let codec = JSValue(newObjectIn: context)!
 
         let utf8 = JSValue(newObjectIn: context)!
         let utf8Encode: @convention(block) (String) -> JSValue = { str in
@@ -580,7 +598,7 @@ final class MITMScriptEngine {
         }
         utf8.setObject(utf8Encode, forKeyedSubscript: "encode" as NSString)
         utf8.setObject(utf8Decode, forKeyedSubscript: "decode" as NSString)
-        anywhere.setObject(utf8, forKeyedSubscript: "utf8" as NSString)
+        codec.setObject(utf8, forKeyedSubscript: "utf8" as NSString)
 
         let base64 = JSValue(newObjectIn: context)!
         let base64Encode: @convention(block) (JSValue) -> String = { val in
@@ -593,7 +611,29 @@ final class MITMScriptEngine {
         }
         base64.setObject(base64Encode, forKeyedSubscript: "encode" as NSString)
         base64.setObject(base64Decode, forKeyedSubscript: "decode" as NSString)
-        anywhere.setObject(base64, forKeyedSubscript: "base64" as NSString)
+        codec.setObject(base64, forKeyedSubscript: "base64" as NSString)
+
+        // Anywhere.base64url — RFC 4648 §5 unpadded base64url. Distinct
+        // from base64 (``-``/``_`` instead of ``+``/``/``, no trailing
+        // ``=`` padding); required for JWT, OAuth bearer tokens,
+        // WebPush, and most modern web crypto. Encode emits the
+        // canonical no-padding form; decode is lenient — it accepts
+        // either alphabet and either padded or unpadded input because
+        // tokens in the wild routinely arrive in mixed shapes (servers
+        // forget to strip padding, clients re-encode through standard
+        // base64, etc.).
+        let base64url = JSValue(newObjectIn: context)!
+        let base64URLEncodeBlock: @convention(block) (JSValue) -> String = { val in
+            let ctx = JSContext.current()!
+            return Self.encodeBase64URL(Self.bytesFromValue(val, in: ctx) ?? Data())
+        }
+        let base64URLDecodeBlock: @convention(block) (String) -> JSValue = { str in
+            let ctx = JSContext.current()!
+            return Self.makeUint8Array(in: ctx, from: Self.decodeBase64URL(str) ?? Data())
+        }
+        base64url.setObject(base64URLEncodeBlock, forKeyedSubscript: "encode" as NSString)
+        base64url.setObject(base64URLDecodeBlock, forKeyedSubscript: "decode" as NSString)
+        codec.setObject(base64url, forKeyedSubscript: "base64url" as NSString)
 
         let hex = JSValue(newObjectIn: context)!
         let hexEncode: @convention(block) (JSValue) -> String = { val in
@@ -607,8 +647,500 @@ final class MITMScriptEngine {
         }
         hex.setObject(hexEncode, forKeyedSubscript: "encode" as NSString)
         hex.setObject(hexDecode, forKeyedSubscript: "decode" as NSString)
-        anywhere.setObject(hex, forKeyedSubscript: "hex" as NSString)
+        codec.setObject(hex, forKeyedSubscript: "hex" as NSString)
 
+        // Anywhere.protobuf — schema-free protobuf wire-format codec.
+        // Targets the common rewrite case (flip one field, re-encode)
+        // without forcing the rule to bundle a ~80 KiB protobuf.js
+        // implementation in its script source — that bundle compiled
+        // multi-ms per chain on the lwIP queue and was a recurring
+        // source of JSC heap pressure in the extension's tight RAM
+        // budget. ``decode`` returns a flat list of ``{field, wire,
+        // value}`` entries preserving on-wire order (so repeated
+        // fields come back as multiple entries the caller can iterate
+        // or splice); ``encode`` takes the same shape back. Wire-0
+        // (varint) values are BigInt so 64-bit IDs / timestamps round
+        // trip losslessly; wire-1 / wire-5 (fixed64 / fixed32) values
+        // are raw Uint8Array of length 8 / 4 because the script-level
+        // interpretation (sfixed vs double vs uint) is a schema
+        // concern this layer can't know — the script picks one with a
+        // DataView. Nested messages and packed-repeated payloads land
+        // as Uint8Array inside a wire-2 entry; recurse with
+        // ``decode`` or split with ``decodeVarint`` to walk them.
+        // Deprecated group wire types (3, 4) are rejected.
+        let protobuf = JSValue(newObjectIn: context)!
+        let pbDecodeBlock: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            guard let bytes = Self.bytesFromValue(val, in: ctx) else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.protobuf.decode: expected Uint8Array/ArrayBuffer/string",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            do {
+                let entries = try Self.protobufDecodeWire(bytes)
+                return Self.makeProtobufEntries(entries, in: ctx)
+            } catch {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.protobuf.decode: \(error)",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+        }
+        let pbEncodeBlock: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            do {
+                let entries = try Self.parseProtobufEntries(val, in: ctx)
+                return Self.makeUint8Array(in: ctx, from: Self.protobufEncodeWire(entries))
+            } catch {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.protobuf.encode: \(error)",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+        }
+        // Single-varint primitives — useful when the script is walking
+        // an embedded message by hand (e.g. picking the third packed
+        // varint out of a wire-2 payload) and doesn't want to roundtrip
+        // through ``decode``.
+        let pbEncodeVarintBlock: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            guard let u = Self.uint64FromJSValue(val) else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.protobuf.encodeVarint: expected non-negative Number or BigInt",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            return Self.makeUint8Array(in: ctx, from: Self.writeVarint(u))
+        }
+        let pbDecodeVarintBlock: @convention(block) (JSValue, JSValue) -> JSValue = { bytesVal, offsetVal in
+            let ctx = JSContext.current()!
+            guard let bytes = Self.bytesFromValue(bytesVal, in: ctx) else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.protobuf.decodeVarint: expected Uint8Array/ArrayBuffer/string",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            let offset: Int
+            if offsetVal.isUndefined || offsetVal.isNull {
+                offset = 0
+            } else if offsetVal.isNumber {
+                offset = Int(offsetVal.toInt32())
+            } else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.protobuf.decodeVarint: offset must be a Number",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            guard offset >= 0, offset <= bytes.count else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.protobuf.decodeVarint: offset out of range",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            // Return null on truncated/malformed rather than throwing —
+            // ``decodeVarint`` is the primitive scripts reach for when
+            // probing unknown bytes, and null is easier to branch on
+            // than a try/catch around a one-byte parse.
+            guard let (value, end) = Self.readVarint(bytes, from: offset) else {
+                return JSValue(nullIn: ctx)
+            }
+            let obj = JSValue(newObjectIn: ctx)!
+            obj.setObject(Self.makeBigInt(value, in: ctx), forKeyedSubscript: "value" as NSString)
+            obj.setObject(end - offset, forKeyedSubscript: "consumed" as NSString)
+            return obj
+        }
+        protobuf.setObject(pbDecodeBlock, forKeyedSubscript: "decode" as NSString)
+        protobuf.setObject(pbEncodeBlock, forKeyedSubscript: "encode" as NSString)
+        protobuf.setObject(pbEncodeVarintBlock, forKeyedSubscript: "encodeVarint" as NSString)
+        protobuf.setObject(pbDecodeVarintBlock, forKeyedSubscript: "decodeVarint" as NSString)
+        codec.setObject(protobuf, forKeyedSubscript: "protobuf" as NSString)
+
+        anywhere.setObject(codec, forKeyedSubscript: "codec" as NSString)
+    }
+
+    /// Installs ``Anywhere.crypto`` — hashes, HMAC, AES-GCM, random
+    /// bytes, UUID. Top-level rather than under ``codec`` because
+    /// cryptographic primitives aren't reversible encodings (hashes
+    /// are one-way; HMAC has no decode side).
+    private func installCryptoGlobals(on anywhere: JSValue) {
+        // Anywhere.crypto — hashes, HMAC, secure random, UUID. Hash and
+        // HMAC functions return raw digest bytes as a Uint8Array; the
+        // script composes with ``Anywhere.codec.hex.encode`` /
+        // ``Anywhere.codec.base64.encode`` to format. Key/data inputs accept
+        // anything ``bytesFromValue`` understands (Uint8Array,
+        // ArrayBuffer, or string — strings are UTF-8 encoded).
+        let crypto = JSValue(newObjectIn: context)!
+        let md5Block: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
+            return Self.makeUint8Array(in: ctx, from: Data(Insecure.MD5.hash(data: bytes)))
+        }
+        let sha1Block: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
+            return Self.makeUint8Array(in: ctx, from: Data(Insecure.SHA1.hash(data: bytes)))
+        }
+        let sha256Block: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
+            return Self.makeUint8Array(in: ctx, from: Data(SHA256.hash(data: bytes)))
+        }
+        let sha384Block: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
+            return Self.makeUint8Array(in: ctx, from: Data(SHA384.hash(data: bytes)))
+        }
+        let sha512Block: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
+            return Self.makeUint8Array(in: ctx, from: Data(SHA512.hash(data: bytes)))
+        }
+        let hmacSHA1Block: @convention(block) (JSValue, JSValue) -> JSValue = { keyVal, dataVal in
+            let ctx = JSContext.current()!
+            let key = Self.bytesFromValue(keyVal, in: ctx) ?? Data()
+            let data = Self.bytesFromValue(dataVal, in: ctx) ?? Data()
+            let mac = HMAC<Insecure.SHA1>.authenticationCode(for: data, using: SymmetricKey(data: key))
+            return Self.makeUint8Array(in: ctx, from: Data(mac))
+        }
+        let hmacSHA256Block: @convention(block) (JSValue, JSValue) -> JSValue = { keyVal, dataVal in
+            let ctx = JSContext.current()!
+            let key = Self.bytesFromValue(keyVal, in: ctx) ?? Data()
+            let data = Self.bytesFromValue(dataVal, in: ctx) ?? Data()
+            let mac = HMAC<SHA256>.authenticationCode(for: data, using: SymmetricKey(data: key))
+            return Self.makeUint8Array(in: ctx, from: Data(mac))
+        }
+        let hmacSHA384Block: @convention(block) (JSValue, JSValue) -> JSValue = { keyVal, dataVal in
+            let ctx = JSContext.current()!
+            let key = Self.bytesFromValue(keyVal, in: ctx) ?? Data()
+            let data = Self.bytesFromValue(dataVal, in: ctx) ?? Data()
+            let mac = HMAC<SHA384>.authenticationCode(for: data, using: SymmetricKey(data: key))
+            return Self.makeUint8Array(in: ctx, from: Data(mac))
+        }
+        let hmacSHA512Block: @convention(block) (JSValue, JSValue) -> JSValue = { keyVal, dataVal in
+            let ctx = JSContext.current()!
+            let key = Self.bytesFromValue(keyVal, in: ctx) ?? Data()
+            let data = Self.bytesFromValue(dataVal, in: ctx) ?? Data()
+            let mac = HMAC<SHA512>.authenticationCode(for: data, using: SymmetricKey(data: key))
+            return Self.makeUint8Array(in: ctx, from: Data(mac))
+        }
+        // randomBytes(n) — cap at 64 KiB so a script typo
+        // (``randomBytes(1<<30)``) can't pin the extension's tiny RAM
+        // budget. Non-integer / negative / oversized lengths throw a JS
+        // error rather than coercing silently; the script sees a normal
+        // catchable exception instead of a confused Uint8Array.
+        let randomBytesBlock: @convention(block) (JSValue) -> JSValue = { lenVal in
+            let ctx = JSContext.current()!
+            let d = lenVal.toDouble()
+            guard d.isFinite, d >= 0, d <= 65536, d == d.rounded() else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.crypto.randomBytes: length must be an integer in [0, 65536]",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            let n = Int(d)
+            if n == 0 { return Self.makeUint8Array(in: ctx, from: Data()) }
+            var bytes = [UInt8](repeating: 0, count: n)
+            let status = bytes.withUnsafeMutableBufferPointer { buf in
+                SecRandomCopyBytes(kSecRandomDefault, n, buf.baseAddress!)
+            }
+            guard status == errSecSuccess else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.crypto.randomBytes: SecRandomCopyBytes failed (status \(status))",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            return Self.makeUint8Array(in: ctx, from: Data(bytes))
+        }
+        // Lowercased to match the form most HTTP/JSON consumers emit;
+        // scripts that need the uppercase variant can ``.toUpperCase()``.
+        let uuidBlock: @convention(block) () -> String = {
+            UUID().uuidString.lowercased()
+        }
+        crypto.setObject(md5Block, forKeyedSubscript: "md5" as NSString)
+        crypto.setObject(sha1Block, forKeyedSubscript: "sha1" as NSString)
+        crypto.setObject(sha256Block, forKeyedSubscript: "sha256" as NSString)
+        crypto.setObject(sha384Block, forKeyedSubscript: "sha384" as NSString)
+        crypto.setObject(sha512Block, forKeyedSubscript: "sha512" as NSString)
+        crypto.setObject(hmacSHA1Block, forKeyedSubscript: "hmacSHA1" as NSString)
+        crypto.setObject(hmacSHA256Block, forKeyedSubscript: "hmacSHA256" as NSString)
+        crypto.setObject(hmacSHA384Block, forKeyedSubscript: "hmacSHA384" as NSString)
+        crypto.setObject(hmacSHA512Block, forKeyedSubscript: "hmacSHA512" as NSString)
+        crypto.setObject(randomBytesBlock, forKeyedSubscript: "randomBytes" as NSString)
+        crypto.setObject(uuidBlock, forKeyedSubscript: "uuid" as NSString)
+
+        // Anywhere.crypto.aesGCM — authenticated encryption (AEAD).
+        // Unlocks the class of E2E-encrypted-body rewrites used by
+        // many app APIs (WeChat / NetEase / Bilibili and most modern
+        // mobile SDKs ship AES-GCM-wrapped JSON over HTTPS); without
+        // this the script can see the encrypted blob but can't read or
+        // mutate it. The spec object accepts:
+        //   - key:       Uint8Array of 16, 24, or 32 bytes (AES-128/192/256)
+        //   - nonce:     Uint8Array (12-byte standard); omit on encrypt
+        //                and the runtime generates a fresh random nonce
+        //                per call (and returns it on the result).
+        //   - plaintext / ciphertext: Uint8Array (string accepted, UTF-8 encoded)
+        //   - tag:       Uint8Array of 16 bytes (decrypt only)
+        //   - aad:       Uint8Array (optional, additional authenticated data)
+        // Decrypt throws a catchable JS error on auth failure (wrong
+        // key, tampered ciphertext, mismatched AAD) so the rule chain
+        // sees a normal try/catch rather than a wedged stream.
+        let aesGCM = JSValue(newObjectIn: context)!
+        let aesGCMEncryptBlock: @convention(block) (JSValue) -> JSValue = { spec in
+            let ctx = JSContext.current()!
+            guard !spec.isUndefined, !spec.isNull else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: expected a spec object", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let key = Self.bytesFromValue(spec.objectForKeyedSubscript("key"), in: ctx),
+                  key.count == 16 || key.count == 24 || key.count == 32 else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: key must be a Uint8Array of length 16, 24, or 32", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let plaintext = Self.bytesFromValue(spec.objectForKeyedSubscript("plaintext"), in: ctx) else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: plaintext must be Uint8Array/ArrayBuffer/string", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            let nonceData: Data?
+            let nonceVal = spec.objectForKeyedSubscript("nonce")
+            if let nonceVal, !nonceVal.isUndefined, !nonceVal.isNull {
+                guard let n = Self.bytesFromValue(nonceVal, in: ctx) else {
+                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: nonce must be Uint8Array/ArrayBuffer/string", in: ctx)
+                    return JSValue(undefinedIn: ctx)
+                }
+                nonceData = n
+            } else {
+                nonceData = nil
+            }
+            let aadData: Data?
+            let aadVal = spec.objectForKeyedSubscript("aad")
+            if let aadVal, !aadVal.isUndefined, !aadVal.isNull {
+                guard let a = Self.bytesFromValue(aadVal, in: ctx) else {
+                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: aad must be Uint8Array/ArrayBuffer/string", in: ctx)
+                    return JSValue(undefinedIn: ctx)
+                }
+                aadData = a
+            } else {
+                aadData = nil
+            }
+            do {
+                let symKey = SymmetricKey(data: key)
+                let nonce: AES.GCM.Nonce
+                if let nonceData {
+                    nonce = try AES.GCM.Nonce(data: nonceData)
+                } else {
+                    nonce = AES.GCM.Nonce()
+                }
+                let box: AES.GCM.SealedBox
+                if let aadData {
+                    box = try AES.GCM.seal(plaintext, using: symKey, nonce: nonce, authenticating: aadData)
+                } else {
+                    box = try AES.GCM.seal(plaintext, using: symKey, nonce: nonce)
+                }
+                let out = JSValue(newObjectIn: ctx)!
+                out.setObject(Self.makeUint8Array(in: ctx, from: Data(box.nonce)), forKeyedSubscript: "nonce" as NSString)
+                out.setObject(Self.makeUint8Array(in: ctx, from: box.ciphertext), forKeyedSubscript: "ciphertext" as NSString)
+                out.setObject(Self.makeUint8Array(in: ctx, from: box.tag), forKeyedSubscript: "tag" as NSString)
+                return out
+            } catch {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: \(error)", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+        }
+        let aesGCMDecryptBlock: @convention(block) (JSValue) -> JSValue = { spec in
+            let ctx = JSContext.current()!
+            guard !spec.isUndefined, !spec.isNull else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: expected a spec object", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let key = Self.bytesFromValue(spec.objectForKeyedSubscript("key"), in: ctx),
+                  key.count == 16 || key.count == 24 || key.count == 32 else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: key must be a Uint8Array of length 16, 24, or 32", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let nonce = Self.bytesFromValue(spec.objectForKeyedSubscript("nonce"), in: ctx) else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: nonce must be Uint8Array/ArrayBuffer/string", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let ciphertext = Self.bytesFromValue(spec.objectForKeyedSubscript("ciphertext"), in: ctx) else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: ciphertext must be Uint8Array/ArrayBuffer/string", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let tag = Self.bytesFromValue(spec.objectForKeyedSubscript("tag"), in: ctx),
+                  tag.count == 16 else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: tag must be a Uint8Array of length 16", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            let aadData: Data?
+            let aadVal = spec.objectForKeyedSubscript("aad")
+            if let aadVal, !aadVal.isUndefined, !aadVal.isNull {
+                guard let a = Self.bytesFromValue(aadVal, in: ctx) else {
+                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: aad must be Uint8Array/ArrayBuffer/string", in: ctx)
+                    return JSValue(undefinedIn: ctx)
+                }
+                aadData = a
+            } else {
+                aadData = nil
+            }
+            do {
+                let symKey = SymmetricKey(data: key)
+                let gcmNonce = try AES.GCM.Nonce(data: nonce)
+                let box = try AES.GCM.SealedBox(nonce: gcmNonce, ciphertext: ciphertext, tag: tag)
+                let plaintext: Data
+                if let aadData {
+                    plaintext = try AES.GCM.open(box, using: symKey, authenticating: aadData)
+                } else {
+                    plaintext = try AES.GCM.open(box, using: symKey)
+                }
+                return Self.makeUint8Array(in: ctx, from: plaintext)
+            } catch {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: \(error)", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+        }
+        aesGCM.setObject(aesGCMEncryptBlock, forKeyedSubscript: "encrypt" as NSString)
+        aesGCM.setObject(aesGCMDecryptBlock, forKeyedSubscript: "decrypt" as NSString)
+        crypto.setObject(aesGCM, forKeyedSubscript: "aesGCM" as NSString)
+        anywhere.setObject(crypto, forKeyedSubscript: "crypto" as NSString)
+    }
+
+    /// Installs ``Anywhere.jwt`` — JWT compact serialization codec.
+    /// Stays top-level (not under ``codec``) because it's a composite
+    /// that already depends on base64url + JSON and is more
+    /// recognizable to script authors at the top level.
+    private func installJWTGlobals(on anywhere: JSValue) {
+        // Anywhere.jwt — JWT compact serialization (RFC 7519 / 7515).
+        // Pure-codec: no signature verification or ``alg`` enforcement
+        // is performed here — the script does that itself with the
+        // HMAC/hash helpers and the key it already has. ``decode``
+        // splits the token on ``.``, base64url-decodes each segment,
+        // JSON-parses the header (required) and the payload
+        // (best-effort — opaque JWS payloads round-trip as
+        // Uint8Array), and returns ``signingInput`` (the literal
+        // ``header.payload`` octet string per RFC 7515 §5.1) so the
+        // script can recompute and compare the signature without
+        // re-base64url-ing anything. ``encode`` glues the three
+        // segments back together: header/payload that look like bytes
+        // (Uint8Array / ArrayBuffer / string) are emitted verbatim;
+        // anything else is JSON.stringify'd first. Signature is the
+        // raw signature bytes — the script computes it (HMAC for HS*,
+        // private-key sign for RS*/ES*/EdDSA) and passes the bytes
+        // through.
+        let jwt = JSValue(newObjectIn: context)!
+        let jwtDecodeBlock: @convention(block) (String) -> JSValue = { token in
+            let ctx = JSContext.current()!
+            let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+            guard parts.count == 2 || parts.count == 3 else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.jwt.decode: expected 2 or 3 dot-separated segments, got \(parts.count)",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let headerBytes = Self.decodeBase64URL(String(parts[0])) else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: header is not valid base64url", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let payloadBytes = Self.decodeBase64URL(String(parts[1])) else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: payload is not valid base64url", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            let signatureBytes: Data
+            if parts.count == 3 {
+                guard let sig = Self.decodeBase64URL(String(parts[2])) else {
+                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: signature is not valid base64url", in: ctx)
+                    return JSValue(undefinedIn: ctx)
+                }
+                signatureBytes = sig
+            } else {
+                signatureBytes = Data()
+            }
+            // Header MUST be JSON per RFC 7519 §5 — a JWT without a
+            // JSON header isn't a JWT.
+            guard let headerStr = String(data: headerBytes, encoding: .utf8),
+                  let headerObj = Self.parseJSON(headerStr, in: ctx) else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.jwt.decode: header is not valid JSON", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            // Payload: try JSON; fall back to raw bytes. Unsigned JWS
+            // tokens occasionally carry a binary payload (RFC 7797),
+            // so silently coercing to a Uint8Array is friendlier than
+            // throwing.
+            let payloadVal: JSValue
+            if let payloadStr = String(data: payloadBytes, encoding: .utf8),
+               let parsed = Self.parseJSON(payloadStr, in: ctx) {
+                payloadVal = parsed
+            } else {
+                payloadVal = Self.makeUint8Array(in: ctx, from: payloadBytes)
+            }
+            let signingInput = "\(parts[0]).\(parts[1])"
+            let result = JSValue(newObjectIn: ctx)!
+            result.setObject(headerObj, forKeyedSubscript: "header" as NSString)
+            result.setObject(payloadVal, forKeyedSubscript: "payload" as NSString)
+            result.setObject(Self.makeUint8Array(in: ctx, from: signatureBytes), forKeyedSubscript: "signature" as NSString)
+            result.setObject(Self.makeUint8Array(in: ctx, from: Data(signingInput.utf8)), forKeyedSubscript: "signingInput" as NSString)
+            return result
+        }
+        let jwtEncodeBlock: @convention(block) (JSValue) -> JSValue = { spec in
+            let ctx = JSContext.current()!
+            guard !spec.isUndefined, !spec.isNull else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.jwt.encode: expected a spec object with {header, payload, signature?}",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let headerSeg = Self.encodeJWTSegment(spec.objectForKeyedSubscript("header"), in: ctx) else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.jwt.encode: header must be an object, string, or Uint8Array",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let payloadSeg = Self.encodeJWTSegment(spec.objectForKeyedSubscript("payload"), in: ctx) else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.jwt.encode: payload must be an object, string, or Uint8Array",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            let signatureSeg: String
+            let sigVal = spec.objectForKeyedSubscript("signature")
+            if let sigVal, !sigVal.isUndefined, !sigVal.isNull {
+                guard let sigBytes = Self.bytesFromValue(sigVal, in: ctx) else {
+                    ctx.exception = JSValue(
+                        newErrorFromMessage: "Anywhere.jwt.encode: signature must be a Uint8Array (the raw signature bytes)",
+                        in: ctx
+                    )
+                    return JSValue(undefinedIn: ctx)
+                }
+                signatureSeg = Self.encodeBase64URL(sigBytes)
+            } else {
+                // RFC 7515 compact serialization keeps the trailing dot
+                // for the empty signature so verifiers can still split
+                // on count == 3.
+                signatureSeg = ""
+            }
+            return JSValue(object: "\(headerSeg).\(payloadSeg).\(signatureSeg)", in: ctx)
+        }
+        jwt.setObject(jwtDecodeBlock, forKeyedSubscript: "decode" as NSString)
+        jwt.setObject(jwtEncodeBlock, forKeyedSubscript: "encode" as NSString)
+        anywhere.setObject(jwt, forKeyedSubscript: "jwt" as NSString)
+    }
+
+    /// Installs ``Anywhere.store`` — per-rule-set persistent key/value
+    /// state. ``[weak self]`` on each block so the JSC-held closures
+    /// don't retain the engine.
+    private func installStoreGlobals(on anywhere: JSValue) {
         let store = JSValue(newObjectIn: context)!
         let storeGet: @convention(block) (String) -> JSValue = { [weak self] key in
             let ctx = JSContext.current()!
@@ -656,7 +1188,43 @@ final class MITMScriptEngine {
         store.setObject(storeDelete, forKeyedSubscript: "delete" as NSString)
         store.setObject(storeKeys, forKeyedSubscript: "keys" as NSString)
         anywhere.setObject(store, forKeyedSubscript: "store" as NSString)
+    }
 
+    /// Installs ``Anywhere.log`` — info/warning/error/debug bridged to
+    /// the shared ``AnywhereLogger`` instance for this file.
+    private func installLogGlobals(on anywhere: JSValue) {
+        // Anywhere.log.{info,warning,error,debug}(message) — writes
+        // through ``AnywhereLogger``. ``info``/``warning``/``error`` also
+        // forward to the user-facing log viewer via the static
+        // ``logSink`` the Network Extension installs; ``debug`` is
+        // os.log-only and compiles to a no-op in release. Each line is
+        // prefixed with ``[MITM][JS]`` to match the engine's own
+        // diagnostic lines, so scripts and engine output share one
+        // grep target.
+        let log = JSValue(newObjectIn: context)!
+        let logInfo: @convention(block) (String) -> Void = { msg in
+            logger.info("[MITM][JS] \(msg)")
+        }
+        let logWarning: @convention(block) (String) -> Void = { msg in
+            logger.warning("[MITM][JS] \(msg)")
+        }
+        let logError: @convention(block) (String) -> Void = { msg in
+            logger.error("[MITM][JS] \(msg)")
+        }
+        let logDebug: @convention(block) (String) -> Void = { msg in
+            logger.debug("[MITM][JS] \(msg)")
+        }
+        log.setObject(logInfo, forKeyedSubscript: "info" as NSString)
+        log.setObject(logWarning, forKeyedSubscript: "warning" as NSString)
+        log.setObject(logError, forKeyedSubscript: "error" as NSString)
+        log.setObject(logDebug, forKeyedSubscript: "debug" as NSString)
+        anywhere.setObject(log, forKeyedSubscript: "log" as NSString)
+    }
+
+    /// Installs the control directives ``Anywhere.done`` / ``exit`` /
+    /// ``respond``. ``[weak self]`` on each block (same reason as
+    /// ``installStoreGlobals``).
+    private func installControlGlobals(on anywhere: JSValue) {
         // Anywhere.done() / Anywhere.exit() — short-circuit the script
         // chain. They set engine state and return undefined; the script
         // keeps executing, so user code is expected to `return`
@@ -726,8 +1294,6 @@ final class MITMScriptEngine {
             )
         }
         anywhere.setObject(respondBlock, forKeyedSubscript: "respond" as NSString)
-
-        context.setObject(anywhere, forKeyedSubscript: "Anywhere" as NSString)
     }
 
     // MARK: - Body bridging (static so closures don't capture self)
@@ -825,6 +1391,331 @@ final class MITMScriptEngine {
         case "A"..."F": return UInt8(scalar.value - 55)
         default: return nil
         }
+    }
+
+    // MARK: - Protobuf wire format
+
+    /// In-flight decoded field. ``.varint`` carries the raw unsigned
+    /// 64-bit value (the script applies zigzag for sint32/sint64
+    /// itself, since this layer can't know the field type);
+    /// ``.bytes`` carries the wire-1 / wire-2 / wire-5 payload
+    /// verbatim.
+    fileprivate enum ProtobufFieldValue {
+        case varint(UInt64)
+        case bytes(Data)
+    }
+
+    fileprivate struct ProtobufEntry {
+        let field: UInt32
+        let wire: UInt8
+        let value: ProtobufFieldValue
+    }
+
+    private struct ProtobufError: Error, CustomStringConvertible {
+        let description: String
+    }
+
+    /// Reads a single varint at ``offset``, returning the decoded
+    /// value and the index immediately past its last byte. Returns
+    /// nil on truncation or when the encoding spans more than 10
+    /// bytes (the maximum for a 64-bit varint per the protobuf spec).
+    fileprivate static func readVarint(_ data: Data, from offset: Int) -> (UInt64, Int)? {
+        var result: UInt64 = 0
+        var shift: UInt64 = 0
+        var idx = offset
+        var bytesRead = 0
+        let end = data.endIndex
+        while idx < end {
+            if bytesRead >= 10 { return nil }
+            let byte = data[idx]
+            result |= UInt64(byte & 0x7F) << shift
+            idx += 1
+            bytesRead += 1
+            if byte & 0x80 == 0 {
+                return (result, idx)
+            }
+            shift += 7
+        }
+        return nil
+    }
+
+    fileprivate static func writeVarint(_ value: UInt64) -> Data {
+        var v = value
+        var out = Data()
+        out.reserveCapacity(10)
+        while true {
+            if v < 0x80 {
+                out.append(UInt8(v))
+                return out
+            }
+            out.append(UInt8((v & 0x7F) | 0x80))
+            v >>= 7
+        }
+    }
+
+    fileprivate static func protobufDecodeWire(_ data: Data) throws -> [ProtobufEntry] {
+        var entries: [ProtobufEntry] = []
+        var idx = data.startIndex
+        let end = data.endIndex
+        while idx < end {
+            guard let (tag, next) = readVarint(data, from: idx) else {
+                throw ProtobufError(description: "truncated or oversized tag varint at offset \(idx - data.startIndex)")
+            }
+            idx = next
+            let wire = UInt8(tag & 0x7)
+            let fieldRaw = tag >> 3
+            // Protobuf reserves field number 0 and caps at 2^29 - 1.
+            // Anything outside that range is malformed wire.
+            guard fieldRaw > 0, fieldRaw <= 536870911 else {
+                throw ProtobufError(description: "invalid field number \(fieldRaw)")
+            }
+            let field = UInt32(fieldRaw)
+            switch wire {
+            case 0:
+                guard let (v, n) = readVarint(data, from: idx) else {
+                    throw ProtobufError(description: "truncated varint for field \(field)")
+                }
+                idx = n
+                entries.append(ProtobufEntry(field: field, wire: 0, value: .varint(v)))
+            case 1:
+                guard idx + 8 <= end else {
+                    throw ProtobufError(description: "truncated fixed64 for field \(field)")
+                }
+                entries.append(ProtobufEntry(field: field, wire: 1, value: .bytes(data.subdata(in: idx..<idx + 8))))
+                idx += 8
+            case 2:
+                guard let (len, n) = readVarint(data, from: idx) else {
+                    throw ProtobufError(description: "truncated length for field \(field)")
+                }
+                idx = n
+                let needed = Int(len)
+                // The Int conversion above truncates on UInt64 ≥ 2^63;
+                // a length that large is itself malformed (it can't fit
+                // in the remaining bytes). Guard both: non-negative
+                // after the cast, and within the message.
+                guard needed >= 0, idx + needed <= end else {
+                    throw ProtobufError(description: "length-delimited field \(field) (len=\(len)) exceeds message")
+                }
+                entries.append(ProtobufEntry(field: field, wire: 2, value: .bytes(data.subdata(in: idx..<idx + needed))))
+                idx += needed
+            case 5:
+                guard idx + 4 <= end else {
+                    throw ProtobufError(description: "truncated fixed32 for field \(field)")
+                }
+                entries.append(ProtobufEntry(field: field, wire: 5, value: .bytes(data.subdata(in: idx..<idx + 4))))
+                idx += 4
+            case 3, 4:
+                throw ProtobufError(description: "deprecated group wire type \(wire) is not supported")
+            default:
+                throw ProtobufError(description: "unknown wire type \(wire)")
+            }
+        }
+        return entries
+    }
+
+    fileprivate static func protobufEncodeWire(_ entries: [ProtobufEntry]) -> Data {
+        var out = Data()
+        for entry in entries {
+            let tag = UInt64(entry.field) << 3 | UInt64(entry.wire)
+            out.append(writeVarint(tag))
+            switch entry.value {
+            case .varint(let v):
+                out.append(writeVarint(v))
+            case .bytes(let bytes):
+                if entry.wire == 2 {
+                    out.append(writeVarint(UInt64(bytes.count)))
+                }
+                out.append(bytes)
+            }
+        }
+        return out
+    }
+
+    /// Pulls a JS array of ``{field, wire, value}`` entries back into
+    /// Swift. Validates shape strictly so a malformed entry surfaces
+    /// as a catchable JS error rather than silently encoding garbage:
+    /// wrong-length fixed payloads, non-numeric varints, and
+    /// out-of-range field numbers all throw.
+    fileprivate static func parseProtobufEntries(_ val: JSValue, in context: JSContext) throws -> [ProtobufEntry] {
+        guard val.isArray else {
+            throw ProtobufError(description: "expected an array of {field, wire, value} entries")
+        }
+        let lengthVal = val.objectForKeyedSubscript("length")
+        guard let lengthVal, lengthVal.isNumber else {
+            throw ProtobufError(description: "input array has no length")
+        }
+        let count = Int(lengthVal.toInt32())
+        var entries: [ProtobufEntry] = []
+        entries.reserveCapacity(count)
+        for idx in 0..<count {
+            guard let entryVal = val.objectAtIndexedSubscript(idx),
+                  !entryVal.isUndefined, !entryVal.isNull else {
+                throw ProtobufError(description: "entry \(idx) is null/undefined")
+            }
+            let fieldVal = entryVal.objectForKeyedSubscript("field")
+            guard let fieldVal, fieldVal.isNumber else {
+                throw ProtobufError(description: "entry \(idx).field must be a Number")
+            }
+            let fieldNum = fieldVal.toInt32()
+            guard fieldNum > 0, fieldNum <= 536_870_911 else {
+                throw ProtobufError(description: "entry \(idx).field \(fieldNum) out of range (1…2^29-1)")
+            }
+            let wireVal = entryVal.objectForKeyedSubscript("wire")
+            guard let wireVal, wireVal.isNumber else {
+                throw ProtobufError(description: "entry \(idx).wire must be a Number")
+            }
+            let wireNum = UInt8(truncatingIfNeeded: wireVal.toInt32())
+            let valueVal = entryVal.objectForKeyedSubscript("value")
+            switch wireNum {
+            case 0:
+                guard let v = valueVal.flatMap({ uint64FromJSValue($0) }) else {
+                    throw ProtobufError(description: "entry \(idx).value (wire 0) must be a non-negative integer Number or BigInt")
+                }
+                entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 0, value: .varint(v)))
+            case 1:
+                guard let bytes = valueVal.flatMap({ bytesFromValue($0, in: context) }), bytes.count == 8 else {
+                    throw ProtobufError(description: "entry \(idx).value (wire 1) must be a Uint8Array of length 8")
+                }
+                entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 1, value: .bytes(bytes)))
+            case 2:
+                guard let bytes = valueVal.flatMap({ bytesFromValue($0, in: context) }) else {
+                    throw ProtobufError(description: "entry \(idx).value (wire 2) must be Uint8Array/ArrayBuffer/string")
+                }
+                entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 2, value: .bytes(bytes)))
+            case 5:
+                guard let bytes = valueVal.flatMap({ bytesFromValue($0, in: context) }), bytes.count == 4 else {
+                    throw ProtobufError(description: "entry \(idx).value (wire 5) must be a Uint8Array of length 4")
+                }
+                entries.append(ProtobufEntry(field: UInt32(fieldNum), wire: 5, value: .bytes(bytes)))
+            case 3, 4:
+                throw ProtobufError(description: "entry \(idx).wire = \(wireNum): deprecated group wire types not supported")
+            default:
+                throw ProtobufError(description: "entry \(idx).wire = \(wireNum): unknown wire type")
+            }
+        }
+        return entries
+    }
+
+    /// Lifts a Swift entry list into a JS array of
+    /// ``{field, wire, value}`` objects. The ``BigInt`` constructor
+    /// lookup is hoisted out of the loop because looking it up per
+    /// entry dominates decode time for varint-heavy messages.
+    fileprivate static func makeProtobufEntries(_ entries: [ProtobufEntry], in context: JSContext) -> JSValue {
+        let array = JSValue(newArrayIn: context)!
+        let bigIntFn = context.objectForKeyedSubscript("BigInt")
+        for (idx, entry) in entries.enumerated() {
+            let obj = JSValue(newObjectIn: context)!
+            obj.setObject(NSNumber(value: entry.field), forKeyedSubscript: "field" as NSString)
+            obj.setObject(NSNumber(value: entry.wire), forKeyedSubscript: "wire" as NSString)
+            let v: JSValue
+            switch entry.value {
+            case .varint(let u):
+                v = bigIntFn?.call(withArguments: [String(u)]) ?? JSValue(undefinedIn: context)
+            case .bytes(let d):
+                v = makeUint8Array(in: context, from: d)
+            }
+            obj.setObject(v, forKeyedSubscript: "value" as NSString)
+            array.setObject(obj, atIndexedSubscript: idx)
+        }
+        return array
+    }
+
+    /// Builds a JS BigInt from a UInt64 by stringifying and calling
+    /// the global ``BigInt`` constructor — the only public path on
+    /// the Obj-C bridge that accepts the full 64-bit range. The
+    /// alternative (passing a Double to ``BigInt``) loses precision
+    /// above 2^53.
+    fileprivate static func makeBigInt(_ value: UInt64, in context: JSContext) -> JSValue {
+        let bigIntFn = context.objectForKeyedSubscript("BigInt")
+        return bigIntFn?.call(withArguments: [String(value)]) ?? JSValue(undefinedIn: context)
+    }
+
+    /// Converts a JS value to a UInt64 for encode-side input. Accepts
+    /// ``Number`` only when it's a non-negative integer in safe-int
+    /// range (so a script using ``3`` for a small field tag works
+    /// without sprinkling ``n`` suffixes); larger values must arrive
+    /// as ``BigInt`` (or a decimal string) to avoid silent precision
+    /// loss. Negative numbers and non-numeric values return nil and
+    /// surface as a JS error at the call site.
+    fileprivate static func uint64FromJSValue(_ val: JSValue) -> UInt64? {
+        if val.isUndefined || val.isNull { return nil }
+        if val.isNumber {
+            let d = val.toDouble()
+            guard d.isFinite, d >= 0, d <= 9_007_199_254_740_991.0, d == d.rounded() else {
+                return nil
+            }
+            return UInt64(d)
+        }
+        // BigInt and string both come through toString as a decimal
+        // representation; UInt64(_:) rejects anything that isn't a
+        // valid non-negative decimal integer.
+        guard let str = val.toString() else { return nil }
+        return UInt64(str)
+    }
+
+    // MARK: - Base64URL / JWT helpers
+
+    /// RFC 4648 §5: standard base64 with ``+``→``-``, ``/``→``_``, and
+    /// trailing ``=`` padding stripped. Always emits the canonical
+    /// no-padding form; decode is permissive about either alphabet
+    /// and either padded or unpadded input because tokens in the wild
+    /// frequently re-encode through a generic base64 step.
+    fileprivate static func encodeBase64URL(_ data: Data) -> String {
+        var s = data.base64EncodedString()
+        s = s.replacingOccurrences(of: "+", with: "-")
+        s = s.replacingOccurrences(of: "/", with: "_")
+        s = s.replacingOccurrences(of: "=", with: "")
+        return s
+    }
+
+    fileprivate static func decodeBase64URL(_ str: String) -> Data? {
+        var s = str.replacingOccurrences(of: "-", with: "+")
+        s = s.replacingOccurrences(of: "_", with: "/")
+        let mod = s.count % 4
+        if mod > 0 {
+            s += String(repeating: "=", count: 4 - mod)
+        }
+        return Data(base64Encoded: s)
+    }
+
+    /// Calls the JS ``JSON.parse`` global. Used instead of a Swift
+    /// JSON decoder so the resulting value is a real JS object the
+    /// script can mutate by assignment (a Swift-side
+    /// ``JSONSerialization`` round-trip would land back in JS as a
+    /// dictionary the script can read but not mutate naturally).
+    /// Returns nil for malformed input and swallows the thrown
+    /// exception so the engine's outer ``context.exception != nil``
+    /// gate doesn't roll back the whole script just because we
+    /// probed a payload that turned out not to be JSON.
+    fileprivate static func parseJSON(_ str: String, in context: JSContext) -> JSValue? {
+        let json = context.objectForKeyedSubscript("JSON")
+        let result = json?.invokeMethod("parse", withArguments: [str])
+        if context.exception != nil {
+            context.exception = nil
+            return nil
+        }
+        return result
+    }
+
+    /// Encodes one JWT header/payload segment. Bytes-shaped inputs
+    /// (string / Uint8Array / ArrayBuffer) are base64url'd verbatim —
+    /// that's how a script feeds a pre-stringified JSON or a binary
+    /// JWS payload (RFC 7797). Anything else (plain object, array,
+    /// number) goes through ``JSON.stringify`` first. Returns nil on
+    /// undefined/null input or when ``JSON.stringify`` returns
+    /// undefined (e.g. a JS value with a non-serializable cycle).
+    fileprivate static func encodeJWTSegment(_ value: JSValue?, in context: JSContext) -> String? {
+        guard let value, !value.isUndefined, !value.isNull else { return nil }
+        if let bytes = bytesFromValue(value, in: context) {
+            return encodeBase64URL(bytes)
+        }
+        let json = context.objectForKeyedSubscript("JSON")
+        guard let result = json?.invokeMethod("stringify", withArguments: [value]),
+              !result.isUndefined,
+              let str = result.toString() else {
+            return nil
+        }
+        return encodeBase64URL(Data(str.utf8))
     }
 }
 
