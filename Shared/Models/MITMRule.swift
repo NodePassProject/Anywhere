@@ -27,56 +27,38 @@ extension MITMPhase: CustomStringConvertible {
 
 /// A single rewrite operation. The associated values carry only the
 /// fields that operation needs; the URL-match ``pattern`` that gates
-/// every rule lives one level up on ``MITMRule`` so it is uniform across
-/// operations and the editor/runtime never thread it through each case.
-///
-/// Note: ``urlReplace`` rewrites only the path-and-query, reusing the
-/// rule's ``MITMRule/pattern`` as both the gate and the substitution
-/// regex. The destination of the upstream connection lives on
-/// ``MITMRuleSet`` as ``rewriteTarget``, so a single rule set always has
-/// a coherent upstream.
+/// every rule lives one level up on ``MITMRule``, uniform across
+/// operations, and the upstream destination is separate again on
+/// ``MITMRuleSet/rewriteTarget``. See ``MITMRuleSetParser`` for the text
+/// import format and the per-operation field layout.
 enum MITMOperation: Equatable {
-    /// Substitutes the rule's ``MITMRule/pattern`` in the request-target
-    /// with this replacement template. Request phase only.
+    /// Request-phase only. ``path`` is the replacement template; the
+    /// rule's ``MITMRule/pattern`` is the substitution regex.
     case urlReplace(path: String)
     case headerAdd(name: String, value: String)
     case headerDelete(name: String)
-    /// Sets the value of every header named ``name`` (case-insensitive)
-    /// to ``value``, regardless of the header's current value. Headers
-    /// that are absent are left untouched (nothing is added).
+    /// Overwrites the value of every header named ``name``
+    /// (case-insensitive); absent headers are left untouched.
     case headerReplace(name: String, value: String)
-    /// JavaScript transform. ``scriptBase64`` is the base64-encoded
-    /// UTF-8 source of a script that defines `function process(ctx)`;
-    /// the runtime decodes, compiles, and invokes it on a mutable
-    /// message-context object. Stored base64-encoded so rule-set text
-    /// import/export survives newlines and quoting.
+    /// JavaScript transform. ``scriptBase64`` is the base64-encoded UTF-8
+    /// source defining `function process(ctx)`. See ``MITMScriptEngine``
+    /// for the runtime contract.
     ///
-    /// Runtime single-rule semantics (by design, not a limitation):
-    /// at most one ``.script`` rule fires per message even when a
-    /// rule set declares several whose URL pattern matches — the last
-    /// matching rule wins. This is a deliberate design choice to
-    /// maximize performance and efficiency; see ``MITMScriptTransform``
-    /// for the full rationale. Authors who need composed behaviour
-    /// should consolidate logic into a single `process(ctx)`.
+    /// Single-rule semantics, by design, not a limitation: at most one
+    /// ``.script`` fires per message; when several match, the last wins.
+    /// This is a deliberate performance choice (see ``MITMScriptTransform``)
+    /// — authors needing composed behaviour should consolidate into one
+    /// `process(ctx)`.
     case script(scriptBase64: String)
-    /// Per-frame JavaScript transform for streaming bodies (gRPC,
-    /// server-sent events, chunked APIs). Same storage shape as
-    /// ``script`` but the runtime invokes the function once per DATA
-    /// frame (HTTP/2) or per chunk (HTTP/1 chunked) without buffering
-    /// the body, decompressing, or allowing head-field mutation. Useful
-    /// when the body is a stream of self-describing frames the script
-    /// can demux on its own (e.g. gRPC length-prefixed messages) and
-    /// when full-body buffering would stall the stream.
+    /// Per-frame JavaScript transform for streaming bodies (gRPC, SSE,
+    /// chunked APIs): same storage shape as ``script`` but invoked once
+    /// per HTTP/2 DATA frame or HTTP/1 chunked chunk, without buffering,
+    /// decompression, or head-field mutation. See ``MITMScriptEngine``.
     ///
-    /// HTTP/1 Content-Length bodies are skipped — changing the byte
-    /// count mid-stream would desync framing the head has already
-    /// committed to. If both ``script`` and ``streamScript`` rules
-    /// match the same message, ``streamScript`` wins.
-    ///
-    /// Same runtime single-rule semantics as ``script`` (by design
-    /// for performance and efficiency, not a limitation): at most one
-    /// ``.streamScript`` fires per stream — the last matching rule
-    /// wins. See ``MITMScriptTransform`` for the full rationale.
+    /// HTTP/1 Content-Length bodies are skipped (the byte count is
+    /// already committed). When both a ``script`` and a ``streamScript``
+    /// match, ``streamScript`` wins; otherwise single-rule semantics
+    /// match ``script`` — at most one fires per stream, last match wins.
     case streamScript(scriptBase64: String)
 }
 
@@ -172,11 +154,10 @@ extension MITMOperation: Codable {
 struct MITMRule: Codable, Equatable, Identifiable {
     var id = UUID()
     var phase: MITMPhase
-    /// NSRegularExpression tested against the request-target
-    /// (path-and-query). The rule's ``operation`` only fires when this
-    /// matches; for ``MITMOperation/urlReplace`` it doubles as the
-    /// substitution regex. The rule set's domain suffixes already gate
-    /// the host, so this refines by path.
+    /// `NSRegularExpression` over the request target's path-and-query
+    /// that gates the ``operation`` (and doubles as the substitution
+    /// regex for ``MITMOperation/urlReplace``). The set's domain suffixes
+    /// gate the host; this refines by path.
     var pattern: String
     var operation: MITMOperation
 
@@ -214,19 +195,18 @@ struct MITMRule: Codable, Equatable, Identifiable {
     }
 }
 
-/// Action applied to traffic matched by a rule set. Three modes:
+/// Action applied to traffic matched by a rule set. See
+/// ``MITMRuleSetParser`` for how each is written in import text and
+/// ``MITMResponseSynthesizer`` for the synthesized wire format.
 ///
-/// - ``transparent``: the outer leg is dialed to ``host``:``port`` instead
-///   of the original destination, and request authority headers are
-///   rewritten so the upstream sees the redirect target. The client still
-///   sees the original SNI on the leaf certificate. ``port`` of nil keeps
-///   the original port.
-/// - ``redirect302``: no outer leg. The session synthesizes
-///   `HTTP/1.1 302 Found` (or h2 equivalent) with
-///   `Location: https://<host>[:<port>]<original-path-and-query>`.
-/// - ``reject200``: no outer leg. The session synthesizes
-///   `HTTP/1.1 200 OK` (or h2 equivalent) with the configured
-///   ``rejectBody`` and an optional ``Content-Type`` override.
+/// - ``transparent``: dial the outer leg to ``host``:``port`` instead of
+///   the original destination and rewrite the request authority; the
+///   client still sees the original SNI on the leaf certificate. A nil
+///   ``port`` keeps the original.
+/// - ``redirect302``: no outer leg; synthesize a `302 Found` redirecting
+///   to the target.
+/// - ``reject200``: no outer leg; synthesize a `200 OK` from the
+///   configured ``rejectBody`` and optional Content-Type override.
 enum MITMRewriteAction: String, Codable {
     case transparent
     case redirect302
@@ -243,18 +223,11 @@ enum MITMRewriteAction: String, Codable {
     }
 }
 
-/// Canned response body for ``MITMRewriteAction/reject200``. Three input
-/// shapes:
-///
-/// - ``text``: ``contents`` is plain UTF-8 text. Default Content-Type is
-///   `text/plain; charset=utf-8`.
-/// - ``gif``: a 43-byte 1×1 transparent GIF89a. ``contents`` is ignored.
-///   Default Content-Type is `image/gif`.
-/// - ``data``: ``contents`` is base64. Decoded at request time. Default
-///   Content-Type is `application/octet-stream`.
-///
-/// ``contentType`` overrides the default for any kind. Empty / nil keeps
-/// the default.
+/// Canned response body for ``MITMRewriteAction/reject200``; see
+/// ``MITMRuleSetParser`` for how kind and contents are written in import
+/// text. ``contentType`` overrides the per-kind default Content-Type
+/// (empty/nil keeps it): ``text`` → `text/plain; charset=utf-8`, ``gif``
+/// → `image/gif`, ``data`` → `application/octet-stream`.
 struct MITMRejectBody: Codable, Equatable {
     enum Kind: String, Codable {
         case text

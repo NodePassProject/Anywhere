@@ -8,39 +8,62 @@
 import Foundation
 import JavaScriptCore
 
-/// Text-based importer for ``MITMRuleSet``s.
+/// Import-only parser that turns the text representation of a
+/// ``MITMRuleSet`` into a value ``ImportMITMRuleSetView`` can install.
+/// There is no serializer; the text comes from a user paste or a
+/// downloaded URL and is treated as untrusted — wire-safety validation
+/// of header and URL bytes happens later, in ``MITMRewritePolicy`` (for
+/// static rules) and ``MITMScriptEngine`` (for script output).
 ///
 /// The text is a flat sequence of header lines and rule lines, in any
 /// order. Header lines have the shape `<key> = <value>` and supply the
-/// set's metadata. Rule lines use the same CSV format the editor's
-/// previous "import rules" feature used.
+/// set's metadata. Rule lines are comma-separated fields describing a
+/// single rewrite operation.
 ///
 ///     name     = My Rule Set
-///     hostname = example.com, *.api.example.com
+///     hostname = example.com, api.example.org
 ///     redirect = upstream.example.com:443
 ///     0, 0, ^/old, /new
 ///     1, 1, ^/api/, X-Powered-By, Anywhere
 ///
-/// Recognized keys:
+/// Header keys are matched case-insensitively; the value is trimmed of
+/// surrounding whitespace and otherwise kept verbatim. Recognized keys:
 ///
-/// - `name`         — display name for the rule set
-/// - `hostname`     — comma-separated list of domain suffixes
-/// - `redirect`     — transparent rewrite target: `host` or `host:port`
-/// - `redirect-302` — synthesize a 302 response with
-///                    `Location: https://<host>[:<port>]<original-path>`
-/// - `reject-200`   — synthesize a 200 response. Value is `<kind>` or
-///                    `<kind> <content>`. Kind is `text`, `gif`, or `data`.
-///                    For `text`, content is the literal UTF-8 body. For
-///                    `gif`, content is ignored (1×1 transparent GIF).
-///                    For `data`, content is base64 (decoded at apply time).
-/// - `content-type` — optional Content-Type override for `reject-200`.
+/// - `name`         — display name for the rule set. The importer
+///                    requires a non-empty name.
+/// - `hostname`     — comma-separated domain suffixes the set applies to.
+///                    Matching is by suffix, so `example.com` also covers
+///                    `www.example.com`; wildcards are not supported. When
+///                    suffixes overlap, the most specific one wins (see
+///                    ``MITMRewritePolicy``).
+/// - `redirect`     — transparent upstream: dial `host` or `host:port`
+///                    instead of the original destination and rewrite the
+///                    request's authority, while the client still sees the
+///                    original host's certificate. See
+///                    ``MITMRewriteAction/transparent``.
+/// - `redirect-302` — synthesize a `302 Found` whose `Location` is
+///                    `https://<host>[:<port>]<original-request-target>`
+///                    (the port is emitted only when set and not 443).
+/// - `reject-200`   — synthesize a `200 OK`. Value is `<kind>` or
+///                    `<kind> <content>`, where kind is `text`, `gif`, or
+///                    `data`. For `text`, content is the literal UTF-8
+///                    body; for `gif`, content is ignored and a 1×1
+///                    transparent GIF is emitted; for `data`, content is
+///                    base64, decoded when the response is synthesized.
+///                    Empty content yields a short non-empty default body.
+/// - `content-type` — Content-Type override applied to `reject-200` only;
+///                    ignored for the other actions.
 ///
 /// `redirect`, `redirect-302`, and `reject-200` are mutually exclusive;
-/// the last one to appear wins.
+/// if more than one appears, the last one wins. The latter two synthesize
+/// the reply on the inner leg and bypass the rewrite pipeline, so any rule
+/// lines in the same set never fire (``MITMRewritePolicy`` logs the
+/// combination at load time).
 ///
-/// Unrecognized header keys are ignored. Comment lines start with `#`
-/// or `//`. Lines that fail to parse as either a header or a rule are
-/// dropped silently so a partially-valid file still imports what it can.
+/// Unrecognized header keys are ignored. Comment lines start with `#` or
+/// `//`. Parsing never fails: a line that is neither a recognized header
+/// nor a valid rule is dropped silently, so a partially-valid file still
+/// imports what it can.
 ///
 /// Rule line format:
 ///
@@ -50,26 +73,34 @@ import JavaScriptCore
 ///
 /// Operations and their trailing fields:
 ///
-/// | ID | Operation       | Phase           | Fields                   |
-/// | -- | --------------- | --------------- | ------------------------ |
-/// | `0` | url-replace    | request only    | pattern, replacement     |
-/// | `1` | header-add     | both            | pattern, name, value     |
-/// | `2` | header-delete  | both            | pattern, name            |
-/// | `3` | header-replace | both            | pattern, name, value     |
-/// | `4` | script         | both            | pattern, base64          |
-/// | `5` | stream-script  | both            | pattern, base64          |
+/// | ID  | Operation      | Phase        | Fields                |
+/// | --- | -------------- | ------------ | --------------------- |
+/// | `0` | url-replace    | request only | pattern, replacement  |
+/// | `1` | header-add     | both         | pattern, name, value  |
+/// | `2` | header-delete  | both         | pattern, name         |
+/// | `3` | header-replace | both         | pattern, name, value  |
+/// | `4` | script         | both         | pattern, base64       |
+/// | `5` | stream-script  | both         | pattern, base64       |
 ///
-/// Fields are separated by `,`. Whitespace around unquoted fields is
+/// `url-replace` is always a request-phase rule; its phase column is
+/// ignored. Every other operation applies to whichever phase the column
+/// names. A rule whose field count does not match the table is dropped.
+///
+/// Fields are separated by `,`. Whitespace around an unquoted field is
 /// trimmed. A field that begins with `"` is read until the matching `"`,
-/// with `""` inside a quoted field producing a literal `"` — so values
-/// containing commas can be wrapped in double quotes.
+/// with `""` inside a quoted field producing a literal `"` — so a value
+/// containing commas or leading/trailing spaces can be wrapped in double
+/// quotes.
 ///
-/// Every rule leads with a `pattern`: an NSRegularExpression (usual
-/// Unicode semantics) tested against the request-target's
-/// path-and-query. The operation only fires when the pattern matches;
-/// the rule set's `hostname` already scopes the host, so the pattern
-/// refines by path. Use `.*` to match every request. For `url-replace`
-/// the same pattern is also the substitution regex.
+/// Every rule leads with a `pattern`: an `NSRegularExpression` (default
+/// Unicode semantics) tested against the request target's path-and-query.
+/// The operation only fires when the pattern matches; the set's
+/// `hostname` already scopes the host, so the pattern refines by path.
+/// Use `.*` to match every request. For `url-replace` the same pattern is
+/// also the substitution regex: every match in the request target is
+/// replaced by the `replacement` template, which may reference capture
+/// groups (`$1`, `$2`, …). A rule whose pattern is empty or fails to
+/// compile as a regex is dropped.
 ///
 /// `header-replace` matches the target header by `name`
 /// (case-insensitive) and overwrites its value with `value`, ignoring
@@ -79,15 +110,17 @@ import JavaScriptCore
 /// `script` carries a base64-encoded UTF-8 JavaScript source defining
 /// `function process(ctx)`. The runtime invokes it with a mutable
 /// message-context object: the script can mutate `ctx.body`
-/// (`Uint8Array`, in-place or by assignment), `ctx.url`, `ctx.method`,
-/// `ctx.status`, and `ctx.headers` (an array of `[name, value]`
-/// pairs). Scripts are stored base64-encoded so newlines and quoting
-/// in the source survive the line-based rule format. See
-/// ``MITMScriptEngine`` for the full runtime contract, including the
-/// `Anywhere.utf8 / base64 / hex / store` helper globals, the
-/// `Anywhere.done() / Anywhere.exit()` short-circuit hooks, and the
+/// (a `Uint8Array`, in place or by assignment), `ctx.url`, `ctx.method`,
+/// `ctx.status`, and `ctx.headers` (an array of `[name, value]` pairs);
+/// `ctx.phase` is read-only. Scripts are stored base64-encoded so
+/// newlines and quoting in the source survive the line-based rule format.
+/// See ``MITMScriptEngine`` for the full runtime contract, including the
+/// `Anywhere.codec` namespace (`utf8` / `base64` / `base64url` / `hex` /
+/// `protobuf`), the `Anywhere.crypto`, `Anywhere.jwt`, `Anywhere.json`,
+/// `Anywhere.store`, and `Anywhere.log` namespaces, the `Anywhere.done()`
+/// / `Anywhere.exit()` short-circuit directives, and the
 /// request-phase-only `Anywhere.respond({status, headers, body})`
-/// hook that drops the upstream request and writes a synthesized
+/// directive that drops the upstream request and writes a synthesized
 /// response straight back to the client.
 ///
 /// A `script` rule's only fields are the `pattern` and the base64:
@@ -97,13 +130,18 @@ import JavaScriptCore
 /// `stream-script` (op `5`) uses the same field shape as `script` but
 /// invokes the script once per HTTP/2 DATA frame or HTTP/1 chunked
 /// chunk — the body is never buffered, HTTP-level compression is not
-/// decoded, and the head's URL/method/status/headers are not
-/// mutable. The script's `process(ctx)` receives an immutable view of
-/// the head plus a mutable `ctx.body` (this frame's payload),
-/// `ctx.frame = { index, end }`, and `ctx.state` (a JS object
-/// persisted across frames of the same stream). HTTP/1 Content-Length
-/// bodies are skipped — the head has already committed to a byte
-/// count we can't change mid-stream.
+/// decoded, and the head's URL/method/status/headers are not mutable.
+/// The script's `process(ctx)` receives an immutable view of the head
+/// plus a mutable `ctx.body` (this frame's payload),
+/// `ctx.frame = { index, end }` (the 0-based frame index and an `end`
+/// flag set on the final frame), and `ctx.state` (a JS object persisted
+/// across frames of the same stream). HTTP/1 Content-Length bodies are
+/// not streamed — the head has already committed to a byte count that
+/// can't change mid-stream.
+///
+/// Both script kinds are dropped at import when the base64 does not decode
+/// to syntactically valid UTF-8 JavaScript; whether `process` is actually
+/// defined and callable is checked by ``MITMScriptEngine`` at runtime.
 enum MITMRuleSetParser {
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""
@@ -167,6 +205,11 @@ enum MITMRuleSetParser {
         "content-type",
     ]
 
+    /// Splits a `<key> = <value>` line on its first `=`. The key is
+    /// lowercased and matched against ``recognizedHeaders``; an
+    /// unrecognized key returns nil so the caller falls through and tries
+    /// the line as a rule. The value is trimmed of surrounding whitespace
+    /// and otherwise returned verbatim.
     private static func parseHeader(_ line: String) -> (key: String, value: String)? {
         guard let equal = line.firstIndex(of: "=") else { return nil }
         let key = line[line.startIndex..<equal]
@@ -223,11 +266,15 @@ enum MITMRuleSetParser {
         return MITMRewriteTarget(action: action, host: trimmed, port: nil)
     }
 
-    /// Parses `reject-200` value. Format: `<kind>` or `<kind> <content>`,
-    /// where kind is `text`, `gif`, or `data`. The first whitespace run
-    /// separates kind from content; everything after is the content
-    /// (preserved verbatim, except a single trailing CR is removed). An
-    /// unknown kind falls back to ``MITMRejectBody/Kind/text``.
+    /// Parses a `reject-200` value of the form `<kind>` or
+    /// `<kind> <content>`. Kind is `text`, `gif`, or `data`; the first
+    /// space separates it from the content, and everything after that
+    /// space is the content, taken verbatim. An unknown or missing kind
+    /// falls back to ``MITMRejectBody/Kind/text``. The content is decoded
+    /// and interpreted only when the response is synthesized — literal
+    /// UTF-8 for `text`, base64 for `data`, ignored for `gif` — so this
+    /// stage neither validates nor decodes it. An empty value yields an
+    /// empty ``MITMRejectBody`` of kind `text`.
     private static func parseReject200(_ value: String) -> MITMRewriteTarget {
         let trimmed = value.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else {
