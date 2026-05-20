@@ -45,6 +45,7 @@ final class MITMHTTP2Connection {
         static let priority: UInt8     = 0x2
         static let rstStream: UInt8    = 0x3
         static let pushPromise: UInt8  = 0x5
+        static let goaway: UInt8       = 0x7
         static let continuation: UInt8 = 0x9
     }
 
@@ -125,6 +126,17 @@ final class MITMHTTP2Connection {
     /// The peer sees a stalled half of the connection and GOAWAYs
     /// after its timeout.
     private var parseError: Bool = false
+
+    /// Highest client-initiated stream ID this (inbound) leg has opened
+    /// via a fresh HEADERS, or zero before any. RFC 9113 §5.1.1 requires
+    /// client streams to use odd, strictly-increasing IDs; a HEADERS
+    /// whose ID advances past this value opens a new stream and is
+    /// validated for parity, while a HEADERS at or below it is a trailer
+    /// on an already-opened stream (§8.1) and skips validation. Only
+    /// meaningful on the inbound leg — outbound responses/pushes arrive
+    /// on already-open streams in arbitrary order, so this stays zero
+    /// there and is never consulted.
+    private var highestInboundStreamID: UInt32 = 0
 
     private struct PendingHeaders {
         let streamID: UInt32
@@ -297,10 +309,28 @@ final class MITMHTTP2Connection {
     // MARK: - Frame dispatch
 
     private func handleFrame(_ frame: RawFrame) -> Data {
-        // While accumulating a header block, only CONTINUATION on the
-        // same stream is legal (§6.10). Anything else here would be a
-        // protocol violation by the peer; we still pass it through
-        // since detecting + reporting the error is the receiver's job.
+        // RFC 9113 §6.10: between a HEADERS/PUSH_PROMISE without
+        // END_HEADERS and its terminating CONTINUATION, the peer is
+        // forbidden from sending any other frame type — including
+        // unrelated DATA, RST_STREAM, even SETTINGS. A peer that does
+        // so is performing a protocol violation. Forwarding the
+        // out-of-band frame would leak the pending header block into
+        // the destination's HPACK decoder out of order (because the
+        // header block's CONTINUATION never arrives), poisoning the
+        // dynamic table. Stop processing — the peer will GOAWAY.
+        if let p = pending,
+           frame.typeCode != FrameTypeCode.continuation {
+            logger.warning("[MITM] HTTP/2: frame type \(frame.typeCode) on stream \(frame.streamID) interleaved with pending HEADERS on stream \(p.streamID); marking parseError")
+            parseError = true
+            rxBuffer = MITMByteBuffer()
+            pending = nil
+            return Data()
+        }
+        // Synth-responded short-circuit: frames on streams whose
+        // request was answered by ``Anywhere.respond`` never reach the
+        // upstream. RST_STREAM is allowed through so the eviction
+        // logic in ``handleRSTStream`` can run, but every other frame
+        // type is swallowed.
         if frame.streamID != 0,
            synthRespondedStreams.contains(frame.streamID),
            frame.typeCode != FrameTypeCode.rstStream {
@@ -328,9 +358,52 @@ final class MITMHTTP2Connection {
             return handleData(frame)
         case FrameTypeCode.rstStream:
             return handleRSTStream(frame)
+        case FrameTypeCode.goaway:
+            return handleGoAway(frame)
         default:
             return serializeFrame(frame)
         }
+    }
+
+    /// Cleans up per-stream bookkeeping for streams above the GOAWAY's
+    /// last-stream-id and forwards the frame verbatim. RFC 9113 §6.8:
+    /// "any streams with identifiers higher than the included
+    /// last-stream-id … will not be processed". Without this, pending
+    /// HEADERS / DATA accumulators for those streams would never
+    /// receive END_STREAM and leak for the connection's lifetime.
+    private func handleGoAway(_ frame: RawFrame) -> Data {
+        // GOAWAY MUST be sent on stream 0 (§6.8). A non-zero streamID
+        // here is a protocol violation; pass through so the receiver
+        // can detect.
+        guard frame.streamID == 0, frame.payload.count >= 8 else {
+            return serializeFrame(frame)
+        }
+        // First 4 bytes: R | Last-Stream-ID (31). Parse the 31-bit ID
+        // with the reserved high bit masked off.
+        let payload = frame.payload
+        let start = payload.startIndex
+        let lastStreamID =
+            (UInt32(payload[start])     & 0x7F) << 24
+            | UInt32(payload[start + 1]) << 16
+            | UInt32(payload[start + 2]) << 8
+            | UInt32(payload[start + 3])
+        // Evict per-stream pending state for any stream above the
+        // last-stream-id — the GOAWAY-sender guarantees those streams
+        // will not be processed, so their END_STREAM trigger never
+        // arrives and the entries would otherwise pin memory.
+        let abandonedPending = pendingMessages.keys.filter { $0 > lastStreamID }
+        for id in abandonedPending {
+            pendingMessages.removeValue(forKey: id)
+        }
+        let abandonedStreaming = streamingScripts.keys.filter { $0 > lastStreamID }
+        for id in abandonedStreaming {
+            streamingScripts.removeValue(forKey: id)
+        }
+        let abandonedSynth = synthRespondedOrder.filter { $0 > lastStreamID }
+        for id in abandonedSynth {
+            _ = clearSynthResponded(id)
+        }
+        return serializeFrame(frame)
     }
 
     /// Drops per-stream bookkeeping for an aborted stream and forwards
@@ -344,6 +417,21 @@ final class MITMHTTP2Connection {
     /// clears independently — the other leg's matching clear is a
     /// no-op.
     private func handleRSTStream(_ frame: RawFrame) -> Data {
+        // RFC 9113 §6.4: RST_STREAM MUST be associated with a stream
+        // (streamID != 0) and its payload MUST be exactly 4 bytes
+        // (the error code). Forwarding a malformed RST_STREAM gives
+        // the peer a basis to GOAWAY the connection on an otherwise
+        // recoverable error; drop here.
+        guard frame.streamID != 0, frame.payload.count == 4 else {
+            return Data()
+        }
+        // Clear any in-flight HEADERS accumulator for the aborted
+        // stream so a follow-on CONTINUATION can't surface fragments
+        // belonging to the dead stream into the next HEADERS that
+        // reuses the slot.
+        if pending?.streamID == frame.streamID {
+            pending = nil
+        }
         pendingMessages.removeValue(forKey: frame.streamID)
         streamingScripts.removeValue(forKey: frame.streamID)
         _ = rewriter.requestLog.popHTTP2(streamID: frame.streamID)
@@ -363,6 +451,42 @@ final class MITMHTTP2Connection {
     // MARK: - HEADERS
 
     private func handleHeaders(_ frame: RawFrame) -> Data {
+        // RFC 9113 §6.2: HEADERS MUST be associated with a stream — a
+        // streamID of zero is a connection-level protocol violation.
+        // Routing the frame through the script chain at the zero slot
+        // would collide with future stream-zero frames; mark
+        // parseError so the peer GOAWAYs.
+        guard frame.streamID != 0 else {
+            logger.warning("[MITM] HTTP/2: HEADERS on stream 0; marking parseError")
+            parseError = true
+            rxBuffer = MITMByteBuffer()
+            return Data()
+        }
+        // RFC 9113 §5.1.1: client-initiated stream IDs MUST be odd and
+        // strictly monotonically increasing. Only the inbound leg
+        // carries that invariant — outbound responses/pushes arrive on
+        // already-open streams in arbitrary order. A HEADERS frame opens
+        // a NEW stream only when its ID advances past the highest opened
+        // on this leg; a HEADERS at or below that high-water mark is a
+        // trailer on a previously-opened stream (§8.1), which is legal
+        // and MUST skip new-stream validation. (Trailers on streams we
+        // still track never reach here — they take the
+        // follow-on-HEADERS flush path in finalizeHeaderBlock. A
+        // backwards or reused ID on an untracked stream collides with no
+        // state, since pass-through streams hold none, so we let it
+        // through for the peer/upstream to reject.)
+        if direction == .inbound,
+           frame.streamID > highestInboundStreamID,
+           isFreshHeadersFrame(streamID: frame.streamID) {
+            guard frame.streamID % 2 == 1 else {
+                logger.warning("[MITM] HTTP/2: client-initiated HEADERS streamID \(frame.streamID) has server (even) parity; marking parseError")
+                parseError = true
+                rxBuffer = MITMByteBuffer()
+                return Data()
+            }
+            highestInboundStreamID = frame.streamID
+        }
+
         guard let body = stripHeadersPadding(frame: frame, hasPriority: frame.flags & 0x20 != 0) else {
             // Malformed padding — drop the frame to avoid feeding
             // garbage into the HPACK decoder. The peer will GOAWAY.
@@ -396,11 +520,47 @@ final class MITMHTTP2Connection {
         return Data()
     }
 
+    /// True when this leg holds no per-stream state for ``streamID``
+    /// (not buffering a message, not streaming a script, not synth-
+    /// responded). The caller combines this with a high-water-mark
+    /// comparison to distinguish a brand-new inbound stream — which is
+    /// validated for parity — from a trailer on an already-opened
+    /// stream we happen not to track (e.g. a pass-through request),
+    /// which must be left alone. Trailers on streams we DO track never
+    /// reach the validation path; they take the follow-on-HEADERS flush
+    /// path in ``finalizeHeaderBlock``.
+    private func isFreshHeadersFrame(streamID: UInt32) -> Bool {
+        return pendingMessages[streamID] == nil
+            && streamingScripts[streamID] == nil
+            && !synthRespondedStreams.contains(streamID)
+    }
+
     private func handleContinuation(_ frame: RawFrame) -> Data {
+        // RFC 9113 §6.10: CONTINUATION MUST be associated with a
+        // stream. A streamID-zero CONTINUATION is a protocol error.
+        guard frame.streamID != 0 else {
+            logger.warning("[MITM] HTTP/2: CONTINUATION on stream 0; marking parseError")
+            parseError = true
+            rxBuffer = MITMByteBuffer()
+            return Data()
+        }
         guard var p = pending, p.streamID == frame.streamID else {
-            // Stray CONTINUATION — pass through; the peer's stack will
-            // raise the protocol error.
-            return serializeFrame(frame)
+            // Stray CONTINUATION (no matching pending HEADERS, or
+            // matching a different stream). Forwarding it would
+            // poison the destination peer's HPACK decoder: the wire
+            // bytes are encoded under the SOURCE leg's dynamic table
+            // (we re-encode every header block we forward with
+            // literal-without-indexing, so the source-side table is
+            // ahead of the destination-side table for any indexed
+            // references). A stray CONTINUATION's indexed slots
+            // wouldn't exist in the destination decoder's table → it
+            // raises COMPRESSION_ERROR and GOAWAYs the connection.
+            // Drop and stop processing to keep both decoders in
+            // sync.
+            logger.warning("[MITM] HTTP/2: stray CONTINUATION on stream \(frame.streamID) (no pending HEADERS); marking parseError")
+            parseError = true
+            rxBuffer = MITMByteBuffer()
+            return Data()
         }
 
         // Project the post-append size and reject *before* allocating.
@@ -429,6 +589,26 @@ final class MITMHTTP2Connection {
     }
 
     private func handlePushPromise(_ frame: RawFrame) -> Data {
+        // RFC 9113 §6.6: PUSH_PROMISE is server-to-client only. A
+        // PUSH_PROMISE arriving on the inbound leg (client→server) is
+        // a client-side protocol violation; re-encoding and
+        // forwarding it would have the upstream raise PROTOCOL_ERROR
+        // and GOAWAY the connection, killing every other in-flight
+        // stream. Drop and mark parseError instead.
+        guard direction == .outbound else {
+            logger.warning("[MITM] HTTP/2: PUSH_PROMISE on inbound leg (client → server); marking parseError")
+            parseError = true
+            rxBuffer = MITMByteBuffer()
+            return Data()
+        }
+        // §6.6: PUSH_PROMISE MUST be associated with an existing,
+        // peer-initiated stream — streamID 0 is a protocol error.
+        guard frame.streamID != 0 else {
+            logger.warning("[MITM] HTTP/2: PUSH_PROMISE on stream 0; marking parseError")
+            parseError = true
+            rxBuffer = MITMByteBuffer()
+            return Data()
+        }
         // PUSH_PROMISE payload (§6.6):
         //   [Pad Length? (8)]
         //   R | Promised Stream ID (31)
@@ -468,9 +648,21 @@ final class MITMHTTP2Connection {
         kind: PendingHeaders.Kind
     ) -> Data {
         guard let decoded = decoder.decodeHeaders(from: fragments) else {
-            // Decoder failure desyncs the dynamic table irrecoverably.
-            // Pass an empty header block through so the receiver can
-            // GOAWAY the connection cleanly.
+            // HPACK decode failure desyncs this leg's dynamic table
+            // irrecoverably — partial decode may have advanced the
+            // dynamic-table state past the failing instruction, so
+            // every subsequent HEADERS on this leg will decode
+            // against a poisoned table and emit silently-corrupted
+            // header values to the destination peer.
+            //
+            // The previous behavior here returned ``Data()`` and let
+            // the connection keep processing, which is exactly the
+            // failure mode the parseError flag exists to prevent.
+            // Trip parseError so ``process(_:)`` short-circuits and
+            // the peer GOAWAYs after its idle timeout.
+            logger.warning("[MITM] HTTP/2 stream \(streamID): HPACK decode failed; marking parseError to prevent table desync")
+            parseError = true
+            rxBuffer = MITMByteBuffer()
             return Data()
         }
 
@@ -683,6 +875,17 @@ final class MITMHTTP2Connection {
     // MARK: - DATA
 
     private func handleData(_ frame: RawFrame) -> Data {
+        // RFC 9113 §6.1: DATA MUST be associated with a stream. A
+        // DATA frame on stream 0 is a connection-level protocol
+        // violation and would otherwise route into the script chain
+        // keyed at slot 0, colliding with any other stream-0
+        // bookkeeping.
+        guard frame.streamID != 0 else {
+            logger.warning("[MITM] HTTP/2: DATA on stream 0; marking parseError")
+            parseError = true
+            rxBuffer = MITMByteBuffer()
+            return Data()
+        }
         guard let body = stripDataPadding(frame: frame) else {
             return Data()
         }
@@ -1667,6 +1870,13 @@ final class MITMHTTP2Connection {
         payloadLength: Int,
         into out: inout Data
     ) {
+        // The 24-bit length field can only represent 0…2^24-1. A
+        // negative or oversized value would sign-extend through the
+        // shifts and emit a corrupt frame header that desyncs the
+        // receiver's framing. No caller passes such a value today,
+        // but assert the invariant rather than silently emit garbage.
+        precondition(payloadLength >= 0 && payloadLength <= 0xFFFFFF,
+                     "HTTP/2 frame payload length \(payloadLength) out of 24-bit range")
         out.append(UInt8((payloadLength >> 16) & 0xFF))
         out.append(UInt8((payloadLength >> 8) & 0xFF))
         out.append(UInt8(payloadLength & 0xFF))

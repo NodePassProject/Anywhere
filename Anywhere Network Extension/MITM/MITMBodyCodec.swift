@@ -196,43 +196,83 @@ enum MITMBodyCodec {
 
     // MARK: - gzip (RFC 1952)
 
-    /// Strips the gzip member header + trailing CRC32/ISIZE and feeds
-    /// the inner deflate stream to ``streamDecode``. Only the first
-    /// member is read; concatenated members are rare in HTTP responses
-    /// and not handled.
+    /// Parses one or more concatenated gzip members per RFC 1952 §2.2.
+    /// Each member is `<10-byte header><optional fields><deflate body>
+    /// <8-byte trailer>`. The previous implementation read only the
+    /// first member, dropping silently when an upstream sent
+    /// concatenated members (which some CDNs and the bgzf format
+    /// produce). Now we loop until the input is exhausted.
     private static func gunzip(_ data: Data) -> Data? {
-        // Minimum: 10-byte fixed header + 8-byte trailer.
-        guard data.count >= 18 else { return nil }
-        let s = data.startIndex
-        guard data[s] == 0x1F, data[s + 1] == 0x8B, data[s + 2] == 0x08 else {
-            return nil
-        }
-        let flags = data[s + 3]
-        var idx = s + 10
+        var combined = Data()
+        var cursor = data.startIndex
         let end = data.endIndex
+        while cursor < end {
+            guard let (memberBytes, consumed) = gunzipOneMember(data, from: cursor) else {
+                // Malformed member: if we already decoded at least
+                // one earlier member, return what we have rather
+                // than dropping the whole body. The trailing junk is
+                // recoverable for the caller (they're presumably
+                // logging a warning); the leading bytes were valid
+                // gzip.
+                return combined.isEmpty ? nil : combined
+            }
+            if combined.count + memberBytes.count > maxBufferedBodyBytes {
+                logger.warning("[MITM] gzip multi-member output would exceed cap \(maxBufferedBodyBytes) B; aborting")
+                return nil
+            }
+            combined.append(memberBytes)
+            cursor = data.index(cursor, offsetBy: consumed)
+        }
+        return combined
+    }
+
+    /// Decodes one gzip member starting at ``offset`` in ``data``.
+    /// Returns the decoded bytes plus the total number of input bytes
+    /// consumed (header + deflate body + trailer), or nil on
+    /// malformed input.
+    private static func gunzipOneMember(_ data: Data, from offset: Data.Index) -> (decoded: Data, consumed: Int)? {
+        let end = data.endIndex
+        // Minimum: 10-byte fixed header + 8-byte trailer.
+        guard data.distance(from: offset, to: end) >= 18 else { return nil }
+        guard data[offset] == 0x1F,
+              data[data.index(offset, offsetBy: 1)] == 0x8B,
+              data[data.index(offset, offsetBy: 2)] == 0x08
+        else { return nil }
+        let flags = data[data.index(offset, offsetBy: 3)]
+        var idx = data.index(offset, offsetBy: 10)
         if flags & 0x04 != 0 { // FEXTRA
-            guard idx + 2 <= end else { return nil }
-            let xlen = Int(data[idx]) | (Int(data[idx + 1]) << 8)
-            idx += 2 + xlen
+            guard data.distance(from: idx, to: end) >= 2 else { return nil }
+            let xlen = Int(data[idx]) | (Int(data[data.index(idx, offsetBy: 1)]) << 8)
+            idx = data.index(idx, offsetBy: 2 + xlen)
             guard idx <= end else { return nil }
         }
         if flags & 0x08 != 0 { // FNAME (NUL-terminated)
-            while idx < end, data[idx] != 0 { idx += 1 }
+            while idx < end, data[idx] != 0 { idx = data.index(after: idx) }
             guard idx < end else { return nil }
-            idx += 1
+            idx = data.index(after: idx)
         }
         if flags & 0x10 != 0 { // FCOMMENT (NUL-terminated)
-            while idx < end, data[idx] != 0 { idx += 1 }
+            while idx < end, data[idx] != 0 { idx = data.index(after: idx) }
             guard idx < end else { return nil }
-            idx += 1
+            idx = data.index(after: idx)
         }
         if flags & 0x02 != 0 { // FHCRC
-            idx += 2
+            idx = data.index(idx, offsetBy: 2)
             guard idx <= end else { return nil }
         }
-        let bodyEnd = end - 8
-        guard bodyEnd > idx else { return nil }
-        return streamDecode(data.subdata(in: idx..<bodyEnd), algorithm: COMPRESSION_ZLIB)
+        // Decode the deflate body, also returning how many input
+        // bytes the deflate stream actually consumed so we can find
+        // this member's trailer (and the next member's header).
+        guard let (decoded, deflateConsumed) = streamDecodeMember(
+            data.subdata(in: idx..<end),
+            algorithm: COMPRESSION_ZLIB
+        ) else { return nil }
+        // Trailer is the 8 bytes following the deflate stream.
+        let trailerStart = data.index(idx, offsetBy: deflateConsumed)
+        guard data.distance(from: trailerStart, to: end) >= 8 else { return nil }
+        let nextMember = data.index(trailerStart, offsetBy: 8)
+        let consumed = data.distance(from: offset, to: nextMember)
+        return (decoded, consumed)
     }
 
     // MARK: - deflate (RFC 7230 §4.2.2)
@@ -263,7 +303,18 @@ enum MITMBodyCodec {
     /// original compressed bytes verbatim, same as a malformed-payload
     /// decode failure.
     private static func streamDecode(_ data: Data, algorithm: compression_algorithm) -> Data? {
-        guard !data.isEmpty else { return Data() }
+        return streamDecodeMember(data, algorithm: algorithm)?.decoded
+    }
+
+    /// Variant of ``streamDecode`` that also returns how many input
+    /// bytes the decoder actually consumed before signalling end of
+    /// stream. Used by ``gunzipOneMember`` to locate the per-member
+    /// trailer and the start of any concatenated next member.
+    private static func streamDecodeMember(
+        _ data: Data,
+        algorithm: compression_algorithm
+    ) -> (decoded: Data, consumed: Int)? {
+        guard !data.isEmpty else { return (Data(), 0) }
         let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
         defer { stream.deallocate() }
 
@@ -275,7 +326,7 @@ enum MITMBodyCodec {
         let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
         defer { buffer.deallocate() }
 
-        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Data? in
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> (decoded: Data, consumed: Int)? in
             guard let inputBase = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
                 return nil
             }
@@ -299,7 +350,8 @@ enum MITMBodyCodec {
                         output.append(buffer, count: written)
                     }
                     if status == COMPRESSION_STATUS_END {
-                        return output
+                        let consumed = data.count - stream.pointee.src_size
+                        return (output, consumed)
                     }
                     if stream.pointee.dst_size == 0 {
                         stream.pointee.dst_ptr = buffer

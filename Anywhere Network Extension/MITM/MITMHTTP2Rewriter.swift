@@ -140,10 +140,25 @@ final class MITMHTTP2Rewriter {
     /// HTTP/2 analog of HTTP/1.1's Host rewrite. The `:authority`
     /// pseudo-header is replaced; if absent, one is inserted before regular
     /// headers as required by RFC 9113 section 8.3.
+    ///
+    /// Skips trailer HEADERS (those that lack ``:method``) entirely.
+    /// RFC 9113 §8.1 forbids pseudo-headers in trailers; strict
+    /// receivers (Go, nghttp2) treat any pseudo-header in a trailer
+    /// as PROTOCOL_ERROR and RST_STREAM the request mid-body. Without
+    /// this guard, a trailer HEADERS on a request stream with
+    /// ``rewriteTarget`` set would otherwise have ``:authority``
+    /// injected.
     private func applyAuthorityRewrite(
         _ headers: [(name: String, value: String)]
     ) -> [(name: String, value: String)] {
         guard let authority = effectiveAuthority else { return headers }
+        // Detect trailer (request HEADERS that lacks ``:method`` per
+        // §8.1). The MITMHTTP2Connection's caller already
+        // classifies trailers via the same predicate before invoking
+        // us, but the defensive check here makes the
+        // pseudo-header-safety invariant local to the function.
+        let hasMethod = headers.contains { $0.name == ":method" }
+        guard hasMethod else { return headers }
         var sawAuthority = false
         var result = headers.map { entry -> (name: String, value: String) in
             if entry.name == ":authority" {

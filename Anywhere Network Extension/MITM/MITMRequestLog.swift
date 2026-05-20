@@ -7,6 +7,8 @@
 
 import Foundation
 
+private let logger = AnywhereLogger(category: "MITM")
+
 /// Per-``MITMSession`` cache of in-flight request method+URL so that
 /// the response-phase script can populate `ctx.method` / `ctx.url` with
 /// the originating request's values. Owned by the session, shared
@@ -87,6 +89,17 @@ final class MITMRequestLog {
         http1Queue.isEmpty
     }
 
+    /// Hard cap on per-record ``synthAfter`` accumulation. A chatty
+    /// request script that fires ``Anywhere.respond`` against every
+    /// pipelined request while one slow upstream response is still
+    /// streaming would otherwise pile responses into a single record's
+    /// ``synthAfter``, eating the Network Extension's memory budget.
+    /// Past the cap, additional synth bytes are dropped with a warning
+    /// rather than queued; the affected requests get no response on
+    /// the wire, but every previously-queued synth still flushes
+    /// cleanly when the head-of-queue response completes.
+    private static let maxSynthAfterBytes: Int = 1 * 1024 * 1024
+
     /// Appends ``bytes`` to the ``synthAfter`` buffer on the most
     /// recently pushed HTTP/1 request record. Used when a request
     /// short-circuits via ``Anywhere.respond`` while earlier
@@ -97,7 +110,18 @@ final class MITMRequestLog {
     /// case emit immediately via ``pendingClientBytes`` instead).
     func attachSynthAfterLastHTTP1(_ bytes: Data) {
         guard !http1Queue.isEmpty else { return }
-        http1Queue[http1Queue.count - 1].synthAfter.append(bytes)
+        let idx = http1Queue.count - 1
+        let projected = http1Queue[idx].synthAfter.count + bytes.count
+        if projected > Self.maxSynthAfterBytes {
+            // Drop with a warning rather than crashing the NE. The
+            // session that owns this log is already at risk of
+            // running out of memory; a partial pipeline result is
+            // strictly better than an OOM kill that takes down
+            // every other tunneled session.
+            logger.warning("[MITM] synthAfter buffer would reach \(projected) B, over cap \(Self.maxSynthAfterBytes) B; dropping \(bytes.count) B of pipelined synth response")
+            return
+        }
+        http1Queue[idx].synthAfter.append(bytes)
     }
 
     // MARK: - HTTP/2

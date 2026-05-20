@@ -12,6 +12,15 @@ import Security
 
 private let logger = AnywhereLogger(category: "MITM")
 
+/// Running total of bytes pinned by ``NoCopy`` Uint8Array allocations
+/// across every ``MITMScriptEngine``. File-private (not a class
+/// static) so the C-convention deallocator handed to
+/// ``JSObjectMakeTypedArrayWithBytesNoCopy`` can reference the
+/// symbol without capturing closure state, which the Swift compiler
+/// forbids inside ``@convention(c)`` blocks.
+private nonisolated(unsafe) var mitmScriptTypedArrayBytes: Int = 0
+private let mitmScriptTypedArrayLock = NSLock()
+
 /// Per-``MITMSession`` JavaScript runtime for the
 /// ``CompiledMITMOperation/script`` rule. One ``JSContext`` is reused
 /// across every script invocation on the connection; compiled functions
@@ -136,7 +145,18 @@ final class MITMScriptEngine {
     /// the previous ``[String: JSValue]`` cache rehashed and recompared
     /// the entire source on every JS call, which dominated CPU for
     /// large scripts on hot streams.
-    private var compiled: [Int: JSValue] = [:]
+    ///
+    /// Stores the source alongside the function so cache hits verify
+    /// the source matches before returning. ``sourceCacheKey`` uses
+    /// ``Hasher`` (a randomly-seeded 64-bit hash), so distinct sources
+    /// collide with probability ~2^-32 per pair — vanishing in
+    /// practice but not impossible. Without the source check, a
+    /// collision would silently execute the wrong script for a rule.
+    private struct CompiledEntry {
+        let source: String
+        let function: JSValue
+    }
+    private var compiled: [Int: CompiledEntry] = [:]
 
     /// Scope key the `Anywhere.store` globals consult on each call.
     /// Stashed by ``apply`` immediately before invoking the user
@@ -166,6 +186,47 @@ final class MITMScriptEngine {
     /// safe without an external lock.
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
 
+    /// Defensive serialization around ``apply``/``applyFrame``. The
+    /// session pipeline runs every rule application on
+    /// ``MITMSession``'s lwIP queue, so concurrent re-entry should be
+    /// impossible — but a future refactor that hops a ``Task`` or
+    /// enqueues a callback off-queue would silently corrupt
+    /// ``currentScope`` / ``currentDirective`` / ``compiled`` (the
+    /// double-init race would also re-build the engine on
+    /// ``Provider.get()``). The lock makes the contract enforceable
+    /// at the engine boundary; cost is a single uncontended
+    /// ``NSLock`` acquisition per script call.
+    private let invocationLock = NSLock()
+
+    /// Running total of bytes pinned by ``NoCopy`` Uint8Array
+    /// allocations. Lives at file scope (see
+    /// ``mitmScriptTypedArrayBytes`` / ``mitmScriptTypedArrayLock``)
+    /// so the C-callable deallocator can access it. The deallocator
+    /// decrements when JSC's GC reclaims the view;
+    /// ``apply``/``applyFrame`` post a ``JSGarbageCollect`` hint when
+    /// the total crosses ``softTypedArrayBudget`` so the heap is
+    /// reclaimed before the Network Extension's ~50 MiB ceiling is
+    /// hit.
+
+    /// Threshold above which we ask JSC to GC after the next script
+    /// invocation completes. 16 MiB leaves ample room for in-flight
+    /// bodies in normal use while keeping the worst-case pin time
+    /// short.
+    private static let softTypedArrayBudget: Int = 16 * 1024 * 1024
+    /// Hard cap on outstanding typed-array bytes. Past this we refuse
+    /// new allocations and hand the script an empty Uint8Array.
+    /// Bounds the worst-case NE memory cost across all engines
+    /// regardless of GC pressure; the script will see truncated body
+    /// bytes which is strictly better than the NE being OOM-killed.
+    private static let hardTypedArrayBudget: Int = 32 * 1024 * 1024
+
+    /// Re-entrancy guard for ``exceptionHandler``: formatting a thrown
+    /// value for the log runs JS ``ToString``, which a script can
+    /// override to throw and re-enter the handler. Only touched on the
+    /// JS execution thread (serialized by ``invocationLock``), so a plain
+    /// ``Bool`` suffices.
+    private var isFormattingException = false
+
     init() {
         self.context = JSContext(virtualMachine: Self.sharedVM)
         // JSC's default exception handler writes the thrown value to
@@ -173,9 +234,28 @@ final class MITMScriptEngine {
         // that default, so we must reinstate the write ourselves or
         // every ``context.exception != nil`` check downstream sees
         // nil and the rollback path silently never fires.
-        self.context.exceptionHandler = { context, exception in
-            logger.warning("[MITM][JS] uncaught: \(exception?.toString() ?? "<unknown>")")
-            context?.exception = exception
+        self.context.exceptionHandler = { [weak self] context, exception in
+            // Restore the thrown value so downstream
+            // ``context.exception != nil`` checks fire and the rollback
+            // path runs — on every path, including the guard below.
+            defer { context?.exception = exception }
+            // Re-entrancy guard: formatting the value for the log runs JS
+            // ``ToString`` (both ``-toString`` and ``JSValue.description``
+            // route through it — there is no allocation-only formatter),
+            // which a script can override to throw, re-entering this
+            // handler. Without the guard that recurses and stack-grows the
+            // NE process.
+            if let self, self.isFormattingException {
+                logger.warning("[MITM][JS] uncaught (nested throw while formatting exception)")
+                return
+            }
+            self?.isFormattingException = true
+            defer { self?.isFormattingException = false }
+            if let exception {
+                logger.warning("[MITM][JS] uncaught: \(String(describing: exception))")
+            } else {
+                logger.warning("[MITM][JS] uncaught: <unknown>")
+            }
         }
         installAnywhereGlobals()
     }
@@ -185,6 +265,11 @@ final class MITMScriptEngine {
     /// otherwise fails to compile. ``sourceKey`` is the cache key
     /// computed at rule-compile time; equal keys imply equal sources.
     func apply(_ message: Message, source: String, sourceKey: Int) -> Outcome {
+        invocationLock.lock()
+        defer {
+            invocationLock.unlock()
+            collectIfBudgetExceeded()
+        }
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(message)
         }
@@ -233,6 +318,24 @@ final class MITMScriptEngine {
         return .modified(updated)
     }
 
+    /// Asks JSC to run GC when outstanding ``NoCopy`` Uint8Array bytes
+    /// have crossed ``softTypedArrayBudget``. JSC's GC scheduler is
+    /// otherwise driven by JS-heap accounting only and has no idea
+    /// the native ``NoCopy`` buffers are pinning megabytes of host
+    /// memory — without the explicit hint a chatty stream can fill
+    /// the Network Extension's ~50 MiB budget long before JSC decides
+    /// to collect on its own.
+    private func collectIfBudgetExceeded() {
+        let snapshot: Int = {
+            mitmScriptTypedArrayLock.lock()
+            defer { mitmScriptTypedArrayLock.unlock() }
+            return mitmScriptTypedArrayBytes
+        }()
+        if snapshot >= Self.softTypedArrayBudget {
+            JSGarbageCollect(context.jsGlobalContextRef)
+        }
+    }
+
     /// Runs ``source`` against a single frame of a streaming body.
     /// Returns the (possibly modified) frame bytes plus the persistent
     /// state object the caller threads into the next frame. On script
@@ -244,6 +347,11 @@ final class MITMScriptEngine {
         frameContext ctx: FrameContext,
         state: JSValue?
     ) -> FrameOutcome {
+        invocationLock.lock()
+        defer {
+            invocationLock.unlock()
+            collectIfBudgetExceeded()
+        }
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(body: frame, state: state)
         }
@@ -290,7 +398,19 @@ final class MITMScriptEngine {
     // MARK: - Compilation
 
     private func compileIfNeeded(_ source: String, key: Int) -> JSValue? {
-        if let cached = compiled[key] { return cached }
+        if let cached = compiled[key] {
+            // Defensive: verify the cached source actually matches
+            // the requested source. The cache is keyed on a 64-bit
+            // ``Hasher`` output; two distinct script sources can in
+            // theory share the same key (extremely unlikely in
+            // practice but not impossible). Without this check, a
+            // collision would silently execute the wrong script for
+            // a rule. On mismatch, fall through and overwrite —
+            // accepting an occasional recompile rather than wrong
+            // execution.
+            if cached.source == source { return cached.function }
+            logger.warning("[MITM][JS] cache-key collision: recompiling under same key")
+        }
         // IIFE wrap so the user's `function process(...)` lives in its
         // own scope; we capture the function as the IIFE return value
         // rather than polluting globalThis.
@@ -320,7 +440,7 @@ final class MITMScriptEngine {
             logger.warning("[MITM][JS] script's `process` is not a function; declare it as `function process(ctx) { ... }`")
             return nil
         }
-        compiled[key] = value
+        compiled[key] = CompiledEntry(source: source, function: value)
         return value
     }
 
@@ -375,7 +495,22 @@ final class MITMScriptEngine {
         frameInfo.setObject(ctx.isLast, forKeyedSubscript: "end" as NSString)
         obj.setObject(frameInfo, forKeyedSubscript: "frame" as NSString)
 
-        let stateValue = state ?? JSValue(newObjectIn: context)!
+        // ``state`` is threaded across frames by the caller's
+        // ``FrameCursor``. A ``JSValue`` is bound to the context it
+        // was created in; using one inside a different context is
+        // undefined behavior in JSC. Within a session the engine (and
+        // thus the context) is stable, so this normally holds — but
+        // guard defensively against a stale cursor that survived an
+        // engine swap (rule reload / teardown race): if the
+        // incoming ``state`` belongs to a different context, discard
+        // it and start the script with a fresh state object rather
+        // than risk a trap.
+        let stateValue: JSValue
+        if let state, state.context === context {
+            stateValue = state
+        } else {
+            stateValue = JSValue(newObjectIn: context)!
+        }
         obj.setObject(stateValue, forKeyedSubscript: "state" as NSString)
 
         obj.setObject(Self.makeUint8Array(in: context, from: frame), forKeyedSubscript: "body" as NSString)
@@ -465,7 +600,18 @@ final class MITMScriptEngine {
             logger.warning("[MITM][JS] ctx.status is not a number; reverting (script may have assigned a string — use a numeric literal)")
             return original
         }
-        let n = Int(value.toInt32())
+        // Use ``toDouble`` rather than ``toInt32``: the latter
+        // silently truncates 64-bit-ish JS numbers (the result of
+        // an overflowed integer expression, for example) modulo
+        // 2^32, so ``ctx.status = 4_294_967_496`` would slip through
+        // as 200 even though it's nonsense. Reject anything that
+        // isn't a finite integer in the wire-status range.
+        let d = value.toDouble()
+        guard d.isFinite, d.rounded() == d else {
+            logger.warning("[MITM][JS] ctx.status \(d) is not a finite integer; reverting")
+            return original
+        }
+        let n = Int(d)
         if (100...599).contains(n) { return n }
         logger.warning("[MITM][JS] ctx.status \(n) outside 100…599; reverting")
         return original
@@ -489,17 +635,44 @@ final class MITMScriptEngine {
     /// fails the ``pair.count == 2`` shape check. Reverting forces the
     /// drop warnings into the log path the caller can act on.
     private static func headersFromValue(_ value: JSValue) -> [(name: String, value: String)]? {
-        guard let array = value.toArray() else { return nil }
-        if array.isEmpty { return [] }
+        // The previous implementation used ``value.toArray()`` which
+        // funnels JS values through the Obj-C bridge — losing the
+        // JSValue identity for numeric, boolean, and nested-object
+        // leaves so the ``as? String`` cast falls through to
+        // ``String(describing:)``. The Obj-C bridge for a JS number
+        // produced strings like ``"Optional(42)"`` or raw
+        // ``JSValue`` debug descriptions, which then either failed
+        // ``isValidHeaderName`` (silently dropping the entry) or, for
+        // value position, landed on the wire verbatim. Iterate the
+        // original ``JSValue`` array and call ``toString()`` on each
+        // leaf so JSC's standard ``ToString`` runs (numbers →
+        // ``"42"``, booleans → ``"true"``, objects → ``"[object …]"``,
+        // etc.) — stable, predictable output that survives the
+        // validators below.
+        guard value.isArray else { return nil }
+        let length = Int(value.objectForKeyedSubscript("length")?.toInt32() ?? 0)
+        if length == 0 { return [] }
         var result: [(name: String, value: String)] = []
-        result.reserveCapacity(array.count)
-        for entry in array {
-            guard let pair = entry as? [Any], pair.count == 2 else {
+        result.reserveCapacity(length)
+        for i in 0..<length {
+            guard let entry = value.objectAtIndexedSubscript(i),
+                  entry.isArray,
+                  let entryLen = entry.objectForKeyedSubscript("length")?.toInt32(),
+                  entryLen == 2
+            else {
                 logger.warning("[MITM][JS] dropping ctx.headers entry that isn't a [name, value] pair")
                 continue
             }
-            let name = (pair[0] as? String) ?? String(describing: pair[0])
-            let val = (pair[1] as? String) ?? String(describing: pair[1])
+            guard let nameVal = entry.objectAtIndexedSubscript(0),
+                  let valueVal = entry.objectAtIndexedSubscript(1),
+                  !nameVal.isUndefined, !nameVal.isNull,
+                  !valueVal.isUndefined, !valueVal.isNull,
+                  let name = nameVal.toString(),
+                  let val = valueVal.toString()
+            else {
+                logger.warning("[MITM][JS] dropping ctx.headers entry with null/undefined/non-stringifiable component")
+                continue
+            }
             guard isValidHeaderName(name) else {
                 logger.warning("[MITM][JS] dropping header with invalid name: \(name)")
                 continue
@@ -1266,11 +1439,15 @@ final class MITMScriptEngine {
             let status: Int
             if let statusVal = spec.objectForKeyedSubscript("status"),
                statusVal.isNumber {
-                let raw = Int(statusVal.toInt32())
+                // ``toDouble`` (not ``toInt32``) so a 64-bit-ish JS
+                // number can't truncate modulo 2^32 into a valid-
+                // looking status (e.g. 4_294_967_496 → 200).
+                let d = statusVal.toDouble()
+                let raw = (d.isFinite && d.rounded() == d) ? Int(d) : -1
                 if (100...599).contains(raw) {
                     status = raw
                 } else {
-                    logger.warning("[MITM][JS] Anywhere.respond status \(raw) out of 100…599; using 200")
+                    logger.warning("[MITM][JS] Anywhere.respond status \(d) out of 100…599; using 200")
                     status = 200
                 }
             } else {
@@ -1285,7 +1462,15 @@ final class MITMScriptEngine {
             let body: Data
             if let bodyVal = spec.objectForKeyedSubscript("body"),
                !bodyVal.isUndefined, !bodyVal.isNull {
-                body = Self.bytesFromValue(bodyVal, in: self.context) ?? Data()
+                // Use the currently-executing context for byte
+                // extraction, matching every sibling helper block
+                // (which all read ``JSContext.current()``). The two
+                // are the same context today, but referencing
+                // ``self.context`` here was an inconsistency that
+                // would break if a child/worker context were ever
+                // introduced.
+                let ctx = JSContext.current() ?? self.context
+                body = Self.bytesFromValue(bodyVal, in: ctx) ?? Data()
             } else {
                 body = Data()
             }
@@ -1300,14 +1485,60 @@ final class MITMScriptEngine {
 
     private static func makeUint8Array(in context: JSContext, from data: Data) -> JSValue {
         let count = data.count
+        // Hard cap: if we've already pinned ``hardTypedArrayBudget``
+        // bytes across all engines, refuse the allocation and return
+        // an empty view. JSC's GC may free the existing pins shortly,
+        // but until it does, growing further risks an NE OOM-kill
+        // (which would take down every active tunnel session). The
+        // script sees a smaller-than-expected body, which the user
+        // can debug; the alternative is a hard crash.
+        let projected: Int = {
+            mitmScriptTypedArrayLock.lock()
+            defer { mitmScriptTypedArrayLock.unlock() }
+            return mitmScriptTypedArrayBytes + count
+        }()
+        if projected > hardTypedArrayBudget && count > 0 {
+            logger.warning("[MITM][JS] typed-array budget exhausted (\(projected) B > \(hardTypedArrayBudget) B); returning empty Uint8Array")
+            // Recurse with empty data so we still hand the script a
+            // valid Uint8Array reference (zero-length); the
+            // recursion bypasses the cap because count=0.
+            return makeUint8Array(in: context, from: Data())
+        }
         // Always allocate at least one byte so the deallocator has a
         // valid pointer to free; JSC accepts a zero-length view fine.
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: max(count, 1), alignment: 1)
         if count > 0 {
             data.copyBytes(to: buffer.assumingMemoryBound(to: UInt8.self), count: count)
         }
-        let deallocator: JSTypedArrayBytesDeallocator = { ptr, _ in
+        // Capture the allocation in the budget; the deallocator
+        // (called by JSC when it reclaims the typed array) subtracts.
+        if count > 0 {
+            mitmScriptTypedArrayLock.lock()
+            mitmScriptTypedArrayBytes += count
+            mitmScriptTypedArrayLock.unlock()
+        }
+        // ``JSTypedArrayBytesDeallocator`` is a C function pointer —
+        // `(bytes, deallocatorContext) -> Void` — that can't capture
+        // closure state. Pass the byte count via the
+        // ``deallocatorContext`` pointer (heap-allocated ``Int`` box)
+        // so the deallocator can subtract the right amount from the
+        // file-private counter (which IS reachable from the C-convention
+        // closure because it's a global symbol, not a capture).
+        let lengthBox = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        lengthBox.initialize(to: count)
+        let deallocator: JSTypedArrayBytesDeallocator = { ptr, ctx in
             ptr?.deallocate()
+            if let ctx {
+                let box = ctx.assumingMemoryBound(to: Int.self)
+                let len = box.pointee
+                if len > 0 {
+                    mitmScriptTypedArrayLock.lock()
+                    mitmScriptTypedArrayBytes -= len
+                    mitmScriptTypedArrayLock.unlock()
+                }
+                box.deinitialize(count: 1)
+                box.deallocate()
+            }
         }
         var exception: JSValueRef?
         let ref = JSObjectMakeTypedArrayWithBytesNoCopy(
@@ -1316,11 +1547,18 @@ final class MITMScriptEngine {
             buffer,
             count,
             deallocator,
-            nil,
+            UnsafeMutableRawPointer(lengthBox),
             &exception
         )
         guard exception == nil, let ref else {
             buffer.deallocate()
+            lengthBox.deinitialize(count: 1)
+            lengthBox.deallocate()
+            if count > 0 {
+                mitmScriptTypedArrayLock.lock()
+                mitmScriptTypedArrayBytes -= count
+                mitmScriptTypedArrayLock.unlock()
+            }
             return JSValue(undefinedIn: context)
         }
         return JSValue(jsValueRef: ref, in: context)
@@ -1419,7 +1657,15 @@ final class MITMScriptEngine {
     /// value and the index immediately past its last byte. Returns
     /// nil on truncation or when the encoding spans more than 10
     /// bytes (the maximum for a 64-bit varint per the protobuf spec).
+    ///
+    /// ``offset`` is an absolute index into ``data`` (i.e. it must lie
+    /// in ``data.startIndex...data.endIndex``). Callers that pass a
+    /// 0-based offset must therefore hand in a zero-based ``Data`` —
+    /// the guard below rejects (returns nil for) a mismatched
+    /// slice-relative offset rather than trapping on an
+    /// out-of-bounds subscript.
     fileprivate static func readVarint(_ data: Data, from offset: Int) -> (UInt64, Int)? {
+        guard offset >= data.startIndex, offset <= data.endIndex else { return nil }
         var result: UInt64 = 0
         var shift: UInt64 = 0
         var idx = offset
@@ -1727,15 +1973,23 @@ extension MITMScriptEngine {
     /// every intercepted connection — sessions whose policy never invokes
     /// a script rule never instantiate a JSContext.
     ///
-    /// Not thread-safe. Sessions serialize all rule application on
-    /// ``MITMSession``'s lwIP queue, so no synchronization is needed
-    /// here.
+    /// Sessions are expected to serialize all rule application on
+    /// ``MITMSession``'s lwIP queue. The lock here is a defensive
+    /// guard against the double-init race that occurs if a future
+    /// refactor lets two concurrent callers reach ``get()`` before
+    /// the engine is published — that would build two distinct
+    /// engines per session, splitting the ``compiled`` script cache
+    /// and the ``currentScope`` state in ways that produce silent,
+    /// hard-to-diagnose rule-set crosstalk.
     final class Provider {
         private var instance: MITMScriptEngine?
+        private let lock = NSLock()
 
         init() {}
 
         func get() -> MITMScriptEngine {
+            lock.lock()
+            defer { lock.unlock() }
             if let instance { return instance }
             let new = MITMScriptEngine()
             instance = new

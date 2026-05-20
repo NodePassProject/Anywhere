@@ -54,6 +54,13 @@ final class MITMResponseSynthesizer {
     private var prefaceConsumed = false
     private let hpackDecoder = HPACKDecoder()
     private var sentInitialSettings = false
+    /// Highest streamID seen across all received frames. RFC 9113
+    /// §6.8 requires GOAWAY's ``last-stream-id`` to be the highest
+    /// stream identifier that the sending endpoint has processed —
+    /// not just the one we happened to respond to. Tracking the
+    /// running max lets the client correctly identify which streams
+    /// were processed and which can be retried.
+    private var highestSeenStreamID: UInt32 = 0
 
     init(
         record: TLSRecordConnection,
@@ -192,6 +199,27 @@ final class MITMResponseSynthesizer {
         if !prefaceConsumed {
             // RFC 9113 §3.4: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24 bytes.
             guard rxBuffer.count >= 24 else { return }
+            // Verify the 24 bytes actually match the preface before
+            // consuming them. The previous behavior swallowed the
+            // first 24 bytes unconditionally; an upstream wiring bug
+            // (e.g. ALPN agreed on h2 but the client speaks
+            // HTTP/1.1) would otherwise have the first 24 plaintext
+            // bytes silently dropped and the remaining bytes
+            // misparsed as frames, producing protocol errors that
+            // are hard to debug. On mismatch, abort the synthesizer
+            // — the inner record will close and the client gets an
+            // unambiguous TLS-level failure rather than corrupted
+            // h2 frames.
+            let preface: [UInt8] = [
+                0x50, 0x52, 0x49, 0x20, 0x2A, 0x20, 0x48, 0x54, // "PRI * HT"
+                0x54, 0x50, 0x2F, 0x32, 0x2E, 0x30, 0x0D, 0x0A, // "TP/2.0\r\n"
+                0x0D, 0x0A, 0x53, 0x4D, 0x0D, 0x0A, 0x0D, 0x0A, // "\r\nSM\r\n\r\n"
+            ]
+            for i in 0..<24 where rxBuffer[i] != preface[i] {
+                logger.warning("[MITM] synth-h2: client preface mismatch at byte \(i); failing")
+                finish(error: nil)
+                return
+            }
             rxBuffer.removeFirst(24)
             prefaceConsumed = true
         }
@@ -226,6 +254,9 @@ final class MITMResponseSynthesizer {
     }
 
     private func handleH2Frame(_ frame: H2Frame) {
+        if frame.streamID > highestSeenStreamID {
+            highestSeenStreamID = frame.streamID
+        }
         switch frame.typeCode {
         case 0x4: // SETTINGS
             // ACK the client's SETTINGS once. Our own ACK frame is
@@ -302,14 +333,19 @@ final class MITMResponseSynthesizer {
         if !bodyData.isEmpty {
             output.append(encodeH2Frame(typeCode: 0x0, flags: 0x1, streamID: streamID, payload: bodyData))
         }
-        // GOAWAY(last_stream_id=streamID, error=NO_ERROR), so the client
-        // knows the connection won't accept new streams.
+        // GOAWAY so the client knows the connection won't accept
+        // new streams. RFC 9113 §6.8 says ``last-stream-id`` must
+        // be the highest stream identifier the sender processed —
+        // using ``streamID`` alone would tell a client that opened
+        // streams 1 and 3 that stream 3 wasn't processed even though
+        // we did receive its HEADERS. Track the running max via
+        // ``highestSeenStreamID`` and use that here.
         var goaway = Data(capacity: 8)
-        let s = streamID & 0x7FFFFFFF
-        goaway.append(UInt8((s >> 24) & 0xFF))
-        goaway.append(UInt8((s >> 16) & 0xFF))
-        goaway.append(UInt8((s >> 8) & 0xFF))
-        goaway.append(UInt8(s & 0xFF))
+        let lastStreamID = max(streamID, highestSeenStreamID) & 0x7FFFFFFF
+        goaway.append(UInt8((lastStreamID >> 24) & 0xFF))
+        goaway.append(UInt8((lastStreamID >> 16) & 0xFF))
+        goaway.append(UInt8((lastStreamID >> 8) & 0xFF))
+        goaway.append(UInt8(lastStreamID & 0xFF))
         goaway.append(0); goaway.append(0); goaway.append(0); goaway.append(0)
         output.append(encodeH2Frame(typeCode: 0x7, flags: 0, streamID: 0, payload: goaway))
 

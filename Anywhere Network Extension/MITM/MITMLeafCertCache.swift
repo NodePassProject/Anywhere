@@ -35,7 +35,6 @@ final class MITMLeafCertCache {
 
     private let lock = NSLock()
     private var entries: [String: CacheEntry] = [:]
-    private var accessOrder: [String] = []
 
     private struct CacheEntry {
         let leaf: Leaf
@@ -61,12 +60,19 @@ final class MITMLeafCertCache {
         if let entry = entries[normalized] {
             let now = Date()
             if entry.leaf.expiry.timeIntervalSince(now) > Self.refreshThreshold {
-                bumpAccessOrderUnlocked(normalized)
+                // Touch the recency timestamp in place. Previously
+                // this also walked an ``accessOrder`` array via
+                // ``firstIndex(of:)`` + ``remove(at:)`` + ``append`` —
+                // O(n) per hit, which on a browser launch hitting
+                // hundreds of hosts dominates the hot path. Storing
+                // recency directly on the entry makes the hit path
+                // O(1) and defers the O(n) walk to eviction time,
+                // which only runs once per cache miss past the cap.
+                entries[normalized]?.lastAccess = now
                 lock.unlock()
                 return entry.leaf
             }
             entries.removeValue(forKey: normalized)
-            removeFromAccessOrderUnlocked(normalized)
         }
         lock.unlock()
 
@@ -75,7 +81,6 @@ final class MITMLeafCertCache {
         lock.lock()
         defer { lock.unlock() }
         entries[normalized] = CacheEntry(leaf: minted, lastAccess: Date())
-        accessOrder.append(normalized)
         evictIfNeededUnlocked()
         return minted
     }
@@ -83,7 +88,6 @@ final class MITMLeafCertCache {
     func reset() {
         lock.lock()
         entries.removeAll()
-        accessOrder.removeAll()
         lock.unlock()
     }
 
@@ -119,22 +123,15 @@ final class MITMLeafCertCache {
         )
     }
 
-    private func bumpAccessOrderUnlocked(_ key: String) {
-        if let i = accessOrder.firstIndex(of: key) {
-            accessOrder.remove(at: i)
-        }
-        accessOrder.append(key)
-    }
-
-    private func removeFromAccessOrderUnlocked(_ key: String) {
-        if let i = accessOrder.firstIndex(of: key) {
-            accessOrder.remove(at: i)
-        }
-    }
-
     private func evictIfNeededUnlocked() {
-        while entries.count > Self.maxEntries, !accessOrder.isEmpty {
-            let oldest = accessOrder.removeFirst()
+        // Evict the LRU entry — the one whose ``lastAccess`` is
+        // smallest — until we're back at or below the cap. ``min(by:)``
+        // is O(n) but eviction runs only on cache miss past the cap,
+        // and we evict at most one entry per miss in the steady state.
+        while entries.count > Self.maxEntries {
+            guard let oldest = entries.min(by: {
+                $0.value.lastAccess < $1.value.lastAccess
+            })?.key else { break }
             entries.removeValue(forKey: oldest)
         }
     }

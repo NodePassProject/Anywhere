@@ -7,6 +7,7 @@
 
 import Foundation
 import CryptoKit
+import Network
 import Security
 
 enum X509BuilderError: Error {
@@ -32,8 +33,9 @@ enum X509Builder {
     ///   - subjectCN: Common Name for the CA subject (and issuer, since
     ///     it's self-signed).
     ///   - organization: Organization name written into the DN.
-    ///   - serial: Monotonic 16-byte big-endian serial. Bits of all zeros
-    ///     are normalized to 1 (RFC 5280 §4.1.2.2 forbids serial 0).
+    ///   - serial: 16-byte big-endian serial. Stripped of leading zero
+    ///     octets and forced positive before encoding; an all-zero value
+    ///     normalizes to 1 (RFC 5280 §4.1.2.2 forbids serial 0).
     ///   - notBefore: Validity start.
     ///   - notAfter: Validity end (typically +10 years).
     /// - Returns: DER-encoded certificate.
@@ -79,7 +81,8 @@ enum X509Builder {
     ///     are read directly from this blob so there's no chance of drift
     ///     between what the CA presents and what the leaf claims.
     ///   - hostname: SNI to embed into the SAN and Common Name.
-    ///   - serial: Monotonic 16-byte big-endian serial.
+    ///   - serial: 16-byte big-endian serial, normalized to a positive
+    ///     integer before encoding (see ``buildCACertificate``).
     ///   - notBefore: Validity start (typically now − 1h for clock skew).
     ///   - notAfter: Validity end (typically now + 7d).
     /// - Returns: DER-encoded leaf certificate.
@@ -104,7 +107,7 @@ enum X509Builder {
             encodeExtendedKeyUsageServerAuth(),
             try encodeSubjectKeyIdentifier(spki: leafSPKI),
             encodeAuthorityKeyIdentifier(keyIdentifier: caComponents.subjectKeyIdentifier),
-            encodeSubjectAltName(dnsName: hostname),
+            encodeSubjectAltName(hostname: hostname),
         ])
 
         let tbs = encodeTBSCertificate(
@@ -246,34 +249,87 @@ enum X509Builder {
 
     /// Bits per RFC 5280 §4.2.1.3:
     ///   0 digitalSignature, 1 nonRepudiation, 2 keyEncipherment,
-    ///   3 dataEncipherment, 4 keyAgreement, 5 keyCertSign, 6 cRLSign.
+    ///   3 dataEncipherment, 4 keyAgreement, 5 keyCertSign, 6 cRLSign,
+    ///   7 encipherOnly.
+    ///
+    /// Encoded as a BIT STRING whose bits are numbered MSB-first per
+    /// X.690 §8.6 (bit 0 = most-significant bit of the first content
+    /// octet). The leading "unused bits" byte of the BIT STRING tells
+    /// the decoder how many trailing bits in the final octet are
+    /// padding — DER requires that to be the minimum, computed from
+    /// the rightmost meaningful bit position.
+    ///
+    /// Rather than packing the byte and computing unused bits from
+    /// trailing-zero count (which couples encoding correctness to the
+    /// specific combination of named bits and breaks any time the
+    /// caller adds a sparse named bit), this version maps each named
+    /// bit to its fixed RFC position and derives ``unusedBits`` from
+    /// the highest set position.
     private static func encodeKeyUsage(keyCertSign: Bool, cRLSign: Bool, digitalSignature: Bool) -> Data {
-        var byte: UInt8 = 0
-        if digitalSignature { byte |= 0b1000_0000 }
-        if keyCertSign      { byte |= 0b0000_0100 }
-        if cRLSign          { byte |= 0b0000_0010 }
-
-        // Compute unused bits: number of trailing zero bits in the active byte.
-        var unused: UInt8 = 0
-        if byte == 0 {
-            unused = 8
-        } else {
-            var b = byte
-            while b & 1 == 0 {
-                unused += 1
-                b >>= 1
-            }
+        var positions: [Int] = []
+        if digitalSignature { positions.append(0) }
+        if keyCertSign      { positions.append(5) }
+        if cRLSign          { positions.append(6) }
+        guard let highest = positions.max() else {
+            // Empty BIT STRING — RFC 5280 forbids this for KeyUsage
+            // (§4.2.1.3 requires at least one bit set), but
+            // defensively emit a well-formed empty BIT STRING rather
+            // than a malformed cert.
+            let bitString = ASN1.bitString(unusedBits: 0, content: Data())
+            return encodeExtension(oid: ASN1OID.keyUsage, critical: true, value: bitString)
         }
+        var byte: UInt8 = 0
+        for pos in positions {
+            byte |= UInt8(0x80 >> pos)
+        }
+        // DER §11.2: unused bits = the number of trailing padding bits
+        // in the last octet. For a single-octet BIT STRING with
+        // ``highest`` as the rightmost meaningful bit position
+        // (0…7, MSB-first), unused = 7 - highest.
+        let unused = UInt8(7 - highest)
         let bitString = ASN1.bitString(unusedBits: unused, content: Data([byte]))
         return encodeExtension(oid: ASN1OID.keyUsage, critical: true, value: bitString)
     }
 
-    /// SAN: GeneralName = [2] dNSName.
-    private static func encodeSubjectAltName(dnsName: String) -> Data {
-        let nameBytes = Data(dnsName.utf8)
-        let dnsGeneralName = ASN1.contextSpecific(tag: 2, constructed: false, content: nameBytes)
-        let value = ASN1.sequence(dnsGeneralName)
+    /// SAN: GeneralName. When ``hostname`` is an IPv4 or IPv6 literal,
+    /// emits an ``iPAddress`` GeneralName ([7] OCTET STRING — 4 or 16
+    /// raw bytes). Otherwise emits a ``dNSName`` ([2] IA5String).
+    /// RFC 5280 §4.2.1.6 requires IP-addressed servers to use
+    /// ``iPAddress`` SAN; using ``dNSName`` for an IP literal would
+    /// be rejected by strict validators (Safari, Chrome).
+    private static func encodeSubjectAltName(hostname: String) -> Data {
+        let generalName: Data
+        if let ipBytes = parseIPAddress(hostname) {
+            generalName = ASN1.contextSpecific(tag: 7, constructed: false, content: ipBytes)
+        } else {
+            let nameBytes = Data(hostname.utf8)
+            generalName = ASN1.contextSpecific(tag: 2, constructed: false, content: nameBytes)
+        }
+        let value = ASN1.sequence(generalName)
         return encodeExtension(oid: ASN1OID.subjectAltName, critical: false, value: value)
+    }
+
+    /// Returns the 4-byte (IPv4) or 16-byte (IPv6) network-order
+    /// representation when ``s`` parses as an IP literal, or nil
+    /// otherwise. IPv6 zone identifiers ("fe80::1%en0") are not
+    /// permitted in certificates so are intentionally rejected.
+    private static func parseIPAddress(_ s: String) -> Data? {
+        // IPv6 literals in SNI are wrapped in [brackets]; strip
+        // them before attempting the network-form parse.
+        let trimmed: String
+        if s.hasPrefix("["), s.hasSuffix("]") {
+            trimmed = String(s.dropFirst().dropLast())
+        } else {
+            trimmed = s
+        }
+        if trimmed.contains("%") { return nil }
+        if let v4 = IPv4Address(trimmed) {
+            return v4.rawValue
+        }
+        if let v6 = IPv6Address(trimmed) {
+            return v6.rawValue
+        }
+        return nil
     }
 
     private static func encodeExtendedKeyUsageServerAuth() -> Data {
@@ -653,14 +709,34 @@ private struct ASN1Parser {
             return (Int(first), 1)
         }
         let count = Int(first & 0x7F)
+        // Long-form length: 0x80 alone means indefinite-length (not
+        // legal in DER, only BER). count > 4 would also exceed the
+        // size addressable by ``Int`` on 32-bit platforms, so cap at
+        // 4 bytes (16 MiB), which is well beyond any cert we
+        // legitimately handle.
         guard count > 0, count <= 4, start + count < data.endIndex else {
             throw X509BuilderError.asn1ParseFailed("Length encoding invalid")
         }
-        var length = 0
+        // Accumulate in UInt64 to avoid signed-Int overflow when
+        // ``count == 4`` and the top byte is ≥ 0x80 (on 32-bit
+        // platforms ``Int`` is 32-bit, so ``length << 8`` overflows
+        // the sign bit before the final byte is read).
+        var length: UInt64 = 0
         for i in 0..<count {
-            length = (length << 8) | Int(data[start + 1 + i])
+            length = (length << 8) | UInt64(data[start + 1 + i])
         }
-        return (length, 1 + count)
+        // Bound the decoded length to the remaining buffer. Without
+        // this guard a huge length value flows into
+        // ``readNextWithHeader`` where ``1 + lengthBytes + length``
+        // can overflow ``Int`` and silently bypass the
+        // ``end <= data.endIndex`` check.
+        let remaining = data.endIndex - (start + 1 + count)
+        guard length <= UInt64(Int.max), length <= UInt64(remaining) else {
+            throw X509BuilderError.asn1ParseFailed(
+                "Length \(length) exceeds remaining buffer \(remaining)"
+            )
+        }
+        return (Int(length), 1 + count)
     }
 
     /// Returns the content bytes of a tag-length-value blob (skips the

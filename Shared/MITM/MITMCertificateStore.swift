@@ -177,25 +177,25 @@ final class MITMCertificateStore {
 
     // MARK: - Leaf Signing Inputs
 
-    /// Returns a fresh 16-byte serial. Stored monotonically in the keychain
-    /// so leaf certs minted across extension restarts don't collide.
+    /// Returns a fresh 16-byte serial.
+    ///
+    /// Previously this mixed 8 bytes of randomness with an 8-byte
+    /// monotonic counter stored in the keychain. The intent was to
+    /// guarantee (issuer, serial) uniqueness across extension
+    /// restarts, but the counter was guarded by an
+    /// intra-process ``NSLock`` while the keychain item itself is
+    /// shared with the main app via the App Group — two processes
+    /// minting concurrently could read the same counter, write
+    /// counter+1, and produce duplicate low-8-byte serials. RFC 5280
+    /// §4.1.2.2 requires (issuer, serial) to be unique, and strict
+    /// validators reject duplicates.
+    ///
+    /// 16 bytes of cryptographic randomness gives 2^128 entropy, so
+    /// the birthday-collision probability across the lifetime of
+    /// any one CA is negligible (~one collision per 2^64 issued
+    /// certs), eliminating the cross-process race entirely.
     func nextSerial() -> Data {
-        lock.lock()
-        defer { lock.unlock() }
-
-        var counter = readSerialUnlocked()
-        counter &+= 1
-        writeSerialUnlocked(counter)
-
-        var bytes = Data(count: 16)
-        // Random high 8 bytes mixed with monotonic low 8 bytes.
-        bytes.withUnsafeMutableBytes { ptr in
-            _ = SecRandomCopyBytes(kSecRandomDefault, 8, ptr.baseAddress!)
-        }
-        for i in 0..<8 {
-            bytes[8 + i] = UInt8((counter >> ((7 - i) * 8)) & 0xFF)
-        }
-        return bytes
+        return randomSerial()
     }
 
     // MARK: - Private — CA load / generate / delete
@@ -228,8 +228,6 @@ final class MITMCertificateStore {
         }
 
         try writeCertificateUnlocked(certDER)
-        // Reset the serial counter when the CA itself is rebuilt.
-        writeSerialUnlocked(0)
         return (privateKey, certDER)
     }
 
@@ -274,11 +272,32 @@ final class MITMCertificateStore {
     }
 
     private func generateSoftwareKey() throws -> SecKey {
+        // Software fallback runs when the Secure Enclave is
+        // unavailable (e.g. simulator or older devices). The CA
+        // private key signs every leaf the MITM mints, so its
+        // compromise is equivalent to handing an attacker a universal
+        // signing key for any host the device trusts.
+        //
+        // Defenses:
+        //   - ``kSecAttrIsExtractable = false`` blocks
+        //     ``SecKeyCopyExternalRepresentation`` from exporting the
+        //     raw scalar — any process in the same App Group that
+        //     binds the item still gets a ``SecKey`` reference, but
+        //     cannot pull the private bytes out. (The reference can
+        //     still produce signatures via ``SecKeyCreateSignature``,
+        //     which is what the leaf-minting path needs.)
+        //   - ``kSecAttrSynchronizable = false`` prevents the key
+        //     from ever leaving this device via iCloud Keychain.
+        //   - ``…ThisDeviceOnly`` accessibility class is preserved
+        //     so a restore from backup cannot re-instantiate the
+        //     same key material on another device.
         let attrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
             kSecPrivateKeyAttrs as String: [
                 kSecAttrIsPermanent as String: true,
+                kSecAttrIsExtractable as String: false,
+                kSecAttrSynchronizable as String: false,
                 kSecAttrApplicationTag as String: Self.privateKeyTag,
                 kSecAttrAccessGroup as String: accessGroup,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
@@ -361,44 +380,12 @@ final class MITMCertificateStore {
         SecItemDelete(query as CFDictionary)
     }
 
-    // MARK: - Private — Keychain (Serial counter)
-
-    private func readSerialUnlocked() -> UInt64 {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: Self.serialAccount,
-            kSecReturnData as String: true,
-            kSecAttrAccessGroup as String: accessGroup,
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data, data.count >= 8 else {
-            return 0
-        }
-        var value: UInt64 = 0
-        for i in 0..<8 {
-            value = (value << 8) | UInt64(data[data.startIndex + i])
-        }
-        return value
-    }
-
-    private func writeSerialUnlocked(_ value: UInt64) {
-        var bytes = Data(count: 8)
-        for i in 0..<8 {
-            bytes[i] = UInt8((value >> ((7 - i) * 8)) & 0xFF)
-        }
-        deleteSerial()
-        let attrs: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: Self.serialAccount,
-            kSecValueData as String: bytes,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecAttrAccessGroup as String: accessGroup,
-        ]
-        SecItemAdd(attrs as CFDictionary, nil)
-    }
+    // MARK: - Private — Keychain (Legacy serial item)
+    //
+    // The monotonic serial counter that lived here was removed when
+    // ``nextSerial`` switched to 16 bytes of randomness (see its doc).
+    // ``deleteSerial`` is retained only so ``deleteUnlocked`` still
+    // purges the stale keychain item on installs that ran the old code.
 
     private func deleteSerial() {
         let query: [String: Any] = [

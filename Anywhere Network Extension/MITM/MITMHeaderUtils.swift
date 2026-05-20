@@ -50,28 +50,38 @@ extension String {
     /// HTTP/1 framing decision to detect a chunked ``Transfer-Encoding``
     /// value (which may be the bare token or one of several comma-
     /// separated chain forms — `chunked`, `gzip, chunked`, etc.).
+    ///
+    /// Iterates ``UTF8View`` indices directly rather than materialising
+    /// ``[UInt8]`` arrays — the previous implementation allocated two
+    /// arrays per call, defeating the "allocation-free" intent the
+    /// companion comparator documents.
     func containsIgnoringASCIICase(_ needle: String) -> Bool {
-        let hayBytes = Array(self.utf8)
-        let needleBytes = Array(needle.utf8)
-        guard !needleBytes.isEmpty, hayBytes.count >= needleBytes.count else {
-            return needleBytes.isEmpty
-        }
-        let last = hayBytes.count - needleBytes.count
-        var i = 0
-        while i <= last {
-            var match = true
-            for k in 0..<needleBytes.count {
-                let h = hayBytes[i + k]
-                let n = needleBytes[k]
+        let hay = self.utf8
+        let pat = needle.utf8
+        let hayCount = hay.count
+        let patCount = pat.count
+        guard patCount > 0 else { return true }
+        guard hayCount >= patCount else { return false }
+        var startIdx = hay.startIndex
+        let lastStart = hay.index(hay.startIndex, offsetBy: hayCount - patCount)
+        while startIdx <= lastStart {
+            var hi = startIdx
+            var pi = pat.startIndex
+            var matched = true
+            while pi < pat.endIndex {
+                let h = hay[hi]
+                let n = pat[pi]
                 let fh = (h >= 0x41 && h <= 0x5A) ? h | 0x20 : h
                 let fn = (n >= 0x41 && n <= 0x5A) ? n | 0x20 : n
                 if fh != fn {
-                    match = false
+                    matched = false
                     break
                 }
+                hi = hay.index(after: hi)
+                pi = pat.index(after: pi)
             }
-            if match { return true }
-            i += 1
+            if matched { return true }
+            startIdx = hay.index(after: startIdx)
         }
         return false
     }

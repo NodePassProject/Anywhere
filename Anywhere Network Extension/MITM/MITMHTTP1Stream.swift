@@ -387,7 +387,27 @@ final class MITMHTTP1Stream {
             if phase == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
             }
-            output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
+            // RFC 9112 §6.3 case 7: a response without Content-Length
+            // or Transfer-Encoding has a body of "indeterminate length,
+            // ending only when the connection is closed". With
+            // HTTP/1.1's default keep-alive, the receiver would
+            // otherwise try to parse the next bytes on the connection
+            // as a follow-on response head and hang. Force
+            // ``Connection: close`` into the head so the receiver knows
+            // to read until close; the rest of the connection enters
+            // passthrough and the underlying TLS leg eventually closes
+            // when the upstream finishes streaming.
+            let finalHeaders: [Header]
+            if case .readUntilClose = framing {
+                var headers = rewrittenHeaders.filter {
+                    !$0.name.equalsIgnoringASCIICase("connection")
+                }
+                headers.append((name: "Connection", value: "close"))
+                finalHeaders = headers
+            } else {
+                finalHeaders = rewrittenHeaders
+            }
+            output.append(serializeHead(startLine: rewrittenStartLine, headers: finalHeaders))
             // Best-effort flush: a synth response attached to this
             // record can no longer be cleanly framed since the
             // connection is about to switch to passthrough (101) or
@@ -500,7 +520,7 @@ final class MITMHTTP1Stream {
         // before consuming a single body byte when the response would
         // exceed the cap. This keeps huge downloads (videos, archives)
         // from ever reaching the accumulator.
-        let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewrittenHeaders, name: "content-encoding"))
+        let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
         let canRewrite = scriptsApply && codec.supported && length <= MITMBodyCodec.maxBufferedBodyBytes
 
         if canRewrite {
@@ -560,7 +580,7 @@ final class MITMHTTP1Stream {
             return true
         }
 
-        let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewrittenHeaders, name: "content-encoding"))
+        let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
         if scriptsApply, codec.supported {
             mode = .rewritingChunked(
                 pending: PendingHead(
@@ -612,10 +632,18 @@ final class MITMHTTP1Stream {
             mode = .awaitingHead
             return true
         case .malformed:
-            // Forward remaining bytes verbatim; the peer will detect the
-            // framing error. Best-effort synth flush before downgrade —
-            // bytes that the script wanted "after this response" still
-            // belong here even if the body framing is broken.
+            // The head was already emitted with ``Transfer-Encoding:
+            // chunked``, so the receiver is mid-parse and waiting for
+            // ``0\r\n\r\n`` to terminate the body. Switching straight
+            // to passthrough would leave the receiver hanging forever
+            // (or, on keep-alive, consume bytes from the next message
+            // as if they were part of this body). Synthesize the
+            // zero-size terminator first so the current response
+            // frames cleanly; the garbage bytes that follow in
+            // ``rxBuffer`` are discarded since they would otherwise
+            // be misparsed as the start of the next response.
+            output.append(contentsOf: "0\r\n\r\n".utf8)
+            rxBuffer.removeAll(keepingCapacity: false)
             flushSynthAfterResponse(into: &output)
             mode = .passthrough
             return true
@@ -715,11 +743,15 @@ final class MITMHTTP1Stream {
                 let line = rxBuffer.subdata(in: 0..<lineEnd)
                 rxBuffer.removeFirst(lineEnd + 2)
                 guard let size = Self.parseHexSize(line) else {
-                    // Best-effort: the stream is mid-corruption and the
-                    // client will see garbled bytes either way, but
-                    // silently dropping synth-after bytes the script
-                    // asked us to deliver is worse than smuggling them
-                    // into the broken stream.
+                    // Head was already emitted with ``Transfer-Encoding:
+                    // chunked``, so the receiver is waiting for
+                    // ``0\r\n\r\n`` to end the body. Synthesize the
+                    // terminator before downgrading so the current
+                    // response frames cleanly; discard the rest of
+                    // ``rxBuffer`` to avoid feeding garbage bytes to
+                    // the receiver as the head of the next response.
+                    output.append(contentsOf: "0\r\n\r\n".utf8)
+                    rxBuffer.removeAll(keepingCapacity: false)
                     flushSynthAfterResponse(into: &output)
                     mode = .passthrough
                     return true
@@ -788,6 +820,12 @@ final class MITMHTTP1Stream {
                 guard rxBuffer[0] == 0x0D,
                       rxBuffer[1] == 0x0A
                 else {
+                    // Same situation as the malformed size-line above:
+                    // head was already emitted as chunked, receiver is
+                    // mid-parse. Synthesize the terminator + drop the
+                    // garbage so the response is closed cleanly.
+                    output.append(contentsOf: "0\r\n\r\n".utf8)
+                    rxBuffer.removeAll(keepingCapacity: false)
                     flushSynthAfterResponse(into: &output)
                     mode = .passthrough
                     return true
@@ -1173,23 +1211,79 @@ final class MITMHTTP1Stream {
         // anywhere in HTTP/1 syntax (RFC 9112 §2.2).
         if Self.containsControlChars(startLine) { return nil }
         var headers: [Header] = []
+        var contentLengthValues: [String] = []
+        var hasTEChunked = false
         for line in lines.dropFirst() {
             if line.isEmpty { continue }
-            guard let colon = line.firstIndex(of: ":") else { continue }
+            // RFC 9112 §5.1: a header field-line MUST contain a colon.
+            // A line without a colon is a syntax error — silently
+            // dropping it is unsafe because a lax downstream parser
+            // might still interpret the bytes (e.g. "Transfer-Encoding
+            // chunked" with SP instead of `:`) as a real framing
+            // header, desynchronizing the proxy's framing from the
+            // peer's and opening a smuggling vector.
+            guard let colon = line.firstIndex(of: ":") else { return nil }
             let name = String(line[..<colon])
             let value = String(line[line.index(after: colon)...])
                 .trimmingCharacters(in: CharacterSet.whitespaces)
-            // Same logic as the start-line guard above, applied per
-            // header field. CRLF terminated the field-line so the value
-            // can't legally carry one; a lone CR or LF inside the value
-            // is still smuggling and we treat the head as un-parseable.
-            // The name has narrower legal alphabet (RFC 9110 §5.6.2
-            // token chars only) — anything outside that, including the
-            // control bytes, fails the check too.
-            if Self.containsControlChars(name) || Self.containsControlChars(value) {
-                return nil
+            // RFC 9110 §5.6.2: field-name is a `token` — tchar+ only.
+            // Anything outside that (SP, CTL, `:`, CR, LF, NUL, …) is a
+            // smuggling vector: SP inside a name lets an attacker craft
+            // headers that we ignore but a lax downstream peer honors
+            // (the classic obfuscated-TE smuggling trick).
+            guard Self.isValidHeaderName(name) else { return nil }
+            // Field-value: CR/LF/NUL are forbidden anywhere; allowing
+            // any would let a value split into two header lines on
+            // re-emission (response-splitting).
+            if Self.containsControlChars(value) { return nil }
+            // Track framing-relevant headers so we can detect and
+            // normalize smuggling vectors before the head is accepted.
+            if name.equalsIgnoringASCIICase("content-length") {
+                contentLengthValues.append(
+                    value.trimmingCharacters(in: CharacterSet.whitespaces)
+                )
+            } else if name.equalsIgnoringASCIICase("transfer-encoding") {
+                // RFC 9112 §6.1: in a request/response, `chunked` MUST
+                // be the final transfer-coding. Split the comma list,
+                // trim each, and compare the last token to "chunked".
+                let parts = value.split(separator: ",", omittingEmptySubsequences: false)
+                if let last = parts.last?.trimmingCharacters(in: CharacterSet.whitespaces),
+                   last.equalsIgnoringASCIICase("chunked") {
+                    hasTEChunked = true
+                }
             }
             headers.append((name: name, value: value))
+        }
+        // RFC 9112 §6.3.5: multiple Content-Length values that differ
+        // is malformed and a primary smuggling vector. Distinct
+        // downstream parsers will disagree on which value to honor,
+        // letting an attacker desync framing. Reject the head; the
+        // stream downgrades to passthrough and the bytes flow verbatim
+        // for the receiver to defend against.
+        let uniqueLengths = Set(contentLengthValues)
+        if uniqueLengths.count > 1 {
+            return nil
+        }
+        // RFC 9112 §6.1: when both Transfer-Encoding (with `chunked`
+        // as the final coding) and Content-Length are present, the
+        // spec calls for treating the message as an error since two
+        // distinct framing sources let an attacker smuggle a second
+        // request through a downstream peer that picks the other
+        // value. The canonical proxy normalization (nginx, haproxy)
+        // is to drop Content-Length and frame strictly via the
+        // chunked encoding, which is what we emit on the wire.
+        if hasTEChunked && !contentLengthValues.isEmpty {
+            headers = headers.filter {
+                !$0.name.equalsIgnoringASCIICase("content-length")
+            }
+        } else if contentLengthValues.count > 1 {
+            // Multiple matching Content-Length entries collapse to one
+            // so the outbound head is unambiguous to the next hop.
+            var filtered = headers.filter {
+                !$0.name.equalsIgnoringASCIICase("content-length")
+            }
+            filtered.append((name: "Content-Length", value: contentLengthValues[0]))
+            headers = filtered
         }
         return ParsedHead(startLine: startLine, headers: headers)
     }
@@ -1210,10 +1304,21 @@ final class MITMHTTP1Stream {
     }
 
     private func isHTTPStartLine(_ line: String) -> Bool {
-        // Request: METHOD SP path SP HTTP/1.x
         // Response: HTTP/1.x SP status SP reason
         if line.hasPrefix("HTTP/1.") { return true }
-        return line.hasSuffix(" HTTP/1.1") || line.hasSuffix(" HTTP/1.0")
+        // Request: METHOD SP path SP HTTP/1.x. The version suffix
+        // check alone admits start lines whose METHOD position is
+        // not a token (e.g. ``"AB/CD / HTTP/1.1"`` — wire-illegal
+        // but parseable here). Tighten by requiring the prefix up
+        // to the first SP to satisfy the RFC 9110 §9.1 token
+        // alphabet so the parser never accepts a method we can't
+        // safely interpolate back onto the wire.
+        guard line.hasSuffix(" HTTP/1.1") || line.hasSuffix(" HTTP/1.0") else {
+            return false
+        }
+        guard let firstSpace = line.firstIndex(of: " ") else { return false }
+        let method = String(line[..<firstSpace])
+        return Self.isValidMethodToken(method)
     }
 
     /// True when ``startLine`` is a response start line with a 1xx
@@ -1348,6 +1453,30 @@ final class MITMHTTP1Stream {
         return true
     }
 
+    /// RFC 9110 §9.1: a method name is a `token` — the same tchar+
+    /// alphabet as header field-names. Scripts can write
+    /// ``ctx.method`` to any string; without validation a value like
+    /// ``"GET /attacker HTTP/1.1\r\nHost: a"`` smuggles a full request
+    /// line into the start position.
+    private static func isValidMethodToken(_ s: String) -> Bool {
+        return isValidHeaderName(s)
+    }
+
+    /// RFC 9112 §3.2: a request-target's syntax forbids SP, HTAB, CR,
+    /// LF, NUL, and other CTL bytes. We additionally reject DEL (0x7F)
+    /// since it is a CTL byte under RFC 9110 §5.6.1. Used to guard the
+    /// post-script and post-regex-substitution request-target before
+    /// it is interpolated into the start line.
+    private static func isValidRequestTarget(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        for byte in s.utf8 {
+            if byte < 0x21 || byte == 0x7F {
+                return false
+            }
+        }
+        return true
+    }
+
     // MARK: - Framing decision
 
     private enum Framing {
@@ -1383,10 +1512,10 @@ final class MITMHTTP1Stream {
             }
         }
         // Single-pass scan: Transfer-Encoding takes precedence over
-        // Content-Length per RFC 9112 §6.3, but both can appear on the
-        // same head. Capturing one value of each in a single loop is
-        // strictly cheaper than two header walks with per-entry
-        // case-folding.
+        // Content-Length per RFC 9112 §6.3. ``parseHead`` already
+        // normalized the smuggling vector where both appear on the same
+        // head (it strips ``Content-Length`` when TE: chunked is
+        // present), so this scan only needs to decide framing.
         var transferEncoding: String?
         var contentLength: String?
         for (name, value) in headers {
@@ -1396,8 +1525,19 @@ final class MITMHTTP1Stream {
                 contentLength = value
             }
         }
-        if let te = transferEncoding, te.containsIgnoringASCIICase("chunked") {
-            return .chunked
+        if let te = transferEncoding {
+            // RFC 9112 §6.1: ``chunked`` MUST be the final transfer-
+            // coding. ``Transfer-Encoding: gzip`` (no chunked) frames as
+            // read-until-close for a response; for a request it is a
+            // protocol error. Splitting on `,` and comparing the last
+            // trimmed token avoids the substring-match overreach
+            // (``x-chunked-encoding`` would have matched the old
+            // ``containsIgnoringASCIICase("chunked")`` check).
+            let parts = te.split(separator: ",", omittingEmptySubsequences: false)
+            if let last = parts.last?.trimmingCharacters(in: CharacterSet.whitespaces),
+               last.equalsIgnoringASCIICase("chunked") {
+                return .chunked
+            }
         }
         if let cl = contentLength {
             let trimmed = cl.trimmingCharacters(in: CharacterSet.whitespaces)
@@ -1413,6 +1553,25 @@ final class MITMHTTP1Stream {
             return v
         }
         return nil
+    }
+
+    /// Returns all values for a header name, joined by ``", "`` per
+    /// RFC 9110 §5.3 (semantically equivalent to a single field with
+    /// the combined value). Used for headers like
+    /// ``Content-Encoding`` where multiple values across separate
+    /// header lines must all be honored — picking only the first via
+    /// ``firstHeaderValue`` would let a second ``Content-Encoding:
+    /// br`` slip past while we only decoded ``gzip``, leaving the
+    /// brotli-compressed body on the wire with the encoding header
+    /// stripped.
+    private func combinedHeaderValue(_ headers: [Header], name: String) -> String? {
+        var parts: [String] = []
+        for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
+            parts.append(v)
+        }
+        if parts.isEmpty { return nil }
+        if parts.count == 1 { return parts[0] }
+        return parts.joined(separator: ", ")
     }
 
     // MARK: - Rule application (head-time)
@@ -1464,6 +1623,22 @@ final class MITMHTTP1Stream {
                 withTemplate: replacement
             )
             if mutated != target {
+                // ``MITMRewritePolicy`` rejects templates with raw
+                // whitespace / CTL at load time, but
+                // ``NSRegularExpression`` expands backreferences
+                // (``$1``…) from the matched groups in the live
+                // request-target. A capture that pulled in bytes
+                // exotic enough to corrupt the start line
+                // (percent-decoded SP, CR, …) would be smuggled
+                // straight onto the wire. Validate the mutated
+                // target before committing it; drop the rule
+                // application on failure so the connection stays
+                // intact rather than emitting a corrupted start
+                // line.
+                guard Self.isValidRequestTarget(mutated) else {
+                    logger.warning("[MITM] HTTP/1 \(host): urlReplace produced invalid request-target; skipping rule")
+                    continue
+                }
                 target = mutated
                 changed = true
             }
@@ -1556,12 +1731,40 @@ final class MITMHTTP1Stream {
             guard let method = message.method, let url = message.url else {
                 return fallback
             }
-            let target = pathAndQuery(fromURL: url) ?? url
+            // Validate script-supplied method against RFC 9110 §9.1
+            // (method = token). A script bug or hostile rule set that
+            // set ``ctx.method = "GET /x HTTP/1.1\r\n"`` would
+            // otherwise smuggle a full request line through the
+            // upstream side, bypassing any upstream auth that gates
+            // off the first request line.
+            guard Self.isValidMethodToken(method) else {
+                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid method '\(method)' from script")
+                return fallback
+            }
+            // ``pathAndQuery`` returns nil for inputs that look
+            // relative (no scheme + no host). Previously this fell
+            // back to the raw ``url`` string, which on a malformed
+            // input could put an absolute-form
+            // (``https://host/path``) request-target on the wire —
+            // legal per RFC 9112 §3.2.2 but unintended and confusing
+            // for upstreams. Falling back to the original request-
+            // target preserves wire shape when the script wrote a
+            // URL the URL parser doesn't recognise.
+            let originalTarget = parts.count >= 2 ? String(parts[1]) : "/"
+            let candidateTarget = pathAndQuery(fromURL: url) ?? originalTarget
+            // RFC 9112 §3.2: SP/CR/LF/NUL/CTL cannot appear in the
+            // request-target. A script that built a URL containing
+            // any of those (via percent-decode mishap or template
+            // injection) would otherwise split the start line.
+            guard Self.isValidRequestTarget(candidateTarget) else {
+                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid request-target from script")
+                return fallback
+            }
             // Request start line: METHOD SP target SP HTTP-version.
             // ``parts[2]`` is the version when the fallback parsed; fall
             // back to 1.1 only when the original line was malformed.
             let version = parts.count >= 3 ? String(parts[2]) : "HTTP/1.1"
-            return "\(method) \(target) \(version)"
+            return "\(method) \(candidateTarget) \(version)"
         case .httpResponse:
             guard let status = message.status else { return fallback }
             let version = parts.count >= 1 ? String(parts[0]) : "HTTP/1.1"

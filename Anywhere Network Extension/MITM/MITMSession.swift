@@ -151,6 +151,18 @@ final class MITMSession {
     /// starts.
     private var pendingClientBytes: Data
 
+    /// Hard cap on ``pendingClientBytes`` while the outer handshake is
+    /// running. A correct TLS client blocks on the ServerHello after
+    /// emitting its ClientHello, so this buffer stays well under 16 KiB
+    /// in real flows; the cap exists to defend against a hostile or
+    /// buggy local app that dumps arbitrary data into the SOCKS leg
+    /// before TLS negotiation completes. Without a cap, that traffic
+    /// would accumulate against the Network Extension's ~50 MiB memory
+    /// ceiling and crash the extension, taking down every other in-
+    /// flight tunneled session. 256 KiB is generous (multi-KB JA3
+    /// extensions, large GREASE blocks) while still catching abuse.
+    private static let maxPendingClientBytes: Int = 256 * 1024
+
     private var tlsServer: TLSServer?
     private var tlsClient: TLSClient?
 
@@ -266,7 +278,16 @@ final class MITMSession {
     func start(sni: String) {
         let parsed = parseClientHello(pendingClientBytes)
         let clientALPNs = parsed?.alpnProtocols ?? []
-        let clientSupportsTLS13 = parsed?.supportedVersions.contains(0x0304) ?? true
+        // Fail-closed default: when the ClientHello fails to parse we
+        // assume the client does NOT support TLS 1.3. Previously this
+        // defaulted to ``true``, which would let a malformed CH coerce
+        // the outer leg into TLS 1.3 (and the inner leg into mirroring
+        // it) even when the client only spoke 1.2. On the false default
+        // the inner leg just offers TLS 1.2; a 1.3-capable client (which
+        // by spec also supports 1.2) negotiates 1.2 and the handshake
+        // still succeeds — only a hypothetical 1.3-only client would be
+        // affected, and none exist in practice.
+        let clientSupportsTLS13 = parsed?.supportedVersions.contains(0x0304) ?? false
 
         if synthesizesResponse {
             startSynthesizeOnlyInnerHandshake(
@@ -300,14 +321,16 @@ final class MITMSession {
             tlsServer.feed(data)
         } else {
             // Outer handshake still running — buffer for the inner
-            // ``TLSServer`` once it is created.
-            //
-            // No size cap by design: a correct TLS client blocks on the
-            // ServerHello after sending its ClientHello, so this buffer
-            // stays at a few KB in the real-world flows we care about.
-            // A misbehaving local app could push more, but the worst
-            // case is bounded by the outer handshake's TCP timeout —
-            // far short of the Network Extension's memory ceiling.
+            // ``TLSServer`` once it is created. Capped at
+            // ``maxPendingClientBytes`` to defend the Network
+            // Extension's memory budget from a hostile local app that
+            // dumps arbitrary bytes into the SOCKS leg before the
+            // outer handshake completes.
+            if pendingClientBytes.count + data.count > Self.maxPendingClientBytes {
+                logger.warning("[MITM] \(dstHost): pre-handshake buffer would exceed \(Self.maxPendingClientBytes) B; tearing down session")
+                cancel(error: nil)
+                return
+            }
             pendingClientBytes.append(data)
         }
     }
@@ -334,6 +357,7 @@ final class MITMSession {
         innerRecord = nil
         outerRecord?.cancel()
         outerRecord = nil
+        legSenders.removeAll()
         synthesizer = nil
         innerTransport.forceCancel()
         onTeardown?(error)
@@ -473,10 +497,31 @@ final class MITMSession {
                 switch result {
                 case .success(let record):
                     self.outerRecord = record
-                    // Inner handshake commits to whichever ALPN the upstream
-                    // server chose; fall back to http/1.1 if the server
-                    // omitted the extension.
-                    let alpn = record.negotiatedALPN.isEmpty ? "http/1.1" : record.negotiatedALPN
+                    // Inner handshake commits to whichever ALPN the
+                    // upstream server chose. When the upstream
+                    // returned no ALPN, fall back to ``http/1.1``
+                    // ONLY when that's compatible with what the inner
+                    // client offered — i.e. either the client opted
+                    // out of ALPN entirely (empty list ⇒ plaintext
+                    // HTTP/1.1 expected by default) or the client
+                    // explicitly listed ``http/1.1``. Otherwise the
+                    // inner ``TLSServer`` would advertise
+                    // ``http/1.1`` to a client that never offered it,
+                    // breaking the inner handshake or — worse —
+                    // shipping HTTP/1 bytes to a client expecting h2
+                    // binary frames.
+                    let alpn: String
+                    if record.negotiatedALPN.isEmpty {
+                        if alpns.isEmpty || alpns.contains("http/1.1") {
+                            alpn = "http/1.1"
+                        } else {
+                            logger.warning("[MITM] \(innerSNI): upstream returned no ALPN but inner client offered \(alpns.joined(separator: ",")); cannot proxy")
+                            self.cancel(error: nil)
+                            return
+                        }
+                    } else {
+                        alpn = record.negotiatedALPN
+                    }
                     self.startInnerHandshake(sni: innerSNI, alpn: alpn, tlsVersion: record.tlsVersion)
                 case .failure(let error):
                     self.cancel(error: error)
@@ -511,6 +556,125 @@ final class MITMSession {
         startOutboundPump(inner: innerRecord, outer: outerRecord)
     }
 
+    /// Chunked-send helper. Splits ``data`` into ``chunkSize``-byte
+    /// pieces and writes each one sequentially, chaining the next
+    /// write off the previous send's completion callback. Achieves
+    /// two things:
+    ///   - Caps the per-send TLS record buffer to ``chunkSize``,
+    ///     instead of letting a ``buildTLSRecords`` allocate the
+    ///     entire (post-script) body in one ~MiB blob (the codec cap
+    ///     of ``MITMBodyCodec.maxBufferedBodyBytes`` is 4 MiB).
+    ///   - Applies upstream backpressure: the next chunk only
+    ///     dispatches after the current chunk's send completes, so a
+    ///     slow underlying transport throttles us instead of letting
+    ///     us queue arbitrary bytes into NWConnection.
+    /// 64 KiB is chosen as 4× the TLS record plaintext cap (16 KiB)
+    /// — enough to amortize per-send overhead without pinning more
+    /// than ~64 KiB of encrypted bytes in the send pipeline per leg.
+    private static let pumpChunkSize: Int = 64 * 1024
+
+    /// Per-leg send serializers, keyed by record identity, created
+    /// lazily on first send. See ``LegSendSerializer``.
+    private var legSenders: [ObjectIdentifier: LegSendSerializer] = [:]
+
+    /// Chunked, per-leg-serialized send. Splits ``data`` into
+    /// ``pumpChunkSize`` pieces written sequentially (next chunk only
+    /// after the previous send completes) to cap the per-send TLS record
+    /// buffer and apply transport backpressure, and serializes whole
+    /// blobs on the same leg so concurrent writers can't interleave
+    /// their chunks. Must be called on ``lwipQueue``.
+    private func sendChunked(
+        _ data: Data,
+        via record: TLSRecordConnection,
+        completion: @escaping (Error?) -> Void
+    ) {
+        let key = ObjectIdentifier(record)
+        let sender: LegSendSerializer
+        if let existing = legSenders[key] {
+            sender = existing
+        } else {
+            sender = LegSendSerializer(record: record, queue: lwipQueue, chunkSize: Self.pumpChunkSize)
+            legSenders[key] = sender
+        }
+        sender.enqueue(data, completion: completion)
+    }
+
+    /// Serializes chunked sends on a single TLS leg. ``sendChunked``
+    /// breaks a logical blob into several ``TLSRecordConnection/send``
+    /// calls; that connection's send lock keeps each call's records
+    /// contiguous and sequence-ordered but does NOT stop a second
+    /// concurrent caller's chunks from landing between this caller's. On
+    /// the inner leg two writers coexist — the inbound pump's synth
+    /// (`injected`) bytes and the outbound pump's response
+    /// (`transformed`) bytes — so unserialized chunking would interleave
+    /// their bytes and split an HTTP/2 frame (or HTTP/1 message)
+    /// mid-payload, desyncing the receiver. This drains one enqueued blob
+    /// to completion before starting the next, restoring the blob-level
+    /// atomicity the old single-``send`` path had.
+    ///
+    /// All methods must run on the ``queue`` passed at init.
+    private final class LegSendSerializer {
+        private let record: TLSRecordConnection
+        private let queue: DispatchQueue
+        private let chunkSize: Int
+        private var pending: [(data: Data, completion: (Error?) -> Void)] = []
+        private var sending = false
+
+        init(record: TLSRecordConnection, queue: DispatchQueue, chunkSize: Int) {
+            self.record = record
+            self.queue = queue
+            self.chunkSize = chunkSize
+        }
+
+        func enqueue(_ data: Data, completion: @escaping (Error?) -> Void) {
+            pending.append((data: data, completion: completion))
+            drain()
+        }
+
+        private func drain() {
+            guard !sending, !pending.isEmpty else { return }
+            sending = true
+            let next = pending.removeFirst()
+            sendSlice(next.data, offset: next.data.startIndex, completion: next.completion)
+        }
+
+        private func sendSlice(
+            _ data: Data,
+            offset: Data.Index,
+            completion: @escaping (Error?) -> Void
+        ) {
+            if offset >= data.endIndex {
+                completion(nil)
+                finishCurrent()
+                return
+            }
+            let take = min(chunkSize, data.distance(from: offset, to: data.endIndex))
+            let chunkEnd = data.index(offset, offsetBy: take)
+            // Fresh ``Data`` so the encoder sees a contiguous slab and the
+            // zero-copy slice doesn't outlive this iteration.
+            let chunk = Data(data[offset..<chunkEnd])
+            record.send(data: chunk) { [weak self] error in
+                guard let self else {
+                    completion(error)
+                    return
+                }
+                self.queue.async {
+                    if let error {
+                        completion(error)
+                        self.finishCurrent()
+                        return
+                    }
+                    self.sendSlice(data, offset: chunkEnd, completion: completion)
+                }
+            }
+        }
+
+        private func finishCurrent() {
+            sending = false
+            drain()
+        }
+    }
+
     /// Reads plaintext from the inner record (= what the client sent) and
     /// writes it to the outer record (= towards the real server).
     ///
@@ -520,10 +684,11 @@ final class MITMSession {
     /// h2 translator emits zero upstream bytes but populates a
     /// client-bound buffer with the synthesized response; we drain
     /// that buffer here and write straight to the inner record,
-    /// bypassing the upstream leg entirely. The two writes are
-    /// independent (different legs) and ``TLSRecordConnection``'s send
-    /// lock serializes any concurrent inner writes that may happen
-    /// alongside an in-flight outbound-pump write.
+    /// bypassing the upstream leg entirely. This synth write and the
+    /// outbound pump's response write can both target the inner leg at
+    /// once; ``sendChunked``'s per-leg ``LegSendSerializer`` drains each
+    /// whole blob before the next so their chunks never interleave on
+    /// the wire.
     private func startInboundPump(inner: TLSRecordConnection, outer: TLSRecordConnection) {
         inner.receive { [weak self] data, error in
             guard let self else { return }
@@ -546,7 +711,7 @@ final class MITMSession {
                     injected = self.requestStream.drainPendingClientBytes()
                 }
                 if !injected.isEmpty {
-                    inner.send(data: injected) { [weak self] sendError in
+                    self.sendChunked(injected, via: inner) { [weak self] sendError in
                         guard let self, let sendError else { return }
                         self.lwipQueue.async { self.cancel(error: sendError) }
                     }
@@ -561,7 +726,8 @@ final class MITMSession {
                     self.startInboundPump(inner: inner, outer: outer)
                     return
                 }
-                outer.send(data: transformed) { sendError in
+                self.sendChunked(transformed, via: outer) { [weak self] sendError in
+                    guard let self else { return }
                     if let sendError {
                         self.lwipQueue.async { self.cancel(error: sendError) }
                         return
@@ -596,7 +762,8 @@ final class MITMSession {
                     self.startOutboundPump(inner: inner, outer: outer)
                     return
                 }
-                inner.send(data: transformed) { sendError in
+                self.sendChunked(transformed, via: inner) { [weak self] sendError in
+                    guard let self else { return }
                     if let sendError {
                         self.lwipQueue.async { self.cancel(error: sendError) }
                         return
