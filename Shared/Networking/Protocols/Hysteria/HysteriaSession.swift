@@ -57,6 +57,12 @@ nonisolated final class HysteriaSession {
 
     private var state: State = .idle
 
+    /// Once-only gate shared by `close()` and `failSession` so terminal
+    /// teardown (incl. `quic.close()`) runs exactly once regardless of which
+    /// path fires first. Acquired from inside their on-queue blocks to keep
+    /// the existing FIFO "first wins" ordering.
+    private let closeLatch = CloseOnce()
+
     /// Bidi stream used for the one-shot auth POST. All other bidi streams
     /// opened after `ready` are raw Hysteria TCP streams.
     private var authStreamID: Int64 = -1
@@ -155,6 +161,15 @@ nonisolated final class HysteriaSession {
             transport: transport
         )
     }
+
+#if DEBUG
+    /// Leak tripwire: a session must reach terminal teardown (`close()` or
+    /// `failSession`, both via `closeLatch`) before being freed — otherwise its
+    /// `QUICConnection` (socket + ngtcp2 state) was never closed. DEBUG-only.
+    deinit {
+        assert(closeLatch.isClosed, "HysteriaSession leaked: freed without close()/failSession")
+    }
+#endif
 
     // MARK: - Lifecycle
 
@@ -624,8 +639,13 @@ nonisolated final class HysteriaSession {
     // MARK: - Close
 
     func close() {
-        let work = { [weak self] in
-            guard let self, self.state != .closed else { return }
+        // `closeLatch.begin()` gives once-only teardown; the strong `self`
+        // capture (not `[weak self]`) keeps the session alive until it runs —
+        // an idle session torn down off-queue (interface-change `closeAll`)
+        // could otherwise be the last reference and deallocate first, skipping
+        // `quic.close()` and leaking the socket + ngtcp2 state.
+        let work = {
+            guard self.closeLatch.begin() else { return }
             self.state = .closed
 
             self.idleCloseWorkItem?.cancel()
@@ -663,8 +683,11 @@ nonisolated final class HysteriaSession {
     }
 
     private func failSession(_ error: Error) {
-        queue.async { [weak self] in
-            guard let self, self.state != .closed else { return }
+        // Shares `closeLatch` with `close()` so whichever runs first wins
+        // (FIFO on `queue`); strong `self` keeps the session alive through
+        // teardown — see `close()`.
+        queue.async {
+            guard self.closeLatch.begin() else { return }
             self.state = .closed
 
             self.idleCloseWorkItem?.cancel()

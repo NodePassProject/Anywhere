@@ -1,6 +1,6 @@
 //
 //  UnfairLock.swift
-//  Network Extension
+//  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
 //

@@ -83,6 +83,12 @@ nonisolated class QUICConnection {
     /// of the current queue cycle via a single coalesced `writeToUDP`.
     private var flushScheduled = false
 
+    /// Guarantees the terminal teardown in `close()` runs exactly once, on
+    /// `queue`, retaining `self` until it completes — so the ngtcp2 conn, UDP
+    /// socket, and dispatch sources are always freed even when `close()` is
+    /// dispatched from off-queue on the connection's last reference.
+    private let closeLatch = CloseOnce()
+
     /// Connected UDP socket. -1 when not open.
     private var socketFD: Int32 = -1
     /// Dispatch source that fires when the socket has at least one datagram
@@ -219,6 +225,19 @@ nonisolated class QUICConnection {
         self.queue = DispatchQueue(label: "com.argsment.Anywhere.quic")
         queue.setSpecific(key: Self.queueKey, value: true)
     }
+
+#if DEBUG
+    /// Leak tripwire: by the time a connection is freed, `close()` (or a
+    /// setup-failure path) must have released the socket, ngtcp2 conn, and
+    /// dispatch sources. A live handle here means it was dropped without
+    /// closing — the exact leak this and `CloseOnce` exist to surface. Reads
+    /// are race-free: deinit implies no other reference, so nothing else can
+    /// touch this state. DEBUG-only; never aborts a shipping build.
+    deinit {
+        assert(socketFD < 0 && conn == nil && readSource == nil && retransmitTimer == nil,
+               "QUICConnection leaked: freed without close() (fd=\(socketFD), connSet=\(conn != nil))")
+    }
+#endif
 
     // MARK: Connect
 
@@ -599,8 +618,13 @@ nonisolated class QUICConnection {
     // MARK: Close
 
     func close(error: Error? = nil) {
-        let work = { [weak self] in
-            guard let self else { return }
+        // `CloseOnce` runs this once on `queue`, strong-capturing `self` so the
+        // ngtcp2 conn / UDP socket / dispatch sources are always freed — even
+        // when `close()` is the connection's last reference (e.g. dispatched
+        // off-queue by `HysteriaSession`/`closeAll`). When already on `queue`
+        // (e.g. handleReceivedPacket detecting DRAINING) it runs synchronously
+        // so pool-visible state updates before new streams can be handed out.
+        closeLatch.fire(on: queue, runningOnQueue: isOnQueue) {
             guard self.state != .closed else { return }
             // Any close that happens before we reached `.connected` means the
             // TLS handshake didn't complete — invalidate any cached session
@@ -651,14 +675,6 @@ nonisolated class QUICConnection {
             for d in dgrams { d.completion?(closeError) }
             self.connectionClosedHandler?(closeError)
             self.connectionClosedHandler = nil
-        }
-        // When called from the QUIC queue (e.g. handleReceivedPacket detecting
-        // DRAINING), execute synchronously so the session's pool-visible state
-        // is updated before the pool can hand out new streams.
-        if isOnQueue {
-            work()
-        } else {
-            queue.async(execute: work)
         }
     }
 

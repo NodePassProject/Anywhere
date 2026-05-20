@@ -40,6 +40,16 @@ class ActivityTimer {
         startTimer(timeout: timeout)
     }
 
+    /// Reclaims the timer if the owner dropped us without calling `cancel()`.
+    /// Unlike FD/ngtcp2 owners (where teardown is queue-affined and can only be
+    /// asserted in deinit), `DispatchSource.cancel()` is thread-safe and
+    /// idempotent — so this can actually free the resource. Without it, a
+    /// resumed-but-uncancelled timer is retained by libdispatch and keeps
+    /// firing (into a nil `weak self`) for the life of the process.
+    deinit {
+        timer?.cancel()
+    }
+
     /// Signals that activity has occurred.
     func update() {
         hasActivity = true

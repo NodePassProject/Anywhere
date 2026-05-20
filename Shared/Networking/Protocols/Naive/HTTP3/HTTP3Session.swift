@@ -440,8 +440,11 @@ nonisolated class HTTP3Session: PoolableSession {
     // MARK: - Close
 
     func close() {
-        queue.async { [weak self] in
-            guard let self, self.state != .closed else { return }
+        // Strong `self`, not `[weak self]`: a pooled session dropped off-queue
+        // could be the last reference and deallocate before this ran, skipping
+        // `quic.close()` and leaking the QUIC socket + ngtcp2 state (see CloseOnce).
+        queue.async {
+            guard self.state != .closed else { return }
             self.state = .closed
 
             self._poolLock.lock()
@@ -483,4 +486,14 @@ nonisolated class HTTP3Session: PoolableSession {
 
         onClose?()
     }
+
+#if DEBUG
+    /// Leak tripwire: a session must reach `.closed` (via `close()` or
+    /// `failSession`) before being freed. DEBUG-only. Note this asserts the
+    /// session reached terminal state, not that `quic` was closed — see the
+    /// `failSession`/`quic.close()` asymmetry flagged in review.
+    deinit {
+        assert(state == .closed, "HTTP3Session leaked: freed without close()/failSession")
+    }
+#endif
 }
