@@ -143,27 +143,6 @@ struct IPEndpoint {
     }
 }
 
-// MARK: - SocketHelpers
-
-/// Low-level POSIX helpers shared between ``RawTCPSocket`` and ``RawUDPSocket``.
-enum SocketHelpers {
-    /// Sets a boolean-like `Int32` socket option. Failure is ignored — a
-    /// missing option should never sink the connection.
-    @inline(__always)
-    static func setInt(_ fd: Int32, level: Int32, name: Int32, value: Int32) {
-        var v = value
-        _ = setsockopt(fd, level, name, &v, socklen_t(MemoryLayout<Int32>.size))
-    }
-
-    /// Puts `fd` into non-blocking mode. Returns `false` on failure.
-    @inline(__always)
-    static func makeNonBlocking(_ fd: Int32) -> Bool {
-        let flags = fcntl(fd, F_GETFL, 0)
-        guard flags >= 0 else { return false }
-        return fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0
-    }
-}
-
 // MARK: - RawTCPSocket
 
 /// A TCP transport using BSD (POSIX) sockets with asynchronous I/O.
@@ -539,19 +518,12 @@ nonisolated class RawTCPSocket: RawTransport {
             return
         }
 
-        var fd = Darwin.socket(endpoint.family, SOCK_STREAM, IPPROTO_TCP)
+        let fd = SocketHelpers.makeSocket(family: endpoint.family, type: SOCK_STREAM,
+                                          proto: IPPROTO_TCP, reliefPriority: .userVisible)
         if fd < 0 {
-            let err = errno
-            if FDPressureRelief.isFDExhaustion(err), FDPressureRelief.relieve(for: .tcp) {
-                // Relief evicted idle UDP flow(s); retry once before
-                // moving on to the next address.
-                fd = Darwin.socket(endpoint.family, SOCK_STREAM, IPPROTO_TCP)
-            }
-            if fd < 0 {
-                logger.debug("[TCP] socket() failed: \(String(cString: strerror(errno)))")
-                tryConnectNext()
-                return
-            }
+            logger.debug("[TCP] socket() failed: \(String(cString: strerror(errno)))")
+            tryConnectNext()
+            return
         }
 
         applyTCPSocketOptions(fd: fd)

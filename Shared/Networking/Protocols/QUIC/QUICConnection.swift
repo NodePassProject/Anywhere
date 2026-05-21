@@ -103,11 +103,9 @@ nonisolated class QUICConnection {
     /// dispatched from off-queue on the connection's last reference.
     private let closeLatch = CloseOnce()
 
-    /// Connected UDP socket. -1 when not open.
-    private var socketFD: Int32 = -1
-    /// Dispatch source that fires when the socket has at least one datagram
-    /// queued.  We drain to EAGAIN inside the handler.
-    private var readSource: DispatchSourceRead?
+    /// Connected UDP socket for the direct-dial path. `nil` when QUIC rides a
+    /// `QUICDatagramTransport` (chained), and before/after the socket is open.
+    private var quicSocket: QUICSocket?
 
     private var localAddr = sockaddr_storage()
     private var remoteAddr = sockaddr_storage()
@@ -168,6 +166,42 @@ nonisolated class QUICConnection {
         let completion: (Error?) -> Void
     }
 
+    /// Stream bytes ngtcp2 still references for retransmission, per stream, in
+    /// ascending end-offset order. ngtcp2's `writev_stream` is zero-copy: it
+    /// retains the *pointer* we pass (only the `ngtcp2_vec` descriptors are
+    /// copied — see ngtcp2_conn.c `conn_write_pkt`) in its retransmission queue
+    /// and re-reads the bytes on every retransmission until they're acked.
+    /// ngtcp2.h: "The caller must keep the portion of data covered by
+    /// |*pdatalen| bytes in tact until acked_stream_data_offset indicates that
+    /// they are acknowledged by a remote endpoint or the stream is closed." A
+    /// pointer from `Data.withUnsafeBytes` dies with its closure, so each
+    /// accepted write is copied into a heap buffer held here until
+    /// `acked_stream_data_offset` (`releaseAckedStreamData`) frees it, the
+    /// stream closes, or the connection tears down. Touched only on `queue`.
+    private var inflightStreamBuffers: [Int64: [InflightStreamBuffer]] = [:]
+    /// Absolute tx offset per stream — a mirror of ngtcp2's `strm->tx.offset`
+    /// (every accepted byte goes through `writeStreamSync`), used to label each
+    /// retained buffer so the ack callback can match it against the acked
+    /// offset. Touched only on `queue`.
+    private var streamTxOffset: [Int64: UInt64] = [:]
+
+    /// Stable heap copy of stream bytes handed to ngtcp2, owning its allocation
+    /// for as long as ngtcp2 may retransmit it. See `inflightStreamBuffers`.
+    private final class InflightStreamBuffer {
+        let storage: UnsafeMutableBufferPointer<UInt8>
+        /// Absolute stream offset one past this buffer's last accepted byte.
+        var endOffset: UInt64 = 0
+
+        /// Copies `data` (which must be non-empty) into a fresh allocation.
+        init(copying data: Data) {
+            let buf = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: data.count)
+            _ = data.copyBytes(to: buf)
+            storage = buf
+        }
+
+        deinit { storage.deallocate() }
+    }
+
     /// Pending datagrams waiting to be sent. Drained in `writeToUDP()` where
     /// they get first priority for congestion window space.
     ///
@@ -207,11 +241,11 @@ nonisolated class QUICConnection {
     /// shrink). 1200 is the smallest size that can never be too large.
     static let chainedMaxUDPPayload = 1200
 
-    /// Reusable per-packet buffers. ngtcp2 is single-threaded on `queue`
-    /// so a single slot for each direction is sufficient; bursts are
-    /// amortised at the dispatch-source level (drain the kernel queue
-    /// to EAGAIN on every wake-up), not via a per-syscall batch.
-    private var rxBuf = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
+    /// Reusable tx buffer. ngtcp2 is single-threaded on `queue` so a single
+    /// slot is sufficient; bursts are amortised at the dispatch-source level
+    /// (the receive side drains the kernel queue to EAGAIN on every wake-up),
+    /// not via a per-syscall batch. The matching rx buffer lives in
+    /// ``QUICSocket``.
     private var txBuf = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
 
     /// Payload sizes PMTUD probes. Must be in (1200, max_tx_udp_payload_size]
@@ -248,8 +282,8 @@ nonisolated class QUICConnection {
     /// are race-free: deinit implies no other reference, so nothing else can
     /// touch this state. DEBUG-only; never aborts a shipping build.
     deinit {
-        assert(socketFD < 0 && conn == nil && readSource == nil && retransmitTimer == nil,
-               "QUICConnection leaked: freed without close() (fd=\(socketFD), connSet=\(conn != nil))")
+        assert(quicSocket == nil && conn == nil && retransmitTimer == nil,
+               "QUICConnection leaked: freed without close() (socketOpen=\(quicSocket?.isOpen ?? false), connSet=\(conn != nil))")
     }
 #endif
 
@@ -525,12 +559,26 @@ nonisolated class QUICConnection {
         let ts = currentTimestamp()
         var offset = 0
 
+        // Empty payload: nothing to retain or feed through the data loop
+        // (preserves prior behavior — a bare FIN was never emitted here).
+        guard !data.isEmpty else {
+            writeToUDP()
+            return 0
+        }
+
+        // ngtcp2 keeps the pointer we hand it — not a copy — until the bytes
+        // are acked (see `inflightStreamBuffers`). Copy into a buffer that
+        // outlives this call and feed ngtcp2 pointers into it; once we know how
+        // much was accepted, register it for release by the ack callback.
+        let baseOffset = streamTxOffset[streamId] ?? 0
+        let inflight = InflightStreamBuffer(copying: data)
+        let stableBase = inflight.storage.baseAddress!
+
         while offset < data.count {
             var pi = ngtcp2_pkt_info()
             var pdatalen: ngtcp2_ssize = 0
 
             let remaining = data.count - offset
-            let chunk = data[offset..<data.count]
             let isLast = (offset + remaining >= data.count)
             let flags: UInt32 = {
                 var f: UInt32 = 0
@@ -539,17 +587,14 @@ nonisolated class QUICConnection {
                 return f
             }()
 
-            let nwrite: ngtcp2_ssize = chunk.withUnsafeBytes { rawBuf in
-                let ptr = rawBuf.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                var vec = ngtcp2_vec(base: UnsafeMutablePointer(mutating: ptr),
-                                    len: remaining)
-                return txBuf.withUnsafeMutableBufferPointer { dest -> ngtcp2_ssize in
-                    ngtcp2_swift_conn_writev_stream(
-                        conn, nil, &pi, dest.baseAddress, dest.count,
-                        &pdatalen, flags,
-                        streamId, &vec, 1, ts
-                    )
-                }
+            var vec = ngtcp2_vec(base: stableBase.advanced(by: offset),
+                                 len: remaining)
+            let nwrite: ngtcp2_ssize = txBuf.withUnsafeMutableBufferPointer { dest -> ngtcp2_ssize in
+                ngtcp2_swift_conn_writev_stream(
+                    conn, nil, &pi, dest.baseAddress, dest.count,
+                    &pdatalen, flags,
+                    streamId, &vec, 1, ts
+                )
             }
 
             if nwrite == 0 { break }
@@ -575,8 +620,43 @@ nonisolated class QUICConnection {
             if pdatalen == 0 { break }
         }
 
+        // Retain the buffer iff ngtcp2 accepted (and may thus retransmit) some
+        // bytes; `acked_stream_data_offset` frees it once they're acked. When
+        // nothing was accepted, `inflight` is released here, freeing storage.
+        if offset > 0 {
+            inflight.endOffset = baseOffset + UInt64(offset)
+            inflightStreamBuffers[streamId, default: []].append(inflight)
+            streamTxOffset[streamId] = inflight.endOffset
+        }
+
         writeToUDP()
         return offset
+    }
+
+    /// Frees the heap copies of stream bytes ngtcp2 has now acknowledged.
+    /// ngtcp2 reports the contiguous acked prefix (`offset + datalen`); any
+    /// buffer ending at or before it can never be retransmitted, so its storage
+    /// is safe to release. Buffers past the prefix stay — ngtcp2 may still
+    /// resend them. Runs on `queue` (invoked synchronously from read_pkt's
+    /// ack handling).
+    fileprivate func releaseAckedStreamData(streamId: Int64, ackedOffset: UInt64) {
+        guard var buffers = inflightStreamBuffers[streamId] else { return }
+        // Appended in ascending end-offset order, so the acked ones are a prefix.
+        var drop = 0
+        while drop < buffers.count && buffers[drop].endOffset <= ackedOffset {
+            drop += 1
+        }
+        guard drop > 0 else { return }
+        buffers.removeFirst(drop)  // releases each buffer → deinit frees storage
+        inflightStreamBuffers[streamId] = buffers.isEmpty ? nil : buffers
+    }
+
+    /// Drops all retained send state for a stream. Called from `stream_close`,
+    /// after which ngtcp2 has freed the stream and no longer references our
+    /// buffers, and on connection teardown.
+    fileprivate func releaseStreamSendState(streamId: Int64) {
+        inflightStreamBuffers[streamId] = nil
+        streamTxOffset[streamId] = nil
     }
 
     /// Fails any queued pendingWrites that target a terminated stream. Called
@@ -692,16 +772,21 @@ nonisolated class QUICConnection {
             self.pendingWrites.removeAll()
             let dgrams = self.pendingDatagrams
             self.pendingDatagrams.removeAll()
+            // `conn` is gone, so the retained stream send buffers can no longer
+            // be retransmitted — free their heap copies (deinit deallocates).
+            self.inflightStreamBuffers.removeAll()
+            self.streamTxOffset.removeAll()
             let closeError = error ?? QUICError.closed
             // Surface the close to a still-pending connect callback. Most
             // close paths (DRAINING in handleReceivedPacket, handshake
             // crypto failure, timer expiry, transport errorHandler) clear
             // and fire `connectCompletion` themselves before reaching
-            // here, but `drainSocketReads` on a non-EAGAIN recv errno
-            // calls `close(error:)` directly — without this the connect
-            // callback would leak and any caller that hadn't installed
-            // `connectionClosedHandler` first would hang on a dropped
-            // socket during the handshake window.
+            // here, but the socket's recv error handler (``QUICSocket``'s
+            // `onError`) on a non-EAGAIN errno calls `close(error:)`
+            // directly — without this the connect callback would leak and
+            // any caller that hadn't installed `connectionClosedHandler`
+            // first would hang on a dropped socket during the handshake
+            // window.
             if let cb = self.connectCompletion {
                 self.connectCompletion = nil
                 cb(closeError)
@@ -730,10 +815,21 @@ nonisolated class QUICConnection {
             guard remoteAddr.ss_family != 0 else {
                 throw QUICError.connectionFailed("DNS lookup failed for \(host)")
             }
-            try createSocket()
+            let sock = QUICSocket(queue: queue, receiveBufferSize: Self.maxUDPPayload)
+            try sock.connect(remoteAddr: remoteAddr, localAddr: &localAddr, addrLen: addrLen)
+            quicSocket = sock
             try initializeNgtcp2()
             state = .handshaking
-            startReadSource()
+            // Reads fire on `queue` and drive ngtcp2 inline; a zero-copy view
+            // goes straight to handleReceivedPacket. A terminal recv error
+            // closes the connection directly (see the connectCompletion note
+            // in close()).
+            sock.startReceiving(
+                onPacket: { [weak self] data in self?.handleReceivedPacket(data) },
+                onError: { [weak self] err in
+                    self?.close(error: QUICError.connectionFailed("recv errno=\(err)"))
+                }
+            )
             writeToUDP()    // send client initial
             rescheduleTimer()
         } catch {
@@ -814,145 +910,9 @@ nonisolated class QUICConnection {
         }
     }
 
-    private func createSocket() throws {
-        let family = Int32(remoteAddr.ss_family)
-        var fd = socket(family, SOCK_DGRAM, 0)
-        if fd < 0 {
-            let err = errno
-            if FDPressureRelief.isFDExhaustion(err), FDPressureRelief.relieve(for: .tcp) {
-                // QUIC here carries Hysteria / HTTP3 to the proxy, so it's
-                // treated as TCP-class transport: relief evicts idle direct
-                // UDP flows on our behalf and we retry once.
-                fd = socket(family, SOCK_DGRAM, 0)
-            }
-            guard fd >= 0 else {
-                throw QUICError.connectionFailed("socket() failed errno=\(errno)")
-            }
-        }
-
-        // Non-blocking so `recv(2)` / `send(2)` return EAGAIN instead of
-        // stalling the QUIC queue when the kernel buffer is empty/full.
-        let flags = fcntl(fd, F_GETFL, 0)
-        if flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 {
-            Darwin.close(fd)
-            throw QUICError.connectionFailed("fcntl(O_NONBLOCK) failed errno=\(errno)")
-        }
-
-        // Widen the kernel buffers. macOS defaults ~9 KB, which caps
-        // throughput at that per-RTT regardless of cwnd.
-        var bufSize: Int32 = 4 * 1024 * 1024
-        _ = setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufSize, socklen_t(MemoryLayout<Int32>.size))
-        _ = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bufSize, socklen_t(MemoryLayout<Int32>.size))
-
-        // Best-effort ECN reporting for ngtcp2. Silently ignored on
-        // older kernels.
-        var on: Int32 = 1
-        if family == AF_INET {
-            _ = setsockopt(fd, IPPROTO_IP, IP_RECVTOS, &on, socklen_t(MemoryLayout<Int32>.size))
-        } else {
-            _ = setsockopt(fd, IPPROTO_IPV6, IPV6_RECVTCLASS, &on, socklen_t(MemoryLayout<Int32>.size))
-        }
-
-        let connectRv = withUnsafePointer(to: &remoteAddr) { ptr -> Int32 in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                Darwin.connect(fd, sa, socklen_t(addrLen))
-            }
-        }
-        if connectRv != 0 {
-            Darwin.close(fd)
-            throw QUICError.connectionFailed("connect() failed errno=\(errno)")
-        }
-
-        // Populate localAddr with the kernel-assigned 4-tuple so ngtcp2's
-        // path matches reality. Cosmetic (migration is disabled).
-        var localStorage = sockaddr_storage()
-        var localLen = socklen_t(MemoryLayout<sockaddr_storage>.size)
-        let gotLocal = withUnsafeMutablePointer(to: &localStorage) { ptr -> Int32 in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                getsockname(fd, sa, &localLen)
-            }
-        }
-        if gotLocal == 0 {
-            if localStorage.ss_family == sa_family_t(AF_INET) {
-                withUnsafePointer(to: &localStorage) { src in
-                    src.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
-                        withUnsafeMutablePointer(to: &localAddr) { dst in
-                            dst.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { dsin in
-                                dsin.pointee.sin_port = sin.pointee.sin_port
-                                dsin.pointee.sin_addr = sin.pointee.sin_addr
-                            }
-                        }
-                    }
-                }
-            } else if localStorage.ss_family == sa_family_t(AF_INET6) {
-                withUnsafePointer(to: &localStorage) { src in
-                    src.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
-                        withUnsafeMutablePointer(to: &localAddr) { dst in
-                            dst.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { dsin6 in
-                                dsin6.pointee.sin6_port = sin6.pointee.sin6_port
-                                dsin6.pointee.sin6_addr = sin6.pointee.sin6_addr
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        socketFD = fd
-    }
-
-    private func startReadSource() {
-        guard socketFD >= 0 else { return }
-        let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
-        source.setEventHandler { [weak self] in
-            self?.drainSocketReads()
-        }
-        readSource = source
-        source.resume()
-    }
-
-    /// Drains the kernel queue via public `recv(2)` until EAGAIN. One
-    /// wake-up of the dispatch source pulls every pending datagram, so
-    /// the per-syscall overhead is amortised at burst level.
-    private func drainSocketReads() {
-        guard socketFD >= 0 else { return }
-        while true {
-            let n = rxBuf.withUnsafeMutableBufferPointer { buf -> Int in
-                Darwin.recv(socketFD, buf.baseAddress, buf.count, 0)
-            }
-            if n < 0 {
-                let err = errno
-                if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
-                close(error: QUICError.connectionFailed("recv errno=\(err)"))
-                return
-            }
-            if n == 0 { return }
-            // Wrap this packet without copying; handleReceivedPacket and
-            // its callbacks copy out before returning, so the view stays
-            // valid only for this call.
-            rxBuf.withUnsafeBufferPointer { buf in
-                let view = Data(
-                    bytesNoCopy: UnsafeMutableRawPointer(mutating: buf.baseAddress!),
-                    count: n, deallocator: .none
-                )
-                handleReceivedPacket(view)
-            }
-            // handleReceivedPacket may synchronously close the socket
-            // (e.g. on NGTCP2_ERR_DRAINING). Re-check before the next recv
-            // so we don't issue recv(-1) → EBADF.
-            if socketFD < 0 { return }
-        }
-    }
-
     private func closeSocket() {
-        if let source = readSource {
-            source.cancel()
-            readSource = nil
-        }
-        if socketFD >= 0 {
-            Darwin.close(socketFD)
-            socketFD = -1
-        }
+        quicSocket?.close()
+        quicSocket = nil
     }
 
     private func populateRemoteAddr() {
@@ -1053,17 +1013,10 @@ nonisolated class QUICConnection {
             transport.sendDatagram(datagram)
             return
         }
-        guard socketFD >= 0 else { return }
-        while true {
-            let n = txBuf.withUnsafeBufferPointer { buf -> Int in
-                Darwin.send(socketFD, buf.baseAddress, length, 0)
-            }
-            if n >= 0 { return }
-            let err = errno
-            if err == EINTR { continue }
-            // Non-EAGAIN errors are silently dropped; ngtcp2's loss recovery
-            // handles the retransmit on the next tx loop.
-            return
+        guard let quicSocket else { return }
+        txBuf.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            quicSocket.send(base, length: length)
         }
     }
 
@@ -1558,10 +1511,21 @@ private let quicRecvStreamDataCB: @convention(c) (
     return 0
 }
 
+/// Fires when a contiguous prefix of a stream's sent data is acknowledged.
+/// ngtcp2's `writev_stream` is zero-copy and keeps our buffer pointers until
+/// this confirms the bytes are acked, so this is where the retained heap copies
+/// are released (without it, the data loop's buffers leak — and before they
+/// were retained at all, ngtcp2 retransmitted from freed memory). `offset` is
+/// the previous acked offset and `datalen` the newly-acked length, so
+/// `offset + datalen` is the new contiguous acked end. Runs on `queue`.
 private let quicAckedCB: @convention(c) (
     OpaquePointer?, Int64, UInt64, UInt64,
     UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
-) -> Int32 = { _, _, _, _, _, _ in 0 }
+) -> Int32 = { _, streamId, offset, datalen, ud, _ in
+    guard let qc = qcFromUserData(ud) else { return 0 }
+    qc.releaseAckedStreamData(streamId: streamId, ackedOffset: offset + datalen)
+    return 0
+}
 
 /// Bit in `flags` that indicates `appErrorCode` was exchanged (RESET_STREAM
 /// or STOP_SENDING). Mirrors `NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET`
@@ -1590,6 +1554,9 @@ private let quicStreamCloseCB: @convention(c) (
         streamId: sid,
         error: error ?? QUICConnection.QUICError.closed
     )
+    // ngtcp2 has freed the stream and no longer references our retained send
+    // buffers, so release them now rather than waiting for connection close.
+    qc.releaseStreamSendState(streamId: sid)
     qc.streamTerminationHandler?(sid, error)
     return 0
 }

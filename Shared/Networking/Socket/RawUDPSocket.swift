@@ -37,10 +37,6 @@ nonisolated final class RawUDPSocket {
     /// `Data` copy handed to the handler.
     private static let receiveBufferSize = 65536
 
-    /// Kernel socket buffer size. macOS defaults (~9 KB) cap
-    /// high-bandwidth relays at that per-RTT.
-    private static let kernelSocketBufferSize: Int32 = 4 * 1024 * 1024
-
     // MARK: State
 
     private let stateLock = UnfairLock()
@@ -168,17 +164,10 @@ nonisolated final class RawUDPSocket {
             return .failure(.connectionFailed("inet_pton failed for \(ip)"))
         }
 
-        var fd = Darwin.socket(endpoint.family, SOCK_DGRAM, 0)
-        if fd < 0 {
-            let err = errno
-            if FDPressureRelief.isFDExhaustion(err), FDPressureRelief.relieve(for: .udp) {
-                // Relief evicted an idle UDP flow; retry once. Failure of
-                // the retry falls through with the latest errno.
-                fd = Darwin.socket(endpoint.family, SOCK_DGRAM, 0)
-            }
-            guard fd >= 0 else {
-                return .failure(.socketCreationFailed("socket() errno=\(errno)"))
-            }
+        let fd = SocketHelpers.makeSocket(family: endpoint.family, type: SOCK_DGRAM,
+                                          reliefPriority: .bestEffort)
+        guard fd >= 0 else {
+            return .failure(.socketCreationFailed("socket() errno=\(errno)"))
         }
 
         guard SocketHelpers.makeNonBlocking(fd) else {
@@ -205,8 +194,7 @@ nonisolated final class RawUDPSocket {
     /// Applies Darwin-specific UDP socket options.
     private func applyUDPSocketOptions(fd: Int32) {
         SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_NOSIGPIPE, value: 1)
-        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_SNDBUF, value: Self.kernelSocketBufferSize)
-        SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_RCVBUF, value: Self.kernelSocketBufferSize)
+        SocketHelpers.setHighThroughputBuffers(fd)
     }
 
     // MARK: - Receive
