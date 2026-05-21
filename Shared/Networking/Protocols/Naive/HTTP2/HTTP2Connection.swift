@@ -71,7 +71,8 @@ nonisolated class HTTP2Connection: NaiveTunnel {
 
     private var state: State = .idle
     /// Serial queue protecting all mutable state.
-    private let queue = DispatchQueue(label: "com.argsment.Anywhere.http2")
+    /// `.userInitiated`: data-plane queue, same priority as the rest of the chain.
+    private let queue = DispatchQueue(label: "com.argsment.Anywhere.http2", qos: .userInitiated)
 
     private var flowControl = HTTP2FlowControl()
     private var receiveBuffer = Data()

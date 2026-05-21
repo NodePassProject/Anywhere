@@ -25,10 +25,17 @@ class LWIPStack {
     // MARK: Properties
 
     /// Serial queue for all lwIP operations (lwIP is not thread-safe).
-    let lwipQueue = DispatchQueue(label: AWCore.Identifier.lwipQueue)
+    /// `.userInitiated` because lwIP is the data-plane hub every proxied flow
+    /// traverses; left at the default QoS it floats below the proxy-protocol
+    /// queues that feed and drain it (QUIC, the raw sockets, Sudoku — all
+    /// `.userInitiated`), so under load the scheduler starves the consumer
+    /// behind its own producers. Keeping the whole chain at one priority avoids
+    /// that inversion.
+    let lwipQueue = DispatchQueue(label: AWCore.Identifier.lwipQueue, qos: .userInitiated)
 
-    /// Queue for writing packets back to the tunnel.
-    let outputQueue = DispatchQueue(label: AWCore.Identifier.outputQueue)
+    /// Queue for writing packets back to the tunnel. `.userInitiated` to match
+    /// `lwipQueue` — this is the final hop delivering received bytes to the OS.
+    let outputQueue = DispatchQueue(label: AWCore.Identifier.outputQueue, qos: .userInitiated)
 
     var packetFlow: NEPacketTunnelFlow?
     var configuration: ProxyConfiguration?

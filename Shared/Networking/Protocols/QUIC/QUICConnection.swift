@@ -270,7 +270,7 @@ nonisolated class QUICConnection {
         self.datagramsEnabled = datagramsEnabled
         self.tuning = tuning
         self.transport = transport
-        self.queue = DispatchQueue(label: "com.argsment.Anywhere.quic")
+        self.queue = DispatchQueue(label: "com.argsment.Anywhere.quic", qos: .userInitiated)
         queue.setSpecific(key: Self.queueKey, value: true)
     }
 
@@ -350,20 +350,33 @@ nonisolated class QUICConnection {
         // Coalesce MAX_STREAM_DATA/MAX_DATA flushes: on bulk receive the
         // reader drains one ~1300-byte chunk at a time, each triggering an
         // ack.  Flushing a full writeToUDP cycle per ack burnt CPU on the
-        // hot path.  ngtcp2 queues the frame internally; schedule one
-        // coalesced flush per queue cycle and let the next organic write
-        // (or this async bounce) carry it out.
+        // hot path.  ngtcp2 queues the frame internally; one coalesced flush
+        // per queue cycle carries them all out.
         //
-        // Inside read_pkt: skip entirely — handleReceivedPacket's tail-flush
-        // already drains pending updates.  Outside read_pkt: schedule once
-        // via queue.async so a run of acks merges into one writeToUDP.
+        // Inside read_pkt: skip entirely — the post-read `scheduleFlush()`
+        // already drains pending updates.  Outside read_pkt: fold into the
+        // same coalesced flush so a run of acks merges into one writeToUDP.
         if inReadPkt { return }
+        scheduleFlush()
+    }
+
+    /// Coalesces tx flushes within a single synchronous queue burst. The first
+    /// caller arms one async drain; everything else that lands on `queue`
+    /// before it runs — the socket's `drainReads` delivering a burst of
+    /// packets, or a run of flow-control acks — folds into that one flush
+    /// rather than each doing its own `writeToUDP`. This is what keeps the
+    /// per-cycle drain cost from scaling 1:1 with received packets under bulk
+    /// transfer. The async always runs on the serial `queue` (so it executes
+    /// once the current burst returns) and no-ops cleanly if the connection
+    /// closed in the meantime (`writeToUDP`/`flushPendingWrites` guard `conn`).
+    private func scheduleFlush() {
         if flushScheduled { return }
         flushScheduled = true
         queue.async { [weak self] in
             guard let self else { return }
             self.flushScheduled = false
             self.writeToUDP()
+            self.flushPendingWrites()
         }
     }
 
@@ -1236,10 +1249,12 @@ nonisolated class QUICConnection {
             close(error: error)
             return
         }
-        writeToUDP()
-        // Incoming packets may contain MAX_STREAM_DATA, extending the send
-        // window.  Retry any writes that were blocked by flow control.
-        flushPendingWrites()
+        // Coalesce the post-read flush. The socket's `drainReads` delivers a
+        // burst of packets per wake-up, each landing here; scheduling one
+        // async flush folds the whole burst into a single writeToUDP +
+        // flushPendingWrites (the latter retries any FC-blocked writes the
+        // burst's MAX_STREAM_DATA just unblocked) instead of one per packet.
+        scheduleFlush()
     }
 
     fileprivate func writeToUDP() {
