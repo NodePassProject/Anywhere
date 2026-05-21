@@ -124,30 +124,40 @@ nonisolated final class DNSResolver {
         _ = resolveAll(host, forceFresh: forceFresh)
     }
 
-    /// Drops every cached entry. Call this when the physical network path
+    /// Re-resolves every cached hostname over the *current* physical network
+    /// path and overwrites each entry's IPs in place. Call this when the path
     /// changes — interface switch (Wi-Fi⇄cellular), Wi-Fi roam, or restore from
-    /// unavailable. Cached IPs were resolved against the *previous* network's
-    /// resolver and can be wrong on the new one: split-horizon/corporate DNS,
-    /// GeoDNS or CDN PoPs that differ per egress, or captive-portal answers
-    /// picked up on the way in. Without a flush the stale-fast path keeps
-    /// handing out those IPs for up to the full TTL, so connections
-    /// reestablished right after the change redial addresses that may no longer
-    /// route.
+    /// unavailable. The cached IPs were resolved against the *previous*
+    /// network's resolver and can be wrong on the new one: split-horizon/
+    /// corporate DNS, GeoDNS or CDN PoPs that differ per egress, or
+    /// captive-portal answers picked up on the way in.
     ///
-    /// Bumping the generation also voids any background refresh already in
-    /// flight (its `getaddrinfo` may have been issued on the network we're
-    /// leaving), so it can't quietly restore a flushed entry once it returns.
-    /// The next lookup for each host then resolves fresh over the new path.
-    func flush() {
-        let cleared: Int = lock.withWriteLock {
-            let count = cache.count
-            cache.removeAll(keepingCapacity: true)
-            inFlightRefreshes.removeAll(keepingCapacity: true)
+    /// Rather than dropping the entries outright — which forces the next
+    /// connection to each host to block on a cold synchronous lookup at the
+    /// very moment the app is reconnecting — we leave them in place to keep
+    /// serving the stale-fast path (the previous IPs still route far more often
+    /// than not, e.g. a proxy server's stable public IP) and refresh them in
+    /// the background. Each entry is overwritten with the answer from the new
+    /// path the instant it lands, so reconnecting flows never wait on DNS yet
+    /// converge onto fresh IPs within a single lookup.
+    ///
+    /// Bumping the generation voids any background refresh already in flight
+    /// (its `getaddrinfo` may have been issued on the network we're leaving) so
+    /// it can't commit an answer from the old path, and clearing
+    /// `inFlightRefreshes` lets the re-resolution below re-fire for the hosts
+    /// that were mid-refresh.
+    func refresh() {
+        let keys: [String] = lock.withWriteLock {
             generation &+= 1
-            return count
+            inFlightRefreshes.removeAll(keepingCapacity: true)
+            return Array(cache.keys)
         }
-        if cleared > 0 {
-            logger.info("[DNS] Flushed \(cleared) cached \(cleared == 1 ? "entry" : "entries") after network change")
+        guard !keys.isEmpty else { return }
+        logger.info("[DNS] Re-resolving \(keys.count) cached \(keys.count == 1 ? "host" : "hosts") after network change")
+        // The cache key is the already-lowercased hostname; getaddrinfo is
+        // case-insensitive, so it doubles as the resolution input.
+        for key in keys {
+            scheduleBackgroundRefresh(key: key, host: key)
         }
     }
 
@@ -155,7 +165,9 @@ nonisolated final class DNSResolver {
 
     /// Fires a background refresh for `key` if one isn't already in flight.
     /// The lock-guarded set ensures duplicate concurrent stale-cache hits for
-    /// the same hostname coalesce into one `getaddrinfo` call.
+    /// the same hostname coalesce into one `getaddrinfo` call. Shared by the
+    /// stale-fast path and ``refresh``: a network-change re-resolution that
+    /// races a stale-fast hit for the same host collapses into a single lookup.
     private func scheduleBackgroundRefresh(key: String, host: String) {
         let (shouldFire, scheduledGeneration): (Bool, UInt64) = lock.withWriteLock {
             if inFlightRefreshes.contains(key) { return (false, generation) }

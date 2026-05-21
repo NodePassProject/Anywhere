@@ -153,10 +153,11 @@ extension LWIPStack {
         invalidateOutboundState(configuration: configuration)
     }
 
-    /// Invalidates all outbound state — the cached DNS answers, the Vision mux,
-    /// QUIC/Hysteria/HTTP3/AnyTLS sessions, Shadowsocks UDP sessions, per-flow
-    /// UDP proxy connections, and every active TCP leg — while leaving the lwIP
-    /// netif, listeners, and timers running. Must be called on `lwipQueue`.
+    /// Re-resolves the cached DNS answers and invalidates all outbound
+    /// transport state — the Vision mux, QUIC/Hysteria/HTTP3/AnyTLS sessions,
+    /// Shadowsocks UDP sessions, per-flow UDP proxy connections, and every
+    /// active TCP leg — while leaving the lwIP netif, listeners, and timers
+    /// running. Must be called on `lwipQueue`.
     ///
     /// Shared by device-wake and network-path-change recovery: both face the
     /// same problem (the kernel's outbound sockets are bound to network state
@@ -168,10 +169,12 @@ extension LWIPStack {
     private func invalidateOutboundState(configuration: ProxyConfiguration) {
         // Cached DNS answers were resolved over the network path we're leaving
         // and may not route on the new one (GeoDNS/CDN locality, split-horizon
-        // DNS, captive-portal answers). Flush first so the rebuilt mux and every
-        // reconnecting flow resolves fresh over the new path instead of redialing
-        // stale IPs from the stale-fast cache.
-        DNSResolver.shared.flush()
+        // DNS, captive-portal answers). Re-resolve every cached host over the
+        // new path and overwrite its IPs in place: the rebuilt mux and every
+        // reconnecting flow keep dialing the still-warm previous IPs (almost
+        // always a server's stable public IP) without stalling on a cold
+        // lookup, then converge onto the fresh answers as they land.
+        DNSResolver.shared.refresh()
 
         muxManager?.closeAll()
         if Self.shouldUseVisionMux(configuration) {
