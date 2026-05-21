@@ -72,7 +72,7 @@ nonisolated final class AnyTLSClient {
         lock.lock()
         if closed {
             lock.unlock()
-            logger.warning("[AnyTLSClient] createStream rejected — client closed")
+            logger.debug("[AnyTLSClient] createStream rejected — client closed")
             completion(.failure(ProxyError.connectionFailed("AnyTLSClient closed")))
             return
         }
@@ -86,7 +86,7 @@ nonisolated final class AnyTLSClient {
             return
         }
         lock.unlock()
-        logger.info("[AnyTLSClient] createStream — pool empty, dialing fresh TLS session")
+        logger.debug("[AnyTLSClient] createStream — pool empty, dialing fresh TLS session")
 
         dialOut { [weak self] result in
             guard let self else {
@@ -95,14 +95,14 @@ nonisolated final class AnyTLSClient {
             }
             switch result {
             case .failure(let error):
-                logger.warning("[AnyTLSClient] dial failed: \(error.localizedDescription)")
+                logger.debug("[AnyTLSClient] dial failed: \(error.localizedDescription)")
                 completion(.failure(error))
             case .success(let connection):
                 self.lock.lock()
                 if self.closed {
                     self.lock.unlock()
                     connection.cancel()
-                    logger.warning("[AnyTLSClient] dial succeeded but client closed in flight — discarding")
+                    logger.debug("[AnyTLSClient] dial succeeded but client closed in flight — discarding")
                     completion(.failure(ProxyError.connectionFailed("AnyTLSClient closed")))
                     return
                 }
@@ -120,7 +120,7 @@ nonisolated final class AnyTLSClient {
                 }
                 self.activeSessions[ObjectIdentifier(session)] = session
                 self.lock.unlock()
-                logger.info("[AnyTLSClient] new session seq=\(seq) — running handshake")
+                logger.debug("[AnyTLSClient] new session seq=\(seq) — running handshake")
                 session.start()
                 self.dispatchOpenStream(on: session, completion: completion)
             }
@@ -147,7 +147,7 @@ nonisolated final class AnyTLSClient {
 
     private func dispatchOpenStream(on session: AnyTLSSession, completion: @escaping (Result<AnyTLSStream, Error>) -> Void) {
         guard let stream = session.openStream() else {
-            logger.warning("[AnyTLSClient] openStream failed on session seq=\(session.seq)")
+            logger.debug("[AnyTLSClient] openStream failed on session seq=\(session.seq)")
             completion(.failure(ProxyError.connectionFailed("Failed to open AnyTLS stream")))
             return
         }

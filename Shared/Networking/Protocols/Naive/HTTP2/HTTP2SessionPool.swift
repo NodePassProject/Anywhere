@@ -71,7 +71,7 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
                 self.lock.lock()
                 self.dedicatedSessions.removeValue(forKey: sessionID)
                 self.lock.unlock()
-                logger.info("[HTTP2Pool] Evicted dedicated session")
+                logger.debug("[HTTP2Pool] Evicted dedicated session")
             }
             session.queue.async {
                 let stream = session.createStream(destination: destination)
@@ -126,7 +126,7 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
         lock.lock()
         dedicatedSessions.removeValue(forKey: ObjectIdentifier(session))
         lock.unlock()
-        logger.info("[HTTP2Pool] Evicted session for \(key)")
+        logger.debug("[HTTP2Pool] Evicted session for \(key)")
     }
 
     /// Closes pooled and dedicated sessions on VPN tunnel teardown.

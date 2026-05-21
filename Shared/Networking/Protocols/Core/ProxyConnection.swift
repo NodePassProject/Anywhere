@@ -7,8 +7,6 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "Proxy")
-
 // MARK: - ProxyConnectionProtocol
 
 /// Defines the interface for all proxy connection types.

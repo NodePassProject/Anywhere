@@ -110,10 +110,10 @@ nonisolated final class AnyTLSSession {
         if paddingLen > 0 {
             prologue.append(Data(repeating: 0, count: paddingLen))
         }
-        logger.info("[AnyTLSSession] prologue \(prologue.count)B (hash=32 + lenHdr=2 + zeros=\(paddingLen)) padding-md5=\(padding.md5Hex)")
+        logger.debug("[AnyTLSSession] prologue \(prologue.count)B (hash=32 + lenHdr=2 + zeros=\(paddingLen)) padding-md5=\(padding.md5Hex)")
         inner.send(data: prologue) { [weak self] error in
             if let error {
-                logger.warning("[AnyTLSSession] prologue write failed: \(error.localizedDescription)")
+                logger.debug("[AnyTLSSession] prologue write failed: \(error.localizedDescription)")
                 self?.handleTransportFailure(error)
             } else {
                 logger.debug("[AnyTLSSession] prologue write completed")
@@ -143,7 +143,7 @@ nonisolated final class AnyTLSSession {
         lock.lock()
         if closed {
             lock.unlock()
-            logger.warning("[AnyTLSSession] openStream rejected — session closed")
+            logger.debug("[AnyTLSSession] openStream rejected — session closed")
             return nil
         }
         nextStreamID &+= 1
@@ -329,10 +329,10 @@ nonisolated final class AnyTLSSession {
             self?.handleInbound(data)
         } errorHandler: { [weak self] error in
             if let error {
-                logger.warning("[AnyTLSSession] inner transport error: \(error.localizedDescription)")
+                logger.debug("[AnyTLSSession] inner transport error: \(error.localizedDescription)")
                 self?.handleTransportFailure(error)
             } else {
-                logger.info("[AnyTLSSession] inner transport EOF")
+                logger.debug("[AnyTLSSession] inner transport EOF")
                 self?.handleTransportEOF()
             }
         }
@@ -379,7 +379,7 @@ nonisolated final class AnyTLSSession {
             lock.unlock()
             if !payload.isEmpty {
                 let msg = String(data: payload, encoding: .utf8) ?? "<binary>"
-                logger.warning("[AnyTLSSession] cmdSYNACK error sid=\(sid): \(msg)")
+                logger.debug("[AnyTLSSession] cmdSYNACK error sid=\(sid): \(msg)")
                 stream?.deliverClose(error: ProxyError.protocolError("AnyTLS remote: \(msg)"))
                 lock.withLock { streams[sid] = nil }
             } else {
@@ -400,20 +400,20 @@ nonisolated final class AnyTLSSession {
             let map = AnyTLSProtocol.decodeStringMap(payload)
             if let v = map["v"], let parsed = UInt8(v) {
                 lock.withLock { peerVersion = parsed }
-                logger.info("[AnyTLSSession] cmdServerSettings peerVersion=\(parsed) keys=\(Array(map.keys))")
+                logger.debug("[AnyTLSSession] cmdServerSettings peerVersion=\(parsed) keys=\(Array(map.keys))")
             } else {
                 logger.warning("[AnyTLSSession] cmdServerSettings missing or invalid v: \(map)")
             }
 
         case AnyTLSProtocol.cmdAlert:
             let msg = String(data: payload, encoding: .utf8) ?? "<binary>"
-            logger.warning("[AnyTLSSession] cmdAlert from server: \(msg)")
+            logger.debug("[AnyTLSSession] cmdAlert from server: \(msg)")
             close(reason: ProxyError.protocolError("AnyTLS alert: \(msg)"))
 
         case AnyTLSProtocol.cmdUpdatePaddingScheme:
             if let new = AnyTLSPaddingScheme.parse(payload) {
                 lock.withLock { padding = new }
-                logger.info("[AnyTLSSession] cmdUpdatePaddingScheme applied md5=\(new.md5Hex) stop=\(new.stop)")
+                logger.debug("[AnyTLSSession] cmdUpdatePaddingScheme applied md5=\(new.md5Hex) stop=\(new.stop)")
             } else {
                 logger.warning("[AnyTLSSession] cmdUpdatePaddingScheme: failed to parse payload (\(payload.count)B)")
             }
@@ -455,7 +455,7 @@ nonisolated final class AnyTLSSession {
         lock.unlock()
 
         let reasonText = reason.map { $0.localizedDescription } ?? "clean"
-        logger.info("[AnyTLSSession] close seq=\(seq) streams=\(liveStreams.count) reason=\(reasonText)")
+        logger.debug("[AnyTLSSession] close seq=\(seq) streams=\(liveStreams.count) reason=\(reasonText)")
         for stream in liveStreams {
             stream.deliverClose(error: reason)
         }

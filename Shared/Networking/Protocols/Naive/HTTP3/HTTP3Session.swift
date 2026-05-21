@@ -427,7 +427,7 @@ nonisolated class HTTP3Session: PoolableSession {
         poolIsStreamBlocked = true
         _poolLock.unlock()
 
-        logger.info("[HTTP3Session] Received GOAWAY, draining \(streams.count) active streams")
+        logger.debug("[HTTP3Session] Received GOAWAY, draining \(streams.count) active streams")
 
         // If no active streams remain, close immediately
         if streams.isEmpty {

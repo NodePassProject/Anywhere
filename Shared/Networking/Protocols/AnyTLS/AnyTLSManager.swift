@@ -47,7 +47,7 @@ nonisolated final class AnyTLSManager {
         guard
             case .anytls(let password, let ici, let it, let mis, _) = configuration.outbound
         else {
-            logger.warning("[AnyTLSManager] outbound is not .anytls — refusing to create client")
+            logger.debug("[AnyTLSManager] outbound is not .anytls — refusing to create client")
             return nil
         }
         let key = Key(host: configuration.serverAddress, port: configuration.serverPort, password: password)
@@ -66,7 +66,7 @@ nonisolated final class AnyTLSManager {
         )
         clients[key] = client
         lock.unlock()
-        logger.info("[AnyTLSManager] created client \(configuration.serverAddress):\(configuration.serverPort) ici=\(ici)s it=\(it)s mis=\(mis)")
+        logger.debug("[AnyTLSManager] created client \(configuration.serverAddress):\(configuration.serverPort) ici=\(ici)s it=\(it)s mis=\(mis)")
         return client
     }
 
@@ -79,7 +79,7 @@ nonisolated final class AnyTLSManager {
         clients.removeAll(keepingCapacity: false)
         lock.unlock()
         if !snapshot.isEmpty {
-            logger.info("[AnyTLSManager] closeAll(\(snapshot.count) clients)")
+            logger.debug("[AnyTLSManager] closeAll(\(snapshot.count) clients)")
         }
         for client in snapshot {
             client.closeAll()

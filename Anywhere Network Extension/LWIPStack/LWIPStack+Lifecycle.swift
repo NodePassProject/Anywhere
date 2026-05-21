@@ -24,7 +24,10 @@ extension LWIPStack {
         AnywhereLogger.logSink = { [weak self] message, level in
             let logLevel: LWIPStack.LogLevel
             switch level {
-            case .info: logLevel = .info
+            // `debug` is below `minimumSinkLevel`, so it never reaches the
+            // sink; map it defensively to the lowest user-visible bucket in
+            // case the floor is ever lowered.
+            case .debug, .info: logLevel = .info
             case .warning: logLevel = .warning
             case .error: logLevel = .error
             }

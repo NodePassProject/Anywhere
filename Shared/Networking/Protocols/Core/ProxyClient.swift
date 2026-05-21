@@ -7,8 +7,6 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "Proxy")
-
 /// Counts down `remaining` callbacks and fires `completion` when the last one
 /// arrives. Used to fan in async-teardown notifications from a `ProxyClient`'s
 /// raw socket plus its chain clients into a single completion.

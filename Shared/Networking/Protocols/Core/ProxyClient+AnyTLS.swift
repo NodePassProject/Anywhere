@@ -25,14 +25,14 @@ extension ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        logger.info("[AnyTLS] connect cmd=\(command) dest=\(destinationHost):\(destinationPort) initialData=\(initialData?.count ?? 0)B chained=\(tunnel != nil)")
+        logger.debug("[AnyTLS] connect cmd=\(command) dest=\(destinationHost):\(destinationPort) initialData=\(initialData?.count ?? 0)B chained=\(tunnel != nil)")
         guard case .anytls(let password, _, _, _, let tlsConfig) = configuration.outbound, !password.isEmpty else {
-            logger.warning("[AnyTLS] reject: password not set")
+            logger.debug("[AnyTLS] reject: password not set")
             completion(.failure(ProxyError.protocolError("AnyTLS password not set")))
             return
         }
         if command == .mux {
-            logger.warning("[AnyTLS] reject: mux not supported")
+            logger.debug("[AnyTLS] reject: mux not supported")
             completion(.failure(ProxyError.protocolError("Mux is not supported with AnyTLS")))
             return
         }
@@ -59,10 +59,10 @@ extension ProxyClient {
                 withExtendedLifetime(tlsClient) {
                     switch result {
                     case .success(let tlsConnection):
-                        logger.info("[AnyTLS] TLS handshake ok, version=\(tlsConnection.tlsVersion)")
+                        logger.debug("[AnyTLS] TLS handshake ok, version=\(tlsConnection.tlsVersion)")
                         dialCompletion(.success(TLSProxyConnection(tlsConnection: tlsConnection)))
                     case .failure(let error):
-                        logger.warning("[AnyTLS] TLS handshake failed: \(error.localizedDescription)")
+                        logger.debug("[AnyTLS] TLS handshake failed: \(error.localizedDescription)")
                         dialCompletion(.failure(error))
                     }
                 }
@@ -77,7 +77,7 @@ extension ProxyClient {
         }
 
         guard let client = AnyTLSManager.shared.client(for: configuration, dialOut: dialOut) else {
-            logger.warning("[AnyTLS] AnyTLSManager returned nil client (outbound type mismatch?)")
+            logger.debug("[AnyTLS] AnyTLSManager returned nil client (outbound type mismatch?)")
             completion(.failure(ProxyError.connectionFailed("Failed to acquire AnyTLS client")))
             return
         }
@@ -85,11 +85,11 @@ extension ProxyClient {
         client.createStream { result in
             switch result {
             case .failure(let error):
-                logger.warning("[AnyTLS] createStream failed: \(error.localizedDescription)")
+                logger.debug("[AnyTLS] createStream failed: \(error.localizedDescription)")
                 completion(.failure(error))
 
             case .success(let stream):
-                logger.info("[AnyTLS] stream opened sid=\(stream.sid) cmd=\(command)")
+                logger.debug("[AnyTLS] stream opened sid=\(stream.sid) cmd=\(command)")
                 switch command {
                 case .tcp:
                     // First cmdPSH on the stream is the destination address;
@@ -104,7 +104,7 @@ extension ProxyClient {
                     logger.debug("[AnyTLS] tcp bootstrap sid=\(stream.sid) bytes=\(bootstrap.count)")
                     stream.send(data: bootstrap) { error in
                         if let error {
-                            logger.warning("[AnyTLS] tcp bootstrap failed sid=\(stream.sid): \(error.localizedDescription)")
+                            logger.debug("[AnyTLS] tcp bootstrap failed sid=\(stream.sid): \(error.localizedDescription)")
                             stream.cancel()
                             completion(.failure(error))
                         } else {
@@ -125,7 +125,7 @@ extension ProxyClient {
                     logger.debug("[AnyTLS] uot bootstrap sid=\(stream.sid) bytes=\(bootstrap.count)")
                     stream.send(data: bootstrap) { error in
                         if let error {
-                            logger.warning("[AnyTLS] uot bootstrap failed sid=\(stream.sid): \(error.localizedDescription)")
+                            logger.debug("[AnyTLS] uot bootstrap failed sid=\(stream.sid): \(error.localizedDescription)")
                             stream.cancel()
                             completion(.failure(error))
                         } else {
