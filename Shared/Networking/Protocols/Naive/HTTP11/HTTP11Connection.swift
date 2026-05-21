@@ -37,7 +37,8 @@ nonisolated class HTTP11Connection: NaiveTunnel {
 
     private var connected = false
     /// Serial queue protecting all mutable state.
-    private let queue = DispatchQueue(label: "com.argsment.Anywhere.http11")
+    /// `.userInitiated`: data-plane queue, same priority as the rest of the chain.
+    private let queue = DispatchQueue(label: "com.argsment.Anywhere.http11", qos: .userInitiated)
 
     /// HTTP/1.1 CONNECT does not support NaiveProxy padding.
     private(set) var negotiatedPaddingType = NaivePaddingNegotiator.PaddingType.none

@@ -45,7 +45,8 @@ nonisolated class HTTP3Connection: NaiveTunnel {
     private let destination: String
 
     private var state: State = .idle
-    private let queue = DispatchQueue(label: "com.argsment.Anywhere.http3")
+    /// `.userInitiated`: data-plane queue, same priority as the rest of the chain.
+    private let queue = DispatchQueue(label: "com.argsment.Anywhere.http3", qos: .userInitiated)
 
     private var controlStreamId: Int64 = -1
     private var requestStreamId: Int64 = -1
