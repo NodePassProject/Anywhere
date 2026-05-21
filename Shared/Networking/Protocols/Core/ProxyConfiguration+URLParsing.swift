@@ -199,8 +199,8 @@ extension ProxyConfiguration {
         let rawUp = params["upmbps"].flatMap { Int($0) }
         let rawDown = params["downmbps"].flatMap { Int($0) }
         let congestionControl: HysteriaCongestionControl = (rawUp != nil || rawDown != nil) ? .brutal : .bbr
-        let uploadMbps = clampHysteriaUploadMbps(rawUp ?? HysteriaUploadMbpsDefault)
-        let downloadMbps = clampHysteriaDownloadMbps(rawDown ?? HysteriaDownloadMbpsDefault)
+        let uploadMbps = HysteriaCongestionControl.clampUploadMbps(rawUp ?? HysteriaCongestionControl.uploadMbpsDefault)
+        let downloadMbps = HysteriaCongestionControl.clampDownloadMbps(rawDown ?? HysteriaCongestionControl.downloadMbpsDefault)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",

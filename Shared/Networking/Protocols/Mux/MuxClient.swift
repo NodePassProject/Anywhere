@@ -125,7 +125,7 @@ nonisolated class MuxClient {
                 globalID: globalID
             )
 
-            let frame = encodeMuxFrame(metadata: metadata, payload: nil)
+            let frame = MuxFrame.encode(metadata: metadata, payload: nil)
             self.writeFrame(frame) { [weak self] writeError in
                 if let writeError {
                     self?.sessions.removeValue(forKey: sessionID)

@@ -16,12 +16,14 @@ extension ProxyClient {
 
     /// Whether the configured flow is a Vision variant.
     var isVisionFlow: Bool {
-        configuration.flow == Self.visionFlow || configuration.flow == Self.visionFlow + "-udp443"
+        guard case .vless(_, _, let flow, _, _, _, _) = configuration.outbound else { return false }
+        return flow == Self.visionFlow || flow == Self.visionFlow + "-udp443"
     }
 
     /// Whether UDP port 443 is allowed (only with the `-udp443` suffix).
     var allowUDP443: Bool {
-        configuration.flow == Self.visionFlow + "-udp443"
+        guard case .vless(_, _, let flow, _, _, _, _) = configuration.outbound else { return false }
+        return flow == Self.visionFlow + "-udp443"
     }
 
     // MARK: - VLESS protocol handshake
@@ -46,9 +48,15 @@ extension ProxyClient {
         // iOS < 26 we MUST refuse to dial. A silent downgrade would send
         // the plaintext request header — including UUID and destination —
         // to a server that expects the encrypted handshake.
+        let vlessEncryption: String
+        if case .vless(_, let encryption, _, _, _, _, _) = configuration.outbound {
+            vlessEncryption = encryption
+        } else {
+            vlessEncryption = "none"
+        }
         let encryptionConfig: VLESSEncryptionConfig?
         do {
-            encryptionConfig = try VLESSEncryptionConfig.parse(configuration.encryption)
+            encryptionConfig = try VLESSEncryptionConfig.parse(vlessEncryption)
         } catch {
             completion(.failure(ProxyError.protocolError(
                 "Invalid VLESS encryption: \(error.localizedDescription)"
@@ -117,10 +125,16 @@ extension ProxyClient {
         supportsVision: Bool,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        let vlessUUID: UUID
+        if case .vless(let u, _, _, _, _, _, _) = configuration.outbound {
+            vlessUUID = u
+        } else {
+            vlessUUID = configuration.id
+        }
         let isVision = supportsVision && isVisionFlow && (command == .tcp || command == .mux)
 
         let requestHeader = VLESSProtocol.encodeRequestHeader(
-            uuid: configuration.uuid,
+            uuid: vlessUUID,
             command: command,
             destinationAddress: destinationHost,
             destinationPort: destinationPort,
@@ -192,7 +206,13 @@ extension ProxyClient {
 
     /// Wraps a VLESS connection with the XTLS Vision layer.
     fileprivate func wrapWithVision(_ connection: ProxyConnection) -> VLESSVisionConnection {
-        let uuidBytes = configuration.uuid.uuid
+        let vlessUUID: UUID
+        if case .vless(let u, _, _, _, _, _, _) = configuration.outbound {
+            vlessUUID = u
+        } else {
+            vlessUUID = configuration.id
+        }
+        let uuidBytes = vlessUUID.uuid
         let uuidData = Data([
             uuidBytes.0, uuidBytes.1, uuidBytes.2, uuidBytes.3,
             uuidBytes.4, uuidBytes.5, uuidBytes.6, uuidBytes.7,

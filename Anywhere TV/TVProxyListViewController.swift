@@ -125,13 +125,15 @@ class TVProxyListViewController: UITableViewController {
         let configuration = configurations[indexPath.row]
         let isSelected = viewModel.selectedConfiguration?.id == configuration.id && viewModel.selectedChainId == nil
 
+        let vlessFlow: String?
+        if case .vless(_, _, let flow, _, _, _, _) = configuration.outbound { vlessFlow = flow } else { vlessFlow = nil }
         cell.configure(
             name: configuration.name,
             isSelected: isSelected,
             protocolName: configuration.outboundProtocol.name,
-            transport: configuration.outboundProtocol == .vless ? configuration.transport : nil,
-            security: configuration.security,
-            flow: configuration.flow
+            transport: configuration.outboundProtocol == .vless ? configuration.transportLayer.tag : nil,
+            security: configuration.securityLayer.tag,
+            flow: vlessFlow
         )
 
         applyLatencyAccessory(to: cell, result: viewModel.latencyResults[configuration.id])

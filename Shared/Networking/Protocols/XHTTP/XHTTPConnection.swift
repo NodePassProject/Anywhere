@@ -9,8 +9,6 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "XHTTP")
 
-let defaultUserAgent = ProxyUserAgent.chrome
-
 // MARK: - XHTTPConnection
 
 /// XHTTP connection implementing packet-up, stream-up, and stream-one modes.

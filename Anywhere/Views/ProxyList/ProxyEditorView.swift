@@ -58,8 +58,8 @@ struct ProxyEditorView: View {
     // Hysteria fields
     @State private var hysteriaPassword = ""
     @State private var hysteriaCC: HysteriaCongestionControl = .brutal
-    @State private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
-    @State private var hysteriaDownloadMbpsText = String(HysteriaDownloadMbpsDefault)
+    @State private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
+    @State private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
     @State private var hysteriaSNI = ""
 
     // Trojan fields
@@ -114,8 +114,8 @@ struct ProxyEditorView: View {
         if isHysteria {
             if hysteriaPassword.isEmpty { return false }
             if hysteriaCC == .brutal {
-                guard let up = Int(hysteriaUploadMbpsText), HysteriaUploadMbpsRange.contains(up),
-                      let down = Int(hysteriaDownloadMbpsText), HysteriaDownloadMbpsRange.contains(down)
+                guard let up = Int(hysteriaUploadMbpsText), HysteriaCongestionControl.uploadMbpsRange.contains(up),
+                      let down = Int(hysteriaDownloadMbpsText), HysteriaCongestionControl.downloadMbpsRange.contains(down)
                 else { return false }
             }
             return true
@@ -686,30 +686,36 @@ struct ProxyEditorView: View {
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
-        uuid = configuration.uuid.uuidString
-        encryption = configuration.encryption
-        transport = configuration.transport
-        flow = configuration.flow ?? ""
-        security = configuration.security
+        if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _, _, _) = configuration.outbound {
+            uuid = vlessUUID.uuidString
+            encryption = vlessEncryption
+            flow = vlessFlow ?? ""
+        } else {
+            uuid = configuration.id.uuidString
+            encryption = "none"
+            flow = ""
+        }
+        transport = configuration.transportLayer.tag
+        security = configuration.securityLayer.tag
 
-        if let ws = configuration.websocket {
+        if case .ws(let ws) = configuration.transportLayer {
             wsHost = ws.host
             wsPath = ws.path
         }
 
-        if let hu = configuration.httpUpgrade {
+        if case .httpUpgrade(let hu) = configuration.transportLayer {
             huHost = hu.host
             huPath = hu.path
         }
 
-        if let xhttp = configuration.xhttp {
+        if case .xhttp(let xhttp) = configuration.transportLayer {
             xhttpHost = xhttp.host
             xhttpPath = xhttp.path
             xhttpMode = xhttp.mode.rawValue
             xhttpExtra = Self.encodeExtra(from: xhttp)
         }
 
-        if let grpc = configuration.grpc {
+        if case .grpc(let grpc) = configuration.transportLayer {
             grpcServiceName = grpc.serviceName
             grpcAuthority = grpc.authority
             grpcMode = grpc.multiMode ? "multi" : "gun"
@@ -719,13 +725,13 @@ struct ProxyEditorView: View {
         muxEnabled = configuration.muxEnabled
         xudpEnabled = configuration.xudpEnabled
 
-        if let tls = configuration.tls {
+        if case .tls(let tls) = configuration.securityLayer {
             tlsSNI = tls.serverName
             tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
             fingerprint = tls.fingerprint
         }
 
-        if let reality = configuration.reality {
+        if case .reality(let reality) = configuration.securityLayer {
             realitySNI = reality.serverName
             realityPublicKey = reality.publicKey.base64URLEncodedString()
             realityShortId = reality.shortId.hexEncodedString()
@@ -822,7 +828,7 @@ struct ProxyEditorView: View {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
         if isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
-            parsedUUID = self.configuration?.uuid ?? UUID()
+            parsedUUID = self.configuration?.id ?? UUID()
         } else {
             guard let u = UUID(xrayString: uuid) else { return }
             parsedUUID = u
@@ -920,8 +926,8 @@ struct ProxyEditorView: View {
                 xudpEnabled: xudpEnabled
             )
         case .hysteria:
-            let up = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
-            let down = clampHysteriaDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaDownloadMbpsDefault)
+            let up = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
+            let down = HysteriaCongestionControl.clampDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault)
             let sni = hysteriaSNI.isEmpty ? bareAddress : hysteriaSNI
             outbound = .hysteria(
                 password: hysteriaPassword,
@@ -943,9 +949,14 @@ struct ProxyEditorView: View {
             // Pool-tuning knobs are not editable in the UI — preserve any
             // values the original config carried (URL/dict imports may set
             // them), or fall back to sing-anytls's defaults.
-            let ici = self.configuration?.anytlsIdleCheckInterval ?? 30
-            let it  = self.configuration?.anytlsIdleTimeout       ?? 30
-            let mis = self.configuration?.anytlsMinIdleSession    ?? 0
+            let ici: Int
+            let it: Int
+            let mis: Int
+            if let existing = self.configuration?.outbound, case .anytls(_, let c, let t, let m, _) = existing {
+                ici = c; it = t; mis = m
+            } else {
+                ici = 30; it = 30; mis = 0
+            }
             outbound = .anytls(
                 password: anytlsPassword,
                 idleCheckInterval: ici,

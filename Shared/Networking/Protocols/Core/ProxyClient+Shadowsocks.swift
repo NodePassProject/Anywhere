@@ -86,12 +86,11 @@ extension ProxyClient {
         destinationHost: String,
         destinationPort: UInt16
     ) -> Result<ProxyConnection, Error> {
-        guard let method = configuration.ssMethod,
-              let cipher = ShadowsocksCipher(method: method) else {
-            return .failure(ProxyError.protocolError("Invalid Shadowsocks method: \(configuration.ssMethod ?? "nil")"))
-        }
-        guard let password = configuration.ssPassword else {
+        guard case .shadowsocks(let password, let method) = configuration.outbound else {
             return .failure(ProxyError.protocolError("Shadowsocks password not set"))
+        }
+        guard let cipher = ShadowsocksCipher(method: method) else {
+            return .failure(ProxyError.protocolError("Invalid Shadowsocks method: \(method)"))
         }
 
         if cipher.isSS2022 {

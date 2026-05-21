@@ -668,7 +668,7 @@ nonisolated class QUICConnection {
             // may have rotated. Without this, one bad ticket produces a
             // permanent HANDSHAKE_TIMEOUT loop across every future session.
             if self.state != .connected {
-                invalidateCachedSessionTicket(serverName: self.serverName, alpn: self.alpn)
+                QUICSessionTicketCache.invalidate(serverName: self.serverName, alpn: self.alpn)
             }
             self.retransmitTimer?.cancel()
             self.retransmitTimer = nil
@@ -676,7 +676,7 @@ nonisolated class QUICConnection {
             // `conn->cc` — trampolines fired after this point would otherwise
             // look up a dangling key.
             if let key = self.brutalCCKey {
-                brutalRegistryRemove(cc: key)
+                BrutalCongestionControl.unregister(cc: key)
                 self.brutalCCKey = nil
                 self.brutalCC = nil
             }
@@ -1188,7 +1188,7 @@ nonisolated class QUICConnection {
         if case .brutal(let initialBps) = tuning.cc {
             let brutal = BrutalCongestionControl(initialBps: initialBps)
             if let ccKey = ngtcp2_swift_install_brutal(connPtr) {
-                brutalRegistryInstall(cc: ccKey, brutal: brutal)
+                BrutalCongestionControl.register(brutal, for: ccKey)
                 self.brutalCC = brutal
                 self.brutalCCKey = ccKey
             }
@@ -1217,7 +1217,7 @@ nonisolated class QUICConnection {
         queue.async { [weak self] in
             guard let self, let conn = self.conn else { return }
             if let key = self.brutalCCKey {
-                brutalRegistryRemove(cc: key)
+                BrutalCongestionControl.unregister(cc: key)
                 self.brutalCCKey = nil
                 self.brutalCC = nil
             }

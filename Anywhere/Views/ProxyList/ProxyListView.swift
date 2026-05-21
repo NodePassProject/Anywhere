@@ -227,14 +227,14 @@ struct ProxyListView: View {
                         Text(configuration.outboundProtocol.name)
                         if configuration.outboundProtocol == .vless {
                             Text("·")
-                            Text(configuration.transport.uppercased())
+                            Text(configuration.transportLayer.tag.uppercased())
                         }
-                        let security = configuration.security.uppercased()
+                        let security = configuration.securityLayer.tag.uppercased()
                         if security != "NONE" {
                             Text("·")
                             Text(security)
                         }
-                        if let flow = configuration.flow, flow.uppercased().contains("VISION") {
+                        if case .vless(_, _, let flow?, _, _, _, _) = configuration.outbound, flow.uppercased().contains("VISION") {
                             Text("·")
                             Text("Vision")
                         }

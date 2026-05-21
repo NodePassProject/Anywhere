@@ -363,14 +363,16 @@ class TVDemoProxyListViewController: UITableViewController {
         let cell = tableView.dequeueReusableCell(withIdentifier: TVProxyCell.reuseIdentifier, for: indexPath) as! TVProxyCell
         let config = configs(for: indexPath.section)[indexPath.row]
         let isSelected = config.id == selectedId
+        let vlessFlow: String?
+        if case .vless(_, _, let flow, _, _, _, _) = config.outbound { vlessFlow = flow } else { vlessFlow = nil }
 
         cell.configure(
             name: config.name,
             isSelected: isSelected,
             protocolName: config.outboundProtocol.name,
-            transport: config.outboundProtocol == .vless ? config.transport : nil,
-            security: config.security,
-            flow: config.flow
+            transport: config.outboundProtocol == .vless ? config.transportLayer.tag : nil,
+            security: config.securityLayer.tag,
+            flow: vlessFlow
         )
 
         // Latency accessory

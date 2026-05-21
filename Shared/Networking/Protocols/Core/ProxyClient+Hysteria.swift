@@ -17,7 +17,7 @@ extension ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard let password = configuration.hysteriaPassword else {
+        guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni) = configuration.outbound else {
             completion(.failure(ProxyError.protocolError("Hysteria password not set")))
             return
         }
@@ -26,10 +26,10 @@ extension ProxyClient {
             proxyHost: configuration.serverAddress,
             proxyPort: configuration.serverPort,
             password: password,
-            sni: configuration.hysteriaSNI ?? configuration.serverAddress,
-            congestionControl: configuration.hysteriaCongestionControl ?? .brutal,
-            uploadMbps: configuration.hysteriaUploadMbps ?? HysteriaUploadMbpsDefault,
-            downloadMbps: configuration.hysteriaDownloadMbps ?? 0
+            sni: sni,
+            congestionControl: congestionControl,
+            uploadMbps: uploadMbps,
+            downloadMbps: downloadMbps
         )
 
         // RFC 3986 §3.2.2: IPv6 literals must be bracketed.

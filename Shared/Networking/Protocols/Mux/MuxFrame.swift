@@ -208,29 +208,31 @@ struct MuxFrameMetadata {
 
 // MARK: - Frame Encoding
 
-/// Encodes a complete mux frame (metadata length + metadata + optional payload).
-func encodeMuxFrame(metadata: MuxFrameMetadata, payload: Data?) -> Data {
-    let metaBytes = metadata.encode()
-    let metaLen = UInt16(metaBytes.count)
+enum MuxFrame {
+    /// Encodes a complete mux frame (metadata length + metadata + optional payload).
+    static func encode(metadata: MuxFrameMetadata, payload: Data?) -> Data {
+        let metaBytes = metadata.encode()
+        let metaLen = UInt16(metaBytes.count)
 
-    var frame = Data(capacity: 2 + metaBytes.count + (payload != nil ? 2 + payload!.count : 0))
+        var frame = Data(capacity: 2 + metaBytes.count + (payload != nil ? 2 + payload!.count : 0))
 
-    // Metadata length (2B big-endian)
-    frame.append(UInt8(metaLen >> 8))
-    frame.append(UInt8(metaLen & 0xFF))
+        // Metadata length (2B big-endian)
+        frame.append(UInt8(metaLen >> 8))
+        frame.append(UInt8(metaLen & 0xFF))
 
-    // Metadata
-    frame.append(metaBytes)
+        // Metadata
+        frame.append(metaBytes)
 
-    // Payload (if HasData flag set)
-    if let payload, metadata.option.contains(.data) {
-        let payloadLen = UInt16(payload.count)
-        frame.append(UInt8(payloadLen >> 8))
-        frame.append(UInt8(payloadLen & 0xFF))
-        frame.append(payload)
+        // Payload (if HasData flag set)
+        if let payload, metadata.option.contains(.data) {
+            let payloadLen = UInt16(payload.count)
+            frame.append(UInt8(payloadLen >> 8))
+            frame.append(UInt8(payloadLen & 0xFF))
+            frame.append(payload)
+        }
+
+        return frame
     }
-
-    return frame
 }
 
 // MARK: - Streaming Frame Parser

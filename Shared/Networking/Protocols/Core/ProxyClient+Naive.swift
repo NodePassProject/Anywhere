@@ -22,18 +22,20 @@ extension ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let scheme: NaiveConfiguration.NaiveScheme
-        switch configuration.outboundProtocol {
-        case .http11: scheme = .http11
-        case .http2:  scheme = .http2
-        case .http3:  scheme = .http3
-        default:      scheme = .http2
+        let username: String?
+        let password: String?
+        switch configuration.outbound {
+        case .http11(let u, let p): scheme = .http11; username = u; password = p
+        case .http2(let u, let p):  scheme = .http2;  username = u; password = p
+        case .http3(let u, let p):  scheme = .http3;  username = u; password = p
+        default:                    scheme = .http2;  username = nil; password = nil
         }
 
         let naiveConfig = NaiveConfiguration(
             proxyHost: configuration.serverAddress,
             proxyPort: configuration.serverPort,
-            username: configuration.activeUsername,
-            password: configuration.activePassword,
+            username: username,
+            password: password,
             sni: nil,
             scheme: scheme
         )

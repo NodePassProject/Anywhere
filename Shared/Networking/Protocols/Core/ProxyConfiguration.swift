@@ -161,35 +161,6 @@ enum Outbound: Hashable {
     case http3(username: String, password: String)
 }
 
-/// Congestion controller for `.hysteria`. `brutal` paces each direction at a
-/// fixed user-configured rate; `bbr` lets the connection adapt and asks the
-/// server to run its own bandwidth detection.
-enum HysteriaCongestionControl: String, Codable, Hashable, CaseIterable {
-    case brutal
-    case bbr
-
-    var displayName: String {
-        switch self {
-        case .brutal: return "Brutal"
-        case .bbr: return "BBR"
-        }
-    }
-}
-
-/// Clamps an integer to the Mbit/s range used by `.hysteria`. Applied at every
-/// construction boundary so the associated values are always valid regardless
-/// of source (URL, dict, Clash, legacy Codable without the keys).
-func clampHysteriaUploadMbps(_ raw: Int) -> Int {
-    max(HysteriaUploadMbpsRange.lowerBound, min(HysteriaUploadMbpsRange.upperBound, raw))
-}
-func clampHysteriaDownloadMbps(_ raw: Int) -> Int {
-    max(HysteriaDownloadMbpsRange.lowerBound, min(HysteriaDownloadMbpsRange.upperBound, raw))
-}
-let HysteriaUploadMbpsRange: ClosedRange<Int> = 0...1000
-let HysteriaUploadMbpsDefault: Int = 20
-let HysteriaDownloadMbpsRange: ClosedRange<Int> = 0...1000
-let HysteriaDownloadMbpsDefault: Int = 50
-
 // MARK: - Transport Layer Configuration
 
 /// Type-safe transport layer (mutually exclusive).
@@ -200,6 +171,17 @@ enum TransportLayer: Hashable {
     case httpUpgrade(HTTPUpgradeConfiguration)
     case grpc(GRPCConfiguration)
     case xhttp(XHTTPConfiguration)
+
+    /// Wire tag used in the flat JSON schema and `vless://` query params.
+    var tag: String {
+        switch self {
+        case .tcp:          "tcp"
+        case .ws:           "ws"
+        case .httpUpgrade:  "httpupgrade"
+        case .grpc:         "grpc"
+        case .xhttp:        "xhttp"
+        }
+    }
 }
 
 // MARK: - Security Layer Configuration
@@ -210,6 +192,15 @@ enum SecurityLayer: Hashable {
     case none
     case tls(TLSConfiguration)
     case reality(RealityConfiguration)
+
+    /// Wire tag used in the flat JSON schema and `vless://` query params.
+    var tag: String {
+        switch self {
+        case .none:     "none"
+        case .tls:      "tls"
+        case .reality:  "reality"
+        }
+    }
 }
 
 // MARK: - ProxyConfiguration
@@ -238,6 +229,24 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     /// The pre-resolved IP if available, otherwise `serverAddress`.
     /// Used by opt-in first-hop dials (for example latency testing) and logging.
     var connectAddress: String { resolvedIP ?? serverAddress }
+
+    /// Protocol discriminator derived from `outbound`. Use this for type
+    /// checks and to reach ``OutboundProtocol``'s behaviour (`isNaive`,
+    /// `supportsMux`, …); pattern-match on `outbound` for the payload.
+    var outboundProtocol: OutboundProtocol {
+        switch outbound {
+        case .vless:        .vless
+        case .hysteria:     .hysteria
+        case .trojan:       .trojan
+        case .anytls:       .anytls
+        case .shadowsocks:  .shadowsocks
+        case .socks5:       .socks5
+        case .sudoku:       .sudoku
+        case .http11:       .http11
+        case .http2:        .http2
+        case .http3:        .http3
+        }
+    }
 
     // MARK: - VLESS-specific computed accessors
     //
@@ -305,7 +314,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         chain == other.chain
     }
 
-    // MARK: - Backward-Compatible Codable
+    // MARK: - Codable
 
     private enum CodingKeys: String, CodingKey {
         case id, name, serverAddress, serverPort, resolvedIP, subscriptionId
@@ -319,19 +328,15 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case ssPassword, ssMethod
         case socks5Username, socks5Password
         case sudoku
-        case sudokuKey, sudokuAEADMethod, sudokuPaddingMin, sudokuPaddingMax
-        case sudokuASCIIMode, sudokuCustomTable, sudokuCustomTables
-        case sudokuEnablePureDownlink, sudokuHTTPMask
         case http11Username, http11Password
         case http2Username, http2Password
         case http3Username, http3Password
         case chain
     }
 
-    /// Custom decoder. Legacy on-disk JSON stored transport/security/mux/xudp
-    /// at the top level; we now fold those into the `.vless` case and
-    /// Hysteria's SNI into `.hysteria`, discarding any fields that appear on
-    /// outbounds that no longer support them (Shadowsocks/SOCKS5 TLS, etc.).
+    /// Custom decoder. The on-disk JSON keeps transport/security/mux/xudp at
+    /// the top level; we fold those into the `.vless` case's associated values
+    /// and read every other outbound's settings from its own keys.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
@@ -383,36 +388,28 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             )
 
         case .hysteria:
-            // Older builds stashed SNI inside a top-level TLSConfiguration
-            // blob; read from either the dedicated key or the legacy blob,
-            // and fall back to `serverAddress` so the SNI is always populated.
-            let legacySNI: String? = {
-                guard let legacyTLS = try? container.decodeIfPresent(TLSConfiguration.self, forKey: .tls) else { return nil }
-                return legacyTLS.serverName
-            }()
-            let explicitSNI = try container.decodeIfPresent(String.self, forKey: .hysteriaSNI) ?? legacySNI
-            // Configs written before the congestion-control option default to
-            // Brutal with no explicit download cap, preserving their prior wire
-            // behaviour (Brutal uplink, server-driven downlink).
+            // Absent congestion-control / cap keys default to Brutal uplink
+            // with a server-driven downlink. SNI falls back to `serverAddress`
+            // so it is always populated.
             let cc = try container.decodeIfPresent(HysteriaCongestionControl.self, forKey: .hysteriaCongestionControl) ?? .brutal
             let rawUp = try container.decodeIfPresent(Int.self, forKey: .hysteriaUploadMbps)
-                ?? HysteriaUploadMbpsDefault
+                ?? HysteriaCongestionControl.uploadMbpsDefault
             let rawDown = try container.decodeIfPresent(Int.self, forKey: .hysteriaDownloadMbps) ?? 0
+            let explicitSNI = try container.decodeIfPresent(String.self, forKey: .hysteriaSNI)
             outbound = .hysteria(
                 password: try container.decodeIfPresent(String.self, forKey: .hysteriaPassword) ?? "",
                 congestionControl: cc,
-                uploadMbps: clampHysteriaUploadMbps(rawUp),
-                downloadMbps: clampHysteriaDownloadMbps(rawDown),
+                uploadMbps: HysteriaCongestionControl.clampUploadMbps(rawUp),
+                downloadMbps: HysteriaCongestionControl.clampDownloadMbps(rawDown),
                 sni: (explicitSNI?.isEmpty == false ? explicitSNI! : serverAddress)
             )
 
         case .trojan:
             let password = try container.decodeIfPresent(String.self, forKey: .trojanPassword) ?? ""
             // Trojan TLS is mandatory; fall back to an SNI=serverAddress default
-            // so legacy/partial configs still decode to a usable outbound.
-            let trojanTLS = try container.decodeIfPresent(TLSConfiguration.self, forKey: .trojanTLS)
-            let legacyTLS = try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)
-            let tls = trojanTLS ?? legacyTLS ?? TLSConfiguration(serverName: serverAddress)
+            // so partial configs still decode to a usable outbound.
+            let tls = try container.decodeIfPresent(TLSConfiguration.self, forKey: .trojanTLS)
+                ?? TLSConfiguration(serverName: serverAddress)
             outbound = .trojan(password: password, tls: tls)
 
         case .anytls:
@@ -422,9 +419,8 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             let ici = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleCheckInterval) ?? 30
             let it  = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleTimeout) ?? 30
             let mis = try container.decodeIfPresent(Int.self, forKey: .anytlsMinIdleSession) ?? 0
-            let anytlsTLS = try container.decodeIfPresent(TLSConfiguration.self, forKey: .anytlsTLS)
-            let legacyTLS = try container.decodeIfPresent(TLSConfiguration.self, forKey: .tls)
-            let tls = anytlsTLS ?? legacyTLS ?? TLSConfiguration(serverName: serverAddress)
+            let tls = try container.decodeIfPresent(TLSConfiguration.self, forKey: .anytlsTLS)
+                ?? TLSConfiguration(serverName: serverAddress)
             outbound = .anytls(
                 password: password,
                 idleCheckInterval: ici,
@@ -444,36 +440,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 password: try container.decodeIfPresent(String.self, forKey: .socks5Password)
             )
         case .sudoku:
-            if let configuration = try container.decodeIfPresent(SudokuConfiguration.self, forKey: .sudoku) {
-                outbound = .sudoku(configuration)
-            } else {
-                let aead = SudokuAEADMethod(
-                    rawValue: try container.decodeIfPresent(String.self, forKey: .sudokuAEADMethod)
-                        ?? SudokuAEADMethod.chacha20Poly1305.rawValue
-                ) ?? .chacha20Poly1305
-                let asciiMode = SudokuASCIIMode(
-                    normalized: try container.decodeIfPresent(String.self, forKey: .sudokuASCIIMode)
-                        ?? SudokuASCIIMode.preferEntropy.rawValue
-                ) ?? .preferEntropy
-                let httpMask = try container.decodeIfPresent(SudokuHTTPMaskConfiguration.self, forKey: .sudokuHTTPMask) ?? .init()
-                let legacyCustomTable = try container.decodeIfPresent(String.self, forKey: .sudokuCustomTable) ?? ""
-                let decodedCustomTables = try container.decodeIfPresent([String].self, forKey: .sudokuCustomTables)
-                let customTables = SudokuConfiguration.normalizeCustomTables(
-                    decodedCustomTables ?? [],
-                    legacy: legacyCustomTable,
-                    legacyFallback: true
-                )
-                outbound = .sudoku(SudokuConfiguration(
-                    key: try container.decodeIfPresent(String.self, forKey: .sudokuKey) ?? "",
-                    aeadMethod: aead,
-                    paddingMin: try container.decodeIfPresent(Int.self, forKey: .sudokuPaddingMin) ?? 5,
-                    paddingMax: try container.decodeIfPresent(Int.self, forKey: .sudokuPaddingMax) ?? 15,
-                    asciiMode: asciiMode,
-                    customTables: customTables,
-                    enablePureDownlink: try container.decodeIfPresent(Bool.self, forKey: .sudokuEnablePureDownlink) ?? true,
-                    httpMask: httpMask
-                ))
-            }
+            outbound = .sudoku(try container.decode(SudokuConfiguration.self, forKey: .sudoku))
         case .http11:
             outbound = .http11(
                 username: try container.decodeIfPresent(String.self, forKey: .http11Username) ?? "",
@@ -494,7 +461,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
     }
 
-    /// Custom encoder that flattens enums back to legacy JSON keys for backward compatibility.
+    /// Custom encoder that flattens the `Outbound` enum to the flat JSON schema.
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
 
@@ -516,7 +483,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(encryption, forKey: .encryption)
             try container.encodeIfPresent(flow, forKey: .flow)
 
-            try container.encode(transportString(for: transport), forKey: .transport)
+            try container.encode(transport.tag, forKey: .transport)
             switch transport {
             case .tcp: break
             case .ws(let config): try container.encode(config, forKey: .websocket)
@@ -525,7 +492,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             case .xhttp(let config): try container.encode(config, forKey: .xhttp)
             }
 
-            try container.encode(securityString(for: security), forKey: .security)
+            try container.encode(security.tag, forKey: .security)
             switch security {
             case .none: break
             case .tls(let config): try container.encode(config, forKey: .tls)
@@ -570,14 +537,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(configuration, forKey: .sudoku)
-            try container.encode(configuration.key, forKey: .sudokuKey)
-            try container.encode(configuration.aeadMethod.rawValue, forKey: .sudokuAEADMethod)
-            try container.encode(configuration.paddingMin, forKey: .sudokuPaddingMin)
-            try container.encode(configuration.paddingMax, forKey: .sudokuPaddingMax)
-            try container.encode(configuration.asciiMode.rawValue, forKey: .sudokuASCIIMode)
-            try container.encode(configuration.customTables, forKey: .sudokuCustomTables)
-            try container.encode(configuration.enablePureDownlink, forKey: .sudokuEnablePureDownlink)
-            try container.encode(configuration.httpMask, forKey: .sudokuHTTPMask)
         case .http11(let username, let password):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
@@ -596,253 +555,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         }
 
         try container.encodeIfPresent(chain, forKey: .chain)
-    }
-
-    // Serialize a transport/security layer to the legacy string tag used in
-    // URL query params and the flat JSON schema.
-    private func transportString(for layer: TransportLayer) -> String {
-        switch layer {
-        case .tcp:          "tcp"
-        case .ws:           "ws"
-        case .httpUpgrade:  "httpupgrade"
-        case .grpc:         "grpc"
-        case .xhttp:        "xhttp"
-        }
-    }
-    private func securityString(for layer: SecurityLayer) -> String {
-        switch layer {
-        case .none:     "none"
-        case .tls:      "tls"
-        case .reality:  "reality"
-        }
-    }
-}
-
-// MARK: - Compatibility Bridges
-//
-// Computed properties that expose the old flat-field API. Consumers that only
-// *read* individual fields can continue to use these without changes.
-
-extension ProxyConfiguration {
-
-    /// Protocol type discriminator.
-    var outboundProtocol: OutboundProtocol {
-        switch outbound {
-        case .vless:        .vless
-        case .hysteria:     .hysteria
-        case .trojan:       .trojan
-        case .anytls:       .anytls
-        case .shadowsocks:  .shadowsocks
-        case .socks5:       .socks5
-        case .sudoku:       .sudoku
-        case .http11:       .http11
-        case .http2:        .http2
-        case .http3:        .http3
-        }
-    }
-
-    /// VLESS UUID (returns `id` as stable fallback for non-VLESS protocols).
-    var uuid: UUID {
-        if case .vless(let uuid, _, _, _, _, _, _) = outbound { return uuid }
-        return id
-    }
-
-    /// Encryption type (always `"none"` for non-VLESS).
-    var encryption: String {
-        if case .vless(_, let encryption, _, _, _, _, _) = outbound { return encryption }
-        return "none"
-    }
-
-    /// VLESS flow (e.g. `"xtls-rprx-vision"`). `nil` for non-VLESS.
-    var flow: String? {
-        if case .vless(_, _, let flow, _, _, _, _) = outbound { return flow }
-        return nil
-    }
-
-    /// Hysteria password. `nil` for non-Hysteria.
-    var hysteriaPassword: String? {
-        if case .hysteria(let password, _, _, _, _) = outbound { return password }
-        return nil
-    }
-
-    /// Selected congestion controller. `nil` for non-Hysteria.
-    var hysteriaCongestionControl: HysteriaCongestionControl? {
-        if case .hysteria(_, let cc, _, _, _) = outbound { return cc }
-        return nil
-    }
-
-    /// Client's declared upload bandwidth (Mbit/s) for Hysteria Brutal CC.
-    /// `nil` for non-Hysteria.
-    var hysteriaUploadMbps: Int? {
-        if case .hysteria(_, _, let mbps, _, _) = outbound { return mbps }
-        return nil
-    }
-
-    /// Client's declared download bandwidth (Mbit/s) for Hysteria Brutal CC.
-    /// `nil` for non-Hysteria.
-    var hysteriaDownloadMbps: Int? {
-        if case .hysteria(_, _, _, let mbps, _) = outbound { return mbps }
-        return nil
-    }
-
-    /// SNI sent on the wire for Hysteria's internal TLS handshake.
-    /// Always populated for Hysteria (defaults to `serverAddress`); `nil`
-    /// for non-Hysteria outbounds.
-    var hysteriaSNI: String? {
-        if case .hysteria(_, _, _, _, let sni) = outbound { return sni }
-        return nil
-    }
-
-    /// Trojan password. `nil` for non-Trojan.
-    var trojanPassword: String? {
-        if case .trojan(let password, _) = outbound { return password }
-        return nil
-    }
-
-    /// Trojan's mandatory TLS configuration. `nil` for non-Trojan.
-    var trojanTLS: TLSConfiguration? {
-        if case .trojan(_, let tls) = outbound { return tls }
-        return nil
-    }
-
-    /// AnyTLS password. `nil` for non-AnyTLS.
-    var anytlsPassword: String? {
-        if case .anytls(let password, _, _, _, _) = outbound { return password }
-        return nil
-    }
-
-    /// Idle session check interval in seconds (sing-anytls clamps to ≥30).
-    var anytlsIdleCheckInterval: Int? {
-        if case .anytls(_, let v, _, _, _) = outbound { return v }
-        return nil
-    }
-
-    /// Idle session timeout in seconds (sing-anytls clamps to ≥30).
-    var anytlsIdleTimeout: Int? {
-        if case .anytls(_, _, let v, _, _) = outbound { return v }
-        return nil
-    }
-
-    /// Minimum number of warm idle sessions to keep in the pool.
-    var anytlsMinIdleSession: Int? {
-        if case .anytls(_, _, _, let v, _) = outbound { return v }
-        return nil
-    }
-
-    /// AnyTLS's mandatory TLS configuration. `nil` for non-AnyTLS.
-    var anytlsTLS: TLSConfiguration? {
-        if case .anytls(_, _, _, _, let tls) = outbound { return tls }
-        return nil
-    }
-
-    /// Shadowsocks password. `nil` for non-Shadowsocks.
-    var ssPassword: String? {
-        if case .shadowsocks(let password, _) = outbound { return password }
-        return nil
-    }
-
-    /// Shadowsocks method. `nil` for non-Shadowsocks.
-    var ssMethod: String? {
-        if case .shadowsocks(_, let method) = outbound { return method }
-        return nil
-    }
-
-    /// SOCKS5 username. `nil` for non-SOCKS5.
-    var socks5Username: String? {
-        if case .socks5(let username, _) = outbound { return username }
-        return nil
-    }
-
-    /// SOCKS5 password. `nil` for non-SOCKS5.
-    var socks5Password: String? {
-        if case .socks5(_, let password) = outbound { return password }
-        return nil
-    }
-
-    /// Sudoku configuration. `nil` for non-Sudoku.
-    var sudoku: SudokuConfiguration? {
-        if case .sudoku(let configuration) = outbound { return configuration }
-        return nil
-    }
-
-    /// Username for the active protocol, or `nil` if not applicable.
-    var activeUsername: String? {
-        switch outbound {
-        case .socks5(let u, _): u
-        case .sudoku: nil
-        case .http11(let u, _): u
-        case .http2(let u, _):  u
-        case .http3(let u, _):  u
-        default: nil
-        }
-    }
-
-    /// Password for the active protocol, or `nil` if not applicable.
-    var activePassword: String? {
-        switch outbound {
-        case .socks5(_, let p): p
-        case .sudoku: nil
-        case .http11(_, let p): p
-        case .http2(_, let p):  p
-        case .http3(_, let p):  p
-        default: nil
-        }
-    }
-
-    /// Transport type string.
-    var transport: String {
-        switch transportLayer {
-        case .tcp:          "tcp"
-        case .ws:           "ws"
-        case .httpUpgrade:  "httpupgrade"
-        case .grpc:         "grpc"
-        case .xhttp:        "xhttp"
-        }
-    }
-
-    /// Security type string.
-    var security: String {
-        switch securityLayer {
-        case .none:     "none"
-        case .tls:      "tls"
-        case .reality:  "reality"
-        }
-    }
-
-    /// TLS configuration, if active.
-    var tls: TLSConfiguration? {
-        if case .tls(let config) = securityLayer { return config }
-        return nil
-    }
-
-    /// Reality configuration, if active.
-    var reality: RealityConfiguration? {
-        if case .reality(let config) = securityLayer { return config }
-        return nil
-    }
-
-    /// WebSocket configuration, if active.
-    var websocket: WebSocketConfiguration? {
-        if case .ws(let config) = transportLayer { return config }
-        return nil
-    }
-
-    /// HTTP upgrade configuration, if active.
-    var httpUpgrade: HTTPUpgradeConfiguration? {
-        if case .httpUpgrade(let config) = transportLayer { return config }
-        return nil
-    }
-    
-    /// gRPC configuration, if active.
-    var grpc: GRPCConfiguration? {
-        if case .grpc(let config) = transportLayer { return config }
-        return nil
-    }
-
-    /// XHTTP configuration, if active.
-    var xhttp: XHTTPConfiguration? {
-        if case .xhttp(let config) = transportLayer { return config }
-        return nil
     }
 }
 

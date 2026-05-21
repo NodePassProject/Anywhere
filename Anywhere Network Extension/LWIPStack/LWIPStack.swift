@@ -239,12 +239,11 @@ class LWIPStack {
         }
         ssUDPSessions.removeValue(forKey: configuration.id)
 
-        guard let method = configuration.ssMethod,
-              let cipher = ShadowsocksCipher(method: method) else {
-            return .failure(ShadowsocksError.invalidMethod(configuration.ssMethod ?? "nil"))
-        }
-        guard let password = configuration.ssPassword else {
+        guard case .shadowsocks(let password, let method) = configuration.outbound else {
             return .failure(ProxyError.protocolError("Shadowsocks password not set"))
+        }
+        guard let cipher = ShadowsocksCipher(method: method) else {
+            return .failure(ShadowsocksError.invalidMethod(method))
         }
 
         let mode: ShadowsocksUDPSession.Mode
@@ -307,9 +306,8 @@ class LWIPStack {
     }
 
     static func shouldUseVisionMux(_ configuration: ProxyConfiguration) -> Bool {
-        configuration.outboundProtocol == .vless &&
-        configuration.muxEnabled &&
-        (configuration.flow == "xtls-rprx-vision" || configuration.flow == "xtls-rprx-vision-udp443")
+        guard case .vless(_, _, let flow, _, _, let muxEnabled, _) = configuration.outbound else { return false }
+        return muxEnabled && (flow == "xtls-rprx-vision" || flow == "xtls-rprx-vision-udp443")
     }
 
     /// Reads IPv6 settings from app group UserDefaults.

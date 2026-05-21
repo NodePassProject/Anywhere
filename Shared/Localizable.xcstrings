@@ -3415,6 +3415,65 @@
         }
       }
     },
+    "Congestion Control" : {
+      "comment" : "Congestion control algorithm for Hysteria protocol",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "التحكم في الازدحام"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Congestion Control"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Control de congestión"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "کنترل ازدحام"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Контроль перегрузки"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Dyknyşyk gözegçiligi"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tıkanıklık Kontrolü"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kiểm soát tắc nghẽn"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "拥塞控制"
+          }
+        }
+      }
+    },
     "Connected" : {
       "localizations" : {
         "ar" : {
@@ -4933,6 +4992,65 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "从互联网下载"
+          }
+        }
+      }
+    },
+    "Download Speed" : {
+      "comment" : "Download Speed for Hysteria protocol",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "سرعة التنزيل"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Download Speed"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Velocidad de descarga"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "سرعت دانلود"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Скорость загрузки"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ýükläp almak tizligi"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "İndirme Hızı"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tốc độ tải xuống"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下载速度"
           }
         }
       }

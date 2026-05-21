@@ -194,20 +194,22 @@ nonisolated final class BrutalCongestionControl {
 private let brutalRegistryLock = UnfairLock()
 private var brutalRegistry: [OpaquePointer: BrutalCongestionControl] = [:]
 
-/// Associates `cc` with the Swift Brutal instance. Call once per QUIC
-/// connection, after `ngtcp2_swift_install_brutal`.
-func brutalRegistryInstall(cc: OpaquePointer, brutal: BrutalCongestionControl) {
-    brutalRegistryLock.lock()
-    brutalRegistry[cc] = brutal
-    brutalRegistryLock.unlock()
-}
+extension BrutalCongestionControl {
+    /// Associates `cc` with the Swift Brutal instance. Call once per QUIC
+    /// connection, after `ngtcp2_swift_install_brutal`.
+    static func register(_ brutal: BrutalCongestionControl, for cc: OpaquePointer) {
+        brutalRegistryLock.lock()
+        brutalRegistry[cc] = brutal
+        brutalRegistryLock.unlock()
+    }
 
-/// Drops the registration when a QUIC connection closes so the Swift
-/// instance can be released.
-func brutalRegistryRemove(cc: OpaquePointer) {
-    brutalRegistryLock.lock()
-    brutalRegistry.removeValue(forKey: cc)
-    brutalRegistryLock.unlock()
+    /// Drops the registration when a QUIC connection closes so the Swift
+    /// instance can be released.
+    static func unregister(cc: OpaquePointer) {
+        brutalRegistryLock.lock()
+        brutalRegistry.removeValue(forKey: cc)
+        brutalRegistryLock.unlock()
+    }
 }
 
 private func brutalForCC(_ cc: OpaquePointer?) -> BrutalCongestionControl? {

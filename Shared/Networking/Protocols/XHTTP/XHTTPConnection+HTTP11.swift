@@ -22,7 +22,7 @@ extension XHTTPConnection {
         let metaQuery = queryParamsForMeta()
         request += buildRequestLine(method: method, path: path, queryParts: [metaQuery])
         request += "Host: \(configuration.host)\r\n"
-        request += "User-Agent: \(configuration.headers["User-Agent"] ?? defaultUserAgent)\r\n"
+        request += "User-Agent: \(configuration.headers["User-Agent"] ?? ProxyUserAgent.default)\r\n"
         applyPadding(to: &request, forPath: path)
         request += "Transfer-Encoding: chunked\r\n"
         if !configuration.noGRPCHeader {
@@ -204,7 +204,7 @@ extension XHTTPConnection {
         let metaQuery = queryParamsForMeta()
         request = buildRequestLine(method: "GET", path: path, queryParts: [metaQuery]) + request
         request += "Host: \(configuration.host)\r\n"
-        request += "User-Agent: \(configuration.headers["User-Agent"] ?? defaultUserAgent)\r\n"
+        request += "User-Agent: \(configuration.headers["User-Agent"] ?? ProxyUserAgent.default)\r\n"
         applyPadding(to: &request, forPath: path)
         for (key, value) in configuration.headers where key != "User-Agent" {
             request += "\(key): \(value)\r\n"
@@ -224,7 +224,7 @@ extension XHTTPConnection {
         let metaQuery = queryParamsForMeta()
         request = buildRequestLine(method: method, path: path, queryParts: [metaQuery]) + request
         request += "Host: \(configuration.host)\r\n"
-        request += "User-Agent: \(configuration.headers["User-Agent"] ?? defaultUserAgent)\r\n"
+        request += "User-Agent: \(configuration.headers["User-Agent"] ?? ProxyUserAgent.default)\r\n"
         applyPadding(to: &request, forPath: path)
         request += "Transfer-Encoding: chunked\r\n"
         if !configuration.noGRPCHeader {
@@ -402,7 +402,7 @@ extension XHTTPConnection {
         let metaQuery = queryParamsForMeta(seq: seq)
         var request = buildRequestLine(method: method, path: path, queryParts: [metaQuery])
         request += "Host: \(configuration.host)\r\n"
-        request += "User-Agent: \(configuration.headers["User-Agent"] ?? defaultUserAgent)\r\n"
+        request += "User-Agent: \(configuration.headers["User-Agent"] ?? ProxyUserAgent.default)\r\n"
         request += headerBlock
         applyPadding(to: &request, forPath: path)
         request += "Content-Length: \(bodyData.count)\r\n"

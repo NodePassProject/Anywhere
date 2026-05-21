@@ -62,7 +62,7 @@ extension ProxyConfiguration {
             )
 
         case .hysteria:
-            let rawUp = (configurationDict["hysteriaUploadMbps"] as? Int) ?? HysteriaUploadMbpsDefault
+            let rawUp = (configurationDict["hysteriaUploadMbps"] as? Int) ?? HysteriaCongestionControl.uploadMbpsDefault
             let rawDown = (configurationDict["hysteriaDownloadMbps"] as? Int) ?? 0
             let congestionControl = (configurationDict["hysteriaCongestionControl"] as? String)
                 .flatMap(HysteriaCongestionControl.init(rawValue:)) ?? .brutal
@@ -73,8 +73,8 @@ extension ProxyConfiguration {
             outbound = .hysteria(
                 password: (configurationDict["hysteriaPassword"] as? String) ?? "",
                 congestionControl: congestionControl,
-                uploadMbps: clampHysteriaUploadMbps(rawUp),
-                downloadMbps: clampHysteriaDownloadMbps(rawDown),
+                uploadMbps: HysteriaCongestionControl.clampUploadMbps(rawUp),
+                downloadMbps: HysteriaCongestionControl.clampDownloadMbps(rawDown),
                 sni: (explicitSNI?.isEmpty == false) ? explicitSNI! : serverAddress
             )
         case .trojan:

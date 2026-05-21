@@ -787,14 +787,22 @@ class VPNViewModel: ObservableObject {
     // MARK: - Configuration Serialization
 
     nonisolated static func serializeConfiguration(_ configuration: ProxyConfiguration) -> [String: Any] {
+        let vlessUUID: UUID
+        let vlessEncryption: String
+        let vlessFlow: String?
+        if case .vless(let u, let enc, let fl, _, _, _, _) = configuration.outbound {
+            vlessUUID = u; vlessEncryption = enc; vlessFlow = fl
+        } else {
+            vlessUUID = configuration.id; vlessEncryption = "none"; vlessFlow = nil
+        }
         var configurationDict: [String: Any] = [
             "name": configuration.name,
             "serverAddress": configuration.serverAddress,
             "serverPort": configuration.serverPort,
-            "uuid": configuration.uuid.uuidString,
-            "encryption": configuration.encryption,
-            "flow": configuration.flow ?? "",
-            "security": configuration.security,
+            "uuid": vlessUUID.uuidString,
+            "encryption": vlessEncryption,
+            "flow": vlessFlow ?? "",
+            "security": configuration.securityLayer.tag,
             "muxEnabled": configuration.muxEnabled,
             "xudpEnabled": configuration.xudpEnabled,
             "outboundProtocol": configuration.outboundProtocol.rawValue,
@@ -858,7 +866,7 @@ class VPNViewModel: ObservableObject {
         }
 
         // Add Reality configuration if present
-        if let reality = configuration.reality {
+        if case .reality(let reality) = configuration.securityLayer {
             configurationDict["realityServerName"] = reality.serverName
             configurationDict["realityPublicKey"] = reality.publicKey.base64EncodedString()
             configurationDict["realityShortId"] = reality.shortId.map { String(format: "%02x", $0) }.joined()
@@ -866,7 +874,7 @@ class VPNViewModel: ObservableObject {
         }
 
         // Add TLS configuration if present
-        if let tls = configuration.tls {
+        if case .tls(let tls) = configuration.securityLayer {
             configurationDict["tlsServerName"] = tls.serverName
             if let alpn = tls.alpn {
                 configurationDict["tlsAlpn"] = alpn.joined(separator: ",")
@@ -875,8 +883,8 @@ class VPNViewModel: ObservableObject {
         }
         
         if configuration.outboundProtocol == .vless {
-            configurationDict["transport"] = configuration.transport
-            if let ws = configuration.websocket {
+            configurationDict["transport"] = configuration.transportLayer.tag
+            if case .ws(let ws) = configuration.transportLayer {
                 configurationDict["wsHost"] = ws.host
                 configurationDict["wsPath"] = ws.path
                 if !ws.headers.isEmpty {
@@ -886,7 +894,7 @@ class VPNViewModel: ObservableObject {
                 configurationDict["wsEarlyDataHeaderName"] = ws.earlyDataHeaderName
             }
 
-            if let hu = configuration.httpUpgrade {
+            if case .httpUpgrade(let hu) = configuration.transportLayer {
                 configurationDict["huHost"] = hu.host
                 configurationDict["huPath"] = hu.path
                 if !hu.headers.isEmpty {
@@ -894,7 +902,7 @@ class VPNViewModel: ObservableObject {
                 }
             }
             
-            if let grpc = configuration.grpc {
+            if case .grpc(let grpc) = configuration.transportLayer {
                 configurationDict["grpcServiceName"] = grpc.serviceName
                 configurationDict["grpcAuthority"] = grpc.authority
                 configurationDict["grpcMultiMode"] = grpc.multiMode
@@ -905,7 +913,7 @@ class VPNViewModel: ObservableObject {
                 configurationDict["grpcPermitWithoutStream"] = grpc.permitWithoutStream
             }
 
-            if let xhttp = configuration.xhttp {
+            if case .xhttp(let xhttp) = configuration.transportLayer {
                 configurationDict["xhttpHost"] = xhttp.host
                 configurationDict["xhttpPath"] = xhttp.path
                 configurationDict["xhttpMode"] = xhttp.mode.rawValue

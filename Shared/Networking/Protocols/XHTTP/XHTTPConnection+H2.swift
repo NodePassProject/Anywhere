@@ -379,7 +379,7 @@ extension XHTTPConnection {
     /// Appends common HPACK headers (user-agent, padding, custom headers) to a header block.
     private func appendH2CommonHeaders(to block: inout Data, path: String) {
         // user-agent — name index 58 (RFC 7541 Appendix A)
-        let ua = configuration.headers["User-Agent"] ?? defaultUserAgent
+        let ua = configuration.headers["User-Agent"] ?? ProxyUserAgent.default
         var uaBytes = Self.hpackEncodeInteger(58, prefixBits: 6)
         uaBytes[0] |= 0x40
         block.append(contentsOf: uaBytes)

@@ -118,7 +118,7 @@ private func reshapeData(_ data: Data) -> [Data] {
 ///
 /// When `longPadding` is true and content is short, pads with a large random block (900..1399 bytes)
 /// to obscure the VLESS header; otherwise uses short random padding (0..255 bytes).
-func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficState, longPadding: Bool) -> Data {
+private func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficState, longPadding: Bool) -> Data {
     let contentLen = Int32(data?.count ?? 0)
     var paddingLen: Int32 = 0
 
@@ -176,7 +176,7 @@ func visionPadding(data: Data?, command: VisionCommand, state: VisionTrafficStat
 
 /// Remove Vision padding from data and extract content
 /// Returns the extracted content data
-func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
+private func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
     var readOffset = 0
     let dataCount = data.count
     let startIdx = data.startIndex
@@ -262,7 +262,7 @@ func visionUnpadding(data: inout Data, state: VisionTrafficState) -> Data {
 // MARK: - TLS Filtering
 
 /// Filter and detect TLS 1.3 in traffic (for incoming server responses)
-func visionFilterTLS(data: Data, state: VisionTrafficState) {
+private func visionFilterTLS(data: Data, state: VisionTrafficState) {
     guard state.numberOfPacketsToFilter > 0 else { return }
 
     state.numberOfPacketsToFilter -= 1
@@ -321,7 +321,7 @@ func visionFilterTLS(data: Data, state: VisionTrafficState) {
 }
 
 /// Detect TLS Client Hello in outgoing data (doesn't decrement counter)
-func visionDetectClientHello(data: Data, state: VisionTrafficState) {
+private func visionDetectClientHello(data: Data, state: VisionTrafficState) {
     guard data.count >= 6 else { return }
 
     let startIdx = data.startIndex
@@ -336,7 +336,7 @@ func visionDetectClientHello(data: Data, state: VisionTrafficState) {
 }
 
 /// Check if data is a complete TLS application data record
-func isCompleteTLSRecord(data: Data) -> Bool {
+private func isCompleteTLSRecord(data: Data) -> Bool {
     let totalLen = data.count
 
     // Quick check - if data doesn't start with TLS app data header, return false

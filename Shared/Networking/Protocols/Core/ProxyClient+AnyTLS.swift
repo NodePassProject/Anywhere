@@ -26,14 +26,9 @@ extension ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         logger.info("[AnyTLS] connect cmd=\(command) dest=\(destinationHost):\(destinationPort) initialData=\(initialData?.count ?? 0)B chained=\(tunnel != nil)")
-        guard let password = configuration.anytlsPassword, !password.isEmpty else {
+        guard case .anytls(let password, _, _, _, let tlsConfig) = configuration.outbound, !password.isEmpty else {
             logger.warning("[AnyTLS] reject: password not set")
             completion(.failure(ProxyError.protocolError("AnyTLS password not set")))
-            return
-        }
-        guard let tlsConfig = configuration.anytlsTLS else {
-            logger.warning("[AnyTLS] reject: TLS configuration missing")
-            completion(.failure(ProxyError.protocolError("AnyTLS requires TLS configuration")))
             return
         }
         if command == .mux {

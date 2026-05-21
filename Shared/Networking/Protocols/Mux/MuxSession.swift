@@ -77,7 +77,7 @@ nonisolated class MuxSession {
             metadata.targetPort = targetPort
         }
 
-        let frame = encodeMuxFrame(metadata: metadata, payload: data)
+        let frame = MuxFrame.encode(metadata: metadata, payload: data)
         client.writeFrame(frame) { [weak self] error in
             if let error, isFirstFrame {
                 // Allow a retry if the first frame failed before the session was torn down.
@@ -100,7 +100,7 @@ nonisolated class MuxSession {
                 status: .end,
                 option: []
             )
-            let frame = encodeMuxFrame(metadata: metadata, payload: nil)
+            let frame = MuxFrame.encode(metadata: metadata, payload: nil)
             client.writeFrame(frame) { _ in }
             client.removeSession(sessionID)
         }

@@ -24,28 +24,42 @@ struct QUICSessionTicket {
     let ageAdd: UInt32      // obfuscation factor for ticket age
 }
 
-/// Global session ticket cache, keyed by (SNI, ALPN list).
-/// Tickets are not portable across ALPN contexts.
-private let ticketCacheLock = UnfairLock()
-private var sessionTicketCache: [String: QUICSessionTicket] = [:]
+/// Global session ticket cache, keyed by (SNI, ALPN list). Tickets are not
+/// portable across ALPN contexts, so the key folds in the ALPN list (order
+/// preserved — offering "h3,hq" is a different context than "hq,h3").
+enum QUICSessionTicketCache {
+    private static let lock = UnfairLock()
+    private static var cache: [String: QUICSessionTicket] = [:]
 
-/// Builds the cache key for a given SNI + ALPN list. ALPN order is preserved
-/// because offering "h3,hq" is a different context than "hq,h3".
-private func sessionTicketCacheKey(serverName: String, alpn: [String]) -> String {
-    return "\(serverName)\u{0}\(alpn.joined(separator: ","))"
-}
+    private static func key(serverName: String, alpn: [String]) -> String {
+        "\(serverName)\u{0}\(alpn.joined(separator: ","))"
+    }
 
-/// Drops any cached session ticket for (serverName, alpn) so the next
-/// handshake falls back to a full TLS exchange. Called when a handshake
-/// fails before reaching `.connected` — a cached ticket whose encryption
-/// keys the server has rotated (naive server restart) would otherwise
-/// cause every subsequent ClientHello to be silently dropped, producing
-/// a permanent HANDSHAKE_TIMEOUT loop.
-func invalidateCachedSessionTicket(serverName: String, alpn: [String]) {
-    let key = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
-    ticketCacheLock.lock()
-    sessionTicketCache.removeValue(forKey: key)
-    ticketCacheLock.unlock()
+    /// The cached ticket for (serverName, alpn), if any.
+    static func lookup(serverName: String, alpn: [String]) -> QUICSessionTicket? {
+        let k = key(serverName: serverName, alpn: alpn)
+        lock.lock(); defer { lock.unlock() }
+        return cache[k]
+    }
+
+    /// Stores a freshly-issued ticket for (serverName, alpn).
+    static func store(_ ticket: QUICSessionTicket, serverName: String, alpn: [String]) {
+        let k = key(serverName: serverName, alpn: alpn)
+        lock.lock(); defer { lock.unlock() }
+        cache[k] = ticket
+    }
+
+    /// Drops any cached ticket for (serverName, alpn) so the next handshake
+    /// falls back to a full TLS exchange. Called when a handshake fails before
+    /// reaching `.connected` — a cached ticket whose encryption keys the server
+    /// has rotated (naive server restart) would otherwise cause every subsequent
+    /// ClientHello to be silently dropped, producing a permanent
+    /// HANDSHAKE_TIMEOUT loop.
+    static func invalidate(serverName: String, alpn: [String]) {
+        let k = key(serverName: serverName, alpn: alpn)
+        lock.lock(); defer { lock.unlock() }
+        cache.removeValue(forKey: k)
+    }
 }
 
 /// SHA-256("HelloRetryRequest") — the magic server_random value that marks an
@@ -173,10 +187,7 @@ nonisolated class QUICTLSHandler {
         var pskExtData: Data?
         var candidatePSK: Data?
 
-        let cacheKey = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
-        ticketCacheLock.lock()
-        let cachedTicket = sessionTicketCache[cacheKey]
-        ticketCacheLock.unlock()
+        let cachedTicket = QUICSessionTicketCache.lookup(serverName: serverName, alpn: alpn)
 
         if let ticket = cachedTicket,
            Date().timeIntervalSince(ticket.createdAt) < Double(ticket.lifetime) {
@@ -729,10 +740,7 @@ nonisolated class QUICTLSHandler {
             cipherSuite: cipherSuite, createdAt: Date(),
             lifetime: lifetime, ageAdd: ageAdd
         )
-        let cacheKey = sessionTicketCacheKey(serverName: serverName, alpn: alpn)
-        ticketCacheLock.lock()
-        sessionTicketCache[cacheKey] = cached
-        ticketCacheLock.unlock()
+        QUICSessionTicketCache.store(cached, serverName: serverName, alpn: alpn)
 
         return .success
     }

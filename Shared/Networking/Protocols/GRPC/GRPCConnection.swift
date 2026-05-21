@@ -551,7 +551,7 @@ extension GRPCConnection {
         block.append(contentsOf: Self.hpackEncodeString("identity"))
 
         // user-agent — literal w/ incremental indexing, static-table name index 58.
-        let ua = configuration.userAgent.isEmpty ? defaultUserAgent : configuration.userAgent
+        let ua = configuration.userAgent.isEmpty ? ProxyUserAgent.default : configuration.userAgent
         var uaBytes = Self.hpackEncodeInteger(58, prefixBits: 6)
         uaBytes[0] |= 0x40
         block.append(contentsOf: uaBytes)

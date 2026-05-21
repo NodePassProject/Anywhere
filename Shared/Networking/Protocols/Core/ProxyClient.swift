@@ -583,11 +583,12 @@ nonisolated class ProxyClient {
             }
             connectWithXHTTP(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         case .tcp:
-            if let tlsConfig = configuration.tls {
+            switch configuration.securityLayer {
+            case .tls(let tlsConfig):
                 connectWithTLS(tlsConfig: tlsConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-            } else if let realityConfig = configuration.reality {
+            case .reality(let realityConfig):
                 connectWithReality(realityConfig: realityConfig, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-            } else {
+            case .none:
                 connectDirect(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
             }
         }
@@ -721,12 +722,12 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard let wsConfig = configuration.websocket else {
+        guard case .ws(let wsConfig) = configuration.transportLayer else {
             completion(.failure(ProxyError.connectionFailed("WebSocket transport specified but no WebSocket configuration")))
             return
         }
 
-        if let baseTLSConfig = configuration.tls {
+        if case .tls(let baseTLSConfig) = configuration.securityLayer {
             // WSS: TCP → TLS → WebSocket → VLESS
             // Force ALPN to http/1.1 (Xray-core tls.WithNextProto("http/1.1"))
             let wsTlsConfig = TLSConfiguration(
@@ -831,12 +832,12 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard let huConfig = configuration.httpUpgrade else {
+        guard case .httpUpgrade(let huConfig) = configuration.transportLayer else {
             completion(.failure(ProxyError.connectionFailed("HTTP upgrade transport specified but no configuration")))
             return
         }
 
-        if let tlsConfiguration = configuration.tls {
+        if case .tls(let tlsConfiguration) = configuration.securityLayer {
             // HTTPS Upgrade: TCP → TLS → HTTP Upgrade → raw TCP over TLS → VLESS
             let tlsClient = TLSClient(configuration: tlsConfiguration)
             self.tlsClient = tlsClient
@@ -946,7 +947,7 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard let grpcConfig = configuration.grpc else {
+        guard case .grpc(let grpcConfig) = configuration.transportLayer else {
             completion(.failure(ProxyError.connectionFailed("gRPC transport specified but no gRPC configuration")))
             return
         }
@@ -965,7 +966,7 @@ nonisolated class ProxyClient {
             serverAddress: configuration.serverAddress
         )
 
-        if let realityConfig = configuration.reality {
+        if case .reality(let realityConfig) = configuration.securityLayer {
             // Reality + gRPC: Reality handles its own ALPN internally; layer gRPC on top.
             let realityClient = RealityClient(configuration: realityConfig)
             self.realityClient = realityClient
@@ -1000,7 +1001,7 @@ nonisolated class ProxyClient {
             return
         }
 
-        if let baseTLSConfig = configuration.tls {
+        if case .tls(let baseTLSConfig) = configuration.securityLayer {
             // gRPC over TLS: force ALPN `h2`, handshake, then open the HTTP/2 stream.
             let grpcTLSConfig = sanitizedGRPCTLSConfiguration(from: baseTLSConfig)
             let tlsClient = TLSClient(configuration: grpcTLSConfig)
@@ -1121,11 +1122,11 @@ nonisolated class ProxyClient {
     /// - TLS with a single `h3` ALPN expects QUIC/HTTP/3.
     /// - Everything else uses HTTP/2.
     private func decideXHTTPHTTPVersion() -> XHTTPHTTPVersion {
-        if configuration.reality != nil {
+        if case .reality = configuration.securityLayer {
             return .http2
         }
 
-        guard let tlsConfig = configuration.tls else {
+        guard case .tls(let tlsConfig) = configuration.securityLayer else {
             return .http11
         }
 
@@ -1196,7 +1197,7 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard let xhttpConfig = configuration.xhttp else {
+        guard case .xhttp(let xhttpConfig) = configuration.transportLayer else {
             completion(.failure(ProxyError.connectionFailed("XHTTP transport specified but no XHTTP configuration")))
             return
         }
@@ -1216,7 +1217,7 @@ nonisolated class ProxyClient {
         // Resolve mode: auto → actual mode
         let resolvedMode: XHTTPMode
         if xhttpConfig.mode == .auto {
-            if configuration.reality != nil {
+            if case .reality = configuration.securityLayer {
                 resolvedMode = .streamOne
             } else {
                 resolvedMode = .packetUp
@@ -1227,9 +1228,9 @@ nonisolated class ProxyClient {
 
         let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? UUID().uuidString.lowercased() : ""
 
-        if let realityConfig = configuration.reality {
+        if case .reality(let realityConfig) = configuration.securityLayer {
             connectXHTTPReality(realityConfig: realityConfig, xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        } else if configuration.tls != nil {
+        } else if case .tls = configuration.securityLayer {
             connectXHTTPS(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, httpVersion: httpVersion, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         } else {
             connectXHTTPPlain(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
@@ -1335,7 +1336,7 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard let baseTLSConfig = configuration.tls else {
+        guard case .tls(let baseTLSConfig) = configuration.securityLayer else {
             completion(.failure(ProxyError.connectionFailed("XHTTPS requires TLS configuration")))
             return
         }

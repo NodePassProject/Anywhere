@@ -215,8 +215,8 @@ struct ClashProxyParser {
         // `up`/`down` carry Brutal's bandwidth; a node without either runs BBR.
         let hasBandwidth = (upString?.isEmpty == false) || (downString?.isEmpty == false)
         let congestionControl: HysteriaCongestionControl = hasBandwidth ? .brutal : .bbr
-        let uploadMbps = clampHysteriaUploadMbps(parseBandwidthMbps(upString, default: HysteriaUploadMbpsDefault))
-        let downloadMbps = clampHysteriaDownloadMbps(parseBandwidthMbps(downString, default: HysteriaDownloadMbpsDefault))
+        let uploadMbps = HysteriaCongestionControl.clampUploadMbps(parseBandwidthMbps(upString, default: HysteriaCongestionControl.uploadMbpsDefault))
+        let downloadMbps = HysteriaCongestionControl.clampDownloadMbps(parseBandwidthMbps(downString, default: HysteriaCongestionControl.downloadMbpsDefault))
 
         return ProxyConfiguration(
             name: basics.name,

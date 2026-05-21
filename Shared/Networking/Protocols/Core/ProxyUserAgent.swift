@@ -5,10 +5,9 @@
 
 import Foundation
 
-/// Shared Chrome User-Agent string matching Xray-core's `utils.ChromeUA`.
-/// Uses a fixed base version (Chrome 144, released 2026-01-13) and advances
-/// by one version every ~35 days (midpoint of Xray-core's 25-45 day range).
 enum ProxyUserAgent {
+    static let `default`: String = chrome
+    
     static let chrome: String = {
         let baseVersion = 144
         let baseDate = DateComponents(calendar: Calendar(identifier: .gregorian),

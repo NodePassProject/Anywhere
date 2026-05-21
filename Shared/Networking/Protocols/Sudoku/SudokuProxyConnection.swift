@@ -279,7 +279,7 @@ nonisolated final class SudokuNativeConfig {
     let httpMask: SudokuHTTPMaskConfiguration
 
     init(configuration: ProxyConfiguration) throws {
-        guard let sudoku = configuration.sudoku else {
+        guard case .sudoku(let sudoku) = configuration.outbound else {
             throw SudokuNativeError.invalidConfiguration("missing protocol settings")
         }
         self.serverHost = configuration.serverAddress

@@ -66,14 +66,18 @@ extension ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
+        guard case .socks5(let username, let password) = configuration.outbound else {
+            completion(.failure(ProxyError.protocolError("SOCKS5 outbound expected")))
+            return
+        }
         let buffer = SOCKS5Buffer(transport: transport)
 
         if command == .udp {
             SOCKS5Handshake.performUDPAssociate(
                 buffer: buffer,
                 transport: transport,
-                username: configuration.socks5Username,
-                password: configuration.socks5Password,
+                username: username,
+                password: password,
                 serverAddress: configuration.serverAddress
             ) { [weak self] result in
                 guard let self else {
@@ -113,8 +117,8 @@ extension ProxyClient {
                 transport: transport,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort,
-                username: configuration.socks5Username,
-                password: configuration.socks5Password
+                username: username,
+                password: password
             ) { error in
                 if let error {
                     completion(.failure(error))

@@ -59,8 +59,8 @@ class TVProxyEditorViewController: UITableViewController {
     // Hysteria fields
     private var hysteriaPassword = ""
     private var hysteriaCC: HysteriaCongestionControl = .brutal
-    private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
-    private var hysteriaDownloadMbpsText = String(HysteriaDownloadMbpsDefault)
+    private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
+    private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
     
     // Trojan fields
     private var trojanPassword = ""
@@ -368,8 +368,8 @@ class TVProxyEditorViewController: UITableViewController {
         if isHysteria {
             if hysteriaPassword.isEmpty { return false }
             if hysteriaCC == .brutal {
-                guard let up = Int(hysteriaUploadMbpsText), HysteriaUploadMbpsRange.contains(up),
-                      let down = Int(hysteriaDownloadMbpsText), HysteriaDownloadMbpsRange.contains(down)
+                guard let up = Int(hysteriaUploadMbpsText), HysteriaCongestionControl.uploadMbpsRange.contains(up),
+                      let down = Int(hysteriaDownloadMbpsText), HysteriaCongestionControl.downloadMbpsRange.contains(down)
                 else { return false }
             }
             return true
@@ -609,40 +609,46 @@ class TVProxyEditorViewController: UITableViewController {
         name = configuration.name
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
-        uuid = configuration.uuid.uuidString
-        encryption = configuration.encryption
-        transport = configuration.transport
-        flow = configuration.flow ?? ""
-        security = configuration.security
+        if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _, _, _) = configuration.outbound {
+            uuid = vlessUUID.uuidString
+            encryption = vlessEncryption
+            flow = vlessFlow ?? ""
+        } else {
+            uuid = configuration.id.uuidString
+            encryption = "none"
+            flow = ""
+        }
+        transport = configuration.transportLayer.tag
+        security = configuration.securityLayer.tag
         muxEnabled = configuration.muxEnabled
         xudpEnabled = configuration.xudpEnabled
 
-        if let ws = configuration.websocket {
+        if case .ws(let ws) = configuration.transportLayer {
             wsHost = ws.host
             wsPath = ws.path
         }
-        if let hu = configuration.httpUpgrade {
+        if case .httpUpgrade(let hu) = configuration.transportLayer {
             huHost = hu.host
             huPath = hu.path
         }
-        if let grpc = configuration.grpc {
+        if case .grpc(let grpc) = configuration.transportLayer {
             grpcServiceName = grpc.serviceName
             grpcAuthority = grpc.authority
             grpcMode = grpc.multiMode ? "multi" : "gun"
             grpcUserAgent = grpc.userAgent
         }
-        if let xhttp = configuration.xhttp {
+        if case .xhttp(let xhttp) = configuration.transportLayer {
             xhttpHost = xhttp.host
             xhttpPath = xhttp.path
             xhttpMode = xhttp.mode.rawValue
             xhttpExtra = Self.encodeExtra(from: xhttp)
         }
-        if let tls = configuration.tls {
+        if case .tls(let tls) = configuration.securityLayer {
             tlsSNI = tls.serverName
             tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
             fingerprint = tls.fingerprint
         }
-        if let reality = configuration.reality {
+        if case .reality(let reality) = configuration.securityLayer {
             realitySNI = reality.serverName
             realityPublicKey = reality.publicKey.base64URLEncodedString()
             realityShortId = reality.shortId.hexEncodedString()
@@ -750,7 +756,7 @@ class TVProxyEditorViewController: UITableViewController {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
         if isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
-            parsedUUID = existingConfiguration?.uuid ?? UUID()
+            parsedUUID = existingConfiguration?.id ?? UUID()
         } else {
             guard let uuid = UUID(uuidString: uuid) else { return }
             parsedUUID = uuid
@@ -829,14 +835,16 @@ class TVProxyEditorViewController: UITableViewController {
                 xudpEnabled: xudpEnabled
             )
         case .hysteria:
-            let up = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
-            let down = clampHysteriaDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaDownloadMbpsDefault)
+            let up = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
+            let down = HysteriaCongestionControl.clampDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault)
+            let existingSNI: String?
+            if let existing = existingConfiguration, case .hysteria(_, _, _, _, let s) = existing.outbound { existingSNI = s } else { existingSNI = nil }
             outbound = .hysteria(
                 password: hysteriaPassword,
                 congestionControl: hysteriaCC,
                 uploadMbps: up,
                 downloadMbps: down,
-                sni: existingConfiguration?.hysteriaSNI ?? bareAddress
+                sni: existingSNI ?? bareAddress
             )
         case .trojan:
             let sniValue = tlsSNI.isEmpty ? bareAddress : tlsSNI
@@ -848,9 +856,14 @@ class TVProxyEditorViewController: UITableViewController {
         case .anytls:
             let sniValue = tlsSNI.isEmpty ? bareAddress : tlsSNI
             let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
-            let ici = existingConfiguration?.anytlsIdleCheckInterval ?? 30
-            let it  = existingConfiguration?.anytlsIdleTimeout       ?? 30
-            let mis = existingConfiguration?.anytlsMinIdleSession    ?? 0
+            let ici: Int
+            let it: Int
+            let mis: Int
+            if let existing = existingConfiguration, case .anytls(_, let c, let t, let m, _) = existing.outbound {
+                ici = c; it = t; mis = m
+            } else {
+                ici = 30; it = 30; mis = 0
+            }
             outbound = .anytls(
                 password: anytlsPassword,
                 idleCheckInterval: ici,

@@ -40,6 +40,9 @@ extension ProxyConfiguration {
     }
 
     private func toVLESSURL() -> String {
+        guard case .vless(let uuid, let encryption, let flow, let transport, let security, _, _) = outbound else {
+            return ""
+        }
         var params: [String] = []
 
         if encryption != "none" {
@@ -48,12 +51,12 @@ extension ProxyConfiguration {
         if let flow, !flow.isEmpty {
             params.append("flow=\(flow)")
         }
-        params.append("security=\(security)")
-        if transport != "tcp" {
-            params.append("type=\(transport)")
+        params.append("security=\(security.tag)")
+        if transport.tag != "tcp" {
+            params.append("type=\(transport.tag)")
         }
         
-        if security == "tls", let tls {
+        if case .tls(let tls) = security {
             if tls.serverName != serverAddress {
                 params.append("sni=\(tls.serverName)")
             }
@@ -65,7 +68,7 @@ extension ProxyConfiguration {
             }
         }
         
-        if security == "reality", let reality {
+        if case .reality(let reality) = security {
             params.append("sni=\(reality.serverName)")
             params.append("pbk=\(reality.publicKey.base64URLEncodedString())")
             if !reality.shortId.isEmpty {
@@ -92,71 +95,72 @@ extension ProxyConfiguration {
     }
     
     private func toHysteriaURL() -> String {
-        let password = (hysteriaPassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni) = outbound else {
+            return ""
+        }
+        let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var params: [String] = []
         // SNI is always populated; only emit when it differs from the server
         // address to keep share links short.
-        if let sni = hysteriaSNI, sni != serverAddress {
+        if sni != serverAddress {
             params.append("sni=\(sni)")
         }
         // Emit the bandwidth params only for Brutal; their presence is what a
         // reader uses to tell Brutal from BBR on import.
-        if hysteriaCongestionControl == .brutal {
-            params.append("upmbps=\(hysteriaUploadMbps ?? HysteriaUploadMbpsDefault)")
-            params.append("downmbps=\(hysteriaDownloadMbps ?? HysteriaDownloadMbpsDefault)")
+        if congestionControl == .brutal {
+            params.append("upmbps=\(uploadMbps)")
+            params.append("downmbps=\(downloadMbps)")
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
-        return "hysteria2://\(password)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
+        return "hysteria2://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
     }
 
     private func toTrojanURL() -> String {
-        let password = (trojanPassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        guard case .trojan(let password, let tls) = outbound else { return "" }
+        let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var params: [String] = []
-        if let tls = trojanTLS {
-            if tls.serverName != serverAddress {
-                params.append("sni=\(tls.serverName)")
-            }
-            if let alpn = tls.alpn, !alpn.isEmpty {
-                let joined = alpn.joined(separator: ",")
-                params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
-            }
-            if tls.fingerprint != .chrome133 {
-                params.append("fp=\(tls.fingerprint.rawValue)")
-            }
+        if tls.serverName != serverAddress {
+            params.append("sni=\(tls.serverName)")
+        }
+        if let alpn = tls.alpn, !alpn.isEmpty {
+            let joined = alpn.joined(separator: ",")
+            params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
+        }
+        if tls.fingerprint != .chrome133 {
+            params.append("fp=\(tls.fingerprint.rawValue)")
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
-        return "trojan://\(password)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
+        return "trojan://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
     private func toAnyTLSURL() -> String {
-        let password = (anytlsPassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        guard case .anytls(let password, let ici, let it, let mis, let tls) = outbound else { return "" }
+        let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var params: [String] = []
-        if let tls = anytlsTLS {
-            if tls.serverName != serverAddress {
-                params.append("sni=\(tls.serverName)")
-            }
-            if let alpn = tls.alpn, !alpn.isEmpty {
-                let joined = alpn.joined(separator: ",")
-                params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
-            }
-            if tls.fingerprint != .chrome133 {
-                params.append("fp=\(tls.fingerprint.rawValue)")
-            }
+        if tls.serverName != serverAddress {
+            params.append("sni=\(tls.serverName)")
+        }
+        if let alpn = tls.alpn, !alpn.isEmpty {
+            let joined = alpn.joined(separator: ",")
+            params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
+        }
+        if tls.fingerprint != .chrome133 {
+            params.append("fp=\(tls.fingerprint.rawValue)")
         }
         // Only emit pool tuners when they differ from the sing-anytls defaults
         // so most exported share links stay short.
-        if let v = anytlsIdleCheckInterval, v != 30 { params.append("ici=\(v)") }
-        if let v = anytlsIdleTimeout,        v != 30 { params.append("it=\(v)") }
-        if let v = anytlsMinIdleSession,     v != 0  { params.append("mis=\(v)") }
+        if ici != 30 { params.append("ici=\(ici)") }
+        if it != 30 { params.append("it=\(it)") }
+        if mis != 0 { params.append("mis=\(mis)") }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
-        return "anytls://\(password)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
+        return "anytls://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
     private func toShadowsocksURL() -> String {
-        guard let method = ssMethod, let password = ssPassword else {
+        guard case .shadowsocks(let password, let method) = outbound else {
             return "ss://invalid"
         }
         let userInfo = "\(method):\(password)"
@@ -169,16 +173,16 @@ extension ProxyConfiguration {
 
     private func toSOCKS5URL() -> String {
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        if let user = socks5Username, !user.isEmpty {
+        if case .socks5(let username, let password) = outbound, let user = username, !user.isEmpty {
             let encodedUser = user.addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? user
-            let encodedPass = (socks5Password ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+            let encodedPass = (password ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
             return "socks5://\(encodedUser):\(encodedPass)@\(bracketedServerAddress):\(serverPort)#\(fragment)"
         }
         return "socks5://\(bracketedServerAddress):\(serverPort)#\(fragment)"
     }
 
     private func toSudokuURL() -> String {
-        guard let sudoku else { return "sudoku://" }
+        guard case .sudoku(let sudoku) = outbound else { return "sudoku://" }
         var payload: [String: Any] = [
             "h": serverAddress,
             "p": Int(serverPort),
@@ -203,14 +207,23 @@ extension ProxyConfiguration {
 
     private func toNaiveURL() -> String {
         let scheme = outboundProtocol == .http3 ? "quic" : "https"
-        let user = (activeUsername ?? "").addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? ""
-        let pass = (activePassword ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        let username: String?
+        let password: String?
+        switch outbound {
+        case .http11(let u, let p), .http2(let u, let p), .http3(let u, let p):
+            username = u; password = p
+        default:
+            username = nil; password = nil
+        }
+        let user = (username ?? "").addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? ""
+        let pass = (password ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         return "\(scheme)://\(user):\(pass)@\(bracketedServerAddress):\(serverPort)#\(fragment)"
     }
 
     private func appendTransportParams(to params: inout [String]) {
-        if let ws = websocket, transport == "ws" {
+        switch transportLayer {
+        case .ws(let ws):
             if ws.host != serverAddress {
                 params.append("host=\(ws.host)")
             }
@@ -220,16 +233,14 @@ extension ProxyConfiguration {
             if ws.maxEarlyData > 0 {
                 params.append("ed=\(ws.maxEarlyData)")
             }
-        }
-        if let hu = httpUpgrade, transport == "httpupgrade" {
+        case .httpUpgrade(let hu):
             if hu.host != serverAddress {
                 params.append("host=\(hu.host)")
             }
             if hu.path != "/" {
                 params.append("path=\(hu.path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? hu.path)")
             }
-        }
-        if let grpc, transport == "grpc" {
+        case .grpc(let grpc):
             if !grpc.serviceName.isEmpty {
                 let encoded = grpc.serviceName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? grpc.serviceName
                 params.append("serviceName=\(encoded)")
@@ -241,8 +252,7 @@ extension ProxyConfiguration {
             if grpc.multiMode {
                 params.append("mode=multi")
             }
-        }
-        if let xhttp, transport == "xhttp" {
+        case .xhttp(let xhttp):
             if xhttp.host != serverAddress {
                 params.append("host=\(xhttp.host)")
             }
@@ -252,6 +262,8 @@ extension ProxyConfiguration {
             if xhttp.mode != .auto {
                 params.append("mode=\(xhttp.mode.rawValue)")
             }
+        case .tcp:
+            break
         }
     }
 }

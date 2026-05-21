@@ -190,6 +190,7 @@
 				Networking/Protocols/HTTPUpgrade/HTTPUpgradeProxyConnection.swift,
 				Networking/Protocols/Hysteria/HysteriaClient.swift,
 				Networking/Protocols/Hysteria/HysteriaConfiguration.swift,
+				Networking/Protocols/Hysteria/HysteriaCongestionControl.swift,
 				Networking/Protocols/Hysteria/HysteriaConnection.swift,
 				Networking/Protocols/Hysteria/HysteriaHTTP3Codec.swift,
 				Networking/Protocols/Hysteria/HysteriaProtocol.swift,
