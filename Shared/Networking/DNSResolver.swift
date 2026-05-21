@@ -40,6 +40,13 @@ nonisolated final class DNSResolver {
     /// stale-fast path for the same key at once.
     private var inFlightRefreshes: Set<String> = []
 
+    /// Monotonic epoch bumped by ``flush``. A background refresh captures the
+    /// epoch when it is scheduled and only commits its result if the epoch is
+    /// still current, so a lookup that began on the previous network can't
+    /// restore a flushed entry after the path has moved on. Lock-guarded
+    /// alongside `cache`.
+    private var generation: UInt64 = 0
+
     private init() {}
 
     // MARK: - Public API
@@ -117,21 +124,52 @@ nonisolated final class DNSResolver {
         _ = resolveAll(host, forceFresh: forceFresh)
     }
 
+    /// Drops every cached entry. Call this when the physical network path
+    /// changes — interface switch (Wi-Fi⇄cellular), Wi-Fi roam, or restore from
+    /// unavailable. Cached IPs were resolved against the *previous* network's
+    /// resolver and can be wrong on the new one: split-horizon/corporate DNS,
+    /// GeoDNS or CDN PoPs that differ per egress, or captive-portal answers
+    /// picked up on the way in. Without a flush the stale-fast path keeps
+    /// handing out those IPs for up to the full TTL, so connections
+    /// reestablished right after the change redial addresses that may no longer
+    /// route.
+    ///
+    /// Bumping the generation also voids any background refresh already in
+    /// flight (its `getaddrinfo` may have been issued on the network we're
+    /// leaving), so it can't quietly restore a flushed entry once it returns.
+    /// The next lookup for each host then resolves fresh over the new path.
+    func flush() {
+        let cleared: Int = lock.withWriteLock {
+            let count = cache.count
+            cache.removeAll(keepingCapacity: true)
+            inFlightRefreshes.removeAll(keepingCapacity: true)
+            generation &+= 1
+            return count
+        }
+        if cleared > 0 {
+            logger.info("[DNS] Flushed \(cleared) cached \(cleared == 1 ? "entry" : "entries") after network change")
+        }
+    }
+
     // MARK: - Internal
 
     /// Fires a background refresh for `key` if one isn't already in flight.
     /// The lock-guarded set ensures duplicate concurrent stale-cache hits for
     /// the same hostname coalesce into one `getaddrinfo` call.
     private func scheduleBackgroundRefresh(key: String, host: String) {
-        let shouldFire: Bool = lock.withWriteLock {
-            if inFlightRefreshes.contains(key) { return false }
+        let (shouldFire, scheduledGeneration): (Bool, UInt64) = lock.withWriteLock {
+            if inFlightRefreshes.contains(key) { return (false, generation) }
             inFlightRefreshes.insert(key)
-            return true
+            return (true, generation)
         }
         guard shouldFire else { return }
         DispatchQueue.global(qos: .utility).async { [self] in
             let ips = Self.resolveViaGetaddrinfo(host)
             self.lock.withWriteLock {
+                // A flush during the lookup means we resolved against a network
+                // path that no longer applies — drop the result. The flush also
+                // cleared this key from inFlightRefreshes, so leave the set be.
+                guard scheduledGeneration == self.generation else { return }
                 if !ips.isEmpty {
                     self.cache[key] = CacheEntry(ips: ips, expiry: Date() + Self.defaultTTL)
                 }

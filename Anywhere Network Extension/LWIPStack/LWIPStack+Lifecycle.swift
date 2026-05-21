@@ -153,10 +153,10 @@ extension LWIPStack {
         invalidateOutboundState(configuration: configuration)
     }
 
-    /// Invalidates all outbound proxy state — the Vision mux, QUIC/Hysteria/
-    /// HTTP3/AnyTLS sessions, Shadowsocks UDP sessions, per-flow UDP proxy
-    /// connections, and every active TCP leg — while leaving the lwIP netif,
-    /// listeners, and timers running. Must be called on `lwipQueue`.
+    /// Invalidates all outbound state — the cached DNS answers, the Vision mux,
+    /// QUIC/Hysteria/HTTP3/AnyTLS sessions, Shadowsocks UDP sessions, per-flow
+    /// UDP proxy connections, and every active TCP leg — while leaving the lwIP
+    /// netif, listeners, and timers running. Must be called on `lwipQueue`.
     ///
     /// Shared by device-wake and network-path-change recovery: both face the
     /// same problem (the kernel's outbound sockets are bound to network state
@@ -166,6 +166,13 @@ extension LWIPStack {
     /// netif and listener PCBs stay up, so new client activity is served
     /// without waiting on a netif rebuild.
     private func invalidateOutboundState(configuration: ProxyConfiguration) {
+        // Cached DNS answers were resolved over the network path we're leaving
+        // and may not route on the new one (GeoDNS/CDN locality, split-horizon
+        // DNS, captive-portal answers). Flush first so the rebuilt mux and every
+        // reconnecting flow resolves fresh over the new path instead of redialing
+        // stale IPs from the stale-fast cache.
+        DNSResolver.shared.flush()
+
         muxManager?.closeAll()
         if Self.shouldUseVisionMux(configuration) {
             muxManager = MuxManager(configuration: configuration, lwipQueue: lwipQueue)
