@@ -156,45 +156,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // When encrypted DNS is enabled with a custom server, uses NEDNSOverHTTPSSettings
     // or NEDNSOverTLSSettings. Otherwise DDR auto-upgrade is controlled at the lwIP level.
 
-    // MARK: - Bypass Routes
-    //
-    // These local/private IP ranges are always excluded from the VPN tunnel (sent directly).
-    // Outbound proxy connections from the extension's own sockets are kernel-excluded
-    // by the NE framework (see RawTCPSocket "Loopback" docs), so the upstream proxy IP
-    // does not need a route here. Apps on the device that explicitly target the proxy IP
-    // will go through the tunnel like any other destination — matching standard VPN
-    // client behavior (sing-box, WireGuard, OpenVPN).
-    //
-    // Domain-based entries (localhost, *.local, captive.apple.com) are not
-    // expressible as packet-level route exclusions:
-    //   - localhost   → loopback; the OS never routes 127.0.0.0/8 into the tunnel
-    //   - *.local     → mDNS/Bonjour; addresses fall in private/link-local ranges below
-    //   - captive.apple.com → handled by the OS captive-portal detection layer
-
-    private static let bypassIPv4Routes: [NEIPv4Route] = [
-        NEIPv4Route(destinationAddress: "10.0.0.0",      subnetMask: "255.0.0.0"),     // 10.0.0.0/8
-        NEIPv4Route(destinationAddress: "172.16.0.0",    subnetMask: "255.240.0.0"),   // 172.16.0.0/12
-        NEIPv4Route(destinationAddress: "192.168.0.0",   subnetMask: "255.255.0.0"),   // 192.168.0.0/16
-        NEIPv4Route(destinationAddress: "100.64.0.0",    subnetMask: "255.192.0.0"),   // 100.64.0.0/10
-        NEIPv4Route(destinationAddress: "162.14.0.0",    subnetMask: "255.255.0.0"),   // 162.14.0.0/16
-        NEIPv4Route(destinationAddress: "211.99.96.0",   subnetMask: "255.255.224.0"), // 211.99.96.0/19
-        NEIPv4Route(destinationAddress: "162.159.192.0", subnetMask: "255.255.255.0"), // 162.159.192.0/24
-        NEIPv4Route(destinationAddress: "162.159.193.0", subnetMask: "255.255.255.0"), // 162.159.193.0/24
-        NEIPv4Route(destinationAddress: "162.159.195.0", subnetMask: "255.255.255.0"), // 162.159.195.0/24
-    ]
-
-    private static let bypassIPv6Routes: [NEIPv6Route] = [
-        NEIPv6Route(destinationAddress: "fc00::", networkPrefixLength: 7),  // fc00::/7  unique-local
-        NEIPv6Route(destinationAddress: "fe80::", networkPrefixLength: 10), // fe80::/10 link-local
-    ]
-
     private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.8.0.1")
 
         let hideVPNIcon = AWCore.getHideVPNIcon()
         let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.0"])
         ipv4Settings.includedRoutes = [NEIPv4Route.default()]
-        ipv4Settings.excludedRoutes = (hideVPNIcon ? [NEIPv4Route(destinationAddress: "0.0.0.0", subnetMask: "255.255.255.254")] : []) + Self.bypassIPv4Routes
+        ipv4Settings.excludedRoutes = hideVPNIcon ? [NEIPv4Route(destinationAddress: "0.0.0.0", subnetMask: "255.255.255.254")] : []
         settings.ipv4Settings = ipv4Settings
 
         // Claiming IPv6 tunnel settings makes iOS show the VPN icon on cellular,
@@ -203,7 +171,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         if advertiseIPv6ToApps {
             let ipv6Settings = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
             ipv6Settings.includedRoutes = [NEIPv6Route.default()]
-            ipv6Settings.excludedRoutes = Self.bypassIPv6Routes
+            ipv6Settings.excludedRoutes = []
             settings.ipv6Settings = ipv6Settings
         }
 
