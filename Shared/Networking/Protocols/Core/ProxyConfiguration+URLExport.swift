@@ -100,8 +100,11 @@ extension ProxyConfiguration {
         if let sni = hysteriaSNI, sni != serverAddress {
             params.append("sni=\(sni)")
         }
-        if let mbps = hysteriaUploadMbps, mbps != HysteriaUploadMbpsDefault {
-            params.append("upmbps=\(mbps)")
+        // Emit the bandwidth params only for Brutal; their presence is what a
+        // reader uses to tell Brutal from BBR on import.
+        if hysteriaCongestionControl == .brutal {
+            params.append("upmbps=\(hysteriaUploadMbps ?? HysteriaUploadMbpsDefault)")
+            params.append("downmbps=\(hysteriaDownloadMbps ?? HysteriaDownloadMbpsDefault)")
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         return "hysteria2://\(password)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"

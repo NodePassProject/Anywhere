@@ -10,11 +10,11 @@ import Security
 
 enum HysteriaProtocol {
 
-    /// Frame type varint prefixed on every Hysteria TCP request.
-    /// `FrameTypeTCPRequest = 0x401` in the reference implementation.
+    /// Frame type varint prefixed on every Hysteria TCP request
+    /// (`FrameTypeTCPRequest`).
     static let tcpRequestFrameType: UInt64 = 0x401
 
-    /// QUIC application error codes used by the reference server/client.
+    /// QUIC application error codes defined by the Hysteria v2 protocol.
     /// `closeErrCodeOK = 0x100`, `closeErrCodeProtocolError = 0x101`.
     static let closeErrCodeOK: UInt64 = 0x100
     static let closeErrCodeProtocolError: UInt64 = 0x101
@@ -24,7 +24,7 @@ enum HysteriaProtocol {
     /// HTTP status code the server returns on successful /auth.
     static let authSuccessStatus = 233
 
-    // MARK: Padding ranges (from padding.go)
+    // MARK: Padding ranges
 
     /// Random padding length applied to auth request/response.
     static let authPaddingRange: ClosedRange<Int> = 256...2047
@@ -204,21 +204,13 @@ enum HysteriaProtocol {
         let fragCount = data[data.index(data.startIndex, offsetBy: offset)]
         offset += 1
 
-        // Match the reference Hysteria server's `ParseUDPMessage`
-        // (core/internal/protocol/proxy.go):
-        //
-        //   if len(bs) <= int(lAddr) {
-        //       // We use <= instead of < here as we expect at
-        //       // least one byte of data after the address
-        //       return nil, errors.ProtocolError{...}
-        //   }
-        //
-        // The reference rejects empty payloads (`<=`, not `<`). The
-        // application-layer drop in `handleIncomingDatagram` still
-        // defends `receiveLoop`'s EOF-on-empty contract, but mirroring
-        // the wire-level rule here also defends `assembleFragment`
-        // against an attacker feeding a stream of zero-byte fragments
-        // to churn defrag slots.
+        // Require at least one byte of payload after the address — the
+        // `offset + addrLen < data.count` check below uses `<`, not `<=`.
+        // The application-layer drop in `handleIncomingDatagram` still
+        // defends `receiveLoop`'s EOF-on-empty contract, but enforcing the
+        // wire-level rule here also defends `assembleFragment` against an
+        // attacker feeding a stream of zero-byte fragments to churn defrag
+        // slots.
         guard let (addrLen, addrLenLen) = decodeVarInt(from: data, offset: offset),
               addrLen > 0, addrLen <= UInt64(maxAddressLength) else { return nil }
         offset += addrLenLen

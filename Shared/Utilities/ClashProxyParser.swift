@@ -210,13 +210,25 @@ struct ClashProxyParser {
         let password = getString(node, key: "password") ?? ""
         let rawSNI = getString(node, key: "sni") ?? getString(node, key: "servername")
         let sni = (rawSNI?.isEmpty == false) ? rawSNI! : basics.server
-        let uploadMbps = clampHysteriaUploadMbps(parseBandwidthMbps(getString(node, key: "up")))
+        let upString = getString(node, key: "up")
+        let downString = getString(node, key: "down")
+        // `up`/`down` carry Brutal's bandwidth; a node without either runs BBR.
+        let hasBandwidth = (upString?.isEmpty == false) || (downString?.isEmpty == false)
+        let congestionControl: HysteriaCongestionControl = hasBandwidth ? .brutal : .bbr
+        let uploadMbps = clampHysteriaUploadMbps(parseBandwidthMbps(upString, default: HysteriaUploadMbpsDefault))
+        let downloadMbps = clampHysteriaDownloadMbps(parseBandwidthMbps(downString, default: HysteriaDownloadMbpsDefault))
 
         return ProxyConfiguration(
             name: basics.name,
             serverAddress: basics.server,
             serverPort: basics.port,
-            outbound: .hysteria(password: password, uploadMbps: uploadMbps, sni: sni)
+            outbound: .hysteria(
+                password: password,
+                congestionControl: congestionControl,
+                uploadMbps: uploadMbps,
+                downloadMbps: downloadMbps,
+                sni: sni
+            )
         )
     }
 
@@ -378,14 +390,14 @@ struct ClashProxyParser {
     }
 
     /// Parses a Clash bandwidth string (e.g. `"30 Mbps"`, `"30"`) into an
-    /// integer Mbit/s value for Hysteria Brutal CC. Returns the default when
-    /// the field is missing or unparseable.
-    private static func parseBandwidthMbps(_ raw: String?) -> Int {
+    /// integer Mbit/s value for Hysteria Brutal CC. Returns `def` when the
+    /// field is missing or unparseable.
+    private static func parseBandwidthMbps(_ raw: String?, default def: Int) -> Int {
         guard let trimmed = raw?.trimmingCharacters(in: .whitespaces), !trimmed.isEmpty else {
-            return HysteriaUploadMbpsDefault
+            return def
         }
         let leading = trimmed.split(separator: " ", maxSplits: 1).first.map(String.init) ?? trimmed
-        return Int(leading) ?? HysteriaUploadMbpsDefault
+        return Int(leading) ?? def
     }
 
     /// Parses `ws-opts` from a Clash proxy node and returns the appropriate transport layer.

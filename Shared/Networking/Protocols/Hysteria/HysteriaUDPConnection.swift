@@ -19,8 +19,7 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     private var sessionID: UInt32 = 0
 
     /// Per-datagram FIFO. Bounded at `maxQueuedPackets` with drop-oldest
-    /// semantics — matches the reference Go client's 1024-slot `ReceiveCh`
-    /// and preserves UDP's lossy contract.
+    /// semantics, preserving UDP's lossy contract under a slow consumer.
     /// All `packetQueue` / `pendingReceive` / `closureError` mutation runs
     /// on `session.queue` (producer, consumer, and teardown all funnel
     /// through it); consumer delivery hops through the queue once so the
@@ -41,9 +40,8 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     /// Per-PacketID reassembly slots. Multiple fragmented packets can be in
     /// flight concurrently and arrive interleaved (the QUIC DATAGRAM frame
     /// gives no ordering guarantee), so each PacketID owns an independent
-    /// slot — matches sing-quic's `udpDefragger` (hysteria2/packet.go).
-    /// Slots evict on completion, on TTL expiry (`defragSlotTTLNanos`), or
-    /// when the concurrent-slot cap (`maxDefragSlots`) forces oldest-out.
+    /// slot. Slots evict on completion, on TTL expiry (`defragSlotTTLNanos`),
+    /// or when the concurrent-slot cap (`maxDefragSlots`) forces oldest-out.
     private struct DefragSlot {
         var fragments: [Data?]
         var received: Int
@@ -52,11 +50,11 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     }
     private var defragSlots: [UInt16: DefragSlot] = [:]
     private static let defragSlotTTLNanos: UInt64 = 10 * 1_000_000_000
-    /// Concurrent in-progress reassembly cap. sing-quic's `cache.LruCache`
-    /// (hysteria2/packet.go) has no count cap — only the 10 s TTL — so a
-    /// tight value here drops legitimate in-progress assemblies under
-    /// concurrent fragmented UDP load (DoQ + WebRTC + QUIC-tunneled video
-    /// all running through one Hysteria session). 32 keeps the worst-case
+    /// Concurrent in-progress reassembly cap. The TTL alone bounds slot
+    /// lifetime but not slot count, so a tight value here drops legitimate
+    /// in-progress assemblies under concurrent fragmented UDP load (DoQ +
+    /// WebRTC + QUIC-tunneled video all running through one Hysteria
+    /// session). 32 keeps the worst-case
     /// memory bounded (32 × 255 × ~1.4 KB ≈ 11 MB if every slot held the
     /// largest possible fragmented payload — in practice slots hold a
     /// handful of fragments and turn over quickly) while leaving enough
@@ -68,9 +66,8 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     /// 1, skipping 0 (reserved as "unfragmented" by some Hysteria servers).
     /// A monotonic counter avoids defrag-slot corruption from ID collisions
     /// inside the 16-bit space — `assembleFragment` reuses a slot when the
-    /// fragment count matches, so two upper-layer packets that draw the
-    /// same random ID would merge into one corrupt payload. Matches
-    /// sing-quic's `packetId.Add(1) % math.MaxUint16` (hysteria2/packet.go).
+    /// fragment count matches, so two upper-layer packets that drew the
+    /// same random ID would merge into one corrupt payload.
     /// Only mutated on `session.queue` (the only call site is `sendRaw`).
     private var nextPacketID: UInt16 = 1
 
@@ -214,8 +211,8 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     /// DATAGRAM MTU would be exceeded.
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         // Zero-byte payloads survive fragmentation but the server rejects
-        // them — the reference Hysteria's `ParseUDPMessage` requires at
-        // least one byte of data after the address (we mirror that in
+        // them — the Hysteria UDP wire format requires at least one byte of
+        // data after the address (we enforce the same rule in
         // `HysteriaProtocol.decodeUDPMessage`). Sending one wastes a
         // QUIC DATAGRAM frame and leaves the caller with a misleading
         // "send succeeded" log line for a packet that's actually

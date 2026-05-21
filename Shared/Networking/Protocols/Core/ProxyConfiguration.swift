@@ -122,8 +122,15 @@ enum Outbound: Hashable {
     )
     /// Hysteria2 runs over QUIC with its own internal TLS. The SNI is always
     /// populated — callers default it to the server address when there is no
-    /// explicit override. `uploadMbps` is clamped to `HysteriaUploadMbpsRange`.
-    case hysteria(password: String, uploadMbps: Int, sni: String)
+    /// explicit override. `uploadMbps` / `downloadMbps` are clamped to their
+    /// ranges and only take effect when `congestionControl` is `.brutal`.
+    case hysteria(
+        password: String,
+        congestionControl: HysteriaCongestionControl,
+        uploadMbps: Int,
+        downloadMbps: Int,
+        sni: String
+    )
     /// Trojan runs as a thin SHA224(password)+CRLF+request header layered on
     /// top of mandatory TLS. The TLS knobs (SNI/ALPN/fingerprint) live in the
     /// associated `TLSConfiguration`; there is no plaintext variant.
@@ -154,14 +161,34 @@ enum Outbound: Hashable {
     case http3(username: String, password: String)
 }
 
-/// Clamps any integer to the 1-100 Mbit/s range used by `.hysteria`.
-/// Used at every construction boundary so the associated value is always
-/// valid regardless of source (URL, dict, legacy Codable without the key).
+/// Congestion controller for `.hysteria`. `brutal` paces each direction at a
+/// fixed user-configured rate; `bbr` lets the connection adapt and asks the
+/// server to run its own bandwidth detection.
+enum HysteriaCongestionControl: String, Codable, Hashable, CaseIterable {
+    case brutal
+    case bbr
+
+    var displayName: String {
+        switch self {
+        case .brutal: return "Brutal"
+        case .bbr: return "BBR"
+        }
+    }
+}
+
+/// Clamps an integer to the Mbit/s range used by `.hysteria`. Applied at every
+/// construction boundary so the associated values are always valid regardless
+/// of source (URL, dict, Clash, legacy Codable without the keys).
 func clampHysteriaUploadMbps(_ raw: Int) -> Int {
     max(HysteriaUploadMbpsRange.lowerBound, min(HysteriaUploadMbpsRange.upperBound, raw))
 }
-let HysteriaUploadMbpsRange: ClosedRange<Int> = 0...100
+func clampHysteriaDownloadMbps(_ raw: Int) -> Int {
+    max(HysteriaDownloadMbpsRange.lowerBound, min(HysteriaDownloadMbpsRange.upperBound, raw))
+}
+let HysteriaUploadMbpsRange: ClosedRange<Int> = 0...1000
 let HysteriaUploadMbpsDefault: Int = 20
+let HysteriaDownloadMbpsRange: ClosedRange<Int> = 0...1000
+let HysteriaDownloadMbpsDefault: Int = 50
 
 // MARK: - Transport Layer Configuration
 
@@ -286,7 +313,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case transport, websocket, httpUpgrade, grpc, xhttp
         case security, tls, reality
         case muxEnabled, xudpEnabled
-        case hysteriaPassword, hysteriaUploadMbps, hysteriaSNI
+        case hysteriaPassword, hysteriaCongestionControl, hysteriaUploadMbps, hysteriaDownloadMbps, hysteriaSNI
         case trojanPassword, trojanTLS
         case anytlsPassword, anytlsIdleCheckInterval, anytlsIdleTimeout, anytlsMinIdleSession, anytlsTLS
         case ssPassword, ssMethod
@@ -364,11 +391,18 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 return legacyTLS.serverName
             }()
             let explicitSNI = try container.decodeIfPresent(String.self, forKey: .hysteriaSNI) ?? legacySNI
-            let raw = try container.decodeIfPresent(Int.self, forKey: .hysteriaUploadMbps)
+            // Configs written before the congestion-control option default to
+            // Brutal with no explicit download cap, preserving their prior wire
+            // behaviour (Brutal uplink, server-driven downlink).
+            let cc = try container.decodeIfPresent(HysteriaCongestionControl.self, forKey: .hysteriaCongestionControl) ?? .brutal
+            let rawUp = try container.decodeIfPresent(Int.self, forKey: .hysteriaUploadMbps)
                 ?? HysteriaUploadMbpsDefault
+            let rawDown = try container.decodeIfPresent(Int.self, forKey: .hysteriaDownloadMbps) ?? 0
             outbound = .hysteria(
                 password: try container.decodeIfPresent(String.self, forKey: .hysteriaPassword) ?? "",
-                uploadMbps: clampHysteriaUploadMbps(raw),
+                congestionControl: cc,
+                uploadMbps: clampHysteriaUploadMbps(rawUp),
+                downloadMbps: clampHysteriaDownloadMbps(rawDown),
                 sni: (explicitSNI?.isEmpty == false ? explicitSNI! : serverAddress)
             )
 
@@ -501,11 +535,13 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(muxEnabled, forKey: .muxEnabled)
             try container.encode(xudpEnabled, forKey: .xudpEnabled)
 
-        case .hysteria(let password, let uploadMbps, let sni):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .hysteriaPassword)
+            try container.encode(congestionControl, forKey: .hysteriaCongestionControl)
             try container.encode(uploadMbps, forKey: .hysteriaUploadMbps)
+            try container.encode(downloadMbps, forKey: .hysteriaDownloadMbps)
             try container.encode(sni, forKey: .hysteriaSNI)
         case .trojan(let password, let tls):
             try container.encode(id, forKey: .uuid)
@@ -625,14 +661,27 @@ extension ProxyConfiguration {
 
     /// Hysteria password. `nil` for non-Hysteria.
     var hysteriaPassword: String? {
-        if case .hysteria(let password, _, _) = outbound { return password }
+        if case .hysteria(let password, _, _, _, _) = outbound { return password }
+        return nil
+    }
+
+    /// Selected congestion controller. `nil` for non-Hysteria.
+    var hysteriaCongestionControl: HysteriaCongestionControl? {
+        if case .hysteria(_, let cc, _, _, _) = outbound { return cc }
         return nil
     }
 
     /// Client's declared upload bandwidth (Mbit/s) for Hysteria Brutal CC.
     /// `nil` for non-Hysteria.
     var hysteriaUploadMbps: Int? {
-        if case .hysteria(_, let mbps, _) = outbound { return mbps }
+        if case .hysteria(_, _, let mbps, _, _) = outbound { return mbps }
+        return nil
+    }
+
+    /// Client's declared download bandwidth (Mbit/s) for Hysteria Brutal CC.
+    /// `nil` for non-Hysteria.
+    var hysteriaDownloadMbps: Int? {
+        if case .hysteria(_, _, _, let mbps, _) = outbound { return mbps }
         return nil
     }
 
@@ -640,7 +689,7 @@ extension ProxyConfiguration {
     /// Always populated for Hysteria (defaults to `serverAddress`); `nil`
     /// for non-Hysteria outbounds.
     var hysteriaSNI: String? {
-        if case .hysteria(_, _, let sni) = outbound { return sni }
+        if case .hysteria(_, _, _, _, let sni) = outbound { return sni }
         return nil
     }
 

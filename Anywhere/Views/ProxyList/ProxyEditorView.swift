@@ -57,7 +57,9 @@ struct ProxyEditorView: View {
     
     // Hysteria fields
     @State private var hysteriaPassword = ""
+    @State private var hysteriaCC: HysteriaCongestionControl = .brutal
     @State private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
+    @State private var hysteriaDownloadMbpsText = String(HysteriaDownloadMbpsDefault)
     @State private var hysteriaSNI = ""
 
     // Trojan fields
@@ -111,8 +113,11 @@ struct ProxyEditorView: View {
         }
         if isHysteria {
             if hysteriaPassword.isEmpty { return false }
-            guard let v = Int(hysteriaUploadMbpsText),
-                  HysteriaUploadMbpsRange.contains(v) else { return false }
+            if hysteriaCC == .brutal {
+                guard let up = Int(hysteriaUploadMbpsText), HysteriaUploadMbpsRange.contains(up),
+                      let down = Int(hysteriaDownloadMbpsText), HysteriaDownloadMbpsRange.contains(down)
+                else { return false }
+            }
             return true
         }
         if isTrojan {
@@ -227,12 +232,28 @@ struct ProxyEditorView: View {
                         } label: {
                             TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                         }
-                        LabeledContent {
-                            TextField("Mbps", text: $hysteriaUploadMbpsText)
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
+                        Picker(selection: $hysteriaCC) {
+                            ForEach(HysteriaCongestionControl.allCases, id: \.self) { cc in
+                                Text(cc.displayName).tag(cc)
+                            }
                         } label: {
-                            TextWithColorfulIcon(title: "Upload Speed", comment: "Upload Speed for Hysteria protocol", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                            TextWithColorfulIcon(title: "Congestion Control", comment: "Congestion control algorithm for Hysteria protocol", systemName: "speedometer", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                        if hysteriaCC == .brutal {
+                            LabeledContent {
+                                TextField("Mbps", text: $hysteriaUploadMbpsText)
+                                    .keyboardType(.numberPad)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(title: "Upload Speed", comment: "Upload Speed for Hysteria protocol", systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                            }
+                            LabeledContent {
+                                TextField("Mbps", text: $hysteriaDownloadMbpsText)
+                                    .keyboardType(.numberPad)
+                                    .multilineTextAlignment(.trailing)
+                            } label: {
+                                TextWithColorfulIcon(title: "Download Speed", comment: "Download Speed for Hysteria protocol", systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .blue)
+                            }
                         }
                    } else if isTrojan {
                         LabeledContent {
@@ -714,9 +735,11 @@ struct ProxyEditorView: View {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let uploadMbps, let sni):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
             hysteriaPassword = password
+            hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
+            hysteriaDownloadMbpsText = String(downloadMbps)
             hysteriaSNI = sni
         case .trojan(let password, let tls):
             trojanPassword = password
@@ -897,11 +920,14 @@ struct ProxyEditorView: View {
                 xudpEnabled: xudpEnabled
             )
         case .hysteria:
-            let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
+            let up = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
+            let down = clampHysteriaDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaDownloadMbpsDefault)
             let sni = hysteriaSNI.isEmpty ? bareAddress : hysteriaSNI
             outbound = .hysteria(
                 password: hysteriaPassword,
-                uploadMbps: mbps,
+                congestionControl: hysteriaCC,
+                uploadMbps: up,
+                downloadMbps: down,
                 sni: sni
             )
         case .trojan:

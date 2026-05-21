@@ -58,7 +58,9 @@ class TVProxyEditorViewController: UITableViewController {
     
     // Hysteria fields
     private var hysteriaPassword = ""
+    private var hysteriaCC: HysteriaCongestionControl = .brutal
     private var hysteriaUploadMbpsText = String(HysteriaUploadMbpsDefault)
+    private var hysteriaDownloadMbpsText = String(HysteriaDownloadMbpsDefault)
     
     // Trojan fields
     private var trojanPassword = ""
@@ -122,7 +124,7 @@ class TVProxyEditorViewController: UITableViewController {
         case xhttpHost, xhttpPath, xhttpMode
         case tlsSNI, tlsALPN, fingerprint
         case realitySNI, realityPublicKey, realityShortId
-        case hysteriaPassword, hysteriaUploadMbps
+        case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps
         case trojanPassword
         case anytlsPassword
         case ssPassword, ssMethod
@@ -175,7 +177,11 @@ class TVProxyEditorViewController: UITableViewController {
             }
         } else if isHysteria {
             serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: String(localized: "Password"), key: .hysteriaPassword, secure: true))
-            serverRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
+            serverRows.append(.selection(label: String(localized: "Congestion Control", comment: "Congestion control algorithm for Hysteria protocol"), value: hysteriaCC.displayName, options: HysteriaCongestionControl.allCases.map { ($0.displayName, $0.rawValue) }, key: .hysteriaCC))
+            if hysteriaCC == .brutal {
+                serverRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
+                serverRows.append(.text(label: String(localized: "Download Speed", comment: "Download Speed for Hysteria protocol"), value: hysteriaDownloadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaDownloadMbps))
+            }
         } else if isTrojan {
             serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword, secure: true))
         } else if isAnyTLS {
@@ -361,8 +367,11 @@ class TVProxyEditorViewController: UITableViewController {
         }
         if isHysteria {
             if hysteriaPassword.isEmpty { return false }
-            guard let v = Int(hysteriaUploadMbpsText),
-                  HysteriaUploadMbpsRange.contains(v) else { return false }
+            if hysteriaCC == .brutal {
+                guard let up = Int(hysteriaUploadMbpsText), HysteriaUploadMbpsRange.contains(up),
+                      let down = Int(hysteriaDownloadMbpsText), HysteriaDownloadMbpsRange.contains(down)
+                else { return false }
+            }
             return true
         }
         if isTrojan { return !trojanPassword.isEmpty }
@@ -561,7 +570,10 @@ class TVProxyEditorViewController: UITableViewController {
         case .realityPublicKey: realityPublicKey = value
         case .realityShortId: realityShortId = value
         case .hysteriaPassword: hysteriaPassword = value
+        case .hysteriaCC:
+            if let cc = HysteriaCongestionControl(rawValue: value) { hysteriaCC = cc }
         case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
+        case .hysteriaDownloadMbps: hysteriaDownloadMbpsText = value
         case .trojanPassword: trojanPassword = value
         case .anytlsPassword: anytlsPassword = value
         case .ssPassword: ssPassword = value
@@ -640,9 +652,11 @@ class TVProxyEditorViewController: UITableViewController {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let uploadMbps, _):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, _):
             hysteriaPassword = password
+            hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
+            hysteriaDownloadMbpsText = String(downloadMbps)
         case .trojan(let password, let tls):
             trojanPassword = password
             tlsSNI = tls.serverName
@@ -815,10 +829,13 @@ class TVProxyEditorViewController: UITableViewController {
                 xudpEnabled: xudpEnabled
             )
         case .hysteria:
-            let mbps = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
+            let up = clampHysteriaUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaUploadMbpsDefault)
+            let down = clampHysteriaDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaDownloadMbpsDefault)
             outbound = .hysteria(
                 password: hysteriaPassword,
-                uploadMbps: mbps,
+                congestionControl: hysteriaCC,
+                uploadMbps: up,
+                downloadMbps: down,
                 sni: existingConfiguration?.hysteriaSNI ?? bareAddress
             )
         case .trojan:

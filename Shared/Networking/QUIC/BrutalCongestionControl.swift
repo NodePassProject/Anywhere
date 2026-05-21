@@ -11,8 +11,8 @@ import Foundation
 
 nonisolated final class BrutalCongestionControl {
 
-    /// 5 seconds of per-second ack/loss slots. Mirrors sing-quic's
-    /// `pktInfoSlotCount = 5` in `hysteria/congestion/brutal.go`.
+    /// 5 seconds of per-second ack/loss slots — the window over which the
+    /// observed loss rate is computed.
     private static let slotCount = 5
     /// Below this many ack+loss samples the loss rate is treated as 0 — too
     /// little data to react to.
@@ -28,12 +28,10 @@ nonisolated final class BrutalCongestionControl {
     /// otherwise compute a cwnd of only a few hundred bytes.
     private static let minCwndPackets: UInt64 = 10
     /// Flat cwnd seed used until ngtcp2 produces its first RTT sample.
-    /// Matches `hysteria/congestion/brutal.go: GetCongestionWindow`, which
-    /// returns `10240` when `rtt <= 0`. The Brutal formula
-    /// (`bps * rtt * 2 / ackRate`) is only meaningful with a real RTT;
-    /// without this seed, applying the formula with a synthetic RTT floor
-    /// would produce a multi-MB cwnd at high `targetBps` and cause startup
-    /// burst loss vs the reference's conservative seed.
+    /// The Brutal formula (`bps * rtt * 2 / ackRate`) is only meaningful
+    /// with a real RTT; without this seed, applying the formula with a
+    /// synthetic RTT floor would produce a multi-MB cwnd at high `targetBps`
+    /// and cause startup burst loss. A flat 10 KB seed avoids that.
     private static let initialCwndBytes: UInt64 = 10240
 
     private struct Slot {
@@ -101,21 +99,14 @@ nonisolated final class BrutalCongestionControl {
     }
 
     /// Computes loss rate over the last `slotCount` seconds — *including*
-    /// the current (in-progress) second. Matches sing-quic's
-    /// `updateAckRate` (`hysteria/congestion/brutal.go`):
+    /// the current (in-progress) second.
     ///
-    ///   minTimestamp := currentTimestamp - pktInfoSlotCount
-    ///   for _, info := range b.pktInfoSlots {
-    ///       if info.Timestamp < minTimestamp { continue }
-    ///       ackCount += info.AckCount; lossCount += info.LossCount
-    ///   }
-    ///
-    /// Excluding the current second (the previous behaviour) starved the
-    /// window of fresh samples and pushed `ackRate` clamped at 1.0 for an
-    /// extra second on bursty-loss startups — the cwnd inflation that
-    /// Brutal does to compensate for loss arrived a full second late vs
-    /// the reference. Slots whose `secondMark` doesn't match a recent
-    /// second are ignored (stale / never updated).
+    /// Excluding the current second (a previous behaviour) starved the
+    /// window of fresh samples and pinned `ackRate` at 1.0 for an extra
+    /// second on bursty-loss startups — the cwnd inflation that Brutal does
+    /// to compensate for loss then arrived a full second late. Slots whose
+    /// `secondMark` doesn't match a recent second are ignored (stale /
+    /// never updated).
     private func observedLossRate(at ts: UInt64) -> Double {
         let now = ts / 1_000_000_000
         var totalAck: UInt64 = 0
@@ -154,21 +145,20 @@ nonisolated final class BrutalCongestionControl {
         // The Brutal formula (`bps * rtt * 2 / ackRate`) is only meaningful
         // with a real RTT — synthesising one with a floor produces a
         // multi-MB cwnd at high `targetBps` (e.g. 2.5 MB at 100 Mbit/s),
-        // and the first burst is what causes startup loss. Mirror
-        // sing-quic's flat-10 KB seed; the next pkt-acked callback brings
-        // a real RTT and the formula takes over from there.
+        // and the first burst is what causes startup loss. Use the flat
+        // seed instead; the next pkt-acked callback brings a real RTT and
+        // the formula takes over from there.
         let minCwnd = Self.minCwndPackets &* max(mss, 1)
         let cwnd: UInt64
         if smoothedRtt == 0 {
             cwnd = max(Self.initialCwndBytes, minCwnd)
         } else {
-            // Match sing-quic's `GetCongestionWindow`: bps * RTT * 2 / ackRate
-            // with raw RTT — no floor. A previous version clamped RTT at
-            // 50 ms; that systematically inflated cwnd by 5-50× on low-RTT
-            // links and could drive startup burst loss. `minCwnd` already
-            // bounds the result from below for the unrealistically-fast
-            // case where the formula would otherwise yield a few hundred
-            // bytes.
+            // Brutal's window formula: bps * RTT * 2 / ackRate, with raw RTT
+            // and no floor. A previous version clamped RTT at 50 ms; that
+            // systematically inflated cwnd by 5-50× on low-RTT links and
+            // could drive startup burst loss. `minCwnd` already bounds the
+            // result from below for the unrealistically-fast case where the
+            // formula would otherwise yield a few hundred bytes.
             let cwndBytes = pacingBps * Self.congestionWindowMultiplier * Double(smoothedRtt) / 1_000_000_000.0
             cwnd = max(UInt64(cwndBytes), minCwnd)
         }

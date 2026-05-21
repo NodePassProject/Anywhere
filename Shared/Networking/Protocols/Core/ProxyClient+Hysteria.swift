@@ -27,8 +27,9 @@ extension ProxyClient {
             proxyPort: configuration.serverPort,
             password: password,
             sni: configuration.hysteriaSNI ?? configuration.serverAddress,
-            clientRxBytesPerSec: 0, // "please probe" — server picks CC on its side
-            uploadMbps: configuration.hysteriaUploadMbps ?? HysteriaUploadMbpsDefault
+            congestionControl: configuration.hysteriaCongestionControl ?? .brutal,
+            uploadMbps: configuration.hysteriaUploadMbps ?? HysteriaUploadMbpsDefault,
+            downloadMbps: configuration.hysteriaDownloadMbps ?? 0
         )
 
         // RFC 3986 §3.2.2: IPv6 literals must be bracketed.

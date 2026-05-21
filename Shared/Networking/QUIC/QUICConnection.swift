@@ -460,9 +460,9 @@ nonisolated class QUICConnection {
     /// Two ceilings apply and we take the lower:
     /// - **Remote frame ceiling**: the peer's `max_datagram_frame_size`, minus
     ///   the DATAGRAM frame's own overhead (1 byte type + length varint). For
-    ///   payloads up to 16383 bytes the varint is 2 bytes, so 3 bytes total —
-    ///   matches sing-quic's `udpMTU = 1200 - 3`. A frame larger than this
-    ///   gets rejected by ngtcp2 with `NGTCP2_ERR_INVALID_ARGUMENT`.
+    ///   payloads up to 16383 bytes the varint is 2 bytes, so 3 bytes total.
+    ///   A frame larger than this gets rejected by ngtcp2 with
+    ///   `NGTCP2_ERR_INVALID_ARGUMENT`.
     /// - **Path-MTU ceiling**: the maximum UDP payload ngtcp2 will currently
     ///   emit on this path, minus the QUIC packet headers wrapping the frame
     ///   (short-header byte, dest-CID, packet number, AEAD tag, DATAGRAM frame
@@ -1151,9 +1151,8 @@ nonisolated class QUICConnection {
         // probes don't prove anything about the wire — they only confirm
         // the inner can carry that size today — and a probe failure trips
         // ngtcp2's blackhole detection on what is, on the wire, a routine
-        // inner drop. Skip probes for chained transports; matches the
-        // reference's approach of disabling PMTUD when the QUIC layer
-        // sits over a non-direct PacketConn.
+        // inner drop. So skip probes whenever the QUIC layer sits over a
+        // non-direct transport rather than a kernel socket.
         let usePMTUD = (transport == nil)
         var connPtr: OpaquePointer?
         let rv = Self.pmtudProbes.withUnsafeBufferPointer { probes -> Int32 in
@@ -1174,10 +1173,9 @@ nonisolated class QUICConnection {
         // Emit a PING after a configurable idle period so a silently-broken
         // UDP path (carrier NAT rebind, server-side idle sweep) surfaces as a
         // loss / idle-close within one retransmission cycle rather than
-        // waiting for the next app write to hit CONNECTION_CLOSE. Naive uses
-        // 15 s (matching naiveproxy's `set_keep_alive_ping_timeout`); Hysteria
-        // uses 10 s (matching the reference client's `defaultKeepAlivePeriod`
-        // in `core/client/config.go`).
+        // waiting for the next app write to hit CONNECTION_CLOSE. The exact
+        // period is per-protocol (see `QUICTuning.keepAliveTimeout`): Naive
+        // uses 15 s, Hysteria 10 s.
         ngtcp2_conn_set_keep_alive_timeout(connPtr, tuning.keepAliveTimeout)
 
         ngtcp2_conn_set_tls_native_handle(connPtr,
@@ -1206,9 +1204,9 @@ nonisolated class QUICConnection {
     }
 
     /// Uninstalls Brutal and reverts to ngtcp2's CUBIC. Used when the
-    /// Hysteria server responds with `Hysteria-CC-RX: auto`, which the
-    /// reference client interprets as "drop Brutal and let your own pacer
-    /// adapt". No-op if Brutal isn't installed. Safe to call off-queue.
+    /// Hysteria server responds with `Hysteria-CC-RX: auto`, which means
+    /// "drop Brutal and let your own pacer adapt". No-op if Brutal isn't
+    /// installed. Safe to call off-queue.
     ///
     /// The Brutal registry entry is dropped BEFORE the CC table is rewired
     /// so any in-flight trampoline that loses the race finds no entry and
@@ -1401,8 +1399,8 @@ nonisolated class QUICConnection {
     // MARK: Timer
 
     /// Schedules a one-shot timer at the exact deadline ngtcp2 needs
-    /// (retransmission, loss detection, etc.). Event-driven alarm matching
-    /// Chromium/QUICHE's QuicAlarm approach.
+    /// (retransmission, loss detection, etc.) — an event-driven alarm
+    /// rather than a periodic tick.
     private var lastScheduledExpiry: UInt64 = 0
 
     private func rescheduleTimer() {
@@ -1454,8 +1452,8 @@ nonisolated class QUICConnection {
         }
         // BBR relies on sub-millisecond inter-packet pacing accuracy; a loose
         // leeway lets the dispatch scheduler coalesce wakeups, converting
-        // smooth pacing into bursts that trip loss detection.  Matches
-        // QUICHE's `QuicAlarm` precision (no leeway).
+        // smooth pacing into bursts that trip loss detection. Use zero
+        // leeway so the alarm fires at the exact deadline.
         retransmitTimer?.schedule(deadline: deadline, leeway: .nanoseconds(0))
     }
 

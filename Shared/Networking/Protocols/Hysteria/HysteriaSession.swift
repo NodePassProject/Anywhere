@@ -157,7 +157,7 @@ nonisolated final class HysteriaSession {
             serverName: configuration.sni,
             alpn: ["h3"],
             datagramsEnabled: true,
-            tuning: .hysteria(uploadMbps: configuration.uploadMbps),
+            tuning: .hysteria(congestionControl: configuration.congestionControl, uploadMbps: configuration.uploadMbps),
             transport: transport
         )
     }
@@ -266,29 +266,14 @@ nonisolated final class HysteriaSession {
     /// isn't fully buffered yet. The returned payload is a zero-copy slice
     /// of `buffer`; `HysteriaHTTP3Codec.decodeHeaderBlock` is slice-safe.
     private func parseNextHTTP3Frame(_ buffer: Data) -> (type: UInt64, payload: Data, consumed: Int)? {
-        guard let (frameType, typeLen) = Self.decodeQUICVarInt(buffer, offset: 0) else { return nil }
-        guard let (payloadLen, lenBytes) = Self.decodeQUICVarInt(buffer, offset: typeLen) else { return nil }
+        guard let (frameType, typeLen) = HysteriaProtocol.decodeVarInt(from: buffer, offset: 0) else { return nil }
+        guard let (payloadLen, lenBytes) = HysteriaProtocol.decodeVarInt(from: buffer, offset: typeLen) else { return nil }
         let headerLen = typeLen + lenBytes
         let total = headerLen + Int(payloadLen)
         guard buffer.count >= total else { return nil }
         let base = buffer.startIndex
         let payload = buffer[(base + headerLen)..<(base + total)]
         return (frameType, payload, total)
-    }
-
-    /// Slice-safe QUIC varint decoder (RFC 9000 §16).
-    private static func decodeQUICVarInt(_ data: Data, offset: Int) -> (UInt64, Int)? {
-        guard offset < data.count else { return nil }
-        let base = data.startIndex
-        let first = data[base + offset]
-        let prefix = first >> 6
-        let len = 1 << Int(prefix)
-        guard offset + len <= data.count else { return nil }
-        var value = UInt64(first & 0x3F)
-        for i in 1..<len {
-            value = (value << 8) | UInt64(data[base + offset + i])
-        }
-        return (value, len)
     }
 
     /// HTTP/3 SETTINGS frame with QPACK dynamic table disabled.
@@ -425,28 +410,31 @@ nonisolated final class HysteriaSession {
         udpSupported = (headers.first(where: { $0.name == "hysteria-udp" })?.value).map {
             $0.lowercased() == "true"
         } ?? false
-        let ccRxValue = headers.first(where: { $0.name == "hysteria-cc-rx" })?.value ?? ""
-        // `auto` is the server's request that the CLIENT defer pacing to
-        // its own bandwidth estimator — the reference client switches to
-        // BBR. ngtcp2 in this tree doesn't ship BBR-with-pacing, so the
-        // closest match is its native CUBIC; uninstall Brutal and let
-        // CUBIC's loss-based control drive the connection. Any other value
-        // (including unparseable / missing) is treated as 0 = "no cap".
-        let serverRxAuto = ccRxValue.lowercased() == "auto"
-        serverRxBytesPerSec = serverRxAuto ? 0 : (UInt64(ccRxValue) ?? 0)
+        // The server's CC-RX only matters under Brutal, where it caps our send
+        // rate. Under BBR the connection paces itself, so there is nothing to
+        // adjust from the response.
+        if configuration.congestionControl == .brutal {
+            let ccRxValue = headers.first(where: { $0.name == "hysteria-cc-rx" })?.value ?? ""
+            // `auto` is the server asking the CLIENT to defer pacing to its own
+            // estimator. ngtcp2 in this tree doesn't ship BBR-with-pacing, so
+            // the closest match is its native CUBIC: uninstall Brutal and let
+            // CUBIC's loss-based control drive. Any other value (including
+            // unparseable / missing) is treated as 0 = "no cap".
+            let serverRxAuto = ccRxValue.lowercased() == "auto"
+            serverRxBytesPerSec = serverRxAuto ? 0 : (UInt64(ccRxValue) ?? 0)
 
-        if serverRxAuto {
-            quic.uninstallBrutalCC()
-        } else {
-            // Brutal tx rate = min(server_rx, client_max_tx), treating a
-            // server-side 0 as "no server cap". The client cap is always
-            // set (validated 1…100 Mbit/s at construction time) so we
-            // always have something to install.
-            let clientTxBps = configuration.uploadBytesPerSec
-            let effectiveTxBps: UInt64 = serverRxBytesPerSec == 0
-                ? clientTxBps
-                : min(serverRxBytesPerSec, clientTxBps)
-            quic.setBrutalBandwidth(effectiveTxBps)
+            if serverRxAuto {
+                quic.uninstallBrutalCC()
+            } else {
+                // Brutal tx rate = min(server_rx, client_max_tx), treating a
+                // server-side 0 as "no server cap". A client cap of 0 leaves
+                // Brutal idle so ngtcp2's CUBIC drives instead.
+                let clientTxBps = configuration.uploadBytesPerSec
+                let effectiveTxBps: UInt64 = serverRxBytesPerSec == 0
+                    ? clientTxBps
+                    : min(serverRxBytesPerSec, clientTxBps)
+                quic.setBrutalBandwidth(effectiveTxBps)
+            }
         }
 
         // Tear down the auth stream — we don't need it anymore.
@@ -500,8 +488,8 @@ nonisolated final class HysteriaSession {
         if let conn = udpSessions[msg.sessionID] {
             conn.handleIncomingDatagram(msg)
         }
-        // Unknown sessions are dropped silently — matches the reference
-        // server/client behavior (no explicit session teardown).
+        // Unknown sessions are dropped silently; Hysteria has no explicit
+        // UDP session teardown handshake.
     }
 
     // MARK: - TCP stream API (called by HysteriaConnection)

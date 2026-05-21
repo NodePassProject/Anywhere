@@ -145,9 +145,9 @@ enum HysteriaHTTP3Codec {
                 }
 
             } else if byte & 0x20 != 0 {
-                // 001 N H — Literal field line with literal name.
-                // Go's net/http (used by the reference Hysteria server)
-                // Huffman-encodes both name and value by default.
+                // 001 N H — Literal field line with literal name. The
+                // Hysteria server's HTTP/3 stack Huffman-encodes both name
+                // and value by default, so handle both forms.
                 let isHuffmanName = (byte & 0x08) != 0
                 guard let (nameLen, nameLenBytes) = decodePrefixedInt(data, offset: offset, prefixBits: 3) else { return nil }
                 offset += nameLenBytes
@@ -272,9 +272,8 @@ enum HysteriaHTTP3Codec {
     }
 
     /// Decodes a length-prefixed string. Handles both raw UTF-8 and Huffman
-    /// (RFC 7541 Appendix B, shared between HPACK and QPACK) since Go's
-    /// net/http — the reference Hysteria server — Huffman-encodes responses
-    /// by default.
+    /// (RFC 7541 Appendix B, shared between HPACK and QPACK), since the
+    /// Hysteria server Huffman-encodes responses by default.
     private static func decodeString(_ data: Data, offset: Int) -> (value: String, bytesConsumed: Int)? {
         let base = data.startIndex
         guard offset < data.count else { return nil }

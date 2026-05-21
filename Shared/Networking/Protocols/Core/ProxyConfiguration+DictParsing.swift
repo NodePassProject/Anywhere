@@ -62,14 +62,19 @@ extension ProxyConfiguration {
             )
 
         case .hysteria:
-            let rawMbps = (configurationDict["hysteriaUploadMbps"] as? Int) ?? HysteriaUploadMbpsDefault
+            let rawUp = (configurationDict["hysteriaUploadMbps"] as? Int) ?? HysteriaUploadMbpsDefault
+            let rawDown = (configurationDict["hysteriaDownloadMbps"] as? Int) ?? 0
+            let congestionControl = (configurationDict["hysteriaCongestionControl"] as? String)
+                .flatMap(HysteriaCongestionControl.init(rawValue:)) ?? .brutal
             // Fall back to legacy `tlsServerName` when `hysteriaSNI` is absent,
             // then fall back to `serverAddress` so SNI is always populated.
             let explicitSNI = (configurationDict["hysteriaSNI"] as? String)
                 ?? (configurationDict["tlsServerName"] as? String)
             outbound = .hysteria(
                 password: (configurationDict["hysteriaPassword"] as? String) ?? "",
-                uploadMbps: clampHysteriaUploadMbps(rawMbps),
+                congestionControl: congestionControl,
+                uploadMbps: clampHysteriaUploadMbps(rawUp),
+                downloadMbps: clampHysteriaDownloadMbps(rawDown),
                 sni: (explicitSNI?.isEmpty == false) ? explicitSNI! : serverAddress
             )
         case .trojan:

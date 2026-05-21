@@ -77,19 +77,17 @@ struct QUICTuning {
 
 extension QUICTuning {
 
-    /// Matches naiveproxy/Chromium defaults. CUBIC is what the upstream
-    /// server stack is tuned against; BBR is a reasonable proxy-side
-    /// choice but deviates from the reference implementation.
+    /// Tuning preset for the Naive (HTTP/3 CONNECT) transport. CUBIC is the
+    /// congestion controller the Naive server stack is tuned against; BBR is
+    /// a reasonable proxy-side alternative but is left off by default.
     ///
-    /// Flow-control windows are sized after upstream naiveproxy
-    /// (`naive_proxy_bin.cc`): 64 MB stream / 128 MB connection, the
-    /// 2× BDP target for 125 Mbps × 256 ms links. Initial per-stream
-    /// window is bumped to 16 MB so the first RTT after CONNECT can
-    /// fill a high-BDP pipe before the ngtcp2 auto-scaler ramps.
+    /// Flow-control windows target 2× BDP for 125 Mbps × 256 ms links:
+    /// 64 MB stream / 128 MB connection. The initial per-stream window is
+    /// bumped to 16 MB so the first RTT after CONNECT can fill a high-BDP
+    /// pipe before the ngtcp2 auto-scaler ramps.
     ///
-    /// Handshake timeout matches naive's `kMaxTimeForCryptoHandshakeSecs = 10`
-    /// (quic_constants.h). Covers ~three PTO retransmissions (1/2/4 s)
-    /// before the pool's one-shot retry kicks in — tight enough to
+    /// The 10 s handshake timeout covers ~three PTO retransmissions
+    /// (1/2/4 s) before the pool's one-shot retry kicks in — tight enough to
     /// recover from a stale PSK quickly, loose enough not to trip on
     /// high-RTT / lossy mobile paths.
     static let naive = QUICTuning(
@@ -108,40 +106,58 @@ extension QUICTuning {
         disableActiveMigration: true
     )
 
-    /// Hysteria v2 runs Brutal congestion control with a user-configured
-    /// upload rate (Mbit/s). The rate applies from the moment the QUIC
-    /// connection opens; `HysteriaSession` replaces it with
-    /// `min(server_rx, client_max_tx)` once the auth response lands.
+    /// Hysteria v2 runs over QUIC with a user-selectable congestion controller.
     ///
-    /// Flow-control windows are smaller than the reference Hysteria client
-    /// (`core/client/config.go` uses 8 MB/20 MB). Each QUIC stream proxies
-    /// a TCP connection with `TCP_SND_BUF ≈ 696 KB`. When the server's
-    /// stream credit dwarfs `TCP_SND_BUF`, Brutal dumps 8 MB into our side
-    /// in milliseconds and then sits stalled behind `snd_buf=0` waiting for
-    /// iOS client ACKs. Matching the stream window to roughly 2× `TCP_SND_BUF`
-    /// keeps the server paced to what the downstream TCP can actually absorb,
-    /// eliminating the "burst-then-stall" pattern without capping throughput
-    /// (Brutal sends at a fixed rate with no window-driven backoff, so a
-    /// smaller window doesn't reduce steady-state goodput).
+    /// `.brutal` paces uploads at a user-configured rate (replaced post-auth
+    /// with `min(server_rx, client_max_tx)`). Its flow-control windows are
+    /// deliberately small: each QUIC stream proxies a TCP connection with
+    /// `TCP_SND_BUF ≈ 696 KB`, so when the server's stream credit dwarfs that,
+    /// Brutal dumps several MB into our side in milliseconds and then sits
+    /// stalled behind `snd_buf=0` waiting for iOS client ACKs. Sizing the
+    /// stream window to roughly 2× `TCP_SND_BUF` keeps the server paced to what
+    /// the downstream TCP can actually absorb, eliminating the "burst-then-stall"
+    /// pattern without capping throughput (Brutal sends at a fixed rate with no
+    /// window-driven backoff). `max == initial` disables ngtcp2's receive-window
+    /// auto-tuner, so those values are also the effective ceiling.
     ///
-    /// `max == initial` disables ngtcp2's receive-window auto-tuner, so the
-    /// values here are also the effective ceiling.
-    static func hysteria(uploadMbps: Int) -> QUICTuning {
-        let bps = UInt64(uploadMbps) * 1_000_000 / 8
-        return QUICTuning(
-            cc: .brutal(initialBps: bps),
-            maxStreamWindow: 2 * 1024 * 1024,
-            maxWindow: 4 * 1024 * 1024,
-            initialMaxData: 4 * 1024 * 1024,
-            initialMaxStreamDataBidiLocal: 2 * 1024 * 1024,
-            initialMaxStreamDataBidiRemote: 2 * 1024 * 1024,
-            initialMaxStreamDataUni: 2 * 1024 * 1024,
-            initialMaxStreamsBidi: 1024,
-            initialMaxStreamsUni: 16,
-            maxIdleTimeout: 30 * 1_000_000_000,
-            handshakeTimeout: 10 * 1_000_000_000,
-            keepAliveTimeout: 10 * 1_000_000_000,
-            disableActiveMigration: true
-        )
+    /// `.bbr` paces from ngtcp2's own bandwidth estimate, so it needs room to
+    /// grow: the windows start small but let the auto-tuner scale up to a
+    /// high-BDP ceiling (`max > initial`).
+    static func hysteria(congestionControl: HysteriaCongestionControl, uploadMbps: Int) -> QUICTuning {
+        switch congestionControl {
+        case .brutal:
+            let bps = UInt64(max(0, uploadMbps)) * 1_000_000 / 8
+            return QUICTuning(
+                cc: .brutal(initialBps: bps),
+                maxStreamWindow: 2 * 1024 * 1024,
+                maxWindow: 4 * 1024 * 1024,
+                initialMaxData: 4 * 1024 * 1024,
+                initialMaxStreamDataBidiLocal: 2 * 1024 * 1024,
+                initialMaxStreamDataBidiRemote: 2 * 1024 * 1024,
+                initialMaxStreamDataUni: 2 * 1024 * 1024,
+                initialMaxStreamsBidi: 1024,
+                initialMaxStreamsUni: 16,
+                maxIdleTimeout: 30 * 1_000_000_000,
+                handshakeTimeout: 10 * 1_000_000_000,
+                keepAliveTimeout: 10 * 1_000_000_000,
+                disableActiveMigration: true
+            )
+        case .bbr:
+            return QUICTuning(
+                cc: .bbr,
+                maxStreamWindow: 16 * 1024 * 1024,
+                maxWindow: 32 * 1024 * 1024,
+                initialMaxData: 8 * 1024 * 1024,
+                initialMaxStreamDataBidiLocal: 2 * 1024 * 1024,
+                initialMaxStreamDataBidiRemote: 2 * 1024 * 1024,
+                initialMaxStreamDataUni: 2 * 1024 * 1024,
+                initialMaxStreamsBidi: 1024,
+                initialMaxStreamsUni: 16,
+                maxIdleTimeout: 30 * 1_000_000_000,
+                handshakeTimeout: 10 * 1_000_000_000,
+                keepAliveTimeout: 10 * 1_000_000_000,
+                disableActiveMigration: true
+            )
+        }
     }
 }

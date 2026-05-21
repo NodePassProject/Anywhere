@@ -161,8 +161,9 @@ nonisolated class QUICTLSHandler {
         let p256Public = privateKeyP256.publicKey.x963Representation
         let x25519Public = privateKeyX25519.publicKey.rawRepresentation
 
-        // Real Chrome offers X25519 first, then secp256r1 — match that ordering
-        // both in supported_groups and key_share so the server can pick either.
+        // Offer X25519 first, then secp256r1, in both supported_groups and
+        // key_share so the server can pick either. This ordering matches what
+        // mainstream browsers send, so the handshake fingerprint blends in.
         let keyShares: [(group: UInt16, keyData: Data)] = [
             (kNamedGroupX25519, x25519Public),
             (kNamedGroupSecp256r1, p256Public),
@@ -486,6 +487,7 @@ nonisolated class QUICTLSHandler {
 
         // Validate server certificate chain (respects allowInsecure setting)
         if let error = validateCertificate() {
+            logger.warning("[QUIC-TLS] Certificate validation failed: \(error.localizedDescription)")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
@@ -498,6 +500,7 @@ nonisolated class QUICTLSHandler {
                 algorithm: certificateVerifyAlgorithm,
                 signature: signature
             ) {
+                logger.warning("[QUIC-TLS] CertificateVerify failed: \(error.localizedDescription)")
                 return .error(NGTCP2_ERR_CALLBACK_FAILURE)
             }
         }
@@ -639,8 +642,6 @@ nonisolated class QUICTLSHandler {
         let txIV = kd.hkdfExpandLabel(key: clientATSKey, label: "quic iv", context: Data(), length: 12)
         let txHP = kd.hkdfExpandLabel(key: clientATSKey, label: "quic hp", context: Data(), length: kd.keyLength)
 
-        // (keys derived)
-
         // Create AEAD and HP contexts
         var rxAeadCtx = ngtcp2_crypto_aead_ctx()
         var rxHPCtx = ngtcp2_crypto_cipher_ctx()
@@ -685,7 +686,6 @@ nonisolated class QUICTLSHandler {
                     &txHPCtx)
             }
         }
-
     }
 
     // MARK: - Session Tickets
@@ -733,7 +733,7 @@ nonisolated class QUICTLSHandler {
         ticketCacheLock.lock()
         sessionTicketCache[cacheKey] = cached
         ticketCacheLock.unlock()
-        
+
         return .success
     }
 

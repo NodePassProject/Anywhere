@@ -193,16 +193,26 @@ extension ProxyConfiguration {
         
         let sni = (params["sni"]?.isEmpty == false) ? params["sni"]! : host
 
-        // `upmbps` matches the Hysteria v2 share-link convention for the
-        // client's declared upload bandwidth (Mbit/s). Clamped to 1...100.
-        let rawMbps = params["upmbps"].flatMap { Int($0) } ?? HysteriaUploadMbpsDefault
-        let uploadMbps = clampHysteriaUploadMbps(rawMbps)
+        // `upmbps` / `downmbps` follow the Hysteria v2 share-link convention
+        // for the client's declared bandwidth (Mbit/s). Their presence selects
+        // Brutal; a link without either runs BBR.
+        let rawUp = params["upmbps"].flatMap { Int($0) }
+        let rawDown = params["downmbps"].flatMap { Int($0) }
+        let congestionControl: HysteriaCongestionControl = (rawUp != nil || rawDown != nil) ? .brutal : .bbr
+        let uploadMbps = clampHysteriaUploadMbps(rawUp ?? HysteriaUploadMbpsDefault)
+        let downloadMbps = clampHysteriaDownloadMbps(rawDown ?? HysteriaDownloadMbpsDefault)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
             serverAddress: host,
             serverPort: port,
-            outbound: .hysteria(password: password, uploadMbps: uploadMbps, sni: sni)
+            outbound: .hysteria(
+                password: password,
+                congestionControl: congestionControl,
+                uploadMbps: uploadMbps,
+                downloadMbps: downloadMbps,
+                sni: sni
+            )
         )
     }
     
