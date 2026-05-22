@@ -374,23 +374,21 @@ class DomainRouter {
             }
         }
 
-        // Rules pointing at the currently-selected proxy/chain are redundant with the
-        // default action; skip them so traffic falls through to the default path.
-        // By design we filter here at load time (not at match time) so the redundant
-        // rules never enter the tier matchers — they cost zero memory while the
-        // current selection stays the same. When the selection changes, the main app
-        // posts `routingChanged` and we re-run this load with the new selection.
-        let currentSelectionId = AWCore.getSelectedChainId() ?? AWCore.getSelectedConfigurationId()
-
-        // Tiered rule loading. Each tier reads from its own array.
+        // Tiered rule loading. Each tier reads from its own array. Every rule is
+        // loaded regardless of its target — including rules that point at the proxy
+        // currently selected as the default. Dropping such "redundant with the
+        // default" rules is unsound: a more-specific rule in the same tier, or any
+        // rule in a lower-priority tier, could otherwise match instead and route the
+        // connection somewhere other than the default the dropped rule intended.
+        // Keeping them preserves both within-tier specificity and cross-tier priority.
         if let entries = json["userRules"] as? [[String: Any]] {
-            loadRuleEntries(entries, into: .user, skippingConfigId: currentSelectionId)
+            loadRuleEntries(entries, into: .user)
         }
         if let entries = json["adBlockRules"] as? [[String: Any]] {
-            loadRuleEntries(entries, into: .adBlock, skippingConfigId: currentSelectionId)
+            loadRuleEntries(entries, into: .adBlock)
         }
         if let entries = json["builtInRules"] as? [[String: Any]] {
-            loadRuleEntries(entries, into: .builtIn, skippingConfigId: currentSelectionId)
+            loadRuleEntries(entries, into: .builtIn)
         }
         if let entries = json["bypassRules"] as? [[String: Any]] {
             loadBypassEntries(entries, into: .bypass)
@@ -401,7 +399,7 @@ class DomainRouter {
         logger.debug("[DomainRouter] Loaded tiers — user: \(self.tiers[Tier.user.rawValue].domainRuleCount)+\(self.tiers[Tier.user.rawValue].ipRuleCount), adBlock: \(self.tiers[Tier.adBlock.rawValue].domainRuleCount)+\(self.tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(self.tiers[Tier.builtIn.rawValue].domainRuleCount)+\(self.tiers[Tier.builtIn.rawValue].ipRuleCount), bypass: \(self.tiers[Tier.bypass.rawValue].domainRuleCount)+\(self.tiers[Tier.bypass.rawValue].ipRuleCount); \(self.configurationMap.count) configurations")
     }
 
-    private func loadRuleEntries(_ entries: [[String: Any]], into tier: Tier, skippingConfigId: UUID? = nil) {
+    private func loadRuleEntries(_ entries: [[String: Any]], into tier: Tier) {
         for rule in entries {
             guard let actionStr = rule["action"] as? String else { continue }
 
@@ -413,10 +411,6 @@ class DomainRouter {
             } else if actionStr == "proxy",
                       let configurationIdStr = rule["configId"] as? String,
                       let configurationId = UUID(uuidString: configurationIdStr) {
-                // Skip rules that point at the current default — see comment in
-                // loadRoutingConfiguration. Dropping them here keeps the tier
-                // matchers free of entries whose action is already the fallback.
-                if configurationId == skippingConfigId { continue }
                 action = .proxy(configurationId)
             } else {
                 continue
