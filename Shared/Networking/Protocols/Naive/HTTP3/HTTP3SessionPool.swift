@@ -17,7 +17,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
     static let shared = HTTP3SessionPool()
 
     /// Last activity time per session (for idle eviction).
-    private var lastActivity: [ObjectIdentifier: Date] = [:]
+    private var lastActivity: [ObjectIdentifier: CFAbsoluteTime] = [:]
 
     /// Soft cap on sessions per pool key. When reached, acquire tries to
     /// evict an idle session before creating a new one.
@@ -60,12 +60,12 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
         evictStale(key: key)
 
         if let existing = sessions[key]?.first(where: { $0.tryReserveStream() }) {
-            lastActivity[ObjectIdentifier(existing)] = Date()
+            lastActivity[ObjectIdentifier(existing)] = CFAbsoluteTimeGetCurrent()
             session = existing
         } else if let overflow = overflowSession(key: key) {
             // Hard cap hit and every session is saturated — pile onto the
             // least-loaded one rather than grow the pool unbounded.
-            lastActivity[ObjectIdentifier(overflow)] = Date()
+            lastActivity[ObjectIdentifier(overflow)] = CFAbsoluteTimeGetCurrent()
             session = overflow
         } else {
             // Soft cap: never close a session that still has live streams —
@@ -93,7 +93,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
                 self.removeSession(new, key: capturedKey)
             }
             sessions[key, default: []].append(new)
-            lastActivity[ObjectIdentifier(new)] = Date()
+            lastActivity[ObjectIdentifier(new)] = CFAbsoluteTimeGetCurrent()
             session = new
         }
         lock.unlock()
@@ -125,7 +125,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
     /// Removes closed, stream-blocked, and idle sessions from `key`'s bucket.
     /// Must be called with ``lock`` held.
     private func evictStale(key: String) {
-        let now = Date()
+        let now = CFAbsoluteTimeGetCurrent()
         sessions[key]?.removeAll { session in
             if session.poolIsClosed || session.poolIsStreamBlocked {
                 lastActivity.removeValue(forKey: ObjectIdentifier(session))
@@ -134,7 +134,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
             // Only evict idle sessions that have NO active streams.
             if !session.hasActiveStreams,
                let activity = lastActivity[ObjectIdentifier(session)],
-               now.timeIntervalSince(activity) > Self.idleTimeout {
+               now - activity > Self.idleTimeout {
                 lastActivity.removeValue(forKey: ObjectIdentifier(session))
                 DispatchQueue.global().async { session.close() }
                 return true
@@ -170,7 +170,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
 
     private func cleanupIdleSessions() {
         lock.lock()
-        let now = Date()
+        let now = CFAbsoluteTimeGetCurrent()
         var sessionsToClose: [HTTP3Session] = []
 
         for key in sessions.keys {
@@ -182,7 +182,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
                 // Never evict sessions that still have active streams.
                 if !session.hasActiveStreams,
                    let activity = lastActivity[ObjectIdentifier(session)],
-                   now.timeIntervalSince(activity) > Self.idleTimeout {
+                   now - activity > Self.idleTimeout {
                     lastActivity.removeValue(forKey: ObjectIdentifier(session))
                     sessionsToClose.append(session)
                     return true

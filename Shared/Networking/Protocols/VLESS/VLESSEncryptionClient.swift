@@ -796,7 +796,7 @@ nonisolated final class VLESSEncryptionClient {
                 if seconds > 0, ticketPayload.count >= 16 {
                     let serverSeconds = VLESSLength.decode(ticketPayload)
                     if serverSeconds > 0 {
-                        let expire = Date().addingTimeInterval(TimeInterval(serverSeconds))
+                        let expire = CFAbsoluteTimeGetCurrent() + TimeInterval(serverSeconds)
                         VLESSEncryption0RTTCache.shared.store(
                             key: cacheKey,
                             pfsKey: pfsKey,

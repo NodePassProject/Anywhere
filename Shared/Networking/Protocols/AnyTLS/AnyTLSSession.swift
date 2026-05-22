@@ -54,7 +54,7 @@ nonisolated final class AnyTLSSession {
 
     /// Set by `AnyTLSClient` when it inserts/withdraws the session from
     /// the idle pool.
-    var idleSince: Date = Date.distantFuture
+    var idleSince: CFAbsoluteTime = .greatestFiniteMagnitude
     var seq: UInt64 = 0
 
     /// Dispatch queue for the synDone watchdog timer.

@@ -184,7 +184,7 @@ nonisolated final class AnyTLSClient {
             return
         }
         activeSessions.removeValue(forKey: ObjectIdentifier(session))
-        session.idleSince = Date()
+        session.idleSince = CFAbsoluteTimeGetCurrent()
         idleSessions.append(session)
         let idleCount = idleSessions.count
         let activeCount = activeSessions.count
@@ -217,7 +217,7 @@ nonisolated final class AnyTLSClient {
     }
 
     private func runIdleCleanup() {
-        let cutoff = Date().addingTimeInterval(-idleSessionTimeout)
+        let cutoff = CFAbsoluteTimeGetCurrent() - idleSessionTimeout
         var toClose: [AnyTLSSession] = []
         lock.lock()
         if closed {
@@ -236,7 +236,7 @@ nonisolated final class AnyTLSClient {
             }
             if keptCount < minIdleSession {
                 // Refresh and keep — matches `idleCleanupExpTime`.
-                session.idleSince = Date()
+                session.idleSince = CFAbsoluteTimeGetCurrent()
                 survivors.append(session)
                 keptCount += 1
                 continue
