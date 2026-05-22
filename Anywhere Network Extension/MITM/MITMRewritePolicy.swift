@@ -202,7 +202,8 @@ final class MITMRewritePolicy {
     /// terminal reached during descent is the most-specific match.
     func set(for host: String) -> CompiledMITMRuleSet? {
         guard !host.isEmpty, setCount > 0 else { return nil }
-        return trie.lookup(host.lowercased())
+        var lowered = host.lowercased()
+        return lowered.withUTF8 { trie.lookup($0) }
     }
 
     /// Convenience for the rewriters: rules from the most-specific set

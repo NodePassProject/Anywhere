@@ -205,16 +205,21 @@ class DomainRouter {
         // MARK: Read API
 
         /// Returns the best-matching action ID, or `ActionTable.noneID` if
-        /// no pattern in the automaton occurs as a substring of `domain`.
-        func lookup(_ domain: String) -> Int16 {
-            guard finalized, !actionID.isEmpty else { return ActionTable.noneID }
+        /// no pattern in the automaton occurs as a substring of `domain`
+        /// (the host's raw UTF-8 bytes).
+        func lookup(_ domain: UnsafeBufferPointer<UInt8>) -> Int16 {
+            // No patterns ⇒ no possible match. After `finalize()` the node
+            // columns always carry the root row, so gate on the edge table
+            // (empty iff nothing was inserted) to skip the O(D) walk for
+            // tiers that have no keyword rules.
+            guard finalized, !edgeByte.isEmpty else { return ActionTable.noneID }
 
             var bestID: Int16 = ActionTable.noneID
             var bestLength: UInt16 = 0
             var bestOrder: Int32 = -1
             var nodeID: Int32 = 0
 
-            for byte in domain.utf8 {
+            for byte in domain {
                 // Walk failure links until either a child for `byte` exists
                 // or we land at root with no match.
                 var nextID = childTarget(nodeID: nodeID, byte: byte)
@@ -311,7 +316,7 @@ class DomainRouter {
 
         /// Domain Suffix wins over Domain Keyword: only fall back to the
         /// keyword automaton when the suffix trie does not match.
-        func lookupDomain(_ domain: String) -> RouteAction? {
+        func lookupDomain(_ domain: UnsafeBufferPointer<UInt8>) -> RouteAction? {
             if let id = suffixTrie.lookup(domain) {
                 return actionTable.resolve(id)
             }
@@ -324,8 +329,8 @@ class DomainRouter {
             return id == ActionTable.noneID ? nil : actionTable.resolve(id)
         }
 
-        func lookupIPv6(_ bytes: UnsafeBufferPointer<UInt8>) -> RouteAction? {
-            let id = ipv6Trie.lookup(bytes)
+        func lookupIPv6(hi: UInt64, lo: UInt64) -> RouteAction? {
+            let id = ipv6Trie.lookup(hi: hi, lo: lo)
             return id == ActionTable.noneID ? nil : actionTable.resolve(id)
         }
     }
@@ -479,15 +484,27 @@ class DomainRouter {
 
     /// Whether any routing rules have been loaded across any tier.
     var hasRules: Bool {
-        tiers.contains { !$0.isEmpty }
+        for i in tiers.indices where !tiers[i].isEmpty { return true }
+        return false
     }
 
     /// Matches a domain by walking tiers in priority order. First hit wins.
     func matchDomain(_ domain: String) -> RouteAction? {
         guard !domain.isEmpty else { return nil }
-        let lowered = domain.lowercased()
-        for tier in tiers {
-            if let action = tier.lookupDomain(lowered) { return action }
+        // Lowercase once (allocation-free when already lowercase ASCII) and
+        // hand the contiguous UTF-8 bytes to every tier, so neither the
+        // suffix trie nor the keyword automaton re-splits or re-allocates
+        // per tier.
+        var lowered = Self.asciiLowercasedIfNeeded(domain)
+        return lowered.withUTF8 { matchDomainBytes($0) }
+    }
+
+    /// Walks tiers in priority order over already-lowercased UTF-8 bytes.
+    /// Iterates by index so the per-tier `TierMatchers` value isn't copied
+    /// (which would retain/release all its backing buffers) on each lookup.
+    private func matchDomainBytes(_ bytes: UnsafeBufferPointer<UInt8>) -> RouteAction? {
+        for i in tiers.indices {
+            if let action = tiers[i].lookupDomain(bytes) { return action }
         }
         return nil
     }
@@ -499,17 +516,19 @@ class DomainRouter {
         if ip.contains(":") {
             var addr = in6_addr()
             guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
-            return withUnsafeBytes(of: &addr) { raw in
-                let buf = raw.bindMemory(to: UInt8.self)
-                for tier in tiers {
-                    if let action = tier.lookupIPv6(buf) { return action }
-                }
-                return nil
+            // Pack the 16 address bytes into a 128-bit pair once, then reuse
+            // it across every tier rather than re-packing per tier.
+            let (hi, lo) = withUnsafeBytes(of: &addr) { raw -> (UInt64, UInt64) in
+                CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
             }
+            for i in tiers.indices {
+                if let action = tiers[i].lookupIPv6(hi: hi, lo: lo) { return action }
+            }
+            return nil
         } else {
             guard let ip32 = Self.parseIPv4(ip) else { return nil }
-            for tier in tiers {
-                if let action = tier.lookupIPv4(ip32) { return action }
+            for i in tiers.indices {
+                if let action = tiers[i].lookupIPv4(ip32) { return action }
             }
             return nil
         }
@@ -524,6 +543,20 @@ class DomainRouter {
         case .proxy(let id):
             return configurationMap[id]
         }
+    }
+
+    // MARK: - Case folding
+
+    /// Lowercases ASCII `A`–`Z` only, returning the input unchanged (no
+    /// allocation) when it is already lowercase ASCII. Any uppercase ASCII
+    /// or non-ASCII byte defers to Unicode-aware `lowercased()`, so
+    /// query-time case folding matches the `lowercased()` applied to rules
+    /// at load time.
+    private static func asciiLowercasedIfNeeded(_ s: String) -> String {
+        for b in s.utf8 where (b >= 0x41 && b <= 0x5A) || b >= 0x80 {
+            return s.lowercased()
+        }
+        return s
     }
 
     // MARK: - CIDR Parsing
@@ -678,31 +711,33 @@ struct CIDRv4Trie {
     // MARK: - Lookup
 
     /// Looks up an IPv4 address. Returns the deepest action along the path,
-    /// or `ActionTable.noneID` if no rule matches.
+    /// or `ActionTable.noneID` if no rule matches. The walk runs over an
+    /// unsafe buffer and reads each child node once into a local, avoiding
+    /// the repeated bounds-checked subscripts on the hot path.
     func lookup(_ ip: UInt32) -> Int16 {
-        var bits = ip
-        var remaining: UInt8 = 32
-        var nodeID: Int32 = 0
-        var deepest = nodes[0].actionID
+        nodes.withUnsafeBufferPointer { buf in
+            var bits = ip
+            var remaining: UInt8 = 32
+            var nodeID = 0
+            var deepest = buf[0].actionID
 
-        while remaining > 0 {
-            let firstBit = UInt8(bits >> 31)
-            let childID = (firstBit == 0) ? nodes[Int(nodeID)].left : nodes[Int(nodeID)].right
-            if childID < 0 { return deepest }
+            while remaining > 0 {
+                let firstBit = bits >> 31
+                let childID = (firstBit == 0) ? buf[nodeID].left : buf[nodeID].right
+                if childID < 0 { return deepest }
 
-            let childBits = nodes[Int(childID)].bits
-            let childBitLen = nodes[Int(childID)].bitLen
-            let lcp = Self.lcp(bits, childBits, cap: min(remaining, childBitLen))
-            if lcp < childBitLen { return deepest }
+                let child = buf[Int(childID)]
+                let lcp = Self.lcp(bits, child.bits, cap: min(remaining, child.bitLen))
+                if lcp < child.bitLen { return deepest }
 
-            bits = Self.shiftLeft(bits, childBitLen)
-            remaining -= childBitLen
-            nodeID = childID
-            let act = nodes[Int(childID)].actionID
-            if act != ActionTable.noneID { deepest = act }
+                bits = Self.shiftLeft(bits, child.bitLen)
+                remaining -= child.bitLen
+                nodeID = Int(childID)
+                if child.actionID != ActionTable.noneID { deepest = child.actionID }
+            }
+
+            return deepest
         }
-
-        return deepest
     }
 
     // MARK: - Patricia core
@@ -835,36 +870,38 @@ struct CIDRv6Trie {
 
     // MARK: - Lookup
 
-    func lookup(_ bytes: UnsafeBufferPointer<UInt8>) -> Int16 {
-        let (hi0, lo0) = Self.pack16(bytes)
-        var hi = hi0
-        var lo = lo0
-        var remaining: UInt8 = 128
-        var nodeID: Int32 = 0
-        var deepest = nodes[0].actionID
+    /// Looks up a packed 128-bit IPv6 address (see ``pack16``). Returns the
+    /// deepest action along the path, or `ActionTable.noneID`. The address
+    /// is packed once by the caller and reused across tiers; the walk runs
+    /// over an unsafe buffer and reads each child node once into a local.
+    func lookup(hi hi0: UInt64, lo lo0: UInt64) -> Int16 {
+        nodes.withUnsafeBufferPointer { buf in
+            var hi = hi0
+            var lo = lo0
+            var remaining: UInt8 = 128
+            var nodeID = 0
+            var deepest = buf[0].actionID
 
-        while remaining > 0 {
-            let firstBit = UInt8(hi >> 63)
-            let childID = (firstBit == 0) ? nodes[Int(nodeID)].left : nodes[Int(nodeID)].right
-            if childID < 0 { return deepest }
+            while remaining > 0 {
+                let firstBit = hi >> 63
+                let childID = (firstBit == 0) ? buf[nodeID].left : buf[nodeID].right
+                if childID < 0 { return deepest }
 
-            let childBitLen = nodes[Int(childID)].bitLen
-            let lcp = Self.lcp(
-                aHi: hi, aLo: lo, aLen: remaining,
-                bHi: nodes[Int(childID)].bitsHi,
-                bLo: nodes[Int(childID)].bitsLo,
-                bLen: childBitLen
-            )
-            if lcp < childBitLen { return deepest }
+                let child = buf[Int(childID)]
+                let lcp = Self.lcp(
+                    aHi: hi, aLo: lo, aLen: remaining,
+                    bHi: child.bitsHi, bLo: child.bitsLo, bLen: child.bitLen
+                )
+                if lcp < child.bitLen { return deepest }
 
-            (hi, lo) = Self.shiftLeft(hi, lo, childBitLen)
-            remaining -= childBitLen
-            nodeID = childID
-            let act = nodes[Int(childID)].actionID
-            if act != ActionTable.noneID { deepest = act }
+                (hi, lo) = Self.shiftLeft(hi, lo, child.bitLen)
+                remaining -= child.bitLen
+                nodeID = Int(childID)
+                if child.actionID != ActionTable.noneID { deepest = child.actionID }
+            }
+
+            return deepest
         }
-
-        return deepest
     }
 
     // MARK: - Patricia core
@@ -980,8 +1017,10 @@ struct CIDRv6Trie {
         return cap
     }
 
-    /// Pack up to 16 big-endian bytes into a (hi, lo) 128-bit pair.
-    private static func pack16(_ buf: UnsafeBufferPointer<UInt8>) -> (UInt64, UInt64) {
+    /// Pack up to 16 big-endian bytes into a (hi, lo) 128-bit pair. Callable
+    /// from ``DomainRouter`` so a v6 address is packed once per lookup and
+    /// shared across tiers.
+    static func pack16(_ buf: UnsafeBufferPointer<UInt8>) -> (UInt64, UInt64) {
         var hi: UInt64 = 0
         var lo: UInt64 = 0
         let count = min(16, buf.count)
