@@ -135,4 +135,24 @@ enum TunnelConstants {
     /// dictionaries (~200 B per entry × 3 maps) in a long-running tunnel.
     static let fakeIPPoolSize = 16_384
 
+    // MARK: - DNS
+
+    /// Cloudflare public resolvers, used as the real upstream for queries
+    /// Anywhere cannot answer locally. The OS (or the tunnel) opens a real
+    /// connection to these IPs, so they must be reachable public resolvers —
+    /// internal tunnel addresses would not work. Two callers share them:
+    ///
+    /// - Encrypted-DNS fallback when the user's DoH/DoT hostname fails to
+    ///   resolve at tunnel start (``PacketTunnelProvider``).
+    /// - Non-A/AAAA queries (SRV/MX/TXT/…) sent to the Anywhere resolver,
+    ///   which has no upstream behind the tunnel peer address and so must
+    ///   forward them here rather than answer NODATA locally.
+    ///
+    /// The IPv6 resolvers are appended only when IPv6 is advertised to apps.
+    static func fallbackDNSServers(includeIPv6: Bool) -> [String] {
+        includeIPv6
+            ? ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
+            : ["1.1.1.1", "1.0.0.1"]
+    }
+
 }

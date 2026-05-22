@@ -7,6 +7,8 @@
 
 import Foundation
 
+private let logger = AnywhereLogger(category: "LWIP-DNS")
+
 extension LWIPStack {
 
     // MARK: - DNS Interception (Fake-IP)
@@ -16,11 +18,13 @@ extension LWIPStack {
     // user-chosen public DNS) is treated as ordinary UDP and proxied to its real
     // server. Two destinations qualify:
     //
-    // - ``DNSDestination/ours`` — `10.8.0.1` / `fd00::1`, the tunnel peer
-    //   addresses configured in ``PacketTunnelProvider/buildTunnelSettings``.
-    //   This is where the system resolver sends plain DNS. There is no real
-    //   upstream behind these IPs, so every query must be answered locally
-    //   (A/AAAA with fake IP; everything else with NODATA).
+    // - ``DNSDestination/anywhereResolver`` — `10.8.0.1` / `fd00::1`, the
+    //   tunnel peer addresses configured in
+    //   ``PacketTunnelProvider/buildTunnelSettings``. This is where the system
+    //   resolver sends plain DNS. Nothing lives behind these IPs, so A/AAAA are
+    //   answered locally with fake IPs, while other query types (SRV/MX/TXT/…)
+    //   are forwarded to a real upstream resolver through the proxy — see
+    //   ``forwardToUpstreamResolver`` — instead of being answered NODATA.
     //
     // - ``DNSDestination/publicResolver`` — Google Public DNS (`8.8.8.8`,
     //   `8.8.4.4`, and IPv6 equivalents). Several Google products hardcode
@@ -44,8 +48,9 @@ extension LWIPStack {
 
     /// Classifies a DNS destination IP for interception.
     enum DNSDestination {
-        /// Anywhere resolver (tunnel peer address). No real upstream, so every
-        /// query must be answered locally.
+        /// Anywhere resolver (tunnel peer address). No real upstream behind it:
+        /// A/AAAA are answered locally with fake IPs; other query types are
+        /// forwarded to a real resolver through the proxy.
         case anywhereResolver
         /// A public resolver an app pointed at directly (e.g., Google Public
         /// DNS). Fake-IP A/AAAA; let other query types pass through to be
@@ -126,12 +131,27 @@ extension LWIPStack {
 
         // Only fake-IP A (1) and AAAA (28) queries.
         // Other query types (MX/SRV/TXT/...):
-        //   - `.anywhereResolver`: no upstream exists behind the tunnel peer
-        //     address, so we must answer locally. NODATA is the safest reply.
+        //   - `.anywhereResolver`: nothing lives behind the tunnel peer
+        //     address, so the query can't fall through to a UDP flow aimed at
+        //     it. Forward it to a real upstream resolver and relay the reply,
+        //     dropping back to NODATA only when there's no configuration to
+        //     forward through.
         //   - `.publicResolver`: return false so the caller falls through to
         //     a normal UDP flow, which proxies the query to the real server.
         guard qtype == 1 || qtype == 28 else {
             if destination == .anywhereResolver {
+                if forwardToUpstreamResolver(
+                    domain: domain,
+                    payload: payload,
+                    srcIP: srcIP,
+                    srcPort: srcPort,
+                    dstIP: dstIP,
+                    dstPort: dstPort,
+                    isIPv6: isIPv6,
+                    qtype: qtype
+                ) {
+                    return true
+                }
                 return sendNODATA(
                     payload: payload,
                     srcIP: srcIP,
@@ -187,6 +207,81 @@ extension LWIPStack {
             )
         }
 
+        return true
+    }
+
+    /// Forwards a query the Anywhere resolver can't answer locally — anything
+    /// but A/AAAA (SRV, MX, TXT, …) — to a real upstream resolver and relays
+    /// the reply back to the client.
+    ///
+    /// The Anywhere resolver addresses (`10.8.0.1` / `fd00::1`) are the tunnel
+    /// peer: there is no DNS server behind them, so — unlike the
+    /// ``DNSDestination/publicResolver`` case — the query can't simply fall
+    /// through to a UDP flow aimed at the destination IP; that flow would go
+    /// nowhere. Instead we send it out through the default proxy configuration,
+    /// mirroring how the public-resolver path proxies SRV/MX/TXT to the real
+    /// server. That keeps the lookup off the local network and consistent with
+    /// how the answer's targets — resolved later via A/AAAA and fake-IP'd —
+    /// will be routed. The flow's reply is sourced from the original
+    /// destination, so the client's resolver accepts it as coming from the
+    /// server it queried.
+    ///
+    /// Must be called on ``lwipQueue`` (mutates ``udpFlows``).
+    ///
+    /// - Returns: `true` once a forwarding flow is started; `false` when there
+    ///   is no active configuration to forward through, so the caller can fall
+    ///   back to NODATA.
+    private func forwardToUpstreamResolver(
+        domain: String,
+        payload: Data,
+        srcIP: UnsafeRawPointer,
+        srcPort: UInt16,
+        dstIP: UnsafeRawPointer,
+        dstPort: UInt16,
+        isIPv6: Bool,
+        qtype: UInt16
+    ) -> Bool {
+        guard let configuration = self.configuration else { return false }
+
+        // Forward over IPv4: proxy egress reaches it regardless of the client's
+        // query family, and the reply family is governed by the flow's
+        // `isIPv6`. The IPv6 entries in the list serve the encrypted-DNS
+        // fallback consumer, which hands the whole list to the OS resolver.
+        let upstream = TunnelConstants.fallbackDNSServers(includeIPv6: false).first ?? "1.1.1.1"
+
+        let addrSize = isIPv6 ? 16 : 4
+        let srcHost = LWIPStack.ipAddrToString(srcIP, isIPv6: isIPv6)
+        let dstHost = LWIPStack.ipAddrToString(dstIP, isIPv6: isIPv6)
+        let srcIPData = Data(bytes: srcIP, count: addrSize)
+        let dstIPData = Data(bytes: dstIP, count: addrSize)
+
+        // Key on the original 5-tuple (destined for the Anywhere resolver) so a
+        // retransmitted query from the same socket reuses this flow instead of
+        // opening a second proxy association. Every datagram to the resolver
+        // re-enters handleDNSQuery, so reuse has to happen here — the callback's
+        // fast path is never reached for intercepted destinations.
+        let flowKey = UDPFlowKey(srcHost: srcHost, srcPort: srcPort, dstHost: dstHost, dstPort: dstPort)
+        if let existing = udpFlows[flowKey] {
+            existing.handleReceivedData(payload, payloadLength: payload.count)
+            return true
+        }
+
+        let flow = LWIPUDPFlow(
+            flowKey: flowKey,
+            srcHost: srcHost,
+            srcPort: srcPort,
+            dstHost: upstream,        // outbound → real upstream resolver
+            dstPort: dstPort,
+            srcIPData: srcIPData,
+            dstIPData: dstIPData,     // reply source → the Anywhere resolver address
+            isIPv6: isIPv6,
+            configuration: configuration,
+            forceBypass: false,       // proxy it, mirroring the public-resolver path
+            lwipQueue: lwipQueue
+        )
+        udpFlows[flowKey] = flow
+        logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(dstPort) via \(configuration.name)")
+        flow.handleReceivedData(payload, payloadLength: payload.count)
         return true
     }
 

@@ -160,7 +160,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.8.0.1")
 
         let hideVPNIcon = AWCore.getHideVPNIcon()
-        let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.0"])
+        let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.1"], subnetMasks: ["255.255.255.0"])
         ipv4Settings.includedRoutes = [NEIPv4Route.default()]
         ipv4Settings.excludedRoutes = hideVPNIcon ? [NEIPv4Route(destinationAddress: "0.0.0.0", subnetMask: "255.255.255.254")] : []
         settings.ipv4Settings = ipv4Settings
@@ -169,7 +169,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // so we drop IPv6 entirely when hideVPNIcon is enabled.
         let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps() && !hideVPNIcon
         if advertiseIPv6ToApps {
-            let ipv6Settings = NEIPv6Settings(addresses: ["fd00::2"], networkPrefixLengths: [64])
+            let ipv6Settings = NEIPv6Settings(addresses: ["fd00::1"], networkPrefixLengths: [64])
             ipv6Settings.includedRoutes = [NEIPv6Route.default()]
             ipv6Settings.excludedRoutes = []
             settings.ipv6Settings = ipv6Settings
@@ -189,12 +189,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // Fallback when the user's encrypted-DNS hostname fails to resolve at
         // tunnel start. The OS opens a real TLS connection to these IPs, so
         // they must speak DoT/DoH — internal tunnel addresses would not work.
-        let encryptedDNSFallbackServers: [String]
-        if advertiseIPv6ToApps {
-            encryptedDNSFallbackServers = ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
-        } else {
-            encryptedDNSFallbackServers = ["1.1.1.1", "1.0.0.1"]
-        }
+        let encryptedDNSFallbackServers = TunnelConstants.fallbackDNSServers(includeIPv6: advertiseIPv6ToApps)
 
         let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
         let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
