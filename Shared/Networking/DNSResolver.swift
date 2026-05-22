@@ -21,15 +21,43 @@ private let logger = AnywhereLogger(category: "DNSResolver")
 /// Concurrent stale hits on the same hostname coalesce into one background
 /// refresh. `forceFresh: true` overrides the stale-fast path for callers that
 /// need accuracy (e.g. latency tests).
+///
+/// The cache is kept small by its TTL, not by its size: the resolver is a
+/// process-lifetime singleton, so it must shed entries as they age rather than
+/// hoarding every host ever resolved — a real memory concern in the
+/// Network Extension, and one that would otherwise make ``refresh`` re-resolve
+/// thousands of dead hosts on a path change. ``compactUnlocked`` drops an entry
+/// once it has been expired longer than ``staleServeWindow``; it runs on the
+/// write path (so the cache is swept exactly when it grows) and in ``refresh``.
+/// An actively-used host is refreshed on access and never reaches the cutoff,
+/// so cleanup only ever removes hosts that have gone quiet. ``maxEntries`` is a
+/// pure backstop for a burst that outruns cleanup. Reads stay lock-shared — the
+/// hit path never writes.
 nonisolated final class DNSResolver {
     static let shared = DNSResolver()
 
     /// Default TTL for cached entries (seconds).
     static let defaultTTL: TimeInterval = 120
 
+    /// How long a host's last answer is still served on the stale-fast path
+    /// after it expires, before cleanup drops it. An actively-used host is
+    /// refreshed on access so it never reaches this; the window only bounds
+    /// how long a host that's gone quiet lingers. An untouched entry therefore
+    /// lives at most `defaultTTL + staleServeWindow` — here, two TTLs.
+    static let staleServeWindow: TimeInterval = defaultTTL
+
+    /// Backstop cap for a pathological burst that resolves more distinct hosts
+    /// than cleanup sheds within one stale window. Normal sessions stay far
+    /// below it; TTL cleanup, not the cap, is what bounds the cache.
+    static let maxEntries = 1024
+
     private struct CacheEntry {
         let ips: [String]
-        let expiry: Date
+        /// `CFAbsoluteTime` (a `Double`), not `Date`: it's read on every
+        /// resolve and written on every store, and avoids `Date`'s allocation
+        /// and bridging. Matches the cache/timeout timestamps elsewhere in the
+        /// tunnel (``RequestLog``, `LWIPUDPFlow.lastActivity`).
+        let expiry: CFAbsoluteTime
     }
 
     private var cache: [String: CacheEntry] = [:]
@@ -72,11 +100,11 @@ nonisolated final class DNSResolver {
         // IP addresses bypass cache
         if Self.isIPAddress(bare) { return [bare] }
 
-        let key = bare.lowercased()
+        let key = Self.cacheKey(for: bare)
 
         let entry: CacheEntry? = lock.withReadLock { cache[key] }
         let cached = entry?.ips
-        let expired = entry.map { $0.expiry <= Date() } ?? false
+        let expired = entry.map { $0.expiry <= CFAbsoluteTimeGetCurrent() } ?? false
 
         // Cache hit — not expired
         if let cached, !expired { return cached }
@@ -99,7 +127,7 @@ nonisolated final class DNSResolver {
         }
 
         lock.withWriteLock {
-            cache[key] = CacheEntry(ips: ips, expiry: Date() + Self.defaultTTL)
+            storeUnlocked(key: key, ips: ips)
         }
 
         return ips
@@ -110,7 +138,7 @@ nonisolated final class DNSResolver {
     func cachedIPs(for host: String) -> [String]? {
         let bare = Self.stripBrackets(host)
         if Self.isIPAddress(bare) { return [bare] }
-        let key = bare.lowercased()
+        let key = Self.cacheKey(for: bare)
         return lock.withReadLock { cache[key]?.ips }
     }
 
@@ -124,8 +152,8 @@ nonisolated final class DNSResolver {
         _ = resolveAll(host, forceFresh: forceFresh)
     }
 
-    /// Re-resolves every cached hostname over the *current* physical network
-    /// path and overwrites each entry's IPs in place. Call this when the path
+    /// Re-resolves each still-live cached hostname over the *current* physical
+    /// network path and overwrites its IPs in place. Call this when the path
     /// changes — interface switch (Wi-Fi⇄cellular), Wi-Fi roam, or restore from
     /// unavailable. The cached IPs were resolved against the *previous*
     /// network's resolver and can be wrong on the new one: split-horizon/
@@ -141,6 +169,14 @@ nonisolated final class DNSResolver {
     /// path the instant it lands, so reconnecting flows never wait on DNS yet
     /// converge onto fresh IPs within a single lookup.
     ///
+    /// Only *fresh* entries are kept and re-resolved, though. An entry that has
+    /// already expired isn't in active use — anything dialed within its TTL was
+    /// served fresh, and a stale hit would have refreshed it — so it's dropped
+    /// rather than re-resolved: re-dialing it later just takes the cold miss.
+    /// This is what keeps a path change cheap. Without it, every host the
+    /// session ever touched would be re-queried at once; with it, the cost is
+    /// the handful of hosts seen within the last TTL.
+    ///
     /// Bumping the generation voids any background refresh already in flight
     /// (its `getaddrinfo` may have been issued on the network we're leaving) so
     /// it can't commit an answer from the old path, and clearing
@@ -150,6 +186,12 @@ nonisolated final class DNSResolver {
         let keys: [String] = lock.withWriteLock {
             generation &+= 1
             inFlightRefreshes.removeAll(keepingCapacity: true)
+            // Keep only the still-fresh entries and re-resolve those; drop the
+            // expired ones rather than spending a getaddrinfo on each over the
+            // new path. Nothing is waiting on an expired host, and if one is
+            // dialed again the cold miss resolves it fresh.
+            let now = CFAbsoluteTimeGetCurrent()
+            cache = cache.filter { $0.value.expiry > now }
             return Array(cache.keys)
         }
         guard !keys.isEmpty else { return }
@@ -183,11 +225,61 @@ nonisolated final class DNSResolver {
                 // cleared this key from inFlightRefreshes, so leave the set be.
                 guard scheduledGeneration == self.generation else { return }
                 if !ips.isEmpty {
-                    self.cache[key] = CacheEntry(ips: ips, expiry: Date() + Self.defaultTTL)
+                    self.storeUnlocked(key: key, ips: ips)
                 }
                 self.inFlightRefreshes.remove(key)
             }
         }
+    }
+
+    /// Inserts or refreshes `key`'s entry, then compacts. The caller must hold
+    /// the write lock. Every cache write — the synchronous resolve and the
+    /// background-refresh commit alike — funnels through here, so the cache is
+    /// swept of aged-out entries exactly when it grows. Because a stale hit
+    /// commits its refresh through here too, an idle host's neighbours get
+    /// reclaimed the moment any nearby host is touched.
+    private func storeUnlocked(key: String, ips: [String]) {
+        let now = CFAbsoluteTimeGetCurrent()
+        cache[key] = CacheEntry(ips: ips, expiry: now + Self.defaultTTL)
+        compactUnlocked(now: now)
+    }
+
+    /// Drops entries whose stale-serve window has fully elapsed, then trims to
+    /// the cap if a burst still left it over. The caller must hold the write
+    /// lock. Mirrors ``RequestLog`` compacting on append.
+    ///
+    /// An entry survives only while `now < expiry + staleServeWindow`. An
+    /// actively-used host keeps its expiry ahead of that — it's refreshed on
+    /// access — so the filter only ever removes hosts that have gone quiet,
+    /// which is what stops the cache from accreting every host ever resolved.
+    /// The cap is a backstop: if a burst of distinct hosts outran cleanup, shed
+    /// the entries closest to expiry until back under it. `min(by:)` is O(n),
+    /// but this runs only on the write path, never on a cache hit.
+    private func compactUnlocked(now: CFAbsoluteTime) {
+        let cutoff = now - Self.staleServeWindow
+        if cache.contains(where: { $0.value.expiry <= cutoff }) {
+            cache = cache.filter { $0.value.expiry > cutoff }
+        }
+
+        while cache.count > Self.maxEntries {
+            guard let coldest = cache.min(by: { $0.value.expiry < $1.value.expiry })?.key
+            else { break }
+            cache.removeValue(forKey: coldest)
+        }
+    }
+
+    /// Lowercased cache key, allocating only when it would change the string.
+    /// Hostnames reach the connect hot path overwhelmingly as already-lowercase
+    /// ASCII, and for those this returns the input's own buffer (copy-on-write,
+    /// no allocation). It falls back to `lowercased()` — matching the previous
+    /// behaviour exactly — only when an ASCII uppercase letter or any non-ASCII
+    /// byte (which Unicode case-folding may alter) is present.
+    private static func cacheKey(for host: String) -> String {
+        for byte in host.utf8
+        where (byte >= UInt8(ascii: "A") && byte <= UInt8(ascii: "Z")) || byte >= 0x80 {
+            return host.lowercased()
+        }
+        return host
     }
 
     private static func stripBrackets(_ host: String) -> String {
