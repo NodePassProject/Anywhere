@@ -19,7 +19,7 @@ struct QUICSessionTicket {
     let nonce: Data
     let psk: Data           // Pre-shared key derived from resumption master secret
     let cipherSuite: UInt16
-    let createdAt: Date
+    let createdAt: CFAbsoluteTime
     let lifetime: UInt32    // seconds
     let ageAdd: UInt32      // obfuscation factor for ticket age
 }
@@ -190,7 +190,7 @@ nonisolated class QUICTLSHandler {
         let cachedTicket = QUICSessionTicketCache.lookup(serverName: serverName, alpn: alpn)
 
         if let ticket = cachedTicket,
-           Date().timeIntervalSince(ticket.createdAt) < Double(ticket.lifetime) {
+           CFAbsoluteTimeGetCurrent() - ticket.createdAt < Double(ticket.lifetime) {
             let (extData, binderLen) = buildPSKExtension(ticket: ticket)
             pskExtData = extData
             pskBinderLength = binderLen
@@ -737,7 +737,7 @@ nonisolated class QUICTLSHandler {
 
         let cached = QUICSessionTicket(
             ticket: ticket, nonce: nonce, psk: psk,
-            cipherSuite: cipherSuite, createdAt: Date(),
+            cipherSuite: cipherSuite, createdAt: CFAbsoluteTimeGetCurrent(),
             lifetime: lifetime, ageAdd: ageAdd
         )
         QUICSessionTicketCache.store(cached, serverName: serverName, alpn: alpn)
@@ -749,7 +749,7 @@ nonisolated class QUICTLSHandler {
 
     /// Builds a pre_shared_key extension (type 0x0029) with a zero-filled binder placeholder.
     private func buildPSKExtension(ticket: QUICSessionTicket) -> (extensionData: Data, binderLen: Int) {
-        let ticketAgeMs = UInt32(Date().timeIntervalSince(ticket.createdAt) * 1000)
+        let ticketAgeMs = UInt32((CFAbsoluteTimeGetCurrent() - ticket.createdAt) * 1000)
         let obfuscatedAge = ticketAgeMs &+ ticket.ageAdd
 
         // PskIdentity: identity_len(2) + identity + obfuscated_ticket_age(4)

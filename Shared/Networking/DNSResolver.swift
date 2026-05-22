@@ -53,10 +53,6 @@ nonisolated final class DNSResolver {
 
     private struct CacheEntry {
         let ips: [String]
-        /// `CFAbsoluteTime` (a `Double`), not `Date`: it's read on every
-        /// resolve and written on every store, and avoids `Date`'s allocation
-        /// and bridging. Matches the cache/timeout timestamps elsewhere in the
-        /// tunnel (``RequestLog``, `LWIPUDPFlow.lastActivity`).
         let expiry: CFAbsoluteTime
     }
 

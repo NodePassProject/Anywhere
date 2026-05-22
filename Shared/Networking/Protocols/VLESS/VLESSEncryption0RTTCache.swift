@@ -30,7 +30,7 @@ final class VLESSEncryption0RTTCache {
     struct Entry {
         let pfsKey: Data
         let ticket: Data       // 16 bytes (encrypted form, used as AEAD context)
-        let expire: Date
+        let expire: CFAbsoluteTime
     }
 
     private let lock = UnfairLock()
@@ -51,7 +51,7 @@ final class VLESSEncryption0RTTCache {
     func lookup(key: String) -> Entry? {
         lock.withLock {
             guard let entry = entries[key] else { return nil }
-            if entry.expire <= Date() {
+            if entry.expire <= CFAbsoluteTimeGetCurrent() {
                 entries.removeValue(forKey: key)
                 return nil
             }
@@ -62,7 +62,7 @@ final class VLESSEncryption0RTTCache {
     /// Store a fresh ticket. Overwrites any prior entry for the same key —
     /// this matches Go's `i.RWLock.Lock(); i.PfsKey = ...; i.Ticket = ...`
     /// pattern where the latest 1-RTT win takes over.
-    func store(key: String, pfsKey: Data, ticket: Data, expire: Date) {
+    func store(key: String, pfsKey: Data, ticket: Data, expire: CFAbsoluteTime) {
         lock.withLock {
             entries[key] = Entry(pfsKey: pfsKey, ticket: ticket, expire: expire)
         }
