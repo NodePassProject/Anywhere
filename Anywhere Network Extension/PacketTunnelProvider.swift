@@ -288,6 +288,16 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    override func sleep(completionHandler: @escaping () -> Void) {
+        // Down edge — the sleep counterpart of wake(). The kernel suspends us
+        // and tears down our outbound sockets, so release the upstream transports
+        // now rather than carrying dead sessions across the sleep. Best-effort: if
+        // we're suspended before it runs, wake() rebuilds everything anyway, so we
+        // don't block sleep on it.
+        lwipStack.suspendOutbound()
+        completionHandler()
+    }
+
     override func wake() {
         lwipStack.handleWake()
     }
@@ -380,8 +390,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case .unsatisfied:
             guard previous.status != .unsatisfied else { return }
             let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
-            logger.warning("[VPN] Network path unavailable\(reasonSuffix); active connections interrupted")
+            logger.warning("[VPN] Network path unavailable\(reasonSuffix); releasing upstream transports")
             reasserting = true
+            // Down edge: free the dead upstream transports now instead of pinning
+            // sockets we can't use through the outage. Idle legs wind down
+            // gracefully; any survivors are closed and the transports rebuilt on
+            // the up edge (.satisfied / wake) via handleNetworkPathChange.
+            lwipStack.suspendOutbound()
 
         @unknown default:
             logger.warning("[VPN] Network path changed unexpectedly; active connections may reconnect")

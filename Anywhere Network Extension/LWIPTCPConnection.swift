@@ -486,7 +486,7 @@ class LWIPTCPConnection {
         } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
             logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
         } else if err == -13, LWIPStack.shared?.isTearingDown == true {
-            // ERR_ABRT during a deliberate stack teardown (shutdown/restart/wake).
+            // ERR_ABRT during a deliberate full-stack teardown (shutdown/restart).
             // Outside teardown, ERR_ABRT indicates lwIP's own pressure aborts
             // (tcp_kill_prio / tcp_kill_timewait) — those stay at warning below.
             logger.debug("[TCP] lwIP aborted connection (tunnel teardown): \(endpointDescription): \(reason)")

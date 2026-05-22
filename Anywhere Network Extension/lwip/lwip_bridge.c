@@ -385,6 +385,22 @@ void lwip_bridge_abort_all_tcp(void) {
     }
 }
 
+void lwip_bridge_for_each_tcp(void (*fn)(void *arg)) {
+    if (fn == NULL) return;
+    /* Capture `next` before invoking `fn`: a graceful close may keep the PCB
+     * on the list (FIN_WAIT) or, when lwIP downgrades to RST on unacknowledged
+     * rx data, free it outright. The pre-captured `next` stays valid either
+     * way because `fn` only ever touches the PCB it is handed. Mirrors the
+     * list-walk discipline in lwip_bridge_input_batch_end. TIME_WAIT PCBs are
+     * left alone — they hold no Swift connection and expire on their own. */
+    struct tcp_pcb *pcb = tcp_active_pcbs;
+    while (pcb != NULL) {
+        struct tcp_pcb *next = pcb->next;
+        fn(pcb->callback_arg);
+        pcb = next;
+    }
+}
+
 void lwip_bridge_shutdown(void) {
     lwip_bridge_abort_all_tcp();
 

@@ -75,9 +75,18 @@ void lwip_bridge_init(void);
 void lwip_bridge_shutdown(void);
 
 /* Abort every active TCP PCB and clear TIME_WAIT, keeping the netif and
- * listeners intact. Used on device wake to invalidate outbound proxy sockets
- * the kernel killed during sleep without a full stack rebuild. */
+ * listeners intact. The blanket RST is the right tool for a full stack
+ * shutdown/restart; the network-recovery path uses lwip_bridge_for_each_tcp
+ * for a gentler, per-connection close instead. */
 void lwip_bridge_abort_all_tcp(void);
+
+/* Iterate every active TCP PCB, invoking `fn` with each PCB's Swift
+ * callback_arg (the retained LWIPTCPConnection, or NULL if already cleared).
+ * `next` is captured before each call, so `fn` may gracefully close or abort
+ * the PCB it is handed; it must not touch other PCBs. The recovery path uses
+ * this to FIN idle legs and let lwIP downgrade in-flight legs to RST, rather
+ * than the blanket RST of lwip_bridge_abort_all_tcp. */
+void lwip_bridge_for_each_tcp(void (*fn)(void *arg));
 
 /* --- Packet input (from TUN) ---
  *

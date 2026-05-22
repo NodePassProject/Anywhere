@@ -96,10 +96,10 @@ extension LWIPStack {
     /// method invalidates, leaving the rest of the stack running so idle
     /// flows and the FakeIP pool are preserved.
     ///
-    /// TCP flows are aborted via ``lwip_bridge_abort_all_tcp`` so each PCB's
-    /// err callback releases its Swift side (which closes the now-dead proxy
-    /// socket). The netif and listener PCBs stay up, so new client activity
-    /// is served without waiting on a netif rebuild.
+    /// Each TCP leg is closed gracefully (see ``invalidateOutboundState``):
+    /// idle legs get a FIN, in-flight legs downgrade to a RST, and the proxy
+    /// socket behind each is torn down. The netif and listener PCBs stay up,
+    /// so new client activity is served without waiting on a netif rebuild.
     func handleWake() {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
@@ -108,13 +108,53 @@ extension LWIPStack {
         }
     }
 
+    /// Releases the dead upstream transports when the network goes away
+    /// (`.unsatisfied`) or the device sleeps — the "down edge" companion to
+    /// ``invalidateOutboundState``'s "up edge". The kernel has torn down, or is
+    /// about to tear down, their sockets, so the Vision mux's long-lived TCP,
+    /// the QUIC/Hysteria/HTTP3/AnyTLS sessions, the Shadowsocks UDP sessions, and
+    /// the per-flow UDP proxy connections are dead weight; freeing them promptly
+    /// stops us pinning sockets we can't use for the duration of the outage.
+    ///
+    /// Deliberately conservative: it does NOT re-resolve DNS or rebuild the mux
+    /// (there's no path to dial over) and does NOT force-close the app-facing TCP
+    /// legs. A leg riding a freed shared session (Hysteria/AnyTLS/HTTP3, or a
+    /// UDP-over-mux flow) sees a graceful downlink EOF — ``MuxManager/closeAll``
+    /// and friends deliver no error — and winds down on its own; a leg actively
+    /// writing when its session drops aborts on the failed send; per-connection
+    /// VLESS legs and direct (bypass) legs are simply left open. Whatever is still
+    /// open is closed gracefully and the transports rebuilt when the path returns
+    /// or the device wakes, via ``invalidateOutboundState``. Hops onto `lwipQueue`
+    /// internally, where all transport state (including ``muxManager``) is owned,
+    /// so it serialises against connection accepts and dials.
+    func suspendOutbound() {
+        lwipQueue.async { [self] in
+            guard running else { return }
+            logger.info("[VPN] Path offline/sleep: releasing upstream transports; will rebuild when it returns")
+
+            muxManager?.closeAll()
+            muxManager = nil
+
+            HysteriaClient.closeAll()
+            AnyTLSManager.shared.closeAll()
+            purgeShadowsocksUDPSessions()
+            HTTP3SessionPool.shared.closeAll()
+
+            for (_, flow) in udpFlows {
+                flow.close()
+            }
+            udpFlows.removeAll()
+        }
+    }
+
     /// Recovers active connections after the network path changes (interface
     /// switch, restored from unavailable, Wi-Fi roam, NAT rebind). Like device
     /// wake, the lwIP netif, listeners, and timers all survive — only the
     /// outbound sockets are stranded on network state that no longer exists —
     /// so this runs the same lightweight ``invalidateOutboundState`` rather
-    /// than a full stack restart. Apps see a RST on their aborted TCP flows and
-    /// reconnect immediately over the new path.
+    /// than a full stack restart. Each app-facing TCP leg is closed gracefully
+    /// (FIN for idle legs, RST only for in-flight ones), so apps reconnect over
+    /// the new path without a blanket reset.
     ///
     /// Debounced by ``TunnelConstants/networkRecoveryDebounceInterval``: the
     /// leading edge fires immediately, and a burst of updates within the window
@@ -165,10 +205,12 @@ extension LWIPStack {
     /// Shared by device-wake and network-path-change recovery: both face the
     /// same problem (the kernel's outbound sockets are bound to network state
     /// that no longer exists) and neither needs the local stack rebuilt.
-    /// TCP flows are aborted via ``lwip_bridge_abort_all_tcp`` so each PCB's
-    /// err callback releases its Swift side and the app receives a RST; the
-    /// netif and listener PCBs stay up, so new client activity is served
-    /// without waiting on a netif rebuild.
+    /// Rather than RST every app-facing leg, each TCP connection is closed
+    /// gracefully via ``lwip_bridge_for_each_tcp`` + ``LWIPTCPConnection/close()``:
+    /// idle legs receive a FIN and reconnect transparently, while in-flight
+    /// legs downgrade to a RST that triggers idempotent retries. The netif and
+    /// listener PCBs stay up, so new client activity is served without waiting
+    /// on a netif rebuild.
     private func invalidateOutboundState(configuration: ProxyConfiguration) {
         // Cached DNS answers were resolved over the network path we're leaving
         // and may not route on the new one (GeoDNS/CDN locality, split-horizon
@@ -178,6 +220,22 @@ extension LWIPStack {
         // always a server's stable public IP) without stalling on a cold
         // lookup, then converge onto the fresh answers as they land.
         DNSResolver.shared.refresh()
+
+        // Gracefully close every app-facing TCP leg before tearing down the
+        // upstream transports below. close() flushes already-received downlink
+        // bytes, then tcp_close sends a FIN to idle legs — the client reconnects
+        // on its next request, seamlessly — and lets lwIP downgrade in-flight
+        // legs (unacknowledged rx data) to a RST, an unambiguous error that
+        // drives idempotent retries. Closing first sets `closed` on each
+        // connection synchronously (we're on lwipQueue), so the upstream
+        // teardown's error completions become no-ops and can't pre-empt a
+        // graceful FIN into a RST. No ERR_ABRT callbacks fire — tcp_close clears
+        // the PCB callbacks before closing — so `isTearingDown` is unnecessary
+        // here, unlike the abort path in shutdownInternal.
+        lwip_bridge_for_each_tcp { arg in
+            guard let arg else { return }
+            Unmanaged<LWIPTCPConnection>.fromOpaque(arg).takeUnretainedValue().close()
+        }
 
         muxManager?.closeAll()
         if Self.shouldUseVisionMux(configuration) {
@@ -195,10 +253,6 @@ extension LWIPStack {
             flow.close()
         }
         udpFlows.removeAll()
-
-        isTearingDown = true
-        lwip_bridge_abort_all_tcp()
-        isTearingDown = false
     }
 
     /// Shuts down the lwIP stack and all active flows. Must be called on `lwipQueue`.
