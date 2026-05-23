@@ -62,14 +62,14 @@ struct ClashProxyParser {
     // MARK: - Dispatch
 
     /// Clash `type:` values we can map to a `ProxyConfiguration`. Every other
-    /// value (vmess, ssr, wireguard, tuic, hysteria v1, ssh, anytls, mieru,
-    /// snell, …) is silently skipped because we have no matching outbound.
+    /// value is silently skipped because we have no matching outbound.
     private static func parseProxy(_ node: Node) -> ProxyConfiguration? {
         guard let type = getString(node, key: "type") else { return nil }
         switch type {
         case "vless":     return parseVLESSProxy(node)
         case "hysteria2": return parseHysteria2Proxy(node)
         case "trojan":    return parseTrojanProxy(node)
+        case "anytls":    return parseAnyTLSProxy(node)
         case "ss":        return parseShadowsocksProxy(node)
         case "socks5":    return parseSOCKS5Proxy(node)
         case "sudoku":    return parseSudokuProxy(node)
@@ -266,6 +266,42 @@ struct ClashProxyParser {
             serverAddress: basics.server,
             serverPort: basics.port,
             outbound: .trojan(password: password, tls: tls)
+        )
+    }
+
+    // MARK: - AnyTLS
+
+    /// Parses a Clash `type: anytls` node. AnyTLS always runs over a mandatory
+    /// TLS layer, so we build a `.anytls` outbound around a `TLSConfiguration`
+    /// (`servername`/`sni`, `alpn`, `client-fingerprint`). The warm-pool knobs
+    /// map straight across; `AnyTLSClient` clamps them to its ≥30s/≥30s/≥0
+    /// minimums at use time, so we store the raw Clash values here.
+    private static func parseAnyTLSProxy(_ node: Node) -> ProxyConfiguration? {
+        guard let basics = parseBasics(node) else { return nil }
+
+        let password = getString(node, key: "password") ?? ""
+
+        let idleCheckInterval = getInt(node, key: "idle-session-check-interval") ?? 30
+        let idleTimeout = getInt(node, key: "idle-session-timeout") ?? 30
+        let minIdleSession = getInt(node, key: "min-idle-session") ?? 0
+
+        let tls = TLSConfiguration(
+            serverName: parseSNI(node, server: basics.server),
+            alpn: getStringSequence(node, key: "alpn"),
+            fingerprint: parseFingerprint(node)
+        )
+
+        return ProxyConfiguration(
+            name: basics.name,
+            serverAddress: basics.server,
+            serverPort: basics.port,
+            outbound: .anytls(
+                password: password,
+                idleCheckInterval: idleCheckInterval,
+                idleTimeout: idleTimeout,
+                minIdleSession: minIdleSession,
+                tls: tls
+            )
         )
     }
 
