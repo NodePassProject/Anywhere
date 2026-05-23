@@ -25,14 +25,14 @@ private let logger = AnywhereLogger(category: "DNSResolver")
 /// The cache is kept small by its TTL, not by its size: the resolver is a
 /// process-lifetime singleton, so it must shed entries as they age rather than
 /// hoarding every host ever resolved — a real memory concern in the
-/// Network Extension, and one that would otherwise make ``refresh`` re-resolve
-/// thousands of dead hosts on a path change. ``compactUnlocked`` drops an entry
-/// once it has been expired longer than ``staleServeWindow``; it runs on the
-/// write path (so the cache is swept exactly when it grows) and in ``refresh``.
-/// An actively-used host is refreshed on access and never reaches the cutoff,
-/// so cleanup only ever removes hosts that have gone quiet. ``maxEntries`` is a
-/// pure backstop for a burst that outruns cleanup. Reads stay lock-shared — the
-/// hit path never writes.
+/// Network Extension. ``compactUnlocked`` drops an entry once it has been
+/// expired longer than ``staleServeWindow``; it runs on the write path, so the
+/// cache is swept exactly when it grows. An actively-used host is refreshed on
+/// access and never reaches the cutoff, so cleanup only ever removes hosts that
+/// have gone quiet. ``maxEntries`` is a pure backstop for a burst that outruns
+/// cleanup. A network-path change is handled separately by ``flush``, which
+/// drops every entry outright. Reads stay lock-shared — the hit path never
+/// writes.
 nonisolated final class DNSResolver {
     static let shared = DNSResolver()
 
@@ -148,64 +148,49 @@ nonisolated final class DNSResolver {
         _ = resolveAll(host, forceFresh: forceFresh)
     }
 
-    /// Re-resolves each still-live cached hostname over the *current* physical
-    /// network path and overwrites its IPs in place. Call this when the path
+    /// Drops every cached entry. Call this when the physical network path
     /// changes — interface switch (Wi-Fi⇄cellular), Wi-Fi roam, or restore from
     /// unavailable. The cached IPs were resolved against the *previous*
     /// network's resolver and can be wrong on the new one: split-horizon/
     /// corporate DNS, GeoDNS or CDN PoPs that differ per egress, or
     /// captive-portal answers picked up on the way in.
     ///
-    /// Rather than dropping the entries outright — which forces the next
-    /// connection to each host to block on a cold synchronous lookup at the
-    /// very moment the app is reconnecting — we leave them in place to keep
-    /// serving the stale-fast path (the previous IPs still route far more often
-    /// than not, e.g. a proxy server's stable public IP) and refresh them in
-    /// the background. Each entry is overwritten with the answer from the new
-    /// path the instant it lands, so reconnecting flows never wait on DNS yet
-    /// converge onto fresh IPs within a single lookup.
-    ///
-    /// Only *fresh* entries are kept and re-resolved, though. An entry that has
-    /// already expired isn't in active use — anything dialed within its TTL was
-    /// served fresh, and a stale hit would have refreshed it — so it's dropped
-    /// rather than re-resolved: re-dialing it later just takes the cold miss.
-    /// This is what keeps a path change cheap. Without it, every host the
-    /// session ever touched would be re-queried at once; with it, the cost is
-    /// the handful of hosts seen within the last TTL.
+    /// Clearing outright — rather than keeping the entries and re-resolving
+    /// them in the background — is the safer trade at a path change. A
+    /// background refresh would keep serving the previous network's IPs on the
+    /// stale-fast path until the new answer lands, handing reconnecting flows
+    /// addresses that may not route on the new path at the very moment routing
+    /// accuracy matters most. With the cache empty, the first dial of each host
+    /// over the new path takes a cold synchronous lookup instead, so the answer
+    /// is guaranteed to match the current network. The cost is bounded: only
+    /// hosts actually re-dialed pay it, one resolve each.
     ///
     /// Bumping the generation voids any background refresh already in flight
     /// (its `getaddrinfo` may have been issued on the network we're leaving) so
-    /// it can't commit an answer from the old path, and clearing
-    /// `inFlightRefreshes` lets the re-resolution below re-fire for the hosts
-    /// that were mid-refresh.
-    func refresh() {
-        let keys: [String] = lock.withWriteLock {
+    /// it can't commit an old-path answer back into the just-cleared cache, and
+    /// clearing `inFlightRefreshes` drops those now-voided keys — their commit
+    /// block bails on the generation guard without removing themselves, so
+    /// leaving them would leak the keys permanently.
+    func flush() {
+        let count: Int = lock.withWriteLock {
             generation &+= 1
             inFlightRefreshes.removeAll(keepingCapacity: true)
-            // Keep only the still-fresh entries and re-resolve those; drop the
-            // expired ones rather than spending a getaddrinfo on each over the
-            // new path. Nothing is waiting on an expired host, and if one is
-            // dialed again the cold miss resolves it fresh.
-            let now = CFAbsoluteTimeGetCurrent()
-            cache = cache.filter { $0.value.expiry > now }
-            return Array(cache.keys)
+            let count = cache.count
+            cache.removeAll(keepingCapacity: true)
+            return count
         }
-        guard !keys.isEmpty else { return }
-        logger.info("[DNS] Re-resolving \(keys.count) cached \(keys.count == 1 ? "host" : "hosts") after network change")
-        // The cache key is the already-lowercased hostname; getaddrinfo is
-        // case-insensitive, so it doubles as the resolution input.
-        for key in keys {
-            scheduleBackgroundRefresh(key: key, host: key)
-        }
+        guard count > 0 else { return }
+        logger.info("[DNS] Cleared \(count) cached \(count == 1 ? "host" : "hosts") after network change")
     }
 
     // MARK: - Internal
 
     /// Fires a background refresh for `key` if one isn't already in flight.
     /// The lock-guarded set ensures duplicate concurrent stale-cache hits for
-    /// the same hostname coalesce into one `getaddrinfo` call. Shared by the
-    /// stale-fast path and ``refresh``: a network-change re-resolution that
-    /// races a stale-fast hit for the same host collapses into a single lookup.
+    /// the same hostname coalesce into one `getaddrinfo` call. Driven by the
+    /// stale-fast path in ``resolveAll``; the generation guard below stops a
+    /// refresh that began on the previous network from committing its answer
+    /// after a ``flush`` has cleared the cache.
     private func scheduleBackgroundRefresh(key: String, host: String) {
         let (shouldFire, scheduledGeneration): (Bool, UInt64) = lock.withWriteLock {
             if inFlightRefreshes.contains(key) { return (false, generation) }

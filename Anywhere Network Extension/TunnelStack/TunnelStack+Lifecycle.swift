@@ -217,12 +217,12 @@ extension TunnelStack {
     private func invalidateOutboundState(configuration: ProxyConfiguration) {
         // Cached DNS answers were resolved over the network path we're leaving
         // and may not route on the new one (GeoDNS/CDN locality, split-horizon
-        // DNS, captive-portal answers). Re-resolve every cached host over the
-        // new path and overwrite its IPs in place: the rebuilt mux and every
-        // reconnecting flow keep dialing the still-warm previous IPs (almost
-        // always a server's stable public IP) without stalling on a cold
-        // lookup, then converge onto the fresh answers as they land.
-        DNSResolver.shared.refresh()
+        // DNS, captive-portal answers). Drop every cached host so the next dial
+        // over the new path takes a fresh lookup: the first connection to each
+        // host pays one cold resolve, but it's guaranteed an answer that routes
+        // on the current network rather than a stale cross-network IP — the
+        // safer trade-off while reconnecting.
+        DNSResolver.shared.flush()
 
         // Gracefully close every app-facing TCP leg before tearing down the
         // upstream transports below. close() flushes already-received downlink
