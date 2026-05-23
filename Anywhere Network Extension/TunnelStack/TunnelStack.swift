@@ -93,7 +93,7 @@ class TunnelStack {
     //                         │                                     │ FakeIPPool preserved)
     var proxyMode: ProxyMode = .rule
     var hideVPNIcon: Bool = false
-    var blockQUICEnabled: Bool = true
+    var quicPolicy: QUICPolicy = .blocked
     var advertiseIPv6ToApps: Bool = false
     var encryptedDNSEnabled: Bool = false
     var encryptedDNSProtocol: String = "doh"
@@ -311,7 +311,7 @@ class TunnelStack {
         loadEncryptedDNSSetting()
         loadProxyModeSetting()
         loadHideVPNIconSetting()
-        loadBlockQUICSetting()
+        loadQUICPolicySetting()
         loadMITMSetting()
 
         if Self.shouldUseVisionMux(configuration) {
@@ -357,8 +357,8 @@ class TunnelStack {
         hideVPNIcon = AWCore.getHideVPNIcon()
     }
 
-    private func loadBlockQUICSetting() {
-        blockQUICEnabled = AWCore.getBlockQUICEnabled()
+    private func loadQUICPolicySetting() {
+        quicPolicy = AWCore.getQUICPolicy()
     }
 
     /// Loads the MITM master toggle and rebuilds the in-memory rewrite

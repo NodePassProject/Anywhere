@@ -453,22 +453,29 @@ extension TunnelStack {
             let proxyMode = AWCore.getProxyMode()
             let bypassCountryCode = AWCore.getBypassCountryCode()
             let hideVPNIcon = AWCore.getHideVPNIcon()
-            let blockQUICEnabled = AWCore.getBlockQUICEnabled()
             let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
             let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
             let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
             let encryptedDNSServer = AWCore.getEncryptedDNSServer()
 
+            // QUIC policy only drives the per-datagram UDP/443 decision, read
+            // on this queue in handleInboundUDP — reload it in place rather
+            // than restarting the stack (which would drop every connection).
+            let quicPolicy = AWCore.getQUICPolicy()
+            if quicPolicy != self.quicPolicy {
+                logger.info("[VPN] QUIC policy changed: \(self.quicPolicy.rawValue) -> \(quicPolicy.rawValue)")
+                self.quicPolicy = quicPolicy
+            }
+
             let proxyModeChanged = proxyMode != self.proxyMode
             let bypassCountryChanged = bypassCountryCode != self.bypassCountryCode
             let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
-            let blockQUICEnabledChanged = blockQUICEnabled != self.blockQUICEnabled
             let advertiseIPv6ToAppsChanged = advertiseIPv6ToApps != self.advertiseIPv6ToApps
             let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
             let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
             let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer
 
-            guard proxyModeChanged || bypassCountryChanged || hideVPNIconChanged || blockQUICEnabledChanged || advertiseIPv6ToAppsChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else {
+            guard proxyModeChanged || bypassCountryChanged || hideVPNIconChanged || advertiseIPv6ToAppsChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else {
                 return
             }
             
