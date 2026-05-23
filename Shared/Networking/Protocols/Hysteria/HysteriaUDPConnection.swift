@@ -15,7 +15,30 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
 
     private let session: HysteriaSession
     private let destination: String
-    private var state: State = .idle
+
+    /// Connection state. Confined to `session.queue` for reads and writes; the
+    /// getter is deliberately lock-free so the per-datagram hot path
+    /// (`sendRaw` / `handleIncomingDatagram`) pays nothing. The setter mirrors
+    /// readiness into `_isReady` under `readyLock` so `isConnected` can be
+    /// answered from any queue WITHOUT a synchronous hop onto `session.queue`.
+    /// That hop is one half of a udpQueue⇄quic.queue deadlock: `UDPFlow`'s
+    /// terminal-send classifier reads `isConnected` on `udpQueue`, while the
+    /// FD-pressure relief path hops the other way (quic.queue→`udpQueue.sync`)
+    /// when `QUICSocket` creation hits `EMFILE`. Reading a mirrored flag here
+    /// removes the `udpQueue → quic.queue` edge so the cycle can't form.
+    private var _state: State = .idle
+    private var state: State {
+        get { _state }
+        set {
+            _state = newValue
+            readyLock.withLock { _isReady = (newValue == .ready) }
+        }
+    }
+    /// Cross-queue-readable mirror of `state == .ready`. Written only by the
+    /// `state` setter (on `session.queue`); read lock-free by `isConnected`.
+    private let readyLock = UnfairLock()
+    private var _isReady = false
+
     private var sessionID: UInt32 = 0
 
     /// Per-datagram FIFO. Bounded at `maxQueuedPackets` with drop-oldest
@@ -77,8 +100,10 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
         super.init()
     }
 
+    /// Non-blocking: reads the lock-guarded readiness mirror rather than
+    /// hopping onto `session.queue` (see `state`). Callable from any queue.
     override var isConnected: Bool {
-        session.isOnQueue ? (state == .ready) : session.queue.sync { state == .ready }
+        readyLock.withLock { _isReady }
     }
 
     override var outerTLSVersion: TLSVersion? { .tls13 }

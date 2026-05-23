@@ -16,7 +16,27 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     private let session: HysteriaSession
     private let destination: String
 
-    private var state: State = .idle
+    /// Connection state. Confined to `session.queue` for reads and writes; the
+    /// getter is deliberately lock-free. The setter mirrors readiness into
+    /// `_isReady` under `readyLock` so `isConnected` can be answered from any
+    /// queue WITHOUT a synchronous hop onto `session.queue` — that hop would
+    /// otherwise help form a deadlock against the FD-pressure relief path,
+    /// which hops the other way (quic.queue→`udpQueue.sync`) when `QUICSocket`
+    /// creation hits `EMFILE`. Only `.ready` mirrors as connected; the
+    /// intermediate `.openingStream` / `.handshaking` states read as not-ready.
+    private var _state: State = .idle
+    private var state: State {
+        get { _state }
+        set {
+            _state = newValue
+            readyLock.withLock { _isReady = (newValue == .ready) }
+        }
+    }
+    /// Cross-queue-readable mirror of `state == .ready`. Written only by the
+    /// `state` setter (on `session.queue`); read lock-free by `isConnected`.
+    private let readyLock = UnfairLock()
+    private var _isReady = false
+
     private var streamID: Int64 = -1
 
     /// True once we've observed FIN on the downlink (server half-closed its
@@ -47,8 +67,10 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         super.init()
     }
 
+    /// Non-blocking: reads the lock-guarded readiness mirror rather than
+    /// hopping onto `session.queue` (see `state`). Callable from any queue.
     override var isConnected: Bool {
-        session.isOnQueue ? (state == .ready) : session.queue.sync { state == .ready }
+        readyLock.withLock { _isReady }
     }
 
     override var outerTLSVersion: TLSVersion? { .tls13 }
