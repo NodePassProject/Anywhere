@@ -356,7 +356,7 @@ nonisolated final class RawUDPSocket {
     ///
     /// MUST NOT be called from this socket's `ioQueue` (would deadlock on
     /// the `ioQueue.sync` below). The relief path is invoked from other
-    /// sockets' I/O queues and from `LWIPStack.lwipQueue`, never from this
+    /// sockets' I/O queues and from `TunnelStack.lwipQueue`, never from this
     /// socket's own `ioQueue`.
     func cancelSync() {
         guard latchCancelled() else { return }

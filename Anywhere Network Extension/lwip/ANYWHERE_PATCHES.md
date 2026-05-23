@@ -298,3 +298,30 @@ carrying TFO data it correctly covers the payload as well.
 
 The pointer storage and bridge setter live in `lwip/lwip_bridge.c` and
 don't need re-applying.
+
+---
+
+## UDP handled outside lwIP (`LWIP_UDP = 0`)
+
+UDP is not handled by lwIP at all. `port/lwipopts.h` sets `LWIP_UDP 0`, so
+`src/core/udp.c` compiles to nothing and lwIP is built TCP-only (ICMP stays
+on). UDP datagrams are intercepted in Swift before they ever reach lwIP:
+
+- **Inbound:** `LWIPStack+IO.startReadingPackets` peeks each packet's IP
+  protocol and routes UDP to `UDPPacket.parse` → `LWIPStack+UDP.handleInboundUDP`
+  (the logic that used to live in the bridge's `udp_recv_cb`). Only TCP/ICMP
+  are fed to `lwip_bridge_input`.
+- **Outbound:** responses are built by `UDPPacket.build` (IP+UDP header +
+  checksums, mirroring the ICMP builder) and queued via
+  `LWIPStack.enqueueOutbound`, replacing the former `lwip_bridge_udp_sendto`.
+
+Parity with the old lwIP path is preserved by `UDPPacket.parse`: fragments and
+IPv6 extension headers are dropped, matching lwIP's `IP_REASSEMBLY` /
+`LWIP_IPV6_REASS` = 0 posture.
+
+**Consequence for upgrades:** there is an in-source udp.c modification
+(`/* Anywhere patch: fallback to wildcard PCB with local_port == 0 */`). It is
+now **inert** — the whole file is `#if LWIP_UDP` — and does **not** need
+re-applying. If you ever re-enable `LWIP_UDP`, you would also have to restore
+the UDP catch-all listeners and `udp_recv_cb` in `lwip_bridge.c` (removed when
+UDP moved to Swift); prefer keeping UDP in Swift.

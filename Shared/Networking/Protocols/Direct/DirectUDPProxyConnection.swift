@@ -76,7 +76,7 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
         // Single-pending discipline — overlapping receives are an API
         // violation. The assert catches it in debug, but in release the
         // previous overwrite-and-forget behavior silently leaked the
-        // earlier completion (a closure capturing the LWIPUDPFlow's
+        // earlier completion (a closure capturing the UDPFlow's
         // receive loop, which would then hang forever waiting on a result
         // that never came). Swap the stale completion out under the lock
         // and surface a defined error to it so the caller learns.

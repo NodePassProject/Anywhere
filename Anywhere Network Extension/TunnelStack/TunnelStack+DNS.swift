@@ -1,5 +1,5 @@
 //
-//  LWIPStack+DNS.swift
+//  TunnelStack+DNS.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/30/26.
@@ -9,7 +9,7 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "LWIP-DNS")
 
-extension LWIPStack {
+extension TunnelStack {
 
     // MARK: - DNS Interception (Fake-IP)
     //
@@ -78,9 +78,9 @@ extension LWIPStack {
     /// Intercepts a DNS query. Returns true if handled (no UDP flow needed).
     func handleDNSQuery(
         payload: Data,
-        srcIP: UnsafeRawPointer,
+        srcIP: Data,
         srcPort: UInt16,
-        dstIP: UnsafeRawPointer,
+        dstIP: Data,
         dstPort: UInt16,
         isIPv6: Bool,
         destination: DNSDestination
@@ -194,18 +194,13 @@ extension LWIPStack {
             )
         }) else { return false }
 
-        responseData.withUnsafeBytes { dataPtr in
-            guard let dataBase = dataPtr.baseAddress else { return }
-            lwip_bridge_udp_sendto(
-                dstIP,
-                dstPort,
-                srcIP,
-                srcPort,
-                isIPv6 ? 1 : 0,
-                dataBase,
-                Int32(responseData.count)
-            )
-        }
+        // Response source = original destination (the resolver the app queried),
+        // destination = original source (the app), so the client accepts it.
+        writeOutboundUDP(
+            srcIP: dstIP, srcPort: dstPort,
+            dstIP: srcIP, dstPort: srcPort,
+            isIPv6: isIPv6, payload: responseData
+        )
 
         return true
     }
@@ -234,9 +229,9 @@ extension LWIPStack {
     private func forwardToUpstreamResolver(
         domain: String,
         payload: Data,
-        srcIP: UnsafeRawPointer,
+        srcIP: Data,
         srcPort: UInt16,
-        dstIP: UnsafeRawPointer,
+        dstIP: Data,
         dstPort: UInt16,
         isIPv6: Bool,
         qtype: UInt16
@@ -249,24 +244,24 @@ extension LWIPStack {
         // fallback consumer, which hands the whole list to the OS resolver.
         let upstream = TunnelConstants.fallbackDNSServers(includeIPv6: false).first ?? "1.1.1.1"
 
-        let addrSize = isIPv6 ? 16 : 4
-        let srcHost = LWIPStack.ipAddrToString(srcIP, isIPv6: isIPv6)
-        let dstHost = LWIPStack.ipAddrToString(dstIP, isIPv6: isIPv6)
-        let srcIPData = Data(bytes: srcIP, count: addrSize)
-        let dstIPData = Data(bytes: dstIP, count: addrSize)
+        let srcHost = TunnelStack.ipAddrToString(srcIP, isIPv6: isIPv6)
+        let srcIPData = srcIP
+        let dstIPData = dstIP
 
         // Key on the original 5-tuple (destined for the Anywhere resolver) so a
         // retransmitted query from the same socket reuses this flow instead of
         // opening a second proxy association. Every datagram to the resolver
         // re-enters handleDNSQuery, so reuse has to happen here — the callback's
-        // fast path is never reached for intercepted destinations.
-        let flowKey = UDPFlowKey(srcHost: srcHost, srcPort: srcPort, dstHost: dstHost, dstPort: dstPort)
+        // fast path is never reached for intercepted destinations. Built from the
+        // raw address bytes to match the inline key the fast path constructs.
+        let flowKey = UDPFlowKey(srcIP: UDPPacket.loadIP(srcIP), srcPort: srcPort,
+                                 dstIP: UDPPacket.loadIP(dstIP), dstPort: dstPort, isIPv6: isIPv6)
         if let existing = udpFlows[flowKey] {
             existing.handleReceivedData(payload, payloadLength: payload.count)
             return true
         }
 
-        let flow = LWIPUDPFlow(
+        let flow = UDPFlow(
             flowKey: flowKey,
             srcHost: srcHost,
             srcPort: srcPort,
@@ -288,9 +283,9 @@ extension LWIPStack {
     /// Sends a NODATA DNS response (ANCOUNT=0) for the given query.
     private func sendNODATA(
         payload: Data,
-        srcIP: UnsafeRawPointer,
+        srcIP: Data,
         srcPort: UInt16,
-        dstIP: UnsafeRawPointer,
+        dstIP: Data,
         dstPort: UInt16,
         isIPv6: Bool,
         qtype: UInt16
@@ -304,18 +299,12 @@ extension LWIPStack {
             )
         }) else { return false }
 
-        responseData.withUnsafeBytes { dataPtr in
-            guard let dataBase = dataPtr.baseAddress else { return }
-            lwip_bridge_udp_sendto(
-                dstIP,
-                dstPort,
-                srcIP,
-                srcPort,
-                isIPv6 ? 1 : 0,
-                dataBase,
-                Int32(responseData.count)
-            )
-        }
+        // Response sourced from the resolver the app queried (original dst).
+        writeOutboundUDP(
+            srcIP: dstIP, srcPort: dstPort,
+            dstIP: srcIP, dstPort: srcPort,
+            isIPv6: isIPv6, payload: responseData
+        )
 
         return true
     }

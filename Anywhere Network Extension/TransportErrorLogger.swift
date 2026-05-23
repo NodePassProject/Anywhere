@@ -12,8 +12,8 @@ import Foundation
 /// Logging policy
 /// ==============
 /// - Connection failures (TCP connect/send/receive, UDP connect/receive) are
-///   terminal events. The user-facing connection (``LWIPTCPConnection`` /
-///   ``LWIPUDPFlow``) owns a ``ConnectionFailureReporter`` that logs them
+///   terminal events. The user-facing connection (``TCPConnection`` /
+///   ``UDPFlow``) owns a ``ConnectionFailureReporter`` that logs them
 ///   exactly once.
 /// - Non-terminal send failures (UDP datagram drops, control-frame sends on a
 ///   still-alive transport) use ``logTransientSend`` and log at warning level.

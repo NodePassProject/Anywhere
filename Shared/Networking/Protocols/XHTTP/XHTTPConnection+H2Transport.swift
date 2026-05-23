@@ -234,7 +234,7 @@ extension XHTTPConnection {
     ///
     /// Matches Xray-core's `scMinPostsIntervalMs` delay: the completion is deferred so that
     /// rapid writes are batched into fewer, larger POSTs by the upstream coalescing buffer
-    /// (LWIPTCPConnection keeps `uploadFlushInFlight` true during the delay).
+    /// (TCPConnection keeps `uploadFlushInFlight` true during the delay).
     func sendH2PacketUp(data: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
         if h2StreamClosed {

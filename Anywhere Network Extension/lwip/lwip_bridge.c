@@ -5,7 +5,6 @@
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
 #include "lwip/priv/tcp_priv.h"
-#include "lwip/udp.h"
 #include "lwip/timeouts.h"
 #include "lwip/ip.h"
 #include "lwip/ip_addr.h"
@@ -25,7 +24,6 @@ static lwip_tcp_accept_fn s_tcp_accept_fn = NULL;
 static lwip_tcp_recv_fn   s_tcp_recv_fn   = NULL;
 static lwip_tcp_sent_fn   s_tcp_sent_fn   = NULL;
 static lwip_tcp_err_fn    s_tcp_err_fn    = NULL;
-static lwip_udp_recv_fn   s_udp_recv_fn   = NULL;
 
 /* Storage for the SYN filter pointer declared in `lwip/priv/tcp_priv.h`.
  * The vendored `tcp_listen_input` patch calls this directly — keeping it
@@ -44,7 +42,6 @@ void lwip_bridge_set_tcp_syn_filter_fn(lwip_tcp_syn_filter_fn fn) {
 void lwip_bridge_set_tcp_recv_fn(lwip_tcp_recv_fn fn)   { s_tcp_recv_fn = fn; }
 void lwip_bridge_set_tcp_sent_fn(lwip_tcp_sent_fn fn)   { s_tcp_sent_fn = fn; }
 void lwip_bridge_set_tcp_err_fn(lwip_tcp_err_fn fn)     { s_tcp_err_fn = fn; }
-void lwip_bridge_set_udp_recv_fn(lwip_udp_recv_fn fn)   { s_udp_recv_fn = fn; }
 
 /* ========================================================================
  *  Network interface
@@ -53,15 +50,6 @@ void lwip_bridge_set_udp_recv_fn(lwip_udp_recv_fn fn)   { s_udp_recv_fn = fn; }
 static struct netif tun_netif;
 static struct tcp_pcb *tcp_listen_pcb_v4 = NULL;
 static struct tcp_pcb *tcp_listen_pcb_v6 = NULL;
-static struct udp_pcb *udp_listen_pcb_v4 = NULL;
-static struct udp_pcb *udp_listen_pcb_v6 = NULL;
-
-/* File-scope variable to capture UDP destination port during synchronous input processing.
- * Since NO_SYS=1, lwip_bridge_input() → ip_input() → udp_input() → udp_recv_cb
- * all execute synchronously on the same thread, so this is safe. */
-static uint16_t s_current_udp_dst_port = 0;
-static ip_addr_t s_current_udp_dst_ip;
-
 
 /* ========================================================================
  *  Netif output callback
@@ -176,7 +164,7 @@ static err_t tcp_accept_cb(void *arg, struct tcp_pcb *newpcb, err_t err) {
     /* The lwIP ↔ local-app leg rides over TUN with no real loss or congestion.
      * Nagle coalescing only adds latency for small writes (HTTP/2 frames,
      * WebSocket pings, interactive SSH). Upload coalescing already happens in
-     * LWIPTCPConnection before handing bytes to lwIP. */
+     * TCPConnection before handing bytes to lwIP. */
     tcp_nagle_disable(newpcb);
 
     return ERR_OK;
@@ -233,43 +221,6 @@ static void tcp_err_cb(void *arg, err_t err) {
     if (arg && s_tcp_err_fn) {
         s_tcp_err_fn(arg, (int)err);
     }
-}
-
-/* ========================================================================
- *  UDP callback
- * ======================================================================== */
-
-static void udp_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
-                          const ip_addr_t *addr, u16_t port) {
-    (void)arg; (void)pcb;
-    if (!p || !s_udp_recv_fn) {
-        if (p) pbuf_free(p);
-        return;
-    }
-
-    uint8_t src_bytes[16], dst_bytes[16];
-    int is_ipv6 = 0;
-    ip_addr_to_bytes(addr, src_bytes, &is_ipv6);
-    ip_addr_to_bytes(&s_current_udp_dst_ip, dst_bytes, &is_ipv6);
-
-    if (p->next != NULL) {
-        void *buf = mem_malloc(p->tot_len);
-        if (buf) {
-            pbuf_copy_partial(p, buf, p->tot_len, 0);
-            s_udp_recv_fn(src_bytes, port,
-                          dst_bytes, s_current_udp_dst_port,
-                          is_ipv6, buf, p->tot_len);
-            mem_free(buf);
-        } else {
-            os_log_error(s_log, "[Bridge] udp_recv_cb: mem_malloc failed for %u bytes", p->tot_len);
-        }
-    } else {
-        s_udp_recv_fn(src_bytes, port,
-                      dst_bytes, s_current_udp_dst_port,
-                      is_ipv6, p->payload, p->tot_len);
-    }
-
-    pbuf_free(p);
 }
 
 /* ========================================================================
@@ -341,33 +292,14 @@ void lwip_bridge_init(void) {
         os_log_error(s_log, "[Bridge] TCP v6 tcp_new_ip_type() failed!");
     }
 
-    /* --- UDP catch-all listeners --- */
-
-    /* IPv4 UDP listener on port 0 (wildcard, see udp.c patch) */
-    udp_listen_pcb_v4 = udp_new();
-    if (udp_listen_pcb_v4) {
-        udp_bind(udp_listen_pcb_v4, IP4_ADDR_ANY, 0);
-        udp_listen_pcb_v4->local_port = 0;
-        udp_recv(udp_listen_pcb_v4, udp_recv_cb, NULL);
-    } else {
-        os_log_error(s_log, "[Bridge] UDP v4 udp_new() failed!");
-    }
-
-    /* IPv6 UDP listener on port 0 (wildcard) */
-    udp_listen_pcb_v6 = udp_new_ip_type(IPADDR_TYPE_V6);
-    if (udp_listen_pcb_v6) {
-        udp_bind(udp_listen_pcb_v6, IP6_ADDR_ANY, 0);
-        udp_listen_pcb_v6->local_port = 0;
-        udp_recv(udp_listen_pcb_v6, udp_recv_cb, NULL);
-    } else {
-        os_log_error(s_log, "[Bridge] UDP v6 udp_new_ip_type() failed!");
-    }
+    /* No UDP listeners: UDP is handled in Swift (UDPPacket / TunnelStack+UDP),
+     * so lwIP is built with LWIP_UDP=0 and never sees a UDP datagram. */
 }
 
 void lwip_bridge_abort_all_tcp(void) {
     /* Abort all active TCP connections.
      * Keep callbacks intact so tcp_abort() fires the err callback, which
-     * notifies the Swift LWIPTCPConnection (sets closed=true, cancels VLESS,
+     * notifies the Swift TCPConnection (sets closed=true, cancels VLESS,
      * balances Unmanaged retain via takeRetainedValue in the callback).
      * tcp_abort() removes the PCB from tcp_active_pcbs, so we always grab
      * the new list head each iteration. */
@@ -376,7 +308,7 @@ void lwip_bridge_abort_all_tcp(void) {
     }
 
     /* Clean up TIME_WAIT PCBs. These have no active Swift connection (the
-     * LWIPTCPConnection was already released during normal close), so we
+     * TCPConnection was already released during normal close), so we
      * just remove and free without firing callbacks. */
     while (tcp_tw_pcbs != NULL) {
         struct tcp_pcb *pcb = tcp_tw_pcbs;
@@ -406,8 +338,6 @@ void lwip_bridge_shutdown(void) {
 
     if (tcp_listen_pcb_v4) { tcp_close(tcp_listen_pcb_v4); tcp_listen_pcb_v4 = NULL; }
     if (tcp_listen_pcb_v6) { tcp_close(tcp_listen_pcb_v6); tcp_listen_pcb_v6 = NULL; }
-    if (udp_listen_pcb_v4) { udp_remove(udp_listen_pcb_v4); udp_listen_pcb_v4 = NULL; }
-    if (udp_listen_pcb_v6) { udp_remove(udp_listen_pcb_v6); udp_listen_pcb_v6 = NULL; }
     netif_set_down(&tun_netif);
     netif_remove(&tun_netif);
 }
@@ -441,37 +371,14 @@ void lwip_bridge_input_batch_end(void) {
 void lwip_bridge_input(const void *data, int len) {
     if (!data || len <= 0) return;
 
-    /* Parse IP version for UDP destination capture */
-    const uint8_t *pkt = (const uint8_t *)data;
-    uint8_t version = (pkt[0] >> 4) & 0x0F;
-
-    if (version == 4 && len >= 20) {
-        uint8_t proto = pkt[9];
-        uint8_t ihl = (pkt[0] & 0x0F) * 4;
-
-        if (proto == 17 && len >= ihl + 8) {
-            s_current_udp_dst_port = ((uint16_t)pkt[ihl + 2] << 8) | pkt[ihl + 3];
-            ip4_addr_t dst4;
-            memcpy(&dst4.addr, pkt + 16, 4);
-            ip_addr_copy_from_ip4(s_current_udp_dst_ip, dst4);
-        }
-    } else if (version == 6 && len >= 40) {
-        uint8_t proto = pkt[6];
-
-        if (proto == 17 && len >= 48) {
-            s_current_udp_dst_port = ((uint16_t)pkt[42] << 8) | pkt[43];
-            ip6_addr_t dst6;
-            memcpy(&dst6, pkt + 24, 16);
-            ip_addr_copy_from_ip6(s_current_udp_dst_ip, dst6);
-        }
-    } else {
-        return;
-    }
-
-    /* Zero-copy input: PBUF_REF references the caller's buffer directly
-     * instead of allocating a PBUF_POOL chain and pbuf_take'ing into it.
-     * Safe because:
-     *   - The caller (LWIPStack+IO.swift) invokes us inside `withUnsafeBytes`,
+    /* Only TCP/ICMP reach here — UDP is intercepted in Swift (TunnelStack+IO
+     * routes it to UDPPacket/handleInboundUDP) before this call, so lwIP is
+     * built TCP-only and never demuxes a UDP datagram. ip_input still validates
+     * the IP header and drops anything it doesn't handle.
+     *
+     * Zero-copy input: PBUF_REF references the caller's buffer directly instead
+     * of allocating a PBUF_POOL chain and pbuf_take'ing into it. Safe because:
+     *   - The caller (TunnelStack+IO.swift) invokes us inside `withUnsafeBytes`,
      *     so `data` is valid for the entire synchronous call chain
      *     (ip_input → tcp_input → tcp_recv_cb → s_tcp_recv_fn → return).
      *   - tcp_recv_cb (below) only returns ERR_MEM on a chained-pbuf flatten;
@@ -552,65 +459,6 @@ int lwip_bridge_tcp_sndbuf(void *pcb) {
 
 int lwip_bridge_tcp_snd_queuelen(void *pcb) {
     return (int)((struct tcp_pcb *)pcb)->snd_queuelen;
-}
-
-/* ========================================================================
- *  UDP Operations
- * ======================================================================== */
-
-void lwip_bridge_udp_sendto(const void *src_ip_bytes, uint16_t src_port,
-                             const void *dst_ip_bytes, uint16_t dst_port,
-                             int is_ipv6,
-                             const void *data, int len) {
-    if (!data || len <= 0) return;
-
-    /* Reconstruct ip_addr_t from raw bytes */
-    ip_addr_t src_addr, dst_addr;
-    if (is_ipv6) {
-        memset(&src_addr, 0, sizeof(src_addr));
-        memset(&dst_addr, 0, sizeof(dst_addr));
-        memcpy(ip_2_ip6(&src_addr), src_ip_bytes, 16);
-        IP_SET_TYPE_VAL(src_addr, IPADDR_TYPE_V6);
-        memcpy(ip_2_ip6(&dst_addr), dst_ip_bytes, 16);
-        IP_SET_TYPE_VAL(dst_addr, IPADDR_TYPE_V6);
-    } else {
-        memset(&src_addr, 0, sizeof(src_addr));
-        memset(&dst_addr, 0, sizeof(dst_addr));
-        memcpy(ip_2_ip4(&src_addr), src_ip_bytes, 4);
-        IP_SET_TYPE_VAL(src_addr, IPADDR_TYPE_V4);
-        memcpy(ip_2_ip4(&dst_addr), dst_ip_bytes, 4);
-        IP_SET_TYPE_VAL(dst_addr, IPADDR_TYPE_V4);
-    }
-
-    struct udp_pcb *pcb = udp_new_ip_type(is_ipv6 ? IPADDR_TYPE_V6 : IPADDR_TYPE_V4);
-    if (!pcb) {
-        os_log_error(s_log, "[Bridge] udp_sendto: udp_new_ip_type failed");
-        return;
-    }
-
-    err_t bind_err = udp_bind(pcb, &src_addr, src_port);
-    if (bind_err != ERR_OK) {
-        os_log_error(s_log, "[Bridge] udp_sendto: udp_bind failed err=%d", (int)bind_err);
-        udp_remove(pcb);
-        return;
-    }
-
-    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
-    if (!p) {
-        os_log_error(s_log, "[Bridge] udp_sendto: pbuf_alloc failed for %d bytes", len);
-        udp_remove(pcb);
-        return;
-    }
-    memcpy(p->payload, data, len);
-
-    /* Use udp_sendto_if_src to bypass routing (lwIP can't route arbitrary IPs
-     * through our TUN netif without a full routing table) */
-    err_t send_err = udp_sendto_if_src(pcb, p, &dst_addr, dst_port, &tun_netif, &src_addr);
-    if (send_err != ERR_OK) {
-        os_log_error(s_log, "[Bridge] udp_sendto: failed err=%d is_ipv6=%d", (int)send_err, is_ipv6);
-    }
-    pbuf_free(p);
-    udp_remove(pcb);
 }
 
 /* ========================================================================

@@ -214,7 +214,7 @@ final class MITMRewritePolicy {
         return set.rules.filter { $0.phase == phase }
     }
 
-    /// Convenience for ``LWIPTCPConnection`` and ``MITMSession``: the
+    /// Convenience for ``TCPConnection`` and ``MITMSession``: the
     /// upstream redirect for a host, if any.
     func rewriteTarget(for host: String) -> MITMRewriteTarget? {
         set(for: host)?.rewriteTarget

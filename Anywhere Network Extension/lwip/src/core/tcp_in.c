@@ -687,7 +687,7 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
      * everything resolvable pre-handshake (IP-CIDR / fake-IP -> domain)
      * can be decided here — saves a SYN-ACK + final ACK + accept_cb
      * for the rejected case. SNI-based rejects still happen later in
-     * `LWIPTCPConnection` since the SNI isn't visible until the
+     * `TCPConnection` since the SNI isn't visible until the
      * ClientHello arrives.
      *
      * Filter verdicts:

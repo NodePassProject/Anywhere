@@ -29,7 +29,7 @@ enum OutboundProtocol: String, Codable {
     ///
     /// `false` for protocols whose handshake has no payload slot (Shadowsocks,
     /// Naive's HTTP CONNECT, Hysteria's TCPRequest, SOCKS5's method negotiation).
-    /// ``LWIPTCPConnection`` checks this to decide whether to hand `pendingData`
+    /// ``TCPConnection`` checks this to decide whether to hand `pendingData`
     /// to the handshake (true) or to leave it buffered and forward it via a
     /// separate `send(...)` right after the tunnel is up (false).
     ///

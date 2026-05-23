@@ -70,7 +70,7 @@ nonisolated final class AnyTLSManager {
         return client
     }
 
-    /// Closes every pooled session — invoked from `LWIPStack` lifecycle hooks
+    /// Closes every pooled session — invoked from `TunnelStack` lifecycle hooks
     /// (device wake, network path change, tunnel stop) so we don't try to
     /// reuse a TLS connection whose underlying socket the kernel tore down.
     func closeAll() {

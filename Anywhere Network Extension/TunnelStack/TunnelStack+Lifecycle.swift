@@ -1,5 +1,5 @@
 //
-//  LWIPStack+Lifecycle.swift
+//  TunnelStack+Lifecycle.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/30/26.
@@ -8,9 +8,9 @@
 import Foundation
 import NetworkExtension
 
-private let logger = AnywhereLogger(category: "LWIPStack")
+private let logger = AnywhereLogger(category: "TunnelStack")
 
-extension LWIPStack {
+extension TunnelStack {
 
     // MARK: - Lifecycle
 
@@ -20,9 +20,9 @@ extension LWIPStack {
     ///   - packetFlow: The tunnel's packet flow for reading/writing IP packets.
     ///   - configuration: The proxy configuration.
     func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) {
-        LWIPStack.shared = self
+        TunnelStack.shared = self
         AnywhereLogger.logSink = { [weak self] message, level in
-            let logLevel: LWIPStack.LogLevel
+            let logLevel: TunnelStack.LogLevel
             switch level {
             // `debug` is below `minimumSinkLevel`, so it never reaches the
             // sink; map it defensively to the lowest user-visible bucket in
@@ -48,7 +48,7 @@ extension LWIPStack {
             startUDPCleanupTimer()
             installFDPressureReliefHandler()
             startReadingPackets()
-            logger.debug("[LWIPStack] Started, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
         }
 
         startObservingSettings()
@@ -72,7 +72,7 @@ extension LWIPStack {
         AnywhereLogger.logSink = nil
         packetFlow = nil
         configuration = nil
-        LWIPStack.shared = nil
+        TunnelStack.shared = nil
     }
 
     /// Switches to a new configuration, tearing down all active connections.
@@ -92,7 +92,7 @@ extension LWIPStack {
     /// suspension intact — they live in our own memory, not the kernel's.
     /// What the kernel does tear down is outbound sockets: the Vision mux's
     /// long-lived TCP, per-flow UDP proxy connections, and the transport
-    /// sockets held by each ``LWIPTCPConnection``. Those are what this
+    /// sockets held by each ``TCPConnection``. Those are what this
     /// method invalidates, leaving the rest of the stack running so idle
     /// flows and the FakeIP pool are preserved.
     ///
@@ -177,7 +177,7 @@ extension LWIPStack {
                 }
                 pendingNetworkRecovery = work
                 lwipQueue.asyncAfter(deadline: .now() + delay, execute: work)
-                logger.debug("[LWIPStack] Network recovery debounced, deferred by \(String(format: "%.0f", delay * 1000))ms")
+                logger.debug("[TunnelStack] Network recovery debounced, deferred by \(String(format: "%.0f", delay * 1000))ms")
                 return
             }
 
@@ -206,7 +206,7 @@ extension LWIPStack {
     /// same problem (the kernel's outbound sockets are bound to network state
     /// that no longer exists) and neither needs the local stack rebuilt.
     /// Rather than RST every app-facing leg, each TCP connection is closed
-    /// gracefully via ``lwip_bridge_for_each_tcp`` + ``LWIPTCPConnection/close()``:
+    /// gracefully via ``lwip_bridge_for_each_tcp`` + ``TCPConnection/close()``:
     /// idle legs receive a FIN and reconnect transparently, while in-flight
     /// legs downgrade to a RST that triggers idempotent retries. The netif and
     /// listener PCBs stay up, so new client activity is served without waiting
@@ -234,7 +234,7 @@ extension LWIPStack {
         // here, unlike the abort path in shutdownInternal.
         lwip_bridge_for_each_tcp { arg in
             guard let arg else { return }
-            Unmanaged<LWIPTCPConnection>.fromOpaque(arg).takeUnretainedValue().close()
+            Unmanaged<TCPConnection>.fromOpaque(arg).takeUnretainedValue().close()
         }
 
         muxManager?.closeAll()
@@ -300,7 +300,7 @@ extension LWIPStack {
         isTearingDown = true
         lwip_bridge_shutdown()
         isTearingDown = false
-        logger.debug("[LWIPStack] Shutdown complete")
+        logger.debug("[TunnelStack] Shutdown complete")
     }
 
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.
@@ -322,7 +322,7 @@ extension LWIPStack {
             }
             deferredRestart = work
             lwipQueue.asyncAfter(deadline: .now() + delay, execute: work)
-            logger.debug("[LWIPStack] Restart throttled, deferred by \(String(format: "%.0f", delay * 1000))ms")
+            logger.debug("[TunnelStack] Restart throttled, deferred by \(String(format: "%.0f", delay * 1000))ms")
             return
         }
 
@@ -349,7 +349,7 @@ extension LWIPStack {
         startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.debug("[LWIPStack] Restarted, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
     }
 
     // MARK: - Settings Observation
@@ -401,7 +401,7 @@ extension LWIPStack {
             Unmanaged.passUnretained(self).toOpaque(),
             { _, observer, _, _, _ in
                 guard let observer else { return }
-                let stack = Unmanaged<LWIPStack>.fromOpaque(observer).takeUnretainedValue()
+                let stack = Unmanaged<TunnelStack>.fromOpaque(observer).takeUnretainedValue()
                 stack.handleSettingsChanged()
             },
             AWCore.Notification.tunnelSettingsChanged,
@@ -414,7 +414,7 @@ extension LWIPStack {
             Unmanaged.passUnretained(self).toOpaque(),
             { _, observer, _, _, _ in
                 guard let observer else { return }
-                let stack = Unmanaged<LWIPStack>.fromOpaque(observer).takeUnretainedValue()
+                let stack = Unmanaged<TunnelStack>.fromOpaque(observer).takeUnretainedValue()
                 stack.handleRoutingChanged()
             },
             AWCore.Notification.routingChanged,
@@ -427,7 +427,7 @@ extension LWIPStack {
             Unmanaged.passUnretained(self).toOpaque(),
             { _, observer, _, _, _ in
                 guard let observer else { return }
-                let stack = Unmanaged<LWIPStack>.fromOpaque(observer).takeUnretainedValue()
+                let stack = Unmanaged<TunnelStack>.fromOpaque(observer).takeUnretainedValue()
                 stack.handleMITMChanged()
             },
             AWCore.Notification.mitmChanged,

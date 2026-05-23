@@ -33,7 +33,7 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
     /// calls (no `pendingReceive` set at the moment `handleSessionError`
     /// fires). Surfaced on the next `receiveRaw` so the consumer learns the
     /// connection is gone and closes its flow — without this, the upstream
-    /// `LWIPUDPFlow` would sit on a dead connection until the 300 s idle
+    /// `UDPFlow` would sit on a dead connection until the 300 s idle
     /// timer reaped it.
     private var closureError: Error?
 
@@ -205,8 +205,8 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
 
     // MARK: - ProxyConnection overrides
 
-    /// Called by LWIPUDPFlow with one raw UDP payload per call (see the
-    /// `.hysteria` branch of `LWIPUDPFlow.connectViaProxyClient`). Wraps the
+    /// Called by UDPFlow with one raw UDP payload per call (see the
+    /// `.hysteria` branch of `UDPFlow.connectViaProxyClient`). Wraps the
     /// payload in a Hysteria UDP datagram, fragmenting when the QUIC
     /// DATAGRAM MTU would be exceeded.
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
@@ -348,7 +348,7 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
             // violation. The contract from `ProxyConnection.receiveLoop` is
             // strictly serial, so in normal use this never trips. But the
             // previous overwrite-and-forget behavior silently leaked the
-            // earlier completion (capturing `LWIPUDPFlow.startReceiving`'s
+            // earlier completion (capturing `UDPFlow.startReceiving`'s
             // loop, which would then hang on a result that never came).
             // Mirrors `DirectUDPProxyConnection.receiveRaw`. The assert
             // catches it in debug; in release we surface a defined error

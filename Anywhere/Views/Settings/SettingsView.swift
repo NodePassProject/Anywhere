@@ -10,8 +10,8 @@ import SwiftUI
 /// Settings that affect the Network Extension are stored in App Group UserDefaults
 /// and propagated via Darwin notifications:
 ///
-/// - "tunnelSettingsChanged": triggers LWIPStack restart. Posted when ipv6, encrypted DNS, or bypass changes.
-///   LWIPStack re-reads all settings from UserDefaults during restart.
+/// - "tunnelSettingsChanged": triggers TunnelStack restart. Posted when ipv6, encrypted DNS, or bypass changes.
+///   TunnelStack re-reads all settings from UserDefaults during restart.
 ///   IPv6 and encrypted DNS changes also trigger tunnel settings re-apply.
 ///
 /// - "routingChanged": triggers DomainRouter rule reload only (no restart).

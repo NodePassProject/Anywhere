@@ -14,7 +14,7 @@ import WidgetKit
 private let logger = AnywhereLogger(category: "PacketTunnel")
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
-    private let lwipStack = LWIPStack()
+    private let tunnelStack = TunnelStack()
     private let pathMonitorQueue = DispatchQueue(label: AWCore.Identifier.pathMonitorQueue)
     private var pathMonitor: NWPathMonitor?
     private var lastPathSnapshot: PathSnapshot?
@@ -96,10 +96,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     //   and custom server configuration.
     //
     // NOT re-applied when (stack restart is sufficient):
-    // - Encrypted DNS toggle without custom server: DDR blocking in LWIPStack
+    // - Encrypted DNS toggle without custom server: DDR blocking in TunnelStack
     //   controls behavior at the DNS interception level; no tunnel settings
     //   change needed.
-    // - Bypass country: only affects per-connection GeoIP checks in LWIPStack.
+    // - Bypass country: only affects per-connection GeoIP checks in TunnelStack.
 
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
         // When started from the app, the configuration arrives in `options`
@@ -122,7 +122,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        lwipStack.onTunnelSettingsNeedReapply = { [weak self] in
+        tunnelStack.onTunnelSettingsNeedReapply = { [weak self] in
             self?.reapplyTunnelSettings()
         }
 
@@ -141,7 +141,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 #endif
             
-            self.lwipStack.start(packetFlow: self.packetFlow,
+            self.tunnelStack.start(packetFlow: self.packetFlow,
                                  configuration: configuration)
             self.startMonitoringPath()
             
@@ -221,7 +221,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     /// Re-applies tunnel network settings with current UserDefaults values.
-    /// Called by LWIPStack via onTunnelSettingsNeedReapply when IPv6/encrypted DNS settings change.
+    /// Called by TunnelStack via onTunnelSettingsNeedReapply when IPv6/encrypted DNS settings change.
     /// Resets the virtual interface and flushes the OS DNS cache.
     private func reapplyTunnelSettings() {
         let settings = buildTunnelSettings()
@@ -243,7 +243,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         
         stopMonitoringPath()
         logTunnelStop(reason: reason)
-        lwipStack.stop()
+        tunnelStack.stop()
     }
 
     // MARK: - App Messages
@@ -256,7 +256,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         switch message {
         case .setConfiguration(let configuration):
-            lwipStack.switchConfiguration(configuration)
+            tunnelStack.switchConfiguration(configuration)
             completionHandler?(nil)
 
         case .testLatency(let configuration):
@@ -268,17 +268,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         case .fetchStats:
             let response = StatsResponse(
-                bytesIn: lwipStack.totalBytesIn,
-                bytesOut: lwipStack.totalBytesOut
+                bytesIn: tunnelStack.totalBytesIn,
+                bytesOut: tunnelStack.totalBytesOut
             )
             completionHandler?(try? JSONEncoder().encode(response))
 
         case .fetchLogs:
-            let response = LogsResponse(logs: lwipStack.fetchLogs())
+            let response = LogsResponse(logs: tunnelStack.fetchLogs())
             completionHandler?(try? JSONEncoder().encode(response))
 
         case .fetchRequests:
-            let response = RequestsResponse(requests: lwipStack.requestLog.snapshot())
+            let response = RequestsResponse(requests: tunnelStack.requestLog.snapshot())
             completionHandler?(try? JSONEncoder().encode(response))
         }
     }
@@ -289,12 +289,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // now rather than carrying dead sessions across the sleep. Best-effort: if
         // we're suspended before it runs, wake() rebuilds everything anyway, so we
         // don't block sleep on it.
-        lwipStack.suspendOutbound()
+        tunnelStack.suspendOutbound()
         completionHandler()
     }
 
     override func wake() {
-        lwipStack.handleWake()
+        tunnelStack.handleWake()
     }
 
     // MARK: - Path Monitoring
@@ -350,7 +350,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if previous.status != .satisfied {
                 // Restored after a drop: any leg that outlived the gap is stale.
                 logger.info("[VPN] Network path restored: \(snapshot.summary); recovering connections")
-                lwipStack.handleNetworkPathChange(summary: "network path restored")
+                tunnelStack.handleNetworkPathChange(summary: "network path restored")
             } else {
                 // Still satisfied — recover only when the egress actually moved.
                 // Additive changes (notably IPv6 arriving on the same Wi-Fi)
@@ -359,10 +359,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 switch Self.classifySatisfiedChange(from: previous, to: snapshot) {
                 case .interfaceChanged(let detail):
                     logger.info("[VPN] Egress interface changed (\(detail)); recovering connections")
-                    lwipStack.handleNetworkPathChange(summary: "interface change")
+                    tunnelStack.handleNetworkPathChange(summary: "interface change")
                 case .ipv4EgressLost:
                     logger.info("[VPN] IPv4 egress lost (\(snapshot.summary)); recovering connections")
-                    lwipStack.handleNetworkPathChange(summary: "IPv4 egress lost")
+                    tunnelStack.handleNetworkPathChange(summary: "IPv4 egress lost")
                 case .capabilityOnly(let what):
                     logger.debug("[VPN] Path attributes changed (\(what)); connections unaffected")
                 case .unchanged:
@@ -391,7 +391,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // sockets we can't use through the outage. Idle legs wind down
             // gracefully; any survivors are closed and the transports rebuilt on
             // the up edge (.satisfied / wake) via handleNetworkPathChange.
-            lwipStack.suspendOutbound()
+            tunnelStack.suspendOutbound()
 
         @unknown default:
             logger.warning("[VPN] Network path changed unexpectedly; active connections may reconnect")
@@ -427,7 +427,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func logTunnelStop(reason: NEProviderStopReason) {
         let message: String
-        let level: LWIPStack.LogLevel
+        let level: TunnelStack.LogLevel
 
         switch reason {
         case .userInitiated:

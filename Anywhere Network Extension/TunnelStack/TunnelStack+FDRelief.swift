@@ -1,5 +1,5 @@
 //
-//  LWIPStack+FDRelief.swift
+//  TunnelStack+FDRelief.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 5/15/26.
@@ -7,9 +7,9 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "LWIPStack")
+private let logger = AnywhereLogger(category: "TunnelStack")
 
-extension LWIPStack {
+extension TunnelStack {
 
     // MARK: - FD-Pressure Relief
     //

@@ -87,7 +87,7 @@ extension LatencyTestResponse {
 
 // MARK: - Shared Types
 
-/// Wire-format log entry. Also the in-memory record kept by ``LWIPStack``.
+/// Wire-format log entry. Also the in-memory record kept by ``TunnelStack``.
 struct TunnelLogEntry: Codable, Sendable, Hashable {
     var id: UUID = UUID()
     /// Seconds since CFAbsoluteTime reference date (Jan 1 2001 UTC).

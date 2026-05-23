@@ -1,5 +1,5 @@
 //
-//  LWIPStack+ICMP.swift
+//  TunnelStack+ICMP.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/30/26.
@@ -7,7 +7,7 @@
 
 import Foundation
 
-extension LWIPStack {
+extension TunnelStack {
 
     // MARK: - ICMP Port Unreachable
     //
@@ -15,47 +15,38 @@ extension LWIPStack {
     // previous VPN session). The ICMP response causes QUIC/UDP clients to abandon
     // the stale connection and re-resolve DNS, instead of retrying indefinitely.
 
-    /// Crafts and queues an ICMP Destination Unreachable (Port Unreachable) response.
-    /// Must be called on lwipQueue.
+    /// Crafts and queues an ICMP Destination Unreachable (Port Unreachable)
+    /// response. `srcIP`/`dstIP` are raw address bytes (4 for IPv4, 16 for
+    /// IPv6) — the original datagram's source/destination, which the builders
+    /// place into the response as destination/source respectively.
     func sendICMPPortUnreachable(
-        srcIP: UnsafeRawPointer,
+        srcIP: Data,
         srcPort: UInt16,
-        dstIP: UnsafeRawPointer,
+        dstIP: Data,
         dstPort: UInt16,
         isIPv6: Bool,
         udpPayloadLength: Int
     ) {
-        let packet: Data
-        let proto: NSNumber
-        if isIPv6 {
-            packet = buildICMPv6PortUnreachable(
-                srcIP: srcIP,
-                srcPort: srcPort,
-                dstIP: dstIP,
-                dstPort: dstPort,
-                udpPayloadLength: udpPayloadLength
-            )
-            proto = Self.ipv6Proto
-        } else {
-            packet = buildICMPv4PortUnreachable(
-                srcIP: srcIP,
-                srcPort: srcPort,
-                dstIP: dstIP,
-                dstPort: dstPort,
-                udpPayloadLength: udpPayloadLength
-            )
-            proto = Self.ipv4Proto
+        let packet: Data = srcIP.withUnsafeBytes { srcRaw in
+            dstIP.withUnsafeBytes { dstRaw in
+                guard let src = srcRaw.baseAddress, let dst = dstRaw.baseAddress else {
+                    return Data()
+                }
+                if isIPv6 {
+                    return buildICMPv6PortUnreachable(
+                        srcIP: src, srcPort: srcPort, dstIP: dst, dstPort: dstPort,
+                        udpPayloadLength: udpPayloadLength
+                    )
+                } else {
+                    return buildICMPv4PortUnreachable(
+                        srcIP: src, srcPort: srcPort, dstIP: dst, dstPort: dstPort,
+                        udpPayloadLength: udpPayloadLength
+                    )
+                }
+            }
         }
-        let needsKick: Bool = outputBufferLock.withLock {
-            outputPackets.append(packet)
-            outputProtocols.append(proto)
-            if outputDrainInFlight { return false }
-            outputDrainInFlight = true
-            return true
-        }
-        if needsKick {
-            outputQueue.async { [self] in drainOutputLoop() }
-        }
+        guard !packet.isEmpty else { return }
+        enqueueOutbound(packet, isIPv6: isIPv6)
     }
 
     /// Builds an IPv4 ICMP Destination Unreachable (Type 3, Code 3) packet.

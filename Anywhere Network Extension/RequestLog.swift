@@ -8,11 +8,11 @@
 import Foundation
 
 /// Bounded ring buffer of recent per-connection routing decisions. One
-/// instance per ``LWIPStack``; the main app pulls a snapshot via the
+/// instance per ``TunnelStack``; the main app pulls a snapshot via the
 /// ``TunnelMessage/fetchRequests`` IPC and renders it in the Requests
 /// view under Advanced Settings.
 ///
-/// Mirrors the in-process log buffer pattern (``LWIPStack``'s log
+/// Mirrors the in-process log buffer pattern (``TunnelStack``'s log
 /// entries): entries older than ``TunnelConstants/requestLogRetentionInterval``
 /// or beyond ``TunnelConstants/requestLogMaxEntries`` are pruned on
 /// each append and each fetch. Appends happen on ``lwipQueue`` (TCP

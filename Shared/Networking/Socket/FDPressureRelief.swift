@@ -39,8 +39,8 @@ nonisolated enum FDReliefPriority {
 /// direct-bypass UDP flows from the lwIP stack) and returns whether anything
 /// was freed; the socket layer then retries `socket(2)` once.
 ///
-/// ``LWIPStack`` installs a handler at start that calls
-/// ``LWIPStack/evictDirectUDPFlowsForFDPressure(priority:)`` on its serial
+/// ``TunnelStack`` installs a handler at start that calls
+/// ``TunnelStack/evictDirectUDPFlowsForFDPressure(priority:)`` on its serial
 /// `lwipQueue`. Callers (``RawUDPSocket``, ``RawTCPSocket``,
 /// ``QUICSocket``) invoke ``relieve(for:)`` from their own I/O queues;
 /// the handler's `lwipQueue.sync` cross-hop is deadlock-safe because the

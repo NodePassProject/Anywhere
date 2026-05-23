@@ -8,7 +8,10 @@
 
 /* --- Core protocol support --- */
 #define LWIP_TCP                        1
-#define LWIP_UDP                        1
+/* UDP is handled entirely in Swift (UDPPacket / TunnelStack+UDP); lwIP is built
+ * TCP-only. UDP datagrams are intercepted in TunnelStack+IO before ever reaching
+ * lwIP, and udp.c compiles to nothing under this flag. */
+#define LWIP_UDP                        0
 #define LWIP_IPV4                       1
 #define LWIP_IPV6                       1
 #define LWIP_ICMP                       1
@@ -50,7 +53,6 @@
 /* --- Pool sizes --- */
 #define MEMP_NUM_TCP_PCB                256
 #define MEMP_NUM_TCP_PCB_LISTEN         2
-#define MEMP_NUM_UDP_PCB                64
 #define MEMP_NUM_TCP_SEG                32768
 #define MEMP_NUM_PBUF                   64
 #define MEMP_NUM_NETBUF                 0

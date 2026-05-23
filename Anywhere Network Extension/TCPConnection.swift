@@ -1,5 +1,5 @@
 //
-//  LWIPTCPConnection.swift
+//  TCPConnection.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
@@ -23,7 +23,7 @@ private struct LWIPWriteFatalError: LocalizedError {
     }
 }
 
-class LWIPTCPConnection {
+class TCPConnection {
     let pcb: UnsafeMutableRawPointer
     let dstPort: UInt16
     let lwipQueue: DispatchQueue
@@ -485,7 +485,7 @@ class LWIPTCPConnection {
             logger.debug("[TCP] lwIP closed connection: \(endpointDescription): \(reason)")
         } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
             logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
-        } else if err == -13, LWIPStack.shared?.isTearingDown == true {
+        } else if err == -13, TunnelStack.shared?.isTearingDown == true {
             // ERR_ABRT during a deliberate full-stack teardown (shutdown/restart).
             // Outside teardown, ERR_ABRT indicates lwIP's own pressure aborts
             // (tcp_kill_prio / tcp_kill_timewait) — those stay at warning below.
@@ -545,7 +545,7 @@ class LWIPTCPConnection {
     ///
     /// Must be called only while in sniff phase (sniffer has just cleared).
     private func applySNI(_ sni: String) {
-        guard let stack = LWIPStack.shared else { return }
+        guard let stack = TunnelStack.shared else { return }
         let router = stack.domainRouter
 
         // MITM policy is evaluated independently of routing: routing selects
@@ -753,7 +753,7 @@ class LWIPTCPConnection {
     /// mode; in that case ``MITMSession`` skips the outer handshake and
     /// drives a ``MITMResponseSynthesizer`` after the inner handshake.
     private func startMITMSession(proxy: ProxyConnection?, transferringClient: Bool) {
-        guard let stack = LWIPStack.shared else { abort(); return }
+        guard let stack = TunnelStack.shared else { abort(); return }
         let sni = mitmSNI ?? dstHost
 
         let cache: MITMLeafCertCache

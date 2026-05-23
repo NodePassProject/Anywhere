@@ -3,7 +3,7 @@
 //  Anywhere
 //
 //  Incremental, bounds-checked parser that extracts the SNI hostname from an
-//  inbound TLS ClientHello. Used by LWIPTCPConnection to enable domain-based
+//  inbound TLS ClientHello. Used by TCPConnection to enable domain-based
 //  routing for traffic that reaches the tunnel by real IP (hardcoded IPs, DoH
 //  clients, etc.) — cases where the fake-IP ↔ domain mapping is unavailable.
 //

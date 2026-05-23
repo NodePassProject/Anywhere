@@ -1,5 +1,5 @@
 //
-//  LWIPStack.swift
+//  TunnelStack.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 1/26/26.
@@ -8,9 +8,9 @@
 import Foundation
 import NetworkExtension
 
-private let logger = AnywhereLogger(category: "LWIPStack")
+private let logger = AnywhereLogger(category: "TunnelStack")
 
-// MARK: - LWIPStack
+// MARK: - TunnelStack
 
 /// Main coordinator for the lwIP TCP/IP stack.
 ///
@@ -20,7 +20,7 @@ private let logger = AnywhereLogger(category: "LWIPStack")
 /// Reads IP packets from the tunnel's `NEPacketTunnelFlow`, feeds them into
 /// lwIP for TCP/UDP reassembly, and dispatches resulting connections through
 /// VLESS proxy clients. Response data is written back to the packet flow.
-class LWIPStack {
+class TunnelStack {
 
     // MARK: Properties
 
@@ -71,6 +71,14 @@ class LWIPStack {
         let fn: @convention(c) (UnsafeMutableRawPointer?) -> Void
     }
 
+    /// Release placeholder for Swift-owned output packets (UDP responses, ICMP
+    /// unreachables) that have no lwIP pbuf/heap buffer behind them. Appended
+    /// alongside such packets so ``pendingReleases`` stays index-aligned with
+    /// ``outputPackets`` — ``drainOutputLoop``'s prefix/removeFirst pulls all
+    /// three arrays in lockstep and would desync (or crash on `removeFirst`) if
+    /// a release entry were ever omitted.
+    static let noopRelease = PendingRelease(ctx: nil, fn: { _ in })
+
     // --- Settings (read from App Group UserDefaults) ---
     // These are loaded at start/restart and live-reloaded via Darwin notification.
     //
@@ -108,7 +116,7 @@ class LWIPStack {
 
     /// True while a deliberate full-stack TCP teardown is in progress (stack
     /// shutdown or restart). Set around the ``lwip_bridge_abort_all_tcp`` call
-    /// in ``shutdownInternal`` so ``LWIPTCPConnection.handleError`` can demote
+    /// in ``shutdownInternal`` so ``TCPConnection.handleError`` can demote
     /// the resulting ERR_ABRT flood to debug — while still surfacing lwIP's own
     /// internal aborts (e.g., `tcp_kill_prio` under PCB pool exhaustion) as
     /// warnings. Network-path-change and wake recovery close gracefully (no
@@ -193,20 +201,25 @@ class LWIPStack {
     /// Mux manager for multiplexing UDP flows (created when Vision flow is active).
     var muxManager: MuxManager?
 
-    /// Hashable key for UDP flows — avoids per-packet string interpolation.
+    /// Hashable 5-tuple key for UDP flows. Addresses are held inline as raw
+    /// bytes (`SIMD16<UInt8>`, zero-padded; IPv4 in the first 4) so the
+    /// per-packet fast-path lookup in ``handleInboundUDP`` allocates nothing —
+    /// no `inet_ntop` string, no address `Data`. `isIPv6` disambiguates an IPv4
+    /// address from an IPv6 address sharing the same leading bytes.
     struct UDPFlowKey: Hashable, CustomStringConvertible {
-        let srcHost: String
+        let srcIP: SIMD16<UInt8>
         let srcPort: UInt16
-        let dstHost: String
+        let dstIP: SIMD16<UInt8>
         let dstPort: UInt16
+        let isIPv6: Bool
 
         var description: String {
-            "\(srcHost):\(srcPort)-\(dstHost):\(dstPort)"
+            "\(TunnelStack.ipAddrToString(srcIP, isIPv6: isIPv6)):\(srcPort)-\(TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6)):\(dstPort)"
         }
     }
 
     /// Active UDP flows keyed by 5-tuple.
-    var udpFlows: [UDPFlowKey: LWIPUDPFlow] = [:]
+    var udpFlows: [UDPFlowKey: UDPFlow] = [:]
     var udpCleanupTimer: DispatchSourceTimer?
 
     /// Shared Shadowsocks UDP sessions keyed by configuration id. One session
@@ -230,7 +243,7 @@ class LWIPStack {
     var onTunnelSettingsNeedReapply: (() -> Void)?
 
     /// Singleton for C callback access (one NE process = one stack).
-    static var shared: LWIPStack?
+    static var shared: TunnelStack?
 
     // MARK: - Shadowsocks UDP Sessions
 
@@ -386,6 +399,25 @@ class LWIPStack {
                 return String(cString: cStr)
             }
             return "?"
+        }
+    }
+
+    /// Converts raw IP address bytes (4 for IPv4, 16 for IPv6) to a
+    /// human-readable string. Convenience over the pointer-based overload for
+    /// the Swift UDP path, which already holds addresses as `Data`.
+    static func ipAddrToString(_ data: Data, isIPv6: Bool) -> String {
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return "?" }
+            return ipAddrToString(base, isIPv6: isIPv6)
+        }
+    }
+
+    /// Converts inline SIMD address storage (``UDPFlowKey`` / the UDP fast path)
+    /// to a human-readable string, reading the leading 4 or 16 bytes per family.
+    static func ipAddrToString(_ addr: SIMD16<UInt8>, isIPv6: Bool) -> String {
+        withUnsafeBytes(of: addr) { raw in
+            guard let base = raw.baseAddress else { return "?" }
+            return ipAddrToString(base, isIPv6: isIPv6)
         }
     }
 }

@@ -1,5 +1,5 @@
 //
-//  LWIPUDPFlow.swift
+//  UDPFlow.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
@@ -9,8 +9,8 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "LWIP-UDP")
 
-class LWIPUDPFlow {
-    let flowKey: LWIPStack.UDPFlowKey
+class UDPFlow {
+    let flowKey: TunnelStack.UDPFlowKey
     let srcHost: String
     let srcPort: UInt16
     let dstHost: String
@@ -19,7 +19,7 @@ class LWIPUDPFlow {
     let configuration: ProxyConfiguration
     let lwipQueue: DispatchQueue
 
-    // Raw IP bytes for lwip_bridge_udp_sendto (swapped src/dst for responses)
+    // Raw IP bytes for building the response packet (swapped src/dst).
     let srcIPBytes: Data  // original source (becomes dst in response)
     let dstIPBytes: Data  // original destination (becomes src in response)
 
@@ -33,7 +33,7 @@ class LWIPUDPFlow {
     private var proxyConnection: ProxyConnection?
 
     // Shadowsocks shared UDP session + our registration token into it.
-    // The session is owned by LWIPStack and shared across every flow for
+    // The session is owned by TunnelStack and shared across every flow for
     // this configuration; we only hold a borrowed reference until close().
     private weak var ssUDPSession: ShadowsocksUDPSession?
     private var ssUDPSessionToken: ShadowsocksUDPSession.Token?
@@ -54,7 +54,7 @@ class LWIPUDPFlow {
     private let failureReporter = ConnectionFailureReporter(prefix: "[UDP]", logger: logger)
 
 
-    init(flowKey: LWIPStack.UDPFlowKey,
+    init(flowKey: TunnelStack.UDPFlowKey,
          srcHost: String, srcPort: UInt16,
          dstHost: String, dstPort: UInt16,
          srcIPData: Data, dstIPData: Data,
@@ -101,7 +101,7 @@ class LWIPUDPFlow {
         if Self.isTerminalProxySendError(error, connection: connection) {
             reportFailure("Send", error: error)
             close()
-            LWIPStack.shared?.udpFlows.removeValue(forKey: flowKey)
+            TunnelStack.shared?.udpFlows.removeValue(forKey: flowKey)
         } else {
             logTransientSendFailure(error)
         }
@@ -246,8 +246,8 @@ class LWIPUDPFlow {
 
         if !hasChain {
             // Mux: only for VLESS with the default configuration (mux is tied to the default proxy)
-            let isDefaultConfiguration = (LWIPStack.shared?.configuration?.id == configuration.id)
-            if configuration.outboundProtocol == .vless, isDefaultConfiguration, let muxManager = LWIPStack.shared?.muxManager {
+            let isDefaultConfiguration = (TunnelStack.shared?.configuration?.id == configuration.id)
+            if configuration.outboundProtocol == .vless, isDefaultConfiguration, let muxManager = TunnelStack.shared?.muxManager {
                 proxyConnecting = true
                 connectViaMux(muxManager: muxManager)
                 return
@@ -300,7 +300,7 @@ class LWIPUDPFlow {
                                 self.reportFailure("Mux", error: error)
                             }
                             self.close()
-                            LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                            TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                         }
                     }
 
@@ -308,7 +308,7 @@ class LWIPUDPFlow {
                     // session (via receive-loop error) before this handler ran.
                     guard !session.closed else {
                         self.close()
-                        LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                        TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                         return
                     }
 
@@ -331,7 +331,7 @@ class LWIPUDPFlow {
                         self.reportFailure("Connect", error: error)
                     }
                     self.close()
-                    LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                 }
             }
         }
@@ -376,7 +376,7 @@ class LWIPUDPFlow {
                         self.reportFailure("Connect", error: error)
                     }
                     self.close()
-                    LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                 }
             }
         }
@@ -385,7 +385,7 @@ class LWIPUDPFlow {
     private func connectShadowsocksUDP() {
         guard ssUDPSession == nil && !closed else { return }
 
-        guard let stack = LWIPStack.shared else {
+        guard let stack = TunnelStack.shared else {
             close()
             return
         }
@@ -424,7 +424,7 @@ class LWIPUDPFlow {
                 self.lwipQueue.async {
                     self.reportFailure("Receive", error: error)
                     self.close()
-                    LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                 }
             }
         )
@@ -497,7 +497,7 @@ class LWIPUDPFlow {
                 if let error {
                     self.reportFailure("Connect", error: error)
                     self.close()
-                    LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                     return
                 }
 
@@ -521,7 +521,7 @@ class LWIPUDPFlow {
                     self.lwipQueue.async {
                         self.reportFailure("Receive", error: error)
                         self.close()
-                        LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                        TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
                     }
                 })
             }
@@ -539,7 +539,7 @@ class LWIPUDPFlow {
                     self.reportFailure("Receive", error: error)
                 }
                 self.close()
-                LWIPStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
             }
         }
     }
@@ -549,25 +549,13 @@ class LWIPUDPFlow {
             guard let self, !self.closed else { return }
             self.lastActivity = CFAbsoluteTimeGetCurrent()
 
-            // Send UDP response via lwIP (swap src/dst for the response packet)
-            self.dstIPBytes.withUnsafeBytes { dstPtr in  // original dst = response src
-                self.srcIPBytes.withUnsafeBytes { srcPtr in  // original src = response dst
-                    data.withUnsafeBytes { dataPtr in
-                        guard let dstBase = dstPtr.baseAddress,
-                              let srcBase = srcPtr.baseAddress,
-                              let dataBase = dataPtr.baseAddress else {
-                            logger.debug("[UDP] NULL base address in data pointers")
-                            return
-                        }
-                        lwip_bridge_udp_sendto(
-                            dstBase, self.dstPort,   // response source = original destination
-                            srcBase, self.srcPort,   // response destination = original source
-                            self.isIPv6 ? 1 : 0,
-                            dataBase, Int32(data.count)
-                        )
-                    }
-                }
-            }
+            // Emit the UDP response back to the app, swapping the 5-tuple:
+            // response source = original destination, dest = original source.
+            TunnelStack.shared?.writeOutboundUDP(
+                srcIP: self.dstIPBytes, srcPort: self.dstPort,
+                dstIP: self.srcIPBytes, dstPort: self.srcPort,
+                isIPv6: self.isIPv6, payload: data
+            )
         }
     }
 
@@ -589,7 +577,7 @@ class LWIPUDPFlow {
     /// (which cancels its direct socket and proxy/session) before being freed.
     /// DEBUG-only.
     deinit {
-        assert(closed, "LWIPUDPFlow leaked: freed without close()")
+        assert(closed, "UDPFlow leaked: freed without close()")
     }
 #endif
 
@@ -630,7 +618,7 @@ class LWIPUDPFlow {
         } else {
             socket?.cancel()
         }
-        // The SS session is owned by LWIPStack and shared across every flow
+        // The SS session is owned by TunnelStack and shared across every flow
         // for this configuration; unregister but never cancel the session.
         if let ssSession, let ssToken {
             ssSession.unregister(token: ssToken)

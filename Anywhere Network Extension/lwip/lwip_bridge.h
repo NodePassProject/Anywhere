@@ -55,12 +55,6 @@ typedef void (*lwip_tcp_sent_fn)(void *conn, uint16_t len);
 /* TCP err: TCP error or connection aborted */
 typedef void (*lwip_tcp_err_fn)(void *conn, int err);
 
-/* UDP recv: UDP datagram received
- * IP addresses are raw bytes: 4 bytes for IPv4, 16 bytes for IPv6 */
-typedef void (*lwip_udp_recv_fn)(const void *src_ip, uint16_t src_port,
-                                  const void *dst_ip, uint16_t dst_port,
-                                  int is_ipv6, const void *data, int len);
-
 /* --- Callback registration --- */
 void lwip_bridge_set_output_fn(lwip_output_fn fn);
 void lwip_bridge_set_tcp_accept_fn(lwip_tcp_accept_fn fn);
@@ -68,7 +62,6 @@ void lwip_bridge_set_tcp_syn_filter_fn(lwip_tcp_syn_filter_fn fn);
 void lwip_bridge_set_tcp_recv_fn(lwip_tcp_recv_fn fn);
 void lwip_bridge_set_tcp_sent_fn(lwip_tcp_sent_fn fn);
 void lwip_bridge_set_tcp_err_fn(lwip_tcp_err_fn fn);
-void lwip_bridge_set_udp_recv_fn(lwip_udp_recv_fn fn);
 
 /* --- Lifecycle --- */
 void lwip_bridge_init(void);
@@ -81,7 +74,7 @@ void lwip_bridge_shutdown(void);
 void lwip_bridge_abort_all_tcp(void);
 
 /* Iterate every active TCP PCB, invoking `fn` with each PCB's Swift
- * callback_arg (the retained LWIPTCPConnection, or NULL if already cleared).
+ * callback_arg (the retained TCPConnection, or NULL if already cleared).
  * `next` is captured before each call, so `fn` may gracefully close or abort
  * the PCB it is handed; it must not touch other PCBs. The recovery path uses
  * this to FIN idle legs and let lwIP downgrade in-flight legs to RST, rather
@@ -108,12 +101,8 @@ void lwip_bridge_tcp_abort(void *pcb);
 int  lwip_bridge_tcp_sndbuf(void *pcb);
 int  lwip_bridge_tcp_snd_queuelen(void *pcb);
 
-/* --- UDP operations ---
- * IP addresses are raw bytes: 4 bytes for IPv4, 16 bytes for IPv6 */
-void lwip_bridge_udp_sendto(const void *src_ip_bytes, uint16_t src_port,
-                             const void *dst_ip_bytes, uint16_t dst_port,
-                             int is_ipv6,
-                             const void *data, int len);
+/* UDP is handled in Swift (UDPPacket / TunnelStack+UDP), so lwIP is built
+ * TCP-only (LWIP_UDP=0) and exposes no UDP bridge entry points. */
 
 /* --- Timer --- */
 void lwip_bridge_check_timeouts(void);
