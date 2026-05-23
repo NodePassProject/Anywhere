@@ -355,9 +355,9 @@ nonisolated final class RawUDPSocket {
     /// the table before the caller retries `socket(2)`.
     ///
     /// MUST NOT be called from this socket's `ioQueue` (would deadlock on
-    /// the `ioQueue.sync` below). The relief path is invoked from other
-    /// sockets' I/O queues and from `TunnelStack.lwipQueue`, never from this
-    /// socket's own `ioQueue`.
+    /// the `ioQueue.sync` below). The relief path reaches it on
+    /// `TunnelStack.udpQueue` (which owns the flow table), evicting a *distinct*
+    /// idle flow's socket — never the requester's own `ioQueue`.
     func cancelSync() {
         guard latchCancelled() else { return }
         ioQueue.sync { [weak self] in

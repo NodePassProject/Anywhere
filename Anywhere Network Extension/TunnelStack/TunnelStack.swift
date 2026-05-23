@@ -12,26 +12,48 @@ private let logger = AnywhereLogger(category: "TunnelStack")
 
 // MARK: - TunnelStack
 
-/// Main coordinator for the lwIP TCP/IP stack.
+/// Main coordinator for the tunnel's data plane.
 ///
-/// All lwIP calls run on a single serial `DispatchQueue` (`lwipQueue`).
 /// One instance per Network Extension process, accessible via ``shared``.
+/// Reads IP packets from the tunnel's `NEPacketTunnelFlow` and splits them
+/// across two serial data planes:
 ///
-/// Reads IP packets from the tunnel's `NEPacketTunnelFlow`, feeds them into
-/// lwIP for TCP/UDP reassembly, and dispatches resulting connections through
-/// VLESS proxy clients. Response data is written back to the packet flow.
+/// - **TCP/ICMP** → ``lwipQueue``, fed into the vendored lwIP stack (which is
+///   not thread-safe, hence the single serial queue).
+/// - **UDP** → ``udpQueue``. lwIP is built TCP-only (`LWIP_UDP 0`), so UDP is
+///   parsed, routed, NATed, and proxied entirely in Swift (``UDPPacket`` /
+///   ``UDPFlow`` / `TunnelStack+UDP`) without ever entering lwIP — and so
+///   without contending on ``lwipQueue``.
+///
+/// Both planes dispatch resulting connections through proxy clients and write
+/// responses back to the packet flow via the shared, lock-guarded output buffer.
 class TunnelStack {
 
     // MARK: Properties
 
     /// Serial queue for all lwIP operations (lwIP is not thread-safe).
-    /// `.userInitiated` because lwIP is the data-plane hub every proxied flow
-    /// traverses; left at the default QoS it floats below the proxy-protocol
+    /// `.userInitiated` because lwIP is the TCP data-plane hub every proxied TCP
+    /// flow traverses; left at the default QoS it floats below the proxy-protocol
     /// queues that feed and drain it (QUIC, the raw sockets, Sudoku — all
     /// `.userInitiated`), so under load the scheduler starves the consumer
     /// behind its own producers. Keeping the whole chain at one priority avoids
-    /// that inversion.
+    /// that inversion. UDP runs on its own ``udpQueue`` (below).
     let lwipQueue = DispatchQueue(label: AWCore.Identifier.lwipQueue, qos: .userInitiated)
+
+    /// Serial queue owning the entire UDP data plane — ``udpFlows``,
+    /// ``ssUDPSessions``, ``muxManager``, and every per-flow send/receive.
+    /// UDP is built TCP-free in lwIP (`LWIP_UDP 0`), so it has no reason to
+    /// share ``lwipQueue``; giving it its own queue stops UDP datagrams (QUIC,
+    /// DNS, games) from queueing head-of-line behind TCP/lwIP work and vice
+    /// versa. `.userInitiated` matches ``lwipQueue`` so neither data plane is
+    /// scheduled below the proxy-protocol queues that feed and drain it.
+    ///
+    /// The cold "new flow" path reads shared routing/config state that
+    /// ``lwipQueue`` mutates at start/restart; that state is made safe for
+    /// cross-queue reads via ``udpConfig()`` (snapshot) and the internal locks
+    /// in ``DomainRouter`` / ``MITMRewritePolicy``. Output (``enqueueOutbound``)
+    /// is already lock-guarded and callable from here.
+    let udpQueue = DispatchQueue(label: AWCore.Identifier.udpQueue, qos: .userInitiated)
 
     /// Queue for writing packets back to the tunnel. `.userInitiated` to match
     /// `lwipQueue` — this is the final hop delivering received bytes to the OS.
@@ -143,11 +165,22 @@ class TunnelStack {
     /// Used to gate DomainRouter bypass flags and detect settings changes.
     var bypassCountryCode: String = ""
 
-    /// Global traffic counters (bytes through the tunnel).
-    /// Incremented on lwipQueue; read from the NE provider message handler thread.
-    /// Small races are tolerable — these are only used for UI display.
-    var totalBytesIn: Int64 = 0
-    var totalBytesOut: Int64 = 0
+    /// Global traffic counters (bytes through the tunnel). Incremented from
+    /// ``lwipQueue`` (TCP/netif) and ``udpQueue`` (UDP responses) on the
+    /// downlink, the read callback on the uplink, and read from the NE message
+    /// handler — so every access goes through ``countersLock``. With two
+    /// data-plane queues now writing the downlink counter, an unlocked `+=`
+    /// could drop increments; the critical section is a single add, so the
+    /// per-packet cost stays in the tens of nanoseconds (the lock is all but
+    /// uncontended) while keeping the UI total exact.
+    private let countersLock = UnfairLock()
+    private var _totalBytesIn: Int64 = 0
+    private var _totalBytesOut: Int64 = 0
+    var totalBytesIn: Int64 { countersLock.withLock { _totalBytesIn } }
+    var totalBytesOut: Int64 { countersLock.withLock { _totalBytesOut } }
+    func addBytesIn(_ n: Int64) { countersLock.withLock { _totalBytesIn += n } }
+    func addBytesOut(_ n: Int64) { countersLock.withLock { _totalBytesOut += n } }
+    func resetByteCounters() { countersLock.withLock { _totalBytesIn = 0; _totalBytesOut = 0 } }
 
     // MARK: - Log Buffer
     //
@@ -198,8 +231,56 @@ class TunnelStack {
         }
     }
 
-    /// Mux manager for multiplexing UDP flows (created when Vision flow is active).
+    /// Mux manager for multiplexing UDP flows (created when Vision flow is
+    /// active). Owned by ``udpQueue`` — created, used, and torn down there —
+    /// since mux carries UDP only. Lifecycle code mutates it via a hop onto
+    /// ``udpQueue``.
     var muxManager: MuxManager?
+
+    // MARK: - UDP Config Snapshot
+    //
+    // The UDP cold path (new-flow routing, DNS interception) runs on
+    // ``udpQueue`` but needs config that ``lwipQueue`` owns and mutates at
+    // start/restart (and, for ``quicPolicy``, on a live in-place reload). Rather
+    // than read those stored properties cross-queue — an ARC data race on
+    // ``configuration`` and torn reads on the scalars — ``lwipQueue`` publishes
+    // an immutable value snapshot under ``udpConfigLock`` whenever any of them
+    // changes, and the UDP path reads it once per datagram via ``udpConfig()``.
+    // Routing tables (``domainRouter`` / ``mitmPolicy``) aren't snapshotted —
+    // they're large and have their own internal reload-vs-read locks.
+
+    /// Immutable view of the config the UDP path needs, published on change.
+    struct UDPConfig {
+        let configuration: ProxyConfiguration?
+        /// `configuration?.id`, precomputed so the mux "is this the default
+        /// configuration?" check needs no cross-queue read of ``configuration``.
+        let configurationID: UUID?
+        let quicPolicy: QUICPolicy
+        let advertiseIPv6ToApps: Bool
+        let mitmEnabled: Bool
+    }
+    private let udpConfigLock = UnfairLock()
+    private var _udpConfig = UDPConfig(configuration: nil, configurationID: nil,
+                                       quicPolicy: .blocked, advertiseIPv6ToApps: false,
+                                       mitmEnabled: false)
+
+    /// Reads the current UDP config snapshot. Callable from any queue; the UDP
+    /// path calls it once at the top of each inbound datagram.
+    func udpConfig() -> UDPConfig { udpConfigLock.withLock { _udpConfig } }
+
+    /// Republishes the UDP config snapshot from the current ``lwipQueue``-owned
+    /// state. Must be called on ``lwipQueue`` (reads ``configuration`` etc.);
+    /// the snapshot it builds is then safe to read from ``udpQueue``.
+    func publishUDPConfig() {
+        let snapshot = UDPConfig(
+            configuration: configuration,
+            configurationID: configuration?.id,
+            quicPolicy: quicPolicy,
+            advertiseIPv6ToApps: advertiseIPv6ToApps,
+            mitmEnabled: mitmEnabled
+        )
+        udpConfigLock.withLock { _udpConfig = snapshot }
+    }
 
     /// Hashable 5-tuple key for UDP flows. Addresses are held inline as raw
     /// bytes (`SIMD16<UInt8>`, zero-padded; IPv4 in the first 4) so the
@@ -218,13 +299,16 @@ class TunnelStack {
         }
     }
 
-    /// Active UDP flows keyed by 5-tuple.
+    /// Active UDP flows keyed by 5-tuple. Owned by ``udpQueue``: every read,
+    /// insert, and removal happens there (the inbound fast path, new-flow
+    /// creation, cleanup timer, FD-pressure relief, and lifecycle teardown all
+    /// run on or sync onto ``udpQueue``).
     var udpFlows: [UDPFlowKey: UDPFlow] = [:]
     var udpCleanupTimer: DispatchSourceTimer?
 
     /// Shared Shadowsocks UDP sessions keyed by configuration id. One session
     /// services every UDP flow for a given SS configuration, so all
-    /// destinations share a sessionID + upstream socket.
+    /// destinations share a sessionID + upstream socket. Owned by ``udpQueue``.
     var ssUDPSessions: [UUID: ShadowsocksUDPSession] = [:]
 
     /// Domain-based DNS routing (loaded from App Group routing.json).
@@ -248,7 +332,7 @@ class TunnelStack {
     // MARK: - Shadowsocks UDP Sessions
 
     /// Returns the shared SS UDP session for `configuration`, creating one on
-    /// first use. Must be called on `lwipQueue`.
+    /// first use. Must be called on `udpQueue`.
     ///
     /// The session lives across individual UDP flows so that one sessionID
     /// and one upstream socket serve every destination — which is what
@@ -287,13 +371,13 @@ class TunnelStack {
             mode: mode,
             serverHost: configuration.serverAddress,
             serverPort: configuration.serverPort,
-            delegateQueue: lwipQueue
+            delegateQueue: udpQueue
         )
         ssUDPSessions[configuration.id] = session
         return .success(session)
     }
 
-    /// Cancels and forgets every SS UDP session. Must be called on `lwipQueue`.
+    /// Cancels and forgets every SS UDP session. Must be called on `udpQueue`.
     /// Called on stack shutdown, configuration switch, and device wake (the
     /// kernel tears down our UDP sockets during sleep).
     func purgeShadowsocksUDPSessions() {
@@ -314,10 +398,23 @@ class TunnelStack {
         loadQUICPolicySetting()
         loadMITMSetting()
 
-        if Self.shouldUseVisionMux(configuration) {
-            muxManager = MuxManager(configuration: configuration, lwipQueue: lwipQueue)
-        } else {
-            muxManager = nil
+        // Publish the snapshot the UDP data plane reads. `configuration` is set
+        // by the caller (start/restart) before configureRuntime; the scalars
+        // were just loaded above.
+        publishUDPConfig()
+
+        // muxManager is udpQueue-owned (mux carries UDP only), so build it
+        // there. Build and flow processing share that serial queue, so any flow
+        // handled afterward finds the mux ready — at cold start that's every
+        // flow (the read loop hasn't begun); on restart a datagram already in
+        // flight may briefly miss it, which is fine since restart resets flows.
+        let useMux = Self.shouldUseVisionMux(configuration)
+        udpQueue.async { [self] in
+            if useMux {
+                muxManager = MuxManager(configuration: configuration, flowQueue: udpQueue)
+            } else {
+                muxManager = nil
+            }
         }
 
         if proxyMode != .global {

@@ -21,6 +21,10 @@ final class AWCore {
         static let pathMonitorQueue = "\(bundle).path-monitor"
         /// Dispatch queue label for the serial lwIP queue.
         static let lwipQueue = "\(bundle).lwip"
+        /// Dispatch queue label for the serial UDP data-plane queue. UDP no
+        /// longer traverses lwIP (`LWIP_UDP 0`), so its flow state and per-packet
+        /// processing run here instead of contending on ``lwipQueue``.
+        static let udpQueue = "\(bundle).udp"
         /// Dispatch queue label for writes back to the TUN interface.
         static let outputQueue = "\(bundle).output"
     }

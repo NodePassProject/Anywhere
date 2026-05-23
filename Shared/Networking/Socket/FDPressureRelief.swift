@@ -36,15 +36,16 @@ nonisolated enum FDReliefPriority {
 
 /// Process-wide hook invoked when a raw `socket(2)` call fails with `EMFILE`
 /// or `ENFILE`. The handler frees FDs (in practice by evicting idle
-/// direct-bypass UDP flows from the lwIP stack) and returns whether anything
-/// was freed; the socket layer then retries `socket(2)` once.
+/// direct-bypass UDP flows) and returns whether anything was freed; the socket
+/// layer then retries `socket(2)` once.
 ///
 /// ``TunnelStack`` installs a handler at start that calls
 /// ``TunnelStack/evictDirectUDPFlowsForFDPressure(priority:)`` on its serial
-/// `lwipQueue`. Callers (``RawUDPSocket``, ``RawTCPSocket``,
-/// ``QUICSocket``) invoke ``relieve(for:)`` from their own I/O queues;
-/// the handler's `lwipQueue.sync` cross-hop is deadlock-safe because the
-/// lwIP path never sync-waits on those queues.
+/// `udpQueue` (which owns the UDP flow table). Callers (``RawUDPSocket``,
+/// ``RawTCPSocket``, ``QUICSocket``) invoke ``relieve(for:)`` from their own
+/// I/O queues; the handler's `udpQueue.sync` cross-hop is deadlock-safe because
+/// udpQueue work never sync-waits back on those queues — the one exception, the
+/// victim flow's per-socket teardown, targets a distinct idle socket.
 enum FDPressureRelief {
 
     /// Backs ``handler``. Access only under ``handlerLock`` — the handler
@@ -66,7 +67,7 @@ enum FDPressureRelief {
     ///
     /// The handler reference is snapshotted under the lock and then
     /// invoked outside the lock so a long-running relief (which crosses
-    /// into `lwipQueue.sync`) doesn't block concurrent reads or the
+    /// into `udpQueue.sync`) doesn't block concurrent reads or the
     /// `stop()` path's `handler = nil` write.
     @inline(__always)
     static func relieve(for priority: FDReliefPriority) -> Bool {

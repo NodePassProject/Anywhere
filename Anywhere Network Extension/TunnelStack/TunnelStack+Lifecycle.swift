@@ -38,8 +38,7 @@ extension TunnelStack {
 
         lwipQueue.async { [self] in
             running = true
-            totalBytesIn = 0
-            totalBytesOut = 0
+            resetByteCounters()
 
             configureRuntime(for: configuration)
             registerCallbacks()
@@ -48,7 +47,7 @@ extension TunnelStack {
             startUDPCleanupTimer()
             installFDPressureReliefHandler()
             startReadingPackets()
-            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), mux=\(Self.shouldUseVisionMux(configuration)), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
         }
 
         startObservingSettings()
@@ -132,18 +131,22 @@ extension TunnelStack {
             guard running else { return }
             logger.info("[VPN] Path offline/sleep: releasing upstream transports; will rebuild when it returns")
 
-            muxManager?.closeAll()
-            muxManager = nil
-
             HysteriaClient.closeAll()
             AnyTLSManager.shared.closeAll()
-            purgeShadowsocksUDPSessions()
             HTTP3SessionPool.shared.closeAll()
 
-            for (_, flow) in udpFlows {
-                flow.close()
+            // The Vision mux, SS UDP sessions, and per-flow UDP state are
+            // udpQueue-owned, so release them there. The sync hop is
+            // deadlock-free: udpQueue work never sync-waits back on lwipQueue.
+            udpQueue.sync {
+                muxManager?.closeAll()
+                muxManager = nil
+                purgeShadowsocksUDPSessions()
+                for (_, flow) in udpFlows {
+                    flow.close()
+                }
+                udpFlows.removeAll()
             }
-            udpFlows.removeAll()
         }
     }
 
@@ -237,22 +240,25 @@ extension TunnelStack {
             Unmanaged<TCPConnection>.fromOpaque(arg).takeUnretainedValue().close()
         }
 
-        muxManager?.closeAll()
-        if Self.shouldUseVisionMux(configuration) {
-            muxManager = MuxManager(configuration: configuration, lwipQueue: lwipQueue)
-        } else {
-            muxManager = nil
-        }
-
         HysteriaClient.closeAll()
         AnyTLSManager.shared.closeAll()
-        purgeShadowsocksUDPSessions()
         HTTP3SessionPool.shared.closeAll()
 
-        for (_, flow) in udpFlows {
-            flow.close()
+        // The Vision mux, SS UDP sessions, and per-flow UDP state are
+        // udpQueue-owned. Tear them down and rebuild the mux on that queue:
+        // serialized against flow processing, so a flow handled after this finds
+        // the mux ready, while one caught mid-churn is torn down with the rest
+        // (wake / path-change resets connections regardless).
+        let useMux = Self.shouldUseVisionMux(configuration)
+        udpQueue.sync {
+            muxManager?.closeAll()
+            muxManager = useMux ? MuxManager(configuration: configuration, flowQueue: udpQueue) : nil
+            purgeShadowsocksUDPSessions()
+            for (_, flow) in udpFlows {
+                flow.close()
+            }
+            udpFlows.removeAll()
         }
-        udpFlows.removeAll()
     }
 
     /// Shuts down the lwIP stack and all active flows. Must be called on `lwipQueue`.
@@ -264,8 +270,7 @@ extension TunnelStack {
     /// - `stop()` calls `fakeIPPool.reset()` (full teardown, no reconnections expected).
     /// - `restartStack()` preserves pool as-is (routing decisions are made at connection time).
     private func shutdownInternal() {
-        totalBytesIn = 0
-        totalBytesOut = 0
+        resetByteCounters()
 
         timeoutTimer?.cancel()
         timeoutTimer = nil
@@ -285,17 +290,22 @@ extension TunnelStack {
             outputDrainInFlight = false
         }
 
-        muxManager?.closeAll()
-        muxManager = nil
-
-        purgeShadowsocksUDPSessions()
         HysteriaClient.closeAll()
         HTTP3SessionPool.shared.closeAll()
-        
-        for (_, flow) in udpFlows {
-            flow.close()
+
+        // mux / SS sessions / flows are udpQueue-owned — close them there and
+        // wait, so they're fully released before lwip_bridge_shutdown tears down
+        // the stack. The sync hop is deadlock-free: no udpQueue work ever
+        // sync-waits back on lwipQueue.
+        udpQueue.sync {
+            muxManager?.closeAll()
+            muxManager = nil
+            purgeShadowsocksUDPSessions()
+            for (_, flow) in udpFlows {
+                flow.close()
+            }
+            udpFlows.removeAll()
         }
-        udpFlows.removeAll()
 
         isTearingDown = true
         lwip_bridge_shutdown()
@@ -349,7 +359,7 @@ extension TunnelStack {
         startUDPCleanupTimer()
         // Note: startReadingPackets() is NOT called here — the existing read loop
         // (started in start()) continues because `running` was never set to false.
-        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), mux=\(muxManager != nil), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), mux=\(Self.shouldUseVisionMux(configuration)), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
     }
 
     // MARK: - Settings Observation
@@ -465,6 +475,11 @@ extension TunnelStack {
             if quicPolicy != self.quicPolicy {
                 logger.info("[VPN] QUIC policy changed: \(self.quicPolicy.rawValue) -> \(quicPolicy.rawValue)")
                 self.quicPolicy = quicPolicy
+                // Propagate to the UDP snapshot — the per-datagram UDP/443
+                // decision in handleInboundUDP reads it from there. This may be
+                // the only change (the guard below returns without a restart),
+                // so republish here rather than relying on configureRuntime.
+                publishUDPConfig()
             }
 
             let proxyModeChanged = proxyMode != self.proxyMode
@@ -499,8 +514,10 @@ extension TunnelStack {
     /// restart, no FakeIPPool rebuild, no connection teardown. In global
     /// mode the router is unused, so the notification is a no-op. Routing
     /// decisions are made at connection accept time, so active flows stay
-    /// valid under any rule edit and new flows pick up the new rules on
-    /// their next accept callback (serialized by lwipQueue).
+    /// valid under any rule edit and new flows pick up the new rules on their
+    /// next accept callback. The reload runs on lwipQueue but takes
+    /// DomainRouter's internal lock, so a concurrent UDP new-flow lookup on
+    /// udpQueue never observes a half-rebuilt table.
     ///
     /// Do NOT call onTunnelSettingsNeedReapply here — setTunnelNetworkSettings
     /// should only be triggered by IPv6 changes (which affect tunnel routes
@@ -528,6 +545,10 @@ extension TunnelStack {
             guard running else { return }
             logger.info("[VPN] MITM settings changed; reloading matcher")
             loadMITMSetting()
+            // `mitmEnabled` gates the UDP/443 MITM decision via the snapshot;
+            // republish so udpQueue sees the new toggle (the matcher itself is
+            // shared by reference and already reloaded under its own lock).
+            publishUDPConfig()
         }
     }
 }

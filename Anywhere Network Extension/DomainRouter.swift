@@ -348,19 +348,40 @@ class DomainRouter {
     // Proxy configurations for rule-assigned proxies
     private var configurationMap: [UUID: ProxyConfiguration] = [:]
 
+    /// Guards ``tiers`` + ``configurationMap`` against the cross-queue split of
+    /// the data plane: routing lookups now come from both ``lwipQueue`` (TCP
+    /// accept) and ``udpQueue`` (UDP new-flow), while ``loadRoutingConfiguration``
+    /// / ``reset`` rebuild the tables on ``lwipQueue`` at start/restart. Reads
+    /// take the lock briefly; the (rare, restart-only) reload holds it across
+    /// the compile so a concurrent lookup never observes a half-built tier. The
+    /// reload reads UserDefaults/JSON only — it never calls back into a data-plane
+    /// queue — so there is no lock-ordering cycle.
+    private let routingLock = UnfairLock()
+
     // MARK: - Loading
 
     /// Clears all routing rules and configurations.
     /// Used when switching to global mode to ensure no stale rules affect routing.
     func reset() {
+        routingLock.withLock { resetUnlocked() }
+    }
+
+    /// Clears the tables. Caller must hold ``routingLock`` (or run before the
+    /// router is visible to any other queue).
+    private func resetUnlocked() {
         tiers = Tier.allCases.map { _ in TierMatchers() }
         configurationMap.removeAll()
     }
 
     /// Reads routing configuration from App Group UserDefaults and compiles rules
-    /// into per-tier matching structures.
+    /// into per-tier matching structures. Holds ``routingLock`` across the whole
+    /// compile so cross-queue lookups block until the new tables are complete.
     func loadRoutingConfiguration() {
-        reset()
+        routingLock.withLock { loadRoutingConfigurationLocked() }
+    }
+
+    private func loadRoutingConfigurationLocked() {
+        resetUnlocked()
 
         guard let data = AWCore.getRoutingData(),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -484,8 +505,10 @@ class DomainRouter {
 
     /// Whether any routing rules have been loaded across any tier.
     var hasRules: Bool {
-        for i in tiers.indices where !tiers[i].isEmpty { return true }
-        return false
+        routingLock.withLock {
+            for i in tiers.indices where !tiers[i].isEmpty { return true }
+            return false
+        }
     }
 
     /// Matches a domain by walking tiers in priority order. First hit wins.
@@ -496,7 +519,9 @@ class DomainRouter {
         // suffix trie nor the keyword automaton re-splits or re-allocates
         // per tier.
         var lowered = Self.asciiLowercasedIfNeeded(domain)
-        return lowered.withUTF8 { matchDomainBytes($0) }
+        return routingLock.withLock {
+            lowered.withUTF8 { matchDomainBytes($0) }
+        }
     }
 
     /// Walks tiers in priority order over already-lowercased UTF-8 bytes.
@@ -513,24 +538,26 @@ class DomainRouter {
     func matchIP(_ ip: String) -> RouteAction? {
         guard !ip.isEmpty else { return nil }
 
-        if ip.contains(":") {
-            var addr = in6_addr()
-            guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
-            // Pack the 16 address bytes into a 128-bit pair once, then reuse
-            // it across every tier rather than re-packing per tier.
-            let (hi, lo) = withUnsafeBytes(of: &addr) { raw -> (UInt64, UInt64) in
-                CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
+        return routingLock.withLock { () -> RouteAction? in
+            if ip.contains(":") {
+                var addr = in6_addr()
+                guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
+                // Pack the 16 address bytes into a 128-bit pair once, then reuse
+                // it across every tier rather than re-packing per tier.
+                let (hi, lo) = withUnsafeBytes(of: &addr) { raw -> (UInt64, UInt64) in
+                    CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
+                }
+                for i in tiers.indices {
+                    if let action = tiers[i].lookupIPv6(hi: hi, lo: lo) { return action }
+                }
+                return nil
+            } else {
+                guard let ip32 = Self.parseIPv4(ip) else { return nil }
+                for i in tiers.indices {
+                    if let action = tiers[i].lookupIPv4(ip32) { return action }
+                }
+                return nil
             }
-            for i in tiers.indices {
-                if let action = tiers[i].lookupIPv6(hi: hi, lo: lo) { return action }
-            }
-            return nil
-        } else {
-            guard let ip32 = Self.parseIPv4(ip) else { return nil }
-            for i in tiers.indices {
-                if let action = tiers[i].lookupIPv4(ip32) { return action }
-            }
-            return nil
         }
     }
 
@@ -541,7 +568,7 @@ class DomainRouter {
         case .direct, .reject:
             return nil
         case .proxy(let id):
-            return configurationMap[id]
+            return routingLock.withLock { configurationMap[id] }
         }
     }
 

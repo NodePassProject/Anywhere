@@ -67,7 +67,7 @@ extension TunnelStack {
         lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
             guard let shared = TunnelStack.shared, let data, let release else { return }
             let byteCount = Int(len)
-            shared.totalBytesIn += Int64(byteCount)
+            shared.addBytesIn(Int64(byteCount))
 
             let mutableData = UnsafeMutableRawPointer(mutating: data)
             let packet = Data(bytesNoCopy: mutableData, count: byteCount, deallocator: .none)

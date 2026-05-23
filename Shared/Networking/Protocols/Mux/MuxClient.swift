@@ -11,9 +11,9 @@ private let logger = AnywhereLogger(category: "MuxClient")
 
 nonisolated class MuxClient {
     let configuration: ProxyConfiguration
-    let lwipQueue: DispatchQueue
+    let flowQueue: DispatchQueue
 
-    /// Key for identifying the lwipQueue (used by removeSession to detect current queue).
+    /// Key for identifying the flowQueue (used by removeSession to detect current queue).
     private static let queueKey = DispatchSpecificKey<Bool>()
 
     private var proxyClient: ProxyClient?
@@ -43,10 +43,10 @@ nonisolated class MuxClient {
     var sessionCount: Int { sessions.count }
     var isFull: Bool { closed || isXUDP }
 
-    init(configuration: ProxyConfiguration, lwipQueue: DispatchQueue) {
+    init(configuration: ProxyConfiguration, flowQueue: DispatchQueue) {
         self.configuration = configuration
-        self.lwipQueue = lwipQueue
-        lwipQueue.setSpecific(key: Self.queueKey, value: true)
+        self.flowQueue = flowQueue
+        flowQueue.setSpecific(key: Self.queueKey, value: true)
     }
 
 #if DEBUG
@@ -146,7 +146,7 @@ nonisolated class MuxClient {
     }
 
     /// Removes a session from the map (called by MuxSession on close).
-    /// Safe to call from any thread — dispatches to lwipQueue if needed.
+    /// Safe to call from any thread — dispatches to flowQueue if needed.
     func removeSession(_ sessionID: UInt16) {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
             sessions.removeValue(forKey: sessionID)
@@ -154,7 +154,7 @@ nonisolated class MuxClient {
                 resetIdleTimer()
             }
         } else {
-            lwipQueue.async { [weak self] in
+            flowQueue.async { [weak self] in
                 guard let self else { return }
                 self.sessions.removeValue(forKey: sessionID)
                 if self.sessions.isEmpty {
@@ -228,7 +228,7 @@ nonisolated class MuxClient {
         client.connectMux { [weak self] (result: Result<ProxyConnection, Error>) in
             guard let self else { return }
 
-            self.lwipQueue.async { [weak self] in
+            self.flowQueue.async { [weak self] in
                 guard let self else { return }
 
                 self.connecting = false
@@ -255,7 +255,7 @@ nonisolated class MuxClient {
 
     /// Enqueues a frame for serialized writing.
     func writeFrame(_ data: Data, completion: @escaping (Error?) -> Void) {
-        lwipQueue.async { [weak self] in
+        flowQueue.async { [weak self] in
             guard let self, !self.closed else {
                 completion(ProxyError.connectionFailed("Mux client closed"))
                 return
@@ -273,7 +273,7 @@ nonisolated class MuxClient {
 
         connection.sendRaw(data: data) { [weak self] (error: Error?) in
             guard let self else { return }
-            self.lwipQueue.async { [weak self] in
+            self.flowQueue.async { [weak self] in
                 guard let self else { return }
                 self.isWriting = false
                 completion(error)
@@ -292,12 +292,12 @@ nonisolated class MuxClient {
     private func startReceiveLoop(_ connection: ProxyConnection) {
         connection.startReceiving(handler: { [weak self] (data: Data) in
             guard let self else { return }
-            self.lwipQueue.async { [weak self] in
+            self.flowQueue.async { [weak self] in
                 self?.handleReceivedData(data)
             }
         }, errorHandler: { [weak self] (error: Error?) in
             guard let self, !self.closed else { return }
-            self.lwipQueue.async { [weak self] in
+            self.flowQueue.async { [weak self] in
                 self?.closeAll(error: error)
             }
         })
@@ -338,7 +338,7 @@ nonisolated class MuxClient {
 
         guard !closed, sessions.isEmpty else { return }
 
-        let timer = DispatchSource.makeTimerSource(queue: lwipQueue)
+        let timer = DispatchSource.makeTimerSource(queue: flowQueue)
         timer.schedule(deadline: .now() + Self.idleTimeout)
         timer.setEventHandler { [weak self] in
             guard let self else { return }

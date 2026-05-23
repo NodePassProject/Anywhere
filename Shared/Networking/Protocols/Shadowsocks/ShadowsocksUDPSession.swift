@@ -93,9 +93,9 @@ nonisolated final class ShadowsocksUDPSession {
     private let mode: Mode
     private let serverHost: String
     private let serverPort: UInt16
-    /// Queue used for all state mutations and callback delivery. Owner
-    /// supplies `lwipQueue`; the internal ``RawUDPSocket`` has its own
-    /// I/O queue and hops callbacks back here.
+    /// Queue used for all state mutations and callback delivery. The owner
+    /// (``TunnelStack``) supplies its `udpQueue`; the internal ``RawUDPSocket``
+    /// has its own I/O queue and hops callbacks back here.
     private let delegateQueue: DispatchQueue
 
     // MARK: - Mutable state (all on `delegateQueue`)

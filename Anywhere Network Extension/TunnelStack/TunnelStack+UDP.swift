@@ -20,11 +20,16 @@ extension TunnelStack {
     // resolve the fake IP, apply IP/domain rules, then create or feed a
     // per-flow ``UDPFlow``.
 
-    /// Routes one parsed inbound UDP datagram. Must be called on ``lwipQueue``
+    /// Routes one parsed inbound UDP datagram. Must be called on ``udpQueue``
     /// (mutates ``udpFlows``).
     func handleInboundUDP(_ datagram: UDPPacket.Inbound) {
         let payload = datagram.payload
         let isIPv6 = datagram.isIPv6
+
+        // Read the config the cold path needs once, from the snapshot
+        // ``lwipQueue`` publishes — never the stored properties directly, which
+        // that queue owns and mutates at start/restart.
+        let cfg = udpConfig()
 
         // The DNS and Blocked-mode QUIC checks run before the flow lookup; the
         // Automatic-mode QUIC/MITM decision needs the routing result, so it
@@ -61,7 +66,7 @@ extension TunnelStack {
         // to the post-resolution check below (it needs the routing decision);
         // Unblocked never drops. A QUIC-based proxy's own transport leaves the
         // extension on a kernel-excluded socket, so it never reaches here.
-        if datagram.dstPort == 443 && quicPolicy.blocksAllQUIC {
+        if datagram.dstPort == 443 && cfg.quicPolicy.blocksAllQUIC {
             sendICMPPortUnreachable(
                 srcIP: datagram.srcIPData,
                 srcPort: datagram.srcPort,
@@ -86,7 +91,7 @@ extension TunnelStack {
         }
 
         // New flow — now the string / Data forms are worth materialising.
-        guard let defaultConfiguration = configuration else { return }
+        guard let defaultConfiguration = cfg.configuration else { return }
         let dstIPString = TunnelStack.ipAddrToString(datagram.dstIP, isIPv6: isIPv6)
         let srcHost = TunnelStack.ipAddrToString(datagram.srcIP, isIPv6: isIPv6)
         let srcIPData = datagram.srcIPData
@@ -178,9 +183,9 @@ extension TunnelStack {
         // decided before routing; Unblocked never drops; neither touches the
         // trie here. When we do drop a bypassed flow it can only be MITM.
         if datagram.dstPort == 443,
-           quicPolicy.blocksResolvedQUIC(
+           cfg.quicPolicy.blocksResolvedQUIC(
                isProxied: !forceBypass,
-               mitmListed: dstIsDomain && mitmEnabled && mitmPolicy.matches(dstHost)
+               mitmListed: dstIsDomain && cfg.mitmEnabled && mitmPolicy.matches(dstHost)
            ) {
             logger.debug("[UDP] QUIC blocked (automatic): \(dstHost):443 reason=\(forceBypass ? "mitm" : "proxied")")
             sendICMPPortUnreachable(
@@ -213,7 +218,7 @@ extension TunnelStack {
             isIPv6: isIPv6,
             configuration: flowConfiguration,
             forceBypass: forceBypass,
-            lwipQueue: lwipQueue
+            flowQueue: udpQueue
         )
         udpFlows[flowKey] = flow
         flow.handleReceivedData(payload, payloadLength: payload.count)
@@ -240,8 +245,9 @@ extension TunnelStack {
         // Tally downlink bytes here: the former lwIP udp_sendto path was counted
         // in the netif output callback, but enqueueOutbound bypasses it. (ICMP
         // unreachables call enqueueOutbound directly and stay uncounted, as they
-        // were before.) Callers run on lwipQueue, matching totalBytesIn's contract.
-        totalBytesIn += Int64(packet.count)
+        // were before.) ``addBytesIn`` is lock-guarded, so this is safe from
+        // udpQueue concurrently with the TCP netif tally on lwipQueue.
+        addBytesIn(Int64(packet.count))
         enqueueOutbound(packet, isIPv6: isIPv6)
     }
 }

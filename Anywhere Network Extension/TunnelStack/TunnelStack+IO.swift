@@ -14,16 +14,18 @@ extension TunnelStack {
 
     // MARK: - Output Batching
     //
-    // Output ownership: lwIP callbacks (on ``lwipQueue``) append IP packets
-    // to ``outputPackets`` under ``outputBufferLock`` and, when no drain is
-    // in flight, kick off one ``outputQueue.async`` invocation of
-    // ``drainOutputLoop``. The loop pulls successive batches under the
-    // lock and calls ``packetFlow.writePackets`` back-to-back on
+    // Output ownership: two producers append IP packets to ``outputPackets``
+    // under ``outputBufferLock`` — lwIP callbacks on ``lwipQueue`` (TCP), and
+    // the Swift UDP/ICMP builders on ``udpQueue`` (via ``enqueueOutbound``).
+    // Whoever appends with no drain in flight kicks off one ``outputQueue.async``
+    // invocation of ``drainOutputLoop``. The loop pulls successive batches under
+    // the lock and calls ``packetFlow.writePackets`` back-to-back on
     // ``outputQueue`` until the buffer is empty; it then clears
     // ``outputDrainInFlight`` and returns. Subsequent appends restart the
     // loop. Keeping the drain on ``outputQueue`` prevents it from
     // serializing behind lwIP work (input processing, proxy-leg
-    // completions) on ``lwipQueue``.
+    // completions) on ``lwipQueue``. Per-packet pbuf/heap releases still fire on
+    // ``lwipQueue`` (UDP/ICMP packets carry a ``noopRelease``, so they're free).
 
     /// Drains the output buffer on ``outputQueue`` by issuing back-to-back
     /// ``packetFlow.writePackets`` calls, each capped at
@@ -110,44 +112,93 @@ extension TunnelStack {
 
     // MARK: - Packet Reading
 
-    /// Continuously reads IP packets from the tunnel. UDP is handled in Swift
-    /// (``UDPPacket`` → ``handleInboundUDP``) so the vendored lwIP can build
-    /// TCP-only; TCP/ICMP are fed into lwIP via ``lwip_bridge_input``.
+    /// Continuously reads IP packets from the tunnel, splitting each batch
+    /// across the two data planes: UDP datagrams go to ``udpQueue``
+    /// (``UDPPacket`` → ``handleInboundUDP`` — lwIP is built TCP-only,
+    /// `LWIP_UDP 0`), while TCP/ICMP are fed into lwIP on ``lwipQueue`` via
+    /// ``lwip_bridge_input``. The two sub-batches process concurrently, so a
+    /// heavy TCP burst no longer queues UDP datagrams head-of-line (and vice
+    /// versa) the way the single shared queue did.
+    ///
+    /// Backpressure is preserved exactly: the next ``readPackets`` is issued
+    /// only after *both* sub-batches finish, so at most one batch is ever in
+    /// flight (utun's input buffer paces us). For the common homogeneous batch
+    /// the re-arm rides the single non-empty side; only a genuinely mixed batch
+    /// pays for a ``DispatchGroup``.
     func startReadingPackets() {
         packetFlow?.readPackets { [weak self] packets, _ in
             guard let self, self.running else { return }
 
+            // Partition on the read-callback thread — only a cheap version/proto
+            // header peek per packet (``UDPPacket/ipProtocol``); the heavier
+            // ``parse`` runs on udpQueue. Tally uplink bytes once for the whole
+            // batch regardless of how it splits.
+            var udpBatch: [Data] = []
+            var lwipBatch: [Data] = []
             var uploadBytes: Int64 = 0
             for packet in packets {
                 uploadBytes += Int64(packet.count)
-            }
-
-            self.lwipQueue.async {
-                self.totalBytesOut += uploadBytes
-                // The batch brackets only the packets actually fed to lwIP:
-                // begin/end coalesces per-segment ACKs into one per PCB and, on
-                // _end, walks every active TCP PCB. Opening it lazily skips that
-                // walk for UDP-only batches (e.g. heavy QUIC). See
-                // `lwip_bridge_input_batch_begin`.
-                var batchOpen = false
-                for packet in packets {
-                    if let info = UDPPacket.ipProtocol(of: packet), info.proto == UDPPacket.ipProtocolUDP {
-                        if let datagram = UDPPacket.parse(packet) {
-                            self.handleInboundUDP(datagram)
-                        }
-                        continue
-                    }
-                    if !batchOpen {
-                        lwip_bridge_input_batch_begin()
-                        batchOpen = true
-                    }
-                    packet.withUnsafeBytes { buffer in
-                        guard let baseAddress = buffer.baseAddress else { return }
-                        lwip_bridge_input(baseAddress, Int32(buffer.count))
-                    }
+                if let info = UDPPacket.ipProtocol(of: packet), info.proto == UDPPacket.ipProtocolUDP {
+                    udpBatch.append(packet)
+                } else {
+                    lwipBatch.append(packet)
                 }
-                if batchOpen { lwip_bridge_input_batch_end() }
+            }
+            self.addBytesOut(uploadBytes)
+
+            switch (lwipBatch.isEmpty, udpBatch.isEmpty) {
+            case (true, true):
+                // Empty batch — readPackets shouldn't deliver one, but re-arm
+                // defensively so the loop can't stall. (Unparseable packets
+                // aren't here: they fall to lwipBatch, where lwIP drops them.)
                 self.startReadingPackets()
+            case (false, true):
+                self.lwipQueue.async {
+                    self.feedLwip(lwipBatch)
+                    self.startReadingPackets()
+                }
+            case (true, false):
+                self.udpQueue.async {
+                    self.feedUDP(udpBatch)
+                    self.startReadingPackets()
+                }
+            case (false, false):
+                let group = DispatchGroup()
+                group.enter()
+                self.lwipQueue.async { self.feedLwip(lwipBatch); group.leave() }
+                group.enter()
+                self.udpQueue.async { self.feedUDP(udpBatch); group.leave() }
+                // Re-arm off the data-plane queues so the next read doesn't wait
+                // behind either side's queue depth — only behind both finishing.
+                group.notify(queue: DispatchQueue.global(qos: .userInitiated)) { [weak self] in
+                    self?.startReadingPackets()
+                }
+            }
+        }
+    }
+
+    /// Feeds a TCP/ICMP sub-batch into lwIP. Must run on ``lwipQueue``.
+    ///
+    /// The batch bracket coalesces per-segment ACKs into one per PCB and, on
+    /// `_end`, walks every active TCP PCB. It's only opened here — for batches
+    /// that actually contain lwIP-bound packets — so a UDP-only read (e.g. heavy
+    /// QUIC) skips that walk entirely by never calling this method.
+    private func feedLwip(_ packets: [Data]) {
+        lwip_bridge_input_batch_begin()
+        for packet in packets {
+            packet.withUnsafeBytes { buffer in
+                guard let baseAddress = buffer.baseAddress else { return }
+                lwip_bridge_input(baseAddress, Int32(buffer.count))
+            }
+        }
+        lwip_bridge_input_batch_end()
+    }
+
+    /// Parses and dispatches a UDP sub-batch. Must run on ``udpQueue``.
+    private func feedUDP(_ packets: [Data]) {
+        for packet in packets {
+            if let datagram = UDPPacket.parse(packet) {
+                handleInboundUDP(datagram)
             }
         }
     }
@@ -169,9 +220,11 @@ extension TunnelStack {
         timeoutTimer = timer
     }
 
-    /// Starts the UDP flow cleanup timer (1-second interval, 300-second idle timeout).
+    /// Starts the UDP flow cleanup timer (1-second interval, 300-second idle
+    /// timeout). Runs on ``udpQueue`` — it iterates and mutates ``udpFlows``,
+    /// which that queue owns.
     func startUDPCleanupTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: lwipQueue)
+        let timer = DispatchSource.makeTimerSource(queue: udpQueue)
         timer.schedule(
             deadline: .now() + .seconds(TunnelConstants.udpCleanupIntervalSec),
             repeating: .seconds(TunnelConstants.udpCleanupIntervalSec)

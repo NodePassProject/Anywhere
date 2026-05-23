@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "LWIP-DNS")
+private let logger = AnywhereLogger(category: "DNS")
 
 extension TunnelStack {
 
@@ -178,8 +178,9 @@ extension TunnelStack {
             // A query → fake IPv4
             let ipv4 = FakeIPPool.ipv4Bytes(offset: offset)
             fakeIPBytes = [ipv4.0, ipv4.1, ipv4.2, ipv4.3]
-        } else if qtype == 28, advertiseIPv6ToApps {
-            // AAAA query + IPv6 enabled → fake IPv6
+        } else if qtype == 28, udpConfig().advertiseIPv6ToApps {
+            // AAAA query + IPv6 enabled → fake IPv6 (snapshot read, not the
+            // lwipQueue-owned stored property — DNS now runs on udpQueue).
             fakeIPBytes = FakeIPPool.ipv6Bytes(offset: offset)
         }
         // else: AAAA query + IPv6 disabled → fakeIPBytes stays nil → NODATA response
@@ -221,7 +222,7 @@ extension TunnelStack {
     /// destination, so the client's resolver accepts it as coming from the
     /// server it queried.
     ///
-    /// Must be called on ``lwipQueue`` (mutates ``udpFlows``).
+    /// Must be called on ``udpQueue`` (mutates ``udpFlows``).
     ///
     /// - Returns: `true` once a forwarding flow is started; `false` when there
     ///   is no active configuration to forward through, so the caller can fall
@@ -236,7 +237,7 @@ extension TunnelStack {
         isIPv6: Bool,
         qtype: UInt16
     ) -> Bool {
-        guard let configuration = self.configuration else { return false }
+        guard let configuration = udpConfig().configuration else { return false }
 
         // Forward over IPv4: proxy egress reaches it regardless of the client's
         // query family, and the reply family is governed by the flow's
@@ -272,7 +273,7 @@ extension TunnelStack {
             isIPv6: isIPv6,
             configuration: configuration,
             forceBypass: false,       // proxy it, mirroring the public-resolver path
-            lwipQueue: lwipQueue
+            flowQueue: udpQueue
         )
         udpFlows[flowKey] = flow
         logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(dstPort) via \(configuration.name)")

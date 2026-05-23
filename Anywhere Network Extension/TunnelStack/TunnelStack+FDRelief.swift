@@ -42,13 +42,17 @@ extension TunnelStack {
     /// in ``stop``.
     ///
     /// The handler is invoked from socket-creation queues (RawUDPSocket /
-    /// RawTCPSocket / QUICSocket I/O queues) and synchronously crosses
-    /// into `lwipQueue`. lwIP never sync-waits on those queues, so the hop
-    /// is deadlock-safe.
+    /// RawTCPSocket / QUICSocket I/O queues) and synchronously crosses into
+    /// `udpQueue`, which owns ``udpFlows``. Deadlock-safe: the only place
+    /// `udpQueue` sync-waits on a socket I/O queue is the victim flow's
+    /// ``UDPFlow/closeSync`` (`cancelSync`), and that victim is a *distinct*,
+    /// idle flow — never the mid-connect requester (excluded by
+    /// ``UDPFlow/holdsDirectFD``) — whose per-socket I/O queue never waits back
+    /// on `udpQueue`. So no queue in the chain waits on its own predecessor.
     func installFDPressureReliefHandler() {
         FDPressureRelief.handler = { [weak self] priority in
             guard let self else { return false }
-            return self.lwipQueue.sync {
+            return self.udpQueue.sync {
                 self.evictDirectUDPFlowsForFDPressure(priority: priority)
             }
         }
@@ -60,7 +64,7 @@ extension TunnelStack {
     }
 
     /// Closes idle direct-bypass UDP flows by LRU to free FDs for the
-    /// requester. Must be called on `lwipQueue`. Returns `true` if any flow
+    /// requester. Must be called on `udpQueue`. Returns `true` if any flow
     /// was evicted.
     fileprivate func evictDirectUDPFlowsForFDPressure(priority: FDReliefPriority) -> Bool {
         let now = CFAbsoluteTimeGetCurrent()

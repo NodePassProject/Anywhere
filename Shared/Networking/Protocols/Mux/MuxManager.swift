@@ -9,12 +9,12 @@ import Foundation
 
 nonisolated class MuxManager {
     let configuration: ProxyConfiguration
-    let lwipQueue: DispatchQueue
+    let flowQueue: DispatchQueue
     private var clients: [MuxClient] = []
 
-    init(configuration: ProxyConfiguration, lwipQueue: DispatchQueue) {
+    init(configuration: ProxyConfiguration, flowQueue: DispatchQueue) {
         self.configuration = configuration
-        self.lwipQueue = lwipQueue
+        self.flowQueue = flowQueue
     }
 
     /// Dispatches a new session to a non-full MuxClient, creating one if needed.
@@ -35,7 +35,7 @@ nonisolated class MuxManager {
         }
 
         // Create a new client
-        let client = MuxClient(configuration: configuration, lwipQueue: lwipQueue)
+        let client = MuxClient(configuration: configuration, flowQueue: flowQueue)
         clients.append(client)
 
         client.createSession(network: network, host: host, port: port, globalID: globalID, completion: completion)

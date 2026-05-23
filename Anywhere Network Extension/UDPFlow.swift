@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "LWIP-UDP")
+private let logger = AnywhereLogger(category: "UDP")
 
 class UDPFlow {
     let flowKey: TunnelStack.UDPFlowKey
@@ -17,7 +17,10 @@ class UDPFlow {
     let dstPort: UInt16
     let isIPv6: Bool
     let configuration: ProxyConfiguration
-    let lwipQueue: DispatchQueue
+    /// The stack's ``TunnelStack/udpQueue``. This flow's mutable state is
+    /// confined to it; every async I/O callback hops back here before touching
+    /// that state, so the flow needs no internal locking.
+    let flowQueue: DispatchQueue
 
     // Raw IP bytes for building the response packet (swapped src/dst).
     let srcIPBytes: Data  // original source (becomes dst in response)
@@ -49,8 +52,8 @@ class UDPFlow {
     private var closed = false
 
     /// One-shot reporter that logs this flow's terminal failure at most once.
-    /// All terminal-error paths funnel through it so the LWIP boundary emits
-    /// exactly one error line per dead flow.
+    /// All terminal-error paths funnel through it, so a dead flow emits exactly
+    /// one error line however many of them trip.
     private let failureReporter = ConnectionFailureReporter(prefix: "[UDP]", logger: logger)
 
 
@@ -61,7 +64,7 @@ class UDPFlow {
          isIPv6: Bool,
          configuration: ProxyConfiguration,
          forceBypass: Bool = false,
-         lwipQueue: DispatchQueue) {
+         flowQueue: DispatchQueue) {
         self.flowKey = flowKey
         self.srcHost = srcHost
         self.srcPort = srcPort
@@ -72,7 +75,7 @@ class UDPFlow {
         self.isIPv6 = isIPv6
         self.configuration = configuration
         self.forceBypass = forceBypass
-        self.lwipQueue = lwipQueue
+        self.flowQueue = flowQueue
     }
 
     private func reportFailure(_ operation: String, error: Error) {
@@ -96,7 +99,7 @@ class UDPFlow {
     /// queue overflows, fragmentation refusals) just log; UDP is lossy and
     /// the flow stays alive.
     ///
-    /// Must be called on `lwipQueue`.
+    /// Must be called on `flowQueue`.
     private func handleProxySendError(_ error: Error, connection: ProxyConnection) {
         if Self.isTerminalProxySendError(error, connection: connection) {
             reportFailure("Send", error: error)
@@ -144,7 +147,7 @@ class UDPFlow {
         return !connection.isConnected
     }
 
-    // MARK: - Data Handling (called on lwipQueue)
+    // MARK: - Data Handling (called on flowQueue)
 
     func handleReceivedData(_ data: Data, payloadLength: Int) {
         guard !closed else { return }
@@ -198,7 +201,7 @@ class UDPFlow {
         if let connection = proxyConnection {
             connection.send(data: payload) { [weak self] error in
                 guard let self, let error else { return }
-                self.lwipQueue.async {
+                self.flowQueue.async {
                     guard !self.closed else { return }
                     self.handleProxySendError(error, connection: connection)
                 }
@@ -245,8 +248,11 @@ class UDPFlow {
         // which builds the chain tunnel before connecting to the exit proxy.
 
         if !hasChain {
-            // Mux: only for VLESS with the default configuration (mux is tied to the default proxy)
-            let isDefaultConfiguration = (TunnelStack.shared?.configuration?.id == configuration.id)
+            // Mux: only for VLESS with the default configuration (mux is tied to
+            // the default proxy). Compare against the snapshot's configurationID
+            // rather than reading TunnelStack.configuration directly — that's
+            // lwipQueue-owned, and we're on flowQueue (udpQueue).
+            let isDefaultConfiguration = (TunnelStack.shared?.udpConfig().configurationID == configuration.id)
             if configuration.outboundProtocol == .vless, isDefaultConfiguration, let muxManager = TunnelStack.shared?.muxManager {
                 proxyConnecting = true
                 connectViaMux(muxManager: muxManager)
@@ -281,7 +287,7 @@ class UDPFlow {
         muxManager.dispatch(network: .udp, host: dstHost, port: dstPort, globalID: globalID) { [weak self] result in
             guard let self else { return }
 
-            self.lwipQueue.async {
+            self.flowQueue.async {
                 self.proxyConnecting = false
                 guard !self.closed else { return }
 
@@ -295,7 +301,7 @@ class UDPFlow {
                     }
                     session.closeHandler = { [weak self] error in
                         guard let self else { return }
-                        self.lwipQueue.async {
+                        self.flowQueue.async {
                             if let error {
                                 self.reportFailure("Mux", error: error)
                             }
@@ -345,7 +351,7 @@ class UDPFlow {
         client.connectUDP(to: dstHost, port: dstPort) { [weak self] result in
             guard let self else { return }
 
-            self.lwipQueue.async {
+            self.flowQueue.async {
                 self.proxyConnecting = false
                 guard !self.closed else { return }
 
@@ -359,7 +365,7 @@ class UDPFlow {
                     for payload in self.pendingData {
                         proxyConnection.send(data: payload) { [weak self] error in
                             guard let self, let error else { return }
-                            self.lwipQueue.async {
+                            self.flowQueue.async {
                                 guard !self.closed else { return }
                                 self.handleProxySendError(error, connection: proxyConnection)
                             }
@@ -408,7 +414,7 @@ class UDPFlow {
         //
         // Seed response-address hints with whatever's already in the DNS
         // cache. Fresh resolutions aren't forced here because the cache
-        // lookup is synchronous and lwipQueue is performance-critical; the
+        // lookup is synchronous and flowQueue is performance-critical; the
         // async prewarm below handles cache misses.
         let cachedHints = DNSResolver.shared.cachedIPs(for: dstHost) ?? []
 
@@ -421,7 +427,7 @@ class UDPFlow {
             },
             errorHandler: { [weak self] error in
                 guard let self else { return }
-                self.lwipQueue.async {
+                self.flowQueue.async {
                     self.reportFailure("Receive", error: error)
                     self.close()
                     TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
@@ -453,7 +459,7 @@ class UDPFlow {
         // e.g. concurrent QUIC connections on 443).
         if cachedHints.isEmpty, Self.isDomainName(host) {
             let weakSession = session
-            let localQueue = lwipQueue
+            let localQueue = flowQueue
             DispatchQueue.global(qos: .userInitiated).async {
                 let ips = DNSResolver.shared.resolveAll(host)
                 guard !ips.isEmpty else { return }
@@ -487,10 +493,10 @@ class UDPFlow {
 
         let socket = RawUDPSocket()
         self.directSocket = socket
-        socket.connect(host: dstHost, port: dstPort, completionQueue: lwipQueue) { [weak self] error in
+        socket.connect(host: dstHost, port: dstPort, completionQueue: flowQueue) { [weak self] error in
             guard let self else { return }
 
-            self.lwipQueue.async {
+            self.flowQueue.async {
                 self.proxyConnecting = false
                 guard !self.closed else { return }
 
@@ -518,7 +524,7 @@ class UDPFlow {
                     self?.handleProxyData(data)
                 }, errorHandler: { [weak self] error in
                     guard let self else { return }
-                    self.lwipQueue.async {
+                    self.flowQueue.async {
                         self.reportFailure("Receive", error: error)
                         self.close()
                         TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
@@ -534,7 +540,7 @@ class UDPFlow {
             self.handleProxyData(data)
         } errorHandler: { [weak self] error in
             guard let self else { return }
-            self.lwipQueue.async {
+            self.flowQueue.async {
                 if let error {
                     self.reportFailure("Receive", error: error)
                 }
@@ -545,7 +551,7 @@ class UDPFlow {
     }
 
     private func handleProxyData(_ data: Data) {
-        lwipQueue.async { [weak self] in
+        flowQueue.async { [weak self] in
             guard let self, !self.closed else { return }
             self.lastActivity = CFAbsoluteTimeGetCurrent()
 

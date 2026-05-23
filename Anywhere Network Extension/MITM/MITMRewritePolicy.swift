@@ -115,11 +115,24 @@ final class MITMRewritePolicy {
     private var trie = FlatLabelTrie<CompiledMITMRuleSet>()
     private var setCount: Int = 0
 
+    /// Guards ``trie`` + ``setCount``. ``matches`` / ``set(for:)`` are now read
+    /// from both ``lwipQueue`` (TCP accept) and ``udpQueue`` (UDP/443 new-flow),
+    /// while ``load`` / ``reset`` rebuild the trie on ``lwipQueue`` at config
+    /// change. The reload holds the lock across the rebuild so a lookup never
+    /// sees a half-built trie; lookups take it briefly. Reads are cold (per
+    /// connection / new flow), never per-packet, so the lock stays uncontended.
+    private let lock = UnfairLock()
+
     /// Whether any rule sets have been loaded. Used by the lwIP path so
     /// the no-op case stays at a single bool check.
-    var hasRules: Bool { setCount > 0 }
+    var hasRules: Bool { lock.withLock { setCount > 0 } }
 
     func reset() {
+        lock.withLock { resetUnlocked() }
+    }
+
+    /// Clears the trie. Caller must hold ``lock``.
+    private func resetUnlocked() {
         trie = FlatLabelTrie<CompiledMITMRuleSet>()
         setCount = 0
     }
@@ -133,11 +146,16 @@ final class MITMRewritePolicy {
     /// Conflict handling: if two sets declare the same suffix, the
     /// later one wins (with a warning).
     func load(ruleSets: [MITMRuleSet]) {
-        reset()
-        for set in ruleSets {
-            insert(set)
+        // Build under the lock so a concurrent lookup never sees a half-built
+        // trie. The script-store purge + logging below touch a different shared
+        // store and don't need this lock, so they run after release.
+        lock.withLock {
+            resetUnlocked()
+            for set in ruleSets {
+                insertUnlocked(set)
+            }
+            trie.freeze()
         }
-        trie.freeze()
         // Drop ``MITMScriptStore`` buckets for rule sets the user has
         // deleted since the last load. Without this every removed
         // rule set leaks up to ``MITMScriptStore.maxBytesPerScope``
@@ -153,7 +171,9 @@ final class MITMRewritePolicy {
         }
     }
 
-    private func insert(_ set: MITMRuleSet) {
+    /// Inserts one rule set. Caller must hold ``lock`` (invoked only from
+    /// ``load`` while building the trie).
+    private func insertUnlocked(_ set: MITMRuleSet) {
         let suffixes = set.domainSuffixes
             .map { $0.lowercased().trimmingCharacters(in: CharacterSet.whitespaces) }
             .filter { !$0.isEmpty }
@@ -201,9 +221,12 @@ final class MITMRewritePolicy {
     /// if no set applies. Walks the label trie greedily; the deepest
     /// terminal reached during descent is the most-specific match.
     func set(for host: String) -> CompiledMITMRuleSet? {
-        guard !host.isEmpty, setCount > 0 else { return nil }
+        guard !host.isEmpty else { return nil }
         var lowered = host.lowercased()
-        return lowered.withUTF8 { trie.lookup($0) }
+        return lock.withLock { () -> CompiledMITMRuleSet? in
+            guard setCount > 0 else { return nil }
+            return lowered.withUTF8 { trie.lookup($0) }
+        }
     }
 
     /// Convenience for the rewriters: rules from the most-specific set
