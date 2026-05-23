@@ -26,10 +26,12 @@ extension TunnelStack {
         let payload = datagram.payload
         let isIPv6 = datagram.isIPv6
 
-        // The DNS / QUIC-block / MITM checks run before the flow lookup, as
-        // before. The address string and `Data` forms are computed lazily: an
-        // established non-53/443 flow takes the fast path below and allocates
-        // nothing beyond the payload copy made during parse.
+        // The DNS and Blocked-mode QUIC checks run before the flow lookup; the
+        // Automatic-mode QUIC/MITM decision needs the routing result, so it
+        // runs after resolution further down. The address string and `Data`
+        // forms are computed lazily: an established flow (including an allowed
+        // UDP/443 one) takes the fast path below and allocates nothing beyond
+        // the payload copy made during parse.
 
         // DNS interception: fake-IP responses for queries targeting our own
         // resolver (the tunnel peer address). Queries to any other resolver
@@ -53,9 +55,13 @@ extension TunnelStack {
             // Non-intercepted DNS server — fall through to ordinary UDP flow
         }
 
-        // QUIC blocking: drop UDP/443 with ICMP port-unreachable so HTTP/3
-        // clients fail fast on the first datagram and fall back to HTTP/2.
-        if blockQUICEnabled && datagram.dstPort == 443 {
+        // QUIC handling (Blocked mode): drop every UDP/443 datagram here,
+        // before routing, with an ICMP port-unreachable so HTTP/3 clients fail
+        // fast on the first datagram and fall back to HTTP/2. Automatic defers
+        // to the post-resolution check below (it needs the routing decision);
+        // Unblocked never drops. A QUIC-based proxy's own transport leaves the
+        // extension on a kernel-excluded socket, so it never reaches here.
+        if datagram.dstPort == 443 && quicPolicy.blocksAllQUIC {
             sendICMPPortUnreachable(
                 srcIP: datagram.srcIPData,
                 srcPort: datagram.srcPort,
@@ -65,28 +71,6 @@ extension TunnelStack {
                 udpPayloadLength: payload.count
             )
             return
-        }
-
-        // MITM HTTP/3 reject: clients that hit a MITM-listed hostname over
-        // UDP/443 get the same ICMP unreachable so they fall back to TCP/TLS,
-        // where the MITM TCP path can terminate the connection. We can only do
-        // this for fake-IP UDP — without a domain we don't know whether the
-        // destination is on the list.
-        if mitmEnabled && datagram.dstPort == 443 {
-            let dstIPString = TunnelStack.ipAddrToString(datagram.dstIP, isIPv6: isIPv6)
-            if FakeIPPool.isFakeIP(dstIPString),
-               let entry = fakeIPPool.lookup(ip: dstIPString),
-               mitmPolicy.matches(entry.domain) {
-                sendICMPPortUnreachable(
-                    srcIP: datagram.srcIPData,
-                    srcPort: datagram.srcPort,
-                    dstIP: datagram.dstIPData,
-                    dstPort: datagram.dstPort,
-                    isIPv6: isIPv6,
-                    udpPayloadLength: payload.count
-                )
-                return
-            }
         }
 
         // Fast path: deliver to an existing flow. The byte-keyed lookup needs no
@@ -111,6 +95,7 @@ extension TunnelStack {
         var dstHost = dstIPString
         var flowConfiguration = defaultConfiguration
         var forceBypass = false
+        var dstIsDomain = false
 
         var requestAction: TunnelRequestAction = .default
         var requestConfigName: String? = defaultConfiguration.name
@@ -149,6 +134,7 @@ extension TunnelStack {
             }
         case .resolved(let domain, let configurationOverride, let bypass):
             dstHost = domain
+            dstIsDomain = true
             if let configuration = configurationOverride {
                 flowConfiguration = configuration
                 requestAction = .proxy
@@ -170,6 +156,33 @@ extension TunnelStack {
             )
             return
         case .unreachable:
+            sendICMPPortUnreachable(
+                srcIP: srcIPData,
+                srcPort: datagram.srcPort,
+                dstIP: dstIPData,
+                dstPort: datagram.dstPort,
+                isIPv6: isIPv6,
+                udpPayloadLength: payload.count
+            )
+            return
+        }
+
+        // QUIC handling (Automatic mode): now that routing is resolved, drop
+        // UDP/443 that would traverse a proxy, or whose domain is MITM-listed,
+        // so it falls back to TCP — where a proxy relays it reliably and the
+        // MITM path can intercept. Direct, non-MITM QUIC is left to flow.
+        //
+        // `mitmListed` is an autoclosure: the MITM trie is consulted only when
+        // it can change the answer — Automatic mode with a direct flow (proxied
+        // flows are already dropped) carrying a real resolved domain. Blocked
+        // decided before routing; Unblocked never drops; neither touches the
+        // trie here. When we do drop a bypassed flow it can only be MITM.
+        if datagram.dstPort == 443,
+           quicPolicy.blocksResolvedQUIC(
+               isProxied: !forceBypass,
+               mitmListed: dstIsDomain && mitmEnabled && mitmPolicy.matches(dstHost)
+           ) {
+            logger.debug("[UDP] QUIC blocked (automatic): \(dstHost):443 reason=\(forceBypass ? "mitm" : "proxied")")
             sendICMPPortUnreachable(
                 srcIP: srcIPData,
                 srcPort: datagram.srcPort,

@@ -7,11 +7,6 @@
 
 import Foundation
 
-enum ProxyMode: String, CaseIterable {
-    case rule
-    case global
-}
-
 final class AWCore {
     // MARK: - Identifiers
 
@@ -53,7 +48,7 @@ final class AWCore {
         UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
         UserDefaultsKey.bypassCountryCode: "",
         UserDefaultsKey.trustedCertificateSHA256s: [],
-        UserDefaultsKey.blockQUICEnabled: true,
+        UserDefaultsKey.quicPolicy: QUICPolicy.blocked.rawValue,
         UserDefaultsKey.encryptedDNSProtocol: "doh",
         UserDefaultsKey.encryptedDNSServer: "https://cloudflare-dns.com/dns-query",
     ]
@@ -63,7 +58,7 @@ final class AWCore {
     private enum UserDefaultsKey {
         static let allowInsecure = "allowInsecure"
         static let alwaysOnEnabled = "alwaysOnEnabled"
-        static let blockQUICEnabled = "blockQUICEnabled"
+        static let quicPolicy = "quicPolicy"
         static let bypassCountryCode = "bypassCountryCode"
         static let encryptedDNSEnabled = "encryptedDNSEnabled"
         static let encryptedDNSProtocol = "encryptedDNSProtocol"
@@ -223,12 +218,12 @@ final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.hideVPNIcon)
     }
     
-    static func getBlockQUICEnabled() -> Bool {
-        userDefaults.bool(forKey: UserDefaultsKey.blockQUICEnabled)
+    static func getQUICPolicy() -> QUICPolicy {
+        userDefaults.string(forKey: UserDefaultsKey.quicPolicy).flatMap(QUICPolicy.init(rawValue:)) ?? .blocked
     }
 
-    static func setBlockQUICEnabled(_ value: Bool) {
-        userDefaults.set(value, forKey: UserDefaultsKey.blockQUICEnabled)
+    static func setQUICPolicy(_ value: QUICPolicy) {
+        userDefaults.set(value.rawValue, forKey: UserDefaultsKey.quicPolicy)
     }
     
     static func getAdvertiseIPv6ToApps() -> Bool {

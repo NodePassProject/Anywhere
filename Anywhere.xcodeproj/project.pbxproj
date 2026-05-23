@@ -92,6 +92,8 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				AWCore.swift,
+				ProxyMode.swift,
+				QUICPolicy.swift,
 				DataStore/FailableDecodable.swift,
 				DataStore/JSONBlobStore.swift,
 				MITM/MITMCertificateStore.swift,
