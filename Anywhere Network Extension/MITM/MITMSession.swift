@@ -758,7 +758,21 @@ final class MITMSession {
                     return
                 }
                 guard let data, !data.isEmpty else {
-                    self.cancel(error: nil)
+                    // Upstream half-closed. For an HTTP/1 read-until-close
+                    // body the close *is* the body terminator, so give the
+                    // response stream a chance to run a buffered script on
+                    // what it accumulated and flush the rewritten response
+                    // to the client before teardown. HTTP/2 frames every
+                    // body with END_STREAM, so it never withholds anything
+                    // here.
+                    let flushed = self.outboundH2 == nil ? self.responseStream.finish() : Data()
+                    if flushed.isEmpty {
+                        self.cancel(error: nil)
+                    } else {
+                        self.sendChunked(flushed, via: inner) { [weak self] _ in
+                            self?.lwipQueue.async { self?.cancel(error: nil) }
+                        }
+                    }
                     return
                 }
                 let transformed: Data
