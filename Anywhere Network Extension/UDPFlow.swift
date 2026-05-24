@@ -104,7 +104,7 @@ class UDPFlow {
         if Self.isTerminalProxySendError(error, connection: connection) {
             reportFailure("Send", error: error)
             close()
-            TunnelStack.shared?.udpFlows.removeValue(forKey: flowKey)
+            TunnelStack.shared?.removeUDPFlow(self)
         } else {
             logTransientSendFailure(error)
         }
@@ -306,7 +306,7 @@ class UDPFlow {
                                 self.reportFailure("Mux", error: error)
                             }
                             self.close()
-                            TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                            TunnelStack.shared?.removeUDPFlow(self)
                         }
                     }
 
@@ -314,7 +314,7 @@ class UDPFlow {
                     // session (via receive-loop error) before this handler ran.
                     guard !session.closed else {
                         self.close()
-                        TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                        TunnelStack.shared?.removeUDPFlow(self)
                         return
                     }
 
@@ -337,7 +337,7 @@ class UDPFlow {
                         self.reportFailure("Connect", error: error)
                     }
                     self.close()
-                    TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    TunnelStack.shared?.removeUDPFlow(self)
                 }
             }
         }
@@ -382,7 +382,7 @@ class UDPFlow {
                         self.reportFailure("Connect", error: error)
                     }
                     self.close()
-                    TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    TunnelStack.shared?.removeUDPFlow(self)
                 }
             }
         }
@@ -404,7 +404,7 @@ class UDPFlow {
         case .failure(let error):
             reportFailure("SS session", error: error)
             close()
-            stack.udpFlows.removeValue(forKey: flowKey)
+            stack.removeUDPFlow(self)
             return
         }
 
@@ -430,7 +430,7 @@ class UDPFlow {
                 self.flowQueue.async {
                     self.reportFailure("Receive", error: error)
                     self.close()
-                    TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    TunnelStack.shared?.removeUDPFlow(self)
                 }
             }
         )
@@ -503,7 +503,7 @@ class UDPFlow {
                 if let error {
                     self.reportFailure("Connect", error: error)
                     self.close()
-                    TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                    TunnelStack.shared?.removeUDPFlow(self)
                     return
                 }
 
@@ -527,7 +527,7 @@ class UDPFlow {
                     self.flowQueue.async {
                         self.reportFailure("Receive", error: error)
                         self.close()
-                        TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                        TunnelStack.shared?.removeUDPFlow(self)
                     }
                 })
             }
@@ -545,7 +545,7 @@ class UDPFlow {
                     self.reportFailure("Receive", error: error)
                 }
                 self.close()
-                TunnelStack.shared?.udpFlows.removeValue(forKey: self.flowKey)
+                TunnelStack.shared?.removeUDPFlow(self)
             }
         }
     }
