@@ -11,6 +11,25 @@ private let logger = AnywhereLogger(category: "TunnelStack")
 
 extension TunnelStack {
 
+    // MARK: - Flow Registry
+
+    /// Removes `flow` from ``udpFlows`` only if it is still the flow registered
+    /// for its key. Teardown callbacks (mux/Shadowsocks/proxy close handlers,
+    /// receive and connect failures) fire asynchronously on ``udpQueue``, and
+    /// during a network-path change the old transports error out just as resumed
+    /// traffic recreates a flow for the same 5-tuple. A blind
+    /// `removeValue(forKey:)` from a stale callback would then evict that *newer*
+    /// flow and strand it — freed without `close()`, tripping the DEBUG leak
+    /// tripwire in ``UDPFlow``'s `deinit`. Identity-guarding makes every removal
+    /// self-only and idempotent.
+    ///
+    /// Must be called on ``udpQueue``.
+    func removeUDPFlow(_ flow: UDPFlow) {
+        if udpFlows[flow.flowKey] === flow {
+            udpFlows.removeValue(forKey: flow.flowKey)
+        }
+    }
+
     // MARK: - Inbound UDP
     //
     // UDP is handled entirely outside lwIP (built TCP-only). ``startReadingPackets``

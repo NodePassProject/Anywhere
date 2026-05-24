@@ -86,7 +86,7 @@ extension TunnelStack {
         var evicted = 0
         for flow in candidates.prefix(maxEvictions) {
             flow.closeSync()
-            udpFlows.removeValue(forKey: flow.flowKey)
+            removeUDPFlow(flow)
             evicted += 1
         }
         if evicted > 0 {
