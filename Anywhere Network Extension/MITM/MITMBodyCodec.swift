@@ -118,6 +118,50 @@ enum MITMBodyCodec {
         return current
     }
 
+    // MARK: - Single-codec encode/decode (JS `Anywhere.codec` bridge)
+
+    /// Decodes a single codec. The transport pipeline already
+    /// decompresses the outer `Content-Encoding` for us (see
+    /// ``decompress``); this is the entry point the JS
+    /// `Anywhere.codec.{gzip,deflate,brotli}.decode` helpers call to
+    /// crack open compression that transport pass never sees — a gzipped
+    /// field inside a JSON body, a brotli'd protobuf, a base64-of-gzip
+    /// token. Honours the same ``maxBufferedBodyBytes`` decompression-
+    /// bomb cap as the rewriter (the underlying stream decoders enforce
+    /// it), so a payload that would exceed the cap returns nil just like
+    /// a malformed one.
+    static func decode(_ data: Data, codec: Codec) -> Data? {
+        switch codec {
+        case .identity: return data
+        case .gzip:     return gunzip(data)
+        case .deflate:  return inflateDeflate(data)
+        case .brotli:   return streamDecode(data, algorithm: COMPRESSION_BROTLI)
+        }
+    }
+
+    /// Encodes a single codec — the compress side the transport pipeline
+    /// never needs (it only ever decodes and re-emits identity) but
+    /// scripts do: to re-pack a field they just edited, to hand a
+    /// compressed body to `Anywhere.respond`, or to restore a
+    /// `Content-Encoding` they want to keep on the wire. gzip emits a
+    /// canonical single-member stream (RFC 1952 header + raw DEFLATE +
+    /// CRC32/ISIZE trailer); deflate emits raw DEFLATE — what
+    /// ``inflateDeflate`` decodes first and what servers actually send
+    /// for `Content-Encoding: deflate` despite RFC 1950's zlib wrapper.
+    static func encode(_ data: Data, codec: Codec) -> Data? {
+        switch codec {
+        case .identity:
+            return data
+        case .gzip:
+            guard let deflated = streamEncode(data, algorithm: COMPRESSION_ZLIB) else { return nil }
+            return gzipWrap(deflated, original: data)
+        case .deflate:
+            return streamEncode(data, algorithm: COMPRESSION_ZLIB)
+        case .brotli:
+            return streamEncode(data, algorithm: COMPRESSION_BROTLI)
+        }
+    }
+
     // MARK: - gzip (RFC 1952)
 
     /// Parses one or more concatenated gzip members per RFC 1952 §2.2.
@@ -289,4 +333,123 @@ enum MITMBodyCodec {
             }
         }
     }
+
+    // MARK: - Streaming encoder (JS codec bridge)
+
+    /// Compresses ``data`` with ``algorithm`` using `compression_stream`
+    /// in encode mode — the mirror of ``streamDecode``. Pulls 64 KiB of
+    /// output at a time until the stream finalises. Only the JS
+    /// `Anywhere.codec` encoders use this; the transport pipeline never
+    /// re-compresses. No explicit output cap is applied: compression
+    /// doesn't meaningfully expand its input, and the input is itself
+    /// bounded by the script engine's typed-array budget, so — unlike
+    /// decode — encode carries no decompression-bomb risk.
+    private static func streamEncode(_ data: Data, algorithm: compression_algorithm) -> Data? {
+        let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
+        defer { stream.deallocate() }
+
+        var status = compression_stream_init(stream, COMPRESSION_STREAM_ENCODE, algorithm)
+        guard status == COMPRESSION_STATUS_OK else { return nil }
+        defer { compression_stream_destroy(stream) }
+
+        let bufferSize = 64 * 1024
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+
+        // Drives the encode loop for a given source pointer/size.
+        // Factored out so the empty-input case — where
+        // `withUnsafeBytes` hands back a nil base address — can still
+        // feed the encoder a zero-length source and get back a valid
+        // (empty) stream rather than nil.
+        func run(srcBase: UnsafePointer<UInt8>?, srcCount: Int) -> Data? {
+            // src_size 0 means nothing is read from src_ptr, so reusing
+            // `buffer` as a non-null placeholder when empty is safe.
+            stream.pointee.src_ptr = srcBase ?? UnsafePointer(buffer)
+            stream.pointee.src_size = srcCount
+            stream.pointee.dst_ptr = buffer
+            stream.pointee.dst_size = bufferSize
+
+            var output = Data()
+            let flags = Int32(COMPRESSION_STREAM_FINALIZE.rawValue)
+            while true {
+                status = compression_stream_process(stream, flags)
+                switch status {
+                case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
+                    let written = bufferSize - stream.pointee.dst_size
+                    if written > 0 {
+                        output.append(buffer, count: written)
+                    }
+                    if status == COMPRESSION_STATUS_END {
+                        return output
+                    }
+                    if stream.pointee.dst_size == 0 {
+                        stream.pointee.dst_ptr = buffer
+                        stream.pointee.dst_size = bufferSize
+                    }
+                case COMPRESSION_STATUS_ERROR:
+                    return nil
+                default:
+                    return nil
+                }
+            }
+        }
+
+        if data.isEmpty {
+            return run(srcBase: nil, srcCount: 0)
+        }
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Data? in
+            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
+                return nil
+            }
+            return run(srcBase: base, srcCount: data.count)
+        }
+    }
+
+    // MARK: - gzip framing (RFC 1952)
+
+    /// Wraps raw DEFLATE output in a single gzip member: the 10-byte
+    /// fixed header (no optional fields, unknown OS/MTIME), the deflate
+    /// body, then the 8-byte trailer — CRC32 of the *uncompressed* input
+    /// and ISIZE (input length mod 2^32), both little-endian. Mirrors
+    /// what ``gunzipOneMember`` parses back.
+    private static func gzipWrap(_ deflated: Data, original: Data) -> Data {
+        var out = Data(capacity: 10 + deflated.count + 8)
+        // ID1 ID2 CM FLG | MTIME(4)=0 | XFL=0 OS=0xFF(unknown)
+        out.append(contentsOf: [0x1F, 0x8B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF])
+        out.append(deflated)
+        let crc = crc32(original)
+        let isize = UInt32(truncatingIfNeeded: original.count)
+        out.append(contentsOf: [
+            UInt8(crc & 0xFF), UInt8((crc >> 8) & 0xFF),
+            UInt8((crc >> 16) & 0xFF), UInt8((crc >> 24) & 0xFF),
+            UInt8(isize & 0xFF), UInt8((isize >> 8) & 0xFF),
+            UInt8((isize >> 16) & 0xFF), UInt8((isize >> 24) & 0xFF),
+        ])
+        return out
+    }
+
+    /// CRC-32 (IEEE 802.3: reflected, polynomial 0xEDB88320) over
+    /// ``data``. The `Compression` framework computes no checksum for
+    /// the raw DEFLATE it emits, so ``gzipWrap`` needs its own to build
+    /// a spec-valid gzip trailer.
+    private static func crc32(_ data: Data) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in data {
+            let idx = Int((crc ^ UInt32(byte)) & 0xFF)
+            crc = crc32Table[idx] ^ (crc >> 8)
+        }
+        return crc ^ 0xFFFF_FFFF
+    }
+
+    /// Precomputed CRC-32 lookup table (one entry per byte value), built
+    /// once on first use.
+    private static let crc32Table: [UInt32] = {
+        (0..<256).map { i -> UInt32 in
+            var c = UInt32(i)
+            for _ in 0..<8 {
+                c = (c & 1) != 0 ? (0xEDB8_8320 ^ (c >> 1)) : (c >> 1)
+            }
+            return c
+        }
+    }()
 }

@@ -937,7 +937,68 @@ final class MITMScriptEngine {
         protobuf.setObject(pbDecodeVarintBlock, forKeyedSubscript: "decodeVarint" as NSString)
         codec.setObject(protobuf, forKeyedSubscript: "protobuf" as NSString)
 
+        // Anywhere.codec.{gzip,deflate,brotli} — transport compression
+        // codecs as encode/decode pairs (see ``installCompressionCodec``
+        // for why a script needs these even though the pipeline already
+        // auto-decodes the outer Content-Encoding).
+        installCompressionCodec(on: codec, named: "gzip", codec: .gzip)
+        installCompressionCodec(on: codec, named: "deflate", codec: .deflate)
+        installCompressionCodec(on: codec, named: "brotli", codec: .brotli)
+
         anywhere.setObject(codec, forKeyedSubscript: "codec" as NSString)
+    }
+
+    /// Installs one `Anywhere.codec.<name>` transport-compression codec
+    /// (gzip/deflate/brotli) as an encode/decode pair backed by
+    /// ``MITMBodyCodec``. The transport pipeline already auto-decodes the
+    /// outer `Content-Encoding` and re-emits identity, so scripts don't
+    /// need these for the response body itself — they're for compression
+    /// that pass never sees: a gzipped blob nested inside a JSON field, a
+    /// brotli'd protobuf, re-compressing a body to hand to
+    /// `Anywhere.respond`, or restoring a `Content-Encoding` the script
+    /// wants to keep on the wire. Both directions accept
+    /// Uint8Array/ArrayBuffer/string and return a Uint8Array. decode
+    /// throws on malformed input or a payload that would exceed the
+    /// ``MITMBodyCodec/maxBufferedBodyBytes`` decompression-bomb cap;
+    /// encode throws only on internal codec failure (effectively never).
+    private func installCompressionCodec(on codecNamespace: JSValue, named name: String, codec codecKind: MITMBodyCodec.Codec) {
+        let obj = JSValue(newObjectIn: context)!
+        let encodeBlock: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            guard let bytes = Self.bytesFromValue(val, in: ctx) else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.codec.\(name).encode: expected Uint8Array/ArrayBuffer/string",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let out = MITMBodyCodec.encode(bytes, codec: codecKind) else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.codec.\(name).encode failed", in: ctx)
+                return JSValue(undefinedIn: ctx)
+            }
+            return Self.makeUint8Array(in: ctx, from: out)
+        }
+        let decodeBlock: @convention(block) (JSValue) -> JSValue = { val in
+            let ctx = JSContext.current()!
+            guard let bytes = Self.bytesFromValue(val, in: ctx) else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.codec.\(name).decode: expected Uint8Array/ArrayBuffer/string",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            guard let out = MITMBodyCodec.decode(bytes, codec: codecKind) else {
+                ctx.exception = JSValue(
+                    newErrorFromMessage: "Anywhere.codec.\(name).decode failed (malformed input or exceeds \(MITMBodyCodec.maxBufferedBodyBytes) B cap)",
+                    in: ctx
+                )
+                return JSValue(undefinedIn: ctx)
+            }
+            return Self.makeUint8Array(in: ctx, from: out)
+        }
+        obj.setObject(encodeBlock, forKeyedSubscript: "encode" as NSString)
+        obj.setObject(decodeBlock, forKeyedSubscript: "decode" as NSString)
+        codecNamespace.setObject(obj, forKeyedSubscript: name as NSString)
     }
 
     /// Installs ``Anywhere.crypto`` — hashes, HMAC, AES-GCM, random
