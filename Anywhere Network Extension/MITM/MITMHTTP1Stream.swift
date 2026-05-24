@@ -445,6 +445,7 @@ final class MITMHTTP1Stream {
                !MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: gatePathAndQuery) {
                 let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
                 if codec.supported, !codec.requiresDecompression {
+                    warnIfBufferedScriptDeStreams(rewrittenHeaders)
                     // Force ``Connection: close`` so both the success
                     // path (definite Content-Length, upstream already
                     // gone) and the overflow fallback (read-until-close
@@ -596,7 +597,7 @@ final class MITMHTTP1Stream {
         // change. Warn and fall through to either buffered-script or
         // passthrough.
         if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery) {
-            logger.warning("[MITM] HTTP/1 \(host): streamScript skipped for Content-Length body (chunked encoding required)")
+            logger.warning("[MITM] HTTP/1 \(host): Stream Script skipped for Content-Length body (chunked encoding required)")
         }
 
         // The length is known up front, so we can opt out of buffering
@@ -620,7 +621,7 @@ final class MITMHTTP1Stream {
             return true
         }
         if scriptsApply, length > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("[MITM] Skipping script rewrite for \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
+            logger.warning("[MITM] HTTP/1 \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
         }
         if phase == .httpRequest {
             logRequest(startLine: rewrittenStartLine)
@@ -645,7 +646,7 @@ final class MITMHTTP1Stream {
         // straightforward here.
         if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery) {
             if scriptsApply {
-                logger.warning("[MITM] HTTP/1 \(host): streamScript wins over script")
+                logger.warning("[MITM] HTTP/1 \(host): Stream Script wins over Script")
             }
             if phase == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
@@ -663,6 +664,7 @@ final class MITMHTTP1Stream {
 
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
         if scriptsApply, codec.supported {
+            warnIfBufferedScriptDeStreams(rewrittenHeaders)
             mode = .rewritingChunked(
                 pending: PendingHead(
                     startLine: rewrittenStartLine,
@@ -771,7 +773,7 @@ final class MITMHTTP1Stream {
             // bodies entirely — would silently break common APIs whose
             // bodies are well under the cap.
             if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-                logger.warning("[MITM] Chunked body for \(host) exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); truncating")
+                logger.warning("[MITM] HTTP1 \(host): Chunked body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); truncating")
                 applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: [accumulator.count], into: &output)
                 // The rewritten head + truncated body now form the
                 // complete response on the wire (collapsed to a
@@ -815,7 +817,7 @@ final class MITMHTTP1Stream {
         accumulator.append(rxBuffer.prefix(rxBuffer.count))
         rxBuffer.removeAll(keepingCapacity: false)
         if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("[MITM] HTTP/1 \(host): read-until-close body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing script and forwarding verbatim")
+            logger.warning("[MITM] HTTP/1 \(host): read-until-close body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding verbatim")
             output.append(serializeHead(startLine: pending.startLine, headers: pending.headers))
             output.append(accumulator)
             flushSynthAfterResponse(into: &output)
@@ -916,7 +918,7 @@ final class MITMHTTP1Stream {
                 // and no body bytes are lost — unlike the buffered path,
                 // which truncates.
                 if left != 0, accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
-                    logger.warning("[MITM] HTTP/1 \(host): streaming chunk exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing script and forwarding remainder verbatim")
+                    logger.warning("[MITM] HTTP/1 \(host): streaming chunk exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding remainder verbatim")
                     if let held = streaming.pendingChunk {
                         streaming.pendingChunk = nil
                         emitStreamingChunk(
@@ -1129,7 +1131,7 @@ final class MITMHTTP1Stream {
     ) {
         let body: Data
         if pending.codec.requiresDecompression {
-            guard let decoded = MITMBodyCodec.decompress(rawBody, plan: pending.codec) else {
+            guard let decoded = MITMBodyCodec.decompress(rawBody, plan: pending.codec, host: host) else {
                 // Decompression failed; treat as identity passthrough.
                 if phase == .httpRequest {
                     logRequest(startLine: pending.startLine)
@@ -1534,14 +1536,14 @@ final class MITMHTTP1Stream {
             guard Self.isValidHeaderName(entry.name),
                   Self.isValidHeaderValue(entry.value)
             else {
-                logger.warning("[MITM][JS] Anywhere.respond dropping invalid header: \(entry.name)")
+                logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond dropping invalid header: \(entry.name)")
                 continue
             }
             headers.append((name: entry.name, value: entry.value))
         }
         let body: Data
         if response.body.count > Self.maxSynthesizedResponseBodyBytes {
-            logger.warning("[MITM][JS] Anywhere.respond body \(response.body.count) B exceeds memory cap \(Self.maxSynthesizedResponseBodyBytes) B; truncating")
+            logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond body \(response.body.count) B exceeds memory cap \(Self.maxSynthesizedResponseBodyBytes) B; truncating")
             let end = response.body.startIndex + Self.maxSynthesizedResponseBodyBytes
             body = response.body.subdata(in: response.body.startIndex..<end)
         } else {
@@ -1707,6 +1709,20 @@ final class MITMHTTP1Stream {
         return nil
     }
 
+    /// Advisory log for when a buffered ``.script`` rule is about to
+    /// rewrite a streaming response (SSE and friends; see
+    /// ``MITMScriptTransform/isStreamingMediaType(_:)``). Buffering
+    /// de-streams the body — the client sees nothing until the whole
+    /// body arrives or the buffer cap trips — so we point the author at
+    /// ``streamScript``. We still apply the rule, as requested; this is
+    /// advisory only. Response phase only.
+    private func warnIfBufferedScriptDeStreams(_ headers: [Header]) {
+        let contentType = firstHeaderValue(headers, name: "content-type")
+        guard phase == .httpResponse,
+              MITMScriptTransform.isStreamingMediaType(contentType) else { return }
+        logger.warning("[MITM] \(host): buffered Script on a streaming response. Switch to Stream Script to rewrite frames as they arrive.")
+    }
+
     /// Returns all values for a header name, joined by ``", "`` per
     /// RFC 9110 §5.3 (semantically equivalent to a single field with
     /// the combined value). Used for headers like
@@ -1788,7 +1804,7 @@ final class MITMHTTP1Stream {
                 // intact rather than emitting a corrupted start
                 // line.
                 guard Self.isValidRequestTarget(mutated) else {
-                    logger.warning("[MITM] HTTP/1 \(host): urlReplace produced invalid request-target; skipping rule")
+                    logger.warning("[MITM] HTTP/1 \(host): URL Replace produced invalid request-target; skipping rule")
                     continue
                 }
                 target = mutated
@@ -1909,7 +1925,7 @@ final class MITMHTTP1Stream {
             // upstream side, bypassing any upstream auth that gates
             // off the first request line.
             guard Self.isValidMethodToken(method) else {
-                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid method '\(method)' from script")
+                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid method '\(method)' from Script")
                 return fallback
             }
             // ``pathAndQuery`` returns nil for inputs that look
@@ -1928,7 +1944,7 @@ final class MITMHTTP1Stream {
             // any of those (via percent-decode mishap or template
             // injection) would otherwise split the start line.
             guard Self.isValidRequestTarget(candidateTarget) else {
-                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid request-target from script")
+                logger.warning("[MITM][JS] HTTP/1 \(host): dropping invalid request-target from Script")
                 return fallback
             }
             // Request start line: METHOD SP target SP HTTP-version.

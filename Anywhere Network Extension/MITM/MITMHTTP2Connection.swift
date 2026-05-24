@@ -319,7 +319,7 @@ final class MITMHTTP2Connection {
         // dynamic table. Stop processing — the peer will GOAWAY.
         if let p = pending,
            frame.typeCode != FrameTypeCode.continuation {
-            logger.warning("[MITM] HTTP/2: frame type \(frame.typeCode) on stream \(frame.streamID) interleaved with pending HEADERS on stream \(p.streamID); marking parseError")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host): frame type \(frame.typeCode) on stream \(frame.streamID) interleaved with pending HEADERS on stream \(p.streamID); marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
             pending = nil
@@ -456,7 +456,7 @@ final class MITMHTTP2Connection {
         // would collide with future stream-zero frames; mark
         // parseError so the peer GOAWAYs.
         guard frame.streamID != 0 else {
-            logger.warning("[MITM] HTTP/2: HEADERS on stream 0; marking parseError")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host): HEADERS on stream 0; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
             return Data()
@@ -478,7 +478,7 @@ final class MITMHTTP2Connection {
            frame.streamID > highestInboundStreamID,
            isFreshHeadersFrame(streamID: frame.streamID) {
             guard frame.streamID % 2 == 1 else {
-                logger.warning("[MITM] HTTP/2: client-initiated HEADERS streamID \(frame.streamID) has server (even) parity; marking parseError")
+                logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): client-initiated HEADERS has server (even) parity; marking parseError")
                 parseError = true
                 rxBuffer = MITMByteBuffer()
                 return Data()
@@ -497,7 +497,7 @@ final class MITMHTTP2Connection {
         // a peer can put the entire ``maxHeaderBlockFragmentBytes``
         // budget into one frame and bypass the chain-side guard.
         if body.count > Self.maxHeaderBlockFragmentBytes {
-            logger.warning("[MITM] HTTP/2 stream \(frame.streamID): HEADERS payload \(body.count) B exceeded cap \(Self.maxHeaderBlockFragmentBytes); dropping")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): HEADERS payload \(body.count) B exceeded cap \(Self.maxHeaderBlockFragmentBytes); dropping")
             return Data()
         }
 
@@ -538,7 +538,7 @@ final class MITMHTTP2Connection {
         // RFC 9113 §6.10: CONTINUATION MUST be associated with a
         // stream. A streamID-zero CONTINUATION is a protocol error.
         guard frame.streamID != 0 else {
-            logger.warning("[MITM] HTTP/2: CONTINUATION on stream 0; marking parseError")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host): CONTINUATION on stream 0; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
             return Data()
@@ -556,7 +556,7 @@ final class MITMHTTP2Connection {
             // raises COMPRESSION_ERROR and GOAWAYs the connection.
             // Drop and stop processing to keep both decoders in
             // sync.
-            logger.warning("[MITM] HTTP/2: stray CONTINUATION on stream \(frame.streamID) (no pending HEADERS); marking parseError")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): stray CONTINUATION; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
             return Data()
@@ -567,7 +567,7 @@ final class MITMHTTP2Connection {
         // on the append itself; the existing variable ``p`` shares
         // ``pending``'s storage by COW until the first mutation.
         if p.fragments.count + frame.payload.count > Self.maxHeaderBlockFragmentBytes {
-            logger.warning("[MITM] HTTP/2 stream \(frame.streamID): header block fragments would be \(p.fragments.count + frame.payload.count) B, over cap \(Self.maxHeaderBlockFragmentBytes); dropping")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): header block fragments would be \(p.fragments.count + frame.payload.count) B, over cap \(Self.maxHeaderBlockFragmentBytes); dropping")
             pending = nil
             return Data()
         }
@@ -595,7 +595,7 @@ final class MITMHTTP2Connection {
         // and GOAWAY the connection, killing every other in-flight
         // stream. Drop and mark parseError instead.
         guard direction == .outbound else {
-            logger.warning("[MITM] HTTP/2: PUSH_PROMISE on inbound leg (client → server); marking parseError")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host): PUSH_PROMISE on inbound leg (client → server); marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
             return Data()
@@ -603,7 +603,7 @@ final class MITMHTTP2Connection {
         // §6.6: PUSH_PROMISE MUST be associated with an existing,
         // peer-initiated stream — streamID 0 is a protocol error.
         guard frame.streamID != 0 else {
-            logger.warning("[MITM] HTTP/2: PUSH_PROMISE on stream 0; marking parseError")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host): PUSH_PROMISE on stream 0; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
             return Data()
@@ -618,7 +618,7 @@ final class MITMHTTP2Connection {
         }
 
         if body.count > Self.maxHeaderBlockFragmentBytes {
-            logger.warning("[MITM] HTTP/2 stream \(frame.streamID): PUSH_PROMISE payload \(body.count) B exceeded cap \(Self.maxHeaderBlockFragmentBytes); dropping")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): PUSH_PROMISE payload \(body.count) B exceeded cap \(Self.maxHeaderBlockFragmentBytes); dropping")
             return Data()
         }
 
@@ -659,7 +659,7 @@ final class MITMHTTP2Connection {
             // failure mode the parseError flag exists to prevent.
             // Trip parseError so ``process(_:)`` short-circuits and
             // the peer GOAWAYs after its idle timeout.
-            logger.warning("[MITM] HTTP/2 stream \(streamID): HPACK decode failed; marking parseError to prevent table desync")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): HPACK decode failed; marking parseError to prevent table desync")
             parseError = true
             rxBuffer = MITMByteBuffer()
             return Data()
@@ -788,7 +788,7 @@ final class MITMHTTP2Connection {
            !endStreamOnHeaders,
            rewriter.hasStreamScriptRule(phase: phase, pathAndQuery: gatePathAndQuery) {
             if rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery) {
-                logger.warning("[MITM] HTTP/2 stream \(streamID): streamScript rule wins over script rule")
+                logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): Stream Script rule wins over Script rule")
             }
 
             // Inbound HEADERS still need to land in the request log so
@@ -827,6 +827,9 @@ final class MITMHTTP2Connection {
         if case .headers = kind, !isTrailer, !isInterimResponse,
            rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery),
            shouldBufferStream(headers: rewritten, endStream: endStreamOnHeaders) {
+            if !endStreamOnHeaders {
+                warnIfBufferedScriptDeStreams(streamID: streamID, headers: rewritten)
+            }
             let codec = MITMBodyCodec.plan(for: firstHeaderValue(rewritten, name: "content-encoding"))
             // Drop content-length: the post-script body size is
             // unknown at HEADERS-defer time and HTTP/2 doesn't require
@@ -892,7 +895,7 @@ final class MITMHTTP2Connection {
         // keyed at slot 0, colliding with any other stream-0
         // bookkeeping.
         guard frame.streamID != 0 else {
-            logger.warning("[MITM] HTTP/2: DATA on stream 0; marking parseError")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host): DATA on stream 0; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
             return Data()
@@ -947,7 +950,7 @@ final class MITMHTTP2Connection {
         // HEADERS (without script mutations) plus the buffered prefix
         // as DATA, then continues to forward subsequent DATA verbatim.
         if !endStream, pending.data.count > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("[MITM] HTTP/2 stream \(streamID) exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); abandoning rewrite")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); abandoning")
             return abandonPending(streamID: streamID, pending: &pending)
         }
 
@@ -1110,7 +1113,7 @@ final class MITMHTTP2Connection {
             let growth = result.body.count - body.count
             let projected = max(0, streaming.cumulativeGrowth + growth)
             if projected > Self.maxStreamingRewriteGrowthBytes {
-                logger.warning("[MITM] HTTP/2 stream \(streamID): streamScript projected growth \(projected) B exceeded cap \(Self.maxStreamingRewriteGrowthBytes) B; bypassing this frame and remaining frames to avoid FLOW_CONTROL_ERROR")
+                logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): streamScript projected growth \(projected) B exceeded cap \(Self.maxStreamingRewriteGrowthBytes) B; bypassing this frame and remaining frames to avoid FLOW_CONTROL_ERROR")
                 streaming.cursor.bypass = true
                 emitted = body
             } else {
@@ -1232,7 +1235,7 @@ final class MITMHTTP2Connection {
             // still carries `content-encoding` because we no longer
             // strip it at deferral time. HTTP/1 takes the same
             // approach in ``applyScriptsAndEmit``.
-            guard let decoded = MITMBodyCodec.decompress(pending.data, plan: pending.codec) else {
+            guard let decoded = MITMBodyCodec.decompress(pending.data, plan: pending.codec, host: rewriter.host) else {
                 return emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream)
             }
             plaintext = decoded
@@ -1292,7 +1295,7 @@ final class MITMHTTP2Connection {
         let rewrittenWireBytes = result.body.count
         if rewrittenWireBytes > originalIdentityBytes,
            rewrittenWireBytes - originalIdentityBytes > Self.maxBufferedRewriteGrowthBytes {
-            logger.warning("[MITM] HTTP/2 stream \(streamID): script grew body by \(rewrittenWireBytes - originalIdentityBytes) B (cap \(Self.maxBufferedRewriteGrowthBytes) B = default initial window); emitting original payload to avoid FLOW_CONTROL_ERROR")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): script grew body by \(rewrittenWireBytes - originalIdentityBytes) B (cap \(Self.maxBufferedRewriteGrowthBytes) B); emitting original payload to avoid FLOW_CONTROL_ERROR")
             return emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream)
         }
 
@@ -1372,6 +1375,19 @@ final class MITMHTTP2Connection {
         return nil
     }
 
+    /// HTTP/2 analogue of the HTTP/1 advisory: warns when a buffered
+    /// ``.script`` rule will hold a streaming response (SSE and friends;
+    /// see ``MITMScriptTransform/isStreamingMediaType(_:)``) until
+    /// END_STREAM before the client sees any of it. The rule still runs,
+    /// as requested; ``streamScript`` is the per-frame alternative.
+    /// Response phase only.
+    private func warnIfBufferedScriptDeStreams(streamID: UInt32, headers: [(name: String, value: String)]) {
+        let contentType = firstHeaderValue(headers, name: "content-type")
+        guard phase == .httpResponse,
+              MITMScriptTransform.isStreamingMediaType(contentType) else { return }
+        logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): buffered Script on a streaming response. Switch to Stream Script to rewrite frames as they arrive.")
+    }
+
     /// HTTP/2's default initial flow-control window (RFC 9113 §6.9.2).
     /// A synthesized response body larger than this would overflow the
     /// client's window before any WINDOW_UPDATE could arrive — we don't
@@ -1442,7 +1458,7 @@ final class MITMHTTP2Connection {
             guard Self.isValidHeaderName(n),
                   Self.isValidHTTP2HeaderValue(entry.value)
             else {
-                logger.warning("[MITM][JS] Anywhere.respond dropping invalid header: \(entry.name)")
+                logger.warning("[MITM][JS] HTTP/2 \(rewriter.host): Anywhere.respond dropping invalid header: \(entry.name)")
                 continue
             }
             // HTTP/2 forbids uppercase header names (RFC 9113 §8.2.1);
@@ -1454,7 +1470,7 @@ final class MITMHTTP2Connection {
 
         let body: Data
         if response.body.count > Self.maxSynthesizedResponseBodyBytes {
-            logger.warning("[MITM][JS] Anywhere.respond body \(response.body.count) B exceeds initial flow-control window; truncating to \(Self.maxSynthesizedResponseBodyBytes) B")
+            logger.warning("[MITM][JS] HTTP/2 \(rewriter.host): Anywhere.respond body \(response.body.count) B exceeds initial flow-control window; truncating to \(Self.maxSynthesizedResponseBodyBytes) B")
             let end = response.body.startIndex + Self.maxSynthesizedResponseBodyBytes
             body = response.body.subdata(in: response.body.startIndex..<end)
         } else {
@@ -1726,7 +1742,7 @@ final class MITMHTTP2Connection {
         guard buffer.count >= 9 else { return nil }
         let length = (Int(buffer[0]) << 16) | (Int(buffer[1]) << 8) | Int(buffer[2])
         if length > Self.maxReceivedFramePayloadSize {
-            logger.warning("[MITM] HTTP/2: frame length \(length) B exceeded receive cap \(Self.maxReceivedFramePayloadSize); breaking connection state")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host): frame length \(length) B exceeded receive cap \(Self.maxReceivedFramePayloadSize); breaking connection state")
             parseError = true
             buffer.removeAll(keepingCapacity: false)
             return nil

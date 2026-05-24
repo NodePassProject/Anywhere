@@ -83,6 +83,36 @@ enum MITMScriptTransform {
         }
     }
 
+    /// Recognises response media types whose whole point is incremental
+    /// delivery — Server-Sent Events, multipart server-push / motion
+    /// JPEG, and the newline-/record-delimited JSON streaming formats.
+    /// A buffered ``.script`` rule on one of these de-streams it: the
+    /// rewriter must accumulate the entire body before the client sees a
+    /// single byte. The rule still runs (the author asked for it), but
+    /// the rewriters use this to warn that a ``.streamScript`` rule
+    /// (per-frame, no buffering) is the better fit. Matches on the media
+    /// type alone — parameters like `; charset=utf-8` or `; boundary=…`
+    /// don't change the verdict.
+    static func isStreamingMediaType(_ contentType: String?) -> Bool {
+        guard let raw = contentType else { return false }
+        let mediaType = raw
+            .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+            .first
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+            ?? ""
+        switch mediaType {
+        case "text/event-stream",            // Server-Sent Events
+             "multipart/x-mixed-replace",    // server push / motion JPEG
+             "application/x-ndjson",         // newline-delimited JSON
+             "application/jsonl",
+             "application/stream+json",
+             "application/json-seq":         // RFC 7464 JSON text sequences
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Runs the single ``.script`` rule whose URL pattern matches the
     /// request-target, picking the last matching rule when several
     /// would qualify (overwrite semantics; see the type-level note).

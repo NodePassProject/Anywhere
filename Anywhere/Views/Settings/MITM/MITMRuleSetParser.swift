@@ -107,6 +107,35 @@ import JavaScriptCore
 /// the header's current value; a header that is not present is left
 /// alone.
 ///
+/// **Choosing `script` (op `4`) vs `stream-script` (op `5`).** Both run
+/// a `process(ctx)` function over the matched message; they differ in
+/// whether the script sees the body whole or frame-by-frame.
+///
+/// Use `script` — the default — whenever the rewrite needs the whole
+/// message at once: mutating head fields (`ctx.url`, `ctx.method`,
+/// `ctx.status`, `ctx.headers`), rewriting a body as a unit (JSON,
+/// protobuf, JWT, or a regex over the full text), or short-circuiting a
+/// request with `Anywhere.respond(...)`. The rewriter buffers the body —
+/// auto-decoding `gzip`/`deflate`/`br` — runs the script once, and
+/// re-emits with a corrected `Content-Length`. The body is held up to a
+/// 4 MiB cap; larger bodies fall back to passthrough (chunked bodies are
+/// truncated at the cap). Because nothing reaches the client until the
+/// body is complete, a `script` rule **de-streams** the response — right
+/// for ordinary request/response APIs, wrong for a live stream.
+///
+/// Use `stream-script` when the response must keep flowing and must not
+/// stall: Server-Sent Events (`text/event-stream`), chunked event /
+/// NDJSON feeds, gRPC or HTTP/2 DATA streams, or any long-lived or very
+/// large body. It runs `process(ctx)` once per frame and never buffers,
+/// so bytes reach the client as they arrive — at the cost of a narrower
+/// contract (immutable head, no HTTP-level decompression, and no HTTP/1
+/// `Content-Length` bodies), detailed below.
+///
+/// Rule of thumb: need the whole body or the head → `script`; must keep
+/// the response flowing frame-by-frame → `stream-script`. A `script`
+/// rule pointed at a streaming response still runs, but logs a runtime
+/// warning recommending `stream-script`.
+///
 /// `script` carries a base64-encoded UTF-8 JavaScript source defining
 /// `function process(ctx)`. The runtime invokes it with a mutable
 /// message-context object: the script can mutate `ctx.body`
