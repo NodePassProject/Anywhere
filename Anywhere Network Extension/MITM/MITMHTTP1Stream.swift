@@ -158,6 +158,19 @@ final class MITMHTTP1Stream {
         case rewritingLength(pending: PendingHead, expected: Int, accumulator: Data)
         case rewritingChunked(pending: PendingHead, accumulator: Data, reader: ChunkedReader)
 
+        /// Buffering a read-until-close body — no Content-Length, no
+        /// chunked framing — to rewrite it. Unlike the other rewrite
+        /// modes there's no in-band terminator: the body ends when the
+        /// upstream closes the connection, so the session pump calls
+        /// ``finish()`` at EOF to run the script chain and flush. The
+        /// head is withheld (in ``pending``) until then. Identity-coded
+        /// only — the framing dispatch gates compressed bodies out,
+        /// since a decompression bomb whose length we can't bound up
+        /// front isn't safe to buffer optimistically. On cap overflow we
+        /// fall back to emitting the head + buffered bytes and passing
+        /// the remainder through verbatim.
+        case rewritingUntilClose(pending: PendingHead, accumulator: Data)
+
         /// Reached when a chunked body has overflowed
         /// ``MITMBodyCodec/maxBufferedBodyBytes`` mid-rewrite. The
         /// head + truncated rewritten body have already been emitted;
@@ -224,6 +237,24 @@ final class MITMHTTP1Stream {
         return bytes
     }
 
+    /// Called by the session pump when the upstream half-closes. A
+    /// read-until-close body carries no in-band terminator — the close
+    /// *is* the terminator — so this is where a buffered
+    /// ``Mode/rewritingUntilClose`` body finally runs its script chain
+    /// and gets emitted. Returns the bytes to write toward the client
+    /// before teardown; empty in every other mode, since nothing was
+    /// withheld. Idempotent: flips to ``Mode/passthrough`` so a second
+    /// call (or stray late bytes) produces nothing.
+    func finish() -> Data {
+        var output = Data()
+        if case .rewritingUntilClose(let pending, let accumulator) = mode {
+            applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: nil, into: &output)
+            flushSynthAfterResponse(into: &output)
+            mode = .passthrough
+        }
+        return output
+    }
+
     /// Appends any synth-after-response bytes captured when this
     /// response's request record was popped, and clears the buffer.
     /// Called by the response stream at every transition where the
@@ -272,6 +303,10 @@ final class MITMHTTP1Stream {
         case .rewritingChunked(let pending, var accumulator, var reader):
             mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
             return rewriteChunked(pending: pending, accumulator: &accumulator, reader: &reader, into: &output)
+
+        case .rewritingUntilClose(let pending, var accumulator):
+            mode = .rewritingUntilClose(pending: pending, accumulator: accumulator)
+            return rewriteUntilClose(pending: pending, accumulator: &accumulator, into: &output)
 
         case .discardingChunked(var reader):
             mode = .discardingChunked(reader: reader)
@@ -389,10 +424,47 @@ final class MITMHTTP1Stream {
             originatingMethod: originatingRequest?.method
         )
 
+        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, pathAndQuery: gatePathAndQuery)
+
         // Protocol upgrades and "read until close" responses can't be
         // safely re-framed, so emit the rewritten head and downgrade.
         switch framing {
         case .switchingProtocols, .readUntilClose:
+            // Read-until-close responses normally pass through
+            // unmodified, but when a buffered script applies and the
+            // body is identity-coded we can buffer it to EOF — the
+            // connection close is the body terminator (see ``finish()``)
+            // — run the script, and re-emit with a definite
+            // Content-Length. Mirrors the HTTP/2 missing-length path
+            // (``shouldBufferStream``). Compressed bodies stay
+            // passthrough: a decompression bomb whose length we can't
+            // bound up front isn't safe to buffer optimistically, same
+            // stance as HTTP/2. Stream scripts need in-band framing they
+            // don't get here, so they fall through too.
+            if case .readUntilClose = framing, scriptsApply,
+               !MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: gatePathAndQuery) {
+                let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
+                if codec.supported, !codec.requiresDecompression {
+                    // Force ``Connection: close`` so both the success
+                    // path (definite Content-Length, upstream already
+                    // gone) and the overflow fallback (read-until-close
+                    // passthrough) frame correctly for the client.
+                    var headers = rewrittenHeaders.filter {
+                        !$0.name.equalsIgnoringASCIICase("connection")
+                    }
+                    headers.append((name: "Connection", value: "close"))
+                    mode = .rewritingUntilClose(
+                        pending: PendingHead(
+                            startLine: rewrittenStartLine,
+                            headers: headers,
+                            codec: codec,
+                            originatingRequest: originatingRequest
+                        ),
+                        accumulator: Data()
+                    )
+                    return true
+                }
+            }
             // Request side records the outgoing request even though
             // scripts can't run, so the response leg can still look up
             // method/url on subsequent messages.
@@ -434,8 +506,6 @@ final class MITMHTTP1Stream {
         case .none, .contentLength, .chunked:
             break
         }
-
-        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, pathAndQuery: gatePathAndQuery)
 
         switch framing {
         case .none:
@@ -726,6 +796,34 @@ final class MITMHTTP1Stream {
             mode = .passthrough
             return true
         }
+    }
+
+    /// Accumulates a read-until-close body until the upstream closes
+    /// (handled in ``finish()``). There's no in-band terminator and no
+    /// up-front length, so the buffer cap is the only bound on how much
+    /// we'll hold. On overflow we give up on rewriting: emit the
+    /// (unmodified) head — still read-until-close framed via the
+    /// ``Connection: close`` forced in at head time — flush what we
+    /// buffered, and pass the remainder through verbatim. Mirrors the
+    /// chunked-overflow fallback.
+    private func rewriteUntilClose(
+        pending: PendingHead,
+        accumulator: inout Data,
+        into output: inout Data
+    ) -> Bool {
+        guard !rxBuffer.isEmpty else { return false }
+        accumulator.append(rxBuffer.prefix(rxBuffer.count))
+        rxBuffer.removeAll(keepingCapacity: false)
+        if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
+            logger.warning("[MITM] HTTP/1 \(host): read-until-close body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing script and forwarding verbatim")
+            output.append(serializeHead(startLine: pending.startLine, headers: pending.headers))
+            output.append(accumulator)
+            flushSynthAfterResponse(into: &output)
+            mode = .passthrough
+            return true
+        }
+        mode = .rewritingUntilClose(pending: pending, accumulator: accumulator)
+        return false
     }
 
     /// Parses chunked-transfer encoding with a one-chunk lookahead so
