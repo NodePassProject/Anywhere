@@ -87,8 +87,9 @@ enum MITMBodyCodec {
 
     /// Applies ``plan`` to ``data`` in reverse-of-apply order. Returns
     /// nil if any codec fails to decode or the plan contains an
-    /// unsupported codec.
-    static func decompress(_ data: Data, plan: Plan) -> Data? {
+    /// unsupported codec. ``host`` is used only to attribute a decode
+    /// failure in the log to the connection it came from.
+    static func decompress(_ data: Data, plan: Plan, host: String) -> Data? {
         guard plan.supported else { return nil }
         var current = data
         for codec in plan.codecs.reversed() {
@@ -97,19 +98,19 @@ enum MITMBodyCodec {
                 continue
             case .gzip:
                 guard let next = gunzip(current) else {
-                    logger.warning("[MITM] gzip decode failed (\(current.count) B)")
+                    logger.warning("[MITM] \(host): gzip decode failed (\(current.count) B)")
                     return nil
                 }
                 current = next
             case .deflate:
                 guard let next = inflateDeflate(current) else {
-                    logger.warning("[MITM] deflate decode failed (\(current.count) B)")
+                    logger.warning("[MITM] \(host): deflate decode failed (\(current.count) B)")
                     return nil
                 }
                 current = next
             case .brotli:
                 guard let next = streamDecode(current, algorithm: COMPRESSION_BROTLI) else {
-                    logger.warning("[MITM] brotli decode failed (\(current.count) B)")
+                    logger.warning("[MITM] \(host): brotli decode failed (\(current.count) B)")
                     return nil
                 }
                 current = next
@@ -312,7 +313,7 @@ enum MITMBodyCodec {
                     let written = bufferSize - stream.pointee.dst_size
                     if written > 0 {
                         if output.count + written > maxBufferedBodyBytes {
-                            logger.warning("[MITM] decompress output would exceed cap \(maxBufferedBodyBytes) B; aborting (likely decompression bomb)")
+                            logger.warning("[MITM] decompress output would exceed cap \(maxBufferedBodyBytes) B; aborting")
                             return nil
                         }
                         output.append(buffer, count: written)
