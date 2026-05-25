@@ -19,7 +19,7 @@ private let logger = AnywhereLogger(category: "MITM")
 /// symbol without capturing closure state, which the Swift compiler
 /// forbids inside ``@convention(c)`` blocks.
 private nonisolated(unsafe) var mitmScriptTypedArrayBytes: Int = 0
-private let mitmScriptTypedArrayLock = NSLock()
+private let mitmScriptTypedArrayLock = UnfairLock()
 
 /// Per-``MITMSession`` JavaScript runtime for the
 /// ``CompiledMITMOperation/script`` rule. One ``JSContext`` is reused
@@ -140,20 +140,22 @@ final class MITMScriptEngine {
 
     private let context: JSContext
     /// Compiled `process(ctx)` functions keyed by the
-    /// ``CompiledMITMOperation``'s ``sourceKey``. Using a precomputed
-    /// hash as the key keeps lookups O(1) regardless of source size —
-    /// the previous ``[String: JSValue]`` cache rehashed and recompared
-    /// the entire source on every JS call, which dominated CPU for
-    /// large scripts on hot streams.
+    /// ``CompiledMITMOperation``'s ``sourceKey``. Keying on a precomputed
+    /// 64-bit hash keeps each lookup O(1) regardless of source size,
+    /// which matters on a hot stream that looks the same rule up on every
+    /// message.
     ///
-    /// Stores the source alongside the function so cache hits verify
-    /// the source matches before returning. ``sourceCacheKey`` uses
-    /// ``Hasher`` (a randomly-seeded 64-bit hash), so distinct sources
-    /// collide with probability ~2^-32 per pair — vanishing in
-    /// practice but not impossible. Without the source check, a
-    /// collision would silently execute the wrong script for a rule.
+    /// The stored ``byteCount`` is a cheap collision guard.
+    /// ``sourceCacheKey`` is a randomly-seeded ``Hasher`` output, so two
+    /// distinct sources share a key only on a full 64-bit collision
+    /// (~2^-64 per pair) — vanishing in practice. Confirming the stored
+    /// length on a hit is O(1); comparing the whole source would be an
+    /// O(n) walk on every JS call, the very cost this hash-keyed cache
+    /// exists to avoid. A length mismatch recompiles under the same key;
+    /// a same-length 64-bit collision is the only residual gap, not worth
+    /// the per-call compare.
     private struct CompiledEntry {
-        let source: String
+        let byteCount: Int
         let function: JSValue
     }
     private var compiled: [Int: CompiledEntry] = [:]
@@ -178,10 +180,10 @@ final class MITMScriptEngine {
     /// Process-wide JSC heap shared by every ``MITMScriptEngine``. Each
     /// session still owns its own ``JSContext`` so script-set globals
     /// stay per-session, but the underlying heap, GC, and allocator
-    /// are shared — the previous one-VM-per-engine layout multiplied
-    /// JSC's multi-MiB per-VM cost by every active MITM session, which
-    /// the Network Extension's ~50 MiB budget can't sustain under even
-    /// modest concurrency. JSC serializes access to the heap with an
+    /// are shared: a separate ``JSVirtualMachine`` per engine would
+    /// multiply JSC's multi-MiB per-VM cost by every active MITM session,
+    /// which the Network Extension's ~50 MiB budget can't sustain under
+    /// even modest concurrency. JSC serializes access to the heap with an
     /// internal mutex, so multiple sessions on independent queues are
     /// safe without an external lock.
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
@@ -197,16 +199,6 @@ final class MITMScriptEngine {
     /// at the engine boundary; cost is a single uncontended
     /// ``NSLock`` acquisition per script call.
     private let invocationLock = NSLock()
-
-    /// Running total of bytes pinned by ``NoCopy`` Uint8Array
-    /// allocations. Lives at file scope (see
-    /// ``mitmScriptTypedArrayBytes`` / ``mitmScriptTypedArrayLock``)
-    /// so the C-callable deallocator can access it. The deallocator
-    /// decrements when JSC's GC reclaims the view;
-    /// ``apply``/``applyFrame`` post a ``JSGarbageCollect`` hint when
-    /// the total crosses ``softTypedArrayBudget`` so the heap is
-    /// reclaimed before the Network Extension's ~50 MiB ceiling is
-    /// hit.
 
     /// Threshold above which we ask JSC to GC after the next script
     /// invocation completes. 16 MiB leaves ample room for in-flight
@@ -398,17 +390,12 @@ final class MITMScriptEngine {
     // MARK: - Compilation
 
     private func compileIfNeeded(_ source: String, key: Int) -> JSValue? {
+        let byteCount = source.utf8.count
         if let cached = compiled[key] {
-            // Defensive: verify the cached source actually matches
-            // the requested source. The cache is keyed on a 64-bit
-            // ``Hasher`` output; two distinct script sources can in
-            // theory share the same key (extremely unlikely in
-            // practice but not impossible). Without this check, a
-            // collision would silently execute the wrong script for
-            // a rule. On mismatch, fall through and overwrite —
-            // accepting an occasional recompile rather than wrong
-            // execution.
-            if cached.source == source { return cached.function }
+            // Defensive collision guard. The cache is keyed on a 64-bit
+            // ``Hasher`` output; two distinct sources can in theory
+            // share a key (extremely unlikely, but not impossible).
+            if cached.byteCount == byteCount { return cached.function }
             logger.warning("[MITM][JS] cache-key collision: recompiling under same key")
         }
         // IIFE wrap so the user's `function process(...)` lives in its
@@ -440,7 +427,7 @@ final class MITMScriptEngine {
             logger.warning("[MITM][JS] script's `process` is not a function; declare it as `function process(ctx) { ... }`")
             return nil
         }
-        compiled[key] = CompiledEntry(source: source, function: value)
+        compiled[key] = CompiledEntry(byteCount: byteCount, function: value)
         return value
     }
 
@@ -635,20 +622,15 @@ final class MITMScriptEngine {
     /// fails the ``pair.count == 2`` shape check. Reverting forces the
     /// drop warnings into the log path the caller can act on.
     private static func headersFromValue(_ value: JSValue) -> [(name: String, value: String)]? {
-        // The previous implementation used ``value.toArray()`` which
-        // funnels JS values through the Obj-C bridge — losing the
-        // JSValue identity for numeric, boolean, and nested-object
-        // leaves so the ``as? String`` cast falls through to
-        // ``String(describing:)``. The Obj-C bridge for a JS number
-        // produced strings like ``"Optional(42)"`` or raw
-        // ``JSValue`` debug descriptions, which then either failed
-        // ``isValidHeaderName`` (silently dropping the entry) or, for
-        // value position, landed on the wire verbatim. Iterate the
-        // original ``JSValue`` array and call ``toString()`` on each
-        // leaf so JSC's standard ``ToString`` runs (numbers →
-        // ``"42"``, booleans → ``"true"``, objects → ``"[object …]"``,
-        // etc.) — stable, predictable output that survives the
-        // validators below.
+        // Iterate the ``JSValue`` array and call ``toString()`` on each
+        // leaf so JSC's standard ``ToString`` runs (numbers → ``"42"``,
+        // booleans → ``"true"``, objects → ``"[object …]"``) — stable,
+        // predictable output that survives the validators below. Going
+        // through ``value.toArray()`` instead would funnel each leaf
+        // through the Obj-C bridge, which stringifies a JS number as
+        // ``"Optional(42)"`` or a raw ``JSValue`` debug description —
+        // values that then fail ``isValidHeaderName`` (dropping the
+        // entry) or land on the wire verbatim from value position.
         guard value.isArray else { return nil }
         let length = Int(value.objectForKeyedSubscript("length")?.toInt32() ?? 0)
         if length == 0 { return [] }
@@ -1933,11 +1915,10 @@ final class MITMScriptEngine {
                !bodyVal.isUndefined, !bodyVal.isNull {
                 // Use the currently-executing context for byte
                 // extraction, matching every sibling helper block
-                // (which all read ``JSContext.current()``). The two
-                // are the same context today, but referencing
-                // ``self.context`` here was an inconsistency that
-                // would break if a child/worker context were ever
-                // introduced.
+                // (which all read ``JSContext.current()``). The two are
+                // the same context today, but reading ``self.context``
+                // here would be an inconsistency that breaks if a
+                // child/worker context is ever introduced.
                 let ctx = JSContext.current() ?? self.context
                 body = Self.bytesFromValue(bodyVal, in: ctx) ?? Data()
             } else {

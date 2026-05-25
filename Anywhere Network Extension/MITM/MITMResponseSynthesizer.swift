@@ -200,13 +200,12 @@ final class MITMResponseSynthesizer {
             // RFC 9113 §3.4: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24 bytes.
             guard rxBuffer.count >= 24 else { return }
             // Verify the 24 bytes actually match the preface before
-            // consuming them. The previous behavior swallowed the
-            // first 24 bytes unconditionally; an upstream wiring bug
-            // (e.g. ALPN agreed on h2 but the client speaks
-            // HTTP/1.1) would otherwise have the first 24 plaintext
-            // bytes silently dropped and the remaining bytes
-            // misparsed as frames, producing protocol errors that
-            // are hard to debug. On mismatch, abort the synthesizer
+            // consuming them. Swallowing them unconditionally would, on
+            // an upstream wiring bug (e.g. ALPN agreed on h2 but the
+            // client speaks HTTP/1.1), silently drop the first 24
+            // plaintext bytes and misparse the remaining bytes as
+            // frames, producing protocol errors that are hard to
+            // debug. On mismatch, abort the synthesizer
             // — the inner record will close and the client gets an
             // unambiguous TLS-level failure rather than corrupted
             // h2 frames.

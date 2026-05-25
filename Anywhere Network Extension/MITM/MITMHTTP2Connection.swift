@@ -654,11 +654,11 @@ final class MITMHTTP2Connection {
             // against a poisoned table and emit silently-corrupted
             // header values to the destination peer.
             //
-            // The previous behavior here returned ``Data()`` and let
-            // the connection keep processing, which is exactly the
-            // failure mode the parseError flag exists to prevent.
-            // Trip parseError so ``process(_:)`` short-circuits and
-            // the peer GOAWAYs after its idle timeout.
+            // Returning ``Data()`` and letting the connection keep
+            // processing would hit exactly the failure mode parseError
+            // exists to prevent. Trip parseError so ``process(_:)``
+            // short-circuits and the peer GOAWAYs after its idle
+            // timeout.
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): HPACK decode failed; marking parseError to prevent table desync")
             parseError = true
             rxBuffer = MITMByteBuffer()
@@ -995,12 +995,11 @@ final class MITMHTTP2Connection {
     ///
     /// Lookahead: each DATA frame is held for one event so the script
     /// call with ``frame.end = true`` always carries the last frame's
-    /// actual bytes (rather than firing on an empty body after the
-    /// last DATA already went out — the old behaviour, which
-    /// diverged from HTTP/1 chunked semantics). When the next DATA
-    /// arrives, the held one is released as non-final; when this
-    /// frame's END_STREAM bit is set, the held one is released as
-    /// non-final and the current one is processed as final.
+    /// actual bytes, rather than firing on an empty body after the last
+    /// DATA already went out. This matches HTTP/1 chunked semantics.
+    /// When the next DATA arrives, the held one is released as non-final;
+    /// when this frame's END_STREAM bit is set, the held one is released
+    /// as non-final and the current one is processed as final.
     private func handleStreamingData(
         streamID: UInt32,
         streaming: inout StreamingState,
@@ -1232,9 +1231,10 @@ final class MITMHTTP2Connection {
             // Decompression failure: skip scripts and emit the
             // deferred HEADERS + raw bytes verbatim so the receiver
             // can still decode the original payload. ``pending.headers``
-            // still carries `content-encoding` because we no longer
-            // strip it at deferral time. HTTP/1 takes the same
-            // approach in ``applyScriptsAndEmit``.
+            // still carries `content-encoding` — it's stripped only
+            // after a successful decompression — so it correctly labels
+            // these still-encoded bytes. HTTP/1 takes the same approach
+            // in ``applyScriptsAndEmit``.
             guard let decoded = MITMBodyCodec.decompress(pending.data, plan: pending.codec, host: rewriter.host) else {
                 return emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream)
             }
@@ -1767,10 +1767,10 @@ final class MITMHTTP2Connection {
     /// ``maxFramePayloadSize``. END_STREAM lands on the last frame only.
     /// An empty input still emits a single empty DATA frame so any
     /// END_STREAM signal survives. Writes frame headers directly into
-    /// ``output`` and appends payload slices in place — avoids the
-    /// per-frame intermediate ``Data`` and ``subdata`` copy that the
-    /// older ``serializeFrame`` round-trip incurred (256 frames for a
-    /// 4 MiB body = 256 throwaway allocations on the previous path).
+    /// ``output`` and appends payload slices in place, avoiding the
+    /// per-frame intermediate ``Data`` and ``subdata`` copy a
+    /// ``serializeFrame`` round-trip would incur — 256 throwaway
+    /// allocations for a 4 MiB body split into 256 frames.
     private func emitDataFrames(streamID: UInt32, payload: Data, endStream: Bool) -> Data {
         if payload.isEmpty {
             var output = Data(capacity: 9)
@@ -1915,7 +1915,7 @@ final class MITMHTTP2Connection {
         out.append(UInt8(sid & 0xFF))
     }
 
-    /// Whole-frame serializer kept for the pass-through path where we
+    /// Whole-frame serializer for the pass-through path, where we
     /// receive a ``RawFrame`` from ``parseFrame`` and emit it verbatim
     /// (unknown frame types: SETTINGS, WINDOW_UPDATE, PING, GOAWAY,
     /// RST_STREAM, PRIORITY, future types). The emit-side hot paths

@@ -279,13 +279,13 @@ final class MITMSession {
         let parsed = parseClientHello(pendingClientBytes)
         let clientALPNs = parsed?.alpnProtocols ?? []
         // Fail-closed default: when the ClientHello fails to parse we
-        // assume the client does NOT support TLS 1.3. Previously this
-        // defaulted to ``true``, which would let a malformed CH coerce
-        // the outer leg into TLS 1.3 (and the inner leg into mirroring
-        // it) even when the client only spoke 1.2. On the false default
-        // the inner leg just offers TLS 1.2; a 1.3-capable client (which
-        // by spec also supports 1.2) negotiates 1.2 and the handshake
-        // still succeeds — only a hypothetical 1.3-only client would be
+        // assume the client does NOT support TLS 1.3. Defaulting to
+        // ``true`` instead would let a malformed CH coerce the outer leg
+        // into TLS 1.3 (and the inner leg into mirroring it) even when
+        // the client only spoke 1.2. With the false default the inner
+        // leg just offers TLS 1.2; a 1.3-capable client (which by spec
+        // also supports 1.2) negotiates 1.2 and the handshake still
+        // succeeds — only a hypothetical 1.3-only client would be
         // affected, and none exist in practice.
         let clientSupportsTLS13 = parsed?.supportedVersions.contains(0x0304) ?? false
 
@@ -618,8 +618,9 @@ final class MITMSession {
     /// (`transformed`) bytes — so unserialized chunking would interleave
     /// their bytes and split an HTTP/2 frame (or HTTP/1 message)
     /// mid-payload, desyncing the receiver. This drains one enqueued blob
-    /// to completion before starting the next, restoring the blob-level
-    /// atomicity the old single-``send`` path had.
+    /// to completion before starting the next, giving each blob the
+    /// all-or-nothing atomicity a single ``send`` call has but a
+    /// multi-chunk ``sendChunked`` does not.
     ///
     /// All methods must run on the ``queue`` passed at init.
     private final class LegSendSerializer {

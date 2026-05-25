@@ -60,14 +60,12 @@ final class MITMLeafCertCache {
         if let entry = entries[normalized] {
             let now = Date()
             if entry.leaf.expiry.timeIntervalSince(now) > Self.refreshThreshold {
-                // Touch the recency timestamp in place. Previously
-                // this also walked an ``accessOrder`` array via
-                // ``firstIndex(of:)`` + ``remove(at:)`` + ``append`` —
-                // O(n) per hit, which on a browser launch hitting
-                // hundreds of hosts dominates the hot path. Storing
-                // recency directly on the entry makes the hit path
-                // O(1) and defers the O(n) walk to eviction time,
-                // which only runs once per cache miss past the cap.
+                // Touch the recency timestamp in place. Storing recency
+                // on the entry keeps the cache-hit path O(1) and defers
+                // the O(n) scan for an eviction victim to eviction time,
+                // which only runs on a cache miss past the cap. On a
+                // browser launch hitting hundreds of hosts the hit path
+                // is hot, so an O(n) update per hit would dominate it.
                 entries[normalized]?.lastAccess = now
                 lock.unlock()
                 return entry.leaf

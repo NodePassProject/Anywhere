@@ -17,8 +17,8 @@ import Foundation
 ///
 /// The visible region is 0-indexed: callers see ``startIndex == 0``
 /// and ``endIndex == count`` regardless of how much storage has been
-/// consumed. ``range(of:)`` returns 0-relative indices so call sites
-/// originally written against ``Data`` need only swap the type.
+/// consumed. ``range(of:)`` returns 0-relative indices so a call site
+/// can swap ``Data`` for this type without reworking its index math.
 struct MITMByteBuffer {
 
     /// Compact when the consumed prefix grows past this many bytes,
