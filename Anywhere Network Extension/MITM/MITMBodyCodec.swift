@@ -167,10 +167,10 @@ enum MITMBodyCodec {
 
     /// Parses one or more concatenated gzip members per RFC 1952 §2.2.
     /// Each member is `<10-byte header><optional fields><deflate body>
-    /// <8-byte trailer>`. The previous implementation read only the
-    /// first member, dropping silently when an upstream sent
-    /// concatenated members (which some CDNs and the bgzf format
-    /// produce). Now we loop until the input is exhausted.
+    /// <8-byte trailer>`. Loops until the input is exhausted rather than
+    /// stopping after the first member: some CDNs and the bgzf format
+    /// emit concatenated members, and decoding only the first would
+    /// silently drop the rest of the body.
     private static func gunzip(_ data: Data) -> Data? {
         var combined = Data()
         var cursor = data.startIndex

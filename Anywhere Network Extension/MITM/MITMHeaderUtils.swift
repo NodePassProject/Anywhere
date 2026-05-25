@@ -46,15 +46,12 @@ extension String {
 
     /// Case-insensitive ASCII substring test. Returns true iff
     /// ``needle`` appears anywhere inside ``self`` under the same
-    /// ASCII A–Z fold rule as ``equalsIgnoringASCIICase``. Used by the
-    /// HTTP/1 framing decision to detect a chunked ``Transfer-Encoding``
-    /// value (which may be the bare token or one of several comma-
-    /// separated chain forms — `chunked`, `gzip, chunked`, etc.).
+    /// ASCII A–Z fold rule as ``equalsIgnoringASCIICase``.
     ///
     /// Iterates ``UTF8View`` indices directly rather than materialising
-    /// ``[UInt8]`` arrays — the previous implementation allocated two
-    /// arrays per call, defeating the "allocation-free" intent the
-    /// companion comparator documents.
+    /// ``[UInt8]`` arrays, which would allocate twice per call and
+    /// defeat the "allocation-free" intent the companion comparator
+    /// documents.
     func containsIgnoringASCIICase(_ needle: String) -> Bool {
         let hay = self.utf8
         let pat = needle.utf8

@@ -50,11 +50,11 @@ final class MITMHTTP1Stream {
     private let host: String
     private let phase: MITMPhase
     /// Compiled rules for this stream's host + phase, captured once at
-    /// init. ``MITMRewritePolicy.rules(for:phase:)`` lowercases the host,
-    /// walks the suffix trie, and filters the matched set into a fresh
-    /// array — none of which changes between messages on the same
-    /// session. Resolving once avoids repeating that work on every head,
-    /// every body chunk, and every script invocation.
+    /// init. Resolving them lowercases the host, walks the locked suffix
+    /// trie, and filters the matched set into a fresh array — none of
+    /// which changes between messages on the same session. Resolving
+    /// once avoids repeating that work on every head, every body chunk,
+    /// and every script invocation.
     private let rules: [CompiledMITMRule]
     /// ID of the rule set the host matched (or nil when no set
     /// applies). Used as the per-rule-set scope key for
@@ -85,8 +85,13 @@ final class MITMHTTP1Stream {
     ) {
         self.host = host
         self.phase = phase
-        self.rules = policy.rules(for: host, phase: phase)
-        self.ruleSetID = policy.set(for: host)?.id
+        // Resolve the host's rule set with one trie walk, then derive the
+        // phase-filtered rules and the set id from it. ``set(for:)``
+        // lowercases the host and walks the locked trie, so reading the
+        // rules and the id separately would walk it twice for one host.
+        let matchedSet = policy.set(for: host)
+        self.rules = matchedSet?.rules.filter { $0.phase == phase } ?? []
+        self.ruleSetID = matchedSet?.id
         self.effectiveAuthority = effectiveAuthority
         self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
@@ -1297,9 +1302,9 @@ final class MITMHTTP1Stream {
         }
     }
 
-    // MARK: - Re-chunking (legacy; kept for the chunked passthrough
-    // path where we want to preserve chunk shape rather than collapse
-    // to a single Content-Length unit).
+    // MARK: - Re-chunking. Used only on the chunked decompression-
+    // failure passthrough, which preserves the original chunk shape
+    // rather than collapsing the body to a single Content-Length unit.
 
     /// Re-emits ``body`` as chunked-transfer-encoding using
     /// ``originalSizes`` as chunk-size targets. All but the last emitted
@@ -1683,10 +1688,10 @@ final class MITMHTTP1Stream {
             // RFC 9112 §6.1: ``chunked`` MUST be the final transfer-
             // coding. ``Transfer-Encoding: gzip`` (no chunked) frames as
             // read-until-close for a response; for a request it is a
-            // protocol error. Splitting on `,` and comparing the last
-            // trimmed token avoids the substring-match overreach
-            // (``x-chunked-encoding`` would have matched the old
-            // ``containsIgnoringASCIICase("chunked")`` check).
+            // protocol error. Comparing only the last comma-separated,
+            // trimmed token avoids a substring-match overreach — a bare
+            // ``contains("chunked")`` would also match values like
+            // ``x-chunked-encoding``.
             let parts = te.split(separator: ",", omittingEmptySubsequences: false)
             if let last = parts.last?.trimmingCharacters(in: CharacterSet.whitespaces),
                last.equalsIgnoringASCIICase("chunked") {
@@ -1929,14 +1934,13 @@ final class MITMHTTP1Stream {
                 return fallback
             }
             // ``pathAndQuery`` returns nil for inputs that look
-            // relative (no scheme + no host). Previously this fell
-            // back to the raw ``url`` string, which on a malformed
-            // input could put an absolute-form
+            // relative (no scheme + no host). Fall back to the original
+            // request-target rather than the raw ``url`` string: on a
+            // malformed input the raw string could put an absolute-form
             // (``https://host/path``) request-target on the wire —
             // legal per RFC 9112 §3.2.2 but unintended and confusing
-            // for upstreams. Falling back to the original request-
-            // target preserves wire shape when the script wrote a
-            // URL the URL parser doesn't recognise.
+            // for upstreams. The fallback preserves wire shape when the
+            // script wrote a URL the parser doesn't recognise.
             let originalTarget = parts.count >= 2 ? String(parts[1]) : "/"
             let candidateTarget = pathAndQuery(fromURL: url) ?? originalTarget
             // RFC 9112 §3.2: SP/CR/LF/NUL/CTL cannot appear in the

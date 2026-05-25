@@ -12,25 +12,19 @@ import JavaScriptCore
 /// decompressed HTTP message. The HTTP/1.1 and HTTP/2 rewriters share
 /// this entry point so the rule-application loop lives in one place.
 ///
-/// **Single-rule semantics — by design, not a limitation.** At most
-/// one ``.script`` and at most one ``.streamScript`` may fire on a
-/// given message. When multiple rules of the same kind match the
-/// request's URL pattern, the last one in rule order wins — later
-/// definitions overwrite earlier ones.
+/// **Single-rule semantics.** At most one ``.script`` and at most one
+/// ``.streamScript`` fire on a given message; when several rules of the
+/// same kind match the request's URL, the last in rule order wins.
 ///
-/// Capping the script chain at one rule per kind is a deliberate
-/// design choice to maximize performance and efficiency, not a
-/// missing feature. It keeps the hot path lean — no chain
+/// Capping at one rule per kind keeps the hot path lean — no chain
 /// orchestration, no repeated Swift↔JS ctx round-trips per rule, no
-/// intermediate message copies between rules — and rules out
-/// state-collision hazards a chain would create: the JS engine's
-/// ``Anywhere.store`` keys are scoped to the rule set (not the rule),
-/// and the per-stream ``FrameCursor.state`` slot for ``streamScript``
-/// is single-valued, so chaining two scripts on the same URL
-/// would have them stomping each other's persistent state on every
-/// frame. Authors who need composed behaviour should consolidate
-/// logic into a single `process(ctx)` function rather than splitting
-/// across multiple rules.
+/// intermediate message copies — and rules out a state-collision hazard
+/// a chain would create: ``Anywhere.store`` keys are scoped to the rule
+/// set (not the rule), and the per-stream ``FrameCursor.state`` slot is
+/// single-valued, so two scripts chained on the same URL would stomp
+/// each other's persistent state on every frame. Authors who need
+/// composed behaviour should consolidate logic into a single
+/// `process(ctx)` function.
 enum MITMScriptTransform {
 
     /// Result of running a buffered ``.script`` rule on a message.
@@ -159,6 +153,15 @@ enum MITMScriptTransform {
         /// True once a script directive said "we're done with this
         /// stream" — subsequent frames bypass the script entirely.
         var bypass: Bool = false
+        /// Memoized stream-script resolution for this stream. A stream's
+        /// request-target and rule list are fixed for its lifetime, so
+        /// ``applyFrame`` resolves the matching ``.streamScript`` on the
+        /// first frame and reuses it — avoiding a per-frame URL parse and
+        /// a per-frame walk of the rule list (each rule a regex match) on
+        /// long-lived streams (SSE, gRPC, chunked APIs). Outer `nil` means
+        /// "not resolved yet"; `.some(nil)` means "resolved: no rule
+        /// matches"; `.some(.some)` carries the matched script.
+        fileprivate var resolvedMatch: ScriptMatch??
         init() {}
     }
 
@@ -182,9 +185,17 @@ enum MITMScriptTransform {
         cursor: FrameCursor,
         engineProvider: MITMScriptEngine.Provider?
     ) -> StreamFrameResult {
-        let pathAndQuery = MITMRequestURL.pathAndQuery(from: frameContext.url)
-        guard let match = lastMatchingStreamScriptSource(in: rules, pathAndQuery: pathAndQuery),
-              let engineProvider
+        // Resolve the stream-script on the first frame and reuse it
+        // thereafter; see ``FrameCursor.resolvedMatch``.
+        let resolved: ScriptMatch?
+        if let cached = cursor.resolvedMatch {
+            resolved = cached
+        } else {
+            let pathAndQuery = MITMRequestURL.pathAndQuery(from: frameContext.url)
+            resolved = lastMatchingStreamScriptSource(in: rules, pathAndQuery: pathAndQuery)
+            cursor.resolvedMatch = resolved
+        }
+        guard let match = resolved, let engineProvider
         else { return StreamFrameResult(body: frame, bypass: false) }
         let outcome = engineProvider.get().applyFrame(
             frame,
@@ -211,7 +222,7 @@ enum MITMScriptTransform {
     /// Match for a script lookup: the source the engine compiles plus
     /// the precomputed cache key the engine uses to dedup compilation
     /// across calls.
-    private struct ScriptMatch {
+    fileprivate struct ScriptMatch {
         let source: String
         let sourceKey: Int
     }

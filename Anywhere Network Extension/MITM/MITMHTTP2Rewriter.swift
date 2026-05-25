@@ -20,14 +20,13 @@ final class MITMHTTP2Rewriter {
 
     let host: String
     /// Compiled rules for this rewriter's host, split by phase and
-    /// captured once at init. ``MITMRewritePolicy.rules(for:phase:)``
-    /// lowercases the host, walks the suffix trie, and allocates a
-    /// fresh filtered array on every call — none of which changes
-    /// between messages on the same session. The same rationale
-    /// applies as in ``MITMHTTP1Stream``: every HEADERS frame would
-    /// otherwise pay that cost twice (script preflight + scripting),
-    /// and DATA frames on streaming-script rules would re-resolve on
-    /// every frame.
+    /// captured once at init. Resolving them lowercases the host, walks
+    /// the suffix trie, and allocates a fresh filtered array — none of
+    /// which changes between messages on the same session. Same
+    /// rationale as in ``MITMHTTP1Stream``: every HEADERS frame would
+    /// otherwise pay that cost twice (script preflight + scripting), and
+    /// DATA frames on streaming-script rules would re-resolve on every
+    /// frame.
     private let requestRules: [CompiledMITMRule]
     private let responseRules: [CompiledMITMRule]
     private let cachedRuleSetID: UUID?
@@ -52,9 +51,15 @@ final class MITMHTTP2Rewriter {
         requestLog: MITMRequestLog
     ) {
         self.host = host
-        self.requestRules = policy.rules(for: host, phase: .httpRequest)
-        self.responseRules = policy.rules(for: host, phase: .httpResponse)
-        self.cachedRuleSetID = policy.set(for: host)?.id
+        // Resolve the host's rule set once — each ``set(for:)`` /
+        // ``rules(for:phase:)`` lowercases the host and walks the locked
+        // trie — then split into per-phase lists and read the id from
+        // that single lookup instead of three.
+        let matchedSet = policy.set(for: host)
+        let matchedRules = matchedSet?.rules ?? []
+        self.requestRules = matchedRules.filter { $0.phase == .httpRequest }
+        self.responseRules = matchedRules.filter { $0.phase == .httpResponse }
+        self.cachedRuleSetID = matchedSet?.id
         self.effectiveAuthority = effectiveAuthority
         self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
