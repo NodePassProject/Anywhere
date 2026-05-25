@@ -643,11 +643,11 @@ nonisolated class TLSRecordConnection {
 
         var nonce = ingressIV
         xorSeqIntoNonce(&nonce, seqNum: seqNum)
+        
+        let ct = ciphertext.prefix(ciphertext.count - 16)
+        let tag = ciphertext.suffix(16)
 
-        let ct = Data(ciphertext.prefix(ciphertext.count - 16))
-        let tag = Data(ciphertext.suffix(16))
-
-        let decrypted = try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: Data(header), key: ingressSymmetricKey)
+        let decrypted = try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: header, key: ingressSymmetricKey)
 
         guard !decrypted.isEmpty else {
             throw RealityError.handshakeFailed("Empty decrypted data")

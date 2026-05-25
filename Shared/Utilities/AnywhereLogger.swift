@@ -70,24 +70,35 @@ struct AnywhereLogger {
 
     /// Per-connection / per-packet churn and other verbose diagnostics. os.log
     /// only (DEBUG builds), never the user-facing viewer.
-    func debug(_ message: String) { emit(message, level: .debug) }
+    ///
+    /// ``message`` is an `@autoclosure`, so the (usually interpolated) string is
+    /// built only when it will actually be logged. In release the body compiles
+    /// away entirely and the closure is never invoked — a `debug` call on a
+    /// per-packet path costs nothing, not even the string construction.
+    func debug(_ message: @autoclosure () -> String) {
+#if DEBUG
+        let text = message()
+        osLogger.debug("\(text, privacy: .public)")
+#endif
+    }
 
     /// Lifecycle milestones. Keep these low volume — they share the bounded
     /// user-facing buffer with warnings and errors.
-    func info(_ message: String) { emit(message, level: .info) }
+    func info(_ message: @autoclosure () -> String) { emit(message(), level: .info) }
 
     /// Degraded-but-recoverable conditions worth surfacing to the user.
-    func warning(_ message: String) { emit(message, level: .warning) }
+    func warning(_ message: @autoclosure () -> String) { emit(message(), level: .warning) }
 
     /// A failure the user can feel. Connection teardown errors should flow
     /// through `ConnectionFailureReporter` so each connection logs at most once.
-    func error(_ message: String) { emit(message, level: .error) }
+    func error(_ message: @autoclosure () -> String) { emit(message(), level: .error) }
 
-    /// Routes one line to os.log (always; `debug` only in DEBUG builds) and,
-    /// when it meets ``minimumSinkLevel``, to the user-facing sink.
+    /// Routes one line to os.log and, when it meets ``minimumSinkLevel``, to the
+    /// user-facing sink. Only `info` / `warning` / `error` reach here; `debug`
+    /// logs to os.log directly (DEBUG only) so it never pays for the sink check.
     private func emit(_ message: String, level: Level) {
         switch level {
-        case .debug: emitDebug(message)
+        case .debug: break // unreachable: debug() logs to os.log directly
         case .info: osLogger.info("\(message, privacy: .public)")
         case .warning: osLogger.warning("\(message, privacy: .public)")
         case .error: osLogger.error("\(message, privacy: .public)")
@@ -96,14 +107,5 @@ struct AnywhereLogger {
         if level >= Self.minimumSinkLevel {
             Self.logSink?(message, level)
         }
-    }
-
-    /// Compiles to a no-op in release so the field never pays for the verbose
-    /// `debug` firehose. Kept in its own function body (rather than a `#if`
-    /// inside the `emit` switch) so the `.debug` case is never empty.
-    private func emitDebug(_ message: String) {
-#if DEBUG
-        osLogger.debug("\(message, privacy: .public)")
-#endif
     }
 }

@@ -80,7 +80,15 @@ class ActivityTimer {
 
     private func startTimer(timeout: TimeInterval) {
         let newTimer = DispatchSource.makeTimerSource(queue: queue)
-        newTimer.schedule(deadline: .now() + timeout, repeating: timeout)
+        // Generous leeway (10% of the interval, ≥100ms) lets libdispatch align
+        // this fire with other wakeups instead of scheduling it at a precise
+        // instant.
+        let leeway = Swift.max(timeout * 0.1, 0.1)
+        newTimer.schedule(
+            deadline: .now() + timeout,
+            repeating: timeout,
+            leeway: .milliseconds(Int(leeway * 1000))
+        )
         newTimer.setEventHandler { [weak self] in
             guard let self, !self.cancelled else { return }
             if self.hasActivity {

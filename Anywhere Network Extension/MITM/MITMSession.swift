@@ -21,7 +21,7 @@ final class MITMSession {
         let queue: DispatchQueue
         var onSendToClient: ((Data, ((Error?) -> Void)?) -> Void)?
 
-        private let lock = NSLock()
+        private let lock = UnfairLock()
         private var buffer = Data()
         private var pending: ((Data?, Bool, Error?) -> Void)?
         private var closed = false
