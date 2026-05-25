@@ -198,11 +198,20 @@ enum HPACKEncoder {
 
     /// Encodes an arbitrary header list into a single HPACK header block.
     ///
-    /// All entries are emitted as "Literal Header Field without Indexing"
-    /// (RFC 7541 §6.2.2): no entries are added to the encoder's dynamic
-    /// table, so the encoder is stateless across calls. Names that appear
-    /// in the static table are encoded with an indexed name reference;
-    /// other names are emitted as literal strings.
+    /// Stateless across calls — nothing is added to a dynamic table, so
+    /// there is no per-connection encoder state to keep in sync. Each
+    /// field uses the smallest representation that needs no dynamic table:
+    ///
+    /// - Static-table *full* match (name **and** value) → "Indexed Header
+    ///   Field" (RFC 7541 §6.1): a single byte, e.g. `:status 200` → `0x88`,
+    ///   `:scheme https` → `0x87`, `:method GET` → `0x82`.
+    /// - Static-table *name* match → "Literal Header Field without Indexing"
+    ///   (§6.2.2) with an indexed name and a literal value.
+    /// - Otherwise → literal without indexing with a literal name.
+    ///
+    /// Because nothing is emitted with incremental indexing (§6.2.1), the
+    /// peer's dynamic table is never loaded and no value — sensitive or
+    /// otherwise — is ever indexed.
     ///
     /// Used by ``MITMHTTP2Connection`` to re-emit HEADERS / CONTINUATION
     /// frames after rewriting — independent dynamic-table state on each
@@ -212,7 +221,11 @@ enum HPACKEncoder {
     ) -> Data {
         var block = Data()
         for header in headers {
-            if let nameIdx = staticTableNameIndex(header.name) {
+            if let fullIndex = staticTableFullIndex(header.name, header.value) {
+                // §6.1 Indexed Header Field — name and value both come from
+                // the static table, so a single index byte suffices.
+                encodeIndexed(fullIndex, into: &block)
+            } else if let nameIdx = staticTableNameIndex(header.name) {
                 encodeLiteralWithoutIndexing(nameIndex: nameIdx, value: header.value, into: &block)
             } else {
                 encodeLiteralWithoutIndexing(name: header.name, value: header.value, into: &block)
@@ -344,6 +357,18 @@ enum HPACKEncoder {
         }
     }
 
+    // MARK: - Indexed Header Encoding
+
+    /// Encodes a §6.1 Indexed Header Field: a back-reference to a table
+    /// entry that supplies both name and value. Only ever called with
+    /// static indices (1–61), which fit the 7-bit prefix in a single byte.
+    private static func encodeIndexed(_ index: Int, into data: inout Data) {
+        var indexData = Data()
+        encodeInteger(index, prefixBits: 7, into: &indexData)
+        indexData[indexData.startIndex] |= 0x80  // 1xxxxxxx — Indexed Header Field
+        data.append(indexData)
+    }
+
     // MARK: - Literal Header Encoding
 
     /// Encodes a literal header without indexing, using an indexed name from the static table.
@@ -411,6 +436,18 @@ enum HPACKEncoder {
         let lower = name.lowercased()
         for (i, entry) in staticTable.enumerated() {
             if entry.name == lower { return i + 1 }  // 1-based
+        }
+        return nil
+    }
+
+    /// Returns the static table index whose name **and** value both match
+    /// (name case-insensitive, value exact), or `nil`. Enables the §6.1
+    /// single-byte Indexed Header Field for fully-specified common entries
+    /// such as `:method GET`, `:scheme https`, and `:status 200`.
+    private static func staticTableFullIndex(_ name: String, _ value: String) -> Int? {
+        let lower = name.lowercased()
+        for (i, entry) in staticTable.enumerated() {
+            if entry.name == lower && entry.value == value { return i + 1 }  // 1-based
         }
         return nil
     }
