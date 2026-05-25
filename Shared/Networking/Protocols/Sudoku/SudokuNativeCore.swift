@@ -9,24 +9,50 @@ import Foundation
 import CryptoKit
 
 private let sudokuProbabilityOne: UInt64 = 1 << 32
+private let sudokuObfsDefaultReadChunkSize = 128 * 1024
+private let sudokuObfsMinDecodeReadSize = 64
 
-struct SudokuSplitMix64 {
+func sudokuObfsWireReadSize(decodedRemaining: Int, pureDownlink: Bool, maxRaw: Int = sudokuObfsDefaultReadChunkSize) -> Int {
+    guard maxRaw > sudokuObfsMinDecodeReadSize, decodedRemaining > 0 else { return maxRaw }
+    let multiplier = pureDownlink ? 5 : 2
+    if decodedRemaining > (maxRaw - sudokuObfsMinDecodeReadSize) / multiplier {
+        return maxRaw
+    }
+    return min(maxRaw, decodedRemaining * multiplier + sudokuObfsMinDecodeReadSize)
+}
+
+struct SudokuXorshift64Star {
     private var state: UInt64
+    private var cachedUInt32: UInt32?
 
     init(seed: Int64) {
         let value = UInt64(bitPattern: seed)
         self.state = value == 0 ? 0x9e3779b97f4a7c15 : value
     }
 
-    mutating func nextUInt64() -> UInt64 {
-        state &+= 0x9e3779b97f4a7c15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xbf58476d1ce4e5b9
-        z = (z ^ (z >> 27)) &* 0x94d049bb133111eb
-        return z ^ (z >> 31)
+    private mutating func generateUInt64() -> UInt64 {
+        var x = state
+        x ^= x >> 12
+        x ^= x << 25
+        x ^= x >> 27
+        state = x
+        return x &* 0x2545f4914f6cdd1d
     }
 
-    mutating func nextUInt32() -> UInt32 { UInt32(truncatingIfNeeded: nextUInt64() >> 32) }
+    mutating func nextUInt64() -> UInt64 {
+        cachedUInt32 = nil
+        return generateUInt64()
+    }
+
+    mutating func nextUInt32() -> UInt32 {
+        if let cached = cachedUInt32 {
+            cachedUInt32 = nil
+            return cached
+        }
+        let value = generateUInt64()
+        cachedUInt32 = UInt32(truncatingIfNeeded: value)
+        return UInt32(truncatingIfNeeded: value >> 32)
+    }
 
     mutating func intn(_ n: Int) -> Int {
         guard n > 1 else { return 0 }
@@ -462,7 +488,7 @@ nonisolated final class SudokuTable {
         decodeMap = dec
     }
 
-    func encode(_ data: Data, rng: inout SudokuSplitMix64, paddingThreshold: UInt64) -> Data {
+    func encode(_ data: Data, rng: inout SudokuXorshift64Star, paddingThreshold: UInt64) -> Data {
         var out = Data(capacity: data.count * 6 + 8)
         for byte in data {
             if rng.shouldPad(threshold: paddingThreshold) { out.append(layout.paddingPool[rng.intn(layout.paddingPool.count)]) }
@@ -529,48 +555,177 @@ nonisolated final class SudokuTablePair {
     }
 }
 
-struct SudokuPureDecoder {
-    private var hintBuffer = [UInt8](); private var pending = Data(); private var pendingOffset = 0
-    mutating func decode(_ data: Data, table: SudokuTable, limit: Int) throws -> Data {
-        var out = drainPending(limit: limit)
-        if out.count == limit { return out }
-        for b in data {
-            guard table.layout.hintTable[Int(b)] else { continue }
-            hintBuffer.append(b)
-            guard hintBuffer.count == 4 else { continue }
-            let key = sudokuPackHints(hintBuffer[0], hintBuffer[1], hintBuffer[2], hintBuffer[3]); hintBuffer.removeAll(keepingCapacity: true)
-            guard let value = table.decodePackedKey(key) else { throw SudokuNativeError.protocolError("Sudoku decode failed") }
-            append(value, to: &out, limit: limit)
+private struct SudokuDecodedPending {
+    private var storage = Data()
+    private var offset = 0
+
+    var available: Int { storage.count - offset }
+    var isEmpty: Bool { available == 0 }
+
+    mutating func append(_ value: UInt8) {
+        compactBeforeAppend(additionalCount: 1)
+        storage.append(value)
+    }
+
+    mutating func drain(into out: UnsafeMutableBufferPointer<UInt8>, written: inout Int, limit: Int) {
+        guard limit > written, available > 0 else { return }
+        let count = min(limit - written, available)
+        guard count > 0 else { return }
+        storage.withUnsafeBytes { raw in
+            guard let source = raw.baseAddress, let target = out.baseAddress else { return }
+            target.advanced(by: written).update(from: source.assumingMemoryBound(to: UInt8.self).advanced(by: offset), count: count)
         }
+        offset += count
+        written += count
+        compactAfterRead()
+    }
+
+    private mutating func compactBeforeAppend(additionalCount: Int) {
+        guard offset > 0 else { return }
+        if offset == storage.count {
+            storage.removeAll(keepingCapacity: true)
+            offset = 0
+        } else if offset > 4096 || offset + additionalCount > storage.count {
+            storage.removeSubrange(0..<offset)
+            offset = 0
+        }
+    }
+
+    private mutating func compactAfterRead() {
+        if offset == storage.count {
+            storage.removeAll(keepingCapacity: true)
+            offset = 0
+        } else if offset > 4096 && offset * 2 > storage.count {
+            storage.removeSubrange(0..<offset)
+            offset = 0
+        }
+    }
+}
+
+struct SudokuPureDecoder {
+    private var hintBuffer = Array(repeating: UInt8(0), count: 4)
+    private var hintCount = 0
+    private var pending = SudokuDecodedPending()
+
+    mutating func decode(_ data: Data, table: SudokuTable, limit: Int) throws -> Data {
+        let outputLimit = max(0, limit)
+        guard outputLimit > 0 else { return Data() }
+        guard !data.isEmpty || !pending.isEmpty else { return Data() }
+        var out = Data(count: outputLimit)
+        var written = 0
+        let hintTable = table.layout.hintTable
+        try out.withUnsafeMutableBytes { rawOut in
+            let outBytes = rawOut.bindMemory(to: UInt8.self)
+            pending.drain(into: outBytes, written: &written, limit: outputLimit)
+            guard written < outputLimit else { return }
+            try data.withUnsafeBytes { rawInput in
+                let input = rawInput.bindMemory(to: UInt8.self)
+                for b in input {
+                    guard hintTable[Int(b)] else { continue }
+                    hintBuffer[hintCount] = b
+                    hintCount += 1
+                    guard hintCount == 4 else { continue }
+                    let key = sudokuPackHints(hintBuffer[0], hintBuffer[1], hintBuffer[2], hintBuffer[3])
+                    hintCount = 0
+                    guard let value = table.decodePackedKey(key) else { throw SudokuNativeError.protocolError("Sudoku decode failed") }
+                    appendDecoded(value, to: outBytes, written: &written, limit: outputLimit)
+                }
+            }
+        }
+        if written < out.count { out.removeSubrange(written..<out.count) }
         return out
     }
-    private mutating func append(_ value: UInt8, to out: inout Data, limit: Int) { if out.count < limit { out.append(value) } else { pending.append(value) } }
-    private mutating func drainPending(limit: Int) -> Data { guard pendingOffset < pending.count else { return Data() }; let n = min(limit, pending.count - pendingOffset); let out = pending.subdata(in: pendingOffset..<(pendingOffset + n)); pendingOffset += n; if pendingOffset == pending.count { pending.removeAll(keepingCapacity: true); pendingOffset = 0 }; return out }
+
+    private mutating func appendDecoded(_ value: UInt8, to out: UnsafeMutableBufferPointer<UInt8>, written: inout Int, limit: Int) {
+        if written < limit, let base = out.baseAddress {
+            base.advanced(by: written).pointee = value
+            written += 1
+        } else {
+            pending.append(value)
+        }
+    }
 }
 
 struct SudokuPackedDecoder {
     private let padMarker: UInt8
-    private var bitbuf: UInt64 = 0; private var bitcount = 0; private var pending = Data(); private var pendingOffset = 0
+    private var bitbuf: UInt64 = 0
+    private var bitcount = 0
+    private var pending = SudokuDecodedPending()
+
     init(table: SudokuTable) { padMarker = table.layout.padMarker }
+
     mutating func decode(_ data: Data, table: SudokuTable, limit: Int) throws -> Data {
-        var out = drainPending(limit: limit)
-        if out.count == limit { return out }
-        for b in data {
-            guard table.layout.hintTable[Int(b)] else { if b == padMarker { bitbuf = 0; bitcount = 0 }; continue }
-            guard table.layout.groupValid[Int(b)] else { throw SudokuNativeError.protocolError("Sudoku decode failed") }
-            let group = UInt64(table.layout.decodeGroup[Int(b)])
-            bitbuf = (bitbuf << 6) | group; bitcount += 6
-            while bitcount >= 8 {
-                bitcount -= 8
-                let value = UInt8(truncatingIfNeeded: bitbuf >> UInt64(bitcount))
-                bitbuf = bitcount == 0 ? 0 : bitbuf & ((UInt64(1) << UInt64(bitcount)) - 1)
-                append(value, to: &out, limit: limit)
+        let outputLimit = max(0, limit)
+        guard outputLimit > 0 else { return Data() }
+        guard !data.isEmpty || !pending.isEmpty else { return Data() }
+        var out = Data(count: outputLimit)
+        var written = 0
+        let hintTable = table.layout.hintTable
+        let groupValid = table.layout.groupValid
+        let decodeGroup = table.layout.decodeGroup
+        try out.withUnsafeMutableBytes { rawOut in
+            let outBytes = rawOut.bindMemory(to: UInt8.self)
+            pending.drain(into: outBytes, written: &written, limit: outputLimit)
+            guard written < outputLimit else { return }
+            try data.withUnsafeBytes { rawInput in
+                let input = rawInput.bindMemory(to: UInt8.self)
+                var index = 0
+                while index < input.count {
+                    if bitcount == 0, written + 3 <= outputLimit, index + 3 < input.count {
+                        let b1 = input[index]
+                        let b2 = input[index + 1]
+                        let b3 = input[index + 2]
+                        let b4 = input[index + 3]
+                        let i1 = Int(b1), i2 = Int(b2), i3 = Int(b3), i4 = Int(b4)
+                        if hintTable[i1], hintTable[i2], hintTable[i3], hintTable[i4],
+                           groupValid[i1], groupValid[i2], groupValid[i3], groupValid[i4] {
+                            let g1 = UInt16(decodeGroup[i1])
+                            let g2 = UInt16(decodeGroup[i2])
+                            let g3 = UInt16(decodeGroup[i3])
+                            let g4 = UInt16(decodeGroup[i4])
+                            outBytes[written] = UInt8(truncatingIfNeeded: (g1 << 2) | (g2 >> 4))
+                            outBytes[written + 1] = UInt8(truncatingIfNeeded: (g2 << 4) | (g3 >> 2))
+                            outBytes[written + 2] = UInt8(truncatingIfNeeded: (g3 << 6) | g4)
+                            written += 3
+                            index += 4
+                            continue
+                        }
+                    }
+
+                    let b = input[index]
+                    index += 1
+                    guard hintTable[Int(b)] else {
+                        if b == padMarker {
+                            bitbuf = 0
+                            bitcount = 0
+                        }
+                        continue
+                    }
+                    guard groupValid[Int(b)] else { throw SudokuNativeError.protocolError("Sudoku decode failed") }
+                    let group = UInt64(decodeGroup[Int(b)])
+                    bitbuf = (bitbuf << 6) | group
+                    bitcount += 6
+                    while bitcount >= 8 {
+                        bitcount -= 8
+                        let value = UInt8(truncatingIfNeeded: bitbuf >> UInt64(bitcount))
+                        bitbuf = bitcount == 0 ? 0 : bitbuf & ((UInt64(1) << UInt64(bitcount)) - 1)
+                        appendDecoded(value, to: outBytes, written: &written, limit: outputLimit)
+                    }
+                }
             }
         }
+        if written < out.count { out.removeSubrange(written..<out.count) }
         return out
     }
-    private mutating func append(_ value: UInt8, to out: inout Data, limit: Int) { if out.count < limit { out.append(value) } else { pending.append(value) } }
-    private mutating func drainPending(limit: Int) -> Data { guard pendingOffset < pending.count else { return Data() }; let n = min(limit, pending.count - pendingOffset); let out = pending.subdata(in: pendingOffset..<(pendingOffset + n)); pendingOffset += n; if pendingOffset == pending.count { pending.removeAll(keepingCapacity: true); pendingOffset = 0 }; return out }
+
+    private mutating func appendDecoded(_ value: UInt8, to out: UnsafeMutableBufferPointer<UInt8>, written: inout Int, limit: Int) {
+        if written < limit, let base = out.baseAddress {
+            base.advanced(by: written).pointee = value
+            written += 1
+        } else {
+            pending.append(value)
+        }
+    }
 }
 
 private struct SudokuUInt128 {
