@@ -7,11 +7,15 @@
 
 import Foundation
 
-/// Text-based importer for ``CustomRoutingRuleSet``s.
+/// Import-only parser that turns the text representation of a
+/// ``CustomRoutingRuleSet`` into a value the rule-set importer can
+/// install. There is no serializer; the text comes from a user paste,
+/// an imported `.arrs` file, or a downloaded subscription URL. The route
+/// an imported set takes (direct / reject / proxy) is assigned separately
+/// in the app, not carried in the text — the file supplies only a name
+/// and a list of match rules.
 ///
-/// The text is a flat sequence of header lines and rule lines, in any
-/// order. Header lines have the shape `<key> = <value>` and supply the
-/// set's metadata. Rule lines use the existing CSV format.
+/// The text is a flat sequence of lines, in any order:
 ///
 ///     name = My Rule Set
 ///     2, example.com
@@ -19,31 +23,21 @@ import Foundation
 ///     0, 10.0.0.0/8
 ///     1, 2001:db8::/32
 ///
-/// Recognized keys:
+/// - **Header lines** (`<key> = <value>`, case-insensitive key) supply
+///   set metadata; only `name` is recognized.
+/// - **Rule lines** (`<type>, <value>`) each describe one match rule.
+///   Type is a ``RoutingRuleType`` raw value (`0`–`3`); the value is a
+///   CIDR or domain, normalized in ``normalizeValue`` (a bare IP gains a
+///   `/32` or `/128`).
+/// - **Comments** start with `#` or `//`.
 ///
-/// - `name` — display name for the rule set
+/// Parsing never fails: a line that is neither a recognized header nor a
+/// valid rule (unrecognized key, unknown type, empty value) is dropped
+/// silently, so a partially-valid file still imports what it can.
 ///
-/// Unrecognized header keys are ignored. Comment lines start with `#`
-/// or `//`. Lines that fail to parse as either a header or a rule are
-/// dropped silently so a partially-valid file still imports what it can.
-///
-/// Rule line format:
-///
-///     <type>, <value>
-///
-/// Type IDs match ``RoutingRuleType``'s raw values:
-///
-/// | ID  | Type           | Value                                         |
-/// | --- | -------------- | --------------------------------------------- |
-/// | `0` | IPv4 CIDR      | `10.0.0.0/8` (`/32` appended if no prefix)    |
-/// | `1` | IPv6 CIDR      | `2001:db8::/32` (`/128` appended if no prefix) |
-/// | `2` | Domain Suffix  | `example.com`                                 |
-/// | `3` | Domain Keyword | `example`                                     |
-///
-/// Domain Keyword (ID `3`) substring-matches every hostname the router
-/// sees, so it is both slower and more prone to false positives than
-/// Domain Suffix (ID `2`), which anchors to the right of the hostname.
-/// Prefer ID `2` whenever a suffix match can express the intent.
+/// The full import-format and matching reference — every rule type, the
+/// suffix-vs-keyword and CIDR semantics, and the source-tier priority
+/// model — lives in `Documentations/Routing.md`.
 enum RoutingRuleSetParser {
     static func parse(_ text: String) -> CustomRoutingRuleSet {
         var name = ""
