@@ -31,27 +31,29 @@ struct MITMSettingsView: View {
                 }
             }
 
-            Section("Rule Sets") {
-                ForEach(store.ruleSets) { ruleSet in
-                    NavigationLink {
-                        MITMRuleSetDetailView(ruleSet: ruleSet)
-                    } label: {
-                        VStack(alignment: .leading) {
-                            Text(ruleSet.name)
-                                .foregroundStyle(.primary)
-                            Text(summary(for: ruleSet))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .truncationMode(.middle)
-                                .lineLimit(1)
+            if !store.ruleSets.isEmpty {
+                Section("Rule Sets") {
+                    ForEach(store.ruleSets) { ruleSet in
+                        NavigationLink {
+                            MITMRuleSetDetailView(ruleSet: ruleSet)
+                        } label: {
+                            VStack(alignment: .leading) {
+                                Text(ruleSet.name)
+                                    .foregroundStyle(.primary)
+                                Text(summary(for: ruleSet))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .truncationMode(.middle)
+                                    .lineLimit(1)
+                            }
                         }
                     }
-                }
-                .onDelete { offsets in
-                    store.removeRuleSets(atOffsets: offsets)
-                }
-                .onMove { source, destination in
-                    store.moveRuleSets(fromOffsets: source, toOffset: destination)
+                    .onDelete { offsets in
+                        store.removeRuleSets(atOffsets: offsets)
+                    }
+                    .onMove { source, destination in
+                        store.moveRuleSets(fromOffsets: source, toOffset: destination)
+                    }
                 }
             }
         }

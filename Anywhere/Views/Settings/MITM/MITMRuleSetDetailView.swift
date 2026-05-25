@@ -87,7 +87,7 @@ struct MITMRuleSetDetailView: View {
                 }
             }
             
-            Section {
+            Section("Domain Suffixes") {
                 ForEach($suffixDrafts) { $draft in
                     TextField(String("anywhere.com"), text: $draft.value)
                         .keyboardType(.URL)
@@ -111,8 +111,6 @@ struct MITMRuleSetDetailView: View {
                         Label("Add", systemImage: "plus")
                     }
                 }
-            } header: {
-                Text("Domain Suffixes")
             }
 
             Section("Rules") {
