@@ -13,6 +13,8 @@
 A native, zero-dependency proxy client built entirely in Swift.
 No Electron. No WebView. No sing-box wrapper. Pure protocol implementation from the ground up.
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/NodePassProject/Anywhere)
+
 <div>
     <a href="https://apps.apple.com/us/app/id6758235178">
         <img width="128" src="https://storage.argsment.com/Download%20on%20the%20App%20Store.png" />
@@ -70,17 +72,9 @@ Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere t
 - **Native QUIC stack** — ngtcp2-powered client used for Hysteria2 and Naive HTTP/3
 - **Fake-IP DNS** — transparent domain-based routing for all apps
 
-## Getting Started
+## Documentation
 
-### Build from Source
-
-```bash
-git clone https://github.com/NodePassProject/Anywhere.git
-cd Anywhere
-open Anywhere.xcodeproj
-```
-
-Select the `Anywhere` scheme, choose your device, and hit Run.
+- [MITM Rewrite System](Documentations/MITM.md) — developer guide to authoring TLS interception rule sets and `process(ctx)` scripts: the import format, rule operations, rewrite actions, and the full `Anywhere` scripting API.
 
 ## Deep Links
 

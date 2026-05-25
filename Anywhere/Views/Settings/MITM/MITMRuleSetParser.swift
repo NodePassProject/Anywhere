@@ -15,162 +15,29 @@ import JavaScriptCore
 /// of header and URL bytes happens later, in ``MITMRewritePolicy`` (for
 /// static rules) and ``MITMScriptEngine`` (for script output).
 ///
-/// The text is a flat sequence of header lines and rule lines, in any
-/// order. Header lines have the shape `<key> = <value>` and supply the
-/// set's metadata. Rule lines are comma-separated fields describing a
-/// single rewrite operation.
+/// The text is a flat sequence of lines, in any order:
 ///
 ///     name     = My Rule Set
 ///     hostname = example.com, api.example.org
-///     redirect = upstream.example.com:443
-///     0, 0, ^/old, /new
-///     1, 1, ^/api/, X-Powered-By, Anywhere
+///     0, 1, ^/api/, X-Powered-By, Anywhere
 ///
-/// Header keys are matched case-insensitively; the value is trimmed of
-/// surrounding whitespace and otherwise kept verbatim. Recognized keys:
+/// - **Header lines** (`<key> = <value>`, case-insensitive key) supply
+///   set metadata: `name`, `hostname`, one of `redirect` /
+///   `redirect-302` / `reject-200`, and `content-type`.
+/// - **Rule lines** (`<phase>, <operation>, <field…>`) each describe one
+///   rewrite. Phase is `0` (request) / `1` (response); operation is
+///   `0`–`5`; the per-op field layout is in the ``parseRuleLine`` switch,
+///   and fields use CSV quoting (see ``splitCSV``).
+/// - **Comments** start with `#` or `//`.
 ///
-/// - `name`         — display name for the rule set. The importer
-///                    requires a non-empty name.
-/// - `hostname`     — comma-separated domain suffixes the set applies to.
-///                    Matching is by suffix, so `example.com` also covers
-///                    `www.example.com`; wildcards are not supported. When
-///                    suffixes overlap, the most specific one wins (see
-///                    ``MITMRewritePolicy``).
-/// - `redirect`     — transparent upstream: dial `host` or `host:port`
-///                    instead of the original destination and rewrite the
-///                    request's authority, while the client still sees the
-///                    original host's certificate. See
-///                    ``MITMRewriteAction/transparent``.
-/// - `redirect-302` — synthesize a `302 Found` whose `Location` is
-///                    `https://<host>[:<port>]<original-request-target>`
-///                    (the port is emitted only when set and not 443).
-/// - `reject-200`   — synthesize a `200 OK`. Value is `<kind>` or
-///                    `<kind> <content>`, where kind is `text`, `gif`, or
-///                    `data`. For `text`, content is the literal UTF-8
-///                    body; for `gif`, content is ignored and a 1×1
-///                    transparent GIF is emitted; for `data`, content is
-///                    base64, decoded when the response is synthesized.
-///                    Empty content yields a short non-empty default body.
-/// - `content-type` — Content-Type override applied to `reject-200` only;
-///                    ignored for the other actions.
+/// Parsing never fails: a line that is neither a recognized header nor a
+/// valid rule (unrecognized key, wrong field count, uncompilable pattern,
+/// non-JavaScript script base64) is dropped silently, so a partially-valid
+/// file still imports what it can.
 ///
-/// `redirect`, `redirect-302`, and `reject-200` are mutually exclusive;
-/// if more than one appears, the last one wins. The latter two synthesize
-/// the reply on the inner leg and bypass the rewrite pipeline, so any rule
-/// lines in the same set never fire (``MITMRewritePolicy`` logs the
-/// combination at load time).
-///
-/// Unrecognized header keys are ignored. Comment lines start with `#` or
-/// `//`. Parsing never fails: a line that is neither a recognized header
-/// nor a valid rule is dropped silently, so a partially-valid file still
-/// imports what it can.
-///
-/// Rule line format:
-///
-///     <phase>, <operation>, <field1> [, <field2> [, <field3> ] ]
-///
-/// Phase: `0` = request, `1` = response.
-///
-/// Operations and their trailing fields:
-///
-/// | ID  | Operation      | Phase        | Fields                |
-/// | --- | -------------- | ------------ | --------------------- |
-/// | `0` | url-replace    | request only | pattern, replacement  |
-/// | `1` | header-add     | both         | pattern, name, value  |
-/// | `2` | header-delete  | both         | pattern, name         |
-/// | `3` | header-replace | both         | pattern, name, value  |
-/// | `4` | script         | both         | pattern, base64       |
-/// | `5` | stream-script  | both         | pattern, base64       |
-///
-/// `url-replace` is always a request-phase rule; its phase column is
-/// ignored. Every other operation applies to whichever phase the column
-/// names. A rule whose field count does not match the table is dropped.
-///
-/// Fields are separated by `,`. Whitespace around an unquoted field is
-/// trimmed. A field that begins with `"` is read until the matching `"`,
-/// with `""` inside a quoted field producing a literal `"` — so a value
-/// containing commas or leading/trailing spaces can be wrapped in double
-/// quotes.
-///
-/// Every rule leads with a `pattern`: an `NSRegularExpression` (default
-/// Unicode semantics) tested against the request target's path-and-query.
-/// The operation only fires when the pattern matches; the set's
-/// `hostname` already scopes the host, so the pattern refines by path.
-/// Use `.*` to match every request. For `url-replace` the same pattern is
-/// also the substitution regex: every match in the request target is
-/// replaced by the `replacement` template, which may reference capture
-/// groups (`$1`, `$2`, …). A rule whose pattern is empty or fails to
-/// compile as a regex is dropped.
-///
-/// `header-replace` matches the target header by `name`
-/// (case-insensitive) and overwrites its value with `value`, ignoring
-/// the header's current value; a header that is not present is left
-/// alone.
-///
-/// **Choosing `script` (op `4`) vs `stream-script` (op `5`).** Both run
-/// a `process(ctx)` function over the matched message; they differ in
-/// whether the script sees the body whole or frame-by-frame.
-///
-/// Use `script` — the default — whenever the rewrite needs the whole
-/// message at once: mutating head fields (`ctx.url`, `ctx.method`,
-/// `ctx.status`, `ctx.headers`), rewriting a body as a unit (JSON,
-/// protobuf, JWT, or a regex over the full text), or short-circuiting a
-/// request with `Anywhere.respond(...)`. The rewriter buffers the body —
-/// auto-decoding `gzip`/`deflate`/`br` — runs the script once, and
-/// re-emits with a corrected `Content-Length`. The body is held up to a
-/// 4 MiB cap; larger bodies fall back to passthrough (chunked bodies are
-/// truncated at the cap). Because nothing reaches the client until the
-/// body is complete, a `script` rule **de-streams** the response — right
-/// for ordinary request/response APIs, wrong for a live stream.
-///
-/// Use `stream-script` when the response must keep flowing and must not
-/// stall: Server-Sent Events (`text/event-stream`), chunked event /
-/// NDJSON feeds, gRPC or HTTP/2 DATA streams, or any long-lived or very
-/// large body. It runs `process(ctx)` once per frame and never buffers,
-/// so bytes reach the client as they arrive — at the cost of a narrower
-/// contract (immutable head, no HTTP-level decompression, and no HTTP/1
-/// `Content-Length` bodies), detailed below.
-///
-/// Rule of thumb: need the whole body or the head → `script`; must keep
-/// the response flowing frame-by-frame → `stream-script`. A `script`
-/// rule pointed at a streaming response still runs, but logs a runtime
-/// warning recommending `stream-script`.
-///
-/// `script` carries a base64-encoded UTF-8 JavaScript source defining
-/// `function process(ctx)`. The runtime invokes it with a mutable
-/// message-context object: the script can mutate `ctx.body`
-/// (a `Uint8Array`, in place or by assignment), `ctx.url`, `ctx.method`,
-/// `ctx.status`, and `ctx.headers` (an array of `[name, value]` pairs);
-/// `ctx.phase` is read-only. Scripts are stored base64-encoded so
-/// newlines and quoting in the source survive the line-based rule format.
-/// See ``MITMScriptEngine`` for the full runtime contract, including the
-/// `Anywhere.codec` namespace (`utf8` / `base64` / `base64url` / `hex` /
-/// `protobuf`), the `Anywhere.crypto`, `Anywhere.jwt`, `Anywhere.json`,
-/// `Anywhere.store`, and `Anywhere.log` namespaces, the `Anywhere.done()`
-/// / `Anywhere.exit()` short-circuit directives, and the
-/// request-phase-only `Anywhere.respond({status, headers, body})`
-/// directive that drops the upstream request and writes a synthesized
-/// response straight back to the client.
-///
-/// A `script` rule's only fields are the `pattern` and the base64:
-///
-///     1, 4, ^/api/, <base64>
-///
-/// `stream-script` (op `5`) uses the same field shape as `script` but
-/// invokes the script once per HTTP/2 DATA frame or HTTP/1 chunked
-/// chunk — the body is never buffered, HTTP-level compression is not
-/// decoded, and the head's URL/method/status/headers are not mutable.
-/// The script's `process(ctx)` receives an immutable view of the head
-/// plus a mutable `ctx.body` (this frame's payload),
-/// `ctx.frame = { index, end }` (the 0-based frame index and an `end`
-/// flag set on the final frame), and `ctx.state` (a JS object persisted
-/// across frames of the same stream). HTTP/1 Content-Length bodies are
-/// not streamed — the head has already committed to a byte count that
-/// can't change mid-stream.
-///
-/// Both script kinds are dropped at import when the base64 does not decode
-/// to syntactically valid UTF-8 JavaScript; whether `process` is actually
-/// defined and callable is checked by ``MITMScriptEngine`` at runtime.
+/// The full import-format and scripting reference — every header key,
+/// operation, rewrite action, and the `Anywhere` script API — lives in
+/// `Documentations/MITM.md`.
 enum MITMRuleSetParser {
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""
