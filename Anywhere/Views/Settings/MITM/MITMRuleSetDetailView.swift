@@ -87,66 +87,79 @@ struct MITMRuleSetDetailView: View {
                 }
             }
             
-            Section("Domain Suffixes") {
-                ForEach($suffixDrafts) { $draft in
-                    TextField(String("anywhere.com"), text: $draft.value)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                }
-                .onDelete { offsets in
-                    suffixDrafts.remove(atOffsets: offsets)
-                    save()
-                }
-                .onMove { source, destination in
-                    suffixDrafts.move(fromOffsets: source, toOffset: destination)
-                    save()
-                }
-                if isEditing == true {
-                    Button {
-                        withAnimation {
-                            suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
+            if isEditing == true || !suffixDrafts.isEmpty {
+                Section("Domain Suffixes") {
+                    ForEach($suffixDrafts) { $draft in
+                        TextField(String("anywhere.com"), text: $draft.value)
+                            .keyboardType(.URL)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .disabled(isEditing != true)
+                    }
+                    .onDelete { offsets in
+                        suffixDrafts.remove(atOffsets: offsets)
+                        if isEditing != true {
+                            save()
                         }
-                    } label: {
-                        Label("Add", systemImage: "plus")
+                    }
+                    .onMove { source, destination in
+                        suffixDrafts.move(fromOffsets: source, toOffset: destination)
+                        if isEditing != true {
+                            save()
+                        }
+                    }
+                    if isEditing == true {
+                        Button {
+                            withAnimation {
+                                suffixDrafts.append(MITMDomainSuffixDraft(value: ""))
+                            }
+                        } label: {
+                            Label("Add", systemImage: "plus")
+                        }
                     }
                 }
             }
 
-            Section("Rules") {
-                ForEach(rules) { rule in
-                    VStack(alignment: .leading) {
-                        Text(MITMRuleSummary.title(for: rule))
-                        Text(MITMRuleSummary.subtitle(for: rule))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .truncationMode(.middle)
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        // Script editor not implemented
-                        switch rule.operation {
-                        case .script, .streamScript: return
-                        default: break
+            if isEditing == true || !rules.isEmpty {
+                Section("Rules") {
+                    ForEach(rules) { rule in
+                        VStack(alignment: .leading) {
+                            Text(MITMRuleSummary.title(for: rule))
+                            Text(MITMRuleSummary.subtitle(for: rule))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .truncationMode(.middle)
+                                .lineLimit(1)
                         }
-                        editingRule = rule
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            // Script editor not implemented
+                            switch rule.operation {
+                            case .script, .streamScript: return
+                            default: break
+                            }
+                            editingRule = rule
+                        }
                     }
-                }
-                .onDelete { offsets in
-                    rules.remove(atOffsets: offsets)
-                    save()
-                }
-                .onMove { source, destination in
-                    rules.move(fromOffsets: source, toOffset: destination)
-                    save()
-                }
-                if isEditing == true {
-                    Button {
-                        showAddSheet = true
-                    } label: {
-                        Label("Add", systemImage: "plus")
+                    .onDelete { offsets in
+                        rules.remove(atOffsets: offsets)
+                        if isEditing != true {
+                            save()
+                        }
+                    }
+                    .onMove { source, destination in
+                        rules.move(fromOffsets: source, toOffset: destination)
+                        if isEditing != true {
+                            save()
+                        }
+                    }
+                    if isEditing == true {
+                        Button {
+                            showAddSheet = true
+                        } label: {
+                            Label("Add", systemImage: "plus")
+                        }
                     }
                 }
             }
