@@ -565,8 +565,25 @@ final class MITMSession {
         // sole acceptable ALPN). When that value is `h2`, swap the
         // byte-stream rewriter for the frame-aware h2 translators.
         if innerRecord.negotiatedALPN == "h2", outerRecord.negotiatedALPN == "h2" {
-            inboundH2 = MITMHTTP2Connection(direction: .inbound, rewriter: h2Rewriter)
-            outboundH2 = MITMHTTP2Connection(direction: .outbound, rewriter: h2Rewriter)
+            let inLeg = MITMHTTP2Connection(direction: .inbound, rewriter: h2Rewriter)
+            let outLeg = MITMHTTP2Connection(direction: .outbound, rewriter: h2Rewriter)
+            // SETTINGS_HEADER_TABLE_SIZE advertised by one endpoint bounds
+            // the *peer's* HPACK encoder, which the opposing leg decodes
+            // (RFC 7541 §4.2). The client's SETTINGS arrives on the inbound
+            // leg and constrains the server's response encoder (decoded
+            // outbound); the server's SETTINGS arrives outbound and
+            // constrains the client's request encoder (decoded inbound). The
+            // weak captures break the otherwise-mutual leg retain cycle; both
+            // legs share the serial lwipQueue, so the synchronous cross-leg
+            // call can't race the other leg's ``process(_:)``.
+            inLeg.onObservedPeerHeaderTableSize = { [weak outLeg] size in
+                outLeg?.configureDecoderTableSize(size)
+            }
+            outLeg.onObservedPeerHeaderTableSize = { [weak inLeg] size in
+                inLeg?.configureDecoderTableSize(size)
+            }
+            inboundH2 = inLeg
+            outboundH2 = outLeg
         }
         startInboundPump(inner: innerRecord, outer: outerRecord)
         startOutboundPump(inner: innerRecord, outer: outerRecord)

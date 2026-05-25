@@ -17,9 +17,65 @@ import Foundation
 ///
 /// One instance should be created per ``HTTP2Session`` and used for every
 /// incoming HEADERS frame on that session.
+///
+/// The dynamic table is bounded per RFC 7541 §4: entry sizes are accounted
+/// per §4.1 (`name + value + 32` octets), and entries are evicted from the
+/// oldest end on insert (§4.4) and on a table-size reduction (§4.3 / §6.3)
+/// so the table never exceeds the limit the encoder was given. Without the
+/// bound the table grows for the connection's whole lifetime — a memory-
+/// exhaustion vector a peer can drive that is acute under the Network
+/// Extension's tight memory budget. Eviction never drops below the
+/// encoder's current table, so index references stay resolvable.
 nonisolated class HPACKDecoder {
 
+    /// HTTP/2's default ``SETTINGS_HEADER_TABLE_SIZE`` (RFC 9113 §6.5.2),
+    /// the table limit in force until a peer's SETTINGS says otherwise.
+    private static let defaultMaxTableSize = 4096
+
+    /// Defensive ceiling on the table limit we'll honor from an observed
+    /// ``SETTINGS_HEADER_TABLE_SIZE``. The setting is a 32-bit value, so
+    /// honoring it unbounded would hand a hostile peer a multi-GiB
+    /// allocation primitive. 64 KiB is the largest value mainstream peers
+    /// (Chrome, Firefox) advertise, so clamping here bounds worst-case
+    /// memory without tearing down real connections. A peer that both
+    /// advertises a larger table *and* fills past this clamp eventually
+    /// references an evicted index, which fails the decode cleanly (the
+    /// caller trips parseError and the connection GOAWAYs) rather than
+    /// mis-resolving to a stale entry.
+    private static let maxAllowedTableSize = 65536
+
     private var dynamicTable: [(name: String, value: String)] = []
+
+    /// Running dynamic-table size in octets (RFC 7541 §4.1):
+    /// Σ(name.utf8.count + value.utf8.count + 32).
+    private var currentSize = 0
+
+    /// Upper bound the encoder was given via ``SETTINGS_HEADER_TABLE_SIZE``.
+    /// A §6.3 Dynamic Table Size Update above this is a decoding error
+    /// (§4.2).
+    private var protocolMaxSize = HPACKDecoder.defaultMaxTableSize
+
+    /// Effective eviction cap. Equals ``protocolMaxSize`` unless the
+    /// encoder signals a smaller working size via a §6.3 update. We only
+    /// ever *raise* it from an observed SETTINGS and lower it from the
+    /// encoder's own §6.3 update, so it never drops below the encoder's
+    /// live table — guaranteeing we don't evict an entry it still
+    /// references.
+    private var maxSize = HPACKDecoder.defaultMaxTableSize
+
+    /// Applies the peer's advertised ``SETTINGS_HEADER_TABLE_SIZE`` (the
+    /// limit imposed on the encoder this decoder mirrors), clamped to
+    /// ``maxAllowedTableSize``. Only raises the working cap: a reduction
+    /// reaches us in-band as the encoder's §6.3 update once it has
+    /// actually evicted, so we never get ahead of it and drop a live
+    /// entry. Must be called on the same serial queue as ``decodeHeaders``.
+    func setPeerHeaderTableSize(_ size: Int) {
+        let clamped = max(0, min(size, HPACKDecoder.maxAllowedTableSize))
+        protocolMaxSize = clamped
+        if clamped > maxSize {
+            maxSize = clamped
+        }
+    }
 
     /// Decodes an HPACK header block, updating the persistent dynamic table.
     func decodeHeaders(from data: Data) -> [(name: String, value: String)]? {
@@ -42,7 +98,7 @@ nonisolated class HPACKDecoder {
                 guard let (name, value) = HPACKEncoder.decodeLiteral(from: data, at: &offset, prefixBits: 6,
                                                                      dynamicTable: dynamicTable) else { return nil }
                 headers.append((name, value))
-                dynamicTable.insert((name, value), at: 0)
+                insertWithEviction(name: name, value: value)
 
             } else if byte & 0xF0 == 0x00 || byte & 0xF0 == 0x10 {
                 // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed
@@ -52,13 +108,54 @@ nonisolated class HPACKDecoder {
 
             } else if byte & 0xE0 == 0x20 {
                 // §6.3 Dynamic Table Size Update (001xxxxx)
-                let _ = HPACKEncoder.decodeInteger(from: data, at: &offset, prefixBits: 5)
+                guard let newSize = HPACKEncoder.decodeInteger(from: data, at: &offset, prefixBits: 5) else {
+                    return nil
+                }
+                // §4.2: an update above the protocol limit is a decoding error.
+                guard newSize <= protocolMaxSize else { return nil }
+                // §4.3: shrink the cap and evict from the oldest end to fit.
+                maxSize = newSize
+                evictToFit()
             } else {
                 return nil
             }
         }
 
         return headers
+    }
+
+    /// Size of a dynamic-table entry in octets (RFC 7541 §4.1).
+    private func entrySize(name: String, value: String) -> Int {
+        name.utf8.count + value.utf8.count + 32
+    }
+
+    /// Inserts a freshly decoded entry at the head of the dynamic table,
+    /// first evicting from the oldest end so the table stays within
+    /// ``maxSize`` (RFC 7541 §4.4). An entry larger than ``maxSize`` is
+    /// not added and empties the table.
+    private func insertWithEviction(name: String, value: String) {
+        let size = entrySize(name: name, value: value)
+        // §4.4: evict until the new entry fits, or the table is empty.
+        while currentSize + size > maxSize, let last = dynamicTable.last {
+            currentSize -= entrySize(name: last.name, value: last.value)
+            dynamicTable.removeLast()
+        }
+        guard size <= maxSize else {
+            // §4.4: an entry larger than the maximum size empties the
+            // table and is not itself inserted.
+            return
+        }
+        dynamicTable.insert((name, value), at: 0)
+        currentSize += size
+    }
+
+    /// Evicts from the oldest end until the table fits ``maxSize``
+    /// (RFC 7541 §4.3).
+    private func evictToFit() {
+        while currentSize > maxSize, let last = dynamicTable.last {
+            currentSize -= entrySize(name: last.name, value: last.value)
+            dynamicTable.removeLast()
+        }
     }
 }
 

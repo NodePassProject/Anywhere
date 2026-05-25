@@ -44,6 +44,7 @@ final class MITMHTTP2Connection {
         static let headers: UInt8      = 0x1
         static let priority: UInt8     = 0x2
         static let rstStream: UInt8    = 0x3
+        static let settings: UInt8     = 0x4
         static let pushPromise: UInt8  = 0x5
         static let goaway: UInt8       = 0x7
         static let continuation: UInt8 = 0x9
@@ -95,6 +96,22 @@ final class MITMHTTP2Connection {
     let direction: Direction
     private let rewriter: MITMHTTP2Rewriter
     private let decoder = HPACKDecoder()
+
+    /// Invoked when this leg observes a ``SETTINGS_HEADER_TABLE_SIZE`` in a
+    /// passed-through SETTINGS frame. The value advertises the dynamic-table
+    /// limit *this* endpoint imposes on its peer's encoder — which is the
+    /// encoder the *opposing* leg decodes — so ``MITMSession`` wires this to
+    /// the opposing leg's ``configureDecoderTableSize(_:)``. Always invoked
+    /// synchronously on the shared serial queue inside ``process(_:)``.
+    var onObservedPeerHeaderTableSize: ((Int) -> Void)?
+
+    /// Bounds this leg's HPACK decoder to the dynamic-table limit the peer
+    /// advertised to the encoder we mirror (RFC 7541 §4.2). Called via the
+    /// opposing leg's ``onObservedPeerHeaderTableSize`` on the shared serial
+    /// queue, so it never races ``process(_:)``.
+    func configureDecoderTableSize(_ size: Int) {
+        decoder.setPeerHeaderTableSize(size)
+    }
 
     /// Phase this connection rewrites. Inbound client-to-server traffic is
     /// the request half; outbound server-to-client traffic is the response
@@ -359,9 +376,38 @@ final class MITMHTTP2Connection {
             return handleRSTStream(frame)
         case FrameTypeCode.goaway:
             return handleGoAway(frame)
+        case FrameTypeCode.settings:
+            return handleSettings(frame)
         default:
             return serializeFrame(frame)
         }
+    }
+
+    /// Observes ``SETTINGS_HEADER_TABLE_SIZE`` (identifier 0x1, RFC 9113
+    /// §6.5.2) then forwards the SETTINGS frame verbatim. The MITM does not
+    /// alter either peer's settings — it only needs the value to bound the
+    /// opposing leg's HPACK decoder (RFC 7541 §4.2). SETTINGS is
+    /// connection-level (stream 0); an ACK (flag 0x1) carries no payload.
+    /// A length that isn't a multiple of the 6-byte entry size is a frame
+    /// error the receiver will catch; we parse whole entries and ignore any
+    /// trailing remainder rather than re-deriving that error here.
+    private func handleSettings(_ frame: RawFrame) -> Data {
+        if frame.streamID == 0, frame.flags & 0x1 == 0 {
+            let payload = frame.payload
+            var i = payload.startIndex
+            while i + 6 <= payload.endIndex {
+                let identifier = (UInt16(payload[i]) << 8) | UInt16(payload[i + 1])
+                if identifier == 0x1 { // SETTINGS_HEADER_TABLE_SIZE
+                    let value = (UInt32(payload[i + 2]) << 24)
+                        | (UInt32(payload[i + 3]) << 16)
+                        | (UInt32(payload[i + 4]) << 8)
+                        | UInt32(payload[i + 5])
+                    onObservedPeerHeaderTableSize?(Int(value))
+                }
+                i += 6
+            }
+        }
+        return serializeFrame(frame)
     }
 
     /// Cleans up per-stream bookkeeping for streams above the GOAWAY's
