@@ -140,10 +140,11 @@ final class MITMScriptEngine {
 
     private let context: JSContext
     /// Compiled `process(ctx)` functions keyed by the
-    /// ``CompiledMITMOperation``'s ``sourceKey``. Keying on a precomputed
-    /// 64-bit hash keeps each lookup O(1) regardless of source size,
-    /// which matters on a hot stream that looks the same rule up on every
-    /// message.
+    /// ``CompiledMITMOperation``'s ``sourceKey``. The engine is shared by
+    /// every connection to its rule set (see ``Provider``), so a script
+    /// compiles once and is reused across connections; keying on a
+    /// precomputed 64-bit hash keeps each lookup O(1) regardless of
+    /// source size.
     ///
     /// The stored ``byteCount`` is a cheap collision guard.
     /// ``sourceCacheKey`` is a randomly-seeded ``Hasher`` output, so two
@@ -178,25 +179,25 @@ final class MITMScriptEngine {
     fileprivate var currentDirective: Directive?
 
     /// Process-wide JSC heap shared by every ``MITMScriptEngine``. Each
-    /// session still owns its own ``JSContext`` so script-set globals
-    /// stay per-session, but the underlying heap, GC, and allocator
-    /// are shared: a separate ``JSVirtualMachine`` per engine would
-    /// multiply JSC's multi-MiB per-VM cost by every active MITM session,
-    /// which the Network Extension's ~50 MiB budget can't sustain under
-    /// even modest concurrency. JSC serializes access to the heap with an
-    /// internal mutex, so multiple sessions on independent queues are
-    /// safe without an external lock.
+    /// rule set owns one ``JSContext`` (see the engine registry on
+    /// ``Provider``) so its script globals stay isolated from other rule
+    /// sets, but the underlying heap, GC, and allocator are shared: a
+    /// separate ``JSVirtualMachine`` per engine would multiply JSC's
+    /// multi-MiB per-VM cost by every active rule set, which the Network
+    /// Extension's ~50 MiB budget can't sustain under even modest
+    /// concurrency. JSC serializes access to the heap with an internal
+    /// mutex, so engines on independent queues are safe without an
+    /// external lock.
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
 
-    /// Defensive serialization around ``apply``/``applyFrame``. The
-    /// session pipeline runs every rule application on
-    /// ``MITMSession``'s lwIP queue, so concurrent re-entry should be
-    /// impossible — but a future refactor that hops a ``Task`` or
-    /// enqueues a callback off-queue would silently corrupt
-    /// ``currentScope`` / ``currentDirective`` / ``compiled`` (the
-    /// double-init race would also re-build the engine on
-    /// ``Provider.get()``). The lock makes the contract enforceable
-    /// at the engine boundary; cost is a single uncontended
+    /// Defensive serialization around ``apply``/``applyFrame``. One engine
+    /// is shared by every connection to its rule set, and all rule
+    /// application runs on the single serial lwIP queue (see
+    /// ``MITMSession``), so concurrent re-entry should be impossible — but
+    /// a future refactor that hops a ``Task`` or enqueues a callback
+    /// off-queue would silently corrupt ``currentScope`` /
+    /// ``currentDirective`` / ``compiled``. The lock makes the contract
+    /// enforceable at the engine boundary; cost is a single uncontended
     /// ``NSLock`` acquisition per script call.
     private let invocationLock = NSLock()
 
@@ -2417,33 +2418,64 @@ final class MITMScriptEngine {
 
 extension MITMScriptEngine {
 
-    /// Lazy holder for one ``MITMScriptEngine`` instance per
-    /// ``MITMSession``. Threads the lazy-creation policy through the rule
-    /// pipeline without requiring the engine to be allocated up front for
-    /// every intercepted connection — sessions whose policy never invokes
-    /// a script rule never instantiate a JSContext.
+    /// Process-wide registry of engines keyed by rule-set id — the same
+    /// scope ``Anywhere.store`` uses. One engine serves every connection
+    /// whose matched rule set has that id, so a script's compiled
+    /// ``process`` function, its installed ``Anywhere`` globals, and any
+    /// state it stashes on ``globalThis`` are built once per rule set and
+    /// reused across connections instead of rebuilt per connection.
     ///
-    /// Sessions are expected to serialize all rule application on
-    /// ``MITMSession``'s lwIP queue. The lock here is a defensive
-    /// guard against the double-init race that occurs if a future
-    /// refactor lets two concurrent callers reach ``get()`` before
-    /// the engine is published — that would build two distinct
-    /// engines per session, splitting the ``compiled`` script cache
-    /// and the ``currentScope`` state in ways that produce silent,
-    /// hard-to-diagnose rule-set crosstalk.
-    final class Provider {
-        private var instance: MITMScriptEngine?
-        private let lock = NSLock()
+    /// Sharing across connections is safe because every rule application
+    /// runs on the single serial lwIP queue (see ``MITMSession``), so no
+    /// two scripts ever execute concurrently. Creation happens under
+    /// ``registryLock`` so two callers racing to first-use a rule set
+    /// can't build two engines for it — that would split the ``compiled``
+    /// cache and ``globalThis`` state and produce silent, hard-to-diagnose
+    /// crosstalk within the rule set.
+    private static var engines: [UUID: MITMScriptEngine] = [:]
+    /// Engine for the degenerate nil-scope case (a script fired for a host
+    /// whose matched set has no id). Scripts always belong to a rule set,
+    /// so this is unreachable in practice; it just gives the lookup a home.
+    private static var scopelessEngine: MITMScriptEngine?
+    private static let registryLock = UnfairLock()
 
-        init() {}
-
-        func get() -> MITMScriptEngine {
-            lock.lock()
-            defer { lock.unlock() }
-            if let instance { return instance }
-            let new = MITMScriptEngine()
-            instance = new
-            return new
+    /// The shared engine for ``scope``, created on first use. Stays lazy:
+    /// a rule set whose rules never invoke a script never builds a
+    /// ``JSContext``.
+    static func sharedEngine(forScope scope: UUID?) -> MITMScriptEngine {
+        registryLock.withLock { () -> MITMScriptEngine in
+            guard let scope else {
+                if let engine = scopelessEngine { return engine }
+                let engine = MITMScriptEngine()
+                scopelessEngine = engine
+                return engine
+            }
+            if let engine = engines[scope] { return engine }
+            let engine = MITMScriptEngine()
+            engines[scope] = engine
+            return engine
         }
+    }
+
+    /// Drops engines whose rule set is no longer present, freeing each
+    /// one's ``JSContext`` and compiled-function cache. Called from
+    /// ``MITMRewritePolicy/load`` after a config change, alongside the
+    /// ``MITMScriptStore`` purge — so in-memory script state, like the
+    /// store, survives a rule-set edit (the id is stable) and is cleared
+    /// only when the set is removed.
+    static func purgeEngines(activeIDs: Set<UUID>) {
+        registryLock.withLock {
+            engines = engines.filter { activeIDs.contains($0.key) }
+        }
+    }
+
+    /// Per-session handle to the shared engine for the session's matched
+    /// rule set. Holds the rule-set ``scope`` and resolves the engine
+    /// lazily on the first script execution, so a connection whose rules
+    /// never fire a script never touches a ``JSContext``.
+    final class Provider {
+        private let scope: UUID?
+        init(scope: UUID?) { self.scope = scope }
+        func get() -> MITMScriptEngine { MITMScriptEngine.sharedEngine(forScope: scope) }
     }
 }

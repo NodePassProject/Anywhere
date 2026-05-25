@@ -156,13 +156,16 @@ final class MITMRewritePolicy {
             }
             trie.freeze()
         }
-        // Drop ``MITMScriptStore`` buckets for rule sets the user has
-        // deleted since the last load. Without this every removed
-        // rule set leaks up to ``MITMScriptStore.maxBytesPerScope``
-        // (1 MiB) of script-store contents until the Network
-        // Extension is recycled — a real drift for users who iterate
-        // on rule sets during development.
+        // Drop per-rule-set state for sets the user deleted since the
+        // last load: the shared ``MITMScriptEngine`` (its JSContext +
+        // compiled-function cache) and the ``MITMScriptStore`` bucket (up
+        // to ``MITMScriptStore.maxBytesPerScope``). Both are keyed by
+        // rule-set id and would otherwise linger until the Network
+        // Extension recycles — a real drift for users who iterate on rule
+        // sets during development. In-memory script state survives an edit
+        // (the id is stable) and is cleared only on removal.
         let activeIDs = Set(ruleSets.map { $0.id })
+        MITMScriptEngine.purgeEngines(activeIDs: activeIDs)
         let purged = MITMScriptStore.shared.purgeExcept(activeIDs: activeIDs)
         if purged > 0 {
             logger.debug("[MITM] Loaded \(ruleSets.count) rule set(s); purged \(purged) stale script-store bucket(s)")

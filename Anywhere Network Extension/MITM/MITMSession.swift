@@ -188,10 +188,12 @@ final class MITMSession {
 
     private let h2Rewriter: MITMHTTP2Rewriter
 
-    /// Lazy JavaScript runtime shared by both HTTP/1 streams and the
-    /// HTTP/2 rewriter. Materializes only when a ``CompiledMITMOperation/script``
-    /// rule actually fires for this connection.
-    private let scriptEngineProvider = MITMScriptEngine.Provider()
+    /// Handle to the JavaScript runtime for this session's rule set,
+    /// shared by both HTTP/1 streams and the HTTP/2 rewriter. The engine
+    /// itself is shared across every connection to the same rule set and
+    /// materializes only when a ``CompiledMITMOperation/script`` rule
+    /// actually fires (see ``MITMScriptEngine/Provider``).
+    private let scriptEngineProvider: MITMScriptEngine.Provider
 
     /// Cross-direction record of the in-flight request's method+URL so
     /// the response-phase script ctx can populate `ctx.method` /
@@ -239,6 +241,11 @@ final class MITMSession {
             if let port = target.port { return "\(target.host):\(port)" }
             return target.host
         }
+        // One JS engine per rule set, shared across every connection to
+        // it and keyed by the matched set's id so it lines up with the
+        // ``Anywhere.store`` scope. A nil scope (no matched set) only
+        // arises when no script rule can fire, so no engine is built then.
+        self.scriptEngineProvider = MITMScriptEngine.Provider(scope: policy.set(for: dstHost)?.id)
         self.requestStream = MITMHTTP1Stream(
             host: dstHost,
             phase: .httpRequest,
