@@ -113,6 +113,17 @@ enum TLSFingerprint: String, Codable, CaseIterable {
 
     case random = "random"
 
+    /// Internal, non-camouflage fingerprint for REAL handshakes (e.g. the MITM
+    /// outer leg). Emits a minimal, standards-correct TLS 1.3/1.2 ClientHello
+    /// that advertises only capabilities we actually implement — no GREASE,
+    /// ALPS, certificate compression, ECH, padding, or extension shuffle. A
+    /// browser fingerprint advertises ALPS, which commits the client to send a
+    /// ``ClientEncryptedExtensions`` message we don't implement; strict origins
+    /// (Google's GFE) then abort with `unexpected_message`. Deliberately
+    /// excluded from ``allCases`` so it never appears in proxy pickers or gets
+    /// chosen by ``random``.
+    case nonBrowser = "non_browser"
+
     var displayName: String {
         switch self {
         case .chrome133:  return "Chrome 133"
@@ -125,7 +136,17 @@ enum TLSFingerprint: String, Codable, CaseIterable {
         case .safari16:   return "Safari 16.0"
         case .edge106:    return "Edge 106"
         case .random:     return "Random"
+        case .nonBrowser: return "Non-Browser"
         }
+    }
+
+    /// User-selectable fingerprints. ``nonBrowser`` is intentionally omitted —
+    /// it's an internal real-handshake fingerprint, not a camouflage option, so
+    /// it must not surface in proxy pickers or be reachable via ``random``.
+    /// (Manually maintained: add new camouflage fingerprints here too.)
+    static var allCases: [TLSFingerprint] {
+        [.chrome133, .firefox148, .safari26, .ios14, .edge85,
+         .chrome120, .firefox120, .safari16, .edge106, .random]
     }
 
     /// All concrete (non-random) fingerprints for random selection.
@@ -141,6 +162,7 @@ enum RealityError: Error, LocalizedError {
     case authenticationFailed
     case connectionFailed(String)
     case decryptionFailed  // Server switched to direct copy mode
+    case tlsAlert(level: UInt8, description: UInt8)  // Peer sent a non-close_notify TLS alert
 
     var errorDescription: String? {
         switch self {
@@ -156,6 +178,43 @@ enum RealityError: Error, LocalizedError {
             return "Reality connection failed: \(reason)"
         case .decryptionFailed:
             return "Reality decryption failed - server may have switched to direct copy"
+        case .tlsAlert(let level, let description):
+            let kind = level == 2 ? "fatal" : "warning"
+            return "TLS alert received: \(RealityError.alertName(description)) (\(kind), code \(description))"
+        }
+    }
+
+    /// Human name for a TLS alert description code (RFC 8446 §6).
+    static func alertName(_ code: UInt8) -> String {
+        switch code {
+        case 0:   return "close_notify"
+        case 10:  return "unexpected_message"
+        case 20:  return "bad_record_mac"
+        case 22:  return "record_overflow"
+        case 40:  return "handshake_failure"
+        case 42:  return "bad_certificate"
+        case 43:  return "unsupported_certificate"
+        case 44:  return "certificate_revoked"
+        case 45:  return "certificate_expired"
+        case 46:  return "certificate_unknown"
+        case 47:  return "illegal_parameter"
+        case 48:  return "unknown_ca"
+        case 49:  return "access_denied"
+        case 50:  return "decode_error"
+        case 51:  return "decrypt_error"
+        case 70:  return "protocol_version"
+        case 71:  return "insufficient_security"
+        case 80:  return "internal_error"
+        case 86:  return "inappropriate_fallback"
+        case 90:  return "user_canceled"
+        case 109: return "missing_extension"
+        case 110: return "unsupported_extension"
+        case 112: return "unrecognized_name"
+        case 113: return "bad_certificate_status_response"
+        case 115: return "unknown_psk_identity"
+        case 116: return "certificate_required"
+        case 120: return "no_application_protocol"
+        default:  return "alert_\(code)"
         }
     }
 }

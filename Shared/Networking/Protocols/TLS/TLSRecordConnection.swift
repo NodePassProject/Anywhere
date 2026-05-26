@@ -503,6 +503,16 @@ nonisolated class TLSRecordConnection {
                         batchedData.append(decrypted)
                     }
                 } catch {
+                    // A genuine TLS alert (peer rejected the connection) is a
+                    // hard error, not the Reality direct-copy fallback. Don't
+                    // stash raw bytes for replay — surface it as `.error` so
+                    // the teardown names the alert.
+                    if case RealityError.tlsAlert = error {
+                        receiveBuffer.removeAll()
+                        consumed = 0
+                        hasError = error
+                        break
+                    }
                     // Reconstruct full record + any trailing data for fallback (rare path)
                     let failed = Data(receiveBuffer[(base + consumed)...])
                     receiveBuffer.removeAll()
@@ -671,6 +681,22 @@ nonisolated class TLSRecordConnection {
         // Skip handshake records (e.g. NewSessionTicket)
         if innerContentType == 0x16 {
             return Data()
+        }
+
+        // TLS 1.3 alerts are encrypted, so the real type (0x15) only shows
+        // up as the inner content type. A close_notify is an orderly
+        // shutdown — drop it and let the read drain to EOF. Any other alert
+        // is the peer rejecting the connection: surface it so the teardown
+        // names the real cause instead of leaking the 2-byte alert body
+        // upstream as application data.
+        if innerContentType == 0x15 {
+            let body = decrypted.prefix(Int(contentLen))
+            let level = body.first ?? 0
+            let description = body.count >= 2 ? body[body.startIndex + 1] : 0
+            if description == 0 { // close_notify — orderly shutdown, drain to EOF
+                return Data()
+            }
+            throw RealityError.tlsAlert(level: level, description: description)
         }
 
         return decrypted.prefix(Int(contentLen))

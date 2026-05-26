@@ -440,6 +440,7 @@ struct TLSClientHelloBuilder {
         mlkemEncapsulationKey: Data? = nil
     ) -> (cipherSuites: Data, extensions: Data, needsPadding: Bool) {
         switch fingerprint {
+        case .nonBrowser: return buildNonBrowser(serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .chrome133:  return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
         case .chrome120:  return buildChrome120(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .firefox148: return buildFirefox148(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
@@ -453,6 +454,50 @@ struct TLSClientHelloBuilder {
             assertionFailure("random fingerprint must be resolved before dispatch")
             return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)
         }
+    }
+
+    // MARK: - Non-Browser (minimal, honest client)
+
+    /// Minimal, standards-correct TLS 1.3 (+ 1.2 fallback) ClientHello for REAL
+    /// handshakes where correctness matters and camouflage does not — e.g. the
+    /// MITM outer leg. Advertises only capabilities we actually implement: no
+    /// GREASE, no ALPS, no certificate compression, no ECH, no padding, no
+    /// extension shuffle. X25519-only.
+    private static func buildNonBrowser(
+        serverName: String, publicKey: Data, alpn: [String]?
+    ) -> (Data, Data, Bool) {
+        let suites = cipherSuitesData([
+            0x1301, 0x1302, 0x1303,                         // TLS 1.3
+            0xC02B, 0xC02F, 0xC02C, 0xC030,                 // ECDHE AES-GCM
+            0xCCA9, 0xCCA8,                                 // ECDHE ChaCha20
+            0xC013, 0xC014,                                 // ECDHE AES-CBC
+            0x009C, 0x009D,                                 // RSA AES-GCM
+            0x002F, 0x0035                                  // RSA AES-CBC
+        ])
+
+        let protocols = alpn ?? ["h2", "http/1.1"]
+
+        let exts: [Data] = [
+            buildSNIExtension(serverName: serverName),
+            extendedMasterSecretExt(),
+            renegotiationInfoExt(),
+            supportedGroupsExt([0x001D, 0x0017, 0x0018]),   // X25519, secp256r1, secp384r1
+            ecPointFormatsExt(),
+            alpnExt(protocols),
+            signatureAlgorithmsExt([
+                0x0403, 0x0804, 0x0401,  // ECDSA-P256-SHA256, PSS-SHA256, PKCS1-SHA256
+                0x0503, 0x0805, 0x0501,  // ECDSA-P384-SHA384, PSS-SHA384, PKCS1-SHA384
+                0x0806, 0x0601           // PSS-SHA512, PKCS1-SHA512
+            ]),
+            keyShareExt([(group: 0x001D, keyData: publicKey)]),   // X25519 only
+            pskKeyExchangeModesExt(),
+            supportedVersionsExt([0x0304, 0x0303]),
+        ]
+
+        var extensionsData = Data()
+        for e in exts { extensionsData.append(e) }
+
+        return (suites, extensionsData, false)   // no BoringSSL padding
     }
 
     // MARK: - Chrome 133 (HelloChrome_Auto)

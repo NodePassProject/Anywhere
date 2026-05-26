@@ -488,10 +488,19 @@ final class MITMSession {
         } else {
             outerALPN = alpns
         }
+        // Fingerprint: the outer leg performs a REAL TLS handshake to the
+        // origin, so correctness matters and camouflage does not — use the
+        // ``.nonBrowser`` minimal client, which advertises only capabilities
+        // we implement. A browser fingerprint offers ALPS (application_settings);
+        // strict origins (Google's GFE — `*.google.com`, `*.googleapis.com`,
+        // YouTube) accept it and then require a ``ClientEncryptedExtensions``
+        // handshake message we don't send, aborting with a fatal
+        // `unexpected_message`. ``.nonBrowser`` omits ALPS (and GREASE, cert
+        // compression, ECH, padding), matching a generic OpenSSL-style client.
         let configuration = TLSConfiguration(
             serverName: outerSNI,
             alpn: outerALPN,
-            fingerprint: .chrome133,
+            fingerprint: .nonBrowser,
             minVersion: .tls12,
             maxVersion: allowTLS13 ? .tls13 : .tls12
         )
