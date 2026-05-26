@@ -554,31 +554,20 @@ nonisolated class ProxyClient {
             return
         }
 
-        // Only VLESS reaches this point
+        // Only VLESS reaches this point.
+        //
+        // Vision needs a TLS-1.3-record-like layer to drive its padding /
+        // direct-copy state machine, supplied by either VLESS Encryption (any
+        // transport) or a raw TCP transport carrying TLS/REALITY — see
+        // ``transportSupportsVision``.
         switch configuration.transportLayer {
         case .ws:
-            if isVisionFlow {
-                completion(.failure(ProxyError.protocolError("Vision flow is not supported over WebSocket transport")))
-                return
-            }
             connectWithWebSocket(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         case .httpUpgrade:
-            if isVisionFlow {
-                completion(.failure(ProxyError.protocolError("Vision flow is not supported over HTTP upgrade transport")))
-                return
-            }
             connectWithHTTPUpgrade(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         case .grpc:
-            if isVisionFlow {
-                completion(.failure(ProxyError.protocolError("Vision flow is not supported over gRPC transport")))
-                return
-            }
             connectWithGRPC(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         case .xhttp:
-            if isVisionFlow {
-                completion(.failure(ProxyError.protocolError("Vision flow is not supported over XHTTP transport")))
-                return
-            }
             connectWithXHTTP(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         case .tcp:
             switch configuration.securityLayer {
@@ -607,7 +596,7 @@ nonisolated class ProxyClient {
             sendProtocolHandshake(
                 over: directProxyConnection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
-                supportsVision: false, completion: completion
+                supportsVision: transportSupportsVision, completion: completion
             )
         } else {
             let transport = RawTCPSocket()
@@ -626,7 +615,7 @@ nonisolated class ProxyClient {
                 self.sendProtocolHandshake(
                     over: directProxyConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData,
-                    supportsVision: false, completion: completion
+                    supportsVision: transportSupportsVision, completion: completion
                 )
             }
         }
@@ -815,7 +804,7 @@ nonisolated class ProxyClient {
             self.sendProtocolHandshake(
                 over: webSocketProxyConnection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
-                supportsVision: false, completion: completion
+                supportsVision: transportSupportsVision, completion: completion
             )
         }
     }
@@ -919,7 +908,7 @@ nonisolated class ProxyClient {
             self.sendProtocolHandshake(
                 over: httpUpgradeProxyConnection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
-                supportsVision: false, completion: completion
+                supportsVision: transportSupportsVision, completion: completion
             )
         }
     }
@@ -1087,7 +1076,7 @@ nonisolated class ProxyClient {
             self.sendProtocolHandshake(
                 over: grpcProxyConnection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
-                supportsVision: false, completion: completion
+                supportsVision: transportSupportsVision, completion: completion
             )
         }
     }
@@ -1505,7 +1494,7 @@ nonisolated class ProxyClient {
             self.sendProtocolHandshake(
                 over: xhttpProxyConnection, command: command, destinationHost: destinationHost,
                 destinationPort: destinationPort, initialData: initialData,
-                supportsVision: false, completion: completion
+                supportsVision: transportSupportsVision, completion: completion
             )
         }
     }

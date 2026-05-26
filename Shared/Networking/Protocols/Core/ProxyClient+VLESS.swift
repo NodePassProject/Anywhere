@@ -26,6 +26,30 @@ extension ProxyClient {
         return flow == Self.visionFlow + "-udp443"
     }
 
+    /// Whether a non-trivial VLESS `encryption` (the `mlkem768x25519plus`
+    /// scheme) is configured. When set, the encryption layer is itself a
+    /// TLS-1.3-equivalent secure channel, so Vision can run over it without an
+    /// outer TLS/REALITY transport — see ``validateOuterTLSForVision(_:)``.
+    var hasVLESSEncryption: Bool {
+        guard case .vless(_, let encryption, _, _, _, _, _) = configuration.outbound else { return false }
+        return !encryption.isEmpty && encryption != "none"
+    }
+
+    /// Whether the configured transport can carry the Vision flow. Vision needs
+    /// a TLS-1.3-record-like layer to drive its padding / direct-copy state
+    /// machine, which is provided by either of two cases:
+    ///   1. VLESS Encryption — its AEAD records masquerade as TLS 1.3
+    ///      `application_data`, so Vision works over *any* transport; or
+    ///   2. a raw TCP transport carrying TLS / REALITY (the security layer is
+    ///      validated separately by ``validateOuterTLSForVision(_:)``).
+    /// Framed transports (WebSocket / HTTPUpgrade / gRPC / XHTTP) qualify only
+    /// via case 1.
+    var transportSupportsVision: Bool {
+        if hasVLESSEncryption { return true }
+        if case .tcp = configuration.transportLayer { return true }
+        return false
+    }
+
     // MARK: - VLESS protocol handshake
 
     /// VLESS protocol handshake on top of an established transport.
@@ -194,7 +218,16 @@ extension ProxyClient {
 
     /// Validates that the outer TLS connection is TLS 1.3 when using Vision flow.
     /// Matches Xray-core `outbound.go` lines 346-355.
+    ///
+    /// VLESS Encryption is exempt: its AEAD records masquerade as TLS 1.3
+    /// `application_data` (`0x17 0x03 0x03` framing), giving Vision the same
+    /// record structure it keys off without a real outer TLS layer. This
+    /// mirrors Xray-core, where the outer-TLS-1.3 check only runs for an actual
+    /// `tls.Conn`; the `encryption.CommonConn` branch needs no outer TLS.
     fileprivate func validateOuterTLSForVision(_ connection: ProxyConnection) -> Error? {
+        if hasVLESSEncryption {
+            return nil
+        }
         guard let version = connection.outerTLSVersion else {
             return ProxyError.protocolError("Vision requires outer TLS or REALITY transport")
         }

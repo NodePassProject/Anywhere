@@ -29,8 +29,8 @@ struct ProxyEditorView: View {
     // VLESS fields
     @State private var uuid = ""
     @State private var encryption = "none"
-    @State private var transport = "tcp"
     @State private var flow = ""
+    @State private var transport = "tcp"
     @State private var security = "none"
     @State private var muxEnabled = true
     @State private var xudpEnabled = true
@@ -178,10 +178,8 @@ struct ProxyEditorView: View {
                         TextWithColorfulIcon(title: "Protocol", comment: nil, systemName: "arrow.down.left.arrow.up.right.circle.fill", foregroundColor: .white, backgroundColor: .orange)
                     }
                     .onChange(of: selectedProtocol) {
-                        if isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
-                            flow = ""
-                            security = security == "reality" ? "none" : security
-                        }
+                        flow = ""
+                        security = "none"
                     }
                 }
 
@@ -379,6 +377,16 @@ struct ProxyEditorView: View {
                 }
 
                 if isVLESS {
+                    Section {
+                        Picker(selection: $flow) {
+                            Text(String(localized: "None")).tag("")
+                            Text(String("Vision")).tag("xtls-rprx-vision")
+                            Text(String("Vision with UDP 443")).tag("xtls-rprx-vision-udp443")
+                        } label: {
+                            TextWithColorfulIcon(title: "Flow", comment: "Flow for VLESS protocol TCP transport", systemName: "arrow.left.arrow.right", foregroundColor: .white, backgroundColor: .indigo)
+                        }
+                    }
+                    
                     Section("Transport") {
                         Picker(selection: $transport) {
                             Text("TCP").tag("tcp")
@@ -389,19 +397,7 @@ struct ProxyEditorView: View {
                         } label: {
                             TextWithColorfulIcon(title: "Transport", comment: "Transport for VLESS protocol", systemName: "arrow.triangle.swap", foregroundColor: .white, backgroundColor: .purple)
                         }
-                        .onChange(of: transport) {
-                            if flow != "" && transport != "tcp" {
-                                flow = ""
-                            }
-                        }
                         if transport == "tcp" {
-                            Picker(selection: $flow) {
-                                Text(String(localized: "None")).tag("")
-                                Text(String("Vision")).tag("xtls-rprx-vision")
-                                Text(String("Vision with UDP 443")).tag("xtls-rprx-vision-udp443")
-                            } label: {
-                                TextWithColorfulIcon(title: "Flow", comment: "Flow for VLESS protocol TCP transport", systemName: "arrow.left.arrow.right", foregroundColor: .white, backgroundColor: .indigo)
-                            }
                             Toggle(isOn: $muxEnabled) {
                                 TextWithColorfulIcon(title: "Mux", comment: "Mux for VLESS protocol TCP transport", systemName: "rectangle.split.3x1.fill", foregroundColor: .white, backgroundColor: .teal)
                             }

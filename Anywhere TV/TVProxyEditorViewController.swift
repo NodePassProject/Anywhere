@@ -222,11 +222,6 @@ class TVProxyEditorViewController: UITableViewController {
                 ], key: .transport),
             ]
             if transport == "tcp" {
-                transportRows.append(.selection(label: String(localized: "Flow", comment: "Flow for VLESS protocol TCP transport"), value: flowDisplayValue, options: [
-                    (String(localized: "None"), ""),
-                    ("Vision", "xtls-rprx-vision"),
-                    ("Vision + UDP 443", "xtls-rprx-vision-udp443"),
-                ], key: .flow))
                 transportRows.append(.toggle(label: String(localized: "Mux", comment: "Mux for VLESS protocol TCP transport"), isOn: muxEnabled, key: .mux))
                 if muxEnabled {
                     transportRows.append(.toggle(label: String(localized: "XUDP", comment: "XUDP for VLESS protocol TCP transport"), isOn: xudpEnabled, key: .xudp))
@@ -259,6 +254,13 @@ class TVProxyEditorViewController: UITableViewController {
                     ("Stream One", "stream-one"),
                 ], key: .xhttpMode))
             }
+            sections.append((nil, [
+                .selection(label: String(localized: "Flow", comment: "Flow for VLESS protocol TCP transport"), value: flowDisplayValue, options: [
+                    (String(localized: "None"), ""),
+                    ("Vision", "xtls-rprx-vision"),
+                    ("Vision + UDP 443", "xtls-rprx-vision-udp443"),
+                ], key: .flow),
+            ]))
             sections.append((String(localized: "Transport"), transportRows))
         }
         
@@ -544,7 +546,6 @@ class TVProxyEditorViewController: UITableViewController {
         case .encryption: encryption = value
         case .transport:
             transport = value
-            if flow != "" && transport != "tcp" { flow = "" }
         case .flow: flow = value
         case .security: security = value
         case .mux:

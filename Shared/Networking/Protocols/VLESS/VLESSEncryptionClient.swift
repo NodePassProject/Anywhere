@@ -1240,6 +1240,46 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         }
     }
 
+    // MARK: Vision direct-copy (bypass AEAD)
+
+    // Once XTLS-Vision detects the proxied stream is TLS 1.3 it stops padding
+    // and switches to "direct copy": both peers stop AEAD-framing right after
+    // the `paddingDirect` command, and the inner TLS records then flow over the
+    // layer beneath us verbatim. These overrides peel exactly our AEAD layer —
+    // matching Xray-core's `UnwrapRawConn`, which unwraps `CommonConn` but not
+    // the `XorConn`/transport beneath it. So we delegate to `inner` (not the
+    // direct-raw API): in `random` mode `inner` is the `VLESSXORConnection`,
+    // which keeps masking record headers, and an outer TLS/REALITY transport
+    // keeps encrypting — only the redundant AEAD framing is dropped.
+
+    override func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {
+        inner.sendRaw(data: data, completion: completion)
+    }
+
+    override func sendDirectRaw(data: Data) {
+        inner.sendRaw(data: data)
+    }
+
+    override func receiveDirectRaw(completion: @escaping (Data?, Error?) -> Void) {
+        // Hand back anything we over-read past the final AEAD record before the
+        // peer switched to raw output. Those are the leading bytes of the inner
+        // TLS stream (already de-masked by the inner XorConn in `random` mode),
+        // and `inner.receiveRaw` would not replay them. This mirrors Vision
+        // flushing `CommonConn`'s buffered `input`/`rawInput` at the moment it
+        // switches to direct copy (see `VisionReader.ReadMultiBuffer` in
+        // Xray-core's proxy.go).
+        recvLock.lock()
+        if !inboundBuffer.isEmpty {
+            let leftover = inboundBuffer
+            inboundBuffer = Data()
+            recvLock.unlock()
+            completion(leftover, nil)
+            return
+        }
+        recvLock.unlock()
+        inner.receiveRaw(completion: completion)
+    }
+
     override func cancel() {
         inner.cancel()
     }
