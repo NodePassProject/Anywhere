@@ -36,7 +36,7 @@ struct RuleSetListView: View {
                 }
             }
             if !customRuleSets.isEmpty {
-                Section {
+                Section("Custom") {
                     ForEach(customRuleSets) { custom in
                         NavigationLink {
                             CustomRuleSetDetailView(customRuleSetId: custom.id)
@@ -66,8 +66,6 @@ struct RuleSetListView: View {
                         customRuleSets = RoutingRuleSetStore.shared.customRuleSets
                         Task { await viewModel.syncRoutingConfigurationToNE() }
                     }
-                } header: {
-                    Text("Custom")
                 }
             }
         }
@@ -104,13 +102,17 @@ struct RuleSetListView: View {
             }
         }
         .onChange(of: builtInServiceRuleSets) { oldValue, newValue in
+            var routingChanged: Bool = false
             for currentRuleSet in newValue {
                 let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
                 if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
                     RoutingRuleSetStore.shared.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
+                    routingChanged = true
                 }
             }
-            Task { await viewModel.syncRoutingConfigurationToNE() }
+            if routingChanged {
+                Task { await viewModel.syncRoutingConfigurationToNE() }
+            }
         }
         .onAppear {
             builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
