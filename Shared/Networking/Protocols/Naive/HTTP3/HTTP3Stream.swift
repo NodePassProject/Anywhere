@@ -9,7 +9,7 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "HTTP3Stream")
 
-nonisolated class HTTP3Stream: NaiveTunnel {
+nonisolated class HTTP3Stream: NaiveTunnel, HTTP3StreamHandler {
 
     // MARK: - State
 

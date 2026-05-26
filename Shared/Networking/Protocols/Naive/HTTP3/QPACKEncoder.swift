@@ -222,6 +222,53 @@ enum QPACKEncoder {
         return block
     }
 
+    /// Encodes HTTP/3 request headers for an arbitrary method into a QPACK
+    /// header block. Used by the XHTTP-over-HTTP/3 download (GET) and upload
+    /// (POST / configured uplink method) streams.
+    ///
+    /// - `:method`    = GET (static index 17) or POST (static index 20) via the
+    ///   static table; any other method as a literal `:method` field line.
+    /// - `:scheme`    = https  (static table index 23)
+    /// - `:authority`          (literal with name ref, static index 0)
+    /// - `:path`               (literal with name ref, static index 1)
+    ///
+    /// - Parameters:
+    ///   - method: HTTP method (e.g. "GET", "POST").
+    ///   - authority: The target host (e.g. "example.com").
+    ///   - path: The request path including any query string.
+    ///   - extraHeaders: Additional headers (user-agent, padding, content-type, …).
+    /// - Returns: QPACK-encoded header block.
+    static func encodeRequestHeaders(
+        method: String,
+        authority: String,
+        path: String,
+        extraHeaders: [(name: String, value: String)]
+    ) -> Data {
+        var block = Data()
+        block.append(0x00) // Required Insert Count = 0
+        block.append(0x00) // S=0, Delta Base = 0
+
+        switch method.uppercased() {
+        case "GET":
+            block.append(contentsOf: encodeIndexedFieldLine(17))  // :method GET
+        case "POST":
+            block.append(contentsOf: encodeIndexedFieldLine(20))  // :method POST
+        default:
+            block.append(contentsOf: encodeLiteralFieldLine(name: ":method", value: method))
+        }
+        // :scheme = https (static table index 23)
+        block.append(contentsOf: encodeIndexedFieldLine(23))
+        // :authority = <authority> (static index 0)
+        block.append(contentsOf: encodeLiteralWithNameRef(staticIndex: 0, value: authority))
+        // :path = <path> (static index 1)
+        block.append(contentsOf: encodeLiteralWithNameRef(staticIndex: 1, value: path))
+
+        for header in extraHeaders {
+            block.append(contentsOf: encodeLiteralFieldLine(name: header.name, value: header.value))
+        }
+        return block
+    }
+
     // MARK: - Encoding Helpers
 
     /// Indexed field line: 1 T(1) Index(6+)

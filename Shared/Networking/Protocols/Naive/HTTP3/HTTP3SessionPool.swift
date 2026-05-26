@@ -85,7 +85,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
             }
 
             let new = HTTP3Session(
-                host: host, port: port, serverName: sni, configuration: configuration
+                host: host, port: port, serverName: sni
             )
             let capturedKey = key
             new.onClose = { [weak self, weak new] in
@@ -99,7 +99,8 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
         lock.unlock()
 
         session.queue.async {
-            let stream = session.createStream(destination: destination)
+            session.noteStreamStarted()
+            let stream = HTTP3Stream(session: session, configuration: configuration, destination: destination)
             completion(stream)
         }
     }

@@ -92,6 +92,19 @@ nonisolated class XHTTPConnection {
     var h2UploadStreamId: UInt32 = 3      // Fixed upload stream for stream-up
     var h2NextPacketStreamId: UInt32 = 3   // Next stream ID for packet-up uploads
 
+    // HTTP/3 state. XHTTP-over-h3 multiplexes its modes onto QUIC streams via an
+    // HTTP3Session, rather than framing over a single byte stream like H2.
+    var h3Session: HTTP3Session?
+    /// Download stream: the GET response body (stream-up / packet-up) or the
+    /// single full-duplex request stream (stream-one).
+    var h3Download: HTTP3RequestStream?
+    /// Persistent upload POST stream (stream-up only).
+    var h3Upload: HTTP3RequestStream?
+    var h3Closed = false
+
+    /// Whether this connection runs over HTTP/3 (set when built with an HTTP3Session).
+    var useHTTP3: Bool { h3Session != nil }
+
     var isConnected: Bool {
         lock.lock()
         let v = _isConnected
@@ -251,6 +264,14 @@ nonisolated class XHTTPConnection {
         self.init(download: TransportClosures(tunnel: tunnel), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
     }
 
+    /// Creates an XHTTP connection over HTTP/3 (QUIC). Byte I/O is multiplexed
+    /// over the provided ``HTTP3Session`` rather than a single transport stream,
+    /// so the closure triple is the no-op ``TransportClosures/unused``.
+    convenience init(h3Session: HTTP3Session, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
+        self.init(download: .unused, configuration: configuration, mode: mode, sessionId: sessionId)
+        self.h3Session = h3Session
+    }
+
     // MARK: - Setup
 
     /// Performs the initial HTTP handshake (sends the initial request and reads the response headers).
@@ -261,7 +282,10 @@ nonisolated class XHTTPConnection {
     /// - For packet-up mode: sends a GET request for the download stream, reads response headers,
     ///   and establishes the upload connection via the factory.
     func performSetup(completion: @escaping (Error?) -> Void) {
-        if useHTTP2 {
+        if useHTTP3 {
+            // HTTP/3: all modes multiplex onto QUIC streams via the HTTP3Session.
+            performH3Setup(completion: completion)
+        } else if useHTTP2 {
             // HTTP/2: all modes go through H2 setup with mode-specific stream handling
             performH2Setup(completion: completion)
         } else if mode == .streamOne {
@@ -281,6 +305,14 @@ nonisolated class XHTTPConnection {
             // Packet-up batches writes through an internal queue (see
             // enqueuePacketUpSend). All other modes go directly to the wire.
             enqueuePacketUpSend(data: data, completion: completion)
+            return
+        }
+        if useHTTP3 {
+            // stream-up writes request body to the dedicated upload POST stream;
+            // stream-one writes to its single full-duplex request stream.
+            let stream = (mode == .streamUp) ? h3Upload : h3Download
+            guard let stream else { completion(XHTTPError.connectionClosed); return }
+            stream.sendBody(data, fin: false, completion: completion)
             return
         }
         if useHTTP2 {
@@ -306,6 +338,10 @@ nonisolated class XHTTPConnection {
 
     /// Receives data from the download stream.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
+        if useHTTP3 {
+            receiveH3Data(completion: completion)
+            return
+        }
         if useHTTP2 {
             receiveH2Data(completion: completion)
             return
@@ -371,6 +407,10 @@ nonisolated class XHTTPConnection {
         h2ReadBuffer.removeAll()
         h2DataBuffer.removeAll()
         h2StreamClosed = true
+        h3Closed = true
+        let h3Dl = h3Download
+        let h3Up = h3Upload
+        let h3Sess = h3Session
         let uploadCancelFn = uploadCancel
         uploadSend = nil
         uploadReceive = nil
@@ -386,6 +426,10 @@ nonisolated class XHTTPConnection {
 
         downloadCancel()
         uploadCancelFn?()
+        // Tear down the HTTP/3 streams and QUIC session (no-ops if not on the h3 path).
+        h3Dl?.close()
+        h3Up?.close()
+        h3Sess?.close()
     }
 
     // MARK: - Packet-Up Batching
@@ -393,7 +437,7 @@ nonisolated class XHTTPConnection {
     /// Queues a write for the next batched POST in packet-up mode.
     func enqueuePacketUpSend(data: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
-        if !_isConnected || (useHTTP2 && h2StreamClosed) {
+        if !_isConnected || (useHTTP2 && h2StreamClosed) || (useHTTP3 && h3Closed) {
             lock.unlock()
             completion(XHTTPError.connectionClosed)
             return
@@ -441,7 +485,7 @@ nonisolated class XHTTPConnection {
     private func flushPacketUpBatch() {
         lock.lock()
 
-        if !_isConnected || (useHTTP2 && h2StreamClosed) {
+        if !_isConnected || (useHTTP2 && h2StreamClosed) || (useHTTP3 && h3Closed) {
             let pending = packetUpQueue
             packetUpQueue.removeAll()
             packetUpFlushPending = false
@@ -476,6 +520,7 @@ nonisolated class XHTTPConnection {
 
         packetUpLastFlushTime = DispatchTime.now().uptimeNanoseconds
         let isH2 = useHTTP2
+        let isH3 = useHTTP3
         lock.unlock()
 
         let onComplete: (Error?) -> Void = { [weak self] error in
@@ -494,7 +539,9 @@ nonisolated class XHTTPConnection {
             self.schedulePacketUpFlush()
         }
 
-        if isH2 {
+        if isH3 {
+            sendH3PacketUp(data: batchedData, completion: onComplete)
+        } else if isH2 {
             sendH2PacketUp(data: batchedData, completion: onComplete)
         } else {
             sendPacketUp(data: batchedData, completion: onComplete)

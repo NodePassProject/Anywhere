@@ -1189,17 +1189,9 @@ nonisolated class ProxyClient {
             return
         }
 
-        // HTTP/3 is intentionally unsupported: XHTTP-over-QUIC would require a
-        // full QUIC stack (DATAGRAM frames, 0-RTT resumption, connection
-        // migration). Server configs that negotiate ALPN "h3" must be rejected
-        // here; clients should downgrade to h2 in the XHTTP config.
+        // ALPN "h3" routes XHTTP over HTTP/3-over-QUIC (see connectXHTTP3); every
+        // other ALPN uses HTTP/1.1 or HTTP/2 over TCP+TLS.
         let httpVersion = decideXHTTPHTTPVersion()
-        if httpVersion == .http3 {
-            completion(.failure(ProxyError.connectionFailed(
-                "XHTTP over TLS with ALPN h3 requires QUIC/HTTP/3, which is not implemented"
-            )))
-            return
-        }
 
         // Resolve mode: auto → actual mode
         let resolvedMode: XHTTPMode
@@ -1217,8 +1209,13 @@ nonisolated class ProxyClient {
 
         if case .reality(let realityConfig) = configuration.securityLayer {
             connectXHTTPReality(realityConfig: realityConfig, xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        } else if case .tls = configuration.securityLayer {
-            connectXHTTPS(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, httpVersion: httpVersion, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+        } else if case .tls(let tlsConfig) = configuration.securityLayer {
+            if httpVersion == .http3 {
+                // ALPN "h3" selects an HTTP/3 transport, which runs over QUIC (UDP).
+                connectXHTTP3(tlsConfig: tlsConfig, xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            } else {
+                connectXHTTPS(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, httpVersion: httpVersion, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
+            }
         } else {
             connectXHTTPPlain(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
         }
@@ -1325,13 +1322,6 @@ nonisolated class ProxyClient {
     ) {
         guard case .tls(let baseTLSConfig) = configuration.securityLayer else {
             completion(.failure(ProxyError.connectionFailed("XHTTPS requires TLS configuration")))
-            return
-        }
-
-        guard httpVersion != .http3 else {
-            completion(.failure(ProxyError.connectionFailed(
-                "XHTTP over TLS with ALPN h3 requires QUIC/HTTP/3, which is not implemented yet"
-            )))
             return
         }
 
@@ -1470,6 +1460,53 @@ nonisolated class ProxyClient {
         } else {
             realityClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleRealityResult)
         }
+    }
+
+    // MARK: XHTTP/3 (QUIC → HTTP/3 → XHTTP → VLESS)
+
+    /// Connects XHTTP over HTTP/3-over-QUIC, used when the TLS ALPN is exactly
+    /// `h3`: that ALPN selects an HTTP/3 transport, which runs over QUIC (UDP)
+    /// rather than TLS-over-TCP. The TLS 1.3 handshake is performed natively by
+    /// the QUIC stack (``QUICTLSHandler``), so no ``TLSClient`` runs here; the
+    /// ALPN reaches the wire as the QUIC connection's `["h3"]`.
+    ///
+    /// Direct-dial only: h3 over a proxy chain would need a QUIC datagram relay
+    /// (``QUICDatagramTransport``).
+    private func connectXHTTP3(
+        tlsConfig: TLSConfiguration,
+        xhttpConfig: XHTTPConfiguration,
+        mode: XHTTPMode,
+        sessionId: String,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        if let chain = configuration.chain, !chain.isEmpty {
+            completion(.failure(ProxyError.connectionFailed(
+                "XHTTP over HTTP/3 (ALPN h3) does not support proxy chaining yet")))
+            return
+        }
+        if tunnel != nil {
+            completion(.failure(ProxyError.connectionFailed(
+                "XHTTP over HTTP/3 (ALPN h3) does not support being tunneled yet")))
+            return
+        }
+
+        let session = HTTP3Session(
+            host: directDialHost,
+            port: configuration.serverPort,
+            serverName: tlsConfig.serverName
+        )
+        let xhttpConnection = XHTTPConnection(
+            h3Session: session, configuration: xhttpConfig, mode: mode, sessionId: sessionId
+        )
+        self.xhttpConnection = xhttpConnection
+        performXHTTPSetup(
+            xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
+            destinationPort: destinationPort, initialData: initialData, completion: completion
+        )
     }
 
     /// Performs XHTTP setup then sends the protocol handshake.

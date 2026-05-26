@@ -66,6 +66,20 @@ extension TransportClosures {
         )
     }
 
+    /// A no-op transport for connections whose byte I/O is handled out-of-band.
+    /// XHTTP-over-HTTP/3 multiplexes over a ``QUICConnection`` (via
+    /// ``HTTP3Session``) rather than a single byte stream, so its
+    /// ``XHTTPConnection`` carries this placeholder; the send/receive closures
+    /// are never invoked (the H3 code path branches before reaching them) and
+    /// cancellation is driven through the H3 session instead.
+    static var unused: TransportClosures {
+        TransportClosures(
+            send: { _, completion in completion(nil) },
+            receive: { completion in completion(nil, true, nil) },
+            cancel: {}
+        )
+    }
+
     /// Adapts a tunneled ``ProxyConnection`` (for proxy chaining) to the
     /// closure triple. Empty / nil data on a non-error receive is translated
     /// to EOF so the caller sees the same three-way signal as the direct
