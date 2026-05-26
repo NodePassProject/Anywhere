@@ -9,6 +9,31 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "HTTP3Session")
 
+// MARK: - HTTP3StreamHandler
+
+/// A handler for one QUIC stream's lifecycle within an ``HTTP3Session``.
+///
+/// The session demuxes incoming QUIC stream data and connection-level errors
+/// to the registered handler for each stream ID. Naive's CONNECT tunnels
+/// (``HTTP3Stream``) and XHTTP's request/response streams both conform, so a
+/// single session can multiplex either kind without the connection layer
+/// knowing which protocol is running on top.
+protocol HTTP3StreamHandler: AnyObject {
+    // Requirements are `nonisolated`: handlers run on the QUICConnection's serial
+    // queue, never the main actor. Without this, the project's default
+    // main-actor isolation would force conformers' `quicStreamID` to @MainActor
+    // and warn on every nonisolated access (in both this stream type and Naive's).
+
+    /// The assigned QUIC stream ID, or nil before one has been opened.
+    nonisolated var quicStreamID: Int64? { get }
+    /// Delivers raw QUIC stream payload (HTTP/3 frames) for this stream.
+    /// Called on the session queue.
+    nonisolated func handleStreamData(_ data: Data, fin: Bool)
+    /// Signals that the underlying session failed or closed.
+    /// Called on the session queue.
+    nonisolated func handleSessionError(_ error: Error)
+}
+
 nonisolated class HTTP3Session: PoolableSession {
 
     // MARK: - State
@@ -20,7 +45,6 @@ nonisolated class HTTP3Session: PoolableSession {
     // MARK: - Properties
 
     private let quic: QUICConnection
-    private let configuration: NaiveConfiguration
     /// Shares the QUICConnection's serial queue to avoid cross-queue dispatch
     /// on the hot receive path (recv_stream_data → session → stream).
     var queue: DispatchQueue { quic.queue }
@@ -31,7 +55,7 @@ nonisolated class HTTP3Session: PoolableSession {
     private var state: SessionState = .idle
 
     /// Active streams keyed by QUIC stream ID.
-    private var streams: [Int64: HTTP3Stream] = [:]
+    private var streams: [Int64: any HTTP3StreamHandler] = [:]
 
     /// Pending ready callbacks (batched while connecting).
     private var readyCallbacks: [(Error?) -> Void] = []
@@ -85,9 +109,11 @@ nonisolated class HTTP3Session: PoolableSession {
 
     // MARK: - Init
 
-    init(host: String, port: UInt16, serverName: String, configuration: NaiveConfiguration) {
-        self.configuration = configuration
-        self.quic = QUICConnection(host: host, port: port, serverName: serverName, alpn: ["h3"], tuning: .naive)
+    /// - Parameter tuning: QUIC transport tuning. Defaults to ``QUICTuning/naive``
+    ///   (the preset the Naive HTTP/3 CONNECT path is tuned against); XHTTP-over-h3
+    ///   reuses it since its stream/flow-control needs are comparable.
+    init(host: String, port: UInt16, serverName: String, tuning: QUICTuning = .naive) {
+        self.quic = QUICConnection(host: host, port: port, serverName: serverName, alpn: ["h3"], tuning: tuning)
     }
 
     // MARK: - Pool Interface
@@ -126,23 +152,25 @@ nonisolated class HTTP3Session: PoolableSession {
 
     // MARK: - Stream Creation
 
-    func createStream(destination: String) -> HTTP3Stream {
+    /// Pool bookkeeping for turning a reserved slot into an active stream.
+    /// The caller constructs the concrete stream type (Naive CONNECT, XHTTP
+    /// request, …) and registers it via ``registerStream(_:streamID:)`` once
+    /// its QUIC stream ID is assigned. Non-pooled callers (e.g. XHTTP, which
+    /// owns one session per proxy connection) skip this and just register.
+    func noteStreamStarted() {
         // Called on queue
         _poolLock.lock()
         _reservedStreams = max(0, _reservedStreams - 1)
         _poolStreamCount += 1
         _poolLock.unlock()
-        let stream = HTTP3Stream(session: self, configuration: configuration,
-                                 destination: destination)
-        return stream
     }
 
     /// Registers a stream after its QUIC stream ID is assigned.
-    func registerStream(_ stream: HTTP3Stream, streamID: Int64) {
+    func registerStream(_ stream: any HTTP3StreamHandler, streamID: Int64) {
         streams[streamID] = stream
     }
 
-    func removeStream(_ stream: HTTP3Stream) {
+    func removeStream(_ stream: any HTTP3StreamHandler) {
         if let sid = stream.quicStreamID {
             if streams.removeValue(forKey: sid) != nil {
                 _poolLock.lock()
@@ -246,8 +274,8 @@ nonisolated class HTTP3Session: PoolableSession {
         quic.openBidiStream()
     }
 
-    func writeStream(_ streamID: Int64, data: Data, completion: @escaping (Error?) -> Void) {
-        quic.writeStream(streamID, data: data, completion: completion)
+    func writeStream(_ streamID: Int64, data: Data, fin: Bool = false, completion: @escaping (Error?) -> Void) {
+        quic.writeStream(streamID, data: data, fin: fin, completion: completion)
     }
 
     func extendStreamOffset(_ streamID: Int64, count: Int) {

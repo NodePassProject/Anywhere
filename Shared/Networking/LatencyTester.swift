@@ -24,7 +24,7 @@ private enum LatencyTestError: Error, LocalizedError {
 nonisolated enum LatencyTester {
 
     /// Per-test timeout.
-    private static let timeout: Duration = .seconds(3)
+    private static let timeout: Duration = .seconds(10)
 
     /// Latency test endpoint
     private static let latencyHost = "captive.apple.com"
