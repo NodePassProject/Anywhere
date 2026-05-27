@@ -149,10 +149,13 @@ final class MITMRewritePolicy {
         // Build under the lock so a concurrent lookup never sees a half-built
         // trie. The script-store purge + logging below touch a different shared
         // store and don't need this lock, so they run after release.
+        var scopedRules: [(scope: UUID, rules: [CompiledMITMRule])] = []
         lock.withLock {
             resetUnlocked()
             for set in ruleSets {
-                insertUnlocked(set)
+                if let compiled = insertUnlocked(set) {
+                    scopedRules.append((scope: set.id, rules: compiled))
+                }
             }
             trie.freeze()
         }
@@ -166,6 +169,11 @@ final class MITMRewritePolicy {
         // (the id is stable) and is cleared only on removal.
         let activeIDs = Set(ruleSets.map { $0.id })
         MITMScriptEngine.purgeEngines(activeIDs: activeIDs)
+        // Prewarm the JS engine + compile cache for script-bearing sets so
+        // the first intercepted flow that triggers a script doesn't pay the
+        // cold start inline (see ``MITMScriptTransform/prewarm``). Runs after
+        // the purge so it only builds engines for sets still active.
+        MITMScriptTransform.prewarm(scopedRules: scopedRules)
         let purged = MITMScriptStore.shared.purgeExcept(activeIDs: activeIDs)
         if purged > 0 {
             logger.debug("[MITM] Loaded \(ruleSets.count) rule set(s); purged \(purged) stale script-store bucket(s)")
@@ -174,13 +182,15 @@ final class MITMRewritePolicy {
         }
     }
 
-    /// Inserts one rule set. Caller must hold ``lock`` (invoked only from
-    /// ``load`` while building the trie).
-    private func insertUnlocked(_ set: MITMRuleSet) {
+    /// Inserts one rule set, returning its compiled rules — or nil when the
+    /// set had no usable domain suffix and was skipped — so ``load`` can
+    /// prewarm the script engine for it. Caller must hold ``lock`` (invoked
+    /// only from ``load`` while building the trie).
+    private func insertUnlocked(_ set: MITMRuleSet) -> [CompiledMITMRule]? {
         let suffixes = set.domainSuffixes
             .map { $0.lowercased().trimmingCharacters(in: CharacterSet.whitespaces) }
             .filter { !$0.isEmpty }
-        guard !suffixes.isEmpty else { return }
+        guard !suffixes.isEmpty else { return nil }
 
         let compiledRules = set.rules.compactMap { rule -> CompiledMITMRule? in
             guard let regex = try? NSRegularExpression(pattern: rule.pattern, options: []) else {
@@ -212,6 +222,7 @@ final class MITMRewritePolicy {
                 setCount += 1
             }
         }
+        return compiledRules
     }
 
     /// Returns `true` when the hostname is covered by any rule set. Empty

@@ -397,6 +397,23 @@ final class MITMScriptEngine {
 
     // MARK: - Compilation
 
+    /// Eagerly compiles ``source`` into the function cache so the first real
+    /// ``apply``/``applyFrame`` that uses it skips the parse + compile step —
+    /// and, for the first engine built process-wide, also absorbs the
+    /// one-time ``JSVirtualMachine`` spin-up and ``Anywhere``-global install
+    /// that ``init`` performs. Serialized with invocations via
+    /// ``invocationLock`` and idempotent: a cache hit is a no-op, and a
+    /// source that fails to compile is simply left uncached (it recompiles,
+    /// still failing and logging once, on first real use). Execution is
+    /// deliberately not triggered — running the user's ``process`` against a
+    /// fabricated ctx could fire ``Anywhere.respond``, mutate the store, or
+    /// loop without bound on the shared script queue.
+    func precompile(source: String, sourceKey: Int) {
+        invocationLock.lock()
+        defer { invocationLock.unlock() }
+        _ = compileIfNeeded(source, key: sourceKey)
+    }
+
     private func compileIfNeeded(_ source: String, key: Int) -> JSValue? {
         let byteCount = source.utf8.count
         if let cached = compiled[key] {

@@ -46,6 +46,45 @@ enum MITMScriptTransform {
         qos: .userInitiated
     )
 
+    /// Builds the JS engine and compiles the `process` source of every
+    /// script / streamScript rule ahead of any traffic, on ``scriptQueue``
+    /// (off the lwIP queue). Called from ``MITMRewritePolicy/load`` when
+    /// MITM is (re)configured, so the cold start lands there instead of
+    /// inside the first intercepted flow that matches a script rule — where
+    /// it would otherwise run while that connection is parked. The cold
+    /// start is the dominant first-call cost: the first engine spins up the
+    /// shared ``JSVirtualMachine`` and installs the whole ``Anywhere`` API,
+    /// then each unique source is parsed and compiled. (JIT tier-up still
+    /// happens on the first real call — warming it would mean executing
+    /// user code speculatively, which isn't safe.)
+    ///
+    /// One async task per scope so a real script call dispatched mid-prewarm
+    /// interleaves between scopes rather than waiting for all of them.
+    static func prewarm(scopedRules: [(scope: UUID, rules: [CompiledMITMRule])]) {
+        for entry in scopedRules {
+            // Dedupe by cache key: the same source on several rules (e.g.
+            // request + response phase) needs compiling only once. ``let`` so
+            // the list is captured by value into the sendable async closure.
+            var seen = Set<Int>()
+            let scripts: [(source: String, sourceKey: Int)] = entry.rules.compactMap { rule in
+                switch rule.operation {
+                case .script(let source, let sourceKey), .streamScript(let source, let sourceKey):
+                    return seen.insert(sourceKey).inserted ? (source: source, sourceKey: sourceKey) : nil
+                case .urlReplace, .headerAdd, .headerDelete, .headerReplace:
+                    return nil
+                }
+            }
+            guard !scripts.isEmpty else { continue }
+            let scope = entry.scope
+            scriptQueue.async {
+                let engine = MITMScriptEngine.sharedEngine(forScope: scope)
+                for script in scripts {
+                    engine.precompile(source: script.source, sourceKey: script.sourceKey)
+                }
+            }
+        }
+    }
+
     /// Result of running a buffered ``.script`` rule on a message.
     /// Distinguishes the normal rewrite path (``message``) from a
     /// request-phase `Anywhere.respond(...)` short-circuit
