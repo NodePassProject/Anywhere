@@ -75,13 +75,21 @@ final class MITMHTTP1Stream {
     /// `method`/`url` fields on response phase.
     private let requestLog: MITMRequestLog
 
+    /// The session's serial lwIP queue. Script execution hops off it onto
+    /// ``MITMScriptTransform/scriptQueue``; the engine result is delivered
+    /// back here so the parked driver resumes on the same queue every other
+    /// part of the stream runs on. All ``drive``/``transform`` state is only
+    /// ever touched on this queue.
+    private let lwipQueue: DispatchQueue
+
     init(
         host: String,
         phase: MITMPhase,
         policy: MITMRewritePolicy,
         effectiveAuthority: String?,
         scriptEngineProvider: MITMScriptEngine.Provider,
-        requestLog: MITMRequestLog
+        requestLog: MITMRequestLog,
+        lwipQueue: DispatchQueue
     ) {
         self.host = host
         self.phase = phase
@@ -95,6 +103,7 @@ final class MITMHTTP1Stream {
         self.effectiveAuthority = effectiveAuthority
         self.scriptEngineProvider = scriptEngineProvider
         self.requestLog = requestLog
+        self.lwipQueue = lwipQueue
     }
 
     // MARK: - State
@@ -133,6 +142,24 @@ final class MITMHTTP1Stream {
         /// any chunk has completed.
         var pendingChunk: Data? = nil
         let cursor: MITMScriptTransform.FrameCursor
+    }
+
+    /// What a streaming-frame resume must do *after* appending the framed
+    /// chunk's result, once the off-queue ``applyFrame`` returns. Mirrors
+    /// the three transient continuations that follow an
+    /// ``emitStreamingChunk`` call in ``driveStreamingChunked``; captured at
+    /// park time so the resume can reconstruct the loop's next step.
+    private enum StreamingPostFrame {
+        /// Hold the just-completed chunk as the new lookahead and continue
+        /// at ``inner`` (normal mid-stream chunk boundary).
+        case hold(nextPending: Data?, inner: StreamingChunkedInner)
+        /// Final chunk just emitted: write the zero-size size line and drain
+        /// the trailer section.
+        case finalThenTrailer
+        /// Per-chunk cap overflow: flip the stream to bypass, emit the
+        /// overflowing accumulator verbatim, and keep reading the remaining
+        /// `left` bytes of the current chunk.
+        case bypassRemainder(left: Int, accumulator: Data)
     }
 
     private enum StreamingChunkedInner {
@@ -193,9 +220,36 @@ final class MITMHTTP1Stream {
         /// Permanent: forward bytes verbatim. Reached on protocol
         /// upgrades (101), CONNECT-style tunnels, or any framing error.
         case passthrough
+
+        /// Parked: a script call has been dispatched to
+        /// ``MITMScriptTransform/scriptQueue`` and we are awaiting its
+        /// result. The ``drive`` loop stops (consumes no further
+        /// ``rxBuffer`` bytes) until the engine completion hops back to the
+        /// lwIP queue and a resume method splices the scripted output,
+        /// restores the real next mode, and resumes driving. Carries no
+        /// payload: everything the resume needs is captured in the dispatch
+        /// closure (see ``resumeBufferedBody``/``resumeHeadNoBody``/
+        /// ``resumeStreamingFrame``).
+        case awaitingScript
     }
 
     private var mode: Mode = .awaitingHead
+
+    /// The in-flight ``transform``/``finish`` completion, retained only
+    /// while a script hop is outstanding (``mode == .awaitingScript``). nil
+    /// otherwise. The pump's one-read-in-flight discipline guarantees at most
+    /// one is ever outstanding, so a plain optional suffices.
+    private var parkedCompletion: ((Data) -> Void)?
+
+    /// Output produced earlier in the current drive pass, held while a script
+    /// hop is outstanding. The resume prepends it so the single completion
+    /// carries every byte of the pass in wire order (e.g. a pipelined
+    /// passthrough response that preceded a scripted one).
+    private var pendingPreParkOutput = Data()
+
+    /// Set when the owning session tears down. A resume that fires after this
+    /// bails without touching a dead leg or firing a stale completion.
+    private var torn = false
     /// Cursor-style buffer so prefix consumption is O(1). Chunked
     /// bodies streaming many small chunks would otherwise pay
     /// `O(remaining)` per ``Data.removeFirst`` shift; see
@@ -220,16 +274,53 @@ final class MITMHTTP1Stream {
 
     // MARK: - Public API
 
-    func transform(_ data: Data) -> Data {
+    /// Feeds `data` through the rewrite pipeline. ``completion`` receives the
+    /// peer-bound bytes and is invoked **exactly once**:
+    /// - synchronously, inline, when no script runs (the common case — same
+    ///   latency and allocations as a plain return), or
+    /// - later, on the lwIP queue, when a script rule parks the stream while
+    ///   its JavaScript runs off-queue.
+    ///
+    /// Client-bound synth bytes (from a request-phase `Anywhere.respond`) are
+    /// not part of this completion; the pump drains them via
+    /// ``drainPendingClientBytes()`` right after the completion fires.
+    func transform(_ data: Data, completion: @escaping (Data) -> Void) {
+        assert(parkedCompletion == nil, "transform re-entered while a script hop is outstanding")
         if case .passthrough = mode {
-            return data
+            completion(data)
+            return
         }
         rxBuffer.append(data)
+        parkedCompletion = completion
         var output = Data()
-        // Each iteration consumes from rxBuffer or returns when more
-        // bytes are needed.
+        // Each iteration consumes from rxBuffer, parks on a script hop, or
+        // returns when more bytes are needed.
         while drive(into: &output) { }
-        return output
+        finishDrivePass(output)
+    }
+
+    /// Tail of every drive pass — the synchronous one in ``transform`` and
+    /// each resumed one. If a script hop started during the pass
+    /// (``mode == .awaitingScript``), holds the bytes produced so far and
+    /// returns without firing; the matching resume prepends them and fires
+    /// once its hop completes. Otherwise fires the stashed completion exactly
+    /// once with the accumulated output.
+    private func finishDrivePass(_ output: Data) {
+        if case .awaitingScript = mode {
+            pendingPreParkOutput = output
+            return
+        }
+        let completion = parkedCompletion
+        parkedCompletion = nil
+        completion?(output)
+    }
+
+    /// Marks the stream torn down (session cancelled). Any in-flight script
+    /// resume that fires afterwards bails immediately. Idempotent.
+    func markTorn() {
+        torn = true
+        parkedCompletion = nil
+        pendingPreParkOutput = Data()
     }
 
     /// Drains and returns any client-bound bytes synthesized by
@@ -246,18 +337,38 @@ final class MITMHTTP1Stream {
     /// read-until-close body carries no in-band terminator — the close
     /// *is* the terminator — so this is where a buffered
     /// ``Mode/rewritingUntilClose`` body finally runs its script chain
-    /// and gets emitted. Returns the bytes to write toward the client
-    /// before teardown; empty in every other mode, since nothing was
-    /// withheld. Idempotent: flips to ``Mode/passthrough`` so a second
-    /// call (or stray late bytes) produces nothing.
-    func finish() -> Data {
-        var output = Data()
-        if case .rewritingUntilClose(let pending, let accumulator) = mode {
-            applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: nil, into: &output)
-            flushSynthAfterResponse(into: &output)
-            mode = .passthrough
+    /// and gets emitted. ``completion`` receives the bytes to write toward
+    /// the client before teardown: fired inline in every other mode (empty,
+    /// since nothing was withheld), or after the script hop returns when a
+    /// buffered body parks. The pass lands in ``Mode/passthrough``, so a
+    /// second call (or stray late bytes) produces nothing.
+    func finish(completion: @escaping (Data) -> Void) {
+        assert(parkedCompletion == nil, "finish re-entered while a script hop is outstanding")
+        guard case .rewritingUntilClose(let pending, let accumulator) = mode else {
+            completion(Data())
+            return
         }
-        return output
+        // Stash the completion: the buffered body parks on its script, and
+        // the resume fires this once it has emitted the flushed bytes. The
+        // resume restores ``Mode/passthrough``, so a later finish (or stray
+        // late bytes) is a no-op — preserving the idempotency contract.
+        parkedCompletion = completion
+        var output = Data()
+        let parked = applyScriptsAndEmit(
+            pending: pending,
+            rawBody: accumulator,
+            originalSizes: nil,
+            resumeMode: .passthrough,
+            into: &output
+        )
+        if parked {
+            // Head was withheld, so `output` is empty here; the resume emits
+            // the scripted body, flushes synth-after, and fires completion.
+            pendingPreParkOutput = output
+            return
+        }
+        // Decompression-fail passthrough: already emitted + set mode.
+        finishDrivePass(output)
     }
 
     /// Appends any synth-after-response bytes captured when this
@@ -289,6 +400,12 @@ final class MITMHTTP1Stream {
         case .passthrough:
             output.append(rxBuffer.prefix(rxBuffer.count))
             rxBuffer.removeAll(keepingCapacity: false)
+            return false
+
+        case .awaitingScript:
+            // A script hop is outstanding; the resume will restore the real
+            // mode and resume driving. Never reached in practice (the loop
+            // stops the moment a handler parks), but defensively halt.
             return false
 
         case .awaitingHead:
@@ -530,29 +647,27 @@ final class MITMHTTP1Stream {
                     body: Data(),
                     originatingRequest: originatingRequest
                 )
-                let outcome = MITMScriptTransform.apply(
+                let fallback = rewrittenStartLine
+                let originatingMethod = originatingRequest?.method
+                mode = .awaitingScript
+                MITMScriptTransform.apply(
                     message,
                     rules: rules,
-                    engineProvider: scriptEngineProvider
-                )
-                switch outcome {
-                case .message(let result):
-                    emitScriptedHead(
-                        fallbackStartLine: rewrittenStartLine,
-                        result: result,
-                        codecRequiresDecompression: false,
-                        originatingMethod: originatingRequest?.method,
-                        into: &output
+                    engineProvider: scriptEngineProvider,
+                    resumeOn: lwipQueue
+                ) { [weak self] outcome in
+                    self?.resumeHeadNoBody(
+                        outcome: outcome,
+                        fallbackStartLine: fallback,
+                        originatingMethod: originatingMethod
                     )
-                case .synthesizedResponse(let response):
-                    queueSynthesizedResponse(response)
                 }
-            } else {
-                if phase == .httpRequest {
-                    logRequest(startLine: rewrittenStartLine)
-                }
-                output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
+                return false // parked; the resume emits the head + flushes synth-after
             }
+            if phase == .httpRequest {
+                logRequest(startLine: rewrittenStartLine)
+            }
+            output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
             // No-body framing — the response is complete with the
             // head alone, so this is the boundary for any synth bytes
             // attached to it. Skipped (as a no-op) when the head was
@@ -752,10 +867,17 @@ final class MITMHTTP1Stream {
         accumulator.append(rxBuffer.prefix(take))
         rxBuffer.removeFirst(take)
         if accumulator.count == expected {
-            applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: nil, into: &output)
-            flushSynthAfterResponse(into: &output)
-            mode = .awaitingHead
-            return true
+            // Parks on the script (returns false to stop the loop; the resume
+            // finishes). On a decompression-fail passthrough nothing parks and
+            // the message is fully handled, so continue the loop.
+            let parked = applyScriptsAndEmit(
+                pending: pending,
+                rawBody: accumulator,
+                originalSizes: nil,
+                resumeMode: .awaitingHead,
+                into: &output
+            )
+            return !parked
         }
         mode = .rewritingLength(pending: pending, expected: expected, accumulator: accumulator)
         return false
@@ -779,25 +901,32 @@ final class MITMHTTP1Stream {
             // bodies are well under the cap.
             if accumulator.count > MITMBodyCodec.maxBufferedBodyBytes {
                 logger.warning("[MITM] HTTP1 \(host): Chunked body exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); truncating")
-                applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: [accumulator.count], into: &output)
-                // The rewritten head + truncated body now form the
-                // complete response on the wire (collapsed to a
-                // Content-Length unit by ``applyScriptsAndEmit``).
-                // Wire-level the response is finished even though we
-                // keep draining the original chunks server-side, so
-                // synth-after bytes belong here rather than after the
-                // discard finishes.
-                flushSynthAfterResponse(into: &output)
-                mode = .discardingChunked(reader: reader)
-                return true
+                // The rewritten head + truncated body form the complete
+                // response on the wire (collapsed to a Content-Length unit);
+                // the remaining original chunks are then drained server-side.
+                // Synth-after bytes therefore belong right after the body
+                // (handled by the resume / passthrough path), so we resume
+                // into ``.discardingChunked``.
+                let parked = applyScriptsAndEmit(
+                    pending: pending,
+                    rawBody: accumulator,
+                    originalSizes: [accumulator.count],
+                    resumeMode: .discardingChunked(reader: reader),
+                    into: &output
+                )
+                return !parked
             }
             mode = .rewritingChunked(pending: pending, accumulator: accumulator, reader: reader)
             return false
         case .complete(let originalSizes):
-            applyScriptsAndEmit(pending: pending, rawBody: accumulator, originalSizes: originalSizes, into: &output)
-            flushSynthAfterResponse(into: &output)
-            mode = .awaitingHead
-            return true
+            let parked = applyScriptsAndEmit(
+                pending: pending,
+                rawBody: accumulator,
+                originalSizes: originalSizes,
+                resumeMode: .awaitingHead,
+                into: &output
+            )
+            return !parked
         case .malformed:
             flushSynthAfterResponse(into: &output)
             mode = .passthrough
@@ -884,12 +1013,15 @@ final class MITMHTTP1Stream {
                     // fails to parse.
                     let finalChunk = streaming.pendingChunk ?? Data()
                     streaming.pendingChunk = nil
-                    emitStreamingChunk(
+                    if emitOrParkStreamingFrame(
                         streaming: &streaming,
                         chunk: finalChunk,
                         isLast: true,
+                        postFrame: .finalThenTrailer,
                         into: &output
-                    )
+                    ) {
+                        return false // parked; resume emits "0\r\n" + drains trailers
+                    }
                     output.append(contentsOf: "0\r\n".utf8)
                     currentInner = .trailerOrEnd
                 } else {
@@ -926,12 +1058,15 @@ final class MITMHTTP1Stream {
                     logger.warning("[MITM] HTTP/1 \(host): streaming chunk exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes) B; bypassing Script and forwarding remainder verbatim")
                     if let held = streaming.pendingChunk {
                         streaming.pendingChunk = nil
-                        emitStreamingChunk(
+                        if emitOrParkStreamingFrame(
                             streaming: &streaming,
                             chunk: held,
                             isLast: false,
+                            postFrame: .bypassRemainder(left: left, accumulator: accumulator),
                             into: &output
-                        )
+                        ) {
+                            return false // parked; resume bypasses + emits the remainder
+                        }
                     }
                     streaming.cursor.bypass = true
                     appendChunk(accumulator, into: &output)
@@ -946,12 +1081,15 @@ final class MITMHTTP1Stream {
                     // (with isLast=false now that we know more chunks
                     // follow), then hold this one.
                     if let held = streaming.pendingChunk {
-                        emitStreamingChunk(
+                        if emitOrParkStreamingFrame(
                             streaming: &streaming,
                             chunk: held,
                             isLast: false,
+                            postFrame: .hold(nextPending: accumulator, inner: .dataCRLF),
                             into: &output
-                        )
+                        ) {
+                            return false // parked; resume holds `accumulator` + continues
+                        }
                     }
                     streaming.pendingChunk = accumulator
                     currentInner = .dataCRLF
@@ -1009,39 +1147,87 @@ final class MITMHTTP1Stream {
     /// are dropped (no zero-size chunk emitted mid-stream — the
     /// terminator reserves that). ``cursor.bypass`` short-circuits the
     /// script chain so subsequent chunks pass through unchanged.
-    private func emitStreamingChunk(
+    private func emitOrParkStreamingFrame(
         streaming: inout StreamingState,
         chunk: Data,
         isLast: Bool,
+        postFrame: StreamingPostFrame,
         into output: inout Data
-    ) {
-        let body: Data
+    ) -> Bool {
         if streaming.cursor.bypass {
-            body = chunk
-        } else {
-            let frameCtx = MITMScriptEngine.FrameContext(
-                phase: phase,
-                method: streamingMethod(streaming),
-                url: streamingURL(streaming),
-                status: streamingStatus(streaming),
-                headers: streaming.headers,
-                frameIndex: streaming.frameIndex,
-                isLast: isLast,
-                ruleSetID: ruleSetID
-            )
-            let result = MITMScriptTransform.applyFrame(
-                chunk,
-                rules: rules,
-                frameContext: frameCtx,
-                cursor: streaming.cursor,
-                engineProvider: scriptEngineProvider
-            )
-            body = result.body
+            // Fast path: the stream is bypassed, so no script runs — emit
+            // synchronously and tell the caller it did not park.
+            streaming.frameIndex += 1
+            if !chunk.isEmpty {
+                appendChunk(chunk, into: &output)
+            }
+            return false
         }
+        let frameCtx = MITMScriptEngine.FrameContext(
+            phase: phase,
+            method: streamingMethod(streaming),
+            url: streamingURL(streaming),
+            status: streamingStatus(streaming),
+            headers: streaming.headers,
+            frameIndex: streaming.frameIndex,
+            isLast: isLast,
+            ruleSetID: ruleSetID
+        )
+        // Capture the stream value (its ``cursor`` is shared by reference, so
+        // the engine's bypass/state mutations are visible on resume) plus the
+        // post-frame continuation, then dispatch off-queue and park.
+        let captured = streaming
+        mode = .awaitingScript
+        MITMScriptTransform.applyFrame(
+            chunk,
+            rules: rules,
+            frameContext: frameCtx,
+            cursor: streaming.cursor,
+            engineProvider: scriptEngineProvider,
+            resumeOn: lwipQueue
+        ) { [weak self] result in
+            self?.resumeStreamingFrame(result: result, streaming: captured, postFrame: postFrame)
+        }
+        return true
+    }
+
+    /// Resume for a parked streaming frame. Appends the framed result onto
+    /// the held pre-park bytes, applies the captured ``StreamingPostFrame``
+    /// continuation, and resumes the chunked-streaming loop. Mirrors the
+    /// synchronous tail of ``emitOrParkStreamingFrame`` plus the transient
+    /// step that followed the original call site.
+    private func resumeStreamingFrame(
+        result: MITMScriptTransform.StreamFrameResult,
+        streaming: StreamingState,
+        postFrame: StreamingPostFrame
+    ) {
+        guard !torn else { return }
+        var resumed = pendingPreParkOutput
+        pendingPreParkOutput = Data()
+        var streaming = streaming
         streaming.frameIndex += 1
-        if !body.isEmpty {
-            appendChunk(body, into: &output)
+        if !result.body.isEmpty {
+            appendChunk(result.body, into: &resumed)
         }
+        // ``cursor.bypass``/``cursor.state`` were already updated in place by
+        // ``applyFrame`` (the cursor is shared by reference).
+        switch postFrame {
+        case .hold(let nextPending, let inner):
+            streaming.pendingChunk = nextPending
+            mode = .streamingChunked(streaming: streaming, inner: inner)
+        case .finalThenTrailer:
+            resumed.append(contentsOf: "0\r\n".utf8)
+            mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
+        case .bypassRemainder(let left, let accumulator):
+            streaming.cursor.bypass = true
+            appendChunk(accumulator, into: &resumed)
+            mode = .streamingChunked(
+                streaming: streaming,
+                inner: .chunkData(remaining: left, accumulator: Data())
+            )
+        }
+        while drive(into: &resumed) { }
+        finishDrivePass(resumed)
     }
 
     private func streamingMethod(_ streaming: StreamingState) -> String? {
@@ -1123,17 +1309,29 @@ final class MITMHTTP1Stream {
 
     // MARK: - Script application + head rebuild
 
-    /// Decompresses the buffered body, runs the script chain, and emits
-    /// the rebuilt head plus the (re-encoded if originally chunked)
-    /// body. If decompression fails, the original bytes are passed
-    /// through unmodified — better to leak the upstream's payload than
-    /// break the connection.
+    /// Decompresses the buffered body and dispatches the buffered ``.script``
+    /// off-queue (parking the stream). The rebuilt head + re-emitted body are
+    /// produced later by ``resumeBufferedBody`` once the engine returns.
+    ///
+    /// Returns `true` when a script hop was parked: the caller must stop the
+    /// drive loop (`return false`); the resume restores `resumeMode`, flushes
+    /// synth-after bytes, and finishes the pass. Returns `false` when
+    /// decompression failed — the original bytes were emitted as an identity
+    /// passthrough (no script), `flushSynthAfterResponse` ran, and `mode` was
+    /// set to `resumeMode` here, so the caller should treat the message as
+    /// fully handled (`return true`). Passing the original bytes through on a
+    /// decompression failure beats breaking the connection.
+    ///
+    /// On the parked path the head is withheld, so nothing is appended to
+    /// `output`.
+    @discardableResult
     private func applyScriptsAndEmit(
         pending: PendingHead,
         rawBody: Data,
         originalSizes: [Int]?,
+        resumeMode: Mode,
         into output: inout Data
-    ) {
+    ) -> Bool {
         let body: Data
         if pending.codec.requiresDecompression {
             guard let decoded = MITMBodyCodec.decompress(rawBody, plan: pending.codec, host: host) else {
@@ -1147,7 +1345,9 @@ final class MITMHTTP1Stream {
                 } else {
                     output.append(rawBody)
                 }
-                return
+                flushSynthAfterResponse(into: &output)
+                mode = resumeMode
+                return false
             }
             body = decoded
         } else {
@@ -1160,39 +1360,87 @@ final class MITMHTTP1Stream {
             body: body,
             originatingRequest: pending.originatingRequest
         )
-        let outcome = MITMScriptTransform.apply(
+        _ = originalSizes // chunked re-encoding is unused once we collapse to Content-Length
+        mode = .awaitingScript
+        MITMScriptTransform.apply(
             message,
             rules: rules,
-            engineProvider: scriptEngineProvider
-        )
-        let result: MITMScriptEngine.Message
+            engineProvider: scriptEngineProvider,
+            resumeOn: lwipQueue
+        ) { [weak self] outcome in
+            self?.resumeBufferedBody(outcome: outcome, pending: pending, resumeMode: resumeMode)
+        }
+        return true
+    }
+
+    /// Resume for the buffered ``.script`` path. Runs on the lwIP queue once
+    /// the off-queue engine call returns. Prepends the bytes held since the
+    /// park, emits the rebuilt head + body (or queues a synth response),
+    /// flushes synth-after, restores the body handler's `resumeMode`, and
+    /// resumes the drive pass — firing the stashed completion exactly once.
+    private func resumeBufferedBody(
+        outcome: MITMScriptTransform.Outcome,
+        pending: PendingHead,
+        resumeMode: Mode
+    ) {
+        guard !torn else { return }
+        var resumed = pendingPreParkOutput
+        pendingPreParkOutput = Data()
         switch outcome {
-        case .message(let updated):
-            result = updated
+        case .message(let result):
+            let finalStartLine = rebuildStartLine(from: result, fallback: pending.startLine)
+            var finalHeaders = strippedFramingHeaders(result.headers, dropContentEncoding: pending.codec.requiresDecompression)
+            // Always set an explicit Content-Length matching the post-script
+            // body size. The original message may have been chunked, but we
+            // emit the rewritten body as a single length-prefixed unit since
+            // we've already buffered all of it.
+            finalHeaders.append((name: "Content-Length", value: String(result.body.count)))
+            if phase == .httpRequest {
+                logRequest(startLine: finalStartLine)
+            }
+            resumed.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
+            if !result.body.isEmpty {
+                resumed.append(result.body)
+            }
         case .synthesizedResponse(let response):
-            // Request-phase short-circuit. Drop the request bytes
-            // we'd otherwise emit to upstream and queue the
-            // synthesized HTTP/1.1 response for the inner leg.
+            // Request-phase short-circuit. Drop the request bytes we'd
+            // otherwise emit to upstream and queue the synthesized HTTP/1.1
+            // response for the inner leg.
             queueSynthesizedResponse(response)
-            return
         }
+        flushSynthAfterResponse(into: &resumed)
+        mode = resumeMode
+        while drive(into: &resumed) { }
+        finishDrivePass(resumed)
+    }
 
-        let finalStartLine = rebuildStartLine(from: result, fallback: pending.startLine)
-        var finalHeaders = strippedFramingHeaders(result.headers, dropContentEncoding: pending.codec.requiresDecompression)
-        // Always set an explicit Content-Length matching the post-script
-        // body size. The original message may have been chunked, but we
-        // emit the rewritten body as a single length-prefixed unit since
-        // we've already buffered all of it.
-        finalHeaders.append((name: "Content-Length", value: String(result.body.count)))
-
-        if phase == .httpRequest {
-            logRequest(startLine: finalStartLine)
+    /// Resume for the no-body (``.none`` framing) ``.script`` path. Emits the
+    /// scripted head (or queues a synth response), flushes synth-after, and
+    /// resumes the pass from ``.awaitingHead``.
+    private func resumeHeadNoBody(
+        outcome: MITMScriptTransform.Outcome,
+        fallbackStartLine: String,
+        originatingMethod: String?
+    ) {
+        guard !torn else { return }
+        var resumed = pendingPreParkOutput
+        pendingPreParkOutput = Data()
+        switch outcome {
+        case .message(let result):
+            emitScriptedHead(
+                fallbackStartLine: fallbackStartLine,
+                result: result,
+                codecRequiresDecompression: false,
+                originatingMethod: originatingMethod,
+                into: &resumed
+            )
+        case .synthesizedResponse(let response):
+            queueSynthesizedResponse(response)
         }
-        output.append(serializeHead(startLine: finalStartLine, headers: finalHeaders))
-        if !result.body.isEmpty {
-            output.append(result.body)
-        }
-        _ = originalSizes // chunked re-encoding is unused once we collapse to Content-Length
+        flushSynthAfterResponse(into: &resumed)
+        mode = .awaitingHead
+        while drive(into: &resumed) { }
+        finishDrivePass(resumed)
     }
 
     /// Handles the no-body framing variant: scripts already ran, no

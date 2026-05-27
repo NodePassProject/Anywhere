@@ -131,23 +131,30 @@ final class MITMHTTP2Rewriter {
     /// init time.
     var ruleSetID: UUID? { cachedRuleSetID }
 
-    /// Applies the script rule for the given phase whose URL pattern
-    /// matches the request-target. The caller is responsible for
-    /// decompressing the body before passing it in;
-    /// on the ``.message`` branch the returned message has the
+    /// Applies the script rule for the given phase whose URL pattern matches
+    /// the request-target. Runs the match on
+    /// ``MITMScriptTransform/scriptQueue`` and delivers the ``Outcome`` back
+    /// on ``resumeQueue`` (the connection's lwIP queue), so a slow script
+    /// parks the connection instead of stalling packet processing.
+    ///
+    /// The caller is responsible for decompressing the body before passing
+    /// it in; on the ``.message`` branch the returned message has the
     /// (possibly modified) body in identity form. The
-    /// ``.synthesizedResponse`` branch fires only on request phase when
-    /// the script called `Anywhere.respond(...)` — the caller must
-    /// suppress upstream emission and inject the response on the inner
-    /// leg instead.
+    /// ``.synthesizedResponse`` branch fires only on request phase when the
+    /// script called `Anywhere.respond(...)` — the caller must suppress
+    /// upstream emission and inject the response on the inner leg instead.
     func applyScripts(
         _ message: MITMScriptEngine.Message,
-        phase: MITMPhase
-    ) -> MITMScriptTransform.Outcome {
+        phase: MITMPhase,
+        resumeOn resumeQueue: DispatchQueue,
+        completion: @escaping (MITMScriptTransform.Outcome) -> Void
+    ) {
         MITMScriptTransform.apply(
             message,
             rules: rules(phase: phase),
-            engineProvider: scriptEngineProvider
+            engineProvider: scriptEngineProvider,
+            resumeOn: resumeQueue,
+            completion: completion
         )
     }
 

@@ -27,6 +27,25 @@ import JavaScriptCore
 /// `process(ctx)` function.
 enum MITMScriptTransform {
 
+    /// Serial queue that carries every off-lwIP-queue script invocation.
+    ///
+    /// All MITM JavaScript runs here rather than inline on the lwIP queue,
+    /// so a slow or pathological `process(ctx)` on one connection parks only
+    /// that connection while every other flow in the tunnel keeps moving on
+    /// the lwIP queue. One process-wide serial queue is correct and
+    /// sufficient: a ``MITMScriptEngine``'s ``JSContext`` shares a single
+    /// process-wide ``JSVirtualMachine`` whose internal mutex already
+    /// serializes heap access across engines, and each engine's
+    /// ``invocationLock`` enforces the "calls are serialized" contract the
+    /// engine was built around (see the lock note in ``MITMScriptEngine``).
+    /// Serial also gives the property the async entry points below rely on:
+    /// per stream, frame N's engine call completes before frame N+1's begins,
+    /// so the shared ``FrameCursor`` is never touched concurrently.
+    static let scriptQueue = DispatchQueue(
+        label: AWCore.Identifier.mitmScriptQueue,
+        qos: .userInitiated
+    )
+
     /// Result of running a buffered ``.script`` rule on a message.
     /// Distinguishes the normal rewrite path (``message``) from a
     /// request-phase `Anywhere.respond(...)` short-circuit
@@ -137,6 +156,35 @@ enum MITMScriptTransform {
         }
     }
 
+    /// Off-queue counterpart to ``apply(_:rules:engineProvider:)``. Runs the
+    /// matching ``.script`` rule on ``scriptQueue`` (never on the caller's
+    /// lwIP queue) and delivers the ``Outcome`` back on ``resumeQueue``.
+    ///
+    /// Contract the rewriters depend on:
+    /// - ``completion`` is invoked **exactly once**, **on ``resumeQueue``**
+    ///   (so the caller's parked driver always resumes on the lwIP queue).
+    /// - The work always hops: callers reach this only after their own
+    ///   head-time gate (`hasScriptRule`) said a script applies, so the
+    ///   lwIP-side fast path lives entirely above this call and never pays a
+    ///   queue round-trip. A rule that no longer matches once re-checked here
+    ///   (e.g. a `url-replace` moved the path) simply yields
+    ///   ``Outcome/message`` unchanged — same as the synchronous variant.
+    /// - ``message`` (and its `body` `Data`) is captured by the dispatched
+    ///   closure and stays alive for the engine call's duration; it is a
+    ///   value copy, never aliased to the caller's receive buffer.
+    static func apply(
+        _ message: MITMScriptEngine.Message,
+        rules: [CompiledMITMRule],
+        engineProvider: MITMScriptEngine.Provider?,
+        resumeOn resumeQueue: DispatchQueue,
+        completion: @escaping (Outcome) -> Void
+    ) {
+        scriptQueue.async {
+            let outcome = apply(message, rules: rules, engineProvider: engineProvider)
+            resumeQueue.async { completion(outcome) }
+        }
+    }
+
     /// Per-stream cursor for ``applyFrame``: the script's persistent
     /// state object and a sticky "skip remainder" flag set when a
     /// previous frame returned ``FrameOutcome/done`` or ``exit``. The
@@ -214,6 +262,38 @@ enum MITMScriptTransform {
         case .exit:
             cursor.bypass = true
             return StreamFrameResult(body: frame, bypass: true)
+        }
+    }
+
+    /// Off-queue counterpart to
+    /// ``applyFrame(_:rules:frameContext:cursor:engineProvider:)``. Runs the
+    /// matching ``.streamScript`` rule on ``scriptQueue`` and delivers the
+    /// ``StreamFrameResult`` back on ``resumeQueue``.
+    ///
+    /// Same contract as the async ``apply`` above: ``completion`` fires
+    /// exactly once on ``resumeQueue``. ``cursor`` is a reference type whose
+    /// ``state``/``bypass`` are mutated by the engine call on ``scriptQueue``;
+    /// this is safe because the caller never dispatches frame N+1 until frame
+    /// N's completion has fired (one-frame-in-flight), so the cursor is never
+    /// read on the lwIP queue while a hop is outstanding.
+    static func applyFrame(
+        _ frame: Data,
+        rules: [CompiledMITMRule],
+        frameContext: MITMScriptEngine.FrameContext,
+        cursor: FrameCursor,
+        engineProvider: MITMScriptEngine.Provider?,
+        resumeOn resumeQueue: DispatchQueue,
+        completion: @escaping (StreamFrameResult) -> Void
+    ) {
+        scriptQueue.async {
+            let result = applyFrame(
+                frame,
+                rules: rules,
+                frameContext: frameContext,
+                cursor: cursor,
+                engineProvider: engineProvider
+            )
+            resumeQueue.async { completion(result) }
         }
     }
 

@@ -540,9 +540,10 @@ Other safety properties:
 - **Wire safety.** Header names, header values, methods, and request targets
   produced by scripts are validated; CR/LF/NUL and other smuggling vectors are
   rejected so a script can't split the wire framing.
-- **No watchdog.** There is no way to preempt a running script. A pathological
-  script blocks the shared serial queue and stalls the whole tunnel. Keep loops
-  and regexes bounded.
+- **No watchdog.** There is no way to preempt a running script. A runaway
+  script wedges only its own connection — other flows keep moving — but it
+  monopolizes the shared script runtime, so other connections' scripts wait
+  behind it. Keep loops and regexes bounded.
 - **Failure is safe-by-default.** A compile failure, a missing `process`, or an
   uncaught throw passes the original message through unchanged.
 

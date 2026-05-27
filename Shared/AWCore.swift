@@ -21,6 +21,13 @@ final class AWCore {
         static let pathMonitorQueue = "\(bundle).path-monitor"
         /// Dispatch queue label for the serial lwIP queue.
         static let lwipQueue = "\(bundle).lwip"
+        /// Dispatch queue label for the serial MITM script-execution queue.
+        /// MITM JavaScript runs here, off the lwIP queue, so a slow or
+        /// pathological `process(ctx)` on one connection can no longer stall
+        /// packet processing for every other flow in the tunnel. Serial because
+        /// JSC's shared virtual machine serializes heap access across engines
+        /// anyway (see ``MITMScriptEngine``).
+        static let mitmScriptQueue = "\(bundle).mitm-script"
         /// Dispatch queue label for the serial UDP data-plane queue. UDP no
         /// longer traverses lwIP (`LWIP_UDP 0`), so its flow state and per-packet
         /// processing run here instead of contending on ``lwipQueue``.

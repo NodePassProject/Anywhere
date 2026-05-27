@@ -32,14 +32,18 @@ private let mitmScriptTypedArrayLock = UnfairLock()
 /// Review's automated scan flags on sight (the symbol name appears
 /// verbatim in the Mach-O import table no matter how the call site
 /// is wrapped), with no public-API substitute that preempts a
-/// synchronous call already running in JSC. We accept the
-/// consequence by design: a user-authored ``process(ctx)`` that
-/// loops forever, recurses without bound, or backtracks a
-/// pathological regex will wedge the calling MITM connection and,
-/// because the pipeline shares one lwIP queue, every other flow in
-/// the tunnel along with it. Mitigation is on the authoring side —
-/// keep scripts simple and bounded; the engine still reverts uncaught
-/// throws so a script that fails partway leaves the wire untouched.
+/// synchronous call already running in JSC. We accept the consequence
+/// by design, but its blast radius is bounded: invocations run off the
+/// lwIP queue on ``MITMScriptTransform``'s serial script queue (the
+/// calling connection parks while its JS runs), so a user-authored
+/// ``process(ctx)`` that loops forever, recurses without bound, or
+/// backtracks a pathological regex wedges only *its own* MITM
+/// connection — every other flow in the tunnel keeps moving on the lwIP
+/// queue. It does monopolize the shared JavaScript runtime, so other
+/// connections' scripts queue behind it (their packet flow is
+/// unaffected). Mitigation is on the authoring side — keep scripts
+/// simple and bounded; the engine still reverts uncaught throws so a
+/// script that fails partway leaves the wire untouched.
 final class MITMScriptEngine {
 
     /// Mutable view of the in-flight HTTP message. The runtime hands
@@ -191,14 +195,17 @@ final class MITMScriptEngine {
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
 
     /// Defensive serialization around ``apply``/``applyFrame``. One engine
-    /// is shared by every connection to its rule set, and all rule
-    /// application runs on the single serial lwIP queue (see
-    /// ``MITMSession``), so concurrent re-entry should be impossible — but
-    /// a future refactor that hops a ``Task`` or enqueues a callback
-    /// off-queue would silently corrupt ``currentScope`` /
-    /// ``currentDirective`` / ``compiled``. The lock makes the contract
-    /// enforceable at the engine boundary; cost is a single uncontended
-    /// ``NSLock`` acquisition per script call.
+    /// is shared by every connection to its rule set, and all invocations
+    /// are funneled through ``MITMScriptTransform``'s single serial script
+    /// queue — off the lwIP queue, so a slow script parks its connection
+    /// instead of stalling packet processing (see
+    /// ``MITMScriptTransform/scriptQueue``). That serial queue already
+    /// serializes calls, but the lock keeps the no-concurrent-re-entry
+    /// contract enforceable at the engine boundary: it guards
+    /// ``currentScope`` / ``currentDirective`` / ``compiled`` against a
+    /// future refactor that runs invocations on a concurrent queue or a
+    /// second VM. Cost is a single uncontended ``NSLock`` acquisition per
+    /// call.
     private let invocationLock = NSLock()
 
     /// Threshold above which we ask JSC to GC after the next script

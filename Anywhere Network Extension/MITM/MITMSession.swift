@@ -252,7 +252,8 @@ final class MITMSession {
             policy: policy,
             effectiveAuthority: effectiveAuthority,
             scriptEngineProvider: scriptEngineProvider,
-            requestLog: requestLog
+            requestLog: requestLog,
+            lwipQueue: lwipQueue
         )
         self.responseStream = MITMHTTP1Stream(
             host: dstHost,
@@ -260,7 +261,8 @@ final class MITMSession {
             policy: policy,
             effectiveAuthority: nil, // Host headers do not apply on responses.
             scriptEngineProvider: scriptEngineProvider,
-            requestLog: requestLog
+            requestLog: requestLog,
+            lwipQueue: lwipQueue
         )
         self.h2Rewriter = MITMHTTP2Rewriter(
             host: dstHost,
@@ -357,6 +359,13 @@ final class MITMSession {
     func cancel(error: Error? = nil) {
         guard !torn else { return }
         torn = true
+        // Disarm any in-flight script resume so it can't write to a
+        // torn-down leg or fire a stale completion once its off-queue hop
+        // returns.
+        requestStream.markTorn()
+        responseStream.markTorn()
+        inboundH2?.markTorn()
+        outboundH2?.markTorn()
         tlsServer = nil
         tlsClient?.cancel()
         tlsClient = nil
@@ -574,8 +583,8 @@ final class MITMSession {
         // sole acceptable ALPN). When that value is `h2`, swap the
         // byte-stream rewriter for the frame-aware h2 translators.
         if innerRecord.negotiatedALPN == "h2", outerRecord.negotiatedALPN == "h2" {
-            let inLeg = MITMHTTP2Connection(direction: .inbound, rewriter: h2Rewriter)
-            let outLeg = MITMHTTP2Connection(direction: .outbound, rewriter: h2Rewriter)
+            let inLeg = MITMHTTP2Connection(direction: .inbound, rewriter: h2Rewriter, lwipQueue: lwipQueue)
+            let outLeg = MITMHTTP2Connection(direction: .outbound, rewriter: h2Rewriter, lwipQueue: lwipQueue)
             // SETTINGS_HEADER_TABLE_SIZE advertised by one endpoint bounds
             // the *peer's* HPACK encoder, which the opposing leg decodes
             // (RFC 7541 §4.2). The client's SETTINGS arrives on the inbound
@@ -744,38 +753,44 @@ final class MITMSession {
                     self.cancel(error: nil)
                     return
                 }
-                let transformed: Data
-                let injected: Data
-                if let inboundH2 = self.inboundH2 {
-                    transformed = inboundH2.process(data)
-                    injected = inboundH2.drainPendingClientBytes()
-                } else {
-                    transformed = self.requestStream.transform(data)
-                    injected = self.requestStream.drainPendingClientBytes()
-                }
-                if !injected.isEmpty {
-                    self.sendChunked(injected, via: inner) { [weak self] sendError in
-                        guard let self, let sendError else { return }
-                        self.lwipQueue.async { self.cancel(error: sendError) }
+                // The completion runs on lwipQueue — inline when no script
+                // ran, or later from the parked resume once the off-queue
+                // script returns. It drains any client-bound synth bytes
+                // (request-phase Anywhere.respond), forwards the peer-bound
+                // bytes upstream, then re-arms the read — keeping the
+                // one-read-in-flight back-pressure intact across a park.
+                let handle: (Data) -> Void = { [weak self] transformed in
+                    guard let self, !self.torn else { return }
+                    let injected = self.inboundH2?.drainPendingClientBytes()
+                        ?? self.requestStream.drainPendingClientBytes()
+                    if !injected.isEmpty {
+                        self.sendChunked(injected, via: inner) { [weak self] sendError in
+                            guard let self, let sendError else { return }
+                            self.lwipQueue.async { self.cancel(error: sendError) }
+                        }
                     }
-                }
-                guard !transformed.isEmpty else {
-                    // The h2 translator or HTTP/1.1 stream may have
-                    // buffered fragments (CONTINUATION pending, partial
-                    // preface, body buffered for rewrite, etc.) or
-                    // fully short-circuited the request via
-                    // Anywhere.respond. Loop back for more bytes
-                    // without writing to outer.
-                    self.startInboundPump(inner: inner, outer: outer)
-                    return
-                }
-                self.sendChunked(transformed, via: outer) { [weak self] sendError in
-                    guard let self else { return }
-                    if let sendError {
-                        self.lwipQueue.async { self.cancel(error: sendError) }
+                    guard !transformed.isEmpty else {
+                        // The h2 translator or HTTP/1.1 stream may have
+                        // buffered fragments (CONTINUATION pending, partial
+                        // preface, body buffered for rewrite, etc.) or fully
+                        // short-circuited the request via Anywhere.respond.
+                        // Loop back for more bytes without writing to outer.
+                        self.startInboundPump(inner: inner, outer: outer)
                         return
                     }
-                    self.startInboundPump(inner: inner, outer: outer)
+                    self.sendChunked(transformed, via: outer) { [weak self] sendError in
+                        guard let self else { return }
+                        if let sendError {
+                            self.lwipQueue.async { self.cancel(error: sendError) }
+                            return
+                        }
+                        self.startInboundPump(inner: inner, outer: outer)
+                    }
+                }
+                if let inboundH2 = self.inboundH2 {
+                    inboundH2.process(data, completion: handle)
+                } else {
+                    self.requestStream.transform(data, completion: handle)
                 }
             }
         }
@@ -798,34 +813,47 @@ final class MITMSession {
                     // what it accumulated and flush the rewritten response
                     // to the client before teardown. HTTP/2 frames every
                     // body with END_STREAM, so it never withholds anything
-                    // here.
-                    let flushed = self.outboundH2 == nil ? self.responseStream.finish() : Data()
-                    if flushed.isEmpty {
+                    // here. ``finish`` is completion-based: if it parks on a
+                    // buffered until-close script, teardown waits for the
+                    // resume to deliver the flushed bytes.
+                    guard self.outboundH2 == nil else {
                         self.cancel(error: nil)
-                    } else {
-                        self.sendChunked(flushed, via: inner) { [weak self] _ in
-                            self?.lwipQueue.async { self?.cancel(error: nil) }
+                        return
+                    }
+                    self.responseStream.finish { [weak self] flushed in
+                        guard let self, !self.torn else { return }
+                        if flushed.isEmpty {
+                            self.cancel(error: nil)
+                        } else {
+                            self.sendChunked(flushed, via: inner) { [weak self] _ in
+                                self?.lwipQueue.async { self?.cancel(error: nil) }
+                            }
                         }
                     }
                     return
                 }
-                let transformed: Data
-                if let outboundH2 = self.outboundH2 {
-                    transformed = outboundH2.process(data)
-                } else {
-                    transformed = self.responseStream.transform(data)
-                }
-                guard !transformed.isEmpty else {
-                    self.startOutboundPump(inner: inner, outer: outer)
-                    return
-                }
-                self.sendChunked(transformed, via: inner) { [weak self] sendError in
-                    guard let self else { return }
-                    if let sendError {
-                        self.lwipQueue.async { self.cancel(error: sendError) }
+                // Completion runs on lwipQueue — inline when no script ran,
+                // or later from the parked resume. Forwards the peer-bound
+                // bytes to the client, then re-arms the read.
+                let handle: (Data) -> Void = { [weak self] transformed in
+                    guard let self, !self.torn else { return }
+                    guard !transformed.isEmpty else {
+                        self.startOutboundPump(inner: inner, outer: outer)
                         return
                     }
-                    self.startOutboundPump(inner: inner, outer: outer)
+                    self.sendChunked(transformed, via: inner) { [weak self] sendError in
+                        guard let self else { return }
+                        if let sendError {
+                            self.lwipQueue.async { self.cancel(error: sendError) }
+                            return
+                        }
+                        self.startOutboundPump(inner: inner, outer: outer)
+                    }
+                }
+                if let outboundH2 = self.outboundH2 {
+                    outboundH2.process(data, completion: handle)
+                } else {
+                    self.responseStream.transform(data, completion: handle)
                 }
             }
         }

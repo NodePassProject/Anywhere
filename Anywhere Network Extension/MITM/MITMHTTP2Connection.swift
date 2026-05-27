@@ -102,7 +102,8 @@ final class MITMHTTP2Connection {
     /// limit *this* endpoint imposes on its peer's encoder — which is the
     /// encoder the *opposing* leg decodes — so ``MITMSession`` wires this to
     /// the opposing leg's ``configureDecoderTableSize(_:)``. Always invoked
-    /// synchronously on the shared serial queue inside ``process(_:)``.
+    /// synchronously on the shared serial lwIP queue, from the frame pump
+    /// (``process(_:)`` or a parked script's resume).
     var onObservedPeerHeaderTableSize: ((Int) -> Void)?
 
     /// Bounds this leg's HPACK decoder to the dynamic-table limit the peer
@@ -264,26 +265,62 @@ final class MITMHTTP2Connection {
     /// is ~1 KiB of UInt32s + array overhead.
     private static let synthRespondedMaxStreams = 256
 
+    /// The session's serial lwIP queue. Script execution hops off it onto
+    /// ``MITMScriptTransform/scriptQueue`` and the engine result is delivered
+    /// back here, so the parked frame pump resumes on the same queue all
+    /// connection state is touched on.
+    private let lwipQueue: DispatchQueue
+
+    /// The in-flight ``process`` completion, retained only while a script hop
+    /// is outstanding. nil otherwise. The pump's one-read-in-flight discipline
+    /// guarantees at most one is ever outstanding.
+    private var parkedCompletion: ((Data) -> Void)?
+
+    /// Peer-bound bytes produced earlier in the current ``process`` pass, held
+    /// while a script hop is outstanding. The resume prepends them so the
+    /// single completion carries every byte of the pass in wire order.
+    private var pendingPreParkOutput = Data()
+
+    /// Set when the owning session tears down. A resume that fires afterwards
+    /// bails without touching connection state or a dead leg.
+    private var torn = false
+
     // MARK: - Init
 
-    init(direction: Direction, rewriter: MITMHTTP2Rewriter) {
+    init(direction: Direction, rewriter: MITMHTTP2Rewriter, lwipQueue: DispatchQueue) {
         self.direction = direction
         self.rewriter = rewriter
         self.prefaceRemaining = (direction == .inbound) ? 24 : 0
+        self.lwipQueue = lwipQueue
+    }
+
+    /// Marks the connection torn down (session cancelled). Any in-flight
+    /// script resume that fires afterwards bails immediately. Idempotent.
+    func markTorn() {
+        torn = true
+        parkedCompletion = nil
+        pendingPreParkOutput = Data()
     }
 
     // MARK: - Public API
 
-    /// Consumes one chunk of decrypted plaintext from the source TLS
-    /// record connection and returns the transformed plaintext that
-    /// should be encrypted onto the destination TLS record connection.
-    /// Streaming-safe: callers may invoke this with arbitrarily small
-    /// or large chunks.
-    func process(_ data: Data) -> Data {
+    /// Feeds one chunk of decrypted plaintext from the source TLS record
+    /// connection through the h2 translator. The peer-bound plaintext for
+    /// the destination TLS leg is delivered via ``completion``, invoked
+    /// **exactly once**: synchronously, inline when no script runs (the
+    /// common case), or later on the lwIP queue when a script rule parks the
+    /// connection while its JavaScript runs off-queue. Streaming-safe:
+    /// callers may invoke this with arbitrarily small or large chunks.
+    ///
+    /// Client-bound synth bytes (from a request-phase `Anywhere.respond`) are
+    /// not part of this completion; the pump drains them via
+    /// ``drainPendingClientBytes()`` right after the completion fires.
+    func process(_ data: Data, completion: @escaping (Data) -> Void) {
+        assert(parkedCompletion == nil, "process re-entered while a script hop is outstanding")
         // Once an oversized frame has broken the parse state, stay
         // broken — dropping further bytes on the floor is strictly
         // safer than misparsing them as a new frame's preamble.
-        if parseError { return Data() }
+        if parseError { completion(Data()); return }
         var output = Data()
         var input = data
 
@@ -301,11 +338,40 @@ final class MITMHTTP2Connection {
             rxBuffer.append(input)
         }
 
-        while let frame = parseFrame(from: &rxBuffer) {
-            output.append(handleFrame(frame))
-        }
+        parkedCompletion = completion
+        // NB: sequence these as two statements. As a single
+        // `finishPumpPass(output, parkedAgain: pump(into: &output))` call,
+        // Swift evaluates the `output` argument (a `Data` value copy) BEFORE
+        // running `pump`, so finishPumpPass would receive the pre-pump empty
+        // buffer and silently drop every byte the pump produced.
+        let parkedAgain = pump(into: &output)
+        finishPumpPass(output, parkedAgain: parkedAgain)
+    }
 
-        return output
+    /// Parses and handles frames until ``rxBuffer`` drains or a script hop
+    /// parks the connection. Returns true when parked (a resume continues the
+    /// pump); false when the buffer drained with no hop outstanding.
+    private func pump(into output: inout Data) -> Bool {
+        while let frame = parseFrame(from: &rxBuffer) {
+            if handleFrame(frame, into: &output) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Tail of every pump pass — the synchronous one in ``process`` and each
+    /// resumed one. If a hop parked the connection, holds the bytes produced
+    /// so far (the matching resume prepends them); otherwise fires the stashed
+    /// completion exactly once with the accumulated output.
+    private func finishPumpPass(_ output: Data, parkedAgain: Bool) {
+        if parkedAgain {
+            pendingPreParkOutput = output
+            return
+        }
+        let completion = parkedCompletion
+        parkedCompletion = nil
+        completion?(output)
     }
 
     /// Drains and returns any client-bound bytes synthesized by
@@ -324,7 +390,7 @@ final class MITMHTTP2Connection {
 
     // MARK: - Frame dispatch
 
-    private func handleFrame(_ frame: RawFrame) -> Data {
+    private func handleFrame(_ frame: RawFrame, into output: inout Data) -> Bool {
         // RFC 9113 §6.10: between a HEADERS/PUSH_PROMISE without
         // END_HEADERS and its terminating CONTINUATION, the peer is
         // forbidden from sending any other frame type — including
@@ -340,7 +406,7 @@ final class MITMHTTP2Connection {
             parseError = true
             rxBuffer = MITMByteBuffer()
             pending = nil
-            return Data()
+            return false
         }
         // Synth-responded short-circuit: frames on streams whose
         // request was answered by ``Anywhere.respond`` never reach the
@@ -361,25 +427,32 @@ final class MITMHTTP2Connection {
             if endStream, endStreamBearing {
                 clearSynthResponded(frame.streamID)
             }
-            return Data()
+            return false
         }
+        // Only the HEADERS/CONTINUATION (→ finalizeHeaderBlock) and DATA paths
+        // can run a script and therefore park; every other frame type is
+        // handled synchronously and appended.
         switch frame.typeCode {
         case FrameTypeCode.headers:
-            return handleHeaders(frame)
+            return handleHeaders(frame, into: &output)
         case FrameTypeCode.continuation:
-            return handleContinuation(frame)
+            return handleContinuation(frame, into: &output)
         case FrameTypeCode.pushPromise:
-            return handlePushPromise(frame)
+            return handlePushPromise(frame, into: &output)
         case FrameTypeCode.data:
-            return handleData(frame)
+            return handleData(frame, into: &output)
         case FrameTypeCode.rstStream:
-            return handleRSTStream(frame)
+            output.append(handleRSTStream(frame))
+            return false
         case FrameTypeCode.goaway:
-            return handleGoAway(frame)
+            output.append(handleGoAway(frame))
+            return false
         case FrameTypeCode.settings:
-            return handleSettings(frame)
+            output.append(handleSettings(frame))
+            return false
         default:
-            return serializeFrame(frame)
+            output.append(serializeFrame(frame))
+            return false
         }
     }
 
@@ -495,7 +568,7 @@ final class MITMHTTP2Connection {
 
     // MARK: - HEADERS
 
-    private func handleHeaders(_ frame: RawFrame) -> Data {
+    private func handleHeaders(_ frame: RawFrame, into output: inout Data) -> Bool {
         // RFC 9113 §6.2: HEADERS MUST be associated with a stream — a
         // streamID of zero is a connection-level protocol violation.
         // Routing the frame through the script chain at the zero slot
@@ -505,7 +578,7 @@ final class MITMHTTP2Connection {
             logger.warning("[MITM] HTTP/2 \(rewriter.host): HEADERS on stream 0; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
-            return Data()
+            return false
         }
         // RFC 9113 §5.1.1: client-initiated stream IDs MUST be odd and
         // strictly monotonically increasing. Only the inbound leg
@@ -527,7 +600,7 @@ final class MITMHTTP2Connection {
                 logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): client-initiated HEADERS has server (even) parity; marking parseError")
                 parseError = true
                 rxBuffer = MITMByteBuffer()
-                return Data()
+                return false
             }
             highestInboundStreamID = frame.streamID
         }
@@ -535,7 +608,7 @@ final class MITMHTTP2Connection {
         guard let body = stripHeadersPadding(frame: frame, hasPriority: frame.flags & 0x20 != 0) else {
             // Malformed padding — drop the frame to avoid feeding
             // garbage into the HPACK decoder. The peer will GOAWAY.
-            return Data()
+            return false
         }
 
         // Single-frame HEADERS cap. ``handleContinuation`` enforces
@@ -544,7 +617,7 @@ final class MITMHTTP2Connection {
         // budget into one frame and bypass the chain-side guard.
         if body.count > Self.maxHeaderBlockFragmentBytes {
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): HEADERS payload \(body.count) B exceeded cap \(Self.maxHeaderBlockFragmentBytes); dropping")
-            return Data()
+            return false
         }
 
         if frame.flags & 0x4 != 0 { // END_HEADERS
@@ -552,7 +625,8 @@ final class MITMHTTP2Connection {
                 streamID: frame.streamID,
                 fragments: body,
                 originalFlags: frame.flags,
-                kind: .headers
+                kind: .headers,
+                into: &output
             )
         }
 
@@ -562,7 +636,7 @@ final class MITMHTTP2Connection {
             originalFlags: frame.flags,
             kind: .headers
         )
-        return Data()
+        return false
     }
 
     /// True when this leg holds no per-stream state for ``streamID``
@@ -580,14 +654,14 @@ final class MITMHTTP2Connection {
             && !synthRespondedStreams.contains(streamID)
     }
 
-    private func handleContinuation(_ frame: RawFrame) -> Data {
+    private func handleContinuation(_ frame: RawFrame, into output: inout Data) -> Bool {
         // RFC 9113 §6.10: CONTINUATION MUST be associated with a
         // stream. A streamID-zero CONTINUATION is a protocol error.
         guard frame.streamID != 0 else {
             logger.warning("[MITM] HTTP/2 \(rewriter.host): CONTINUATION on stream 0; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
-            return Data()
+            return false
         }
         guard var p = pending, p.streamID == frame.streamID else {
             // Stray CONTINUATION (no matching pending HEADERS, or
@@ -605,7 +679,7 @@ final class MITMHTTP2Connection {
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): stray CONTINUATION; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
-            return Data()
+            return false
         }
 
         // Project the post-append size and reject *before* allocating.
@@ -615,7 +689,7 @@ final class MITMHTTP2Connection {
         if p.fragments.count + frame.payload.count > Self.maxHeaderBlockFragmentBytes {
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): header block fragments would be \(p.fragments.count + frame.payload.count) B, over cap \(Self.maxHeaderBlockFragmentBytes); dropping")
             pending = nil
-            return Data()
+            return false
         }
         p.fragments.append(frame.payload)
 
@@ -625,15 +699,16 @@ final class MITMHTTP2Connection {
                 streamID: p.streamID,
                 fragments: p.fragments,
                 originalFlags: p.originalFlags,
-                kind: p.kind
+                kind: p.kind,
+                into: &output
             )
         }
 
         pending = p
-        return Data()
+        return false
     }
 
-    private func handlePushPromise(_ frame: RawFrame) -> Data {
+    private func handlePushPromise(_ frame: RawFrame, into output: inout Data) -> Bool {
         // RFC 9113 §6.6: PUSH_PROMISE is server-to-client only. A
         // PUSH_PROMISE arriving on the inbound leg (client→server) is
         // a client-side protocol violation; re-encoding and
@@ -644,7 +719,7 @@ final class MITMHTTP2Connection {
             logger.warning("[MITM] HTTP/2 \(rewriter.host): PUSH_PROMISE on inbound leg (client → server); marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
-            return Data()
+            return false
         }
         // §6.6: PUSH_PROMISE MUST be associated with an existing,
         // peer-initiated stream — streamID 0 is a protocol error.
@@ -652,7 +727,7 @@ final class MITMHTTP2Connection {
             logger.warning("[MITM] HTTP/2 \(rewriter.host): PUSH_PROMISE on stream 0; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
-            return Data()
+            return false
         }
         // PUSH_PROMISE payload (§6.6):
         //   [Pad Length? (8)]
@@ -660,20 +735,24 @@ final class MITMHTTP2Connection {
         //   Header Block Fragment
         //   [Padding]
         guard let (promisedStreamID, body) = stripPushPromisePadding(frame: frame) else {
-            return Data()
+            return false
         }
 
         if body.count > Self.maxHeaderBlockFragmentBytes {
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): PUSH_PROMISE payload \(body.count) B exceeded cap \(Self.maxHeaderBlockFragmentBytes); dropping")
-            return Data()
+            return false
         }
 
         if frame.flags & 0x4 != 0 { // END_HEADERS
+            // PUSH_PROMISE never enters a script branch in
+            // ``finalizeHeaderBlock`` (those are gated on `.headers`), so
+            // this never parks.
             return finalizeHeaderBlock(
                 streamID: frame.streamID,
                 fragments: body,
                 originalFlags: frame.flags,
-                kind: .pushPromise(promisedStreamID: promisedStreamID)
+                kind: .pushPromise(promisedStreamID: promisedStreamID),
+                into: &output
             )
         }
 
@@ -683,15 +762,16 @@ final class MITMHTTP2Connection {
             originalFlags: frame.flags,
             kind: .pushPromise(promisedStreamID: promisedStreamID)
         )
-        return Data()
+        return false
     }
 
     private func finalizeHeaderBlock(
         streamID: UInt32,
         fragments: Data,
         originalFlags: UInt8,
-        kind: PendingHeaders.Kind
-    ) -> Data {
+        kind: PendingHeaders.Kind,
+        into output: inout Data
+    ) -> Bool {
         guard let decoded = decoder.decodeHeaders(from: fragments) else {
             // HPACK decode failure desyncs this leg's dynamic table
             // irrecoverably — partial decode may have advanced the
@@ -708,7 +788,7 @@ final class MITMHTTP2Connection {
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): HPACK decode failed; marking parseError to prevent table desync")
             parseError = true
             rxBuffer = MITMByteBuffer()
-            return Data()
+            return false
         }
 
         // Classify the HEADERS frame against the raw decoded block,
@@ -723,7 +803,6 @@ final class MITMHTTP2Connection {
         // 103 Early Hints, …): more HEADERS follow on the same stream
         // so the request-log record must stay live for the final
         // response.
-        var output = Data()
         let isTrailer: Bool
         let isInterimResponse: Bool
         if case .headers = kind {
@@ -755,17 +834,69 @@ final class MITMHTTP2Connection {
         // ``frame.end = true`` so it can flush any per-stream state;
         // non-empty output goes on the wire as a final DATA frame
         // before the trailer HEADERS.
+        //
+        // The flush runs a script and so may park; when it does, the
+        // fresh-block processing (``processFreshHeaderBlock``) runs in the
+        // resume via the continuation, preserving wire order.
         if case .headers = kind {
             if pendingMessages[streamID] != nil {
-                output.append(runScriptsAndFlush(streamID: streamID, endStream: false))
-                if synthRespondedStreams.contains(streamID) {
-                    return output
+                return runScriptsAndFlush(streamID: streamID, endStream: false, into: &output) { [weak self] out in
+                    guard let self else { return false }
+                    // A request-phase ``Anywhere.respond`` on the flushed
+                    // message short-circuits the stream; the trailer /
+                    // follow-on HEADERS must not be processed.
+                    if self.synthRespondedStreams.contains(streamID) { return false }
+                    return self.processFreshHeaderBlock(
+                        streamID: streamID,
+                        decoded: decoded,
+                        originalFlags: originalFlags,
+                        kind: kind,
+                        isTrailer: isTrailer,
+                        isInterimResponse: isInterimResponse,
+                        into: &out
+                    )
                 }
             } else if streamingScripts[streamID] != nil {
-                output.append(flushStreamingScript(streamID: streamID))
+                return flushStreamingScript(streamID: streamID, into: &output) { [weak self] out in
+                    guard let self else { return false }
+                    return self.processFreshHeaderBlock(
+                        streamID: streamID,
+                        decoded: decoded,
+                        originalFlags: originalFlags,
+                        kind: kind,
+                        isTrailer: isTrailer,
+                        isInterimResponse: isInterimResponse,
+                        into: &out
+                    )
+                }
             }
         }
+        return processFreshHeaderBlock(
+            streamID: streamID,
+            decoded: decoded,
+            originalFlags: originalFlags,
+            kind: kind,
+            isTrailer: isTrailer,
+            isInterimResponse: isInterimResponse,
+            into: &output
+        )
+    }
 
+    /// Processes a freshly-arrived header block once any deferred script
+    /// state for the stream has been flushed. Pops/peeks the originating
+    /// request, runs header rules, and either enters streaming-script mode,
+    /// enters buffered-script mode (parking when END_STREAM-on-HEADERS runs a
+    /// script immediately), or emits the block on the pass-through path.
+    /// Returns true when a script hop parked the connection.
+    private func processFreshHeaderBlock(
+        streamID: UInt32,
+        decoded: [(name: String, value: String)],
+        originalFlags: UInt8,
+        kind: PendingHeaders.Kind,
+        isTrailer: Bool,
+        isInterimResponse: Bool,
+        into output: inout Data
+    ) -> Bool {
         // Pop or peek the originating request once per outbound
         // response head, before the header transform (so a response
         // rule's URL gate can be tested against the originating
@@ -860,7 +991,7 @@ final class MITMHTTP2Connection {
                 endStream: false,
                 kind: kind
             ))
-            return output
+            return false
         }
 
         // Buffered-script mode: defer HEADERS emission. The script may
@@ -899,10 +1030,11 @@ final class MITMHTTP2Connection {
             if endStreamOnHeaders {
                 // No DATA will follow — run scripts immediately on an
                 // empty body. ``runScriptsAndFlush`` emits the deferred
-                // HEADERS plus any body the script populated.
-                output.append(runScriptsAndFlush(streamID: streamID, endStream: true))
+                // HEADERS plus any body the script populated, and parks
+                // while the script runs off-queue.
+                return runScriptsAndFlush(streamID: streamID, endStream: true, into: &output) { _ in false }
             }
-            return output
+            return false
         }
 
         // Pass-through path: no script applies, this is a trailer or
@@ -929,12 +1061,12 @@ final class MITMHTTP2Connection {
             endStream: endStreamOnHeaders,
             kind: kind
         ))
-        return output
+        return false
     }
 
     // MARK: - DATA
 
-    private func handleData(_ frame: RawFrame) -> Data {
+    private func handleData(_ frame: RawFrame, into output: inout Data) -> Bool {
         // RFC 9113 §6.1: DATA MUST be associated with a stream. A
         // DATA frame on stream 0 is a connection-level protocol
         // violation and would otherwise route into the script chain
@@ -944,10 +1076,10 @@ final class MITMHTTP2Connection {
             logger.warning("[MITM] HTTP/2 \(rewriter.host): DATA on stream 0; marking parseError")
             parseError = true
             rxBuffer = MITMByteBuffer()
-            return Data()
+            return false
         }
         guard let body = stripDataPadding(frame: frame) else {
-            return Data()
+            return false
         }
 
         let endStream = frame.flags & 0x1 != 0
@@ -956,13 +1088,13 @@ final class MITMHTTP2Connection {
         // Streaming-script path: run the script chain on this single
         // DATA frame and emit immediately. No buffering, no
         // decompression — gRPC and other framed-stream payloads stay
-        // streaming.
-        if var streaming = streamingScripts[streamID] {
+        // streaming. May park while a frame's script runs off-queue.
+        if streamingScripts[streamID] != nil {
             return handleStreamingData(
                 streamID: streamID,
-                streaming: &streaming,
                 body: body,
-                endStream: endStream
+                endStream: endStream,
+                into: &output
             )
         }
 
@@ -970,7 +1102,8 @@ final class MITMHTTP2Connection {
         // DATA frame with the original body and END_STREAM flag, with
         // PADDED cleared.
         guard var pending = pendingMessages[streamID] else {
-            return emitDataFrames(streamID: streamID, payload: body, endStream: endStream)
+            output.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
+            return false
         }
 
         // Abandoned path: a previous DATA frame on this stream blew
@@ -983,7 +1116,8 @@ final class MITMHTTP2Connection {
             } else {
                 pendingMessages[streamID] = pending
             }
-            return emitDataFrames(streamID: streamID, payload: body, endStream: endStream)
+            output.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
+            return false
         }
 
         // Buffering path: accumulate until END_STREAM.
@@ -997,14 +1131,15 @@ final class MITMHTTP2Connection {
         // as DATA, then continues to forward subsequent DATA verbatim.
         if !endStream, pending.data.count > MITMBodyCodec.maxBufferedBodyBytes {
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): exceeded cap \(MITMBodyCodec.maxBufferedBodyBytes); abandoning")
-            return abandonPending(streamID: streamID, pending: &pending)
+            output.append(abandonPending(streamID: streamID, pending: &pending))
+            return false
         }
 
         pendingMessages[streamID] = pending
         if !endStream {
-            return Data()
+            return false
         }
-        return runScriptsAndFlush(streamID: streamID, endStream: true)
+        return runScriptsAndFlush(streamID: streamID, endStream: true, into: &output) { _ in false }
     }
 
     /// Closes out a streaming-script stream when END_STREAM lands on
@@ -1017,19 +1152,30 @@ final class MITMHTTP2Connection {
     /// ``isLast=true`` call as a flush opportunity. The wire
     /// END_STREAM bit lives on the upcoming trailer HEADERS, so the
     /// DATA frame we emit here carries ``endStream=false``.
-    private func flushStreamingScript(streamID: UInt32) -> Data {
-        guard var streaming = streamingScripts.removeValue(forKey: streamID) else {
-            return Data()
+    ///
+    /// Parks while the final frame's script runs off-queue; ``continuation``
+    /// runs once the flush is emitted (it processes the trailing HEADERS).
+    private func flushStreamingScript(
+        streamID: UInt32,
+        into output: inout Data,
+        then continuation: @escaping (inout Data) -> Bool
+    ) -> Bool {
+        guard var streaming = streamingScripts[streamID] else {
+            return continuation(&output)
         }
         let body = streaming.pendingFrame ?? Data()
         streaming.pendingFrame = nil
+        streamingScripts[streamID] = streaming
         return processStreamingFrame(
             streamID: streamID,
-            streaming: &streaming,
             body: body,
             isLast: true,
-            wireEndStream: false
-        )
+            wireEndStream: false,
+            into: &output
+        ) { [weak self] out in
+            self?.streamingScripts.removeValue(forKey: streamID)
+            return continuation(&out)
+        }
     }
 
     /// Streaming-script path. ``Anywhere.done`` / ``Anywhere.exit``
@@ -1048,52 +1194,73 @@ final class MITMHTTP2Connection {
     /// as non-final and the current one is processed as final.
     private func handleStreamingData(
         streamID: UInt32,
-        streaming: inout StreamingState,
         body: Data,
-        endStream: Bool
-    ) -> Data {
-        var output = Data()
-
+        endStream: Bool,
+        into output: inout Data
+    ) -> Bool {
         // Release the previously held frame, if any. Its mere
         // presence here means the stream did not end on it (a
         // subsequent DATA frame has arrived), so the script's
         // ``frame.end`` is false. Bypass is honoured inside
         // ``processStreamingFrame``: held frames are still emitted,
-        // just verbatim.
+        // just verbatim. The held frame and the current frame each run
+        // their own (possibly off-queue) script, so they chain via
+        // continuations to keep wire order across any park.
+        guard let streaming = streamingScripts[streamID] else {
+            return handleStreamingCurrentFrame(streamID: streamID, body: body, endStream: endStream, into: &output)
+        }
         if let held = streaming.pendingFrame {
-            streaming.pendingFrame = nil
-            output.append(processStreamingFrame(
+            var cleared = streaming
+            cleared.pendingFrame = nil
+            streamingScripts[streamID] = cleared
+            return processStreamingFrame(
                 streamID: streamID,
-                streaming: &streaming,
                 body: held,
                 isLast: false,
-                wireEndStream: false
-            ))
+                wireEndStream: false,
+                into: &output
+            ) { [weak self] out in
+                guard let self else { return false }
+                return self.handleStreamingCurrentFrame(streamID: streamID, body: body, endStream: endStream, into: &out)
+            }
         }
+        return handleStreamingCurrentFrame(streamID: streamID, body: body, endStream: endStream, into: &output)
+    }
 
+    /// Handles the current DATA frame of a streaming-script stream once any
+    /// held lookahead frame has been released. On END_STREAM the frame is
+    /// final (``isLast=true``, wire END_STREAM) and the stream entry drops;
+    /// otherwise it is stashed as the lookahead for the next event.
+    private func handleStreamingCurrentFrame(
+        streamID: UInt32,
+        body: Data,
+        endStream: Bool,
+        into output: inout Data
+    ) -> Bool {
         if endStream {
             // END_STREAM on this DATA frame: this IS the last frame
-            // on the stream, no trailers can follow. Process inline
-            // with ``isLast=true`` so the script sees the actual
-            // last-frame bytes (HTTP/1 chunked parity).
-            output.append(processStreamingFrame(
+            // on the stream, no trailers can follow. ``isLast=true`` so
+            // the script sees the actual last-frame bytes (HTTP/1 chunked
+            // parity); drop the stream entry once emitted.
+            return processStreamingFrame(
                 streamID: streamID,
-                streaming: &streaming,
                 body: body,
                 isLast: true,
-                wireEndStream: true
-            ))
-            streamingScripts.removeValue(forKey: streamID)
-        } else {
-            // Defer: we don't yet know whether this is the last DATA
-            // (a trailer HEADERS could follow). Stash it; the next
-            // event — another DATA frame or trailer — will release
-            // it with the correct ``frame.end`` value.
+                wireEndStream: true,
+                into: &output
+            ) { [weak self] _ in
+                self?.streamingScripts.removeValue(forKey: streamID)
+                return false
+            }
+        }
+        // Defer: we don't yet know whether this is the last DATA (a
+        // trailer HEADERS could follow). Stash it; the next event — another
+        // DATA frame or trailer — releases it with the right ``frame.end``.
+        if var streaming = streamingScripts[streamID] {
             streaming.pendingFrame = body
             streamingScripts[streamID] = streaming
         }
-
-        return output
+        return false
     }
 
     /// Runs one buffered frame through the streaming-script chain and
@@ -1104,79 +1271,121 @@ final class MITMHTTP2Connection {
     /// trailer flush (``isLast=true`` so the script knows it's the
     /// last call, ``wireEndStream=false`` because the trailer
     /// HEADERS will carry END_STREAM on the wire).
+    ///
+    /// Reads the stream's state from ``streamingScripts`` (the source of
+    /// truth across an async hop). When the stream is bypassed, emits
+    /// synchronously and runs ``continuation`` inline. Otherwise dispatches
+    /// the frame's script off-queue, parks, and runs ``continuation`` from
+    /// the resume once ``emitStreamFrameResult`` has emitted the frame.
     private func processStreamingFrame(
         streamID: UInt32,
-        streaming: inout StreamingState,
         body: Data,
         isLast: Bool,
-        wireEndStream: Bool
-    ) -> Data {
-        let emitted: Data
+        wireEndStream: Bool,
+        into output: inout Data,
+        then continuation: @escaping (inout Data) -> Bool
+    ) -> Bool {
+        guard var streaming = streamingScripts[streamID] else {
+            // Stream entry gone (e.g. already removed); nothing to script.
+            return continuation(&output)
+        }
         if streaming.cursor.bypass {
+            streaming.frameIndex += 1
+            streamingScripts[streamID] = streaming
+            // Skip emitting an empty mid-stream DATA frame so a swallowed
+            // frame stays swallowed; END_STREAM still needs a frame to carry
+            // the flag, so empty + endStream collapses to one zero-length
+            // DATA frame.
+            if !(body.isEmpty && !wireEndStream) {
+                output.append(emitDataFrames(streamID: streamID, payload: body, endStream: wireEndStream))
+            }
+            return continuation(&output)
+        }
+        let ctx = MITMScriptEngine.FrameContext(
+            phase: phase,
+            method: streaming.originatingRequest?.method
+                ?? firstHeaderValue(streaming.headers, name: ":method"),
+            url: streamingURL(streaming),
+            status: parseStatus(streaming.headers),
+            headers: streaming.headers.filter { !$0.name.hasPrefix(":") },
+            frameIndex: streaming.frameIndex,
+            isLast: isLast,
+            ruleSetID: rewriter.ruleSetID
+        )
+        MITMScriptTransform.applyFrame(
+            body,
+            rules: rewriter.rules(phase: phase),
+            frameContext: ctx,
+            cursor: streaming.cursor,
+            engineProvider: rewriter.scriptEngineProvider,
+            resumeOn: lwipQueue
+        ) { [weak self] result in
+            guard let self else { return }
+            guard !self.torn else { return }
+            var resumed = self.pendingPreParkOutput
+            self.pendingPreParkOutput = Data()
+            self.emitStreamFrameResult(
+                result: result,
+                streamID: streamID,
+                body: body,
+                wireEndStream: wireEndStream,
+                into: &resumed
+            )
+            var parkedAgain = continuation(&resumed)
+            // Drain frames that followed the parked one (see the matching
+            // note in runScriptsAndFlush). Skipped when the continuation
+            // re-parked.
+            if !parkedAgain {
+                parkedAgain = self.pump(into: &resumed)
+            }
+            self.finishPumpPass(resumed, parkedAgain: parkedAgain)
+        }
+        return true
+    }
+
+    /// Applies a streaming frame's script result: enforces the cumulative
+    /// wire-growth cap (flipping the stream to ``bypass`` on overflow),
+    /// advances the frame index, and emits the resulting DATA frame(s).
+    /// State is threaded through ``streamingScripts``; the ``cursor`` was
+    /// already mutated in place by ``applyFrame`` on the script queue.
+    private func emitStreamFrameResult(
+        result: MITMScriptTransform.StreamFrameResult,
+        streamID: UInt32,
+        body: Data,
+        wireEndStream: Bool,
+        into output: inout Data
+    ) {
+        guard var streaming = streamingScripts[streamID] else {
+            // Stream removed during the hop (shouldn't happen on the serial
+            // lwIP queue, since the connection is parked); emit best-effort.
+            if !(result.body.isEmpty && !wireEndStream) {
+                output.append(emitDataFrames(streamID: streamID, payload: result.body, endStream: wireEndStream))
+            }
+            return
+        }
+        // Track cumulative wire-byte growth across the stream's frames. The
+        // receiver's flow-control window was budgeted for the original
+        // sender's bytes; any growth we add eats unaccounted into that
+        // window. Once the projected total would exceed the cap, this frame
+        // and every subsequent one fall back to the original payload. Clamp
+        // at zero rather than banking headroom from an earlier shrink — see
+        // the constant's note for the FLOW_CONTROL_ERROR rationale.
+        let emitted: Data
+        let growth = result.body.count - body.count
+        let projected = max(0, streaming.cumulativeGrowth + growth)
+        if projected > Self.maxStreamingRewriteGrowthBytes {
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): streamScript projected growth \(projected) B exceeded cap \(Self.maxStreamingRewriteGrowthBytes) B; bypassing this frame and remaining frames to avoid FLOW_CONTROL_ERROR")
+            streaming.cursor.bypass = true
             emitted = body
         } else {
-            let ctx = MITMScriptEngine.FrameContext(
-                phase: phase,
-                method: streaming.originatingRequest?.method
-                    ?? firstHeaderValue(streaming.headers, name: ":method"),
-                url: streamingURL(streaming),
-                status: parseStatus(streaming.headers),
-                headers: streaming.headers.filter { !$0.name.hasPrefix(":") },
-                frameIndex: streaming.frameIndex,
-                isLast: isLast,
-                ruleSetID: rewriter.ruleSetID
-            )
-            let result = MITMScriptTransform.applyFrame(
-                body,
-                rules: rewriter.rules(phase: phase),
-                frameContext: ctx,
-                cursor: streaming.cursor,
-                engineProvider: rewriter.scriptEngineProvider
-            )
-            // Track cumulative wire-byte growth across the stream's
-            // frames. The receiver's flow-control window was budgeted
-            // for the original sender's bytes; any growth we add eats
-            // unaccounted into that window. Once the *projected*
-            // total would exceed the cap, both this frame and every
-            // subsequent one fall back to the original payload — we
-            // never emit a frame that would push us past the budget,
-            // even partially.
-            //
-            // Clamp at zero rather than carrying negative growth from a
-            // shrink: the receiver's per-stream window refills only via
-            // WINDOW_UPDATE, which the MITM cannot observe. Banking
-            // headroom from an earlier shrink would let a later frame
-            // emit a large grow under the cumulative cap, but the
-            // receiver's window at that moment may still be smaller
-            // than what we projected — net result, FLOW_CONTROL_ERROR +
-            // GOAWAY tearing the whole connection down. Treating
-            // shrinks as "free" (no future credit) is the conservative
-            // play: we never emit more than ``maxStreamingRewriteGrowthBytes``
-            // unaccounted bytes ahead of the original sender's wire
-            // total, even on a stream the script chose to compress
-            // earlier.
-            let growth = result.body.count - body.count
-            let projected = max(0, streaming.cumulativeGrowth + growth)
-            if projected > Self.maxStreamingRewriteGrowthBytes {
-                logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): streamScript projected growth \(projected) B exceeded cap \(Self.maxStreamingRewriteGrowthBytes) B; bypassing this frame and remaining frames to avoid FLOW_CONTROL_ERROR")
-                streaming.cursor.bypass = true
-                emitted = body
-            } else {
-                streaming.cumulativeGrowth = projected
-                emitted = result.body
-            }
+            streaming.cumulativeGrowth = projected
+            emitted = result.body
         }
         streaming.frameIndex += 1
-        // Skip emitting an empty mid-stream DATA frame so that a script
-        // returning `Data()` for a frame "swallows" it cleanly — same
-        // semantics as the HTTP/1 chunked path, which simply doesn't
-        // append a chunk on empty output. END_STREAM still has to land
-        // somewhere though, so empty + endStream collapses to one
-        // zero-length DATA frame carrying the flag.
-        if emitted.isEmpty, !wireEndStream {
-            return Data()
+        streamingScripts[streamID] = streaming
+        if !(emitted.isEmpty && !wireEndStream) {
+            output.append(emitDataFrames(streamID: streamID, payload: emitted, endStream: wireEndStream))
         }
-        return emitDataFrames(streamID: streamID, payload: emitted, endStream: wireEndStream)
     }
 
     /// URL for the streaming script's ctx. On response phase the
@@ -1263,14 +1472,25 @@ final class MITMHTTP2Connection {
     /// Runs the script chain on the buffered message and emits the
     /// final HEADERS (with script mutations) plus the rewritten body
     /// as DATA frame(s). Removes the entry from ``pendingMessages`` so
-    /// the stream is settled. Returns empty when no pending message
-    /// exists, or when it was already abandoned.
-    private func runScriptsAndFlush(streamID: UInt32, endStream: Bool) -> Data {
+    /// the stream is settled.
+    ///
+    /// Dispatches the script off-queue and parks, returning true;
+    /// ``continuation`` then runs from the resume once the flush is emitted.
+    /// The no-pending and already-abandoned cases have nothing to script,
+    /// and a decompression failure emits the deferred bytes verbatim — all
+    /// three run ``continuation`` inline and return its value instead of
+    /// parking.
+    private func runScriptsAndFlush(
+        streamID: UInt32,
+        endStream: Bool,
+        into output: inout Data,
+        then continuation: @escaping (inout Data) -> Bool
+    ) -> Bool {
         guard let pending = pendingMessages.removeValue(forKey: streamID) else {
-            return Data()
+            return continuation(&output)
         }
         if pending.abandoned {
-            return Data()
+            return continuation(&output)
         }
         let plaintext: Data
         if pending.codec.requiresDecompression {
@@ -1282,7 +1502,8 @@ final class MITMHTTP2Connection {
             // these still-encoded bytes. HTTP/1 takes the same approach
             // in ``applyScriptsAndEmit``.
             guard let decoded = MITMBodyCodec.decompress(pending.data, plan: pending.codec, host: rewriter.host) else {
-                return emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream)
+                output.append(emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream))
+                return continuation(&output)
             }
             plaintext = decoded
         } else {
@@ -1303,7 +1524,48 @@ final class MITMHTTP2Connection {
             body: plaintext,
             originatingRequest: pending.originatingRequest
         )
-        let outcome = rewriter.applyScripts(inputMessage, phase: phase)
+        rewriter.applyScripts(inputMessage, phase: phase, resumeOn: lwipQueue) { [weak self] outcome in
+            guard let self else { return }
+            guard !self.torn else { return }
+            var resumed = self.pendingPreParkOutput
+            self.pendingPreParkOutput = Data()
+            self.emitFlushResult(
+                outcome: outcome,
+                streamID: streamID,
+                endStream: endStream,
+                pending: pending,
+                plaintext: plaintext,
+                into: &resumed
+            )
+            var parkedAgain = continuation(&resumed)
+            // Drain any frames that followed the parked one in rxBuffer.
+            // Without this the pump stops at the parked frame, so frames the
+            // peer already sent after it (WINDOW_UPDATE, SETTINGS ACK, the
+            // next stream's HEADERS/DATA) are stranded until the next
+            // receive — which may never come if the peer is now waiting on
+            // us, deadlocking the connection. Mirrors HTTP/1's resume, which
+            // continues its drive loop. Skipped when the continuation itself
+            // parked (its own resume will drain).
+            if !parkedAgain {
+                parkedAgain = self.pump(into: &resumed)
+            }
+            self.finishPumpPass(resumed, parkedAgain: parkedAgain)
+        }
+        return true
+    }
+
+    /// Emits a buffered-message script flush's result: a synthesized response
+    /// short-circuit (queued to the client), the flow-control passthrough
+    /// fallback on excessive growth, or the rewritten HEADERS + body.
+    /// Extracted so it can run from the off-queue resume.
+    private func emitFlushResult(
+        outcome: MITMScriptTransform.Outcome,
+        streamID: UInt32,
+        endStream: Bool,
+        pending: PendingMessage,
+        plaintext: Data,
+        into output: inout Data
+    ) {
         let result: MITMScriptEngine.Message
         switch outcome {
         case .message(let updated):
@@ -1315,7 +1577,7 @@ final class MITMHTTP2Connection {
             // The outer leg never saw a HEADERS for this stream so
             // there's nothing to RST.
             queueSynthesizedResponse(streamID: streamID, response: response)
-            return Data()
+            return
         }
 
         // Flow-control safeguard. The wire-level body bytes the
@@ -1342,7 +1604,8 @@ final class MITMHTTP2Connection {
         if rewrittenWireBytes > originalIdentityBytes,
            rewrittenWireBytes - originalIdentityBytes > Self.maxBufferedRewriteGrowthBytes {
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): script grew body by \(rewrittenWireBytes - originalIdentityBytes) B (cap \(Self.maxBufferedRewriteGrowthBytes) B); emitting original payload to avoid FLOW_CONTROL_ERROR")
-            return emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream)
+            output.append(emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream))
+            return
         }
 
         // Re-build the HTTP/2 header block: pseudo-headers from the
@@ -1370,16 +1633,15 @@ final class MITMHTTP2Connection {
         // DATA frame (body case). HTTP/2 requires DATA to follow HEADERS
         // when there's a body; an empty body is fine on HEADERS alone.
         let headersHaveEndStream = endStream && body.isEmpty
-        var out = emitHeaderBlock(
+        output.append(emitHeaderBlock(
             streamID: streamID,
             block: reencoded,
             endStream: headersHaveEndStream,
             kind: .headers
-        )
+        ))
         if !body.isEmpty {
-            out.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
+            output.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
         }
-        return out
     }
 
     // MARK: - Deferral policy
