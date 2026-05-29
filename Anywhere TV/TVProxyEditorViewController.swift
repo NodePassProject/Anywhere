@@ -61,6 +61,10 @@ class TVProxyEditorViewController: UITableViewController {
     private var hysteriaCC: HysteriaCongestionControl = .brutal
     private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
     private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
+
+    // Nowhere fields
+    private var nowhereKey = ""
+    private var nowhereUploadMbpsText = "0"
     
     // Trojan fields
     private var trojanPassword = ""
@@ -97,6 +101,7 @@ class TVProxyEditorViewController: UITableViewController {
 
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
+    private var isNowhere: Bool { selectedProtocol == .nowhere }
     private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isAnyTLS: Bool { selectedProtocol == .anytls }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
@@ -125,6 +130,7 @@ class TVProxyEditorViewController: UITableViewController {
         case tlsSNI, tlsALPN, fingerprint
         case realitySNI, realityPublicKey, realityShortId
         case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps
+        case nowhereKey, nowhereUploadMbps
         case trojanPassword
         case anytlsPassword
         case ssPassword, ssMethod
@@ -149,6 +155,7 @@ class TVProxyEditorViewController: UITableViewController {
         let protocolOptions: [(String, String)] = [
             ("VLESS", "vless"),
             ("Hysteria", "hysteria"),
+            ("Nowhere", "nowhere"),
             ("Trojan", "trojan"),
             ("AnyTLS", "anytls"),
             ("Shadowsocks", "shadowsocks"),
@@ -182,6 +189,9 @@ class TVProxyEditorViewController: UITableViewController {
                 serverRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
                 serverRows.append(.text(label: String(localized: "Download Speed", comment: "Download Speed for Hysteria protocol"), value: hysteriaDownloadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaDownloadMbps))
             }
+        } else if isNowhere {
+            serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
+            serverRows.append(.text(label: String(localized: "Upload Speed"), value: nowhereUploadMbpsText, placeholder: String(localized: "Mbps"), key: .nowhereUploadMbps))
         } else if isTrojan {
             serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword, secure: true))
         } else if isAnyTLS {
@@ -376,6 +386,12 @@ class TVProxyEditorViewController: UITableViewController {
             }
             return true
         }
+        if isNowhere {
+            guard !nowhereKey.isEmpty,
+                  let up = Int(nowhereUploadMbpsText), HysteriaCongestionControl.uploadMbpsRange.contains(up)
+            else { return false }
+            return true
+        }
         if isTrojan { return !trojanPassword.isEmpty }
         if isAnyTLS { return !anytlsPassword.isEmpty }
         if isShadowsocks { return !ssPassword.isEmpty }
@@ -538,7 +554,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .outboundProtocol:
             if let proto = OutboundProtocol(rawValue: value) {
                 selectedProtocol = proto
-                if isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+                if isHysteria || isNowhere || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
                     flow = ""
                     if security == "reality" { security = "none" }
                 }
@@ -575,6 +591,8 @@ class TVProxyEditorViewController: UITableViewController {
             if let cc = HysteriaCongestionControl(rawValue: value) { hysteriaCC = cc }
         case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
         case .hysteriaDownloadMbps: hysteriaDownloadMbpsText = value
+        case .nowhereKey: nowhereKey = value
+        case .nowhereUploadMbps: nowhereUploadMbpsText = value
         case .trojanPassword: trojanPassword = value
         case .anytlsPassword: anytlsPassword = value
         case .ssPassword: ssPassword = value
@@ -664,6 +682,9 @@ class TVProxyEditorViewController: UITableViewController {
             hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
+        case .nowhere(let key, let uploadMbps):
+            nowhereKey = key
+            nowhereUploadMbpsText = String(uploadMbps)
         case .trojan(let password, let tls):
             trojanPassword = password
             tlsSNI = tls.serverName
@@ -756,7 +777,7 @@ class TVProxyEditorViewController: UITableViewController {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+        if isHysteria || isNowhere || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = existingConfiguration?.id ?? UUID()
         } else {
             guard let uuid = UUID(uuidString: uuid) else { return }
@@ -846,6 +867,12 @@ class TVProxyEditorViewController: UITableViewController {
                 uploadMbps: up,
                 downloadMbps: down,
                 sni: existingSNI ?? bareAddress
+            )
+        case .nowhere:
+            let up = HysteriaCongestionControl.clampUploadMbps(Int(nowhereUploadMbpsText) ?? 0)
+            outbound = .nowhere(
+                key: nowhereKey,
+                uploadMbps: up
             )
         case .trojan:
             let sniValue = tlsSNI.isEmpty ? bareAddress : tlsSNI

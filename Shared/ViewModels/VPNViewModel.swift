@@ -817,6 +817,9 @@ class VPNViewModel: ObservableObject {
             configurationDict["hysteriaUploadMbps"] = uploadMbps
             configurationDict["hysteriaDownloadMbps"] = downloadMbps
             configurationDict["hysteriaSNI"] = sni
+        case .nowhere(let key, let uploadMbps):
+            configurationDict["nowhereKey"] = key
+            configurationDict["nowhereUploadMbps"] = uploadMbps
         case .trojan(let password, let tls):
             configurationDict["trojanPassword"] = password
             configurationDict["trojanSNI"] = tls.serverName

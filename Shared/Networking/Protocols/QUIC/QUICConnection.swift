@@ -139,6 +139,9 @@ nonisolated class QUICConnection {
     var streamTerminationHandler: ((Int64, Error?) -> Void)?
     /// Called when a QUIC DATAGRAM frame is received.
     var datagramHandler: ((Data) -> Void)?
+    /// Gives a protocol layer first refusal on raw UDP packets that are not
+    /// meant for ngtcp2, such as Nowhere's side-path UDP frames.
+    var nonQUICPacketHandler: ((Data) -> Bool)?
     /// Called when the QUIC connection is closed (draining, error, etc.).
     /// Allows the session to react immediately rather than discovering it on the next operation.
     var connectionClosedHandler: ((Error) -> Void)?
@@ -541,6 +544,29 @@ nonisolated class QUICConnection {
         return min(frameLimit, pathLimit)
     }
 
+    var canSendRawPackets: Bool {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return transport == nil && quicSocket != nil && state == .connected
+    }
+
+    func writeRawPacket(_ data: Data, completion: ((Error?) -> Void)? = nil) {
+        queue.async { [weak self] in
+            guard let self else {
+                completion?(QUICError.closed)
+                return
+            }
+            guard self.transport == nil, let quicSocket = self.quicSocket, self.state == .connected else {
+                completion?(QUICError.connectionFailed("Raw packet side path unavailable"))
+                return
+            }
+            data.withUnsafeBytes { raw in
+                guard let ptr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+                quicSocket.send(ptr, length: data.count)
+            }
+            completion?(nil)
+        }
+    }
+
     /// Writes stream data, queuing any remainder that can't be sent due to
     /// flow control. Queued data is flushed when incoming packets extend the
     /// window (MAX_STREAM_DATA).
@@ -828,7 +854,7 @@ nonisolated class QUICConnection {
             guard remoteAddr.ss_family != 0 else {
                 throw QUICError.connectionFailed("DNS lookup failed for \(host)")
             }
-            let sock = QUICSocket(queue: queue, receiveBufferSize: Self.maxUDPPayload)
+            let sock = QUICSocket(queue: queue)
             try sock.connect(remoteAddr: remoteAddr, localAddr: &localAddr, addrLen: addrLen)
             quicSocket = sock
             try initializeNgtcp2()
@@ -1194,6 +1220,9 @@ nonisolated class QUICConnection {
     // MARK: Packet Processing
 
     fileprivate func handleReceivedPacket(_ data: Data) {
+        if nonQUICPacketHandler?(data) == true {
+            return
+        }
         guard let conn else { return }
         let ts = currentTimestamp()
         var pi = ngtcp2_pkt_info()

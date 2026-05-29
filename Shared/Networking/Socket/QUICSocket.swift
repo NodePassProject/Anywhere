@@ -56,9 +56,9 @@ nonisolated final class QUICSocket {
     /// True while the socket FD is open.
     var isOpen: Bool { socketFD >= 0 }
 
-    init(queue: DispatchQueue, receiveBufferSize: Int) {
+    init(queue: DispatchQueue) {
         self.queue = queue
-        self.rxBuf = [UInt8](repeating: 0, count: receiveBufferSize)
+        self.rxBuf = [UInt8](repeating: 0, count: QUICConnection.maxUDPPayload)
     }
 
 #if DEBUG

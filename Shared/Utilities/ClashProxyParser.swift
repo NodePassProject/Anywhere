@@ -68,6 +68,7 @@ struct ClashProxyParser {
         switch type {
         case "vless":     return parseVLESSProxy(node)
         case "hysteria2": return parseHysteria2Proxy(node)
+        case "nowhere":   return parseNowhereProxy(node)
         case "trojan":    return parseTrojanProxy(node)
         case "anytls":    return parseAnyTLSProxy(node)
         case "ss":        return parseShadowsocksProxy(node)
@@ -228,6 +229,27 @@ struct ClashProxyParser {
                 uploadMbps: uploadMbps,
                 downloadMbps: downloadMbps,
                 sni: sni
+            )
+        )
+    }
+
+    /// Parses a Clash-style Nowhere node. This is not a standard Clash type,
+    /// but keeps Nowhere subscription imports round-trippable.
+    private static func parseNowhereProxy(_ node: Node) -> ProxyConfiguration? {
+        guard let basics = parseBasics(node) else { return nil }
+        let key = getString(node, key: "key") ?? getString(node, key: "password") ?? ""
+        guard !key.isEmpty else { return nil }
+        let uploadMbps = HysteriaCongestionControl.clampUploadMbps(
+            parseBandwidthMbps(getString(node, key: "rate") ?? getString(node, key: "up"), default: 0)
+        )
+
+        return ProxyConfiguration(
+            name: basics.name,
+            serverAddress: basics.server,
+            serverPort: basics.port,
+            outbound: .nowhere(
+                key: key,
+                uploadMbps: uploadMbps
             )
         )
     }

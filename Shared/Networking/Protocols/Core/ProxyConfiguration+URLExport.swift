@@ -24,6 +24,8 @@ extension ProxyConfiguration {
             return toVLESSURL()
         case .hysteria:
             return toHysteriaURL()
+        case .nowhere:
+            return toNowhereURL()
         case .trojan:
             return toTrojanURL()
         case .anytls:
@@ -114,6 +116,16 @@ extension ProxyConfiguration {
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         return "hysteria2://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"
+    }
+
+    private func toNowhereURL() -> String {
+        guard case .nowhere(let key, let uploadMbps) = outbound else {
+            return ""
+        }
+        let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
+        let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
+        let params = "rate=\(uploadMbps)"
+        return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)?\(params)#\(fragment)"
     }
 
     private func toTrojanURL() -> String {

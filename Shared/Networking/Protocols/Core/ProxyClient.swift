@@ -154,9 +154,9 @@ nonisolated class ProxyClient {
             return
         }
 
-        // Chained Hysteria pools its chain + QUIC session in `HysteriaClient`;
-        // route through `connectWithHysteria` instead of building a chain here.
-        if configuration.outboundProtocol == .hysteria {
+        // Chained QUIC protocols pool their chain + session in their clients;
+        // route through protocol-specific dispatch instead of building a chain here.
+        if configuration.outboundProtocol == .hysteria || configuration.outboundProtocol == .nowhere {
             connectWithCommand(
                 command: command,
                 destinationHost: destinationHost,
@@ -486,6 +486,16 @@ nonisolated class ProxyClient {
 
         if configuration.outboundProtocol == .hysteria {
             connectWithHysteria(
+                command: command,
+                destinationHost: destinationHost,
+                destinationPort: destinationPort,
+                completion: completion
+            )
+            return
+        }
+
+        if configuration.outboundProtocol == .nowhere {
+            connectWithNowhere(
                 command: command,
                 destinationHost: destinationHost,
                 destinationPort: destinationPort,
