@@ -15,6 +15,10 @@ struct MITMSettingsView: View {
     
     @State private var showImportSheet = false
 
+    @State private var showSubscribeAlert = false
+    @State private var subscribeURL = ""
+    @State private var subscribeError: String?
+
     var body: some View {
         Form {
             Section {
@@ -37,14 +41,27 @@ struct MITMSettingsView: View {
                         NavigationLink {
                             MITMRuleSetDetailView(ruleSet: ruleSet)
                         } label: {
-                            VStack(alignment: .leading) {
-                                Text(ruleSet.name)
-                                    .foregroundStyle(.primary)
-                                Text(summary(for: ruleSet))
-                                    .font(.caption)
+                            HStack {
+                                Image(systemName: "list.bullet.rectangle")
                                     .foregroundStyle(.secondary)
-                                    .truncationMode(.middle)
-                                    .lineLimit(1)
+                                    .frame(width: 32, height: 32)
+                                VStack(alignment: .leading) {
+                                    Text(ruleSet.name)
+                                        .foregroundStyle(.primary)
+                                    Text(summary(for: ruleSet))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .truncationMode(.middle)
+                                        .lineLimit(1)
+                                }
+                                Spacer()
+                                if ruleSet.enabled {
+                                    Text("Enabled")
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Text("Disabled")
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
@@ -74,6 +91,12 @@ struct MITMSettingsView: View {
                     } label: {
                         Label("Import Rule Set", systemImage: "square.and.arrow.down")
                     }
+                    Button {
+                        subscribeURL = ""
+                        showSubscribeAlert = true
+                    } label: {
+                        Label("Subscribe Rule Set", systemImage: "link")
+                    }
                 }
             }
         }
@@ -92,6 +115,62 @@ struct MITMSettingsView: View {
         .sheet(isPresented: $showImportSheet) {
             ImportMITMRuleSetView { ruleSet in
                 store.addRuleSet(ruleSet)
+            }
+        }
+        .alert("Subscribe Rule Set", isPresented: $showSubscribeAlert) {
+            TextField("Anywhere MITM Rule Set URL", text: $subscribeURL)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+            Button("Subscribe") {
+                subscribe(to: subscribeURL)
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Subscription Failed", isPresented: Binding(
+            get: { subscribeError != nil },
+            set: { if !$0 { subscribeError = nil } }
+        )) {
+            Button("OK") { subscribeError = nil }
+        } message: {
+            Text(subscribeError ?? "")
+        }
+    }
+
+    private func subscribe(to rawValue: String) {
+        guard let url = MITMRuleSet.validSubscriptionURL(from: rawValue) else {
+            subscribeError = String(localized: "Invalid Anywhere MITM Rule Set URL.")
+            return
+        }
+        Task {
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                    subscribeError = "HTTP \(http.statusCode)"
+                    return
+                }
+                guard let body = String(data: data, encoding: .utf8) else {
+                    subscribeError = String(localized: "Unknown content.")
+                    return
+                }
+                let parsed = MITMRuleSetParser.parse(body)
+                guard parsed.rules.count <= MITMRuleSet.maxRuleCount else {
+                    subscribeError = String(localized: "Rule set is too large.")
+                    return
+                }
+                let name = parsed.name.isEmpty
+                    ? (url.deletingPathExtension().lastPathComponent.isEmpty ? "Subscription" : url.deletingPathExtension().lastPathComponent)
+                    : parsed.name
+                let ruleSet = MITMRuleSet(
+                    name: name,
+                    domainSuffixes: parsed.domainSuffixes,
+                    rewriteTarget: parsed.rewriteTarget,
+                    rules: parsed.rules,
+                    subscriptionURL: url
+                )
+                store.addRuleSet(ruleSet)
+            } catch {
+                subscribeError = error.localizedDescription
             }
         }
     }

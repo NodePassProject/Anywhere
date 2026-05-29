@@ -56,6 +56,7 @@ struct MITMRuleSetDetailView: View {
     let ruleSet: MITMRuleSet?
 
     @State private var name: String = ""
+    @State private var enabled: Bool = true
     @State private var suffixDrafts: [MITMDomainSuffixDraft] = []
     @State private var actionChoice: MITMRewriteActionChoice = .disabled
     @State private var redirectHost: String = ""
@@ -71,10 +72,41 @@ struct MITMRuleSetDetailView: View {
 
     @State private var validationError: String?
 
+    @State private var isUpdating = false
+    @State private var updateError: String?
+
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
+
+    /// The live rule set from the store. The ``ruleSet`` passed in is a
+    /// snapshot that goes stale after a subscription refresh, so reads that
+    /// must reflect the latest content — the subscription URL, and whether
+    /// the set is read-only — go through the store by id.
+    private var currentRuleSet: MITMRuleSet? {
+        guard let id = ruleSet?.id else { return ruleSet }
+        return store.ruleSet(id: id) ?? ruleSet
+    }
+
+    private var subscriptionURL: URL? { currentRuleSet?.subscriptionURL }
+    private var isSubscribed: Bool { subscriptionURL != nil }
 
     var body: some View {
         Form {
+            Section {
+                Toggle("Enable", isOn: Binding(
+                    get: { enabled },
+                    set: { newValue in
+                        enabled = newValue
+                        if let id = ruleSet?.id {
+                            store.setRuleSet(id, enabled: newValue)
+                        }
+                    }
+                ))
+            }
+
+            if let subscriptionURL {
+                subscriptionSection(url: subscriptionURL)
+            }
+
             Section {
                 if isEditing == true {
                     actionEditor
@@ -82,7 +114,7 @@ struct MITMRuleSetDetailView: View {
                     LabeledContent {
                         Text(actionChoice.label)
                     } label: {
-                        TextWithColorfulIcon(title: "Rewrite", comment: "MITM rewrite action", systemName: "arrow.trianglehead.turn.up.right", foregroundColor: .white, backgroundColor: .purple)
+                        TextWithColorfulIcon(title: "Rewrite", comment: "MITM rewrite action", systemName: "arrow.triangle.turn.up.right.circle", foregroundColor: .white, backgroundColor: .purple)
                     }
                 }
             }
@@ -96,18 +128,18 @@ struct MITMRuleSetDetailView: View {
                             .textInputAutocapitalization(.never)
                             .disabled(isEditing != true)
                     }
-                    .onDelete { offsets in
+                    .onDelete(perform: isSubscribed ? nil : { offsets in
                         suffixDrafts.remove(atOffsets: offsets)
                         if isEditing != true {
                             save()
                         }
-                    }
-                    .onMove { source, destination in
+                    })
+                    .onMove(perform: isSubscribed ? nil : { source, destination in
                         suffixDrafts.move(fromOffsets: source, toOffset: destination)
                         if isEditing != true {
                             save()
                         }
-                    }
+                    })
                     if isEditing == true {
                         Button {
                             withAnimation {
@@ -134,6 +166,8 @@ struct MITMRuleSetDetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                         .onTapGesture {
+                            // Subscribed sets are remote-managed and read-only.
+                            guard !isSubscribed else { return }
                             // Script editor not implemented
                             switch rule.operation {
                             case .script, .streamScript: return
@@ -142,18 +176,18 @@ struct MITMRuleSetDetailView: View {
                             editingRule = rule
                         }
                     }
-                    .onDelete { offsets in
+                    .onDelete(perform: isSubscribed ? nil : { offsets in
                         rules.remove(atOffsets: offsets)
                         if isEditing != true {
                             save()
                         }
-                    }
-                    .onMove { source, destination in
+                    })
+                    .onMove(perform: isSubscribed ? nil : { source, destination in
                         rules.move(fromOffsets: source, toOffset: destination)
                         if isEditing != true {
                             save()
                         }
-                    }
+                    })
                     if isEditing == true {
                         Button {
                             showAddSheet = true
@@ -167,8 +201,10 @@ struct MITMRuleSetDetailView: View {
         .navigationTitle(ruleSet?.name ?? String(localized: "Rule Set"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem {
-                EditButton()
+            if !isSubscribed {
+                ToolbarItem {
+                    EditButton()
+                }
             }
         }
         .sheet(isPresented: $showAddSheet) {
@@ -187,6 +223,14 @@ struct MITMRuleSetDetailView: View {
                     }
                 }
             }
+        }
+        .alert("Update Failed", isPresented: Binding(
+            get: { updateError != nil },
+            set: { if !$0 { updateError = nil } }
+        )) {
+            Button("OK") { updateError = nil }
+        } message: {
+            Text(updateError ?? "")
         }
         .onAppear { loadInitial() }
         .onChange(of: isEditing) { _, newValue in
@@ -277,9 +321,11 @@ struct MITMRuleSetDetailView: View {
         let result = MITMRuleSet(
             id: ruleSet?.id ?? UUID(),
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            enabled: enabled,
             domainSuffixes: suffixes,
             rewriteTarget: target,
-            rules: rules
+            rules: rules,
+            subscriptionURL: currentRuleSet?.subscriptionURL
         )
         store.updateRuleSet(result)
     }
@@ -308,11 +354,61 @@ struct MITMRuleSetDetailView: View {
         }
     }
 
+    @ViewBuilder
+    private func subscriptionSection(url: URL) -> some View {
+        Section("Subscription") {
+            Text(url.absoluteString)
+                .font(.system(size: 14).monospaced())
+                .foregroundStyle(.secondary)
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button {
+                refresh()
+            } label: {
+                HStack {
+                    Label("Update", systemImage: "arrow.clockwise")
+                    if isUpdating {
+                        Spacer()
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(isUpdating)
+        }
+    }
+
+    private func refresh() {
+        guard let id = ruleSet?.id else { return }
+        isUpdating = true
+        Task {
+            defer { isUpdating = false }
+            do {
+                let updated = try await store.refreshRuleSet(id: id)
+                loadState(from: updated)
+            } catch {
+                updateError = error.localizedDescription
+            }
+        }
+    }
+
     private func loadInitial() {
-        guard let ruleSet else { return }
+        guard let ruleSet = currentRuleSet else { return }
+        loadState(from: ruleSet)
+    }
+
+    /// Populates the editor's local @State from a rule set. Used on appear
+    /// and again after a subscription refresh replaces the content, so it
+    /// resets the action-specific fields rather than assuming defaults.
+    private func loadState(from ruleSet: MITMRuleSet) {
         name = ruleSet.name
+        enabled = ruleSet.enabled
         suffixDrafts = ruleSet.domainSuffixes.map { MITMDomainSuffixDraft(value: $0) }
         rules = ruleSet.rules
+        redirectHost = ""
+        redirectPort = ""
+        rejectBodyKind = .text
+        rejectBodyContents = ""
         guard let target = ruleSet.rewriteTarget else {
             actionChoice = .disabled
             return

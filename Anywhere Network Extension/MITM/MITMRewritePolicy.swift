@@ -153,6 +153,11 @@ final class MITMRewritePolicy {
         lock.withLock {
             resetUnlocked()
             for set in ruleSets {
+                // Disabled sets are never compiled into the trie, so they
+                // match no traffic until re-enabled. They still count toward
+                // `activeIDs` below, so toggling a set off (vs. removing it)
+                // keeps its script-store bucket — "cleared only on removal".
+                guard set.enabled else { continue }
                 if let compiled = insertUnlocked(set) {
                     scopedRules.append((scope: set.id, rules: compiled))
                 }

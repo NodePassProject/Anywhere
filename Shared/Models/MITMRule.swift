@@ -318,34 +318,55 @@ struct MITMRewriteTarget: Codable, Equatable {
 /// optional ``rewriteTarget`` gives the set a coherent upstream; if set,
 /// every connection covered by the set is redirected to the target,
 /// regardless of which rule fires.
+///
+/// When ``subscriptionURL`` is set, the suffixes, rewrite target, and
+/// rules are sourced from a remote `.amrs` file and replaced on refresh;
+/// the set's ``id`` (its ``MITMScriptStore`` scope key) and user-given
+/// ``name`` are preserved across refreshes so the scope and any rename
+/// stick.
 struct MITMRuleSet: Codable, Equatable, Identifiable {
+    static let maxRuleCount = 10000
+
     var id = UUID()
     var name: String
+    /// Per-set master switch. A disabled set is persisted and editable but
+    /// excluded from the compiled rewrite policy, so it matches no traffic
+    /// until re-enabled. Blobs predating this field decode as enabled.
+    var enabled: Bool
     var domainSuffixes: [String]
     var rewriteTarget: MITMRewriteTarget?
     var rules: [MITMRule]
+    /// When set, the set's content is sourced from a remote `.amrs` file
+    /// and replaced on refresh.
+    var subscriptionURL: URL?
 
     init(
         id: UUID = UUID(),
         name: String,
+        enabled: Bool = true,
         domainSuffixes: [String] = [],
         rewriteTarget: MITMRewriteTarget? = nil,
-        rules: [MITMRule] = []
+        rules: [MITMRule] = [],
+        subscriptionURL: URL? = nil
     ) {
         self.id = id
         self.name = name
+        self.enabled = enabled
         self.domainSuffixes = domainSuffixes
         self.rewriteTarget = rewriteTarget
         self.rules = rules
+        self.subscriptionURL = subscriptionURL
     }
 
     private enum CodingKeys: String, CodingKey {
         case id
         case name
+        case enabled
         case domainSuffix       // legacy: single-suffix shape predating named sets
         case domainSuffixes
         case rewriteTarget
         case rules
+        case subscriptionURL
     }
 
     init(from decoder: Decoder) throws {
@@ -364,18 +385,32 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
             self.domainSuffixes = []
         }
         self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? legacySuffix ?? ""
+        self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         self.rewriteTarget = try c.decodeIfPresent(MITMRewriteTarget.self, forKey: .rewriteTarget)
         // A single corrupt rule shouldn't take down the whole set.
         self.rules = try c.decodeSkippingInvalid([MITMRule].self, forKey: .rules)
+        self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(id, forKey: .id)
         try c.encode(name, forKey: .name)
+        try c.encode(enabled, forKey: .enabled)
         try c.encode(domainSuffixes, forKey: .domainSuffixes)
         try c.encodeIfPresent(rewriteTarget, forKey: .rewriteTarget)
         try c.encode(rules, forKey: .rules)
+        try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+    }
+
+    /// Returns a parsed http(s) URL whose path ends with `.amrs` (case-insensitive), or nil.
+    static func validSubscriptionURL(from rawValue: String) -> URL? {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.path.lowercased().hasSuffix(".amrs") else { return nil }
+        return url
     }
 }
 
