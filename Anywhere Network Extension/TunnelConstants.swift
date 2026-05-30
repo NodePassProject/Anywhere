@@ -71,6 +71,32 @@ enum TunnelConstants {
     static let udpMaxBufferSize = 256 * 1024
     /// Idle timeout for UDP flows (seconds).
     static let udpIdleTimeout: CFAbsoluteTime = 300
+    /// Hard ceiling on concurrent UDP flows in ``TunnelStack/udpFlows``.
+    ///
+    /// Each live flow pins a socket (kernel send/receive buffers) plus a 64 KB
+    /// in-process receive buffer, and the idle reaper only collects flows after
+    /// ``udpIdleTimeout``. With no ceiling, an app spraying UDP NAT-traversal
+    /// probes on a lossy link (common with P2P remote-desktop tools) can pile
+    /// up flows faster than they idle out and push the Network Extension past
+    /// its hard memory limit, getting it jetsam-killed. When the table is full,
+    /// the least-recently-active flow is evicted to admit a new one (see
+    /// ``TunnelStack/evictUDPFlowsToAdmit(_:)``). 256 sits far above any
+    /// legitimate app's working set while bounding the data plane's footprint.
+    static let udpMaxFlows = 256
+    /// Maximum concurrent UDP flows to any single destination *host* (`dstIP`).
+    ///
+    /// Time-based global eviction alone is scan-vulnerable: a client that
+    /// sprays hundreds of flows at one target (P2P remote-desktop NAT traversal
+    /// on a lossy link is the usual culprit) fills the table with flows that
+    /// all carry a *recent* `lastActivity`, so the global LRU would evict
+    /// *innocent* flows to other destinations first. Bounding the slots any one
+    /// destination may hold makes the noisy target evict its own oldest flow
+    /// instead, so a single heavy hitter can neither monopolize the table nor
+    /// crowd out unrelated traffic. Keyed by host (not `ip:port`) so it also
+    /// contains a port-spray across one peer. 32 is generous for legitimate
+    /// multi-stream use (a remote-desktop session rarely needs more than a
+    /// handful of flows to one peer) while firmly capping a storm.
+    static let udpMaxFlowsPerTarget = 32
 
     // MARK: - Log Buffer
 

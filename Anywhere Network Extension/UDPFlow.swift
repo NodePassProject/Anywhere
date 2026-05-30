@@ -500,7 +500,11 @@ class UDPFlow {
         guard directSocket == nil && !closed else { return }
         proxyConnecting = true  // reuse flag to prevent re-entry
 
-        let socket = RawUDPSocket()
+        // Direct bypass is one socket per peer 5-tuple; size its kernel buffers
+        // modestly so a NAT-traversal storm of these can't blow the extension's
+        // memory cap. The 4 MB default is reserved for the proxy-relay
+        // transports. See ``SocketHelpers/directDatagramSocketBufferSize``.
+        let socket = RawUDPSocket(socketBufferSize: SocketHelpers.directDatagramSocketBufferSize)
         self.directSocket = socket
         socket.connect(host: dstHost, port: dstPort, completionQueue: flowQueue) { [weak self] error in
             guard let self else { return }

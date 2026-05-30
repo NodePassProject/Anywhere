@@ -242,6 +242,12 @@ extension TunnelStack {
             for key in keysToRemove {
                 self.udpFlows.removeValue(forKey: key)
             }
+            // Re-arm the flow-cap warning once the table has drained back below
+            // the ceiling, so a later storm logs its own rising edge instead of
+            // staying silent behind the first one's latch.
+            if self.udpFlowCapWarned && self.udpFlows.count < TunnelConstants.udpMaxFlows {
+                self.udpFlowCapWarned = false
+            }
         }
         timer.resume()
         udpCleanupTimer = timer
