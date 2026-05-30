@@ -44,6 +44,11 @@ nonisolated class ProxyClient {
     private var realityConnection: TLSRecordConnection?
     var tlsClient: TLSClient?
     var tlsConnection: TLSRecordConnection?
+
+    /// Transports/clients dialed for an XHTTP up/download-detached session
+    /// (both legs). Retained here for the connection's lifetime; released when
+    /// the ``ProxyClient`` is torn down.
+    private var retainedDetachObjects: [AnyObject] = []
     private var webSocketConnection: WebSocketConnection?
     private var httpUpgradeConnection: HTTPUpgradeConnection?
     private var grpcConnection: GRPCConnection?
@@ -402,6 +407,9 @@ nonisolated class ProxyClient {
         grpcConnection = nil
         xhttpConnection?.cancel()
         xhttpConnection = nil
+        // The detached legs' sockets are torn down via xhttpConnection.cancel()
+        // above; drop the extra client references kept alive during the session.
+        retainedDetachObjects.removeAll()
         realityConnection?.cancel()
         realityConnection = nil
         realityClient?.cancel()
@@ -1126,12 +1134,13 @@ nonisolated class ProxyClient {
     /// - TLS with a single `http/1.1` ALPN stays on HTTP/1.1.
     /// - TLS with a single `h3` ALPN expects QUIC/HTTP/3.
     /// - Everything else uses HTTP/2.
-    private func decideXHTTPHTTPVersion() -> XHTTPHTTPVersion {
-        if case .reality = configuration.securityLayer {
+    private func decideXHTTPHTTPVersion(for securityLayer: SecurityLayer? = nil) -> XHTTPHTTPVersion {
+        let security = securityLayer ?? configuration.securityLayer
+        if case .reality = security {
             return .http2
         }
 
-        guard case .tls(let tlsConfig) = configuration.securityLayer else {
+        guard case .tls(let tlsConfig) = security else {
             return .http11
         }
 
@@ -1212,7 +1221,7 @@ nonisolated class ProxyClient {
         let httpVersion = decideXHTTPHTTPVersion()
 
         // Resolve mode: auto → actual mode
-        let resolvedMode: XHTTPMode
+        var resolvedMode: XHTTPMode
         if xhttpConfig.mode == .auto {
             if case .reality = configuration.securityLayer {
                 resolvedMode = .streamOne
@@ -1221,6 +1230,29 @@ nonisolated class ProxyClient {
             }
         } else {
             resolvedMode = xhttpConfig.mode
+        }
+
+        // Up/download detach: when `downloadSettings` is set, the GET (download)
+        // stream is dialed to a separate server while the POST (upload) stays on
+        // this node, the two correlated by a shared session ID. stream-one is a
+        // single bidirectional stream and can't carry a split, so promote it to
+        // stream-up. Only HTTP/1.1 and HTTP/2 legs over a direct (unchained) dial
+        // are supported; anything else falls through to a normal single-server
+        // connection.
+        if let downloadSettings = xhttpConfig.downloadSettings {
+            if resolvedMode == .streamOne { resolvedMode = .streamUp }
+            let downloadHTTPVersion = decideXHTTPHTTPVersion(for: downloadSettings.securityLayer)
+            let isChained = (self.tunnel != nil) || !(configuration.chain?.isEmpty ?? true)
+            if httpVersion != .http3, downloadHTTPVersion != .http3, !isChained {
+                connectXHTTPDetached(
+                    xhttpConfig: xhttpConfig, downloadSettings: downloadSettings,
+                    mode: resolvedMode, sessionId: UUID().uuidString.lowercased(),
+                    mainHTTPVersion: httpVersion, downloadHTTPVersion: downloadHTTPVersion,
+                    command: command, destinationHost: destinationHost, destinationPort: destinationPort,
+                    initialData: initialData, completion: completion
+                )
+                return
+            }
         }
 
         let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? UUID().uuidString.lowercased() : ""
@@ -1590,6 +1622,119 @@ nonisolated class ProxyClient {
                 destinationPort: destinationPort, initialData: initialData,
                 supportsVision: transportSupportsVision, completion: completion
             )
+        }
+    }
+
+    // MARK: XHTTP up/download detach
+
+    /// Connects an XHTTP session whose download (GET) and upload (POST) legs use
+    /// different servers/transports, joined by a shared session ID. The download
+    /// leg is the coordinator the VLESS layer rides on — its `receive` is the
+    /// downlink — and it owns the upload leg, whose `send` is the uplink. Both
+    /// legs are HTTP/1.1 or HTTP/2 over direct dials; the caller guarantees
+    /// neither is HTTP/3 and the node is not chained/tunneled.
+    private func connectXHTTPDetached(
+        xhttpConfig: XHTTPConfiguration,
+        downloadSettings: XHTTPDownloadSettings,
+        mode: XHTTPMode,
+        sessionId: String,
+        mainHTTPVersion: XHTTPHTTPVersion,
+        downloadHTTPVersion: XHTTPHTTPVersion,
+        command: ProxyCommand,
+        destinationHost: String,
+        destinationPort: UInt16,
+        initialData: Data?,
+        completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) {
+        // 1. Dial the upload (main) leg to this node's own server.
+        dialDirectXHTTPByteTransport(
+            host: directDialHost, port: configuration.serverPort,
+            security: configuration.securityLayer, httpVersion: mainHTTPVersion
+        ) { [weak self] uploadResult in
+            guard let self else {
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                return
+            }
+            switch uploadResult {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let uploadTransport):
+                // 2. Dial the download leg to the downloadSettings server.
+                self.dialDirectXHTTPByteTransport(
+                    host: downloadSettings.serverAddress, port: downloadSettings.serverPort,
+                    security: downloadSettings.securityLayer, httpVersion: downloadHTTPVersion
+                ) { [weak self] downloadResult in
+                    guard let self else {
+                        completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                        return
+                    }
+                    switch downloadResult {
+                    case .failure(let error):
+                        completion(.failure(error))
+                    case .success(let downloadTransport):
+                        // 3. Build the two legs sharing one session ID. The upload
+                        //    leg drives POSTs on the main server; the download leg
+                        //    drives the GET on the downloadSettings server.
+                        let uploadLeg = XHTTPConnection(
+                            download: uploadTransport, configuration: xhttpConfig,
+                            mode: mode, sessionId: sessionId, useHTTP2: mainHTTPVersion == .http2
+                        )
+                        uploadLeg.role = .uploadOnly
+
+                        let downloadLeg = XHTTPConnection(
+                            download: downloadTransport, configuration: downloadSettings.xhttp,
+                            mode: mode, sessionId: sessionId, useHTTP2: downloadHTTPVersion == .http2
+                        )
+                        downloadLeg.role = .downloadOnly
+                        downloadLeg.uploadChannel = uploadLeg
+
+                        self.xhttpConnection = downloadLeg
+                        self.performXHTTPSetup(
+                            xhttpConnection: downloadLeg, command: command,
+                            destinationHost: destinationHost, destinationPort: destinationPort,
+                            initialData: initialData, completion: completion
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Dials a direct byte transport (TCP, optionally wrapped in TLS or Reality)
+    /// for one leg of a detached XHTTP session, returning the closure triple the
+    /// ``XHTTPConnection`` rides on. The socket/client is retained for the
+    /// connection's lifetime via ``retainedDetachObjects``.
+    private func dialDirectXHTTPByteTransport(
+        host: String, port: UInt16,
+        security: SecurityLayer, httpVersion: XHTTPHTTPVersion,
+        completion: @escaping (Result<TransportClosures, Error>) -> Void
+    ) {
+        switch security {
+        case .none:
+            let socket = RawTCPSocket()
+            retainedDetachObjects.append(socket)
+            socket.connect(host: host, port: port) { error in
+                if let error { completion(.failure(error)); return }
+                completion(.success(TransportClosures(rawTCP: socket)))
+            }
+        case .tls(let tlsConfig):
+            let client = TLSClient(configuration: sanitizedXHTTPTLSConfiguration(from: tlsConfig, httpVersion: httpVersion))
+            retainedDetachObjects.append(client)
+            client.connect(host: host, port: port) { result in
+                switch result {
+                case .success(let conn): completion(.success(TransportClosures(tls: conn)))
+                case .failure(let error): completion(.failure(error))
+                }
+            }
+        case .reality(let realityConfig):
+            let client = RealityClient(configuration: realityConfig)
+            retainedDetachObjects.append(client)
+            client.connect(host: host, port: port) { result in
+                switch result {
+                case .success(let conn): completion(.success(TransportClosures(tls: conn)))
+                case .failure(let error): completion(.failure(error))
+                }
+            }
         }
     }
 

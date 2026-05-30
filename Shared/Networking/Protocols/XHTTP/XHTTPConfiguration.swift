@@ -103,6 +103,19 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
     /// Chunk size for data in headers/cookies (default 0 = no chunking).
     let uplinkChunkSize: Int
 
+    /// Separate download source for XHTTP up/download detach. When set, the GET
+    /// (download) stream is dialed to a different server with its own
+    /// security/transport while the POST (upload) stays on this node, the two
+    /// correlated by a shared session ID.
+    ///
+    /// Boxed in a reference type to break the value-type recursion this would
+    /// otherwise create (``XHTTPConfiguration`` → settings → download-side
+    /// `xhttp:` ``XHTTPConfiguration``). Access via ``downloadSettings``.
+    private let _downloadSettings: XHTTPDownloadSettingsBox?
+
+    /// Separate download source, or `nil` when up/download are not detached.
+    var downloadSettings: XHTTPDownloadSettings? { _downloadSettings?.value }
+
     init(
         host: String,
         path: String = "/",
@@ -125,7 +138,8 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         seqKey: String = "",
         uplinkDataPlacement: XHTTPPlacement = .body,
         uplinkDataKey: String = "",
-        uplinkChunkSize: Int = 0
+        uplinkChunkSize: Int = 0,
+        downloadSettings: XHTTPDownloadSettings? = nil
     ) {
         self.host = host
         self.path = path
@@ -149,6 +163,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         self.uplinkDataPlacement = uplinkDataPlacement
         self.uplinkDataKey = uplinkDataKey
         self.uplinkChunkSize = uplinkChunkSize
+        self._downloadSettings = downloadSettings.map(XHTTPDownloadSettingsBox.init)
     }
 
     init(from decoder: Decoder) throws {
@@ -175,6 +190,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         uplinkDataPlacement = try c.decodeIfPresent(XHTTPPlacement.self, forKey: .uplinkDataPlacement) ?? .body
         uplinkDataKey = try c.decodeIfPresent(String.self, forKey: .uplinkDataKey) ?? ""
         uplinkChunkSize = try c.decodeIfPresent(Int.self, forKey: .uplinkChunkSize) ?? 0
+        _downloadSettings = try c.decodeIfPresent(XHTTPDownloadSettingsBox.self, forKey: ._downloadSettings)
     }
 
     /// Normalized path: ensure leading "/" and trailing "/".
@@ -271,6 +287,99 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             extra = json
         }
 
+        let downloadSettings = parseDownloadSettings(from: extra["downloadSettings"] as? [String: Any])
+        return build(host: host, path: path, mode: mode, extra: extra, downloadSettings: downloadSettings)
+    }
+
+    /// Builds an ``XHTTPConfiguration`` from an `xhttpSettings` /
+    /// `splithttpSettings` JSON object (the download leg's transport block),
+    /// where the advanced fields live at the top level rather than under a
+    /// nested `extra`. Never produces its own nested detach.
+    static func parse(fromJSON json: [String: Any], serverAddress: String, tlsServerName: String? = nil, realityServerName: String? = nil) -> XHTTPConfiguration {
+        let host = (json["host"] as? String) ?? tlsServerName ?? realityServerName ?? serverAddress
+        let path = (json["path"] as? String) ?? "/"
+        let mode = XHTTPMode(rawValue: (json["mode"] as? String) ?? "auto") ?? .auto
+        return build(host: host, path: path, mode: mode, extra: json, downloadSettings: nil)
+    }
+
+    /// Parses the `downloadSettings` object from the `extra` blob into a separate
+    /// download source. Returns `nil` when absent or unusable (missing
+    /// address/port, or an invalid Reality key), so the node falls back to a
+    /// normal single-server connection. Field names match the share-link JSON.
+    static func parseDownloadSettings(from json: [String: Any]?) -> XHTTPDownloadSettings? {
+        guard let json else { return nil }
+        guard let address = ((json["address"] as? String) ?? (json["server"] as? String)), !address.isEmpty else {
+            return nil
+        }
+        let port: UInt16
+        if let p = json["port"] as? Int, p > 0, p <= 65535 {
+            port = UInt16(p)
+        } else if let ps = json["port"] as? String, let p = UInt16(ps) {
+            port = p
+        } else {
+            return nil
+        }
+
+        // The wire format treats "" (or an absent key) and "none" the same.
+        let securityRaw = (json["security"] as? String ?? "none").lowercased()
+        let security = securityRaw.isEmpty ? "none" : securityRaw
+
+        var tls: TLSConfiguration? = nil
+        var reality: RealityConfiguration? = nil
+        switch security {
+        case "tls":
+            tls = mapDownloadTLS(json["tlsSettings"] as? [String: Any], serverAddress: address)
+        case "reality":
+            guard let r = mapDownloadReality(json["realitySettings"] as? [String: Any], serverAddress: address) else {
+                // Reality requested but the public key is missing/invalid — drop the
+                // detach entirely so the node still connects on its main server.
+                return nil
+            }
+            reality = r
+        default:
+            break
+        }
+
+        let xhttpJSON = (json["xhttpSettings"] as? [String: Any])
+            ?? (json["splithttpSettings"] as? [String: Any])
+            ?? [:]
+        let xhttp = parse(fromJSON: xhttpJSON, serverAddress: address,
+                          tlsServerName: tls?.serverName, realityServerName: reality?.serverName)
+
+        return XHTTPDownloadSettings(serverAddress: address, serverPort: port,
+                                     security: security, tls: tls, reality: reality, xhttp: xhttp)
+    }
+
+    /// Maps a `tlsSettings` JSON object to a ``TLSConfiguration``.
+    private static func mapDownloadTLS(_ json: [String: Any]?, serverAddress: String) -> TLSConfiguration {
+        let serverName = (json?["serverName"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? serverAddress
+        var alpn: [String]? = nil
+        if let arr = json?["alpn"] as? [String], !arr.isEmpty {
+            alpn = arr
+        } else if let s = json?["alpn"] as? String, !s.isEmpty {
+            alpn = s.split(separator: ",").map(String.init)
+        }
+        let fp = (json?["fingerprint"] as? String).flatMap { TLSFingerprint(rawValue: $0) } ?? .chrome133
+        return TLSConfiguration(serverName: serverName, alpn: alpn, fingerprint: fp)
+    }
+
+    /// Maps a `realitySettings` JSON object to a ``RealityConfiguration``.
+    /// Returns `nil` when the public key is missing or not a valid 32-byte key
+    /// (base64url or standard base64).
+    private static func mapDownloadReality(_ json: [String: Any]?, serverAddress: String) -> RealityConfiguration? {
+        guard let json, let pbkString = json["publicKey"] as? String, !pbkString.isEmpty else { return nil }
+        guard let publicKey = (Data(base64URLEncoded: pbkString) ?? Data(base64Encoded: pbkString)),
+              publicKey.count == 32 else { return nil }
+        let serverName = (json["serverName"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? serverAddress
+        let shortId = Data(hexString: (json["shortId"] as? String) ?? "") ?? Data()
+        let fp = (json["fingerprint"] as? String).flatMap { TLSFingerprint(rawValue: $0) } ?? .chrome133
+        return RealityConfiguration(serverName: serverName, publicKey: publicKey, shortId: shortId, fingerprint: fp)
+    }
+
+    /// Core builder shared by URL-param parsing and download-leg JSON parsing.
+    /// Reads the advanced fields from `extra` — either the share-link `extra`
+    /// blob, or an `xhttpSettings` object whose advanced fields are top-level.
+    private static func build(host: String, path: String, mode: XHTTPMode, extra: [String: Any], downloadSettings: XHTTPDownloadSettings?) -> XHTTPConfiguration {
         // Headers from extra
         var headers: [String: String] = [:]
         if let extraHeaders = extra["headers"] as? [String: String] {
@@ -362,8 +471,78 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             seqKey: seqKey,
             uplinkDataPlacement: uplinkDataPlacement,
             uplinkDataKey: uplinkDataKey,
-            uplinkChunkSize: uplinkChunkSize
+            uplinkChunkSize: uplinkChunkSize,
+            downloadSettings: downloadSettings
         )
+    }
+}
+
+// MARK: - XHTTP Download Settings (up/download detach)
+
+/// A separate download source for XHTTP: the GET (download) stream is dialed to
+/// this server with these settings while the POST (upload) stream stays on the
+/// main node, the two correlated by a shared session ID. Holds the subset of a
+/// stream's settings that `downloadSettings` carries in a VLESS share link.
+struct XHTTPDownloadSettings: Codable, Equatable, Hashable {
+    /// Download server address.
+    let serverAddress: String
+    /// Download server port.
+    let serverPort: UInt16
+    /// Security tag for the download leg: `"none"`, `"tls"`, or `"reality"`.
+    let security: String
+    /// TLS settings when `security == "tls"`.
+    let tls: TLSConfiguration?
+    /// Reality settings when `security == "reality"`.
+    let reality: RealityConfiguration?
+    /// Download-side XHTTP request config (its own host/path/headers/padding).
+    /// Never carries its own nested `downloadSettings`.
+    let xhttp: XHTTPConfiguration
+
+    init(serverAddress: String, serverPort: UInt16, security: String,
+         tls: TLSConfiguration? = nil, reality: RealityConfiguration? = nil,
+         xhttp: XHTTPConfiguration) {
+        self.serverAddress = serverAddress
+        self.serverPort = serverPort
+        self.security = security
+        self.tls = tls
+        self.reality = reality
+        self.xhttp = xhttp
+    }
+
+    /// The download leg's security layer reconstructed from the flattened fields.
+    var securityLayer: SecurityLayer {
+        switch security {
+        case "tls":     return tls.map(SecurityLayer.tls) ?? .none
+        case "reality": return reality.map(SecurityLayer.reality) ?? .none
+        default:        return .none
+        }
+    }
+}
+
+/// Reference box that lets ``XHTTPConfiguration`` (a value type) hold a
+/// ``XHTTPDownloadSettings`` whose `xhttp` is itself an ``XHTTPConfiguration``,
+/// without becoming infinitely sized. Immutable, so value semantics are
+/// preserved; `Codable`/`Equatable`/`Hashable` delegate transparently to the
+/// wrapped value so the box never appears in JSON or affects equality.
+final class XHTTPDownloadSettingsBox: Codable, Equatable, Hashable {
+    let value: XHTTPDownloadSettings
+
+    init(_ value: XHTTPDownloadSettings) { self.value = value }
+
+    init(from decoder: Decoder) throws {
+        value = try XHTTPDownloadSettings(from: decoder)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        try value.encode(to: encoder)
+    }
+
+    static func == (lhs: XHTTPDownloadSettingsBox, rhs: XHTTPDownloadSettingsBox) -> Bool {
+        lhs.value == rhs.value
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(value)
     }
 }
 
