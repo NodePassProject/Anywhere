@@ -45,10 +45,11 @@ nonisolated class ProxyClient {
     var tlsClient: TLSClient?
     var tlsConnection: TLSRecordConnection?
 
-    /// Transports/clients dialed for an XHTTP up/download-detached session
-    /// (both legs). Retained here for the connection's lifetime; released when
-    /// the ``ProxyClient`` is torn down.
-    private var retainedDetachObjects: [AnyObject] = []
+    /// Sockets/TLS/Reality clients dialed for an XHTTP connection — the single
+    /// combined leg, or both legs of an up/download-detached session. Retained
+    /// here for the connection's lifetime; released when the ``ProxyClient`` is
+    /// torn down (the sockets themselves are closed via ``XHTTPConnection/cancel()``).
+    private var retainedXHTTPObjects: [AnyObject] = []
     private var webSocketConnection: WebSocketConnection?
     private var httpUpgradeConnection: HTTPUpgradeConnection?
     private var grpcConnection: GRPCConnection?
@@ -163,7 +164,8 @@ nonisolated class ProxyClient {
         // transport, so they build (or adopt) the chain inside their own
         // protocol-specific dispatch rather than the generic TCP chain below.
         // Hysteria/Nowhere are QUIC end to end; VLESS-over-XHTTP negotiates QUIC
-        // only when it selects HTTP/3 (ALPN h3) — see `connectXHTTP3`.
+        // only when it selects HTTP/3 (ALPN h3), which the XHTTP leg factory
+        // dispatches to `dialXHTTPHTTP3Session`.
         if configuration.outboundProtocol == .hysteria
             || configuration.outboundProtocol == .nowhere
             || configuration.isXHTTPOverHTTP3 {
@@ -407,9 +409,9 @@ nonisolated class ProxyClient {
         grpcConnection = nil
         xhttpConnection?.cancel()
         xhttpConnection = nil
-        // The detached legs' sockets are torn down via xhttpConnection.cancel()
+        // The XHTTP leg(s)' sockets are torn down via xhttpConnection.cancel()
         // above; drop the extra client references kept alive during the session.
-        retainedDetachObjects.removeAll()
+        retainedXHTTPObjects.removeAll()
         realityConnection?.cancel()
         realityConnection = nil
         realityClient?.cancel()
@@ -1216,8 +1218,9 @@ nonisolated class ProxyClient {
             return
         }
 
-        // ALPN "h3" routes XHTTP over HTTP/3-over-QUIC (see connectXHTTP3); every
-        // other ALPN uses HTTP/1.1 or HTTP/2 over TCP+TLS.
+        // ALPN "h3" routes XHTTP over HTTP/3-over-QUIC; every other ALPN uses
+        // HTTP/1.1 or HTTP/2 over TCP+TLS. Each leg's transport is dialed by the
+        // shared XHTTP leg factory (see `dialXHTTPTransport`).
         let httpVersion = decideXHTTPHTTPVersion()
 
         // Resolve mode: auto → actual mode
@@ -1236,130 +1239,41 @@ nonisolated class ProxyClient {
         // stream is dialed to a separate server while the POST (upload) stays on
         // this node, the two correlated by a shared session ID. stream-one is a
         // single bidirectional stream and can't carry a split, so promote it to
-        // stream-up. Only HTTP/1.1 and HTTP/2 legs over a direct (unchained) dial
-        // are supported; anything else falls through to a normal single-server
-        // connection.
+        // stream-up. Each leg independently picks its HTTP version (1.1/2/3) and
+        // may be direct or chained — the shared leg factory handles every
+        // combination.
         if let downloadSettings = xhttpConfig.downloadSettings {
             if resolvedMode == .streamOne { resolvedMode = .streamUp }
             let downloadHTTPVersion = decideXHTTPHTTPVersion(for: downloadSettings.securityLayer)
-            let isChained = (self.tunnel != nil) || !(configuration.chain?.isEmpty ?? true)
-            if httpVersion != .http3, downloadHTTPVersion != .http3, !isChained {
-                connectXHTTPDetached(
-                    xhttpConfig: xhttpConfig, downloadSettings: downloadSettings,
-                    mode: resolvedMode, sessionId: UUID().uuidString.lowercased(),
-                    mainHTTPVersion: httpVersion, downloadHTTPVersion: downloadHTTPVersion,
-                    command: command, destinationHost: destinationHost, destinationPort: destinationPort,
-                    initialData: initialData, completion: completion
-                )
-                return
-            }
-        }
-
-        let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? UUID().uuidString.lowercased() : ""
-
-        if case .reality(let realityConfig) = configuration.securityLayer {
-            connectXHTTPReality(realityConfig: realityConfig, xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        } else if case .tls(let tlsConfig) = configuration.securityLayer {
-            if httpVersion == .http3 {
-                // ALPN "h3" selects an HTTP/3 transport, which runs over QUIC (UDP).
-                connectXHTTP3(tlsConfig: tlsConfig, xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-            } else {
-                connectXHTTPS(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, httpVersion: httpVersion, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-            }
-        } else {
-            connectXHTTPPlain(xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
-        }
-    }
-
-    // MARK: Plain XHTTP (TCP → XHTTP → VLESS)
-
-    private func connectXHTTPPlain(
-        xhttpConfig: XHTTPConfiguration,
-        mode: XHTTPMode,
-        sessionId: String,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let setupXHTTP: (any RawTransport) -> Void = { [weak self] transport in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-
-            // Upload connection factory for packet-up and stream-up modes
-            let needsUpload = mode == .packetUp || mode == .streamUp
-            let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = needsUpload ? { [weak self] factoryCompletion in
-                guard let self else {
-                    factoryCompletion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                    return
-                }
-                self.createUploadTransport(factoryCompletion)
-            } : nil
-
-            let xhttpConnection: XHTTPConnection
-            if let tunnel = self.tunnel {
-                xhttpConnection = XHTTPConnection(tunnel: tunnel, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
-            } else {
-                guard let socket = transport as? RawTCPSocket else {
-                    completion(.failure(ProxyError.connectionFailed("Expected RawTCPSocket for plain XHTTP")))
-                    return
-                }
-                xhttpConnection = XHTTPConnection(transport: socket, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
-            }
-            self.xhttpConnection = xhttpConnection
-            self.performXHTTPSetup(
-                xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
+            connectXHTTPDetached(
+                xhttpConfig: xhttpConfig, downloadSettings: downloadSettings,
+                mode: resolvedMode, sessionId: UUID().uuidString.lowercased(),
+                mainHTTPVersion: httpVersion, downloadHTTPVersion: downloadHTTPVersion,
+                command: command, destinationHost: destinationHost, destinationPort: destinationPort,
+                initialData: initialData, completion: completion
             )
+            return
         }
 
-        if let tunnel = self.tunnel {
-            setupXHTTP(TunneledTransport(tunnel: tunnel))
-        } else {
-            let transport = RawTCPSocket()
-            self.connection = transport
-            transport.connect(host: directDialHost, port: configuration.serverPort) { error in
-                if let error {
-                    completion(.failure(error))
-                    return
-                }
-                setupXHTTP(transport)
-            }
-        }
+        // Normal single-server connection. The transport (plain/TLS/Reality/HTTP3)
+        // and route (direct/tunnel/chain) are resolved by the leg factory.
+        let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? UUID().uuidString.lowercased() : ""
+        connectXHTTPCombined(
+            xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, httpVersion: httpVersion,
+            command: command, destinationHost: destinationHost, destinationPort: destinationPort,
+            initialData: initialData, completion: completion
+        )
     }
 
-    /// Creates transport closures for an XHTTP upload connection.
-    /// For chained connections, builds a new chain tunnel for the upload.
-    private func createUploadTransport(_ factoryCompletion: @escaping (Result<TransportClosures, Error>) -> Void) {
-        if let chain = configuration.chain, !chain.isEmpty {
-            // XHTTP requires a TCP stream end-to-end.
-            let hopCommands = [ProxyCommand](repeating: .tcp, count: chain.count)
-            buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { result in
-                switch result {
-                case .success(let uploadTunnel):
-                    factoryCompletion(.success(TransportClosures(tunnel: uploadTunnel)))
-                case .failure(let error):
-                    factoryCompletion(.failure(error))
-                }
-            }
-        } else {
-            let uploadTransport = RawTCPSocket()
-            uploadTransport.connect(host: directDialHost, port: configuration.serverPort) { error in
-                if let error {
-                    factoryCompletion(.failure(error))
-                    return
-                }
-                factoryCompletion(.success(TransportClosures(rawTCP: uploadTransport)))
-            }
-        }
-    }
+    // MARK: Combined XHTTP (single server)
 
-    // MARK: XHTTPS (TCP → TLS → XHTTP → VLESS)
-
-    private func connectXHTTPS(
+    /// Connects a normal (non-detached) XHTTP session to this node's own server.
+    /// The transport — plain TCP, TLS, Reality, or HTTP/3-over-QUIC — and the
+    /// route (direct, over an inbound tunnel, or through a freshly built chain)
+    /// are resolved by the shared leg factory. HTTP/1.1 can't multiplex, so
+    /// packet-up / stream-up dial a second connection for the upload POST via the
+    /// upload factory; HTTP/2 and HTTP/3 carry both directions over one transport.
+    private func connectXHTTPCombined(
         xhttpConfig: XHTTPConfiguration,
         mode: XHTTPMode,
         sessionId: String,
@@ -1370,232 +1284,30 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .tls(let baseTLSConfig) = configuration.securityLayer else {
-            completion(.failure(ProxyError.connectionFailed("XHTTPS requires TLS configuration")))
-            return
-        }
-
-        // Keep the original fingerprint/SNI, but do not advertise h3 on the TCP path.
-        let tlsConfiguration = sanitizedXHTTPTLSConfiguration(from: baseTLSConfig, httpVersion: httpVersion)
-        let tlsClient = TLSClient(configuration: tlsConfiguration)
-        self.tlsClient = tlsClient
-
-        let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
+        let route = consumeMainXHTTPRoute()
+        let needsUploadFactory = httpVersion == .http11 && (mode == .packetUp || mode == .streamUp)
+        let uploadFactory = needsUploadFactory
+            ? makeXHTTPUploadFactory(security: configuration.securityLayer, httpVersion: httpVersion)
+            : nil
+        dialXHTTPLeg(
+            endpoint: mainXHTTPEndpoint(), httpVersion: httpVersion, route: route,
+            xhttp: xhttpConfig, mode: mode, sessionId: sessionId, role: .combined, uploadFactory: uploadFactory
+        ) { [weak self] result in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
                 return
             }
             switch result {
-            case .success(let tlsConnection):
-                self.tlsConnection = tlsConnection
-
-                if httpVersion == .http2 {
-                    // HTTP/2 uses a single TLS connection with H2 framing for all XHTTP modes.
-                    let xhttpConnection = XHTTPConnection(
-                        tlsConnection: tlsConnection,
-                        configuration: xhttpConfig,
-                        mode: mode,
-                        sessionId: sessionId,
-                        useHTTP2: true
-                    )
-                    self.xhttpConnection = xhttpConnection
-                    self.performXHTTPSetup(
-                        xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
-                        destinationPort: destinationPort, initialData: initialData, completion: completion
-                    )
-                } else {
-                    // HTTP/1.1: separate upload connection for packet-up and stream-up
-                    let needsUpload = mode == .packetUp || mode == .streamUp
-                    let uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = needsUpload ? { [weak self] factoryCompletion in
-                        guard let self else {
-                            factoryCompletion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                            return
-                        }
-                        let uploadTLSClient = TLSClient(configuration: tlsConfiguration)
-                        if let chain = self.configuration.chain, !chain.isEmpty {
-                            let hopCommands = [ProxyCommand](repeating: .tcp, count: chain.count)
-                            self.buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { tunnelResult in
-                                switch tunnelResult {
-                                case .success(let uploadTunnel):
-                                    uploadTLSClient.connect(overTunnel: uploadTunnel) { result in
-                                        switch result {
-                                        case .success(let uploadTLSConnection):
-                                            factoryCompletion(.success(TransportClosures(tls: uploadTLSConnection)))
-                                        case .failure(let error):
-                                            factoryCompletion(.failure(error))
-                                        }
-                                    }
-                                case .failure(let error):
-                                    factoryCompletion(.failure(error))
-                                }
-                            }
-                        } else {
-                            uploadTLSClient.connect(host: self.directDialHost, port: self.configuration.serverPort) { result in
-                                switch result {
-                                case .success(let uploadTLSConnection):
-                                    factoryCompletion(.success(TransportClosures(tls: uploadTLSConnection)))
-                                case .failure(let error):
-                                    factoryCompletion(.failure(error))
-                                }
-                            }
-                        }
-                    } : nil
-
-                    let xhttpConnection = XHTTPConnection(tlsConnection: tlsConnection, configuration: xhttpConfig, mode: mode, sessionId: sessionId, uploadConnectionFactory: uploadFactory)
-                    self.xhttpConnection = xhttpConnection
-                    self.performXHTTPSetup(
-                        xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
-                        destinationPort: destinationPort, initialData: initialData, completion: completion
-                    )
-                }
-
             case .failure(let error):
                 completion(.failure(error))
-            }
-        }
-
-        if let tunnel = self.tunnel {
-            tlsClient.connect(overTunnel: tunnel, completion: handleTLSResult)
-        } else {
-            tlsClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleTLSResult)
-        }
-    }
-
-    // MARK: XHTTP Reality (TCP → Reality TLS → HTTP/2 → XHTTP → VLESS)
-
-    private func connectXHTTPReality(
-        realityConfig: RealityConfiguration,
-        xhttpConfig: XHTTPConfiguration,
-        mode: XHTTPMode,
-        sessionId: String,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        let realityClient = RealityClient(configuration: realityConfig)
-        self.realityClient = realityClient
-
-        let handleRealityResult: (Result<TLSRecordConnection, Error>) -> Void = { [weak self] result in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            switch result {
-            case .success(let realityConnection):
-                self.realityConnection = realityConnection
-
-                // Reality + XHTTP uses HTTP/2 (Xray-core dialer.go:80-82)
-                let xhttpConnection = XHTTPConnection(
-                    tlsConnection: realityConnection,
-                    configuration: xhttpConfig,
-                    mode: mode,
-                    sessionId: sessionId,
-                    useHTTP2: true
-                )
+            case .success(let xhttpConnection):
                 self.xhttpConnection = xhttpConnection
                 self.performXHTTPSetup(
                     xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData, completion: completion
                 )
-
-            case .failure(let error):
-                completion(.failure(error))
             }
         }
-
-        if let tunnel {
-            realityClient.connect(overTunnel: tunnel, completion: handleRealityResult)
-        } else {
-            realityClient.connect(host: directDialHost, port: configuration.serverPort, completion: handleRealityResult)
-        }
-    }
-
-    // MARK: XHTTP/3 (QUIC → HTTP/3 → XHTTP → VLESS)
-
-    /// Connects XHTTP over HTTP/3-over-QUIC, used when the TLS ALPN is exactly
-    /// `h3`: that ALPN selects an HTTP/3 transport, which runs over QUIC (UDP)
-    /// rather than TLS-over-TCP. The TLS 1.3 handshake is performed natively by
-    /// the QUIC stack (``QUICTLSHandler``), so no ``TLSClient`` runs here; the
-    /// ALPN reaches the wire as the QUIC connection's `["h3"]`.
-    ///
-    /// Chaining mirrors Hysteria/Nowhere: QUIC rides a ``QUICDatagramTransport``
-    /// instead of a kernel socket. As a chain link (`tunnel` set) the inbound
-    /// UDP-relay tunnel *is* that transport; as the chain exit (`chain` set) we
-    /// build a chain whose last hop opens a `.udp` relay to this server and ride
-    /// the result. Direct dials pass `transport: nil` and open a real UDP
-    /// socket. Xray-core does the equivalent — its h3 dialer wraps a
-    /// `dialerProxy` connection in a `FakePacketConn` for QUIC to ride.
-    private func connectXHTTP3(
-        tlsConfig: TLSConfiguration,
-        xhttpConfig: XHTTPConfiguration,
-        mode: XHTTPMode,
-        sessionId: String,
-        command: ProxyCommand,
-        destinationHost: String,
-        destinationPort: UInt16,
-        initialData: Data?,
-        completion: @escaping (Result<ProxyConnection, Error>) -> Void
-    ) {
-        // Builds the XHTTP-over-h3 connection on a QUIC session riding
-        // `transport` (nil → direct kernel UDP socket).
-        let startSession: (QUICDatagramTransport?) -> Void = { [weak self] transport in
-            guard let self else {
-                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
-                return
-            }
-            // Direct dials may target the pre-resolved IP (latency testing);
-            // a chained/tunneled session rides the relay, so the host is just
-            // the server's logical identity (SNI is passed through explicitly).
-            let host = (transport == nil) ? self.directDialHost : self.configuration.serverAddress
-            let session = HTTP3Session(
-                host: host,
-                port: self.configuration.serverPort,
-                serverName: tlsConfig.serverName,
-                transport: transport
-            )
-            let xhttpConnection = XHTTPConnection(
-                h3Session: session, configuration: xhttpConfig, mode: mode, sessionId: sessionId
-            )
-            self.xhttpConnection = xhttpConnection
-            self.performXHTTPSetup(
-                xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
-                destinationPort: destinationPort, initialData: initialData, completion: completion
-            )
-        }
-
-        // Chain link: the inbound UDP-relay tunnel carries our QUIC datagrams.
-        if let tunnel = self.tunnel {
-            self.tunnel = nil
-            startSession(ProxyConnectionDatagramTransport(connection: tunnel))
-            return
-        }
-
-        // Chain exit: build a chain whose last hop opens a `.udp` relay to this
-        // server, then ride it. Hops are retained in `self.chainClients`.
-        if let chain = configuration.chain, !chain.isEmpty {
-            let hopCommands: [ProxyCommand]
-            switch Self.computeChainHopCommands(chain: chain, lastDeliver: .udp) {
-            case .success(let cmds):
-                hopCommands = cmds
-            case .failure(let error):
-                completion(.failure(error))
-                return
-            }
-            buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { result in
-                switch result {
-                case .success(let chainTunnel):
-                    startSession(ProxyConnectionDatagramTransport(connection: chainTunnel))
-                case .failure(let error):
-                    completion(.failure(error))
-                }
-            }
-            return
-        }
-
-        // Direct: open a real UDP socket inside the QUIC stack.
-        startSession(nil)
     }
 
     /// Performs XHTTP setup then sends the protocol handshake.
@@ -1630,9 +1342,11 @@ nonisolated class ProxyClient {
     /// Connects an XHTTP session whose download (GET) and upload (POST) legs use
     /// different servers/transports, joined by a shared session ID. The download
     /// leg is the coordinator the VLESS layer rides on — its `receive` is the
-    /// downlink — and it owns the upload leg, whose `send` is the uplink. Both
-    /// legs are HTTP/1.1 or HTTP/2 over direct dials; the caller guarantees
-    /// neither is HTTP/3 and the node is not chained/tunneled.
+    /// downlink — and it owns the upload leg, whose `send` is the uplink. Each leg
+    /// independently picks its HTTP version (1.1/2/3); the upload leg follows this
+    /// node's route (direct or chained), while the download leg always dials its
+    /// own server directly — a distinct download source is the whole point of the
+    /// split, so it is never routed back through this node's chain.
     private func connectXHTTPDetached(
         xhttpConfig: XHTTPConfiguration,
         downloadSettings: XHTTPDownloadSettings,
@@ -1646,10 +1360,11 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        // 1. Dial the upload (main) leg to this node's own server.
-        dialDirectXHTTPByteTransport(
-            host: directDialHost, port: configuration.serverPort,
-            security: configuration.securityLayer, httpVersion: mainHTTPVersion
+        let uploadRoute = consumeMainXHTTPRoute()
+        // 1. Upload (main) leg → this node's own server, over our route.
+        dialXHTTPLeg(
+            endpoint: mainXHTTPEndpoint(), httpVersion: mainHTTPVersion, route: uploadRoute,
+            xhttp: xhttpConfig, mode: mode, sessionId: sessionId, role: .uploadOnly, uploadFactory: nil
         ) { [weak self] uploadResult in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
@@ -1658,11 +1373,12 @@ nonisolated class ProxyClient {
             switch uploadResult {
             case .failure(let error):
                 completion(.failure(error))
-            case .success(let uploadTransport):
-                // 2. Dial the download leg to the downloadSettings server.
-                self.dialDirectXHTTPByteTransport(
-                    host: downloadSettings.serverAddress, port: downloadSettings.serverPort,
-                    security: downloadSettings.securityLayer, httpVersion: downloadHTTPVersion
+            case .success(let uploadLeg):
+                // 2. Download leg → the downloadSettings server, always direct.
+                self.dialXHTTPLeg(
+                    endpoint: self.downloadXHTTPEndpoint(downloadSettings), httpVersion: downloadHTTPVersion,
+                    route: .direct, xhttp: downloadSettings.xhttp, mode: mode, sessionId: sessionId,
+                    role: .downloadOnly, uploadFactory: nil
                 ) { [weak self] downloadResult in
                     guard let self else {
                         completion(.failure(ProxyError.connectionFailed("Client deallocated")))
@@ -1670,24 +1386,16 @@ nonisolated class ProxyClient {
                     }
                     switch downloadResult {
                     case .failure(let error):
+                        // The upload leg was dialed but never joined to
+                        // `xhttpConnection`, so a later `cancel()` can't reach it.
+                        // Tear it down here (closes its socket / H3 session) so an
+                        // unreachable download server can't leak the upload leg.
+                        uploadLeg.cancel()
                         completion(.failure(error))
-                    case .success(let downloadTransport):
-                        // 3. Build the two legs sharing one session ID. The upload
-                        //    leg drives POSTs on the main server; the download leg
-                        //    drives the GET on the downloadSettings server.
-                        let uploadLeg = XHTTPConnection(
-                            download: uploadTransport, configuration: xhttpConfig,
-                            mode: mode, sessionId: sessionId, useHTTP2: mainHTTPVersion == .http2
-                        )
-                        uploadLeg.role = .uploadOnly
-
-                        let downloadLeg = XHTTPConnection(
-                            download: downloadTransport, configuration: downloadSettings.xhttp,
-                            mode: mode, sessionId: sessionId, useHTTP2: downloadHTTPVersion == .http2
-                        )
-                        downloadLeg.role = .downloadOnly
+                    case .success(let downloadLeg):
+                        // 3. Join the legs: the download leg is the coordinator the
+                        //    VLESS layer rides on, and it owns the upload leg.
                         downloadLeg.uploadChannel = uploadLeg
-
                         self.xhttpConnection = downloadLeg
                         self.performXHTTPSetup(
                             xhttpConnection: downloadLeg, command: command,
@@ -1700,39 +1408,277 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Dials a direct byte transport (TCP, optionally wrapped in TLS or Reality)
-    /// for one leg of a detached XHTTP session, returning the closure triple the
-    /// ``XHTTPConnection`` rides on. The socket/client is retained for the
-    /// connection's lifetime via ``retainedDetachObjects``.
-    private func dialDirectXHTTPByteTransport(
-        host: String, port: UInt16,
-        security: SecurityLayer, httpVersion: XHTTPHTTPVersion,
-        completion: @escaping (Result<TransportClosures, Error>) -> Void
+    // MARK: XHTTP leg factory (shared by combined & detach)
+
+    /// Where one XHTTP leg's server lives and how the connection to it is secured.
+    private struct XHTTPEndpoint {
+        /// Host for a direct kernel dial — a pre-resolved IP when latency testing,
+        /// otherwise the server address.
+        let directHost: String
+        /// Logical server identity, used as the HTTP/3 host when chained.
+        let chainHost: String
+        /// SNI / HTTP/3 server name.
+        let serverName: String
+        let port: UInt16
+        let security: SecurityLayer
+    }
+
+    /// How an XHTTP leg reaches its server.
+    private enum XHTTPLegRoute {
+        /// Open a fresh kernel socket (TCP) or UDP socket (HTTP/3) to the server.
+        case direct
+        /// Ride an already-established proxy tunnel (this node is a chain link).
+        case overTunnel(ProxyConnection)
+        /// Build a chain to the server, then ride its last hop.
+        case buildChain([ProxyConfiguration])
+    }
+
+    /// The dialed transport for one XHTTP leg: a byte stream (HTTP/1.1 or HTTP/2)
+    /// or an HTTP/3 QUIC session.
+    private enum XHTTPDialedTransport {
+        case byteStream(TransportClosures)
+        case http3(HTTP3Session)
+    }
+
+    /// The endpoint for this node's own XHTTP server (the combined connection, or a
+    /// detached session's upload leg).
+    private func mainXHTTPEndpoint() -> XHTTPEndpoint {
+        XHTTPEndpoint(
+            directHost: directDialHost,
+            chainHost: configuration.serverAddress,
+            serverName: xhttpServerName(for: configuration.securityLayer, fallback: configuration.serverAddress),
+            port: configuration.serverPort,
+            security: configuration.securityLayer
+        )
+    }
+
+    /// The endpoint for a detached session's download server.
+    private func downloadXHTTPEndpoint(_ downloadSettings: XHTTPDownloadSettings) -> XHTTPEndpoint {
+        XHTTPEndpoint(
+            directHost: downloadSettings.serverAddress,
+            chainHost: downloadSettings.serverAddress,
+            serverName: xhttpServerName(for: downloadSettings.securityLayer, fallback: downloadSettings.serverAddress),
+            port: downloadSettings.serverPort,
+            security: downloadSettings.securityLayer
+        )
+    }
+
+    /// SNI / HTTP/3 server name carried by a security layer (the address itself
+    /// when the leg is unsecured).
+    private func xhttpServerName(for security: SecurityLayer, fallback: String) -> String {
+        switch security {
+        case .tls(let tlsConfig): return tlsConfig.serverName
+        case .reality(let realityConfig): return realityConfig.serverName
+        case .none: return fallback
+        }
+    }
+
+    /// Resolves how the main (this-node) leg reaches its server, consuming
+    /// `self.tunnel` if present so it is dialed exactly once. A chain link rides the
+    /// inbound tunnel; the chain exit builds a tunnel from `configuration.chain`;
+    /// otherwise the leg dials directly.
+    private func consumeMainXHTTPRoute() -> XHTTPLegRoute {
+        if let tunnel = self.tunnel {
+            self.tunnel = nil
+            return .overTunnel(tunnel)
+        }
+        if let chain = configuration.chain, !chain.isEmpty {
+            return .buildChain(chain)
+        }
+        return .direct
+    }
+
+    /// Dials one XHTTP leg and wraps it in an ``XHTTPConnection`` with the given
+    /// role. Shared by the combined single-server connection (`.combined`) and each
+    /// leg of a detached session (`.uploadOnly` / `.downloadOnly`).
+    private func dialXHTTPLeg(
+        endpoint: XHTTPEndpoint,
+        httpVersion: XHTTPHTTPVersion,
+        route: XHTTPLegRoute,
+        xhttp: XHTTPConfiguration,
+        mode: XHTTPMode,
+        sessionId: String,
+        role: XHTTPChannelRole,
+        uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)?,
+        completion: @escaping (Result<XHTTPConnection, Error>) -> Void
+    ) {
+        dialXHTTPTransport(endpoint: endpoint, httpVersion: httpVersion, route: route) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let transport):
+                let connection: XHTTPConnection
+                switch transport {
+                case .byteStream(let closures):
+                    connection = XHTTPConnection(
+                        download: closures, configuration: xhttp, mode: mode, sessionId: sessionId,
+                        useHTTP2: httpVersion == .http2, uploadConnectionFactory: uploadFactory
+                    )
+                case .http3(let session):
+                    connection = XHTTPConnection(
+                        h3Session: session, configuration: xhttp, mode: mode, sessionId: sessionId
+                    )
+                }
+                connection.role = role
+                completion(.success(connection))
+            }
+        }
+    }
+
+    /// Dials the underlying transport for one XHTTP leg, applying the endpoint's
+    /// security and the leg's HTTP version, routed direct / over an existing tunnel
+    /// / through a freshly built chain. HTTP/1.1 and HTTP/2 ride a byte stream (TCP,
+    /// TLS, or Reality); HTTP/3 rides a QUIC session whose datagram transport
+    /// encodes the route. Dialed sockets/clients are retained via
+    /// ``retainedXHTTPObjects``; chain hops via ``chainClients``.
+    private func dialXHTTPTransport(
+        endpoint: XHTTPEndpoint,
+        httpVersion: XHTTPHTTPVersion,
+        route: XHTTPLegRoute,
+        completion: @escaping (Result<XHTTPDialedTransport, Error>) -> Void
+    ) {
+        if httpVersion == .http3 {
+            dialXHTTPHTTP3Session(endpoint: endpoint, route: route, completion: completion)
+            return
+        }
+        switch route {
+        case .direct:
+            dialXHTTPByteStream(host: endpoint.directHost, port: endpoint.port, security: endpoint.security,
+                                httpVersion: httpVersion, overTunnel: nil, completion: completion)
+        case .overTunnel(let tunnel):
+            dialXHTTPByteStream(host: endpoint.chainHost, port: endpoint.port, security: endpoint.security,
+                                httpVersion: httpVersion, overTunnel: tunnel, completion: completion)
+        case .buildChain(let chain):
+            // XHTTP requires a TCP stream end-to-end.
+            let hopCommands = [ProxyCommand](repeating: .tcp, count: chain.count)
+            buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { [weak self] result in
+                guard let self else {
+                    completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                    return
+                }
+                switch result {
+                case .success(let tunnel):
+                    self.dialXHTTPByteStream(host: endpoint.chainHost, port: endpoint.port, security: endpoint.security,
+                                             httpVersion: httpVersion, overTunnel: tunnel, completion: completion)
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    /// Dials a single byte-stream XHTTP transport — plain TCP, TLS, or Reality —
+    /// either directly (`overTunnel == nil`) or riding an existing proxy tunnel.
+    private func dialXHTTPByteStream(
+        host: String,
+        port: UInt16,
+        security: SecurityLayer,
+        httpVersion: XHTTPHTTPVersion,
+        overTunnel: ProxyConnection?,
+        completion: @escaping (Result<XHTTPDialedTransport, Error>) -> Void
     ) {
         switch security {
         case .none:
-            let socket = RawTCPSocket()
-            retainedDetachObjects.append(socket)
-            socket.connect(host: host, port: port) { error in
-                if let error { completion(.failure(error)); return }
-                completion(.success(TransportClosures(rawTCP: socket)))
+            if let tunnel = overTunnel {
+                completion(.success(.byteStream(TransportClosures(tunnel: tunnel))))
+            } else {
+                let socket = RawTCPSocket()
+                retainedXHTTPObjects.append(socket)
+                socket.connect(host: host, port: port) { error in
+                    if let error { completion(.failure(error)); return }
+                    completion(.success(.byteStream(TransportClosures(rawTCP: socket))))
+                }
             }
         case .tls(let tlsConfig):
             let client = TLSClient(configuration: sanitizedXHTTPTLSConfiguration(from: tlsConfig, httpVersion: httpVersion))
-            retainedDetachObjects.append(client)
-            client.connect(host: host, port: port) { result in
-                switch result {
-                case .success(let conn): completion(.success(TransportClosures(tls: conn)))
-                case .failure(let error): completion(.failure(error))
-                }
+            retainedXHTTPObjects.append(client)
+            let handle: (Result<TLSRecordConnection, Error>) -> Void = { result in
+                completion(result.map { .byteStream(TransportClosures(tls: $0)) })
+            }
+            if let tunnel = overTunnel {
+                client.connect(overTunnel: tunnel, completion: handle)
+            } else {
+                client.connect(host: host, port: port, completion: handle)
             }
         case .reality(let realityConfig):
             let client = RealityClient(configuration: realityConfig)
-            retainedDetachObjects.append(client)
-            client.connect(host: host, port: port) { result in
+            retainedXHTTPObjects.append(client)
+            let handle: (Result<TLSRecordConnection, Error>) -> Void = { result in
+                completion(result.map { .byteStream(TransportClosures(tls: $0)) })
+            }
+            if let tunnel = overTunnel {
+                client.connect(overTunnel: tunnel, completion: handle)
+            } else {
+                client.connect(host: host, port: port, completion: handle)
+            }
+        }
+    }
+
+    /// Builds the HTTP/3 QUIC session for one XHTTP leg. QUIC performs TLS
+    /// natively, so there is no TLSClient/RealityClient here — the route is encoded
+    /// as the session's datagram transport: `direct` opens a real UDP socket, while
+    /// a tunnel (or a freshly built `.udp` chain) carries the QUIC datagrams.
+    private func dialXHTTPHTTP3Session(
+        endpoint: XHTTPEndpoint,
+        route: XHTTPLegRoute,
+        completion: @escaping (Result<XHTTPDialedTransport, Error>) -> Void
+    ) {
+        let makeSession: (String, QUICDatagramTransport?) -> XHTTPDialedTransport = { host, transport in
+            .http3(HTTP3Session(host: host, port: endpoint.port, serverName: endpoint.serverName, transport: transport))
+        }
+        switch route {
+        case .direct:
+            completion(.success(makeSession(endpoint.directHost, nil)))
+        case .overTunnel(let tunnel):
+            completion(.success(makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))))
+        case .buildChain(let chain):
+            let hopCommands: [ProxyCommand]
+            switch Self.computeChainHopCommands(chain: chain, lastDeliver: .udp) {
+            case .success(let cmds):
+                hopCommands = cmds
+            case .failure(let error):
+                completion(.failure(error))
+                return
+            }
+            buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { result in
                 switch result {
-                case .success(let conn): completion(.success(TransportClosures(tls: conn)))
-                case .failure(let error): completion(.failure(error))
+                case .success(let tunnel):
+                    completion(.success(makeSession(endpoint.chainHost, ProxyConnectionDatagramTransport(connection: tunnel))))
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    /// Builds the upload-connection factory for a combined HTTP/1.1 session: a
+    /// second byte stream to this node's own server (HTTP/1.1 can't multiplex the
+    /// upload POST onto the download GET's connection). Mirrors the main leg's
+    /// security; routes through a freshly built chain when configured, else direct
+    /// (an inbound tunnel is already consumed by the download connection).
+    private func makeXHTTPUploadFactory(
+        security: SecurityLayer,
+        httpVersion: XHTTPHTTPVersion
+    ) -> (@escaping (Result<TransportClosures, Error>) -> Void) -> Void {
+        return { [weak self] completion in
+            guard let self else {
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                return
+            }
+            let route: XHTTPLegRoute
+            if let chain = self.configuration.chain, !chain.isEmpty {
+                route = .buildChain(chain)
+            } else {
+                route = .direct
+            }
+            self.dialXHTTPTransport(endpoint: self.mainXHTTPEndpoint(), httpVersion: httpVersion, route: route) { result in
+                switch result {
+                case .success(.byteStream(let closures)):
+                    completion(.success(closures))
+                case .success(.http3):
+                    completion(.failure(ProxyError.connectionFailed("HTTP/3 has no separate upload connection")))
+                case .failure(let error):
+                    completion(.failure(error))
                 }
             }
         }

@@ -35,42 +35,67 @@ extension XHTTPConnection {
             return
         }
 
-        switch mode {
-        case .streamOne:
-            // Single full-duplex POST: request body is the upload, response body
-            // the download. Setup can't wait for the response — the server only
-            // replies once it sees upload body, which the caller sends afterwards.
-            let stream = HTTP3RequestStream(session: session)
-            lock.lock(); h3Download = stream; lock.unlock()
-            let headers = h3RequestHeaderBlock(method: "POST", includeMeta: false)
-            stream.sendRequest(headerBlock: headers, endStream: false) { error in
-                if let error {
-                    completion(XHTTPError.setupFailed("H3 stream-one request failed: \(error.localizedDescription)"))
-                } else {
-                    completion(nil)
-                }
+        switch role {
+        case .downloadOnly:
+            // Download leg of a detached session: open only the GET (stream-down);
+            // the upload POST lives on a separate leg (its own QUIC session).
+            setupH3Download(session: session, completion: completion)
+
+        case .uploadOnly:
+            // Upload leg of a detached session: open only the POST. stream-up keeps a
+            // persistent POST stream; packet-up opens one per batch in sendH3PacketUp,
+            // so there is nothing to open at setup.
+            if mode == .streamUp {
+                openH3UploadStream(session: session, completion: completion)
+            } else {
+                completion(nil)
             }
 
-        case .streamUp:
-            setupH3Download(session: session) { [weak self] error in
-                if let error { completion(error); return }
-                guard let self else { completion(XHTTPError.connectionClosed); return }
-                // Persistent upload POST stream (no seq; body streams over its lifetime).
-                let upload = HTTP3RequestStream(session: session)
-                self.lock.lock(); self.h3Upload = upload; self.lock.unlock()
-                let headers = self.h3UploadHeaderBlock(seq: nil, contentLength: nil)
-                upload.sendRequest(headerBlock: headers, endStream: false) { upErr in
-                    if let upErr {
-                        completion(XHTTPError.setupFailed("H3 upload stream open failed: \(upErr.localizedDescription)"))
+        case .combined:
+            switch mode {
+            case .streamOne:
+                // Single full-duplex POST: request body is the upload, response body
+                // the download. Setup can't wait for the response — the server only
+                // replies once it sees upload body, which the caller sends afterwards.
+                let stream = HTTP3RequestStream(session: session)
+                lock.lock(); h3Download = stream; lock.unlock()
+                let headers = h3RequestHeaderBlock(method: "POST", includeMeta: false)
+                stream.sendRequest(headerBlock: headers, endStream: false) { error in
+                    if let error {
+                        completion(XHTTPError.setupFailed("H3 stream-one request failed: \(error.localizedDescription)"))
                     } else {
                         completion(nil)
                     }
                 }
-            }
 
-        default:
-            // packet-up (and .auto, already resolved to packet-up for TLS upstream).
-            setupH3Download(session: session, completion: completion)
+            case .streamUp:
+                setupH3Download(session: session) { [weak self] error in
+                    if let error { completion(error); return }
+                    guard let self else { completion(XHTTPError.connectionClosed); return }
+                    self.openH3UploadStream(session: session, completion: completion)
+                }
+
+            default:
+                // packet-up (and .auto, already resolved to packet-up for TLS upstream).
+                setupH3Download(session: session, completion: completion)
+            }
+        }
+    }
+
+    /// Opens the persistent upload POST stream (stream-up) and completes once its
+    /// request headers are sent. The body streams over the stream's lifetime, so
+    /// no sequence number or content length is set. Shared by the combined
+    /// stream-up setup and the upload leg of a detached session.
+    private func openH3UploadStream(session: HTTP3Session, completion: @escaping (Error?) -> Void) {
+        let upload = HTTP3RequestStream(session: session)
+        lock.lock(); h3Upload = upload; lock.unlock()
+        let headers = h3UploadHeaderBlock(seq: nil, contentLength: nil)
+        upload.sendRequest(headerBlock: headers, endStream: false) { upErr in
+            if let upErr {
+                completion(XHTTPError.setupFailed("H3 upload stream open failed: \(upErr.localizedDescription)"))
+            } else {
+                completion(nil)
+            }
         }
     }
 
