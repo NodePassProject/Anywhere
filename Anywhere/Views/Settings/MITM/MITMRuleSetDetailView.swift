@@ -361,8 +361,8 @@ struct MITMRuleSetDetailView: View {
                 .font(.system(size: 14).monospaced())
                 .foregroundStyle(.secondary)
                 .minimumScaleFactor(0.5)
-                .lineLimit(1)
                 .truncationMode(.middle)
+                .lineLimit(3)
             Button {
                 refresh()
             } label: {
