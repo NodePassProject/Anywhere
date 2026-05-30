@@ -112,8 +112,14 @@ nonisolated class HTTP3Session: PoolableSession {
     /// - Parameter tuning: QUIC transport tuning. Defaults to ``QUICTuning/naive``
     ///   (the preset the Naive HTTP/3 CONNECT path is tuned against); XHTTP-over-h3
     ///   reuses it since its stream/flow-control needs are comparable.
-    init(host: String, port: UInt16, serverName: String, tuning: QUICTuning = .naive) {
-        self.quic = QUICConnection(host: host, port: port, serverName: serverName, alpn: ["h3"], tuning: tuning)
+    /// - Parameter transport: Optional UDP-relay transport for chained
+    ///   XHTTP-over-h3. When set, QUIC rides it instead of a kernel socket
+    ///   (mirrors ``HysteriaSession``); `host`/`port` then identify the server
+    ///   logically rather than naming a dial target.
+    init(host: String, port: UInt16, serverName: String, tuning: QUICTuning = .naive,
+         transport: QUICDatagramTransport? = nil) {
+        self.quic = QUICConnection(host: host, port: port, serverName: serverName,
+                                   alpn: ["h3"], tuning: tuning, transport: transport)
     }
 
     // MARK: - Pool Interface

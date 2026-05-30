@@ -154,9 +154,14 @@ nonisolated class ProxyClient {
             return
         }
 
-        // Chained QUIC protocols pool their chain + session in their clients;
-        // route through protocol-specific dispatch instead of building a chain here.
-        if configuration.outboundProtocol == .hysteria || configuration.outboundProtocol == .nowhere {
+        // QUIC-based transports ride the chain's UDP relay as a datagram
+        // transport, so they build (or adopt) the chain inside their own
+        // protocol-specific dispatch rather than the generic TCP chain below.
+        // Hysteria/Nowhere are QUIC end to end; VLESS-over-XHTTP negotiates QUIC
+        // only when it selects HTTP/3 (ALPN h3) — see `connectXHTTP3`.
+        if configuration.outboundProtocol == .hysteria
+            || configuration.outboundProtocol == .nowhere
+            || configuration.isXHTTPOverHTTP3 {
             connectWithCommand(
                 command: command,
                 destinationHost: destinationHost,
@@ -232,11 +237,14 @@ nonisolated class ProxyClient {
 
         if chain.count > 1 {
             for i in stride(from: chain.count - 2, through: 0, by: -1) {
-                let nextHopProto = chain[i + 1].outboundProtocol
+                let nextHop = chain[i + 1]
                 let downstreamCmd = commands[i + 1]
-                guard let req = nextHopProto.upstreamCommand(for: downstreamCmd) else {
+                // Config-aware (not just protocol-level): a VLESS hop reached
+                // over XHTTP-h3 rides QUIC, so it needs a `.udp` relay from
+                // below even though plain VLESS would ask for `.tcp`.
+                guard let req = nextHop.upstreamCommand(for: downstreamCmd) else {
                     return .failure(ProxyError.protocolError(
-                        "Chain hop \(nextHopProto.name) doesn't support \(downstreamCmd) downstream — needed by the hop above it"
+                        "Chain hop \(nextHop.outboundProtocol.name) doesn't support \(downstreamCmd) downstream — needed by the hop above it"
                     ))
                 }
                 commands[i] = req
@@ -1480,8 +1488,13 @@ nonisolated class ProxyClient {
     /// the QUIC stack (``QUICTLSHandler``), so no ``TLSClient`` runs here; the
     /// ALPN reaches the wire as the QUIC connection's `["h3"]`.
     ///
-    /// Direct-dial only: h3 over a proxy chain would need a QUIC datagram relay
-    /// (``QUICDatagramTransport``).
+    /// Chaining mirrors Hysteria/Nowhere: QUIC rides a ``QUICDatagramTransport``
+    /// instead of a kernel socket. As a chain link (`tunnel` set) the inbound
+    /// UDP-relay tunnel *is* that transport; as the chain exit (`chain` set) we
+    /// build a chain whose last hop opens a `.udp` relay to this server and ride
+    /// the result. Direct dials pass `transport: nil` and open a real UDP
+    /// socket. Xray-core does the equivalent — its h3 dialer wraps a
+    /// `dialerProxy` connection in a `FakePacketConn` for QUIC to ride.
     private func connectXHTTP3(
         tlsConfig: TLSConfiguration,
         xhttpConfig: XHTTPConfiguration,
@@ -1493,30 +1506,64 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        if let chain = configuration.chain, !chain.isEmpty {
-            completion(.failure(ProxyError.connectionFailed(
-                "XHTTP over HTTP/3 (ALPN h3) does not support proxy chaining yet")))
-            return
+        // Builds the XHTTP-over-h3 connection on a QUIC session riding
+        // `transport` (nil → direct kernel UDP socket).
+        let startSession: (QUICDatagramTransport?) -> Void = { [weak self] transport in
+            guard let self else {
+                completion(.failure(ProxyError.connectionFailed("Client deallocated")))
+                return
+            }
+            // Direct dials may target the pre-resolved IP (latency testing);
+            // a chained/tunneled session rides the relay, so the host is just
+            // the server's logical identity (SNI is passed through explicitly).
+            let host = (transport == nil) ? self.directDialHost : self.configuration.serverAddress
+            let session = HTTP3Session(
+                host: host,
+                port: self.configuration.serverPort,
+                serverName: tlsConfig.serverName,
+                transport: transport
+            )
+            let xhttpConnection = XHTTPConnection(
+                h3Session: session, configuration: xhttpConfig, mode: mode, sessionId: sessionId
+            )
+            self.xhttpConnection = xhttpConnection
+            self.performXHTTPSetup(
+                xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
+                destinationPort: destinationPort, initialData: initialData, completion: completion
+            )
         }
-        if tunnel != nil {
-            completion(.failure(ProxyError.connectionFailed(
-                "XHTTP over HTTP/3 (ALPN h3) does not support being tunneled yet")))
+
+        // Chain link: the inbound UDP-relay tunnel carries our QUIC datagrams.
+        if let tunnel = self.tunnel {
+            self.tunnel = nil
+            startSession(ProxyConnectionDatagramTransport(connection: tunnel))
             return
         }
 
-        let session = HTTP3Session(
-            host: directDialHost,
-            port: configuration.serverPort,
-            serverName: tlsConfig.serverName
-        )
-        let xhttpConnection = XHTTPConnection(
-            h3Session: session, configuration: xhttpConfig, mode: mode, sessionId: sessionId
-        )
-        self.xhttpConnection = xhttpConnection
-        performXHTTPSetup(
-            xhttpConnection: xhttpConnection, command: command, destinationHost: destinationHost,
-            destinationPort: destinationPort, initialData: initialData, completion: completion
-        )
+        // Chain exit: build a chain whose last hop opens a `.udp` relay to this
+        // server, then ride it. Hops are retained in `self.chainClients`.
+        if let chain = configuration.chain, !chain.isEmpty {
+            let hopCommands: [ProxyCommand]
+            switch Self.computeChainHopCommands(chain: chain, lastDeliver: .udp) {
+            case .success(let cmds):
+                hopCommands = cmds
+            case .failure(let error):
+                completion(.failure(error))
+                return
+            }
+            buildChainTunnel(chain: chain, index: 0, currentTunnel: nil, hopCommands: hopCommands) { result in
+                switch result {
+                case .success(let chainTunnel):
+                    startSession(ProxyConnectionDatagramTransport(connection: chainTunnel))
+                case .failure(let error):
+                    completion(.failure(error))
+                }
+            }
+            return
+        }
+
+        // Direct: open a real UDP socket inside the QUIC stack.
+        startSession(nil)
     }
 
     /// Performs XHTTP setup then sends the protocol handshake.

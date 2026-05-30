@@ -281,6 +281,31 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         return false
     }
 
+    /// Whether this configuration is VLESS-over-XHTTP negotiating HTTP/3.
+    ///
+    /// XHTTP selects HTTP/3 when TLS advertises exactly one ALPN of `h3`
+    /// (mirrors Xray-core's `decideHTTPVersion` and ``ProxyClient``'s
+    /// `decideXHTTPHTTPVersion`). Unlike XHTTP over HTTP/1.1 or HTTP/2 — which
+    /// ride a TCP stream — HTTP/3 runs over QUIC (UDP), so a chain hop below it
+    /// must provide a `.udp` relay, exactly like Hysteria and Nowhere. Reality
+    /// (always HTTP/2) and the plaintext path (HTTP/1.1) are never h3.
+    var isXHTTPOverHTTP3: Bool {
+        guard case .xhttp = transportLayer else { return false }
+        guard case .tls(let tls) = securityLayer else { return false }
+        let alpn = tls.alpn ?? []
+        return alpn.count == 1 && alpn[0].caseInsensitiveCompare("h3") == .orderedSame
+    }
+
+    /// Transport this configuration needs from the chain hop below it to
+    /// service `downstreamCommand`. A transport-aware superset of
+    /// ``OutboundProtocol/upstreamCommand(for:)``: XHTTP-over-HTTP/3 rides QUIC,
+    /// so it always needs a `.udp` relay regardless of the command it carries
+    /// onward; every other configuration defers to the protocol-level rule.
+    func upstreamCommand(for downstreamCommand: ProxyCommand) -> ProxyCommand? {
+        if isXHTTPOverHTTP3 { return .udp }
+        return outboundProtocol.upstreamCommand(for: downstreamCommand)
+    }
+
     init(
         id: UUID = UUID(),
         name: String,
