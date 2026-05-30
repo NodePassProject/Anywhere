@@ -192,6 +192,58 @@ extension XHTTPConnection {
         }
     }
 
+    // MARK: Detached leg Setup (up/download detach)
+
+    /// Download leg of a detached session over HTTP/1.1: send the GET and read
+    /// response headers. No upload connection — the upload is a separate leg.
+    func performDownloadOnlyHTTP11Setup(completion: @escaping (Error?) -> Void) {
+        let request = buildDownloadGETRequest()
+        guard let requestData = request.data(using: .utf8) else {
+            completion(XHTTPError.setupFailed("Failed to encode GET request"))
+            return
+        }
+        downloadSend(requestData) { [weak self] error in
+            if let error {
+                completion(XHTTPError.setupFailed(error.localizedDescription))
+                return
+            }
+            self?.receiveResponseHeaders(completion: completion)
+        }
+    }
+
+    /// Upload leg of a detached session over HTTP/1.1. This leg's own primary
+    /// transport *is* the upload connection, so `uploadSend`/`uploadReceive` are
+    /// aliased to it and the `sendStreamUp` / `sendPacketUp` paths write to it.
+    /// `uploadCancel` is left nil — `downloadCancel` already tears down this
+    /// transport, avoiding a double cancel.
+    func performUploadOnlyHTTP11Setup(completion: @escaping (Error?) -> Void) {
+        lock.lock()
+        uploadSend = downloadSend
+        uploadReceive = downloadReceive
+        lock.unlock()
+
+        if mode == .streamUp {
+            // Open the streaming POST on this leg's transport.
+            let postRequest = buildStreamUpPOSTRequest()
+            guard let postData = postRequest.data(using: .utf8) else {
+                completion(XHTTPError.setupFailed("Failed to encode stream-up POST request"))
+                return
+            }
+            downloadSend(postData) { error in
+                if let error {
+                    completion(XHTTPError.setupFailed("Stream-up POST send failed: \(error.localizedDescription)"))
+                } else {
+                    completion(nil)
+                }
+            }
+        } else {
+            // packet-up: each send() is its own POST; drain responses to keep the
+            // TCP receive buffer from saturating (see startUploadResponseDrain).
+            startUploadResponseDrain()
+            completion(nil)
+        }
+    }
+
     // MARK: - Request Builders
 
     /// Builds a GET request for the download stream (used by packet-up and stream-up).

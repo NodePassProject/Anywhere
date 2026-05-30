@@ -9,6 +9,20 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "XHTTP")
 
+// MARK: - XHTTP Channel Role
+
+/// Which half of an XHTTP session a connection drives.
+///
+/// `.combined` (default) runs both directions over one connection. For
+/// up/download detach the download leg is `.downloadOnly` (issues the GET, reads
+/// the body) and owns an `.uploadOnly` ``XHTTPConnection/uploadChannel`` (issues
+/// the POST(s)); the two are distinct connections sharing one session ID.
+enum XHTTPChannelRole {
+    case combined
+    case downloadOnly
+    case uploadOnly
+}
+
 // MARK: - XHTTPConnection
 
 /// XHTTP connection implementing packet-up, stream-up, and stream-one modes.
@@ -32,6 +46,14 @@ nonisolated class XHTTPConnection {
     var uploadSend: ((Data, @escaping (Error?) -> Void) -> Void)?
     var uploadReceive: ((@escaping (Data?, Bool, Error?) -> Void) -> Void)?
     var uploadCancel: (() -> Void)?
+
+    // Up/download detach. Set by the dialer before `performSetup`; `.combined`
+    // legs leave these at their defaults.
+    /// Role of this connection in an up/download-detached session.
+    var role: XHTTPChannelRole = .combined
+    /// Upload leg, owned by the download-leg coordinator when detached (else nil).
+    /// `send` is delegated here; `receive` always reads this (download) leg.
+    var uploadChannel: XHTTPConnection?
 
     // State
     var nextSeq: Int64 = 0
@@ -91,6 +113,10 @@ nonisolated class XHTTPConnection {
     // HTTP/2 multiplexing state (for stream-up / packet-up over H2)
     var h2UploadStreamId: UInt32 = 3      // Fixed upload stream for stream-up
     var h2NextPacketStreamId: UInt32 = 3   // Next stream ID for packet-up uploads
+    /// Stream id treated as the download (GET) stream when reading H2 frames.
+    /// 1 on a normal/download leg; set out of range on an `.uploadOnly` leg so
+    /// its POST responses are drained for flow control rather than delivered.
+    var h2DownloadStreamId: UInt32 = 1
 
     // HTTP/3 state. XHTTP-over-h3 multiplexes its modes onto QUIC streams via an
     // HTTP3Session, rather than framing over a single byte stream like H2.
@@ -109,7 +135,8 @@ nonisolated class XHTTPConnection {
         lock.lock()
         let v = _isConnected
         lock.unlock()
-        return v
+        // Detached: healthy only while both legs are up.
+        return v && (uploadChannel?.isConnected ?? true)
     }
 
     // MARK: - X-Padding (matching Xray-core xpadding.go)
@@ -282,18 +309,46 @@ nonisolated class XHTTPConnection {
     /// - For packet-up mode: sends a GET request for the download stream, reads response headers,
     ///   and establishes the upload connection via the factory.
     func performSetup(completion: @escaping (Error?) -> Void) {
+        // Detached coordinator: set up this (download) leg, then the upload leg.
+        // Both share `sessionId`; the VLESS layer above sees one connection.
+        guard let uploadChannel else {
+            performLegSetup(completion: completion)
+            return
+        }
+        performLegSetup { error in
+            if let error {
+                completion(error)
+                return
+            }
+            uploadChannel.performLegSetup(completion: completion)
+        }
+    }
+
+    /// Sets up a single leg according to its role and HTTP version.
+    private func performLegSetup(completion: @escaping (Error?) -> Void) {
         if useHTTP3 {
             // HTTP/3: all modes multiplex onto QUIC streams via the HTTP3Session.
+            // (Up/download detach over H3 is not used; the dialer keeps both legs
+            // on H1.1/H2.)
             performH3Setup(completion: completion)
         } else if useHTTP2 {
-            // HTTP/2: all modes go through H2 setup with mode-specific stream handling
+            // HTTP/2 setup is role-aware (combined / download-only / upload-only).
             performH2Setup(completion: completion)
-        } else if mode == .streamOne {
-            performStreamOneSetup(completion: completion)
-        } else if mode == .streamUp {
-            performStreamUpSetup(completion: completion)
         } else {
-            performPacketUpSetup(completion: completion)
+            switch role {
+            case .downloadOnly:
+                performDownloadOnlyHTTP11Setup(completion: completion)
+            case .uploadOnly:
+                performUploadOnlyHTTP11Setup(completion: completion)
+            case .combined:
+                if mode == .streamOne {
+                    performStreamOneSetup(completion: completion)
+                } else if mode == .streamUp {
+                    performStreamUpSetup(completion: completion)
+                } else {
+                    performPacketUpSetup(completion: completion)
+                }
+            }
         }
     }
 
@@ -301,6 +356,11 @@ nonisolated class XHTTPConnection {
 
     /// Sends data through the XHTTP connection.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
+        // Detached: writes go to the upload leg; this (download) leg only reads.
+        if let uploadChannel {
+            uploadChannel.send(data: data, completion: completion)
+            return
+        }
         if mode == .packetUp {
             // Packet-up batches writes through an internal queue (see
             // enqueuePacketUpSend). All other modes go directly to the wire.
@@ -430,6 +490,8 @@ nonisolated class XHTTPConnection {
         h3Dl?.close()
         h3Up?.close()
         h3Sess?.close()
+        // Detached: tear down the upload leg too.
+        uploadChannel?.cancel()
     }
 
     // MARK: - Packet-Up Batching

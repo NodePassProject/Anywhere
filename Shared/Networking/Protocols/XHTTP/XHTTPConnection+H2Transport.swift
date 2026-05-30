@@ -21,12 +21,78 @@ extension XHTTPConnection {
     /// all in one write, then processing server frames (SETTINGS, ACK, etc.)
     /// while waiting for the response HEADERS (200 OK).
     func performH2Setup(completion: @escaping (Error?) -> Void) {
-        var initData = Data()
+        var initData = h2ClientPreface()
 
-        // 1. Connection preface
+        // HEADERS go out immediately, before the server's SETTINGS arrive, to save
+        // a round trip; SETTINGS are handled afterward in processInitialServerFrames.
+        // That step deliberately does not wait for the 200 response HEADERS: some
+        // CDNs buffer the response until the backend produces body data, which only
+        // happens after the POST sent post-setup, so waiting would deadlock.
+        switch role {
+        case .uploadOnly:
+            // Upload leg on its own connection: the POST is stream 1, and no stream
+            // here is the download stream — reads are a flow-control/response drain
+            // (see startH2UploadPump). packet-up opens a stream per batch later.
+            h2UploadStreamId = 1
+            h2DownloadStreamId = .max
+            if mode == .streamUp {
+                let uploadHeaders = encodeH2UploadHeaders(seq: nil)
+                initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: h2UploadStreamId, payload: uploadHeaders))
+            }
+            downloadSend(initData) { [weak self] error in
+                if let error {
+                    completion(XHTTPError.setupFailed("H2 upload setup send failed: \(error.localizedDescription)"))
+                    return
+                }
+                self?.processInitialServerFrames { [weak self] err in
+                    if err == nil { self?.startH2UploadPump() }
+                    completion(err)
+                }
+            }
+
+        case .downloadOnly:
+            // Download leg: GET on stream 1 only (no upload stream on this leg).
+            let headerBlock = encodeH2RequestHeaders(method: "GET", includeMeta: true)
+            initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders | Self.h2FlagEndStream, streamId: 1, payload: headerBlock))
+            downloadSend(initData) { [weak self] error in
+                if let error {
+                    completion(XHTTPError.setupFailed("H2 download setup send failed: \(error.localizedDescription)"))
+                    return
+                }
+                self?.processInitialServerFrames(completion: completion)
+            }
+
+        case .combined:
+            if mode == .streamOne {
+                let headerBlock = encodeH2RequestHeaders(method: "POST", includeMeta: false)
+                initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: 1, payload: headerBlock))
+            } else {
+                let headerBlock = encodeH2RequestHeaders(method: "GET", includeMeta: true)
+                initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders | Self.h2FlagEndStream, streamId: 1, payload: headerBlock))
+            }
+            // For stream-up, also open the upload stream (stream 3) on this connection.
+            if mode == .streamUp {
+                let uploadHeaders = encodeH2UploadHeaders(seq: nil)
+                initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: h2UploadStreamId, payload: uploadHeaders))
+            }
+            downloadSend(initData) { [weak self] error in
+                if let error {
+                    completion(XHTTPError.setupFailed("H2 setup send failed: \(error.localizedDescription)"))
+                    return
+                }
+                self?.processInitialServerFrames(completion: completion)
+            }
+        }
+    }
+
+    /// Builds the H2 client preface + client SETTINGS (ENABLE_PUSH off, 4MB stream
+    /// window, 10MB max header list) + a 1GB connection-level WINDOW_UPDATE. Shared
+    /// by all roles so each leg of a detached session opens its H2 connection
+    /// identically.
+    private func h2ClientPreface() -> Data {
+        var initData = Data()
         initData.append(Self.h2Preface)
 
-        // 2. Client SETTINGS (ENABLE_PUSH=0, INITIAL_WINDOW_SIZE=4MB, MAX_HEADER_LIST_SIZE=10MB)
         var settingsPayload = Data()
         settingsPayload.append(contentsOf: [0x00, 0x02, 0x00, 0x00, 0x00, 0x00])
         let winSize = Self.h2StreamWindowSize
@@ -38,7 +104,6 @@ extension XHTTPConnection {
         settingsPayload.append(contentsOf: [0x00, 0x06, 0x00, 0xA0, 0x00, 0x00])
         initData.append(buildH2Frame(type: Self.h2FrameSettings, flags: 0, streamId: 0, payload: settingsPayload))
 
-        // 3. Connection-level WINDOW_UPDATE (1GB, matching Go's transportDefaultConnFlow)
         let windowIncrement = Self.h2ConnectionWindowSize
         var wuPayload = Data(count: 4)
         wuPayload[0] = UInt8((windowIncrement >> 24) & 0xFF)
@@ -46,38 +111,17 @@ extension XHTTPConnection {
         wuPayload[2] = UInt8((windowIncrement >> 8) & 0xFF)
         wuPayload[3] = UInt8(windowIncrement & 0xFF)
         initData.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: wuPayload))
+        return initData
+    }
 
-        // 4. HEADERS — sent immediately, without waiting for server SETTINGS.
-        //    Go's http2.Transport does the same (sends HEADERS before processing
-        //    the server's SETTINGS reply). Server SETTINGS are processed below
-        //    while we wait for the response HEADERS.
-        if mode == .streamOne {
-            let headerBlock = encodeH2RequestHeaders(method: "POST", includeMeta: false)
-            initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: 1, payload: headerBlock))
-        } else {
-            let headerBlock = encodeH2RequestHeaders(method: "GET", includeMeta: true)
-            initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders | Self.h2FlagEndStream, streamId: 1, payload: headerBlock))
-        }
-
-        // 5. For stream-up, also open the upload stream
-        if mode == .streamUp {
-            let uploadHeaders = encodeH2UploadHeaders(seq: nil)
-            initData.append(buildH2Frame(type: Self.h2FrameHeaders, flags: Self.h2FlagEndHeaders, streamId: h2UploadStreamId, payload: uploadHeaders))
-        }
-
-        downloadSend(initData) { [weak self] error in
-            if let error {
-                completion(XHTTPError.setupFailed("H2 setup send failed: \(error.localizedDescription)"))
-                return
-            }
-            // After sending, process the server's SETTINGS and send ACK before
-            // completing. This is required by RFC 7540 §6.5.3 ("MUST immediately
-            // emit a SETTINGS frame with the ACK flag"). Without it, some CDNs
-            // drop subsequent frames because the client hasn't acknowledged.
-            // We do NOT wait for the 200 OK response HEADERS — that would deadlock
-            // with CDNs that buffer the response until the backend produces body
-            // data (which requires the POST that is sent after setup completes).
-            self?.processInitialServerFrames(completion: completion)
+    /// Background frame pump for an `.uploadOnly` H2 leg. Keeps connection-level
+    /// flow control current (WINDOW_UPDATE), ACKs SETTINGS/PING, and discards POST
+    /// responses so the server's writes never stall the upload. Runs until the
+    /// connection closes; `receiveH2Data` never delivers data here because
+    /// `h2DownloadStreamId == .max` matches no real stream.
+    func startH2UploadPump() {
+        receiveH2Data { [weak self] _, _ in
+            self?.markH2Closed()
         }
     }
 
@@ -112,7 +156,7 @@ extension XHTTPConnection {
 
                 case Self.h2FrameHeaders:
                     // Early response HEADERS — process and complete
-                    let isDownload = frame.streamId == 0 || frame.streamId == 1
+                    let isDownload = frame.streamId == 0 || frame.streamId == self.h2DownloadStreamId
                     if isDownload {
                         if let rejection = self.checkH2ResponseStatus(frame.payload) {
                             completion(XHTTPError.setupFailed("H2 response rejected: \(rejection)"))
@@ -414,7 +458,7 @@ extension XHTTPConnection {
                 completion(nil, error)
 
             case .success(let frame):
-                let isDownloadStream = frame.streamId == 0 || frame.streamId == 1
+                let isDownloadStream = frame.streamId == 0 || frame.streamId == self.h2DownloadStreamId
 
                 switch frame.type {
                 case Self.h2FrameData:

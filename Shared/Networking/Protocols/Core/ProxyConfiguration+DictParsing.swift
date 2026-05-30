@@ -279,9 +279,15 @@ extension ProxyConfiguration {
             let xhttpMode = XHTTPMode(rawValue: xhttpModeStr) ?? .auto
             let xhttpHeaders = parseHeaders(configurationDict["xhttpHeaders"] as? String)
             let xhttpNoGRPCHeader = (configurationDict["xhttpNoGRPCHeader"] as? Bool) ?? false
+            var xhttpDownloadSettings: XHTTPDownloadSettings? = nil
+            if let json = configurationDict["xhttpDownloadSettings"] as? String,
+               let data = json.data(using: .utf8) {
+                xhttpDownloadSettings = try? JSONDecoder().decode(XHTTPDownloadSettings.self, from: data)
+            }
             return .xhttp(XHTTPConfiguration(
                 host: xhttpHost, path: xhttpPath, mode: xhttpMode,
-                headers: xhttpHeaders, noGRPCHeader: xhttpNoGRPCHeader
+                headers: xhttpHeaders, noGRPCHeader: xhttpNoGRPCHeader,
+                downloadSettings: xhttpDownloadSettings
             ))
         default:
             return .tcp

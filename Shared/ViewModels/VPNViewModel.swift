@@ -923,6 +923,14 @@ class VPNViewModel: ObservableObject {
                     configurationDict["xhttpHeaders"] = xhttp.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
                 }
                 configurationDict["xhttpNoGRPCHeader"] = xhttp.noGRPCHeader
+                // Up/download detach: carry the whole settings as one JSON value
+                // (lossless) rather than flattening each field. (Other advanced
+                // XHTTP fields are not serialized on this routing-rule path.)
+                if let ds = xhttp.downloadSettings,
+                   let data = try? JSONEncoder().encode(ds),
+                   let json = String(data: data, encoding: .utf8) {
+                    configurationDict["xhttpDownloadSettings"] = json
+                }
             }
         }
 
