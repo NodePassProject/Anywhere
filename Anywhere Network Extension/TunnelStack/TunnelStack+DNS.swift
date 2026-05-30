@@ -275,6 +275,7 @@ extension TunnelStack {
             forceBypass: false,       // proxy it, mirroring the public-resolver path
             flowQueue: udpQueue
         )
+        evictUDPFlowsToAdmit(flowKey)
         udpFlows[flowKey] = flow
         logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(dstPort) via \(configuration.name)")
         flow.handleReceivedData(payload, payloadLength: payload.count)

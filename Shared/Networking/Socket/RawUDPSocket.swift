@@ -93,7 +93,16 @@ nonisolated final class RawUDPSocket {
 
     // MARK: - Lifecycle
 
-    init() {}
+    /// Kernel `SO_SNDBUF`/`SO_RCVBUF` size applied on connect. The relay
+    /// transports (SOCKS5/Shadowsocks upstream) keep the high-throughput
+    /// default (``SocketHelpers/kernelSocketBufferSize``); direct-bypass flows
+    /// pass the smaller ``SocketHelpers/directDatagramSocketBufferSize`` so a
+    /// per-peer flow storm can't exhaust the extension's memory budget.
+    private let socketBufferSize: Int32
+
+    init(socketBufferSize: Int32 = SocketHelpers.kernelSocketBufferSize) {
+        self.socketBufferSize = socketBufferSize
+    }
 
 #if DEBUG
     /// Leak tripwire: a connected socket must be torn down via `cancel()`
@@ -194,7 +203,7 @@ nonisolated final class RawUDPSocket {
     /// Applies Darwin-specific UDP socket options.
     private func applyUDPSocketOptions(fd: Int32) {
         SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_NOSIGPIPE, value: 1)
-        SocketHelpers.setHighThroughputBuffers(fd)
+        SocketHelpers.setDatagramBuffers(fd, size: socketBufferSize)
     }
 
     // MARK: - Receive

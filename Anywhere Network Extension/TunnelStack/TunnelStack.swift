@@ -306,6 +306,13 @@ class TunnelStack {
     var udpFlows: [UDPFlowKey: UDPFlow] = [:]
     var udpCleanupTimer: DispatchSourceTimer?
 
+    /// Rising-edge latch for the flow-cap warning: set when ``udpFlows`` first
+    /// reaches ``TunnelConstants/udpMaxFlows`` and eviction begins, cleared by
+    /// the cleanup timer once the table drains back below the cap. Keeps a
+    /// sustained flow storm from emitting one warning per evicted flow — which
+    /// would both flood the bounded log ring and burn CPU. Owned by ``udpQueue``.
+    var udpFlowCapWarned = false
+
     /// Shared Shadowsocks UDP sessions keyed by configuration id. One session
     /// services every UDP flow for a given SS configuration, so all
     /// destinations share a sessionID + upstream socket. Owned by ``udpQueue``.
