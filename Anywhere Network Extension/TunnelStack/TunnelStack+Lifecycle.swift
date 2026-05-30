@@ -117,7 +117,7 @@ extension TunnelStack {
     ///
     /// Deliberately conservative: it does NOT re-resolve DNS or rebuild the mux
     /// (there's no path to dial over) and does NOT force-close the app-facing TCP
-    /// legs. A leg riding a freed shared session (Hysteria/AnyTLS/HTTP3, or a
+    /// legs. A leg riding a freed shared session (Hysteria/Nowhere/AnyTLS/HTTP3, or a
     /// UDP-over-mux flow) sees a graceful downlink EOF — ``MuxManager/closeAll``
     /// and friends deliver no error — and winds down on its own; a leg actively
     /// writing when its session drops aborts on the failed send; per-connection
@@ -132,6 +132,7 @@ extension TunnelStack {
             logger.info("[VPN] Path offline/sleep: releasing upstream transports; will rebuild when it returns")
 
             HysteriaClient.closeAll()
+            NowhereClient.closeAll()
             AnyTLSManager.shared.closeAll()
             HTTP3SessionPool.shared.closeAll()
 
@@ -241,6 +242,7 @@ extension TunnelStack {
         }
 
         HysteriaClient.closeAll()
+        NowhereClient.closeAll()
         AnyTLSManager.shared.closeAll()
         HTTP3SessionPool.shared.closeAll()
 
@@ -291,6 +293,7 @@ extension TunnelStack {
         }
 
         HysteriaClient.closeAll()
+        NowhereClient.closeAll()
         HTTP3SessionPool.shared.closeAll()
 
         // mux / SS sessions / flows are udpQueue-owned — close them there and

@@ -160,4 +160,20 @@ extension QUICTuning {
             )
         }
     }
+
+    static let nowhere = QUICTuning(
+        cc: .cubic,
+        maxStreamWindow: 16 * 1024 * 1024,
+        maxWindow: 32 * 1024 * 1024,
+        initialMaxData: 8 * 1024 * 1024,
+        initialMaxStreamDataBidiLocal: 2 * 1024 * 1024,
+        initialMaxStreamDataBidiRemote: 2 * 1024 * 1024,
+        initialMaxStreamDataUni: 2 * 1024 * 1024,
+        initialMaxStreamsBidi: 1024,
+        initialMaxStreamsUni: 16,
+        maxIdleTimeout: 30 * 1_000_000_000,
+        handshakeTimeout: 10 * 1_000_000_000,
+        keepAliveTimeout: 10 * 1_000_000_000,
+        disableActiveMigration: true
+    )
 }
