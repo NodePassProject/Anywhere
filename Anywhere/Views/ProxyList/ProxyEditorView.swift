@@ -62,6 +62,9 @@ struct ProxyEditorView: View {
     @State private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
     @State private var hysteriaSNI = ""
 
+    // Nowhere fields
+    @State private var nowhereKey = ""
+
     // Trojan fields
     @State private var trojanPassword = ""
 
@@ -97,6 +100,7 @@ struct ProxyEditorView: View {
 
     private var isVLESS: Bool { selectedProtocol == .vless }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
+    private var isNowhere: Bool { selectedProtocol == .nowhere }
     private var isTrojan: Bool { selectedProtocol == .trojan }
     private var isAnyTLS: Bool { selectedProtocol == .anytls }
     private var isShadowsocks: Bool { selectedProtocol == .shadowsocks }
@@ -119,6 +123,9 @@ struct ProxyEditorView: View {
                 else { return false }
             }
             return true
+        }
+        if isNowhere {
+            return !nowhereKey.isEmpty
         }
         if isTrojan {
             return !trojanPassword.isEmpty
@@ -166,6 +173,7 @@ struct ProxyEditorView: View {
                     Picker(selection: $selectedProtocol) {
                         Text(String("VLESS")).tag(OutboundProtocol.vless)
                         Text(String("Hysteria")).tag(OutboundProtocol.hysteria)
+                        Text(String("Nowhere")).tag(OutboundProtocol.nowhere)
                         Text(String("Trojan")).tag(OutboundProtocol.trojan)
                         Text(String("AnyTLS")).tag(OutboundProtocol.anytls)
                         Text(String("Shadowsocks")).tag(OutboundProtocol.shadowsocks)
@@ -253,7 +261,16 @@ struct ProxyEditorView: View {
                                 TextWithColorfulIcon(title: "Download Speed", comment: "Download Speed for Hysteria protocol", systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .blue)
                             }
                         }
-                   } else if isTrojan {
+                    } else if isNowhere {
+                        LabeledContent {
+                            SecureField("Key", text: $nowhereKey)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Key", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                        }
+                    } else if isTrojan {
                         LabeledContent {
                             SecureField("Password", text: $trojanPassword)
                                 .autocorrectionDisabled()
@@ -743,6 +760,8 @@ struct ProxyEditorView: View {
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
             hysteriaSNI = sni
+        case .nowhere(let key):
+            nowhereKey = key
         case .trojan(let password, let tls):
             trojanPassword = password
             tlsSNI = tls.serverName
@@ -823,7 +842,7 @@ struct ProxyEditorView: View {
     private func save() {
         guard let port = UInt16(serverPort) else { return }
         let parsedUUID: UUID
-        if isHysteria || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
+        if isHysteria || isNowhere || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = self.configuration?.id ?? UUID()
         } else {
             guard let u = UUID(xrayString: uuid) else { return }
@@ -931,6 +950,10 @@ struct ProxyEditorView: View {
                 uploadMbps: up,
                 downloadMbps: down,
                 sni: sni
+            )
+        case .nowhere:
+            outbound = .nowhere(
+                key: nowhereKey
             )
         case .trojan:
             let sni = tlsSNI.isEmpty ? bareAddress : tlsSNI

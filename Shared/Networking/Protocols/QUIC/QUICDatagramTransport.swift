@@ -107,6 +107,15 @@ final class ProxyConnectionDatagramTransport: QUICDatagramTransport {
                 return true
             }
         }
+        if let nErr = error as? NowhereError {
+            switch nErr {
+            case .streamClosed, .authFailed, .invalidTargetLength,
+                 .destinationTooLargeForDatagram:
+                return false
+            case .notReady, .connectionFailed:
+                return true
+            }
+        }
         return false
     }
 

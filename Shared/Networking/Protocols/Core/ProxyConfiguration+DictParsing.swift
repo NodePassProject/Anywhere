@@ -77,6 +77,10 @@ extension ProxyConfiguration {
                 downloadMbps: HysteriaCongestionControl.clampDownloadMbps(rawDown),
                 sni: (explicitSNI?.isEmpty == false) ? explicitSNI! : serverAddress
             )
+        case .nowhere:
+            outbound = .nowhere(
+                key: (configurationDict["nowhereKey"] as? String) ?? ""
+            )
         case .trojan:
             let password = (configurationDict["trojanPassword"] as? String) ?? ""
             let tls = parseTrojanTLS(from: configurationDict, serverAddress: serverAddress)

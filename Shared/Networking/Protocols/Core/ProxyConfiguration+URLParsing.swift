@@ -12,7 +12,7 @@ import Foundation
 extension ProxyConfiguration {
 
     /// URL scheme prefixes that ``parse(url:)`` can handle.
-    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://", "https://", "quic://"]
+    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "nowhere://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://", "https://", "quic://"]
 
     /// Whether the given string starts with a URL scheme that ``parse(url:)`` can handle.
     static func canParseURL(_ string: String) -> Bool {
@@ -28,6 +28,9 @@ extension ProxyConfiguration {
     static func parse(url: String, naiveProtocol: OutboundProtocol? = nil) throws -> ProxyConfiguration {
         if url.hasPrefix("hysteria2://") || url.hasPrefix("hy2://") {
             return try parseHysteria(url: url)
+        }
+        if url.hasPrefix("nowhere://") {
+            return try parseNowhere(url: url)
         }
         if url.hasPrefix("trojan://") {
             return try parseTrojan(url: url)
@@ -48,7 +51,7 @@ extension ProxyConfiguration {
             return try parseNaive(url: url, protocolOverride: naiveProtocol)
         }
         guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless://, trojan://, anytls://, ss://, socks5://, sudoku://, https://, or quic://")
+            throw ProxyError.invalidURL("URL must start with vless://, hysteria2://, nowhere://, trojan://, anytls://, ss://, socks5://, sudoku://, https://, or quic://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -212,6 +215,50 @@ extension ProxyConfiguration {
                 uploadMbps: uploadMbps,
                 downloadMbps: downloadMbps,
                 sni: sni
+            )
+        )
+    }
+
+    /// Parse a Nowhere URL.
+    /// Format: `nowhere://<key>@host:port#name`
+    private static func parseNowhere(url: String) throws -> ProxyConfiguration {
+        let rawPrefix = "nowhere://"
+        var remaining = String(url.dropFirst(rawPrefix.count))
+
+        var fragmentName: String?
+        if let hashIndex = remaining.lastIndex(of: "#") {
+            fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
+            remaining = String(remaining[..<hashIndex])
+        }
+        DeviceCensorship.deCensor(&fragmentName)
+
+        if let questionIndex = remaining.firstIndex(of: "?") {
+            remaining = String(remaining[..<questionIndex])
+        }
+
+        guard let atIndex = remaining.lastIndex(of: "@") else {
+            throw ProxyError.invalidURL("Missing @ separator in Nowhere URL")
+        }
+        let userInfo = String(remaining[..<atIndex])
+        var serverPart = String(remaining[remaining.index(after: atIndex)...])
+        if serverPart.hasSuffix("/") { serverPart.removeLast() }
+        if let slashIndex = serverPart.firstIndex(of: "/") {
+            serverPart = String(serverPart[..<slashIndex])
+        }
+
+        let key = userInfo.removingPercentEncoding ?? userInfo
+        guard !key.isEmpty else {
+            throw ProxyError.invalidURL("Missing Nowhere key")
+        }
+
+        let (host, port) = try parseHostPort(serverPart)
+
+        return ProxyConfiguration(
+            name: fragmentName ?? "Nowhere",
+            serverAddress: host,
+            serverPort: port,
+            outbound: .nowhere(
+                key: key
             )
         )
     }

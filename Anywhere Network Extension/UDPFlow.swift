@@ -131,6 +131,15 @@ class UDPFlow {
                 return false
             }
         }
+        if let nErr = error as? NowhereError {
+            switch nErr {
+            case .streamClosed, .authFailed, .invalidTargetLength,
+                 .destinationTooLargeForDatagram:
+                return true
+            case .notReady, .connectionFailed:
+                return false
+            }
+        }
         if let qErr = error as? QUICConnection.QUICError {
             switch qErr {
             case .closed, .streamReset, .streamClosedWithError, .handshakeFailed:
