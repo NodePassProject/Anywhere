@@ -191,6 +191,18 @@ final class MITMHTTP2Connection {
         var headers: [(name: String, value: String)]
         let originatingRequest: MITMRequestLog.Record?
         var abandoned: Bool = false
+        /// Set when this stream's opening HEADERS were already emitted to
+        /// the destination at HEADERS time — the early-open path for inbound
+        /// bodied requests (see ``processFreshHeaderBlock``). A request
+        /// stream must open on the server in stream-ID order, but deferring
+        /// its HEADERS until the body is buffered and the script runs lets
+        /// later streams open first (RFC 9113 §5.1.1 regression →
+        /// PROTOCOL_ERROR GOAWAY). So we open the stream in order up front
+        /// and buffer only the body; the flush then emits just the
+        /// script-rewritten body. Script mutations to method/url/headers and
+        /// ``Anywhere.respond`` can't take effect once the stream is open and
+        /// are ignored on this path.
+        var headersAlreadyEmitted: Bool = false
     }
     private var pendingMessages: [UInt32: PendingMessage] = [:]
 
@@ -1017,6 +1029,36 @@ final class MITMHTTP2Connection {
             // try to decode the original payload.
             rewritten.removeAll { $0.name.equalsIgnoringASCIICase("content-length") }
 
+            // Inbound bodied request: open the stream now, in stream-ID
+            // order, instead of deferring HEADERS until the body is buffered.
+            // See ``PendingMessage/headersAlreadyEmitted`` for why the order
+            // matters and the trade-off it costs. Only the body is buffered
+            // for the script; content-encoding is dropped from the opening
+            // block because that body is re-emitted as identity. A no-body
+            // request falls through to the deferred path below, which can
+            // still rewrite the head.
+            if direction == .inbound, !endStreamOnHeaders {
+                var openingHeaders = rewritten
+                if codec.requiresDecompression {
+                    openingHeaders.removeAll { $0.name.equalsIgnoringASCIICase("content-encoding") }
+                }
+                logHTTP2Request(streamID: streamID, headers: openingHeaders)
+                output.append(emitHeaderBlock(
+                    streamID: streamID,
+                    block: HPACKEncoder.encodeHeaderBlock(openingHeaders),
+                    endStream: false,
+                    kind: kind
+                ))
+                pendingMessages[streamID] = PendingMessage(
+                    data: Data(),
+                    codec: codec,
+                    headers: openingHeaders,
+                    originatingRequest: originatingRequest,
+                    headersAlreadyEmitted: true
+                )
+                return false
+            }
+
             // ``originatingRequest`` was popped once at the top of
             // this function for outbound streams; pass-through and
             // PUSH_PROMISE cases see nil and ignore it.
@@ -1374,7 +1416,7 @@ final class MITMHTTP2Connection {
         let growth = result.body.count - body.count
         let projected = max(0, streaming.cumulativeGrowth + growth)
         if projected > Self.maxStreamingRewriteGrowthBytes {
-            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): streamScript projected growth \(projected) B exceeded cap \(Self.maxStreamingRewriteGrowthBytes) B; bypassing this frame and remaining frames to avoid FLOW_CONTROL_ERROR")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): streamScript projected growth \(projected) B exceeded cap \(Self.maxStreamingRewriteGrowthBytes) B; bypassing this frame and remaining frames")
             streaming.cursor.bypass = true
             emitted = body
         } else {
@@ -1420,14 +1462,20 @@ final class MITMHTTP2Connection {
     /// so subsequent DATA frames forward verbatim. Used when the body
     /// overflows the buffer cap mid-stream.
     private func abandonPending(streamID: UInt32, pending: inout PendingMessage) -> Data {
+        let prefix = pending.data
+        pending.data = Data()
+        pending.abandoned = true
+        // Early-open stream: HEADERS already opened it in order, so emit only
+        // the buffered body prefix; subsequent DATA forwards verbatim.
+        if pending.headersAlreadyEmitted {
+            pendingMessages[streamID] = pending
+            return emitDataFrames(streamID: streamID, payload: prefix, endStream: false)
+        }
         // Inbound HEADERS need to be logged for the response side to
         // populate ctx.method/url even though scripts won't run.
         if direction == .inbound {
             logHTTP2Request(streamID: streamID, headers: pending.headers)
         }
-        let prefix = pending.data
-        pending.data = Data()
-        pending.abandoned = true
         let reencoded = HPACKEncoder.encodeHeaderBlock(pending.headers)
         var out = emitHeaderBlock(
             streamID: streamID,
@@ -1502,7 +1550,16 @@ final class MITMHTTP2Connection {
             // these still-encoded bytes. HTTP/1 takes the same approach
             // in ``applyScriptsAndEmit``.
             guard let decoded = MITMBodyCodec.decompress(pending.data, plan: pending.codec, host: rewriter.host) else {
-                output.append(emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream))
+                if pending.headersAlreadyEmitted {
+                    // Early-open stream: its HEADERS (announced identity) are
+                    // already on the wire, so we can't fall back to the
+                    // encoded-passthrough HEADERS. Emit the buffered body to
+                    // close the stream — a rare decode failure degrades to one
+                    // unparseable request, not a connection-wide reset.
+                    output.append(emitDataFrames(streamID: streamID, payload: pending.data, endStream: endStream))
+                } else {
+                    output.append(emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream))
+                }
                 return continuation(&output)
             }
             plaintext = decoded
@@ -1566,6 +1623,32 @@ final class MITMHTTP2Connection {
         plaintext: Data,
         into output: inout Data
     ) {
+        // Early-open path: this stream's HEADERS already went on the wire in
+        // stream-ID order, so only the body can still change. Emit just the
+        // script-rewritten body; the script's method/url/header mutations and
+        // ``Anywhere.respond`` can't apply once the stream is open.
+        if pending.headersAlreadyEmitted {
+            let body: Data
+            switch outcome {
+            case .message(let updated):
+                // Same flow-control guard as the deferred path below: if the
+                // script grew the body past the cap, forward the original to
+                // avoid a FLOW_CONTROL_ERROR.
+                if updated.body.count > plaintext.count,
+                   updated.body.count - plaintext.count > Self.maxBufferedRewriteGrowthBytes {
+                    logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): script grew body by \(updated.body.count - plaintext.count) B (cap \(Self.maxBufferedRewriteGrowthBytes) B); emitting original body")
+                    body = plaintext
+                } else {
+                    body = updated.body
+                }
+            case .synthesizedResponse:
+                logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): Anywhere.respond ignored on an already-opened request stream; forwarding original body")
+                body = plaintext
+            }
+            output.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
+            return
+        }
+
         let result: MITMScriptEngine.Message
         switch outcome {
         case .message(let updated):
@@ -1603,7 +1686,7 @@ final class MITMHTTP2Connection {
         let rewrittenWireBytes = result.body.count
         if rewrittenWireBytes > originalIdentityBytes,
            rewrittenWireBytes - originalIdentityBytes > Self.maxBufferedRewriteGrowthBytes {
-            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): script grew body by \(rewrittenWireBytes - originalIdentityBytes) B (cap \(Self.maxBufferedRewriteGrowthBytes) B); emitting original payload to avoid FLOW_CONTROL_ERROR")
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): script grew body by \(rewrittenWireBytes - originalIdentityBytes) B (cap \(Self.maxBufferedRewriteGrowthBytes) B); emitting original payload")
             output.append(emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream))
             return
         }

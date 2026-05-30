@@ -37,33 +37,19 @@ struct RuleSetListView: View {
             }
             if !customRuleSets.isEmpty {
                 Section("Custom") {
-                    ForEach(customRuleSets) { custom in
+                    ForEach(customRuleSets) { customRuleSet in
                         NavigationLink {
-                            CustomRuleSetDetailView(customRuleSetId: custom.id)
+                            CustomRuleSetDetailView(customRuleSetId: customRuleSet.id)
                         } label: {
-                            HStack {
-                                Image(systemName: "list.bullet.rectangle")
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 32, height: 32)
-                                VStack(alignment: .leading) {
-                                    Text(custom.name)
-                                    Text("\(custom.rules.count) rule(s)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if let ruleSet = builtInServiceRuleSets.first(where: { $0.id == custom.id.uuidString }) {
-                                    assignmentLabel(for: ruleSet)
-                                }
-                            }
+                            ruleSetRow(for: customRuleSet)
                         }
                     }
                     .onDelete { offsets in
-                        let customs = RoutingRuleSetStore.shared.customRuleSets
+                        let customRuleSets = RoutingRuleSetStore.shared.customRuleSets
                         for offset in offsets {
-                            RoutingRuleSetStore.shared.removeCustomRuleSet(customs[offset].id)
+                            RoutingRuleSetStore.shared.removeCustomRuleSet(customRuleSets[offset].id)
                         }
-                        customRuleSets = RoutingRuleSetStore.shared.customRuleSets
+                        self.customRuleSets = RoutingRuleSetStore.shared.customRuleSets
                         Task { await viewModel.syncRoutingConfigurationToNE() }
                     }
                 }
@@ -162,6 +148,25 @@ struct RuleSetListView: View {
             Button("OK") { subscribeError = nil }
         } message: {
             Text(subscribeError ?? "")
+        }
+    }
+    
+    @ViewBuilder
+    private func ruleSetRow(for ruleSet: CustomRoutingRuleSet) -> some View {
+        HStack {
+            Image(systemName: "list.bullet.rectangle")
+                .foregroundStyle(.secondary)
+                .frame(width: 32, height: 32)
+            VStack(alignment: .leading) {
+                Text(ruleSet.name)
+                Text("\(ruleSet.rules.count) rule(s)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let ruleSet = builtInServiceRuleSets.first(where: { $0.id == ruleSet.id.uuidString }) {
+                assignmentLabel(for: ruleSet)
+            }
         }
     }
 

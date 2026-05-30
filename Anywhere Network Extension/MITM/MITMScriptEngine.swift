@@ -46,17 +46,24 @@ private let mitmScriptTypedArrayLock = UnfairLock()
 /// script that fails partway leaves the wire untouched.
 final class MITMScriptEngine {
 
-    /// Mutable view of the in-flight HTTP message. The runtime hands
-    /// this to `function process(ctx)` and reads each field back after
-    /// the call; the JS side may mutate any field by assignment or in
-    /// place (`ctx.body` is a Uint8Array backed by Swift-owned memory,
-    /// so element-wise writes propagate without a return value).
+    /// View of the in-flight HTTP message handed to `function process(ctx)`.
+    /// Only `body` is read back: scripts replace it or mutate it in place
+    /// (`ctx.body` is a Uint8Array backed by Swift-owned memory, so
+    /// element-wise writes propagate without a return value).
+    ///
+    /// `method`, `url`, `status`, and `headers` are **read-only** (like
+    /// `phase`): a script may read them but assigning them is a no-op on
+    /// readback. URL and header edits have dedicated rule operations —
+    /// `url-replace` and `header-add` / `header-delete` / `header-replace`
+    /// — so the script surface deliberately doesn't duplicate them. This
+    /// also lets the HTTP/2 path open a request stream in stream-ID order
+    /// without waiting on the script (see ``MITMHTTP2Connection``'s
+    /// early-open path) and makes request-line / header / URL injection
+    /// from a rule set structurally impossible.
     ///
     /// `method` and `url` are populated on both request and response
     /// phases (response carries the originating request's values, looked
-    /// up via ``MITMRequestLog``). `status` is populated on response
-    /// only. `phase` is read-only on the JS side; reassigning it is a
-    /// no-op on Swift readback.
+    /// up via ``MITMRequestLog``). `status` is populated on response only.
     struct Message {
         let phase: MITMPhase
         var method: String?
@@ -529,104 +536,19 @@ final class MITMScriptEngine {
         return obj
     }
 
-    /// Reads each mutable field off the post-call ctx object and builds
-    /// an updated ``Message``. Anything the script didn't touch comes
-    /// back identical to the input; anything it cleared (assigned
-    /// `null` / `undefined`) becomes nil on Swift side.
-    ///
-    /// Hostile / buggy scripts can write CR / LF / NUL into ``method``,
-    /// ``url``, header names, or header values. The HTTP/1 serializer
-    /// emits those bytes verbatim, which would split the wire framing
-    /// (request smuggling / response splitting); HTTP/2 receivers
-    /// reject any CR / LF / NUL in a HEADERS block per RFC 9113 §8.2.1
-    /// and drop the stream. To make either outcome impossible from a
-    /// rule set, this method validates each field before adopting it:
-    /// fields that fail validation revert to the ``original`` input,
-    /// invalid header entries are dropped, and a non-array
-    /// ``ctx.headers`` is treated as "leave headers alone" rather than
-    /// silently wiping every header (a common typo footgun).
+    /// Reads the one script-mutable field, ``body``, off the post-call ctx
+    /// and returns the updated ``Message``. Every other field is read-only
+    /// (see ``Message``), so a script's assignment to ``method`` / ``url`` /
+    /// ``status`` / ``headers`` is ignored and the originals carry through —
+    /// which is what makes request-line / header / URL injection from a rule
+    /// set impossible.
     private func readBack(_ original: Message, from ctx: JSValue) -> Message {
         var msg = original
-        let methodVal = ctx.objectForKeyedSubscript("method")
-        msg.method = validatedMethod(methodVal, original: original.method)
-        let urlVal = ctx.objectForKeyedSubscript("url")
-        msg.url = validatedURL(urlVal, original: original.url)
-        let statusVal = ctx.objectForKeyedSubscript("status")
-        msg.status = validatedStatus(statusVal, original: original.status)
-        if let headersVal = ctx.objectForKeyedSubscript("headers"),
-           !headersVal.isUndefined, !headersVal.isNull {
-            if let validated = Self.headersFromValue(headersVal) {
-                msg.headers = validated
-            }
-            // else: ctx.headers isn't array-shaped — keep ``original.headers``
-            //       rather than wiping them. A script doing
-            //       ``ctx.headers = "Foo: bar"`` shouldn't strip every
-            //       header from the message.
-        }
         if let body = ctx.objectForKeyedSubscript("body"),
            let bytes = Self.bytesFromValue(body, in: context) {
             msg.body = bytes
         }
         return msg
-    }
-
-    /// Pulls ``ctx.method`` back. ``undefined`` / ``null`` clears the
-    /// field; a value that's a non-empty RFC 9110 §9.1 token (same
-    /// charset as a header field-name) is adopted; anything else
-    /// reverts to ``original`` with a warning. The token check rules
-    /// out SP / HTAB / CR / LF / NUL, all of which would smuggle bytes
-    /// onto the request line.
-    private func validatedMethod(_ value: JSValue?, original: String?) -> String? {
-        guard let value, !value.isUndefined, !value.isNull else { return nil }
-        guard let str = value.toString() else { return original }
-        if Self.isValidHeaderName(str) { return str }
-        logger.warning("[MITM][JS] ctx.method contains invalid characters; reverting")
-        return original
-    }
-
-    /// Pulls ``ctx.url`` back. Same cleared-vs-adopted semantics as
-    /// ``validatedMethod``; the validation rejects empty strings and
-    /// anything containing SP / HTAB / CTLs. We don't try to fully
-    /// validate URL syntax — ``rebuildStartLine`` already falls back to
-    /// the original request-target when the URL fails to parse — but
-    /// stripping HTTP/1 start-line delimiters keeps a malicious or
-    /// buggy script from corrupting the request line.
-    private func validatedURL(_ value: JSValue?, original: String?) -> String? {
-        guard let value, !value.isUndefined, !value.isNull else { return nil }
-        guard let str = value.toString() else { return original }
-        if Self.isValidRequestTargetValue(str) { return str }
-        logger.warning("[MITM][JS] ctx.url is empty or contains whitespace/control characters; reverting")
-        return original
-    }
-
-    /// Pulls ``ctx.status`` back. ``undefined`` / ``null`` clears the
-    /// status (response-phase scripts can use this to drop a value);
-    /// a number in the 100…599 wire range is adopted; out-of-range
-    /// numbers and non-numeric values revert to ``original`` with a
-    /// warning. Strings convertible to numbers (`"200"`) are refused
-    /// rather than silently coerced — the failure mode of accidentally
-    /// stringifying the status is hard enough to debug already.
-    private func validatedStatus(_ value: JSValue?, original: Int?) -> Int? {
-        guard let value, !value.isUndefined, !value.isNull else { return nil }
-        guard value.isNumber else {
-            logger.warning("[MITM][JS] ctx.status is not a number; reverting (script may have assigned a string — use a numeric literal)")
-            return original
-        }
-        // Use ``toDouble`` rather than ``toInt32``: the latter
-        // silently truncates 64-bit-ish JS numbers (the result of
-        // an overflowed integer expression, for example) modulo
-        // 2^32, so ``ctx.status = 4_294_967_496`` would slip through
-        // as 200 even though it's nonsense. Reject anything that
-        // isn't a finite integer in the wire-status range.
-        let d = value.toDouble()
-        guard d.isFinite, d.rounded() == d else {
-            logger.warning("[MITM][JS] ctx.status \(d) is not a finite integer; reverting")
-            return original
-        }
-        let n = Int(d)
-        if (100...599).contains(n) { return n }
-        logger.warning("[MITM][JS] ctx.status \(n) outside 100…599; reverting")
-        return original
     }
 
     /// Decodes a JS `[[name, value], ...]` array into the Swift header
@@ -731,20 +653,6 @@ final class MITMScriptEngine {
         return true
     }
 
-    /// HTTP/1 request-targets are delimited by SP in the start line, so a
-    /// script-provided URL / relative target cannot safely contain SP,
-    /// HTAB, or any control byte. Absolute URLs are still allowed; the
-    /// serializers will project them down to path + query where needed.
-    private static func isValidRequestTargetValue(_ value: String) -> Bool {
-        guard !value.isEmpty else { return false }
-        for byte in value.utf8 {
-            if byte <= 0x20 || byte == 0x7F {
-                return false
-            }
-        }
-        return true
-    }
-
     // MARK: - Anywhere globals
 
     private func installAnywhereGlobals() {
@@ -757,6 +665,59 @@ final class MITMScriptEngine {
         installLogGlobals(on: anywhere)
         installControlGlobals(on: anywhere)
         context.setObject(anywhere, forKeyedSubscript: "Anywhere" as NSString)
+        // Must follow the ``Anywhere`` install: the shim captures
+        // ``Anywhere.codec.utf8`` to back the native text codecs.
+        installTextCodecGlobals()
+    }
+
+    /// Installs WHATWG ``TextEncoder`` / ``TextDecoder`` on the JS global,
+    /// backed by the native UTF-8 path of ``Anywhere.codec.utf8``.
+    ///
+    /// JavaScriptCore has no `TextEncoder` / `TextDecoder` (they're Web APIs,
+    /// not ECMAScript), so a script that needs them ships a JS polyfill that
+    /// walks the body char-by-char — the dominant cost when a rewrite touches
+    /// a large response. Such polyfills self-install only when the global is
+    /// absent (`globalThis.TextEncoder || install`), so a native one here
+    /// takes over and routes the round-trip through the Swift codec; a script
+    /// that never decodes pays nothing.
+    ///
+    /// `encode` / `decode` are captured from ``Anywhere.codec.utf8`` so the
+    /// bridge survives a script reassigning ``Anywhere``. To stand in for a
+    /// real ``TextDecoder``, `decode` must be lossy (invalid UTF-8 → U+FFFD,
+    /// never "") and must honour the view's byte offset (see
+    /// ``typedArrayBytesFromValue``); a script that decodes the body one
+    /// field at a time relies on both, and either one wrong breaks it
+    /// silently. Only the exercised subset exists: constructor `encoding` /
+    /// `fatal` / `ignoreBOM` and one-shot `encode` / `decode`.
+    private func installTextCodecGlobals() {
+        let installed = context.evaluateScript(#"""
+        (function (g) {
+          if (!g.Anywhere || !g.Anywhere.codec || !g.Anywhere.codec.utf8) return false;
+          var enc = g.Anywhere.codec.utf8.encode;
+          var dec = g.Anywhere.codec.utf8.decode;
+          function TextEncoder() { this.encoding = "utf-8"; }
+          TextEncoder.prototype.encode = function (input) {
+            return enc(input == null ? "" : String(input));
+          };
+          function TextDecoder(label, options) {
+            this.encoding = (label == null ? "utf-8" : String(label)).toLowerCase();
+            this.fatal = !!(options && options.fatal);
+            this.ignoreBOM = !!(options && options.ignoreBOM);
+          }
+          TextDecoder.prototype.decode = function (input) {
+            return input == null ? "" : dec(input);
+          };
+          Object.defineProperty(g, "TextEncoder", { value: TextEncoder, writable: true, configurable: true });
+          Object.defineProperty(g, "TextDecoder", { value: TextDecoder, writable: true, configurable: true });
+          return true;
+        })(typeof globalThis !== "undefined" ? globalThis : this);
+        """#)
+        if context.exception != nil {
+            context.exception = nil
+            logger.warning("[MITM][JS] failed to install TextEncoder/TextDecoder globals")
+        } else if installed?.isBoolean == true, installed?.toBool() == false {
+            logger.warning("[MITM][JS] TextEncoder/TextDecoder install skipped: Anywhere.codec.utf8 missing")
+        }
     }
 
     /// Installs ``Anywhere.codec`` — every paired encoder/decoder
@@ -775,7 +736,10 @@ final class MITMScriptEngine {
         let utf8Decode: @convention(block) (JSValue) -> String = { val in
             let ctx = JSContext.current()!
             let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
-            return String(data: bytes, encoding: .utf8) ?? ""
+            // Lossy: invalid UTF-8 becomes U+FFFD rather than discarding the
+            // whole string, so decoding a buffer that is only partly text
+            // (one field of a binary body) still yields the text it holds.
+            return String(decoding: bytes, as: UTF8.self)
         }
         utf8.setObject(utf8Encode, forKeyedSubscript: "encode" as NSString)
         utf8.setObject(utf8Decode, forKeyedSubscript: "decode" as NSString)
@@ -2073,11 +2037,17 @@ final class MITMScriptEngine {
             return Data(bytes: ptr, count: len)
         }
         let len = JSObjectGetTypedArrayByteLength(ctxRef, obj, &exception)
+        guard exception == nil else { return nil }
+        // ``JSObjectGetTypedArrayBytesPtr`` points at the start of the backing
+        // buffer, not the view, so it ignores ``byteOffset``. Add it so a
+        // subarray (e.g. ``body.subarray(pos, end)``) reads its own slice
+        // rather than the buffer's head.
+        let offset = JSObjectGetTypedArrayByteOffset(ctxRef, obj, &exception)
         guard exception == nil,
               let ptr = JSObjectGetTypedArrayBytesPtr(ctxRef, obj, &exception),
               exception == nil
         else { return nil }
-        return Data(bytes: ptr, count: len)
+        return Data(bytes: ptr + offset, count: len)
     }
 
     private static func decodeHex(_ str: String) -> Data {

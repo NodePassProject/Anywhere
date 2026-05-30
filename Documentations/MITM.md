@@ -275,10 +275,13 @@ JavaScript transforms. The field is base64-encoded UTF-8 source defining
 
 ## Scripting: `script`
 
-Use `script` whenever the rewrite needs the **whole message at once**: mutating
-head fields (`ctx.url`, `ctx.method`, `ctx.status`, `ctx.headers`), rewriting a
-body as a unit (JSON, protobuf, JWT, a regex over the full text), or
-short-circuiting a request with `Anywhere.respond(...)`.
+Use `script` whenever the rewrite needs the **whole message at once**: rewriting
+a body as a unit (JSON, protobuf, JWT, a regex over the full text) or
+short-circuiting a request with `Anywhere.respond(...)`. The head is read-only —
+URL and header edits have dedicated rules (`url-replace`, `header-add` /
+`header-delete` / `header-replace`), and `ctx.method` / `ctx.status` aren't
+script-writable either — so a `script` rule's job is the body (plus the
+`Anywhere.done` / `exit` / `respond` control directives).
 
 The rewriter buffers the body — auto-decoding `gzip` / `deflate` / `br` — runs
 `process(ctx)` once, and re-emits with a corrected `Content-Length`. Because
@@ -343,31 +346,31 @@ Authoring is identical to `script` but with op `5`:
 
 ## The `ctx` object
 
-`process(ctx)` receives a mutable context object. Mutate fields in place or by
-assignment; the runtime reads them back after the call.
+`process(ctx)` receives a context object. Scripts read its fields freely, but the
+only one read back is `ctx.body` — replace it or mutate it in place.
 
 | Field         | Type                      | Phase     | Mutable | Notes |
 | ------------- | ------------------------- | --------- | ------- | ----- |
 | `ctx.phase`   | `"request"` / `"response"`| both      | no      | Reassigning is a no-op. |
-| `ctx.method`  | string or `null`          | both      | yes¹    | On response, the originating request's method. |
-| `ctx.url`     | string or `null`          | both      | yes¹    | Absolute URL. On response, the originating request's URL. |
-| `ctx.status`  | number or `null`          | response  | yes¹    | `null` on request. |
-| `ctx.headers` | array of `[name, value]`  | both      | yes¹    | Pairs; preserves duplicates and order. |
+| `ctx.method`  | string or `null`          | both      | no      | Read-only. On response, the originating request's method. |
+| `ctx.url`     | string or `null`          | both      | no      | Read-only — use a `url-replace` rule. Absolute URL; on response, the originating request's URL. |
+| `ctx.status`  | number or `null`          | response  | no      | Read-only. `null` on request. |
+| `ctx.headers` | array of `[name, value]`  | both      | no      | Read-only — use `header-add` / `header-delete` / `header-replace` rules. Pairs; preserves duplicates and order. |
 | `ctx.body`    | `Uint8Array`              | both      | yes     | Backed by native memory; element-wise writes propagate. |
 
-¹ Mutable in `script` only. In `stream-script` all head fields are read-only and
-only `ctx.body` (plus `ctx.state`) is read back.
+Only `ctx.body` is mutable — in both `script` and `stream-script` (the latter
+also reads back `ctx.state`). Every head field (`method`, `url`, `status`,
+`headers`, `phase`) is **read-only**: assigning it is ignored on readback. URL
+and header edits have dedicated rule operations — `url-replace` and `header-add`
+/ `header-delete` / `header-replace` — so scripts don't duplicate them; `method`
+and `status` have no script-side write at all. Keeping the head read-only also
+lets the HTTP/2 path open a request stream in stream-ID order without waiting on
+the script.
 
-**Readback validation** (the wire must stay well-formed):
+**Readback** (the wire stays well-formed by construction):
 
-- `ctx.method` must be a valid HTTP token; otherwise it reverts with a warning.
-- `ctx.url` must contain no spaces or control characters; otherwise it reverts.
-- `ctx.status` must be a **number** in 100–599 (strings like `"200"` are
-  rejected, not coerced); otherwise it reverts.
-- `ctx.headers`: entries whose name isn't a valid token or whose value contains
-  CR/LF/NUL are dropped with a warning. A non-array value leaves headers
-  untouched (so a typo can't wipe them); set `ctx.headers = []` to intentionally
-  clear all headers.
+- Only `ctx.body` is adopted; every head-field assignment is ignored, so a script
+  can't inject a malformed request line, status, or header.
 - An **uncaught exception** discards all mutations and emits the original
   message unchanged (use `try/catch`, or signal a directive before throwing, to
   keep partial work).
@@ -644,13 +647,16 @@ function process(ctx) {
   const next = (prev ? parseInt(prev, 10) : 0) + 1;
   try { Anywhere.store.set("count", next.toString()); }
   catch (e) { Anywhere.log.warning("store full: " + e); }
-  ctx.headers.push(["X-Request-Count", next.toString()]);
+  Anywhere.log.info("request #" + next + " to " + ctx.url);
 }
 ```
 
 ```
 0, 4, .*, <base64>
 ```
+
+> A script can't add the count as a request header (`ctx.headers` is read-only);
+> to put a fixed header on the wire use a `header-add` rule instead.
 
 ---
 
