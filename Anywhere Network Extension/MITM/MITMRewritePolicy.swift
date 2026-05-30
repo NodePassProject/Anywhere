@@ -339,7 +339,7 @@ final class MITMRewritePolicy {
 
     // MARK: - Static-rule validation
     //
-    // Rule sets imported from third-party URLs (see ``ImportMITMRuleSetView``)
+    // Rule sets imported from `.amrs` files or subscription URLs
     // are untrusted input by the time they reach this policy. The wire
     // serializers — both HTTP/1's ``MITMHTTP1Stream.serializeHead`` and
     // HTTP/2's HPACK encoder — emit header bytes verbatim, so a rule
