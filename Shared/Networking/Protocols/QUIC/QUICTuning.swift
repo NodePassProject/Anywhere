@@ -162,7 +162,7 @@ extension QUICTuning {
     }
 
     static let nowhere = QUICTuning(
-        cc: .cubic,
+        cc: .bbr,
         maxStreamWindow: 16 * 1024 * 1024,
         maxWindow: 32 * 1024 * 1024,
         initialMaxData: 8 * 1024 * 1024,
