@@ -328,8 +328,8 @@ nonisolated class XHTTPConnection {
     private func performLegSetup(completion: @escaping (Error?) -> Void) {
         if useHTTP3 {
             // HTTP/3: all modes multiplex onto QUIC streams via the HTTP3Session.
-            // (Up/download detach over H3 is not used; the dialer keeps both legs
-            // on H1.1/H2.)
+            // performH3Setup is role-aware, so an up/download-detached session can
+            // run either leg over its own QUIC session (download-only / upload-only).
             performH3Setup(completion: completion)
         } else if useHTTP2 {
             // HTTP/2 setup is role-aware (combined / download-only / upload-only).
