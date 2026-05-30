@@ -488,8 +488,8 @@ nonisolated class ProxyClient {
         initialData: Data?,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        // Vision silently drops UDP/443 (QUIC) unless the -udp443 flow variant is used
-        if command == .udp && destinationPort == 443 && isVisionFlow && !allowUDP443 {
+        // Vision silently drops UDP/443 (QUIC).
+        if command == .udp && destinationPort == 443 && isVisionFlow {
             completion(.failure(ProxyError.dropped))
             return
         }

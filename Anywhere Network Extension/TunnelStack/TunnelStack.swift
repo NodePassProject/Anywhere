@@ -433,7 +433,7 @@ class TunnelStack {
 
     static func shouldUseVisionMux(_ configuration: ProxyConfiguration) -> Bool {
         guard case .vless(_, _, let flow, _, _, let muxEnabled, _) = configuration.outbound else { return false }
-        return muxEnabled && (flow == "xtls-rprx-vision" || flow == "xtls-rprx-vision-udp443")
+        return muxEnabled && flow == "xtls-rprx-vision"
     }
 
     /// Reads IPv6 settings from app group UserDefaults.

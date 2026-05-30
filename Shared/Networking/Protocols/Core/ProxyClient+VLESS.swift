@@ -14,16 +14,10 @@ extension ProxyClient {
     /// The base Vision flow string sent on the wire (suffix stripped).
     fileprivate static let visionFlow = "xtls-rprx-vision"
 
-    /// Whether the configured flow is a Vision variant.
+    /// Whether the configured flow is the Vision flow.
     var isVisionFlow: Bool {
         guard case .vless(_, _, let flow, _, _, _, _) = configuration.outbound else { return false }
-        return flow == Self.visionFlow || flow == Self.visionFlow + "-udp443"
-    }
-
-    /// Whether UDP port 443 is allowed (only with the `-udp443` suffix).
-    var allowUDP443: Bool {
-        guard case .vless(_, _, let flow, _, _, _, _) = configuration.outbound else { return false }
-        return flow == Self.visionFlow + "-udp443"
+        return flow == Self.visionFlow
     }
 
     /// Whether a non-trivial VLESS `encryption` (the `mlkem768x25519plus`

@@ -13,72 +13,91 @@ class TVProxyEditorViewController: UITableViewController {
 
     private let existingConfiguration: ProxyConfiguration?
     private let onSave: (ProxyConfiguration) -> Void
-    
+
     private var selectedProtocol: OutboundProtocol = .vless
     private var name = ""
     private var serverAddress = ""
     private var serverPort = ""
-    
-    // Security layer fields
-    private var tlsSNI = ""
-    private var tlsALPN = ""
-    private var realitySNI = ""
-    private var realityPublicKey = ""
-    private var realityShortId = ""
-    private var fingerprint: TLSFingerprint = .chrome133
-    
+
     // VLESS fields
-    private var uuid = ""
-    private var encryption = "none"
-    private var transport = "tcp"
-    private var flow = ""
-    private var security = "none"
-    private var muxEnabled = true
-    private var xudpEnabled = true
-    
-    // VLESS WebSocket fields
-    private var wsHost = ""
-    private var wsPath = "/"
-    
-    // VLESS HTTPUpgrade fields
-    private var huHost = ""
-    private var huPath = "/"
-    
-    // VLESS gRPC fields
-    private var grpcServiceName = ""
-    private var grpcAuthority = ""
-    private var grpcMode = "gun"
-    private var grpcUserAgent = ""
-    
-    // VLESS XHTTP fields
-    private var xhttpHost = ""
-    private var xhttpPath = "/"
-    private var xhttpMode = "auto"
-    private var xhttpExtra = ""
-    
+    private var vlessUUID = ""
+    private var vlessEncryption = "none"
+    private var vlessFlow = ""
+    private var vlessTransport = "tcp"
+    private var vlessMuxEnabled = true
+    private var vlessXUDPEnabled = true
+
+    private var vlessWebSocketHost = ""
+    private var vlessWebSocketPath = "/"
+
+    private var vlessHTTPUpgradeHost = ""
+    private var vlessHTTPUpgradePath = "/"
+
+    private var vlessGRPCServiceName = ""
+    private var vlessGRPCAuthority = ""
+    private var vlessGRPCMode = "gun"
+    private var vlessGRPCUserAgent = ""
+
+    private var vlessXHTTPHost = ""
+    private var vlessXHTTPPath = "/"
+    private var vlessXHTTPMode = "auto"
+    private var vlessXHTTPExtra = ""
+
+    private var vlessSecurity = "none"
+    private var vlessTLSSNI = ""
+    private var vlessTLSALPN = ""
+    private var vlessRealitySNI = ""
+    private var vlessRealityPublicKey = ""
+    private var vlessRealityShortId = ""
+    private var vlessFingerprint: TLSFingerprint = .chrome133
+
+    // VLESS XHTTP up/download detach: a separate download source, flattened into
+    // its own server + security + host/path (effectively a second proxy that the
+    // download stream is dialed to).
+    private var vlessXHTTPDownloadEnabled = false
+    private var vlessXHTTPDownloadAddress = ""
+    private var vlessXHTTPDownloadPort = ""
+    private var vlessXHTTPDownloadHost = ""
+    private var vlessXHTTPDownloadPath = "/"
+
+    private var vlessXHTTPDownloadSecurity = "none"
+    private var vlessXHTTPDownloadTLSSNI = ""
+    private var vlessXHTTPDownloadTLSALPN = ""
+    private var vlessXHTTPDownloadRealitySNI = ""
+    private var vlessXHTTPDownloadRealityPublicKey = ""
+    private var vlessXHTTPDownloadRealityShortId = ""
+    private var vlessXHTTPDownloadFingerprint: TLSFingerprint = .chrome133
+
     // Hysteria fields
     private var hysteriaPassword = ""
     private var hysteriaCC: HysteriaCongestionControl = .brutal
     private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
     private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
+    private var hysteriaSNI = ""
 
     // Nowhere fields
     private var nowhereKey = ""
-    
+
     // Trojan fields
     private var trojanPassword = ""
-    
+    private var trojanSNI = ""
+    private var trojanALPN = ""
+    private var trojanFingerprint: TLSFingerprint = .chrome133
+
     // AnyTLS fields
     private var anytlsPassword = ""
-    
+    private var anytlsSNI = ""
+    private var anytlsALPN = ""
+    private var anytlsFingerprint: TLSFingerprint = .chrome133
+
     // Shadowsocks fields
     private var ssPassword = ""
     private var ssMethod = "aes-128-gcm"
-    
+
     // SOCKS5 fields
     private var socks5Username = ""
     private var socks5Password = ""
-    
+
     // Sudoku fields
     private var sudokuKey = ""
     private var sudokuAEADMethod: SudokuAEADMethod = .chacha20Poly1305
@@ -93,12 +112,14 @@ class TVProxyEditorViewController: UITableViewController {
     private var sudokuHTTPMaskHost = ""
     private var sudokuHTTPMaskPathRoot = ""
     private var sudokuHTTPMaskMultiplex: SudokuHTTPMaskMultiplex = .off
-    
+
     // Shared credential fields for HTTPS/HTTP2/QUIC
     private var naiveUsername = ""
     private var naivePassword = ""
 
     private var isVLESS: Bool { selectedProtocol == .vless }
+    private var isVLESSReality: Bool { vlessSecurity == "reality" }
+    private var isVLESSTLS: Bool { vlessSecurity == "tls" }
     private var isHysteria: Bool { selectedProtocol == .hysteria }
     private var isNowhere: Bool { selectedProtocol == .nowhere }
     private var isTrojan: Bool { selectedProtocol == .trojan }
@@ -107,8 +128,6 @@ class TVProxyEditorViewController: UITableViewController {
     private var isSOCKS5: Bool { selectedProtocol == .socks5 }
     private var isSudoku: Bool { selectedProtocol == .sudoku }
     private var isNaive: Bool { selectedProtocol.isNaive }
-    private var isReality: Bool { security == "reality" }
-    private var isTLS: Bool { security == "tls" }
 
     // MARK: - Form Structure
 
@@ -119,19 +138,24 @@ class TVProxyEditorViewController: UITableViewController {
     }
 
     private enum FieldKey {
-        case name, address, port, uuid
-        case outboundProtocol, encryption, transport, flow, security
-        case mux, xudp
-        case wsHost, wsPath
-        case huHost, huPath
-        case grpcServiceName, grpcAuthority, grpcMode, grpcUserAgent
-        case xhttpHost, xhttpPath, xhttpMode
-        case tlsSNI, tlsALPN, fingerprint
-        case realitySNI, realityPublicKey, realityShortId
-        case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps
+        case name, address, port
+        case outboundProtocol
+        case vlessUUID, vlessEncryption, vlessTransport, vlessFlow, vlessSecurity
+        case vlessMux, vlessXUDP
+        case vlessWebSocketHost, vlessWebSocketPath
+        case vlessHTTPUpgradeHost, vlessHTTPUpgradePath
+        case vlessGRPCServiceName, vlessGRPCAuthority, vlessGRPCMode, vlessGRPCUserAgent
+        case vlessXHTTPHost, vlessXHTTPPath, vlessXHTTPMode
+        case vlessTLSSNI, vlessTLSALPN, vlessFingerprint
+        case vlessRealitySNI, vlessRealityPublicKey, vlessRealityShortId
+        case vlessXHTTPDownloadEnabled, vlessXHTTPDownloadAddress, vlessXHTTPDownloadPort
+        case vlessXHTTPDownloadSecurity, vlessXHTTPDownloadTLSSNI, vlessXHTTPDownloadTLSALPN, vlessXHTTPDownloadFingerprint
+        case vlessXHTTPDownloadRealitySNI, vlessXHTTPDownloadRealityPublicKey, vlessXHTTPDownloadRealityShortId
+        case vlessXHTTPDownloadHost, vlessXHTTPDownloadPath
+        case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps, hysteriaSNI
         case nowhereKey
-        case trojanPassword
-        case anytlsPassword
+        case trojanPassword, trojanSNI, trojanALPN, trojanFingerprint
+        case anytlsPassword, anytlsSNI, anytlsALPN, anytlsFingerprint
         case ssPassword, ssMethod
         case sudokuKey, sudokuAEADMethod, sudokuPaddingMin, sudokuPaddingMax
         case sudokuASCIIMode, sudokuCustomTables
@@ -174,12 +198,12 @@ class TVProxyEditorViewController: UITableViewController {
             .text(label: String(localized: "Port"), value: serverPort, placeholder: "443", key: .port),
         ]
         if isVLESS {
-            serverRows.append(.text(label: String(localized: "UUID", comment: "UUID for VLESS protocol"), value: uuid, placeholder: String(localized: "UUID", comment: "UUID for VLESS protocol"), key: .uuid))
+            serverRows.append(.text(label: String(localized: "UUID", comment: "UUID for VLESS protocol"), value: vlessUUID, placeholder: String(localized: "UUID", comment: "UUID for VLESS protocol"), key: .vlessUUID))
             // Encryption (mlkem768x25519plus) requires CryptoKit's
             // ML-KEM-768 — tvOS 26+ only. Older OSes refuse the feature
             // at dial time, so don't expose the field there.
             if #available(tvOS 26.0, *) {
-                serverRows.append(.text(label: String(localized: "Encryption", comment: "Encryption for VLESS protocol"), value: encryption, placeholder: "none", key: .encryption))
+                serverRows.append(.text(label: String(localized: "Encryption", comment: "Encryption for VLESS protocol"), value: vlessEncryption, placeholder: "none", key: .vlessEncryption))
             }
         } else if isHysteria {
             serverRows.append(.text(label: String(localized: "Password"), value: hysteriaPassword, placeholder: String(localized: "Password"), key: .hysteriaPassword, secure: true))
@@ -222,79 +246,135 @@ class TVProxyEditorViewController: UITableViewController {
             serverRows.append(.text(label: String(localized: "Password"), value: naivePassword, placeholder: String(localized: "Password"), key: .naivePassword, secure: true))
         }
         sections.append((String(localized: "Server"), serverRows))
-        
+
+        // Transport (VLESS only)
         if isVLESS {
             var transportRows: [RowType] = [
                 .selection(label: String(localized: "Transport", comment: "Transport for VLESS protocol"), value: transportDisplayValue, options: [
                     ("TCP", "tcp"), ("WebSocket", "ws"), ("HTTPUpgrade", "httpupgrade"), ("gRPC", "grpc"), ("XHTTP", "xhttp"),
-                ], key: .transport),
+                ], key: .vlessTransport),
             ]
-            if transport == "tcp" {
-                transportRows.append(.toggle(label: String(localized: "Mux", comment: "Mux for VLESS protocol TCP transport"), isOn: muxEnabled, key: .mux))
-                if muxEnabled {
-                    transportRows.append(.toggle(label: String(localized: "XUDP", comment: "XUDP for VLESS protocol TCP transport"), isOn: xudpEnabled, key: .xudp))
+            if vlessTransport == "tcp" {
+                transportRows.append(.toggle(label: String(localized: "Mux", comment: "Mux for VLESS protocol TCP transport"), isOn: vlessMuxEnabled, key: .vlessMux))
+                if vlessMuxEnabled {
+                    transportRows.append(.toggle(label: String(localized: "XUDP", comment: "XUDP for VLESS protocol TCP transport"), isOn: vlessXUDPEnabled, key: .vlessXUDP))
                 }
             }
-            if transport == "ws" {
-                transportRows.append(.text(label: String(localized: "Host"), value: wsHost, placeholder: String(localized: "Host"), key: .wsHost))
-                transportRows.append(.text(label: String(localized: "Path"), value: wsPath, placeholder: String(localized: "Path"), key: .wsPath))
+            if vlessTransport == "ws" {
+                transportRows.append(.text(label: String(localized: "Host"), value: vlessWebSocketHost, placeholder: String(localized: "Host"), key: .vlessWebSocketHost))
+                transportRows.append(.text(label: String(localized: "Path"), value: vlessWebSocketPath, placeholder: String(localized: "Path"), key: .vlessWebSocketPath))
             }
-            if transport == "httpupgrade" {
-                transportRows.append(.text(label: String(localized: "Host"), value: huHost, placeholder: String(localized: "Host"), key: .huHost))
-                transportRows.append(.text(label: String(localized: "Path"), value: huPath, placeholder: String(localized: "Path"), key: .huPath))
+            if vlessTransport == "httpupgrade" {
+                transportRows.append(.text(label: String(localized: "Host"), value: vlessHTTPUpgradeHost, placeholder: String(localized: "Host"), key: .vlessHTTPUpgradeHost))
+                transportRows.append(.text(label: String(localized: "Path"), value: vlessHTTPUpgradePath, placeholder: String(localized: "Path"), key: .vlessHTTPUpgradePath))
             }
-            if transport == "grpc" {
-                transportRows.append(.text(label: String(localized: "Service Name", comment: "Service Name for VLESS protocol gRPC transport"), value: grpcServiceName, placeholder: String(localized: "Service Name", comment: "Service Name for VLESS protocol gRPC transport"), key: .grpcServiceName))
-                transportRows.append(.text(label: String(localized: "Authority", comment: "Authority for VLESS protocol gRPC transport"), value: grpcAuthority, placeholder: String(localized: "Authority", comment: "Authority for VLESS protocol gRPC transport"), key: .grpcAuthority))
+            if vlessTransport == "grpc" {
+                transportRows.append(.text(label: String(localized: "Service Name", comment: "Service Name for VLESS protocol gRPC transport"), value: vlessGRPCServiceName, placeholder: String(localized: "Service Name", comment: "Service Name for VLESS protocol gRPC transport"), key: .vlessGRPCServiceName))
+                transportRows.append(.text(label: String(localized: "Authority", comment: "Authority for VLESS protocol gRPC transport"), value: vlessGRPCAuthority, placeholder: String(localized: "Authority", comment: "Authority for VLESS protocol gRPC transport"), key: .vlessGRPCAuthority))
                 transportRows.append(.selection(label: String(localized: "Mode"), value: grpcModeDisplayValue, options: [
                     ("Gun", "gun"),
                     ("Multi", "multi"),
-                ], key: .grpcMode))
-                transportRows.append(.text(label: String(localized: "User Agent"), value: grpcUserAgent, placeholder: String(localized: "User Agent"), key: .grpcUserAgent))
+                ], key: .vlessGRPCMode))
+                transportRows.append(.text(label: String(localized: "User Agent"), value: vlessGRPCUserAgent, placeholder: String(localized: "User Agent"), key: .vlessGRPCUserAgent))
             }
-            if transport == "xhttp" {
-                transportRows.append(.text(label: String(localized: "Host"), value: xhttpHost, placeholder: String(localized: "Host"), key: .xhttpHost))
-                transportRows.append(.text(label: String(localized: "Path"), value: xhttpPath, placeholder: String(localized: "Path"), key: .xhttpPath))
+            if vlessTransport == "xhttp" {
+                transportRows.append(.text(label: String(localized: "Host"), value: vlessXHTTPHost, placeholder: String(localized: "Host"), key: .vlessXHTTPHost))
+                transportRows.append(.text(label: String(localized: "Path"), value: vlessXHTTPPath, placeholder: String(localized: "Path"), key: .vlessXHTTPPath))
                 transportRows.append(.selection(label: String(localized: "Mode"), value: xhttpModeDisplayValue, options: [
                     (String(localized: "Auto"), "auto"),
                     ("Packet Up", "packet-up"),
                     ("Stream Up", "stream-up"),
                     ("Stream One", "stream-one"),
-                ], key: .xhttpMode))
+                ], key: .vlessXHTTPMode))
             }
             sections.append((nil, [
                 .selection(label: String(localized: "Flow", comment: "Flow for VLESS protocol TCP transport"), value: flowDisplayValue, options: [
                     (String(localized: "None"), ""),
                     ("Vision", "xtls-rprx-vision"),
-                    ("Vision + UDP 443", "xtls-rprx-vision-udp443"),
-                ], key: .flow),
+                ], key: .vlessFlow),
             ]))
             sections.append((String(localized: "Transport"), transportRows))
         }
-        
-        if isVLESS || isTrojan || isAnyTLS {
-            var tlsRows: [RowType] = []
-            if isVLESS {
-                tlsRows.append(.selection(label: String(localized: "Security", comment: "Security for VLESS protocol"), value: securityDisplayValue, options: [
+
+        // Security / TLS — one section per protocol
+        if isVLESS {
+            var tlsRows: [RowType] = [
+                .selection(label: String(localized: "Security", comment: "Security for VLESS protocol"), value: securityDisplayValue, options: [
                     (String("None"), "none"),
                     ("TLS", "tls"),
                     ("Reality", "reality"),
-                ], key: .security))
+                ], key: .vlessSecurity),
+            ]
+            if isVLESSTLS {
+                tlsRows.append(.text(label: String(localized: "SNI"), value: vlessTLSSNI, placeholder: String(localized: "SNI"), key: .vlessTLSSNI))
+                tlsRows.append(.text(label: String(localized: "ALPN"), value: vlessTLSALPN, placeholder: String(localized: "h2,http/1.1"), key: .vlessTLSALPN))
+                tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: vlessFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .vlessFingerprint))
             }
-            if isTLS || isTrojan || isAnyTLS {
-                tlsRows.append(.text(label: String(localized: "SNI"), value: tlsSNI, placeholder: String(localized: "SNI"), key: .tlsSNI))
-                tlsRows.append(.text(label: String(localized: "ALPN"), value: tlsALPN, placeholder: String(localized: "h2,http/1.1"), key: .tlsALPN))
-                tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: fingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .fingerprint))
+            if isVLESSReality {
+                tlsRows.append(.text(label: String(localized: "SNI"), value: vlessRealitySNI, placeholder: String(localized: "SNI"), key: .vlessRealitySNI))
+                tlsRows.append(.text(label: String(localized: "Public Key", comment: "Public Key for Reality security layer"), value: vlessRealityPublicKey, placeholder: String(localized: "Public Key", comment: "Public Key for Reality security layer"), key: .vlessRealityPublicKey))
+                tlsRows.append(.text(label: String(localized: "Short ID", comment: "Short ID for Reality security layer"), value: vlessRealityShortId, placeholder: String(localized: "Short ID", comment: "Short ID for Reality security layer"), key: .vlessRealityShortId))
+                tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: vlessFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .vlessFingerprint))
             }
-            if isReality {
-                tlsRows.append(.text(label: String(localized: "SNI"), value: realitySNI, placeholder: String(localized: "SNI"), key: .realitySNI))
-                tlsRows.append(.text(label: String(localized: "Public Key", comment: "Public Key for Reality security layer"), value: realityPublicKey, placeholder: String(localized: "Public Key", comment: "Public Key for Reality security layer"), key: .realityPublicKey))
-                tlsRows.append(.text(label: String(localized: "Short ID", comment: "Short ID for Reality security layer"), value: realityShortId, placeholder: String(localized: "Short ID", comment: "Short ID for Reality security layer"), key: .realityShortId))
-                tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: fingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .fingerprint))
-            }
-            sections.append((String(localized: "TLS"), tlsRows))
+            // When the download stream is detached, the main TLS only secures the
+            // upload leg — label it so it pairs with the "TLS (Download)" section.
+            let tlsTitle = (vlessTransport == "xhttp" && vlessXHTTPDownloadEnabled)
+                ? String(localized: "TLS (Upload)") : String(localized: "TLS")
+            sections.append((tlsTitle, tlsRows))
+        } else if isTrojan {
+            sections.append((String(localized: "TLS"), [
+                .text(label: String(localized: "SNI"), value: trojanSNI, placeholder: String(localized: "SNI"), key: .trojanSNI),
+                .text(label: String(localized: "ALPN"), value: trojanALPN, placeholder: String(localized: "h2,http/1.1"), key: .trojanALPN),
+                .selection(label: String(localized: "Fingerprint"), value: trojanFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .trojanFingerprint),
+            ]))
+        } else if isAnyTLS {
+            sections.append((String(localized: "TLS"), [
+                .text(label: String(localized: "SNI"), value: anytlsSNI, placeholder: String(localized: "SNI"), key: .anytlsSNI),
+                .text(label: String(localized: "ALPN"), value: anytlsALPN, placeholder: String(localized: "h2,http/1.1"), key: .anytlsALPN),
+                .selection(label: String(localized: "Fingerprint"), value: anytlsFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .anytlsFingerprint),
+            ]))
+        } else if isHysteria {
+            sections.append((nil, [
+                .text(label: String(localized: "SNI"), value: hysteriaSNI, placeholder: String(localized: "SNI"), key: .hysteriaSNI),
+            ]))
         }
-        
+
+        // XHTTP up/download detach
+        if isVLESS && vlessTransport == "xhttp" {
+            var detachRows: [RowType] = [
+                .toggle(label: String(localized: "Detached Download"), isOn: vlessXHTTPDownloadEnabled, key: .vlessXHTTPDownloadEnabled),
+            ]
+            if vlessXHTTPDownloadEnabled {
+                detachRows.append(.text(label: String(localized: "Address"), value: vlessXHTTPDownloadAddress, placeholder: String(localized: "Address"), key: .vlessXHTTPDownloadAddress))
+                detachRows.append(.text(label: String(localized: "Port"), value: vlessXHTTPDownloadPort, placeholder: "443", key: .vlessXHTTPDownloadPort))
+            }
+            sections.append((nil, detachRows))
+
+            if vlessXHTTPDownloadEnabled {
+                var downloadRows: [RowType] = [
+                    .selection(label: String(localized: "Security", comment: "Security for VLESS protocol"), value: downloadSecurityDisplayValue, options: [
+                        (String(localized: "None"), "none"),
+                        ("TLS", "tls"),
+                        ("Reality", "reality"),
+                    ], key: .vlessXHTTPDownloadSecurity),
+                ]
+                if vlessXHTTPDownloadSecurity == "tls" {
+                    downloadRows.append(.text(label: String(localized: "SNI"), value: vlessXHTTPDownloadTLSSNI, placeholder: String(localized: "SNI"), key: .vlessXHTTPDownloadTLSSNI))
+                    downloadRows.append(.text(label: String(localized: "ALPN"), value: vlessXHTTPDownloadTLSALPN, placeholder: String(localized: "h2,http/1.1"), key: .vlessXHTTPDownloadTLSALPN))
+                    downloadRows.append(.selection(label: String(localized: "Fingerprint"), value: vlessXHTTPDownloadFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .vlessXHTTPDownloadFingerprint))
+                }
+                if vlessXHTTPDownloadSecurity == "reality" {
+                    downloadRows.append(.text(label: String(localized: "SNI"), value: vlessXHTTPDownloadRealitySNI, placeholder: String(localized: "SNI"), key: .vlessXHTTPDownloadRealitySNI))
+                    downloadRows.append(.text(label: String(localized: "Public Key", comment: "Public Key for Reality security layer"), value: vlessXHTTPDownloadRealityPublicKey, placeholder: String(localized: "Public Key", comment: "Public Key for Reality security layer"), key: .vlessXHTTPDownloadRealityPublicKey))
+                    downloadRows.append(.text(label: String(localized: "Short ID", comment: "Short ID for Reality security layer"), value: vlessXHTTPDownloadRealityShortId, placeholder: String(localized: "Short ID", comment: "Short ID for Reality security layer"), key: .vlessXHTTPDownloadRealityShortId))
+                    downloadRows.append(.selection(label: String(localized: "Fingerprint"), value: vlessXHTTPDownloadFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .vlessXHTTPDownloadFingerprint))
+                }
+                downloadRows.append(.text(label: String(localized: "Host"), value: vlessXHTTPDownloadHost, placeholder: String(localized: "Host"), key: .vlessXHTTPDownloadHost))
+                downloadRows.append(.text(label: String(localized: "Path"), value: vlessXHTTPDownloadPath, placeholder: String(localized: "Path"), key: .vlessXHTTPDownloadPath))
+                sections.append((String(localized: "TLS (Download)"), downloadRows))
+            }
+        }
+
         if isSudoku {
             var httpMaskRows: [RowType] = [
                 .toggle(label: String(localized: "Disable HTTP Mask", comment: "Disable HTTP Mask for Sudoku protocol"), isOn: sudokuHTTPMaskDisable, key: .sudokuHTTPMaskDisable),
@@ -311,7 +391,7 @@ class TVProxyEditorViewController: UITableViewController {
 
         return sections
     }
-    
+
     private var ssMethodDisplayValue: String {
         switch ssMethod {
         case "none": String(localized: "None")
@@ -326,54 +406,69 @@ class TVProxyEditorViewController: UITableViewController {
     }
 
     private var transportDisplayValue: String {
-        switch transport {
+        switch vlessTransport {
         case "tcp": "TCP"
         case "ws": "WebSocket"
         case "httpupgrade": "HTTPUpgrade"
         case "grpc": "gRPC"
         case "xhttp": "XHTTP"
-        default: transport
+        default: vlessTransport
         }
     }
 
     private var grpcModeDisplayValue: String {
-        switch grpcMode {
+        switch vlessGRPCMode {
         case "gun": "Gun"
         case "multi": "Multi"
-        default: grpcMode
+        default: vlessGRPCMode
         }
     }
 
     private var flowDisplayValue: String {
-        switch flow {
+        switch vlessFlow {
         case "xtls-rprx-vision": "Vision"
-        case "xtls-rprx-vision-udp443": "Vision + UDP 443"
         default: String(localized: "None")
         }
     }
 
     private var xhttpModeDisplayValue: String {
-        switch xhttpMode {
+        switch vlessXHTTPMode {
         case "auto": String(localized: "Auto")
         case "packet-up": "Packet Up"
         case "stream-up": "Stream Up"
         case "stream-one": "Stream One"
-        default: xhttpMode
+        default: vlessXHTTPMode
         }
     }
+
     private var securityDisplayValue: String {
-        switch security {
+        switch vlessSecurity {
         case "none": String(localized: "None")
         case "tls": "TLS"
         case "reality": "Reality"
-        default: security
+        default: vlessSecurity
+        }
+    }
+
+    private var downloadSecurityDisplayValue: String {
+        switch vlessXHTTPDownloadSecurity {
+        case "none": String(localized: "None")
+        case "tls": "TLS"
+        case "reality": "Reality"
+        default: vlessXHTTPDownloadSecurity
         }
     }
 
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
         if isVLESS {
-            return UUID(uuidString: uuid) != nil && (!isReality || (!realitySNI.isEmpty && !realityPublicKey.isEmpty))
+            guard UUID(uuidString: vlessUUID) != nil,
+                  !isVLESSReality || (!vlessRealitySNI.isEmpty && !vlessRealityPublicKey.isEmpty) else { return false }
+            if vlessTransport == "xhttp", vlessXHTTPDownloadEnabled {
+                guard !vlessXHTTPDownloadAddress.isEmpty, UInt16(vlessXHTTPDownloadPort) != nil else { return false }
+                if vlessXHTTPDownloadSecurity == "reality", vlessXHTTPDownloadRealityPublicKey.isEmpty { return false }
+            }
+            return true
         }
         if isHysteria {
             if hysteriaPassword.isEmpty { return false }
@@ -545,50 +640,67 @@ class TVProxyEditorViewController: UITableViewController {
         case .name: name = value
         case .address: serverAddress = value
         case .port: serverPort = value
-        case .uuid: uuid = value
         case .outboundProtocol:
             if let proto = OutboundProtocol(rawValue: value) {
                 selectedProtocol = proto
-                if isHysteria || isNowhere || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
-                    flow = ""
-                    if security == "reality" { security = "none" }
-                }
             }
-        case .encryption: encryption = value
-        case .transport:
-            transport = value
-        case .flow: flow = value
-        case .security: security = value
-        case .mux:
-            muxEnabled = value == "true"
-            if !muxEnabled { xudpEnabled = false }
-        case .xudp: xudpEnabled = value == "true"
-        case .wsHost: wsHost = value
-        case .wsPath: wsPath = value
-        case .huHost: huHost = value
-        case .huPath: huPath = value
-        case .grpcServiceName: grpcServiceName = value
-        case .grpcAuthority: grpcAuthority = value
-        case .grpcMode: grpcMode = value
-        case .grpcUserAgent: grpcUserAgent = value
-        case .xhttpHost: xhttpHost = value
-        case .xhttpPath: xhttpPath = value
-        case .xhttpMode: xhttpMode = value
-        case .tlsSNI: tlsSNI = value
-        case .tlsALPN: tlsALPN = value
-        case .fingerprint:
-            if let fp = TLSFingerprint(rawValue: value) { fingerprint = fp }
-        case .realitySNI: realitySNI = value
-        case .realityPublicKey: realityPublicKey = value
-        case .realityShortId: realityShortId = value
+        case .vlessUUID: vlessUUID = value
+        case .vlessEncryption: vlessEncryption = value
+        case .vlessTransport: vlessTransport = value
+        case .vlessFlow: vlessFlow = value
+        case .vlessSecurity: vlessSecurity = value
+        case .vlessMux:
+            vlessMuxEnabled = value == "true"
+            if !vlessMuxEnabled { vlessXUDPEnabled = false }
+        case .vlessXUDP: vlessXUDPEnabled = value == "true"
+        case .vlessWebSocketHost: vlessWebSocketHost = value
+        case .vlessWebSocketPath: vlessWebSocketPath = value
+        case .vlessHTTPUpgradeHost: vlessHTTPUpgradeHost = value
+        case .vlessHTTPUpgradePath: vlessHTTPUpgradePath = value
+        case .vlessGRPCServiceName: vlessGRPCServiceName = value
+        case .vlessGRPCAuthority: vlessGRPCAuthority = value
+        case .vlessGRPCMode: vlessGRPCMode = value
+        case .vlessGRPCUserAgent: vlessGRPCUserAgent = value
+        case .vlessXHTTPHost: vlessXHTTPHost = value
+        case .vlessXHTTPPath: vlessXHTTPPath = value
+        case .vlessXHTTPMode: vlessXHTTPMode = value
+        case .vlessTLSSNI: vlessTLSSNI = value
+        case .vlessTLSALPN: vlessTLSALPN = value
+        case .vlessFingerprint:
+            if let fp = TLSFingerprint(rawValue: value) { vlessFingerprint = fp }
+        case .vlessRealitySNI: vlessRealitySNI = value
+        case .vlessRealityPublicKey: vlessRealityPublicKey = value
+        case .vlessRealityShortId: vlessRealityShortId = value
+        case .vlessXHTTPDownloadEnabled: vlessXHTTPDownloadEnabled = value == "true"
+        case .vlessXHTTPDownloadAddress: vlessXHTTPDownloadAddress = value
+        case .vlessXHTTPDownloadPort: vlessXHTTPDownloadPort = value
+        case .vlessXHTTPDownloadSecurity: vlessXHTTPDownloadSecurity = value
+        case .vlessXHTTPDownloadTLSSNI: vlessXHTTPDownloadTLSSNI = value
+        case .vlessXHTTPDownloadTLSALPN: vlessXHTTPDownloadTLSALPN = value
+        case .vlessXHTTPDownloadFingerprint:
+            if let fp = TLSFingerprint(rawValue: value) { vlessXHTTPDownloadFingerprint = fp }
+        case .vlessXHTTPDownloadRealitySNI: vlessXHTTPDownloadRealitySNI = value
+        case .vlessXHTTPDownloadRealityPublicKey: vlessXHTTPDownloadRealityPublicKey = value
+        case .vlessXHTTPDownloadRealityShortId: vlessXHTTPDownloadRealityShortId = value
+        case .vlessXHTTPDownloadHost: vlessXHTTPDownloadHost = value
+        case .vlessXHTTPDownloadPath: vlessXHTTPDownloadPath = value
         case .hysteriaPassword: hysteriaPassword = value
         case .hysteriaCC:
             if let cc = HysteriaCongestionControl(rawValue: value) { hysteriaCC = cc }
         case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
         case .hysteriaDownloadMbps: hysteriaDownloadMbpsText = value
+        case .hysteriaSNI: hysteriaSNI = value
         case .nowhereKey: nowhereKey = value
         case .trojanPassword: trojanPassword = value
+        case .trojanSNI: trojanSNI = value
+        case .trojanALPN: trojanALPN = value
+        case .trojanFingerprint:
+            if let fp = TLSFingerprint(rawValue: value) { trojanFingerprint = fp }
         case .anytlsPassword: anytlsPassword = value
+        case .anytlsSNI: anytlsSNI = value
+        case .anytlsALPN: anytlsALPN = value
+        case .anytlsFingerprint:
+            if let fp = TLSFingerprint(rawValue: value) { anytlsFingerprint = fp }
         case .ssPassword: ssPassword = value
         case .ssMethod: ssMethod = value
         case .socks5Username: socks5Username = value
@@ -623,71 +735,93 @@ class TVProxyEditorViewController: UITableViewController {
         serverAddress = configuration.serverAddress
         serverPort = String(configuration.serverPort)
         if case .vless(let vlessUUID, let vlessEncryption, let vlessFlow, _, _, _, _) = configuration.outbound {
-            uuid = vlessUUID.uuidString
-            encryption = vlessEncryption
-            flow = vlessFlow ?? ""
+            self.vlessUUID = vlessUUID.uuidString
+            self.vlessEncryption = vlessEncryption
+            self.vlessFlow = vlessFlow ?? ""
         } else {
-            uuid = configuration.id.uuidString
-            encryption = "none"
-            flow = ""
+            vlessUUID = configuration.id.uuidString
+            vlessEncryption = "none"
+            vlessFlow = ""
         }
-        transport = configuration.transportLayer.tag
-        security = configuration.securityLayer.tag
-        muxEnabled = configuration.muxEnabled
-        xudpEnabled = configuration.xudpEnabled
+        if isVLESS {
+            vlessTransport = configuration.transportLayer.tag
+            vlessSecurity = configuration.securityLayer.tag
+            vlessMuxEnabled = configuration.muxEnabled
+            vlessXUDPEnabled = configuration.xudpEnabled
 
-        if case .ws(let ws) = configuration.transportLayer {
-            wsHost = ws.host
-            wsPath = ws.path
-        }
-        if case .httpUpgrade(let hu) = configuration.transportLayer {
-            huHost = hu.host
-            huPath = hu.path
-        }
-        if case .grpc(let grpc) = configuration.transportLayer {
-            grpcServiceName = grpc.serviceName
-            grpcAuthority = grpc.authority
-            grpcMode = grpc.multiMode ? "multi" : "gun"
-            grpcUserAgent = grpc.userAgent
-        }
-        if case .xhttp(let xhttp) = configuration.transportLayer {
-            xhttpHost = xhttp.host
-            xhttpPath = xhttp.path
-            xhttpMode = xhttp.mode.rawValue
-            xhttpExtra = Self.encodeExtra(from: xhttp)
-        }
-        if case .tls(let tls) = configuration.securityLayer {
-            tlsSNI = tls.serverName
-            tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
-            fingerprint = tls.fingerprint
-        }
-        if case .reality(let reality) = configuration.securityLayer {
-            realitySNI = reality.serverName
-            realityPublicKey = reality.publicKey.base64URLEncodedString()
-            realityShortId = reality.shortId.hexEncodedString()
-            fingerprint = reality.fingerprint
+            if case .ws(let ws) = configuration.transportLayer {
+                vlessWebSocketHost = ws.host
+                vlessWebSocketPath = ws.path
+            }
+            if case .httpUpgrade(let httpUpgrade) = configuration.transportLayer {
+                vlessHTTPUpgradeHost = httpUpgrade.host
+                vlessHTTPUpgradePath = httpUpgrade.path
+            }
+            if case .grpc(let grpc) = configuration.transportLayer {
+                vlessGRPCServiceName = grpc.serviceName
+                vlessGRPCAuthority = grpc.authority
+                vlessGRPCMode = grpc.multiMode ? "multi" : "gun"
+                vlessGRPCUserAgent = grpc.userAgent
+            }
+            if case .xhttp(let xhttp) = configuration.transportLayer {
+                vlessXHTTPHost = xhttp.host
+                vlessXHTTPPath = xhttp.path
+                vlessXHTTPMode = xhttp.mode.rawValue
+                vlessXHTTPExtra = Self.encodeExtra(from: xhttp)
+                if let download = xhttp.downloadSettings {
+                    vlessXHTTPDownloadEnabled = true
+                    vlessXHTTPDownloadAddress = download.serverAddress
+                    vlessXHTTPDownloadPort = String(download.serverPort)
+                    vlessXHTTPDownloadSecurity = download.security
+                    if let tls = download.tls {
+                        vlessXHTTPDownloadTLSSNI = tls.serverName
+                        vlessXHTTPDownloadTLSALPN = tls.alpn?.joined(separator: ",") ?? ""
+                        vlessXHTTPDownloadFingerprint = tls.fingerprint
+                    }
+                    if let reality = download.reality {
+                        vlessXHTTPDownloadRealitySNI = reality.serverName
+                        vlessXHTTPDownloadRealityPublicKey = reality.publicKey.base64URLEncodedString()
+                        vlessXHTTPDownloadRealityShortId = reality.shortId.hexEncodedString()
+                        vlessXHTTPDownloadFingerprint = reality.fingerprint
+                    }
+                    vlessXHTTPDownloadHost = download.xhttp.host
+                    vlessXHTTPDownloadPath = download.xhttp.path
+                }
+            }
+            if case .tls(let tls) = configuration.securityLayer {
+                vlessTLSSNI = tls.serverName
+                vlessTLSALPN = tls.alpn?.joined(separator: ",") ?? ""
+                vlessFingerprint = tls.fingerprint
+            }
+            if case .reality(let reality) = configuration.securityLayer {
+                vlessRealitySNI = reality.serverName
+                vlessRealityPublicKey = reality.publicKey.base64URLEncodedString()
+                vlessRealityShortId = reality.shortId.hexEncodedString()
+                vlessFingerprint = reality.fingerprint
+            }
         }
 
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, _):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
             hysteriaPassword = password
             hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
+            hysteriaSNI = sni
         case .nowhere(let key):
             nowhereKey = key
         case .trojan(let password, let tls):
             trojanPassword = password
-            tlsSNI = tls.serverName
-            tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
-            fingerprint = tls.fingerprint
+            trojanSNI = tls.serverName
+            trojanALPN = tls.alpn?.joined(separator: ",") ?? ""
+            trojanFingerprint = tls.fingerprint
         case .anytls(let password, _, _, _, let tls):
             anytlsPassword = password
-            tlsSNI = tls.serverName
-            tlsALPN = tls.alpn?.joined(separator: ",") ?? ""
-            fingerprint = tls.fingerprint
+            anytlsSNI = tls.serverName
+            anytlsALPN = tls.alpn?.joined(separator: ",") ?? ""
+            anytlsFingerprint = tls.fingerprint
         case .shadowsocks(let password, let method):
             ssPassword = password
             ssMethod = method
@@ -726,6 +860,45 @@ class TVProxyEditorViewController: UITableViewController {
 
     private func updateSaveButton() {
         navigationItem.rightBarButtonItem?.isEnabled = isValid
+    }
+
+    /// Builds the `downloadSettings` object for the XHTTP `extra` blob from the
+    /// flattened detach fields, or nil when the split is off or its address/port
+    /// are missing. Keys match what `XHTTPConfiguration.parse` reads back.
+    private func xhttpDownloadSettingsDict() -> [String: Any]? {
+        guard vlessXHTTPDownloadEnabled,
+              !vlessXHTTPDownloadAddress.isEmpty,
+              let port = UInt16(vlessXHTTPDownloadPort) else { return nil }
+        var download: [String: Any] = [
+            "address": vlessXHTTPDownloadAddress,
+            "port": Int(port),
+            "security": vlessXHTTPDownloadSecurity
+        ]
+        switch vlessXHTTPDownloadSecurity {
+        case "tls":
+            var tls: [String: Any] = ["fingerprint": vlessXHTTPDownloadFingerprint.rawValue]
+            if !vlessXHTTPDownloadTLSSNI.isEmpty { tls["serverName"] = vlessXHTTPDownloadTLSSNI }
+            let alpn = vlessXHTTPDownloadTLSALPN
+                .split(separator: ",")
+                .map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            if !alpn.isEmpty { tls["alpn"] = alpn }
+            download["tlsSettings"] = tls
+        case "reality":
+            download["realitySettings"] = [
+                "serverName": vlessXHTTPDownloadRealitySNI,
+                "publicKey": vlessXHTTPDownloadRealityPublicKey,
+                "shortId": vlessXHTTPDownloadRealityShortId,
+                "fingerprint": vlessXHTTPDownloadFingerprint.rawValue
+            ]
+        default:
+            break
+        }
+        var xhttpSettings: [String: Any] = [:]
+        if !vlessXHTTPDownloadHost.isEmpty { xhttpSettings["host"] = vlessXHTTPDownloadHost }
+        if !vlessXHTTPDownloadPath.isEmpty, vlessXHTTPDownloadPath != "/" { xhttpSettings["path"] = vlessXHTTPDownloadPath }
+        if !xhttpSettings.isEmpty { download["xhttpSettings"] = xhttpSettings }
+        return download
     }
 
     private static func encodeExtra(from configuration: XHTTPConfiguration) -> String {
@@ -773,53 +946,65 @@ class TVProxyEditorViewController: UITableViewController {
         if isHysteria || isNowhere || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = existingConfiguration?.id ?? UUID()
         } else {
-            guard let uuid = UUID(uuidString: uuid) else { return }
-            parsedUUID = uuid
-        }
-        
-        var tlsConfiguration: TLSConfiguration?
-        if isTLS {
-            let sniValue = tlsSNI.isEmpty ? serverAddress : tlsSNI
-            let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
-            tlsConfiguration = TLSConfiguration(serverName: sniValue, alpn: alpn, fingerprint: fingerprint)
+            guard let parsed = UUID(uuidString: vlessUUID) else { return }
+            parsedUUID = parsed
         }
 
-        var realityConfiguration: RealityConfiguration?
-        if isReality {
-            guard let pk = Data(base64URLEncoded: realityPublicKey) else { return }
-            let sid = Data(hexString: realityShortId) ?? Data()
-            realityConfiguration = RealityConfiguration(serverName: realitySNI, publicKey: pk, shortId: sid, fingerprint: fingerprint)
+        var vlessTLSConfiguration: TLSConfiguration?
+        if isVLESSTLS {
+            let sni = vlessTLSSNI.isEmpty ? serverAddress : vlessTLSSNI
+            let alpn: [String]? = vlessTLSALPN.isEmpty ? nil : vlessTLSALPN.split(separator: ",").map { String($0) }
+            vlessTLSConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: vlessFingerprint)
         }
 
-        var wsConfig: WebSocketConfiguration?
-        if transport == "ws" {
-            wsConfig = WebSocketConfiguration(host: wsHost.isEmpty ? serverAddress : wsHost, path: wsPath.isEmpty ? "/" : wsPath)
+        var vlessRealityConfiguration: RealityConfiguration?
+        if isVLESSReality {
+            guard let pk = Data(base64URLEncoded: vlessRealityPublicKey) else { return }
+            let sid = Data(hexString: vlessRealityShortId) ?? Data()
+            vlessRealityConfiguration = RealityConfiguration(serverName: vlessRealitySNI, publicKey: pk, shortId: sid, fingerprint: vlessFingerprint)
         }
 
-        var huConfig: HTTPUpgradeConfiguration?
-        if transport == "httpupgrade" {
-            huConfig = HTTPUpgradeConfiguration(host: huHost.isEmpty ? serverAddress : huHost, path: huPath.isEmpty ? "/" : huPath)
+        var vlessWebSocketConfiguration: WebSocketConfiguration?
+        if vlessTransport == "ws" {
+            vlessWebSocketConfiguration = WebSocketConfiguration(host: vlessWebSocketHost.isEmpty ? serverAddress : vlessWebSocketHost, path: vlessWebSocketPath.isEmpty ? "/" : vlessWebSocketPath)
         }
-        
-        var grpcConfig: GRPCConfiguration?
-        if transport == "grpc" {
-            grpcConfig = GRPCConfiguration(
-                serviceName: grpcServiceName,
-                authority: grpcAuthority,
-                multiMode: grpcMode == "multi",
-                userAgent: grpcUserAgent
+
+        var vlessHTTPUpgradeConfiguration: HTTPUpgradeConfiguration?
+        if vlessTransport == "httpupgrade" {
+            vlessHTTPUpgradeConfiguration = HTTPUpgradeConfiguration(host: vlessHTTPUpgradeHost.isEmpty ? serverAddress : vlessHTTPUpgradeHost, path: vlessHTTPUpgradePath.isEmpty ? "/" : vlessHTTPUpgradePath)
+        }
+
+        var vlessGRPCConfiguration: GRPCConfiguration?
+        if vlessTransport == "grpc" {
+            vlessGRPCConfiguration = GRPCConfiguration(
+                serviceName: vlessGRPCServiceName,
+                authority: vlessGRPCAuthority,
+                multiMode: vlessGRPCMode == "multi",
+                userAgent: vlessGRPCUserAgent
             )
         }
 
-        var xhttpConfig: XHTTPConfiguration?
-        if transport == "xhttp" {
-            let host = xhttpHost.isEmpty ? serverAddress : xhttpHost
-            let mode = XHTTPMode(rawValue: xhttpMode) ?? .auto
-            var params: [String: String] = ["host": host, "path": xhttpPath, "mode": mode.rawValue]
-            if !xhttpExtra.isEmpty {
-                params["extra"] = xhttpExtra
+        var vlessXHTTPConfiguration: XHTTPConfiguration?
+        if vlessTransport == "xhttp" {
+            let host = vlessXHTTPHost.isEmpty ? serverAddress : vlessXHTTPHost
+            let mode = XHTTPMode(rawValue: vlessXHTTPMode) ?? .auto
+            var params: [String: String] = ["host": host, "path": vlessXHTTPPath, "mode": mode.rawValue]
+            // `extra` carries the advanced fields (vlessXHTTPExtra) plus the detached
+            // download source; merge so neither clobbers the other.
+            var extra: [String: Any] = [:]
+            if !vlessXHTTPExtra.isEmpty, let data = vlessXHTTPExtra.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                extra = parsed
             }
-            xhttpConfig = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress)
+            if let download = xhttpDownloadSettingsDict() {
+                extra["downloadSettings"] = download
+            }
+            if !extra.isEmpty,
+               let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
+               let json = String(data: data, encoding: .utf8) {
+                params["extra"] = json
+            }
+            vlessXHTTPConfiguration = XHTTPConfiguration.parse(from: params, serverAddress: serverAddress)
         }
 
         let bareAddress = serverAddress.hasPrefix("[") && serverAddress.hasSuffix("]")
@@ -828,53 +1013,52 @@ class TVProxyEditorViewController: UITableViewController {
         let outbound: Outbound
         switch selectedProtocol {
         case .vless:
-            let transportLayer: TransportLayer
-            if let wsConfig { transportLayer = .ws(wsConfig) }
-            else if let huConfig { transportLayer = .httpUpgrade(huConfig) }
-            else if let grpcConfig { transportLayer = .grpc(grpcConfig) }
-            else if let xhttpConfig { transportLayer = .xhttp(xhttpConfig) }
-            else { transportLayer = .tcp }
+            let vlessTransportLayer: TransportLayer
+            if let vlessWebSocketConfiguration { vlessTransportLayer = .ws(vlessWebSocketConfiguration) }
+            else if let vlessHTTPUpgradeConfiguration { vlessTransportLayer = .httpUpgrade(vlessHTTPUpgradeConfiguration) }
+            else if let vlessGRPCConfiguration { vlessTransportLayer = .grpc(vlessGRPCConfiguration) }
+            else if let vlessXHTTPConfiguration { vlessTransportLayer = .xhttp(vlessXHTTPConfiguration) }
+            else { vlessTransportLayer = .tcp }
 
-            let securityLayer: SecurityLayer
-            if let realityConfiguration { securityLayer = .reality(realityConfiguration) }
-            else if let tlsConfiguration { securityLayer = .tls(tlsConfiguration) }
-            else { securityLayer = .none }
+            let vlessSecurityLayer: SecurityLayer
+            if let vlessRealityConfiguration { vlessSecurityLayer = .reality(vlessRealityConfiguration) }
+            else if let vlessTLSConfiguration { vlessSecurityLayer = .tls(vlessTLSConfiguration) }
+            else { vlessSecurityLayer = .none }
 
             outbound = .vless(
                 uuid: parsedUUID,
-                encryption: encryption,
-                flow: flow.isEmpty ? nil : flow,
-                transport: transportLayer,
-                security: securityLayer,
-                muxEnabled: muxEnabled,
-                xudpEnabled: xudpEnabled
+                encryption: vlessEncryption,
+                flow: vlessFlow.isEmpty ? nil : vlessFlow,
+                transport: vlessTransportLayer,
+                security: vlessSecurityLayer,
+                muxEnabled: vlessMuxEnabled,
+                xudpEnabled: vlessXUDPEnabled
             )
         case .hysteria:
             let up = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
             let down = HysteriaCongestionControl.clampDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault)
-            let existingSNI: String?
-            if let existing = existingConfiguration, case .hysteria(_, _, _, _, let s) = existing.outbound { existingSNI = s } else { existingSNI = nil }
+            let sni = hysteriaSNI.isEmpty ? bareAddress : hysteriaSNI
             outbound = .hysteria(
                 password: hysteriaPassword,
                 congestionControl: hysteriaCC,
                 uploadMbps: up,
                 downloadMbps: down,
-                sni: existingSNI ?? bareAddress
+                sni: sni
             )
         case .nowhere:
             outbound = .nowhere(
                 key: nowhereKey
             )
         case .trojan:
-            let sniValue = tlsSNI.isEmpty ? bareAddress : tlsSNI
-            let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
+            let sni = trojanSNI.isEmpty ? bareAddress : trojanSNI
+            let alpn: [String]? = trojanALPN.isEmpty ? nil : trojanALPN.split(separator: ",").map { String($0) }
             outbound = .trojan(
                 password: trojanPassword,
-                tls: TLSConfiguration(serverName: sniValue, alpn: alpn, fingerprint: fingerprint)
+                tls: TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: trojanFingerprint)
             )
         case .anytls:
-            let sniValue = tlsSNI.isEmpty ? bareAddress : tlsSNI
-            let alpn: [String]? = tlsALPN.isEmpty ? nil : tlsALPN.split(separator: ",").map { String($0) }
+            let sni = anytlsSNI.isEmpty ? bareAddress : anytlsSNI
+            let alpn: [String]? = anytlsALPN.isEmpty ? nil : anytlsALPN.split(separator: ",").map { String($0) }
             let ici: Int
             let it: Int
             let mis: Int
@@ -888,7 +1072,7 @@ class TVProxyEditorViewController: UITableViewController {
                 idleCheckInterval: ici,
                 idleTimeout: it,
                 minIdleSession: mis,
-                tls: TLSConfiguration(serverName: sniValue, alpn: alpn, fingerprint: fingerprint)
+                tls: TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: anytlsFingerprint)
             )
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)
