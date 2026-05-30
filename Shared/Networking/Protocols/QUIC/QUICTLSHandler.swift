@@ -496,7 +496,7 @@ nonisolated class QUICTLSHandler {
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
         }
 
-        // Validate server certificate chain (respects CertificatePolicy).
+        // Validate server certificate chain (respects allowInsecure setting)
         if let error = validateCertificate() {
             logger.warning("[QUIC-TLS] Certificate validation failed: \(error.localizedDescription)")
             return .error(NGTCP2_ERR_CALLBACK_FAILURE)
@@ -881,7 +881,7 @@ nonisolated class QUICTLSHandler {
     // MARK: - Certificate Validation
 
     /// Validates the server certificate chain using SecTrust.
-    /// Respects `CertificatePolicy.allowInsecure` and user-trusted certificate SHA-256 fingerprints,
+    /// Respects `allowInsecure` and user-trusted certificate SHA-256 fingerprints,
     /// matching the behavior of TLSClient for HTTP/2.
     private func validateCertificate() -> Error? {
         if CertificatePolicy.allowInsecure {
@@ -958,7 +958,7 @@ nonisolated class QUICTLSHandler {
         )
 
         if !isValid {
-            // Respect CertificatePolicy for signature verification too.
+            // Respect allowInsecure for signature verification too
             if CertificatePolicy.allowInsecure {
                 return nil
             }

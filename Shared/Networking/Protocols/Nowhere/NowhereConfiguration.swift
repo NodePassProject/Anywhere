@@ -2,7 +2,7 @@
 //  NowhereConfiguration.swift
 //  Anywhere
 //
-// Created by NodePassProject on 5/29/26.
+//  Created by NodePassProject on 5/30/26.
 //
 
 import Foundation
@@ -12,9 +12,4 @@ struct NowhereConfiguration: Hashable {
     let proxyHost: String
     let proxyPort: UInt16
     let key: String
-    let uploadMbps: Int
-
-    var uploadBytesPerSec: UInt64 {
-        UInt64(max(0, uploadMbps)) * 1_000_000 / 8
-    }
 }

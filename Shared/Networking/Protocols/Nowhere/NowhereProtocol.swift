@@ -2,7 +2,7 @@
 //  NowhereProtocol.swift
 //  Anywhere
 //
-// Created by NodePassProject on 5/29/26.
+//  Created by NodePassProject on 5/30/26.
 //
 
 import Foundation
@@ -11,12 +11,11 @@ import Security
 
 enum NowhereProtocol {
     static let alpn = "nowhere/1"
-    static let authFrameLength = 80
+    static let authFrameLength = 72
     static let maxTargetLength = 512
 
     private static let authMagic = Data("NWQAUTH1".utf8)
     private static let authInfo = Data("nowhere quic auth v1".utf8)
-    private static let sideMagic = Data([0x00, 0x4E, 0x57, 0x53])
 
     enum UDPType: UInt8 {
         case request = 1
@@ -31,25 +30,7 @@ enum NowhereProtocol {
         let payload: Data
     }
 
-    struct SideFrame {
-        let type: UInt8
-        let clientID: UInt64
-        let flowID: UInt64
-        let target: String
-        let payload: Data
-    }
-
-    static func randomClientID() -> UInt64 {
-        var bytes = [UInt8](repeating: 0, count: 8)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        var value: UInt64 = 0
-        for byte in bytes {
-            value = (value << 8) | UInt64(byte)
-        }
-        return value == 0 ? 1 : value
-    }
-
-    static func makeAuthFrame(key: String, clientID: UInt64) throws -> Data {
+    static func makeAuthFrame(key: String) throws -> Data {
         var nonce = Data(count: 32)
         let rv = nonce.withUnsafeMutableBytes { raw -> Int32 in
             guard let ptr = raw.baseAddress else { return errSecAllocate }
@@ -59,10 +40,8 @@ enum NowhereProtocol {
             throw NowhereError.connectionFailed("Failed to generate auth nonce")
         }
 
-        let clientBytes = uint64Bytes(clientID)
         var message = Data()
         message.append(authInfo)
-        message.append(clientBytes)
         message.append(nonce)
 
         let derived = Data(SHA256.hash(data: Data(key.utf8)))
@@ -73,7 +52,6 @@ enum NowhereProtocol {
 
         var frame = Data(capacity: authFrameLength)
         frame.append(authMagic)
-        frame.append(clientBytes)
         frame.append(nonce)
         frame.append(contentsOf: tag)
         return frame
@@ -103,50 +81,8 @@ enum NowhereProtocol {
         return UDPMessage(type: type, flowID: flowID, target: parsed.target, payload: payload)
     }
 
-    static func encodeSideFrame(type: UDPType, clientID: UInt64, flowID: UInt64, target: String, payload: Data) throws -> Data {
-        let targetBytes = try encodeTarget(target)
-        var out = Data(capacity: 4 + 1 + 8 + 8 + targetBytes.count + payload.count)
-        out.append(sideMagic)
-        out.append(type.rawValue)
-        out.append(uint64Bytes(clientID))
-        out.append(uint64Bytes(flowID))
-        out.append(targetBytes)
-        out.append(payload)
-        return out
-    }
-
-    static func decodeSideFrame(_ data: Data) -> SideFrame? {
-        guard data.count >= 23, data.prefix(sideMagic.count) == sideMagic else { return nil }
-        let type = byte(data, at: 4)
-        guard type == UDPType.response.rawValue || type == UDPType.close.rawValue else { return nil }
-        let clientID = readUInt64(data, at: 5)
-        let flowID = readUInt64(data, at: 13)
-        guard let parsed = decodeTarget(data, offset: 21) else { return nil }
-        let payload = data.subdata(in: parsed.nextOffset..<data.endIndex)
-        return SideFrame(type: type, clientID: clientID, flowID: flowID, target: parsed.target, payload: payload)
-    }
-
-    static func isSideFrame(_ data: Data) -> Bool {
-        data.count >= sideMagic.count && data.prefix(sideMagic.count) == sideMagic
-    }
-
-    static func isQUICLongHeader(_ data: Data) -> Bool {
-        guard !data.isEmpty else { return false }
-        return (byte(data, at: 0) & 0x80) != 0
-    }
-
-    static func isQUICShortHeader(_ data: Data) -> Bool {
-        guard !data.isEmpty else { return false }
-        let first = byte(data, at: 0)
-        return (first & 0x80) == 0 && (first & 0x40) != 0
-    }
-
     static func udpHeaderSize(target: String) -> Int {
         1 + 8 + 2 + target.utf8.count
-    }
-
-    static func sideHeaderSize(target: String) -> Int {
-        4 + 1 + 8 + 8 + 2 + target.utf8.count
     }
 
     private static func encodeTarget(_ target: String) throws -> Data {

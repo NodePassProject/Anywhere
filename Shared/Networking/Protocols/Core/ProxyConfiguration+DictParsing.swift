@@ -78,10 +78,8 @@ extension ProxyConfiguration {
                 sni: (explicitSNI?.isEmpty == false) ? explicitSNI! : serverAddress
             )
         case .nowhere:
-            let rawUp = (configurationDict["nowhereUploadMbps"] as? Int) ?? 0
             outbound = .nowhere(
-                key: (configurationDict["nowhereKey"] as? String) ?? "",
-                uploadMbps: HysteriaCongestionControl.clampUploadMbps(rawUp)
+                key: (configurationDict["nowhereKey"] as? String) ?? ""
             )
         case .trojan:
             let password = (configurationDict["trojanPassword"] as? String) ?? ""

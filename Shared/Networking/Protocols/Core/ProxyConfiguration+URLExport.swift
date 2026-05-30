@@ -119,13 +119,12 @@ extension ProxyConfiguration {
     }
 
     private func toNowhereURL() -> String {
-        guard case .nowhere(let key, let uploadMbps) = outbound else {
+        guard case .nowhere(let key) = outbound else {
             return ""
         }
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        let params = "rate=\(uploadMbps)"
-        return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)?\(params)#\(fragment)"
+        return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)#\(fragment)"
     }
 
     private func toTrojanURL() -> String {

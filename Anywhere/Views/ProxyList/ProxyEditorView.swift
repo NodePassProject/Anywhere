@@ -64,7 +64,6 @@ struct ProxyEditorView: View {
 
     // Nowhere fields
     @State private var nowhereKey = ""
-    @State private var nowhereUploadMbpsText = "0"
 
     // Trojan fields
     @State private var trojanPassword = ""
@@ -126,10 +125,7 @@ struct ProxyEditorView: View {
             return true
         }
         if isNowhere {
-            guard !nowhereKey.isEmpty,
-                  let up = Int(nowhereUploadMbpsText), HysteriaCongestionControl.uploadMbpsRange.contains(up)
-            else { return false }
-            return true
+            return !nowhereKey.isEmpty
         }
         if isTrojan {
             return !trojanPassword.isEmpty
@@ -273,13 +269,6 @@ struct ProxyEditorView: View {
                                 .multilineTextAlignment(.trailing)
                         } label: {
                             TextWithColorfulIcon(title: "Key", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
-                        }
-                        LabeledContent {
-                            TextField("Mbps", text: $nowhereUploadMbpsText)
-                                .keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing)
-                        } label: {
-                            TextWithColorfulIcon(title: "Upload Speed", comment: nil, systemName: "arrow.up.circle.fill", foregroundColor: .white, backgroundColor: .blue)
                         }
                     } else if isTrojan {
                         LabeledContent {
@@ -771,9 +760,8 @@ struct ProxyEditorView: View {
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
             hysteriaSNI = sni
-        case .nowhere(let key, let uploadMbps):
+        case .nowhere(let key):
             nowhereKey = key
-            nowhereUploadMbpsText = String(uploadMbps)
         case .trojan(let password, let tls):
             trojanPassword = password
             tlsSNI = tls.serverName
@@ -964,10 +952,8 @@ struct ProxyEditorView: View {
                 sni: sni
             )
         case .nowhere:
-            let up = HysteriaCongestionControl.clampUploadMbps(Int(nowhereUploadMbpsText) ?? 0)
             outbound = .nowhere(
-                key: nowhereKey,
-                uploadMbps: up
+                key: nowhereKey
             )
         case .trojan:
             let sni = tlsSNI.isEmpty ? bareAddress : tlsSNI

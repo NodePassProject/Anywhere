@@ -134,12 +134,8 @@ enum Outbound: Hashable {
         downloadMbps: Int,
         sni: String
     )
-    /// Nowhere runs over QUIC with a shared-key auth frame. Upload speed drives
-    /// the client Brutal pacer.
-    case nowhere(
-        key: String,
-        uploadMbps: Int
-    )
+    /// Nowhere runs over QUIC with a shared-key auth frame.
+    case nowhere(key: String)
     /// Trojan runs as a thin SHA224(password)+CRLF+request header layered on
     /// top of mandatory TLS. The TLS knobs (SNI/ALPN/fingerprint) live in the
     /// associated `TLSConfiguration`; there is no plaintext variant.
@@ -333,7 +329,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case security, tls, reality
         case muxEnabled, xudpEnabled
         case hysteriaPassword, hysteriaCongestionControl, hysteriaUploadMbps, hysteriaDownloadMbps, hysteriaSNI
-        case nowhereKey, nowhereUploadMbps
+        case nowhereKey
         case trojanPassword, trojanTLS
         case anytlsPassword, anytlsIdleCheckInterval, anytlsIdleTimeout, anytlsMinIdleSession, anytlsTLS
         case ssPassword, ssMethod
@@ -416,11 +412,8 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             )
 
         case .nowhere:
-            let rawUp = try container.decodeIfPresent(Int.self, forKey: .nowhereUploadMbps)
-                ?? 0
             outbound = .nowhere(
-                key: try container.decodeIfPresent(String.self, forKey: .nowhereKey) ?? "",
-                uploadMbps: HysteriaCongestionControl.clampUploadMbps(rawUp)
+                key: try container.decodeIfPresent(String.self, forKey: .nowhereKey) ?? ""
             )
 
         case .trojan:
@@ -529,11 +522,10 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(uploadMbps, forKey: .hysteriaUploadMbps)
             try container.encode(downloadMbps, forKey: .hysteriaDownloadMbps)
             try container.encode(sni, forKey: .hysteriaSNI)
-        case .nowhere(let key, let uploadMbps):
+        case .nowhere(let key):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(key, forKey: .nowhereKey)
-            try container.encode(uploadMbps, forKey: .nowhereUploadMbps)
         case .trojan(let password, let tls):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)

@@ -220,7 +220,7 @@ extension ProxyConfiguration {
     }
 
     /// Parse a Nowhere URL.
-    /// Format: `nowhere://<key>@host:port?rate=20#name`
+    /// Format: `nowhere://<key>@host:port#name`
     private static func parseNowhere(url: String) throws -> ProxyConfiguration {
         let rawPrefix = "nowhere://"
         var remaining = String(url.dropFirst(rawPrefix.count))
@@ -232,9 +232,7 @@ extension ProxyConfiguration {
         }
         DeviceCensorship.deCensor(&fragmentName)
 
-        var queryString: String?
         if let questionIndex = remaining.firstIndex(of: "?") {
-            queryString = String(remaining[remaining.index(after: questionIndex)...])
             remaining = String(remaining[..<questionIndex])
         }
 
@@ -254,16 +252,13 @@ extension ProxyConfiguration {
         }
 
         let (host, port) = try parseHostPort(serverPart)
-        let params = parseQueryParams(queryString)
-        let rawUp = (params["rate"] ?? params["upmbps"]).flatMap { Int($0) }
 
         return ProxyConfiguration(
             name: fragmentName ?? "Nowhere",
             serverAddress: host,
             serverPort: port,
             outbound: .nowhere(
-                key: key,
-                uploadMbps: HysteriaCongestionControl.clampUploadMbps(rawUp ?? 0)
+                key: key
             )
         )
     }

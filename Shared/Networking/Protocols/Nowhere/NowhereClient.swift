@@ -2,7 +2,7 @@
 //  NowhereClient.swift
 //  Anywhere
 //
-// Created by NodePassProject on 5/29/26.
+//  Created by NodePassProject on 5/30/26.
 //
 
 import Foundation
@@ -13,7 +13,6 @@ nonisolated final class NowhereClient {
         let host: String
         let port: UInt16
         let key: String
-        let uploadMbps: Int
         let chainSignature: String
     }
 
@@ -26,7 +25,6 @@ nonisolated final class NowhereClient {
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             key: configuration.key,
-            uploadMbps: configuration.uploadMbps,
             chainSignature: ""
         )
         registryLock.lock()
@@ -64,7 +62,6 @@ nonisolated final class NowhereClient {
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             key: configuration.key,
-            uploadMbps: configuration.uploadMbps,
             chainSignature: chainSignature
         )
 

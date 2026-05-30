@@ -64,7 +64,6 @@ class TVProxyEditorViewController: UITableViewController {
 
     // Nowhere fields
     private var nowhereKey = ""
-    private var nowhereUploadMbpsText = "0"
     
     // Trojan fields
     private var trojanPassword = ""
@@ -130,7 +129,7 @@ class TVProxyEditorViewController: UITableViewController {
         case tlsSNI, tlsALPN, fingerprint
         case realitySNI, realityPublicKey, realityShortId
         case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps
-        case nowhereKey, nowhereUploadMbps
+        case nowhereKey
         case trojanPassword
         case anytlsPassword
         case ssPassword, ssMethod
@@ -191,7 +190,6 @@ class TVProxyEditorViewController: UITableViewController {
             }
         } else if isNowhere {
             serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
-            serverRows.append(.text(label: String(localized: "Upload Speed"), value: nowhereUploadMbpsText, placeholder: String(localized: "Mbps"), key: .nowhereUploadMbps))
         } else if isTrojan {
             serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword, secure: true))
         } else if isAnyTLS {
@@ -387,10 +385,7 @@ class TVProxyEditorViewController: UITableViewController {
             return true
         }
         if isNowhere {
-            guard !nowhereKey.isEmpty,
-                  let up = Int(nowhereUploadMbpsText), HysteriaCongestionControl.uploadMbpsRange.contains(up)
-            else { return false }
-            return true
+            return !nowhereKey.isEmpty
         }
         if isTrojan { return !trojanPassword.isEmpty }
         if isAnyTLS { return !anytlsPassword.isEmpty }
@@ -592,7 +587,6 @@ class TVProxyEditorViewController: UITableViewController {
         case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
         case .hysteriaDownloadMbps: hysteriaDownloadMbpsText = value
         case .nowhereKey: nowhereKey = value
-        case .nowhereUploadMbps: nowhereUploadMbpsText = value
         case .trojanPassword: trojanPassword = value
         case .anytlsPassword: anytlsPassword = value
         case .ssPassword: ssPassword = value
@@ -682,9 +676,8 @@ class TVProxyEditorViewController: UITableViewController {
             hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
-        case .nowhere(let key, let uploadMbps):
+        case .nowhere(let key):
             nowhereKey = key
-            nowhereUploadMbpsText = String(uploadMbps)
         case .trojan(let password, let tls):
             trojanPassword = password
             tlsSNI = tls.serverName
@@ -869,10 +862,8 @@ class TVProxyEditorViewController: UITableViewController {
                 sni: existingSNI ?? bareAddress
             )
         case .nowhere:
-            let up = HysteriaCongestionControl.clampUploadMbps(Int(nowhereUploadMbpsText) ?? 0)
             outbound = .nowhere(
-                key: nowhereKey,
-                uploadMbps: up
+                key: nowhereKey
             )
         case .trojan:
             let sniValue = tlsSNI.isEmpty ? bareAddress : tlsSNI

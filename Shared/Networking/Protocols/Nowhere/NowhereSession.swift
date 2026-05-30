@@ -2,7 +2,7 @@
 //  NowhereSession.swift
 //  Anywhere
 //
-// Created by NodePassProject on 5/29/26.
+//  Created by NodePassProject on 5/30/26.
 //
 
 import Foundation
@@ -42,7 +42,6 @@ nonisolated final class NowhereSession {
     private let closeLatch = CloseOnce()
 
     private var authStreamID: Int64 = -1
-    private let clientID: UInt64
     private var readyCallbacks: [(Error?) -> Void] = []
 
     var onClose: (() -> Void)?
@@ -73,14 +72,13 @@ nonisolated final class NowhereSession {
 
     init(configuration: NowhereConfiguration, transport: QUICDatagramTransport? = nil) {
         self.configuration = configuration
-        self.clientID = NowhereProtocol.randomClientID()
         self.quic = QUICConnection(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             serverName: configuration.proxyHost,
             alpn: [NowhereProtocol.alpn],
             datagramsEnabled: true,
-            tuning: .nowhere(uploadMbps: configuration.uploadMbps),
+            tuning: .nowhere,
             transport: transport
         )
     }
@@ -124,9 +122,6 @@ nonisolated final class NowhereSession {
         quic.datagramHandler = { [weak self] data in
             self?.handleDatagram(data)
         }
-        quic.nonQUICPacketHandler = { [weak self] data in
-            self?.handleNonQUICPacket(data) ?? false
-        }
 
         quic.connect { [weak self] error in
             guard let self else { return }
@@ -150,7 +145,7 @@ nonisolated final class NowhereSession {
 
         let frame: Data
         do {
-            frame = try NowhereProtocol.makeAuthFrame(key: configuration.key, clientID: clientID)
+            frame = try NowhereProtocol.makeAuthFrame(key: configuration.key)
         } catch {
             failSession(error)
             return
@@ -213,17 +208,6 @@ nonisolated final class NowhereSession {
         guard let msg = NowhereProtocol.decodeUDPDatagram(data),
               msg.type == NowhereProtocol.UDPType.response.rawValue else { return }
         udpSessions[msg.flowID]?.handleIncomingDatagram(msg.payload)
-    }
-
-    private func handleNonQUICPacket(_ data: Data) -> Bool {
-        guard NowhereProtocol.isSideFrame(data) else { return false }
-        guard let frame = NowhereProtocol.decodeSideFrame(data),
-              frame.type == NowhereProtocol.UDPType.response.rawValue,
-              frame.clientID == clientID else {
-            return true
-        }
-        udpSessions[frame.flowID]?.handleIncomingDatagram(frame.payload)
-        return true
     }
 
     func openTCPStream(for conn: NowhereConnection, completion: @escaping (Int64?, Error?) -> Void) {
@@ -315,19 +299,9 @@ nonisolated final class NowhereSession {
         quic.writeDatagram(datagram, completion: completion)
     }
 
-    func writeSideFrame(_ frame: Data, completion: @escaping (Error?) -> Void) {
-        quic.writeRawPacket(frame, completion: completion)
-    }
-
     var maxDatagramPayloadSize: Int {
         quic.maxDatagramPayloadSize
     }
-
-    var canUseSidePath: Bool {
-        quic.canSendRawPackets
-    }
-
-    var clientIDValue: UInt64 { clientID }
 
     private func updateIdleCloseTimer() {
         idleCloseWorkItem?.cancel()

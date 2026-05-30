@@ -2,7 +2,7 @@
 //  NowhereUDPConnection.swift
 //  Anywhere
 //
-// Created by NodePassProject on 5/29/26.
+//  Created by NodePassProject on 5/30/26.
 //
 
 import Foundation
@@ -30,11 +30,6 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
     private static let maxQueuedPackets = 1024
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var closureError: Error?
-
-    /// Once a long-header QUIC packet has identified this UDP flow as an
-    /// inner QUIC conversation, short-header packets use Nowhere's raw side
-    /// path when direct UDP is available.
-    private var innerQUICFlow = false
 
     init(session: NowhereSession, destination: String) {
         self.session = session
@@ -90,28 +85,12 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
                 completion(self.state == .closed ? NowhereError.streamClosed : NowhereError.notReady)
                 return
             }
-            self.sendPayload(data, completion: completion)
+            self.sendDatagramPayload(data, completion: completion)
         }
     }
 
     override func sendRaw(data: Data) {
         sendRaw(data: data) { _ in }
-    }
-
-    private func sendPayload(_ payload: Data, completion: @escaping (Error?) -> Void) {
-        if shouldUseSidePath(for: payload) {
-            sendSidePayload(payload, completion: completion)
-            return
-        }
-        sendDatagramPayload(payload, completion: completion)
-    }
-
-    private func shouldUseSidePath(for payload: Data) -> Bool {
-        if NowhereProtocol.isQUICLongHeader(payload) {
-            innerQUICFlow = true
-            return false
-        }
-        return innerQUICFlow && NowhereProtocol.isQUICShortHeader(payload) && session.canUseSidePath
     }
 
     private func sendDatagramPayload(_ payload: Data, completion: @escaping (Error?) -> Void) {
@@ -139,32 +118,6 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
             return
         }
         session.writeDatagram(frame, completion: completion)
-    }
-
-    private func sendSidePayload(_ payload: Data, completion: @escaping (Error?) -> Void) {
-        let headerSize = NowhereProtocol.sideHeaderSize(target: destination)
-        guard headerSize + payload.count <= QUICConnection.maxUDPPayload else {
-            completion(NowhereError.destinationTooLargeForDatagram(
-                maxFrame: QUICConnection.maxUDPPayload,
-                headerSize: headerSize
-            ))
-            return
-        }
-
-        let frame: Data
-        do {
-            frame = try NowhereProtocol.encodeSideFrame(
-                type: .request,
-                clientID: session.clientIDValue,
-                flowID: flowID,
-                target: destination,
-                payload: payload
-            )
-        } catch {
-            completion(error)
-            return
-        }
-        session.writeSideFrame(frame, completion: completion)
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {

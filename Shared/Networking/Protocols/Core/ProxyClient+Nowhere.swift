@@ -2,7 +2,7 @@
 //  ProxyClient+Nowhere.swift
 //  Anywhere
 //
-// Created by NodePassProject on 5/29/26.
+//  Created by NodePassProject on 5/30/26.
 //
 
 import Foundation
@@ -17,7 +17,7 @@ extension ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .nowhere(let key, let uploadMbps) = configuration.outbound else {
+        guard case .nowhere(let key) = configuration.outbound else {
             completion(.failure(ProxyError.protocolError("Nowhere key not set")))
             return
         }
@@ -25,8 +25,7 @@ extension ProxyClient {
         let nwConfig = NowhereConfiguration(
             proxyHost: configuration.serverAddress,
             proxyPort: configuration.serverPort,
-            key: key,
-            uploadMbps: uploadMbps
+            key: key
         )
 
         let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
