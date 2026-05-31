@@ -121,6 +121,13 @@ class TunnelStack {
     var encryptedDNSProtocol: String = "doh"
     var encryptedDNSServer: String = ""
 
+    // Reflection: packets to these addresses are reflected back to their source
+    // instead of routed/proxied (see ``TunnelStack+Reflection``). Read on
+    // ``lwipQueue``, then published as the ``reflector()`` snapshot the read
+    // callback consumes. Live-reloaded in place — no restart.
+    var reflectionEnabled: Bool = false
+    var reflectionAddresses: [String] = []
+
     // MARK: MITM
     //
     // MITM state lives beside routing state: routing selects the upstream
@@ -282,6 +289,25 @@ class TunnelStack {
         udpConfigLock.withLock { _udpConfig = snapshot }
     }
 
+    // Reflector snapshot. The packet reader runs on the ``NEPacketTunnelFlow``
+    // read-callback thread, while the addresses are (re)loaded on ``lwipQueue``;
+    // publishing an immutable value under a lock — read once per inbound batch
+    // via ``reflector()`` — avoids a cross-thread race without a per-packet
+    // lock. Mirrors ``udpConfig``.
+    private let reflectorLock = UnfairLock()
+    private var _reflector = Reflector.inactive
+
+    /// Reads the current reflector snapshot. Callable from any queue; the read
+    /// loop calls it once at the top of each inbound batch.
+    func reflector() -> Reflector { reflectorLock.withLock { _reflector } }
+
+    /// Rebuilds and publishes the reflector from the current ``lwipQueue``-owned
+    /// settings. Must be called on ``lwipQueue``.
+    func publishReflector() {
+        let snapshot = reflectionEnabled ? Reflector(addresses: reflectionAddresses) : .inactive
+        reflectorLock.withLock { _reflector = snapshot }
+    }
+
     /// Hashable 5-tuple key for UDP flows. Addresses are held inline as raw
     /// bytes (`SIMD16<UInt8>`, zero-padded; IPv4 in the first 4) so the
     /// per-packet fast-path lookup in ``handleInboundUDP`` allocates nothing —
@@ -403,12 +429,17 @@ class TunnelStack {
         loadProxyModeSetting()
         loadHideVPNIconSetting()
         loadQUICPolicySetting()
+        loadReflectionSetting()
         loadMITMSetting()
 
         // Publish the snapshot the UDP data plane reads. `configuration` is set
         // by the caller (start/restart) before configureRuntime; the scalars
         // were just loaded above.
         publishUDPConfig()
+
+        // Publish the reflector the read callback consumes (same
+        // lwipQueue-publishes / data-plane-reads contract as publishUDPConfig).
+        publishReflector()
 
         // muxManager is udpQueue-owned (mux carries UDP only), so build it
         // there. Build and flow processing share that serial queue, so any flow
@@ -463,6 +494,13 @@ class TunnelStack {
 
     private func loadQUICPolicySetting() {
         quicPolicy = AWCore.getQUICPolicy()
+    }
+
+    /// Reads the reflection toggle and address list from app group
+    /// UserDefaults. ``publishReflector`` turns these into the read-path snapshot.
+    private func loadReflectionSetting() {
+        reflectionEnabled = AWCore.getReflectionEnabled()
+        reflectionAddresses = AWCore.getReflectionAddresses()
     }
 
     /// Loads the MITM master toggle and rebuilds the in-memory rewrite

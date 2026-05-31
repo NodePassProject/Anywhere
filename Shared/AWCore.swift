@@ -62,6 +62,7 @@ final class AWCore {
         UserDefaultsKey.quicPolicy: QUICPolicy.blocked.rawValue,
         UserDefaultsKey.encryptedDNSProtocol: "doh",
         UserDefaultsKey.encryptedDNSServer: "https://cloudflare-dns.com/dns-query",
+        UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
     ]
 
     // MARK: - UserDefaults Keys
@@ -76,6 +77,8 @@ final class AWCore {
         static let encryptedDNSServer = "encryptedDNSServer"
         static let experimentalEnabled = "experimentalEnabled"
         static let hideVPNIcon = "hideVPNIcon"
+        static let reflectionEnabled = "reflectionEnabled"
+        static let reflectionAddresses = "reflectionAddresses"
         static let lastConfigurationData = "lastConfigurationData"
         static let identifier = "identifier"
         static let advertiseIPv6ToApps = "advertiseIPv6ToApps"
@@ -229,6 +232,22 @@ final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.hideVPNIcon)
     }
     
+    static func getReflectionEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.reflectionEnabled)
+    }
+
+    static func setReflectionEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.reflectionEnabled)
+    }
+
+    static func getReflectionAddresses() -> [String] {
+        userDefaults.stringArray(forKey: UserDefaultsKey.reflectionAddresses) ?? []
+    }
+
+    static func setReflectionAddresses(_ addresses: [String]) {
+        userDefaults.set(addresses, forKey: UserDefaultsKey.reflectionAddresses)
+    }
+
     static func getQUICPolicy() -> QUICPolicy {
         userDefaults.string(forKey: UserDefaultsKey.quicPolicy).flatMap(QUICPolicy.init(rawValue:)) ?? .blocked
     }
