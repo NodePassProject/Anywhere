@@ -170,8 +170,9 @@ struct MITMRuleSetDetailView: View {
                             guard !isSubscribed else { return }
                             // Scripts and native JSON-body edits are
                             // import-only; no in-app editor for them.
+                            // body-replace is editable, so it falls through.
                             switch rule.operation {
-                            case .script, .streamScript, .jsonBody: return
+                            case .script, .streamScript, .bodyJSON: return
                             default: break
                             }
                             editingRule = rule
@@ -449,8 +450,8 @@ enum MITMRuleSummary {
 
     static func subtitle(for rule: MITMRule) -> String {
         switch rule.operation {
-        case .urlReplace:
-            return rule.pattern
+        case .urlReplace(let search, _):
+            return search
         case .headerAdd(let name, _):
             return name
         case .headerDelete(let name):
@@ -461,7 +462,9 @@ enum MITMRuleSummary {
              .streamScript(let scriptBase64):
             let bytes = Data(base64Encoded: scriptBase64)?.count ?? 0
             return String(localized: "\(bytes) byte(s)")
-        case .jsonBody(let operation):
+        case .bodyReplace(let search, _):
+            return search
+        case .bodyJSON(let operation):
             return operation.description
         }
     }

@@ -26,7 +26,7 @@ import JavaScriptCore
 ///   `redirect-302` / `reject-200`, and `content-type`.
 /// - **Rule lines** (`<phase>, <operation>, <field…>`) each describe one
 ///   rewrite. Phase is `0` (request) / `1` (response); operation is
-///   `0`–`6`; the per-op field layout is in the ``parseRuleLine`` switch,
+///   `0`–`7`; the per-op field layout is in the ``parseRuleLine`` switch,
 ///   and fields use CSV quoting (see ``splitCSV``).
 /// - **Comments** start with `#` or `//`.
 ///
@@ -201,76 +201,85 @@ enum MITMRuleSetParser {
         guard let opInt = Int(fields[1]) else { return nil }
         let args = Array(fields.dropFirst(2))
 
-        // Every rule leads with a URL pattern (a regex over the
-        // request-target's path-and-query) that gates whether the
-        // operation fires. For url-replace it doubles as the
-        // substitution regex.
+        // Every rule leads with a URL pattern (a regex over the whole
+        // request URL) that gates whether the operation fires. The replace
+        // operations carry their own `search` regex separately.
         switch opInt {
-        case 0:  // url-replace, request-only regardless of phase column
-            guard args.count == 2 else { return nil }
-            let pattern = args[0]
-            guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
-            return MITMRule(phase: .httpRequest, pattern: pattern, operation: .urlReplace(path: args[1]))
+        case 0:  // url-replace — fields: urlPattern, search, replacement
+            guard args.count == 3 else { return nil }
+            let urlPattern = args[0]
+            let search = args[1]
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern),
+                  !search.isEmpty, isValidSearchRegex(search) else { return nil }
+            return MITMRule(phase: .httpRequest, urlPattern: urlPattern, operation: .urlReplace(search: search, replacement: args[2]))
 
         case 1:  // header-add
             guard args.count == 3 else { return nil }
-            let pattern = args[0]
+            let urlPattern = args[0]
             let name = args[1]
-            guard !pattern.isEmpty, isValidRegex(pattern), !name.isEmpty else { return nil }
-            return MITMRule(phase: phase, pattern: pattern, operation: .headerAdd(name: name, value: args[2]))
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerAdd(name: name, value: args[2]))
 
         case 2:  // header-delete
             guard args.count == 2 else { return nil }
-            let pattern = args[0]
+            let urlPattern = args[0]
             let name = args[1]
-            guard !pattern.isEmpty, isValidRegex(pattern), !name.isEmpty else { return nil }
-            return MITMRule(phase: phase, pattern: pattern, operation: .headerDelete(name: name))
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerDelete(name: name))
 
-        case 3:  // header-replace, by name (the old header-value pattern is gone)
+        case 3:  // header-replace, by name (the old header-value match is gone)
             guard args.count == 3 else { return nil }
-            let pattern = args[0]
+            let urlPattern = args[0]
             let name = args[1]
-            guard !pattern.isEmpty, isValidRegex(pattern), !name.isEmpty else { return nil }
-            return MITMRule(phase: phase, pattern: pattern, operation: .headerReplace(name: name, value: args[2]))
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerReplace(name: name, value: args[2]))
 
-        case 4:  // script — fields: pattern, base64
+        case 4:  // script — fields: urlPattern, base64
             guard args.count == 2 else { return nil }
-            let pattern = args[0]
-            guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
+            let urlPattern = args[0]
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
             let b64 = args[1]
             guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
             return MITMRule(
                 phase: phase,
-                pattern: pattern,
+                urlPattern: urlPattern,
                 operation: .script(scriptBase64: b64)
             )
 
-        case 5:  // stream-script — fields: pattern, base64
+        case 5:  // stream-script — fields: urlPattern, base64
             guard args.count == 2 else { return nil }
-            let pattern = args[0]
-            guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
+            let urlPattern = args[0]
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
             let b64 = args[1]
             guard !b64.isEmpty, isValidScriptBase64(b64) else { return nil }
             return MITMRule(
                 phase: phase,
-                pattern: pattern,
+                urlPattern: urlPattern,
                 operation: .streamScript(scriptBase64: b64)
             )
 
-        case 6:  // json-body — fields: pattern, action, <action-specific…>
+        case 6:  // body-replace — fields: urlPattern, search, replacement
+            guard args.count == 3 else { return nil }
+            let urlPattern = args[0]
+            let search = args[1]
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern),
+                  !search.isEmpty, isValidSearchRegex(search) else { return nil }
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyReplace(search: search, replacement: args[2]))
+
+        case 7:  // body-json — fields: urlPattern, action, <action-specific…>
             guard args.count >= 2 else { return nil }
-            let pattern = args[0]
-            guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
+            let urlPattern = args[0]
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
             guard let operation = parseJSONOperation(action: args[1], fields: Array(args.dropFirst(2))) else { return nil }
-            return MITMRule(phase: phase, pattern: pattern, operation: .jsonBody(operation))
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyJSON(operation))
 
         default:
             return nil
         }
     }
 
-    /// Parses the action token and its trailing fields of a `json-body`
-    /// (operation `6`) rule into a ``MITMJSONOperation``. Field layout per
+    /// Parses the action token and its trailing fields of a `body-json`
+    /// (operation `7`) rule into a ``MITMJSONOperation``. Field layout per
     /// action (each field CSV-quoted like any other):
     ///
     ///     add                      <path>, <value>
@@ -373,6 +382,14 @@ enum MITMRuleSetParser {
 
     private static func isValidRegex(_ pattern: String) -> Bool {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
+    }
+
+    /// Validates a `search` field for the replace operations, which run the
+    /// substitution through `String.replacing` and so compile to a Swift
+    /// ``Regex`` rather than an `NSRegularExpression`. Checked with the same
+    /// engine the runtime uses so an importable rule is one that will run.
+    private static func isValidSearchRegex(_ search: String) -> Bool {
+        (try? Regex(search)) != nil
     }
 
     /// Validates a `script` field: base64 → UTF-8 → JavaScript parse.

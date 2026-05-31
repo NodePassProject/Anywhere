@@ -54,7 +54,7 @@ decoded header lists and whole-body buffers; for HTTP/1.1 it drives a byte-level
 framing state machine. Either way the rule model below is identical.
 
 A rule set's `hostname` suffixes gate **which hosts** are intercepted; each
-rule's `pattern` regex gates **which requests** within those hosts it acts on.
+rule's `url-pattern` regex gates **which requests** within those hosts it acts on.
 A request that matches no rule is forwarded unchanged (its body is streamed
 through without buffering), so the marginal cost of an intercepted-but-unrewritten
 request is small — but interception itself (the extra TLS handshakes) is not
@@ -103,8 +103,8 @@ name        = My Rule Set
 hostname    = example.com, api.example.org
 redirect    = upstream.example.com:443
 
-# request: rewrite /old... to /new...
-0, 0, ^/old/(.*), /new/$1
+# request: rewrite the /old/ prefix to /new/
+0, 0, .*, ^/old/, /new/
 # request: add a header on /api/ paths
 0, 1, ^/api/, X-Powered-By, Anywhere
 ```
@@ -141,18 +141,20 @@ Shape:
 
 | ID  | Operation        | Phase        | Fields                  |
 | --- | ---------------- | ------------ | ----------------------- |
-| `0` | `url-replace`    | request only | `pattern`, `replacement`|
-| `1` | `header-add`     | both         | `pattern`, `name`, `value` |
-| `2` | `header-delete`  | both         | `pattern`, `name`       |
-| `3` | `header-replace` | both         | `pattern`, `name`, `value` |
-| `4` | `script`         | both         | `pattern`, `base64`     |
-| `5` | `stream-script`  | both         | `pattern`, `base64`     |
-| `6` | `json-body`      | both         | `pattern`, `action`, …  |
+| `0` | `url-replace`    | request only | `url-pattern`, `search`, `replacement` |
+| `1` | `header-add`     | both         | `url-pattern`, `name`, `value` |
+| `2` | `header-delete`  | both         | `url-pattern`, `name`       |
+| `3` | `header-replace` | both         | `url-pattern`, `name`, `value` |
+| `4` | `script`         | both         | `url-pattern`, `base64`     |
+| `5` | `stream-script`  | both         | `url-pattern`, `base64`     |
+| `6` | `body-replace`   | both         | `url-pattern`, `search`, `replacement` |
+| `7` | `body-json`      | both         | `url-pattern`, `action`, …  |
 
 `url-replace` is always request-phase regardless of the phase column. A rule
-whose field count does not match the table, or whose `pattern` is empty or
-fails to compile as a regex, is dropped. For `json-body` the trailing fields
-depend on `action` — see [`json-body` (6)](#json-body-6).
+whose field count does not match the table, or whose `url-pattern` is empty or
+fails to compile as a regex, is dropped. For `url-replace` and `body-replace`
+the `search` field must also be a valid regex; for `body-json` the trailing
+fields depend on `action` — see [`body-json` (7)](#body-json-7).
 
 ### Fields and quoting
 
@@ -165,21 +167,19 @@ significant leading/trailing whitespace:
 0, 1, ^/, X-Note, "value, with a comma"
 ```
 
-### The `pattern`
+### The `url-pattern`
 
-Every rule leads with a `pattern`: an `NSRegularExpression` (default Unicode
-semantics) tested against the request target's **path-and-query** — e.g.
-`/api/login?token=abc`. It does **not** see the host, scheme, method, or HTTP
-version. Use `.*` to match every request. The rule fires only when the pattern
-matches.
-
-For `url-replace` the same `pattern` doubles as the substitution regex: every
-match in the request target is replaced with the `replacement` template, which
-may reference capture groups (`$1`, `$2`, …).
+Every rule leads with a `url-pattern`: an `NSRegularExpression` (default Unicode
+semantics) tested against the **whole request URL** — e.g.
+`https://api.example.com/login?token=abc`. It is purely a gate (the replace
+operations carry their own `search` regex); it does **not** see the method or
+HTTP version. Use `.*` to match every request, or anchor on the scheme/host
+(`^https://api\.example\.com/`) to scope by origin. The rule fires only when the
+URL pattern matches.
 
 For **response**-phase rules, the gate is tested against the **originating
-request's** path-and-query (response heads carry no path), so a request and its
-response can be matched by the same pattern.
+request's** URL (response heads carry no path), so a request and its response
+can be matched by the same URL pattern.
 
 ---
 
@@ -236,11 +236,15 @@ Empty content yields a short non-empty default body (some apps treat an empty
 
 ### `url-replace` (0) — request only
 
-Regex substitution on the request target. Pattern is the match regex;
-`replacement` is the template (`$1`…). Example — strip an API version prefix:
+Regex substitution on the request target (path-and-query): every match of the
+`search` regex becomes the **literal** `replacement` (no `$1` capture expansion
+— the substitution runs through `String.replacing`). The `url-pattern` gate is
+separate — it decides whether the rule fires. A rule whose `search` is empty or
+won't compile is dropped, and a post-substitution target that isn't a valid
+request-target is skipped. Example — strip an API version prefix:
 
 ```
-0, 0, ^/v1/(.*), /$1
+0, 0, .*, ^/v1/, /
 ```
 
 ### `header-add` (1)
@@ -273,11 +277,42 @@ A header that is not present is left alone — it does **not** add it:
 JavaScript transforms. The field is base64-encoded UTF-8 source defining
 `function process(ctx)`. See the next sections.
 
-### `json-body` (6)
+### `body-replace` (6)
+
+Regex find-and-replace over the text body in **native code** — the body-side
+analog of `url-replace`, without writing any JavaScript. Its fields are
+`url-pattern` (the URL gate), a `search` regex, and a `replacement`:
+
+```
+1, 6, .*, http://, https://
+1, 6, .*, (?i)debug=true, debug=false
+```
+
+`search` is a Swift `Regex` (default Unicode semantics) matched against the
+**whole decompressed body**, and every match is swapped for the **literal**
+`replacement` (no `$1` capture expansion — the substitution runs through
+`String.replacing`); an **empty** replacement deletes every match. A rule whose
+`search` is empty or won't compile as a regex is dropped. Per the
+[Fields and quoting](#fields-and-quoting) rules, quote either field when it
+contains a comma or begins with `"`, doubling any inner `"` — so searching for
+the literal text `"price":` is written as the field `"""price"":"`.
+
+Like `script`, `body-replace` is a **buffered body transform**: the rewriter
+accumulates the body (auto-decoding `gzip` / `deflate` / `br`, up to the same
+**4 MiB** cap), edits it, and re-emits with a corrected `Content-Length`. The
+contract is **total** — a body that isn't valid UTF-8, or a `search` that
+matches nothing, leaves the body **unchanged**. Unlike `script`, **every**
+matching `body-replace` rule fires, in rule order, so replacements compose.
+
+When several body transforms match the same message they run in a fixed order:
+`body-json` edits first, then `body-replace`, then a `script` (so the script
+sees the fully-edited body).
+
+### `body-json` (7)
 
 Declarative JSON body editing in **native code** — the same edits as the
 [`Anywhere.json`](#anywherejson) script API, without writing any JavaScript. One
-rule carries one edit; its fields are `pattern`, an `action` token, and the
+rule carries one edit; its fields are `url-pattern`, an `action` token, and the
 action's own fields:
 
 | `action`                  | Trailing fields    | Effect                                                            |
@@ -297,21 +332,21 @@ valid JSON is taken literally, so `value = Anywhere` means the string
 `"Anywhere"`. Action tokens are case-insensitive and also accept the camelCase
 spelling (`replaceRecursive`). A rule whose `path` can't be parsed is dropped.
 
-Like `script`, `json-body` is a **buffered body transform**: the rewriter
+Like `script`, `body-json` is a **buffered body transform**: the rewriter
 accumulates the body (auto-decoding `gzip` / `deflate` / `br`, up to the same
 **4 MiB** cap), edits it, and re-emits with a corrected `Content-Length`. The
 contract is **total** — a body that isn't JSON, a path that doesn't resolve, or
 a non-serializable result leaves the body **unchanged**. Unlike `script`,
-**every** matching `json-body` rule fires, in rule order, so edits compose; when
+**every** matching `body-json` rule fires, in rule order, so edits compose; when
 a `script` rule also matches the same message, the JSON edits run **first** and
-the script sees the already-edited body.
+the script sees the already-edited body (after any `body-replace` edits).
 
 Examples — flip a flag, drop a field, and filter an array on the response:
 
 ```
-1, 6, ^/api/user, add, $.user.vip, true
-1, 6, ^/api/user, delete, $.user.password
-1, 6, ^/api/feed, remove-where-field-in, $.items, status, expired
+1, 7, ^/api/user, add, $.user.vip, true
+1, 7, ^/api/user, delete, $.user.password
+1, 7, ^/api/feed, remove-where-field-in, $.items, status, expired
 ```
 
 A `value` / `values` that contains a comma — a multi-element array or a
@@ -320,16 +355,16 @@ since the field separator is also `,`. So matching several values is either one
 quoted array or one rule per value (they compose):
 
 ```
-1, 6, ^/api/feed, remove-where-field-in, $.items, status, "[""expired"",""deleted""]"
-1, 6, ^/api/profile, add, $.meta, "{""beta"":true,""tier"":2}"
+1, 7, ^/api/feed, remove-where-field-in, $.items, status, "[""expired"",""deleted""]"
+1, 7, ^/api/profile, add, $.meta, "{""beta"":true,""tier"":2}"
 ```
 
 Set a string value (CSV-quote it when it contains a comma) and redact a token
 wherever it appears:
 
 ```
-1, 6, ^/api/profile, replace, $.tier, "gold, platinum"
-1, 6, .*, replace-recursive, access_token, "***"
+1, 7, ^/api/profile, replace, $.tier, "gold, platinum"
+1, 7, .*, replace-recursive, access_token, "***"
 ```
 
 ---
@@ -536,7 +571,7 @@ Paths use JSONPath like `$.data.items[0].id` (leading `$` optional; dotted keys
 and `[index]` / `["key"]` brackets). Recursive methods take a bare key name.
 
 > For these same edits **without** a script — declared as a rule and run in
-> native code — use the [`json-body` (6)](#json-body-6) operation. A `script` is
+> native code — use the [`body-json` (7)](#body-json-7) operation. A `script` is
 > only needed when the edit must be conditional, computed, or combined with
 > `Anywhere.respond` / control directives.
 
@@ -633,7 +668,7 @@ hostname = api.example.com
 ```
 name     = Path Migration
 hostname = example.com
-0, 0, ^/old/(.*)$, /new/$1
+0, 0, .*, ^/old/, /new/
 ```
 
 ### Block a host with a 1×1 GIF
@@ -742,7 +777,9 @@ function process(ctx) {
 - **Streaming media + `script`.** A buffered `script` on `text/event-stream`,
   `multipart/x-mixed-replace`, NDJSON, and similar de-streams the body; the rule
   still runs but logs a warning recommending `stream-script`.
-- **Fail-closed URL gate.** If the request target can't be determined, every
+- **Fail-closed URL gate.** If the request URL can't be determined, every
   rule's URL gate fails closed (the rule is skipped) rather than firing blind.
-- **Regex scope.** Patterns are matched against the path-and-query only, never
-  the host (use `hostname`), method, scheme, or HTTP version.
+- **Regex scope.** URL patterns are matched against the whole request URL
+  (`https://host/path?query`), so they can scope by scheme and host as well as
+  path; they never see the method or HTTP version. The set's `hostname` suffixes
+  still gate the host first.

@@ -13,45 +13,32 @@ private let logger = AnywhereLogger(category: "MITM")
 /// names case-folded.
 struct CompiledMITMRule {
     let phase: MITMPhase
-    /// Pre-compiled URL gate: a regex over the request-target's
-    /// path-and-query. The ``operation`` only fires when this matches;
-    /// for ``CompiledMITMOperation/urlReplace`` it is also the
-    /// substitution regex.
-    let patternRegex: NSRegularExpression
+    /// Pre-compiled gate: a regex over the whole request URL. The
+    /// ``operation`` only fires when this matches — it is purely a gate
+    /// (``CompiledMITMOperation/urlReplace`` carries its own substitution
+    /// regex).
+    let urlPatternRegex: NSRegularExpression
     let operation: CompiledMITMOperation
 }
 
 extension CompiledMITMRule {
-    /// Whether this rule's URL gate matches the given request-target
-    /// (path-and-query). A nil target — the URL could not be determined
+    /// Whether this rule's gate matches the given **whole request URL**
+    /// (`https://host/path?query`). A nil URL — it could not be determined
     /// — fails closed, so the rule is skipped rather than applied blind.
-    func matchesURL(_ pathAndQuery: String?) -> Bool {
-        guard let pathAndQuery else { return false }
-        let range = NSRange(pathAndQuery.startIndex..., in: pathAndQuery)
-        return patternRegex.firstMatch(in: pathAndQuery, options: [], range: range) != nil
-    }
-}
-
-/// Path-and-query extraction for rule gating, shared by the HTTP/1 and
-/// HTTP/2 paths and the script transform.
-enum MITMRequestURL {
-    /// Extracts the request-target (path-and-query) from an absolute URL
-    /// string — the same string ``MITMScriptEngine/Message`` exposes as
-    /// `ctx.url`. Returns nil for relative or unparseable input so the
-    /// gate fails closed.
-    static func pathAndQuery(from url: String?) -> String? {
-        guard let url, let components = URLComponents(string: url) else { return nil }
-        if components.scheme == nil && components.host == nil { return nil }
-        var target = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
-        if let query = components.percentEncodedQuery {
-            target += "?\(query)"
-        }
-        return target
+    func matchesURL(_ url: String?) -> Bool {
+        guard let url else { return false }
+        let range = NSRange(url.startIndex..., in: url)
+        return urlPatternRegex.firstMatch(in: url, options: [], range: range) != nil
     }
 }
 
 enum CompiledMITMOperation {
-    case urlReplace(replacement: String)
+    /// Request-phase regex substitution on the request target: every match
+    /// of ``search`` becomes the literal ``replacement`` (via
+    /// `String.replacing`). The ``CompiledMITMRule/urlPatternRegex`` gate is
+    /// separate — it decides whether the rule fires, this decides what the
+    /// target becomes.
+    case urlReplace(search: Regex<AnyRegexOutput>, replacement: String)
     case headerAdd(name: String, value: String)
     case headerDelete(nameLower: String)
     /// Overwrites the value of every header named ``name`` (matched
@@ -85,14 +72,22 @@ enum CompiledMITMOperation {
     /// Single-rule runtime semantics apply (see ``.script`` above):
     /// at most one ``.streamScript`` runs per stream by design.
     case streamScript(source: String, sourceKey: Int)
-    /// Native JSON body edit (import op id `6`). Each edit's path and
+    /// Native regex find-and-replace over the text body (import op id `6`).
+    /// The ``search`` pattern is pre-compiled at rule-load time (see
+    /// ``MITMBodyReplace``); ``replacement`` is the literal swapped in for
+    /// each match. ``MITMScriptTransform`` applies every matching
+    /// ``bodyReplace`` rule to the buffered body in rule order — like
+    /// ``bodyJSON`` these compose and run in native code without a
+    /// `JSContext`.
+    case bodyReplace(search: Regex<AnyRegexOutput>, replacement: String)
+    /// Native JSON body edit (import op id `7`). Each edit's path and
     /// value are pre-parsed at rule-load time (see ``MITMJSONPatch``);
-    /// ``MITMScriptTransform`` applies every matching ``jsonBody`` rule to
+    /// ``MITMScriptTransform`` applies every matching ``bodyJSON`` rule to
     /// the buffered body in rule order. Unlike ``script`` these compose —
     /// all matching rules fire — and they run in native code without a
     /// `JSContext`. When a ``script`` also matches, the JSON edits run
     /// first and the script sees the edited body.
-    case jsonBody(MITMJSONPatch.CompiledOp)
+    case bodyJSON(MITMJSONPatch.CompiledOp)
 }
 
 /// Compiled view of a rule set at one trie terminal: the specific suffix
@@ -206,12 +201,12 @@ final class MITMRewritePolicy {
         guard !suffixes.isEmpty else { return nil }
 
         let compiledRules = set.rules.compactMap { rule -> CompiledMITMRule? in
-            guard let regex = try? NSRegularExpression(pattern: rule.pattern, options: []) else {
-                logger.warning("[MITM] rule pattern failed to compile (suffix=\(set.name)): \(rule.pattern)")
+            guard let regex = try? NSRegularExpression(pattern: rule.urlPattern, options: []) else {
+                logger.warning("[MITM] rule URL pattern failed to compile (suffix=\(set.name)): \(rule.urlPattern)")
                 return nil
             }
             guard let op = compile(rule.operation, suffix: set.name) else { return nil }
-            return CompiledMITMRule(phase: rule.phase, patternRegex: regex, operation: op)
+            return CompiledMITMRule(phase: rule.phase, urlPatternRegex: regex, operation: op)
         }
 
         // Synthesize-response actions (reject_200 / redirect_302) bypass
@@ -274,12 +269,20 @@ final class MITMRewritePolicy {
 
     private func compile(_ operation: MITMOperation, suffix: String) -> CompiledMITMOperation? {
         switch operation {
-        case .urlReplace(let replacement):
-            guard Self.isValidRequestTargetTemplate(replacement) else {
+        case .urlReplace(let search, let replacement):
+            // The replacement lands verbatim on the request target, so it
+            // must be wire-safe (no SP/CR/LF/CTL that would split the start
+            // line); the post-substitution target is re-checked at apply
+            // time as a backstop.
+            guard Self.isValidRequestTargetReplacement(replacement) else {
                 logger.warning("[MITM] urlReplace dropped: replacement contains whitespace or control bytes (suffix=\(suffix))")
                 return nil
             }
-            return .urlReplace(replacement: replacement)
+            guard let regex = try? Regex(search) else {
+                logger.warning("[MITM] urlReplace dropped: search is not a valid regex (suffix=\(suffix))")
+                return nil
+            }
+            return .urlReplace(search: regex, replacement: replacement)
         case .headerAdd(let name, let value):
             guard Self.isValidHeaderName(name) else {
                 logger.warning("[MITM] headerAdd dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
@@ -316,15 +319,25 @@ final class MITMRewritePolicy {
                 return nil
             }
             return .streamScript(source: source, sourceKey: sourceCacheKey(source))
-        case .jsonBody(let operation):
+        case .bodyReplace(let search, let replacement):
+            // The only compile failure is a malformed search regex; the
+            // replacement is lenient and carries no wire-safety constraint
+            // (it produces a body, not a head), so a dropped rule means the
+            // author's search pattern couldn't be compiled.
+            guard let compiled = MITMBodyReplace.compile(search: search, replacement: replacement) else {
+                logger.warning("[MITM] bodyReplace dropped: search is not a valid regex (suffix=\(suffix))")
+                return nil
+            }
+            return .bodyReplace(search: compiled.search, replacement: compiled.replacement)
+        case .bodyJSON(let operation):
             // The only compile failure is a malformed JSONPath; values
             // are lenient (a non-JSON string is taken literally), so a
             // dropped rule means the author's path couldn't be parsed.
             guard let compiled = MITMJSONPatch.compile(operation) else {
-                logger.warning("[MITM] jsonBody dropped: malformed JSON path in \(operation.action) (suffix=\(suffix))")
+                logger.warning("[MITM] bodyJSON dropped: malformed JSON path in \(operation.action) (suffix=\(suffix))")
                 return nil
             }
-            return .jsonBody(compiled)
+            return .bodyJSON(compiled)
         }
     }
 
@@ -402,14 +415,13 @@ final class MITMRewritePolicy {
         return true
     }
 
-    /// Conservative check for an ``urlReplace`` replacement template.
-    /// The template becomes the new request-target (HTTP/1 start line
-    /// or HTTP/2 ``:path``) once regex substitution runs; allowing
-    /// SP / HTAB / CR / LF / NUL / DEL would either break HTTP/1's
-    /// SP-delimited start line or be rejected by HTTP/2 receivers.
-    /// Empty replacements pass — deleting a matched substring is
-    /// legitimate.
-    private static func isValidRequestTargetTemplate(_ replacement: String) -> Bool {
+    /// Conservative check for an ``urlReplace`` replacement. It is spliced
+    /// into the request-target (HTTP/1 start line or HTTP/2 ``:path``) at
+    /// every match site; allowing SP / HTAB / CR / LF / NUL / DEL would
+    /// either break HTTP/1's SP-delimited start line or be rejected by
+    /// HTTP/2 receivers. Empty replacements pass — deleting a matched
+    /// substring is legitimate.
+    private static func isValidRequestTargetReplacement(_ replacement: String) -> Bool {
         for byte in replacement.utf8 {
             if byte <= 0x20 || byte == 0x7F {
                 return false

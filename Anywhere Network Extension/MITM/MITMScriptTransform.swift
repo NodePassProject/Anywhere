@@ -70,7 +70,7 @@ enum MITMScriptTransform {
                 switch rule.operation {
                 case .script(let source, let sourceKey), .streamScript(let source, let sourceKey):
                     return seen.insert(sourceKey).inserted ? (source: source, sourceKey: sourceKey) : nil
-                case .urlReplace, .headerAdd, .headerDelete, .headerReplace, .jsonBody:
+                case .urlReplace, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
                     return nil
                 }
             }
@@ -101,62 +101,75 @@ enum MITMScriptTransform {
     }
 
     /// True when at least one ``.script`` rule in ``rules`` would fire
-    /// for the given request-target. Rewriters consult this at
+    /// for the given request URL. Rewriters consult this at
     /// head-completion time to decide whether to defer head emission
     /// (and, for bodied messages, buffer the body).
     ///
     /// Streaming rules win when both apply (see ``hasStreamScriptRule``)
     /// so callers should check the streaming variant first and only
     /// fall through to the buffered path when no stream rule matches.
-    static func hasScriptRule(in rules: [CompiledMITMRule], pathAndQuery: String?) -> Bool {
+    static func hasScriptRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
         rules.contains { rule in
             switch rule.operation {
             case .script:
-                return rule.matchesURL(pathAndQuery)
-            case .streamScript, .urlReplace, .headerAdd, .headerDelete, .headerReplace, .jsonBody:
+                return rule.matchesURL(requestURL)
+            case .streamScript, .urlReplace, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
                 return false
             }
         }
     }
 
     /// True when at least one ``.streamScript`` rule in ``rules``
-    /// would fire for the given request-target. Both rewriters
+    /// would fire for the given request URL. Both rewriters
     /// consult this at head-completion time to decide whether to
     /// enter per-frame streaming mode (emit head immediately, no
     /// body buffering, no HTTP-level decompression).
-    static func hasStreamScriptRule(in rules: [CompiledMITMRule], pathAndQuery: String?) -> Bool {
+    static func hasStreamScriptRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
         rules.contains { rule in
             switch rule.operation {
             case .streamScript:
-                return rule.matchesURL(pathAndQuery)
-            case .script, .urlReplace, .headerAdd, .headerDelete, .headerReplace, .jsonBody:
+                return rule.matchesURL(requestURL)
+            case .script, .urlReplace, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
                 return false
             }
         }
     }
 
-    /// True when at least one ``.jsonBody`` rule in ``rules`` would fire
-    /// for the given request-target. ``.jsonBody`` is a buffered body
+    /// True when at least one ``.bodyJSON`` rule in ``rules`` would fire
+    /// for the given request URL. ``.bodyJSON`` is a buffered body
     /// transform like ``.script`` — the rewriters must accumulate and
     /// decompress the body before its native JSON edits can run — so it is
     /// folded into ``hasBufferedBodyRule``.
-    static func hasJSONBodyRule(in rules: [CompiledMITMRule], pathAndQuery: String?) -> Bool {
+    static func hasBodyJSONRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
         rules.contains { rule in
-            if case .jsonBody = rule.operation { return rule.matchesURL(pathAndQuery) }
+            if case .bodyJSON = rule.operation { return rule.matchesURL(requestURL) }
             return false
         }
     }
 
-    /// True when any **buffered** body transform would fire: a ``.script``
-    /// or one or more ``.jsonBody`` edits. The HTTP/1 and HTTP/2 rewriters
-    /// gate body buffering on this — either kind needs the whole
-    /// (decompressed) body in hand before it can run, and both are applied
-    /// together by ``apply``. ``.streamScript`` is deliberately excluded:
-    /// it runs per-frame without buffering and is gated by
-    /// ``hasStreamScriptRule`` instead, which callers must check first.
-    static func hasBufferedBodyRule(in rules: [CompiledMITMRule], pathAndQuery: String?) -> Bool {
-        hasScriptRule(in: rules, pathAndQuery: pathAndQuery)
-            || hasJSONBodyRule(in: rules, pathAndQuery: pathAndQuery)
+    /// True when at least one ``.bodyReplace`` rule in ``rules`` would fire
+    /// for the given request URL. Like ``.bodyJSON`` it is a buffered
+    /// body transform (the regex runs over the whole decompressed body), so
+    /// it too is folded into ``hasBufferedBodyRule``.
+    static func hasBodyReplaceRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
+        rules.contains { rule in
+            if case .bodyReplace = rule.operation { return rule.matchesURL(requestURL) }
+            return false
+        }
+    }
+
+    /// True when any **buffered** body transform would fire: a ``.script``,
+    /// one or more ``.bodyReplace`` edits, or one or more ``.bodyJSON``
+    /// edits. The HTTP/1 and HTTP/2 rewriters gate body buffering on this —
+    /// every kind needs the whole (decompressed) body in hand before it can
+    /// run, and all are applied together by ``apply``. ``.streamScript`` is
+    /// deliberately excluded: it runs per-frame without buffering and is
+    /// gated by ``hasStreamScriptRule`` instead, which callers must check
+    /// first.
+    static func hasBufferedBodyRule(in rules: [CompiledMITMRule], requestURL: String?) -> Bool {
+        hasScriptRule(in: rules, requestURL: requestURL)
+            || hasBodyReplaceRule(in: rules, requestURL: requestURL)
+            || hasBodyJSONRule(in: rules, requestURL: requestURL)
     }
 
     /// Recognises response media types whose whole point is incremental
@@ -189,34 +202,40 @@ enum MITMScriptTransform {
         }
     }
 
-    /// Applies the buffered body transforms to ``message``: first every
-    /// matching ``.jsonBody`` edit in rule order (native, composing), then
-    /// the single matching ``.script`` (last-wins) on the already-edited
-    /// body. Header-only rules are no-ops here (they ran at head time).
-    /// Returns ``Outcome/message`` carrying the (possibly JSON-edited)
-    /// message when no script matches or ``engineProvider`` is nil;
-    /// returns ``Outcome/synthesizedResponse`` when a request-phase script
-    /// called `Anywhere.respond(...)`.
+    /// Applies the buffered body transforms to ``message`` in a fixed
+    /// order: first every matching ``.bodyJSON`` edit in rule order (native,
+    /// composing), then every matching ``.bodyReplace`` edit in rule order
+    /// (native, composing) on the JSON-edited body, then the single matching
+    /// ``.script`` (last-wins) on the already-edited body. Header-only rules
+    /// are no-ops here (they ran at head time). Returns ``Outcome/message``
+    /// carrying the (possibly edited) message when no script matches or
+    /// ``engineProvider`` is nil; returns ``Outcome/synthesizedResponse``
+    /// when a request-phase script called `Anywhere.respond(...)`.
     static func apply(
         _ message: MITMScriptEngine.Message,
         rules: [CompiledMITMRule],
         engineProvider: MITMScriptEngine.Provider? = nil
     ) -> Outcome {
-        let pathAndQuery = MITMRequestURL.pathAndQuery(from: message.url)
+        let requestURL = message.url
 
-        // Native JSON edits run first and compose: every matching
-        // ``.jsonBody`` rule applies to the body in rule order (no JS
-        // engine involved). A ``.script`` then sees the already-edited
-        // body. Mirrors how header rules commit before the script — the
-        // JSON stage is independent of the script and survives its
-        // ``Anywhere.exit``.
+        // Native body edits run first and compose: every matching
+        // ``.bodyJSON`` rule, then every matching ``.bodyReplace`` rule,
+        // each in rule order (no JS engine involved). A ``.script`` then
+        // sees the already-edited body. JSON edits run before the text
+        // replace so the latter operates on the re-serialized JSON; both
+        // run before the script and survive its ``Anywhere.exit``, mirroring
+        // how header rules commit before the script.
         var message = message
-        let jsonOps = matchingJSONOps(in: rules, pathAndQuery: pathAndQuery)
+        let jsonOps = matchingBodyJSONOps(in: rules, requestURL: requestURL)
         if !jsonOps.isEmpty {
             message.body = MITMJSONPatch.applyAll(jsonOps, to: message.body)
         }
+        let replaceOps = matchingBodyReplaceOps(in: rules, requestURL: requestURL)
+        if !replaceOps.isEmpty {
+            message.body = MITMBodyReplace.applyAll(replaceOps, to: message.body)
+        }
 
-        guard let match = lastMatchingScriptSource(in: rules, pathAndQuery: pathAndQuery),
+        guard let match = lastMatchingScriptSource(in: rules, requestURL: requestURL),
               let engineProvider
         else { return .message(message) }
         let outcome = engineProvider.get().apply(
@@ -232,19 +251,36 @@ enum MITMScriptTransform {
         }
     }
 
-    /// The compiled ``.jsonBody`` edits whose URL pattern matches the
-    /// request-target, in rule order. Unlike the single-rule ``.script``
-    /// (last match wins), **every** matching ``.jsonBody`` rule is
+    /// The compiled ``.bodyJSON`` edits whose URL pattern matches the
+    /// request URL, in rule order. Unlike the single-rule ``.script``
+    /// (last match wins), **every** matching ``.bodyJSON`` rule is
     /// returned so the edits compose — ``MITMJSONPatch/applyAll`` runs them
     /// against one parse of the body.
-    private static func matchingJSONOps(
+    private static func matchingBodyJSONOps(
         in rules: [CompiledMITMRule],
-        pathAndQuery: String?
+        requestURL: String?
     ) -> [MITMJSONPatch.CompiledOp] {
         var ops: [MITMJSONPatch.CompiledOp] = []
         for rule in rules {
-            if case .jsonBody(let op) = rule.operation, rule.matchesURL(pathAndQuery) {
+            if case .bodyJSON(let op) = rule.operation, rule.matchesURL(requestURL) {
                 ops.append(op)
+            }
+        }
+        return ops
+    }
+
+    /// The compiled ``.bodyReplace`` edits whose URL pattern matches the
+    /// request URL, in rule order. Like ``matchingBodyJSONOps``, **every**
+    /// matching rule is returned so the regex replacements compose —
+    /// ``MITMBodyReplace/applyAll`` runs them against the running body text.
+    private static func matchingBodyReplaceOps(
+        in rules: [CompiledMITMRule],
+        requestURL: String?
+    ) -> [MITMBodyReplace.CompiledOp] {
+        var ops: [MITMBodyReplace.CompiledOp] = []
+        for rule in rules {
+            if case .bodyReplace(let search, let replacement) = rule.operation, rule.matchesURL(requestURL) {
+                ops.append(MITMBodyReplace.CompiledOp(search: search, replacement: replacement))
             }
         }
         return ops
@@ -287,7 +323,7 @@ enum MITMScriptTransform {
     ///
     /// With single-rule semantics the ``state`` slot has unambiguous
     /// ownership: it belongs to the one ``.streamScript`` rule that
-    /// matched the stream's request-target at head time. Earlier
+    /// matched the stream's request URL at head time. Earlier
     /// matching rules don't run on this stream and so can't trample
     /// the slot.
     final class FrameCursor {
@@ -296,7 +332,7 @@ enum MITMScriptTransform {
         /// stream" — subsequent frames bypass the script entirely.
         var bypass: Bool = false
         /// Memoized stream-script resolution for this stream. A stream's
-        /// request-target and rule list are fixed for its lifetime, so
+        /// request URL and rule list are fixed for its lifetime, so
         /// ``applyFrame`` resolves the matching ``.streamScript`` on the
         /// first frame and reuses it — avoiding a per-frame URL parse and
         /// a per-frame walk of the rule list (each rule a regex match) on
@@ -333,8 +369,7 @@ enum MITMScriptTransform {
         if let cached = cursor.resolvedMatch {
             resolved = cached
         } else {
-            let pathAndQuery = MITMRequestURL.pathAndQuery(from: frameContext.url)
-            resolved = lastMatchingStreamScriptSource(in: rules, pathAndQuery: pathAndQuery)
+            resolved = lastMatchingStreamScriptSource(in: rules, requestURL: frameContext.url)
             cursor.resolvedMatch = resolved
         }
         guard let match = resolved, let engineProvider
@@ -402,15 +437,15 @@ enum MITMScriptTransform {
     }
 
     /// Returns the source of the last ``.script`` rule whose URL
-    /// pattern matches the request-target, or nil when none match.
+    /// pattern matches the request URL, or nil when none match.
     /// Walks rules back-to-front so the first hit is the winner.
     private static func lastMatchingScriptSource(
         in rules: [CompiledMITMRule],
-        pathAndQuery: String?
+        requestURL: String?
     ) -> ScriptMatch? {
         for rule in rules.reversed() {
             if case .script(let source, let sourceKey) = rule.operation,
-               rule.matchesURL(pathAndQuery) {
+               rule.matchesURL(requestURL) {
                 return ScriptMatch(source: source, sourceKey: sourceKey)
             }
         }
@@ -418,14 +453,14 @@ enum MITMScriptTransform {
     }
 
     /// Returns the source of the last ``.streamScript`` rule whose
-    /// URL pattern matches the request-target, or nil when none match.
+    /// URL pattern matches the request URL, or nil when none match.
     private static func lastMatchingStreamScriptSource(
         in rules: [CompiledMITMRule],
-        pathAndQuery: String?
+        requestURL: String?
     ) -> ScriptMatch? {
         for rule in rules.reversed() {
             if case .streamScript(let source, let sourceKey) = rule.operation,
-               rule.matchesURL(pathAndQuery) {
+               rule.matchesURL(requestURL) {
                 return ScriptMatch(source: source, sourceKey: sourceKey)
             }
         }

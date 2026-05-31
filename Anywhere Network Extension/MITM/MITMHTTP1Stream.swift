@@ -525,12 +525,12 @@ final class MITMHTTP1Stream {
             originatingRequest = nil
         }
 
-        // The request-target every rule's URL gate is tested against:
-        // the (already url-replaced) start-line target on requests, the
-        // originating request's path on responses — so request and
-        // response rules in a set gate on the same URL the client asked
+        // The whole request URL every rule's gate is tested against:
+        // built from the (already url-replaced) start-line target on
+        // requests, the originating request's URL on responses — so request
+        // and response rules in a set gate on the same URL the client asked
         // for. nil fails the gate closed.
-        let gatePathAndQuery = requestTargetForGating(
+        let gateURL = requestURLForGating(
             startLine: rewrittenStartLine,
             originatingRequest: originatingRequest
         )
@@ -538,7 +538,7 @@ final class MITMHTTP1Stream {
         // Auto Host rewrite runs first so a headerReplace targeting Host
         // still overrides the canonical post-redirect value.
         let withAuthority = applyAuthorityRewrite(parsed.headers)
-        let rewrittenHeaders = applyHeaderRules(withAuthority, pathAndQuery: gatePathAndQuery)
+        let rewrittenHeaders = applyHeaderRules(withAuthority, requestURL: gateURL)
 
         let framing = bodyFraming(
             startLine: rewrittenStartLine,
@@ -546,14 +546,16 @@ final class MITMHTTP1Stream {
             originatingMethod: originatingRequest?.method
         )
 
-        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, pathAndQuery: gatePathAndQuery)
-        // Buffered body transforms = a script OR one/more native JSON
-        // edits. Both need the whole decompressed body in hand, so either
-        // drives buffering for bodied framings below. The no-body (.none)
-        // path stays gated on ``scriptsApply`` alone — a JSON edit has
-        // nothing to act on without a body.
+        let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, requestURL: gateURL)
+        // Buffered body transforms = a script OR one/more native text
+        // replaces OR one/more native JSON edits. Each needs the whole
+        // decompressed body in hand, so any of them drives buffering for
+        // bodied framings below. The no-body (.none) path stays gated on
+        // ``scriptsApply`` alone — a body edit has nothing to act on
+        // without a body.
         let buffersBody = scriptsApply
-            || MITMScriptTransform.hasJSONBodyRule(in: rules, pathAndQuery: gatePathAndQuery)
+            || MITMScriptTransform.hasBodyReplaceRule(in: rules, requestURL: gateURL)
+            || MITMScriptTransform.hasBodyJSONRule(in: rules, requestURL: gateURL)
 
         // Protocol upgrades and "read until close" responses can't be
         // safely re-framed, so emit the rewritten head and downgrade.
@@ -571,7 +573,7 @@ final class MITMHTTP1Stream {
             // stance as HTTP/2. Stream scripts need in-band framing they
             // don't get here, so they fall through too.
             if case .readUntilClose = framing, buffersBody,
-               !MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: gatePathAndQuery) {
+               !MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: gateURL) {
                 let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
                 if codec.supported, !codec.requiresDecompression {
                     warnIfBufferedScriptDeStreams(rewrittenHeaders)
@@ -690,7 +692,7 @@ final class MITMHTTP1Stream {
                 length: length,
                 buffersBody: buffersBody,
                 rules: rules,
-                pathAndQuery: gatePathAndQuery,
+                requestURL: gateURL,
                 originatingRequest: originatingRequest,
                 into: &output
             )
@@ -700,7 +702,7 @@ final class MITMHTTP1Stream {
                 rewrittenHeaders: rewrittenHeaders,
                 buffersBody: buffersBody,
                 rules: rules,
-                pathAndQuery: gatePathAndQuery,
+                requestURL: gateURL,
                 originatingRequest: originatingRequest,
                 into: &output
             )
@@ -715,7 +717,7 @@ final class MITMHTTP1Stream {
         length: Int,
         buffersBody: Bool,
         rules: [CompiledMITMRule],
-        pathAndQuery: String?,
+        requestURL: String?,
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
@@ -723,7 +725,7 @@ final class MITMHTTP1Stream {
         // the head has already committed to a byte count we can't
         // change. Warn and fall through to either buffered-script or
         // passthrough.
-        if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery) {
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: requestURL) {
             logger.warning("[MITM] HTTP/1 \(host): Stream Script skipped for Content-Length body (chunked encoding required)")
         }
 
@@ -763,7 +765,7 @@ final class MITMHTTP1Stream {
         rewrittenHeaders: [Header],
         buffersBody: Bool,
         rules: [CompiledMITMRule],
-        pathAndQuery: String?,
+        requestURL: String?,
         originatingRequest: MITMRequestLog.Record?,
         into output: inout Data
     ) -> Bool {
@@ -771,7 +773,7 @@ final class MITMHTTP1Stream {
         // immediately and switch to per-chunk script mode. Stream
         // scripts can't mutate head fields, so head emission is
         // straightforward here.
-        if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery) {
+        if MITMScriptTransform.hasStreamScriptRule(in: rules, requestURL: requestURL) {
             if buffersBody {
                 logger.warning("[MITM] HTTP/1 \(host): Stream Script wins over buffered body rule")
             }
@@ -2018,8 +2020,9 @@ final class MITMHTTP1Stream {
 
     /// Rewrites the request-target on the start line via any
     /// ``urlReplace`` rules. Request phase only; no-op on responses,
-    /// asterisk-form (`OPTIONS *`), or unparseable lines. The regex applies
-    /// to the path-and-query, not the method or HTTP-version.
+    /// asterisk-form (`OPTIONS *`), or unparseable lines. Each rule gates on
+    /// the whole URL, then substitutes its ``search`` regex within the
+    /// path-and-query — not the method or HTTP-version.
     private func applyURLRules(_ startLine: String) -> String {
         guard phase == .httpRequest else { return startLine }
         guard rules.contains(where: {
@@ -2040,29 +2043,20 @@ final class MITMHTTP1Stream {
 
         var changed = false
         for rule in rules {
-            guard case .urlReplace(let replacement) = rule.operation else {
+            guard case .urlReplace(let search, let replacement) = rule.operation else {
                 continue
             }
-            let range = NSRange(target.startIndex..., in: target)
-            let mutated = rule.patternRegex.stringByReplacingMatches(
-                in: target,
-                options: [],
-                range: range,
-                withTemplate: replacement
-            )
+            // Gate on the whole URL — built from the live (possibly
+            // already-rewritten) target — then substitute on the target.
+            guard rule.matchesURL("https://\(host)\(target)") else { continue }
+            let mutated = target.replacing(search, with: replacement)
             if mutated != target {
-                // ``MITMRewritePolicy`` rejects templates with raw
-                // whitespace / CTL at load time, but
-                // ``NSRegularExpression`` expands backreferences
-                // (``$1``…) from the matched groups in the live
-                // request-target. A capture that pulled in bytes
-                // exotic enough to corrupt the start line
-                // (percent-decoded SP, CR, …) would be smuggled
-                // straight onto the wire. Validate the mutated
-                // target before committing it; drop the rule
-                // application on failure so the connection stays
-                // intact rather than emitting a corrupted start
-                // line.
+                // The replacement is validated wire-safe at load time, but
+                // splicing it into the live target can still yield an
+                // invalid request-target (e.g. a stray byte left by the
+                // surrounding bytes the match spanned). Re-validate before
+                // committing so a bad result is dropped rather than smuggled
+                // onto the start line as a response-splitting payload.
                 guard Self.isValidRequestTarget(mutated) else {
                     logger.warning("[MITM] HTTP/1 \(host): URL Replace produced invalid request-target; skipping rule")
                     continue
@@ -2074,13 +2068,13 @@ final class MITMHTTP1Stream {
         return changed ? "\(method) \(target) \(version)" : startLine
     }
 
-    /// ``pathAndQuery`` is the request-target the URL gate is tested
-    /// against; a rule whose pattern doesn't match it is skipped.
-    private func applyHeaderRules(_ headers: [Header], pathAndQuery: String?) -> [Header] {
+    /// ``requestURL`` is the whole request URL the gate is tested against;
+    /// a rule whose ``urlPattern`` doesn't match it is skipped.
+    private func applyHeaderRules(_ headers: [Header], requestURL: String?) -> [Header] {
         guard !rules.isEmpty else { return headers }
         var current = headers
         for rule in rules {
-            guard rule.matchesURL(pathAndQuery) else { continue }
+            guard rule.matchesURL(requestURL) else { continue }
             switch rule.operation {
             case .headerAdd(let name, let value):
                 current.append((name: name, value: value))
@@ -2090,19 +2084,19 @@ final class MITMHTTP1Stream {
                 current = current.map { entry in
                     entry.name.equalsIgnoringASCIICase(name) ? (name: name, value: value) : entry
                 }
-            case .urlReplace, .script, .streamScript, .jsonBody:
+            case .urlReplace, .script, .streamScript, .bodyReplace, .bodyJSON:
                 continue
             }
         }
         return current
     }
 
-    /// The request-target (path-and-query) used to gate every rule's
-    /// URL pattern. Request phase: the (already url-replaced) start-line
-    /// target. Response phase: the path-and-query of the originating
-    /// request's URL, so a response rule gates on the URL the client
-    /// asked for. nil — indeterminate — fails the gate closed.
-    private func requestTargetForGating(
+    /// The whole request URL used to gate every rule's ``urlPattern``.
+    /// Request phase: `https://host` joined with the (already url-replaced)
+    /// start-line target. Response phase: the originating request's URL, so
+    /// a response rule gates on the URL the client asked for. nil —
+    /// indeterminate — fails the gate closed.
+    private func requestURLForGating(
         startLine: String,
         originatingRequest: MITMRequestLog.Record?
     ) -> String? {
@@ -2112,9 +2106,9 @@ final class MITMHTTP1Stream {
             guard parts.count >= 2 else { return nil }
             let target = String(parts[1])
             // Asterisk-form (OPTIONS *) is not a path to match against.
-            return target == "*" ? nil : target
+            return target == "*" ? nil : "https://\(host)\(target)"
         case .httpResponse:
-            return MITMRequestURL.pathAndQuery(from: originatingRequest?.url)
+            return originatingRequest?.url
         }
     }
 
