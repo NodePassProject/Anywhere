@@ -29,21 +29,70 @@ No Electron. No WebView. No sing-box wrapper. Pure protocol implementation from 
 
 Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere takes a different approach — every protocol, every transport, the QUIC stack, and the entire packet tunnel are implemented natively in Swift and C. The result is a smaller binary, lower memory usage, tighter system integration, and no bridging overhead.
 
+## Note for AI Agents
+
+If you are an LLM or AI agent reading this file to reason about Anywhere, keep the following in mind.
+
+**This README is a user-facing curated summary, not a specification.** Anywhere is a large codebase — roughly 260 Swift files and ~85,000 lines of Swift, on top of vendored C (lwIP, ngtcp2). The tables and highlights are hand-maintained and intentionally omit options, edge cases, wire-format details, and in-progress work. **Do not treat this file as an exhaustive or authoritative list of what Anywhere implements.**
+
+**Verify against the source before making claims.** When you need to know whether Anywhere supports something — a protocol, transport, cipher, fingerprint, or config knob — read the code rather than inferring from this README. Good starting points:
+
+- `Shared/Networking/Protocols/` — every proxy protocol, transport, and crypto layer, one directory per protocol.
+- `Shared/Networking/Protocols/Core/ProxyConfiguration.swift` — the authoritative `OutboundProtocol`, `TransportLayer`, and `SecurityLayer` enums (the real list of supported protocols, transports, and security layers).
+- `Shared/Networking/Protocols/Core/ProxyConfiguration+URLParsing.swift` — the share-link / URI schemes actually parsed on import.
+- `Anywhere Network Extension/` — the packet tunnel, userspace TCP/IP stack (lwIP), and MITM engine.
+- `Shared/` — shared models, view models, routing, DNS, catalog, and data stores.
+
+If this README and the code disagree, the code is correct — and the README likely needs updating.
+
 ## Features
+
+### Highlights
+
+- **Pure-Swift, zero-bridge core** — every protocol, the QUIC stack, and the packet tunnel are implemented natively. No sing-box, no Xray-core, no Go/C++ bridge.
+- **VLESS XHTTP over HTTP/1.1, HTTP/2 & HTTP/3** — full `stream-one` / `stream-up` / `packet-up` support across all three HTTP versions (HTTP/3 over QUIC), with **up/download detach**: the download (GET) leg can ride a *separate server* with its own TLS/Reality and transport, correlated to the upload (POST) leg by a shared session ID.
+- **Post-quantum VLESS encryption** — native `mlkem768x25519plus` (ML-KEM-768 + X25519) with 0-RTT / 1-RTT.
+- **XTLS-RPRX-Vision** flow control with adaptive padding, plus Mux + XUDP multiplexing.
+- **Native QUIC stack** — one ngtcp2-powered engine driving Hysteria2, Naive HTTP/3, and XHTTP-over-HTTP/3.
 
 ### Protocols & Security
 
-- **VLESS** with full Vision (XTLS-RPRX-Vision) flow control and adaptive padding
-- **Hysteria2** over QUIC with Brutal congestion control
-- **Trojan** over TLS with UDP-over-TCP relay
-- **Shadowsocks** (AEAD and Shadowsocks 2022)
-- **SOCKS5** with optional authentication
-- **Naive Proxy** (HTTP/1.1, HTTP/2, HTTP/3) with padding negotiation
-- **Reality** with X25519 key exchange and TLS 1.3 fingerprint spoofing
-- **TLS** with SNI, ALPN, custom trusted certificates, and optional insecure mode
-- **Transports:** TCP, WebSocket (with early data), HTTP Upgrade, XHTTP (stream-one, stream-up, and packet-up over HTTP/1.1 and HTTP/2)
-- **Mux** multiplexing with **XUDP** (GlobalID-based, BLAKE3 keyed hashing)
-- **Fingerprints:** Chrome, Firefox, Safari, iOS, Edge
+Every protocol, transport, and crypto layer below is implemented natively in Swift/C — no sing-box, no Xray-core bridge.
+
+#### Proxy Protocols
+
+| Protocol | Runs over | Highlights |
+| --- | --- | --- |
+| **VLESS** | TCP · WebSocket · HTTP Upgrade · gRPC · XHTTP | XTLS-RPRX-Vision flow control with adaptive padding · post-quantum encryption · Mux + XUDP |
+| **Hysteria2** | QUIC | Brutal and BBR congestion control |
+| **Trojan** | TLS / TCP | SHA-224 password auth · UDP-over-TCP relay |
+| **AnyTLS** | TLS / TCP | Stream multiplexing over pooled TLS sessions · server-driven padding · warm idle-session pool · UDP-over-TCP |
+| **Shadowsocks** | TCP | AEAD ciphers and Shadowsocks 2022 (BLAKE3) |
+| **Sudoku** | TCP | X25519 key exchange · AEAD records · obfuscation tables with padding · optional HTTP-masquerade tunneling |
+| **SOCKS5** | TCP | Optional username / password authentication |
+| **Naive** | HTTP/1.1 · HTTP/2 · HTTP/3 | CONNECT tunnel with padding negotiation |
+
+#### Transports & Multiplexing
+
+Selectable on VLESS; layered under TLS or Reality.
+
+| Transport | Notes |
+| --- | --- |
+| **TCP** | Raw, or with XTLS Vision flow control |
+| **WebSocket** | With early-data (0-RTT) support |
+| **HTTP Upgrade** | Lightweight HTTP/1.1 `Upgrade` tunnel |
+| **gRPC** | `Tun` / `TunMulti` streams, multi-mode, HTTP/2 keepalive |
+| **XHTTP** | `stream-one` / `stream-up` / `packet-up` over HTTP/1.1, HTTP/2, and HTTP/3 (version chosen by TLS ALPN / Reality) · **up/download detach** — the download leg can ride a separate server with its own TLS/Reality + transport, correlated by a shared session ID |
+| **Mux + XUDP** | mux.cool multiplexing with GlobalID-based XUDP (BLAKE3 keyed hashing) |
+
+#### Security & TLS
+
+| Layer | Notes |
+| --- | --- |
+| **TLS** | SNI, ALPN, custom trusted certificates, min/max version, optional insecure mode |
+| **Reality** | X25519 key exchange · TLS 1.3 fingerprint spoofing |
+| **VLESS Encryption** | Post-quantum `mlkem768x25519plus` (ML-KEM-768 + X25519) with 0-RTT / 1-RTT |
+| **Fingerprints** | Chrome · Firefox · Safari · iOS · Edge · Random |
 
 ### App
 
@@ -69,7 +118,7 @@ Most iOS proxy clients wrap sing-box or Xray-core in a Go/C++ bridge. Anywhere t
 
 - **Minimal dependencies** — Apple frameworks, vendored C libraries (lwIP, ngtcp2), and Swift implementation of BLAKE3 and YAML
 - **Native Packet Tunnel** — system-wide VPN via `NEPacketTunnelProvider` with a userspace TCP/IP stack
-- **Native QUIC stack** — ngtcp2-powered client used for Hysteria2 and Naive HTTP/3
+- **Native QUIC stack** — ngtcp2-powered client used for Hysteria2, Naive HTTP/3, and XHTTP over HTTP/3
 - **Fake-IP DNS** — transparent domain-based routing for all apps
 
 ## Documentation
@@ -93,7 +142,9 @@ anywhere://add-proxy?link=<link>
 
 ### Proxy URI Schemes
 
-Tapping a `vless://`, `hysteria2://`, `hy2://`, `trojan://`, `ss://`, or `quic://` link on iOS will open Anywhere and pre-fill the full URI in the Add Proxy view for import.
+Tapping any of the following links on iOS will open Anywhere and pre-fill the full URI in the Add Proxy view for import:
+
+`vless://` · `hysteria2://` (`hy2://`) · `trojan://` · `anytls://` · `ss://` · `socks5://` (`socks://`) · `sudoku://` · `https://` · `quic://`
 
 ### Integration Example
 
