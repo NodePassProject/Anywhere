@@ -485,6 +485,21 @@ extension TunnelStack {
                 publishUDPConfig()
             }
 
+            // Reflection is a pure read-path setting: reflection happens
+            // in the read callback off the published snapshot, with no effect on
+            // tunnel network settings or any connection state. Reload it in place
+            // like quicPolicy rather than restarting the stack (which would drop
+            // every connection); this may also be the only change, so it must
+            // run before the change-detection guard below.
+            let reflectionEnabled = AWCore.getReflectionEnabled()
+            let reflectionAddresses = AWCore.getReflectionAddresses()
+            if reflectionEnabled != self.reflectionEnabled || reflectionAddresses != self.reflectionAddresses {
+                logger.info("[VPN] Reflection changed: enabled=\(reflectionEnabled), addresses=\(reflectionAddresses)")
+                self.reflectionEnabled = reflectionEnabled
+                self.reflectionAddresses = reflectionAddresses
+                publishReflector()
+            }
+
             let proxyModeChanged = proxyMode != self.proxyMode
             let bypassCountryChanged = bypassCountryCode != self.bypassCountryCode
             let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon

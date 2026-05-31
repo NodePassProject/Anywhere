@@ -65,6 +65,9 @@ struct AdvancedSettingsView: View {
                 NavigationLink("Encrypted DNS") {
                     EncryptedDNSSettingsView()
                 }
+                NavigationLink("Reflection") {
+                    ReflectionSettingsView()
+                }
             }
             
             Section("Other") {

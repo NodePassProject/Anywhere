@@ -94,26 +94,6 @@ Selectable on VLESS; layered under TLS or Reality.
 | **VLESS Encryption** | Post-quantum `mlkem768x25519plus` (ML-KEM-768 + X25519) with 0-RTT / 1-RTT |
 | **Fingerprints** | Chrome · Firefox · Safari · iOS · Edge · Random |
 
-### App
-
-- **ASR™ Smart Routing** — reduce latency while routing through proxy on demand
-- **One-tap connect** with animated status UI and real-time traffic stats
-- **Proxy chains** — cascade traffic through multiple outbounds
-- **Subscription import** with auto-detection, auto-refresh, and profile metadata
-- **Deep link support** for quick proxy/subscription import (see [Deep Links](#deep-links))
-- **QR code scanner** for instant config import
-- **Latency testing** per-configuration
-- **Custom routing rule sets** with domain/IP/GeoIP matching (MaxMind GeoLite2)
-- **Country bypass** — exclude traffic by destination country
-- **Built-in ad blocking** rule set
-- **Encrypted DNS** (DNS-over-HTTPS, DNS-over-TLS) with auto-upgrade
-- **IPv6** support with configurable behavior
-- **Always On** / on-demand VPN
-- **Trusted certificate** management for private CAs
-- **Xray-core compatible** — works with standard V2Ray/Xray server deployments
-- **Lock Screen / Control Center widget** for one-tap VPN toggle
-- **tvOS companion app** — full proxy management on Apple TV
-
 ### Architecture
 
 - **Minimal dependencies** — Apple frameworks, vendored C libraries (lwIP, ngtcp2), and Swift implementation of BLAKE3 and YAML

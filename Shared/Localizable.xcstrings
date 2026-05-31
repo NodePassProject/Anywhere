@@ -9971,6 +9971,64 @@
     "Packet Up" : {
       "shouldTranslate" : false
     },
+    "Packets sent to a reflection address are returned to their sender instead of being routed or proxied." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تُعاد الحِزَم المُرسَلة إلى عنوان انعكاس إلى مُرسِلها بدلاً من توجيهها أو تمريرها عبر الوكيل."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Packets sent to a reflection address are returned to their sender instead of being routed or proxied."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Los paquetes enviados a una dirección de reflexión se devuelven al remitente en lugar de enrutarse o pasar por el proxy."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بسته‌های ارسال‌شده به یک آدرس بازتاب، به‌جای مسیریابی یا عبور از پراکسی، به فرستنده‌شان بازگردانده می‌شوند."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Пакеты, отправленные на адрес отражения, возвращаются отправителю вместо маршрутизации или проксирования."
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Serpikme salgysyna iberilen paketler ugrukdyrylmagyň ýa-da proksiden geçirilmegiň ýerine iberijisine gaýtarylýar."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bir yansıma adresine gönderilen paketler yönlendirilmek veya proxy üzerinden geçirilmek yerine gönderenine geri döndürülür."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Các gói tin được gửi đến địa chỉ phản chiếu sẽ được trả lại cho người gửi thay vì được định tuyến hoặc đi qua proxy."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发送到反射地址的数据包会被退回给发送方，而不会进行路由或代理。"
+          }
+        }
+      }
+    },
     "Padding Max" : {
       "comment" : "Padding Max for Sudoku protocol",
       "shouldTranslate" : false
@@ -10686,6 +10744,122 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在重连..."
+          }
+        }
+      }
+    },
+    "Reflection" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الانعكاس"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reflection"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reflexión"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بازتاب"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Отражение"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Serpikme"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Yansıma"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Phản chiếu"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "反射"
+          }
+        }
+      }
+    },
+    "Reflection Addresses" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "عناوين الانعكاس"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reflection Addresses"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Direcciones de reflexión"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "آدرس‌های بازتاب"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Адреса отражения"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Serpikme salgylary"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Yansıma Adresleri"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Địa chỉ phản chiếu"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "反射地址"
           }
         }
       }
