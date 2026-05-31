@@ -25,6 +25,168 @@ extension MITMPhase: CustomStringConvertible {
     }
 }
 
+/// One declarative edit to a JSON message body — the native,
+/// rule-configured analog of the ``Anywhere.json`` script API. A single
+/// ``MITMOperation/jsonBody`` rule carries exactly one of these; several
+/// ``jsonBody`` rules matching the same message compose in rule order
+/// (unlike ``MITMOperation/script``, which is single-rule, last-wins).
+/// The body is parsed once, every matching edit applies in turn, and the
+/// result is re-serialized — and, exactly as in ``Anywhere.json``, a body
+/// that isn't JSON or an edit that doesn't resolve leaves the body
+/// untouched (total / fail-closed).
+///
+/// ``path`` is a JSONPath like `"$.data.items[0].id"` (leading `$`
+/// optional; dotted keys and `[index]` / `["key"]` brackets). ``key`` and
+/// ``field`` are bare names — for the recursive ops ``key`` matches at any
+/// depth. ``value`` / ``values`` are authored as JSON literals (`true`,
+/// `42`, `"text"`, `{"a":1}`); a string that isn't valid JSON is taken as
+/// a literal JSON string, so the common case `value = Anywhere` means the
+/// string `"Anywhere"`. The compile step (``MITMJSONPatch/compile``)
+/// pre-parses path and value once at rule-load time.
+enum MITMJSONOperation: Equatable {
+    /// Upsert: create the addressed member (or overwrite it if present);
+    /// for an array index, set in range or append when index == count.
+    case add(path: String, value: String)
+    /// Modify-in-place: does nothing when the addressed member/index
+    /// doesn't already exist, so it can't introduce new fields.
+    case replace(path: String, value: String)
+    /// Remove the addressed member/element.
+    case delete(path: String)
+    /// Overwrite every property named ``key`` at any depth (existing
+    /// occurrences only; never created where absent).
+    case replaceRecursive(key: String, value: String)
+    /// Remove every property named ``key`` at any depth.
+    case deleteRecursive(key: String)
+    /// At the array addressed by ``path``, drop every object element that
+    /// contains ``key``.
+    case removeWhereKeyExists(path: String, key: String)
+    /// At the array addressed by ``path``, drop every object element whose
+    /// ``field`` equals one of ``values`` (a JSON array literal, or a lone
+    /// scalar).
+    case removeWhereFieldIn(path: String, field: String, values: String)
+}
+
+extension MITMJSONOperation: CustomStringConvertible {
+    /// Short action token, reused by the text import format and the rule
+    /// list subtitle.
+    var action: String {
+        switch self {
+        case .add:                  return "add"
+        case .replace:              return "replace"
+        case .delete:               return "delete"
+        case .replaceRecursive:     return "replace-recursive"
+        case .deleteRecursive:      return "delete-recursive"
+        case .removeWhereKeyExists: return "remove-where-key-exists"
+        case .removeWhereFieldIn:   return "remove-where-field-in"
+        }
+    }
+
+    /// `action target` for the rule list, e.g. `add $.user.vip`.
+    var description: String {
+        switch self {
+        case .add(let path, _),
+             .replace(let path, _),
+             .delete(let path),
+             .removeWhereKeyExists(let path, _),
+             .removeWhereFieldIn(let path, _, _):
+            return "\(action) \(path)"
+        case .replaceRecursive(let key, _),
+             .deleteRecursive(let key):
+            return "\(action) \(key)"
+        }
+    }
+}
+
+extension MITMJSONOperation: Codable {
+    private enum Action: String, Codable {
+        case add
+        case replace
+        case delete
+        case replaceRecursive
+        case deleteRecursive
+        case removeWhereKeyExists
+        case removeWhereFieldIn
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case action
+        case path
+        case key
+        case field
+        case value
+        case values
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(Action.self, forKey: .action) {
+        case .add:
+            self = .add(
+                path: try c.decode(String.self, forKey: .path),
+                value: try c.decode(String.self, forKey: .value)
+            )
+        case .replace:
+            self = .replace(
+                path: try c.decode(String.self, forKey: .path),
+                value: try c.decode(String.self, forKey: .value)
+            )
+        case .delete:
+            self = .delete(path: try c.decode(String.self, forKey: .path))
+        case .replaceRecursive:
+            self = .replaceRecursive(
+                key: try c.decode(String.self, forKey: .key),
+                value: try c.decode(String.self, forKey: .value)
+            )
+        case .deleteRecursive:
+            self = .deleteRecursive(key: try c.decode(String.self, forKey: .key))
+        case .removeWhereKeyExists:
+            self = .removeWhereKeyExists(
+                path: try c.decode(String.self, forKey: .path),
+                key: try c.decode(String.self, forKey: .key)
+            )
+        case .removeWhereFieldIn:
+            self = .removeWhereFieldIn(
+                path: try c.decode(String.self, forKey: .path),
+                field: try c.decode(String.self, forKey: .field),
+                values: try c.decode(String.self, forKey: .values)
+            )
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .add(let path, let value):
+            try c.encode(Action.add, forKey: .action)
+            try c.encode(path, forKey: .path)
+            try c.encode(value, forKey: .value)
+        case .replace(let path, let value):
+            try c.encode(Action.replace, forKey: .action)
+            try c.encode(path, forKey: .path)
+            try c.encode(value, forKey: .value)
+        case .delete(let path):
+            try c.encode(Action.delete, forKey: .action)
+            try c.encode(path, forKey: .path)
+        case .replaceRecursive(let key, let value):
+            try c.encode(Action.replaceRecursive, forKey: .action)
+            try c.encode(key, forKey: .key)
+            try c.encode(value, forKey: .value)
+        case .deleteRecursive(let key):
+            try c.encode(Action.deleteRecursive, forKey: .action)
+            try c.encode(key, forKey: .key)
+        case .removeWhereKeyExists(let path, let key):
+            try c.encode(Action.removeWhereKeyExists, forKey: .action)
+            try c.encode(path, forKey: .path)
+            try c.encode(key, forKey: .key)
+        case .removeWhereFieldIn(let path, let field, let values):
+            try c.encode(Action.removeWhereFieldIn, forKey: .action)
+            try c.encode(path, forKey: .path)
+            try c.encode(field, forKey: .field)
+            try c.encode(values, forKey: .values)
+        }
+    }
+}
+
 /// A single rewrite operation. The associated values carry only the
 /// fields that operation needs; the URL-match ``pattern`` that gates
 /// every rule lives one level up on ``MITMRule``, uniform across
@@ -60,6 +222,16 @@ enum MITMOperation: Equatable {
     /// match, ``streamScript`` wins; otherwise single-rule semantics
     /// match ``script`` — at most one fires per stream, last match wins.
     case streamScript(scriptBase64: String)
+    /// Native JSON body edit — the declarative analog of the
+    /// ``Anywhere.json`` script API, applied in compiled native code
+    /// rather than JavaScript. Buffered like ``script`` (the body is
+    /// accumulated, decompressed, edited, and re-emitted with a fresh
+    /// length), but, unlike ``script``, **every** matching ``jsonBody``
+    /// rule fires in rule order so edits compose. When a ``script`` rule
+    /// also matches the same message, the JSON edits run first and the
+    /// script sees the already-edited body. See ``MITMJSONOperation`` for
+    /// the edit catalog and ``MITMJSONPatch`` for the runtime.
+    case jsonBody(MITMJSONOperation)
 }
 
 extension MITMOperation: CustomStringConvertible {
@@ -77,6 +249,8 @@ extension MITMOperation: CustomStringConvertible {
             String(localized: "Script")
         case .streamScript:
             String(localized: "Stream Script")
+        case .jsonBody:
+            String(localized: "JSON Body")
         }
     }
 }
@@ -89,6 +263,7 @@ extension MITMOperation: Codable {
         case headerReplace
         case script
         case streamScript
+        case jsonBody
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -97,6 +272,7 @@ extension MITMOperation: Codable {
         case value
         case replacement
         case script
+        case json
     }
 
     init(from decoder: Decoder) throws {
@@ -121,6 +297,8 @@ extension MITMOperation: Codable {
             self = .script(scriptBase64: try c.decode(String.self, forKey: .script))
         case .streamScript:
             self = .streamScript(scriptBase64: try c.decode(String.self, forKey: .script))
+        case .jsonBody:
+            self = .jsonBody(try c.decode(MITMJSONOperation.self, forKey: .json))
         }
     }
 
@@ -147,6 +325,9 @@ extension MITMOperation: Codable {
         case .streamScript(let scriptBase64):
             try c.encode(Kind.streamScript, forKey: .kind)
             try c.encode(scriptBase64, forKey: .script)
+        case .jsonBody(let operation):
+            try c.encode(Kind.jsonBody, forKey: .kind)
+            try c.encode(operation, forKey: .json)
         }
     }
 }

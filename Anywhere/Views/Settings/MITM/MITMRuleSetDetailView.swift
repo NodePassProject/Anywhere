@@ -168,9 +168,10 @@ struct MITMRuleSetDetailView: View {
                         .onTapGesture {
                             // Subscribed sets are remote-managed and read-only.
                             guard !isSubscribed else { return }
-                            // Script editor not implemented
+                            // Scripts and native JSON-body edits are
+                            // import-only; no in-app editor for them.
                             switch rule.operation {
-                            case .script, .streamScript: return
+                            case .script, .streamScript, .jsonBody: return
                             default: break
                             }
                             editingRule = rule
@@ -460,6 +461,8 @@ enum MITMRuleSummary {
              .streamScript(let scriptBase64):
             let bytes = Data(base64Encoded: scriptBase64)?.count ?? 0
             return String(localized: "\(bytes) byte(s)")
+        case .jsonBody(let operation):
+            return operation.description
         }
     }
 }

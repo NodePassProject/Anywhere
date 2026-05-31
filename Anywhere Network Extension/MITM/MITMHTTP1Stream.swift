@@ -547,6 +547,13 @@ final class MITMHTTP1Stream {
         )
 
         let scriptsApply = MITMScriptTransform.hasScriptRule(in: rules, pathAndQuery: gatePathAndQuery)
+        // Buffered body transforms = a script OR one/more native JSON
+        // edits. Both need the whole decompressed body in hand, so either
+        // drives buffering for bodied framings below. The no-body (.none)
+        // path stays gated on ``scriptsApply`` alone — a JSON edit has
+        // nothing to act on without a body.
+        let buffersBody = scriptsApply
+            || MITMScriptTransform.hasJSONBodyRule(in: rules, pathAndQuery: gatePathAndQuery)
 
         // Protocol upgrades and "read until close" responses can't be
         // safely re-framed, so emit the rewritten head and downgrade.
@@ -563,7 +570,7 @@ final class MITMHTTP1Stream {
             // bound up front isn't safe to buffer optimistically, same
             // stance as HTTP/2. Stream scripts need in-band framing they
             // don't get here, so they fall through too.
-            if case .readUntilClose = framing, scriptsApply,
+            if case .readUntilClose = framing, buffersBody,
                !MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: gatePathAndQuery) {
                 let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
                 if codec.supported, !codec.requiresDecompression {
@@ -681,7 +688,7 @@ final class MITMHTTP1Stream {
                 rewrittenStartLine: rewrittenStartLine,
                 rewrittenHeaders: rewrittenHeaders,
                 length: length,
-                scriptsApply: scriptsApply,
+                buffersBody: buffersBody,
                 rules: rules,
                 pathAndQuery: gatePathAndQuery,
                 originatingRequest: originatingRequest,
@@ -691,7 +698,7 @@ final class MITMHTTP1Stream {
             return enterChunked(
                 rewrittenStartLine: rewrittenStartLine,
                 rewrittenHeaders: rewrittenHeaders,
-                scriptsApply: scriptsApply,
+                buffersBody: buffersBody,
                 rules: rules,
                 pathAndQuery: gatePathAndQuery,
                 originatingRequest: originatingRequest,
@@ -706,7 +713,7 @@ final class MITMHTTP1Stream {
         rewrittenStartLine: String,
         rewrittenHeaders: [Header],
         length: Int,
-        scriptsApply: Bool,
+        buffersBody: Bool,
         rules: [CompiledMITMRule],
         pathAndQuery: String?,
         originatingRequest: MITMRequestLog.Record?,
@@ -725,7 +732,7 @@ final class MITMHTTP1Stream {
         // exceed the cap. This keeps huge downloads (videos, archives)
         // from ever reaching the accumulator.
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-        let canRewrite = scriptsApply && codec.supported && length <= MITMBodyCodec.maxBufferedBodyBytes
+        let canRewrite = buffersBody && codec.supported && length <= MITMBodyCodec.maxBufferedBodyBytes
 
         if canRewrite {
             mode = .rewritingLength(
@@ -740,7 +747,7 @@ final class MITMHTTP1Stream {
             )
             return true
         }
-        if scriptsApply, length > MITMBodyCodec.maxBufferedBodyBytes {
+        if buffersBody, length > MITMBodyCodec.maxBufferedBodyBytes {
             logger.warning("[MITM] HTTP/1 \(host): Content-Length \(length) exceeds cap \(MITMBodyCodec.maxBufferedBodyBytes)")
         }
         if phase == .httpRequest {
@@ -754,7 +761,7 @@ final class MITMHTTP1Stream {
     private func enterChunked(
         rewrittenStartLine: String,
         rewrittenHeaders: [Header],
-        scriptsApply: Bool,
+        buffersBody: Bool,
         rules: [CompiledMITMRule],
         pathAndQuery: String?,
         originatingRequest: MITMRequestLog.Record?,
@@ -765,8 +772,8 @@ final class MITMHTTP1Stream {
         // scripts can't mutate head fields, so head emission is
         // straightforward here.
         if MITMScriptTransform.hasStreamScriptRule(in: rules, pathAndQuery: pathAndQuery) {
-            if scriptsApply {
-                logger.warning("[MITM] HTTP/1 \(host): Stream Script wins over Script")
+            if buffersBody {
+                logger.warning("[MITM] HTTP/1 \(host): Stream Script wins over buffered body rule")
             }
             if phase == .httpRequest {
                 logRequest(startLine: rewrittenStartLine)
@@ -783,7 +790,7 @@ final class MITMHTTP1Stream {
         }
 
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
-        if scriptsApply, codec.supported {
+        if buffersBody, codec.supported {
             warnIfBufferedScriptDeStreams(rewrittenHeaders)
             mode = .rewritingChunked(
                 pending: PendingHead(
@@ -2083,7 +2090,7 @@ final class MITMHTTP1Stream {
                 current = current.map { entry in
                     entry.name.equalsIgnoringASCIICase(name) ? (name: name, value: value) : entry
                 }
-            case .urlReplace, .script, .streamScript:
+            case .urlReplace, .script, .streamScript, .jsonBody:
                 continue
             }
         }

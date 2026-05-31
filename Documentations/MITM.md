@@ -147,10 +147,12 @@ Shape:
 | `3` | `header-replace` | both         | `pattern`, `name`, `value` |
 | `4` | `script`         | both         | `pattern`, `base64`     |
 | `5` | `stream-script`  | both         | `pattern`, `base64`     |
+| `6` | `json-body`      | both         | `pattern`, `action`, …  |
 
 `url-replace` is always request-phase regardless of the phase column. A rule
 whose field count does not match the table, or whose `pattern` is empty or
-fails to compile as a regex, is dropped.
+fails to compile as a regex, is dropped. For `json-body` the trailing fields
+depend on `action` — see [`json-body` (6)](#json-body-6).
 
 ### Fields and quoting
 
@@ -270,6 +272,65 @@ A header that is not present is left alone — it does **not** add it:
 
 JavaScript transforms. The field is base64-encoded UTF-8 source defining
 `function process(ctx)`. See the next sections.
+
+### `json-body` (6)
+
+Declarative JSON body editing in **native code** — the same edits as the
+[`Anywhere.json`](#anywherejson) script API, without writing any JavaScript. One
+rule carries one edit; its fields are `pattern`, an `action` token, and the
+action's own fields:
+
+| `action`                  | Trailing fields    | Effect                                                            |
+| ------------------------- | ------------------ | ----------------------------------------------------------------- |
+| `add`                     | `path`, `value`    | Upsert at `path` (create or overwrite; append at array end).      |
+| `replace`                 | `path`, `value`    | Overwrite at `path` only if the member/index already exists.      |
+| `delete`                  | `path`             | Remove the member/element at `path`.                              |
+| `replace-recursive`       | `key`, `value`     | Overwrite every property named `key` at any depth.                |
+| `delete-recursive`        | `key`              | Remove every property named `key` at any depth.                   |
+| `remove-where-key-exists` | `path`, `key`      | At the array at `path`, drop objects containing `key`.            |
+| `remove-where-field-in`   | `path`, `field`, `values` | At the array at `path`, drop objects whose `field` ∈ `values`. |
+
+`path` is a JSONPath like `$.data.items[0].id` (leading `$` optional; dotted
+keys and `[index]` / `["key"]` brackets). `value` / `values` are written as JSON
+literals (`true`, `42`, `"text"`, `{"a":1}`, `["x","y"]`); a string that **isn't**
+valid JSON is taken literally, so `value = Anywhere` means the string
+`"Anywhere"`. Action tokens are case-insensitive and also accept the camelCase
+spelling (`replaceRecursive`). A rule whose `path` can't be parsed is dropped.
+
+Like `script`, `json-body` is a **buffered body transform**: the rewriter
+accumulates the body (auto-decoding `gzip` / `deflate` / `br`, up to the same
+**4 MiB** cap), edits it, and re-emits with a corrected `Content-Length`. The
+contract is **total** — a body that isn't JSON, a path that doesn't resolve, or
+a non-serializable result leaves the body **unchanged**. Unlike `script`,
+**every** matching `json-body` rule fires, in rule order, so edits compose; when
+a `script` rule also matches the same message, the JSON edits run **first** and
+the script sees the already-edited body.
+
+Examples — flip a flag, drop a field, and filter an array on the response:
+
+```
+1, 6, ^/api/user, add, $.user.vip, true
+1, 6, ^/api/user, delete, $.user.password
+1, 6, ^/api/feed, remove-where-field-in, $.items, status, expired
+```
+
+A `value` / `values` that contains a comma — a multi-element array or a
+multi-key object — has to be one quoted CSV field with each inner `"` doubled,
+since the field separator is also `,`. So matching several values is either one
+quoted array or one rule per value (they compose):
+
+```
+1, 6, ^/api/feed, remove-where-field-in, $.items, status, "[""expired"",""deleted""]"
+1, 6, ^/api/profile, add, $.meta, "{""beta"":true,""tier"":2}"
+```
+
+Set a string value (CSV-quote it when it contains a comma) and redact a token
+wherever it appears:
+
+```
+1, 6, ^/api/profile, replace, $.tier, "gold, platinum"
+1, 6, .*, replace-recursive, access_token, "***"
+```
 
 ---
 
@@ -473,6 +534,11 @@ rather than throwing.
 
 Paths use JSONPath like `$.data.items[0].id` (leading `$` optional; dotted keys
 and `[index]` / `["key"]` brackets). Recursive methods take a bare key name.
+
+> For these same edits **without** a script — declared as a rule and run in
+> native code — use the [`json-body` (6)](#json-body-6) operation. A `script` is
+> only needed when the edit must be conditional, computed, or combined with
+> `Anywhere.respond` / control directives.
 
 ### `Anywhere.store`
 

@@ -238,10 +238,10 @@ struct MITMRuleEditorView: View {
             operationKind = .headerReplace
             self.headerName = name
             self.headerValue = value
-        case .script, .streamScript:
-            // Scripts are import-only; the detail view should never route
-            // a script rule into this editor. Guard anyway so the
-            // exhaustiveness check passes.
+        case .script, .streamScript, .jsonBody:
+            // Scripts and native JSON-body edits are import-only; the
+            // detail view should never route one of these into this editor.
+            // Guard anyway so the exhaustiveness check passes.
             break
         }
     }

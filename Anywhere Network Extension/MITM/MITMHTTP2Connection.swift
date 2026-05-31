@@ -976,8 +976,8 @@ final class MITMHTTP2Connection {
         if case .headers = kind, !isTrailer, !isInterimResponse,
            !endStreamOnHeaders,
            rewriter.hasStreamScriptRule(phase: phase, pathAndQuery: gatePathAndQuery) {
-            if rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery) {
-                logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): Stream Script rule wins over Script rule")
+            if rewriter.hasBufferedBodyRule(phase: phase, pathAndQuery: gatePathAndQuery) {
+                logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): Stream Script rule wins over buffered body rule")
             }
 
             // Inbound HEADERS still need to land in the request log so
@@ -1014,7 +1014,7 @@ final class MITMHTTP2Connection {
         // an empty body. Skipped for trailers and interim responses
         // for the same reasons as streaming-script above.
         if case .headers = kind, !isTrailer, !isInterimResponse,
-           rewriter.hasScriptRule(phase: phase, pathAndQuery: gatePathAndQuery),
+           rewriter.hasBufferedBodyRule(phase: phase, pathAndQuery: gatePathAndQuery),
            shouldBufferStream(headers: rewritten, endStream: endStreamOnHeaders) {
             if !endStreamOnHeaders {
                 warnIfBufferedScriptDeStreams(streamID: streamID, headers: rewritten)
@@ -1730,15 +1730,15 @@ final class MITMHTTP2Connection {
     // MARK: - Deferral policy
 
     /// Decides whether a stream's HEADERS (and DATA, if any) should be
-    /// deferred so the script chain can mutate the full message. The
+    /// deferred so the buffered transform can mutate the full message. The
     /// codec and content-length gates make the decision once at HEADERS
     /// time rather than rediscovered per-frame. Rule matching happens
     /// earlier, on the rewriter side via
-    /// ``MITMHTTP2Rewriter/hasScriptRule(phase:pathAndQuery:)``.
+    /// ``MITMHTTP2Rewriter/hasBufferedBodyRule(phase:pathAndQuery:)``.
     ///
     /// An END_STREAM-on-HEADERS message has no DATA to buffer, so the
     /// content-length / codec gates don't apply — defer unconditionally
-    /// so the script can still mutate head fields.
+    /// so a script can still mutate head fields.
     private func shouldBufferStream(
         headers: [(name: String, value: String)],
         endStream: Bool
