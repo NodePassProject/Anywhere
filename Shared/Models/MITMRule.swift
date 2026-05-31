@@ -27,8 +27,8 @@ extension MITMPhase: CustomStringConvertible {
 
 /// One declarative edit to a JSON message body — the native,
 /// rule-configured analog of the ``Anywhere.json`` script API. A single
-/// ``MITMOperation/jsonBody`` rule carries exactly one of these; several
-/// ``jsonBody`` rules matching the same message compose in rule order
+/// ``MITMOperation/bodyJSON`` rule carries exactly one of these; several
+/// ``bodyJSON`` rules matching the same message compose in rule order
 /// (unlike ``MITMOperation/script``, which is single-rule, last-wins).
 /// The body is parsed once, every matching edit applies in turn, and the
 /// result is re-serialized — and, exactly as in ``Anywhere.json``, a body
@@ -188,15 +188,17 @@ extension MITMJSONOperation: Codable {
 }
 
 /// A single rewrite operation. The associated values carry only the
-/// fields that operation needs; the URL-match ``pattern`` that gates
+/// fields that operation needs; the ``MITMRule/urlPattern`` that gates
 /// every rule lives one level up on ``MITMRule``, uniform across
 /// operations, and the upstream destination is separate again on
 /// ``MITMRuleSet/rewriteTarget``. See ``MITMRuleSetParser`` for the text
 /// import format and the per-operation field layout.
 enum MITMOperation: Equatable {
-    /// Request-phase only. ``path`` is the replacement template; the
-    /// rule's ``MITMRule/pattern`` is the substitution regex.
-    case urlReplace(path: String)
+    /// Request-phase only. Substitutes ``search`` (a regex) with the literal
+    /// ``replacement`` in the request target (path-and-query) — independent
+    /// of the rule's ``MITMRule/urlPattern``, which only gates whether the
+    /// rule fires.
+    case urlReplace(search: String, replacement: String)
     case headerAdd(name: String, value: String)
     case headerDelete(name: String)
     /// Overwrites the value of every header named ``name``
@@ -222,16 +224,27 @@ enum MITMOperation: Equatable {
     /// match, ``streamScript`` wins; otherwise single-rule semantics
     /// match ``script`` — at most one fires per stream, last match wins.
     case streamScript(scriptBase64: String)
+    /// Native regex find-and-replace over the decompressed text body
+    /// (import op id `6`). ``search`` is a regex and ``replacement`` the
+    /// literal swapped in for each match — exactly like ``urlReplace`` but
+    /// applied to the body instead of the request target. Buffered like
+    /// ``bodyJSON`` (the body is accumulated, decompressed, edited, and
+    /// re-emitted with a fresh length) and, like it, **every** matching
+    /// ``bodyReplace`` rule fires in rule order so edits compose. Total /
+    /// fail-closed: a body that isn't valid UTF-8 — or a search that matches
+    /// nothing — leaves the body untouched. See ``MITMBodyReplace`` for the
+    /// runtime.
+    case bodyReplace(search: String, replacement: String)
     /// Native JSON body edit — the declarative analog of the
     /// ``Anywhere.json`` script API, applied in compiled native code
     /// rather than JavaScript. Buffered like ``script`` (the body is
     /// accumulated, decompressed, edited, and re-emitted with a fresh
-    /// length), but, unlike ``script``, **every** matching ``jsonBody``
+    /// length), but, unlike ``script``, **every** matching ``bodyJSON``
     /// rule fires in rule order so edits compose. When a ``script`` rule
     /// also matches the same message, the JSON edits run first and the
     /// script sees the already-edited body. See ``MITMJSONOperation`` for
     /// the edit catalog and ``MITMJSONPatch`` for the runtime.
-    case jsonBody(MITMJSONOperation)
+    case bodyJSON(MITMJSONOperation)
 }
 
 extension MITMOperation: CustomStringConvertible {
@@ -249,8 +262,10 @@ extension MITMOperation: CustomStringConvertible {
             String(localized: "Script")
         case .streamScript:
             String(localized: "Stream Script")
-        case .jsonBody:
-            String(localized: "JSON Body")
+        case .bodyReplace:
+            String(localized: "Body Replace")
+        case .bodyJSON:
+            String(localized: "Body JSON")
         }
     }
 }
@@ -263,7 +278,8 @@ extension MITMOperation: Codable {
         case headerReplace
         case script
         case streamScript
-        case jsonBody
+        case bodyReplace
+        case bodyJSON
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -271,6 +287,7 @@ extension MITMOperation: Codable {
         case name
         case value
         case replacement
+        case search
         case script
         case json
     }
@@ -280,7 +297,10 @@ extension MITMOperation: Codable {
         let kind = try c.decode(Kind.self, forKey: .kind)
         switch kind {
         case .urlReplace:
-            self = .urlReplace(path: try c.decode(String.self, forKey: .replacement))
+            self = .urlReplace(
+                search: try c.decode(String.self, forKey: .search),
+                replacement: try c.decode(String.self, forKey: .replacement)
+            )
         case .headerAdd:
             self = .headerAdd(
                 name: try c.decode(String.self, forKey: .name),
@@ -297,17 +317,23 @@ extension MITMOperation: Codable {
             self = .script(scriptBase64: try c.decode(String.self, forKey: .script))
         case .streamScript:
             self = .streamScript(scriptBase64: try c.decode(String.self, forKey: .script))
-        case .jsonBody:
-            self = .jsonBody(try c.decode(MITMJSONOperation.self, forKey: .json))
+        case .bodyReplace:
+            self = .bodyReplace(
+                search: try c.decode(String.self, forKey: .search),
+                replacement: try c.decode(String.self, forKey: .replacement)
+            )
+        case .bodyJSON:
+            self = .bodyJSON(try c.decode(MITMJSONOperation.self, forKey: .json))
         }
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .urlReplace(let path):
+        case .urlReplace(let search, let replacement):
             try c.encode(Kind.urlReplace, forKey: .kind)
-            try c.encode(path, forKey: .replacement)
+            try c.encode(search, forKey: .search)
+            try c.encode(replacement, forKey: .replacement)
         case .headerAdd(let name, let value):
             try c.encode(Kind.headerAdd, forKey: .kind)
             try c.encode(name, forKey: .name)
@@ -325,8 +351,12 @@ extension MITMOperation: Codable {
         case .streamScript(let scriptBase64):
             try c.encode(Kind.streamScript, forKey: .kind)
             try c.encode(scriptBase64, forKey: .script)
-        case .jsonBody(let operation):
-            try c.encode(Kind.jsonBody, forKey: .kind)
+        case .bodyReplace(let search, let replacement):
+            try c.encode(Kind.bodyReplace, forKey: .kind)
+            try c.encode(search, forKey: .search)
+            try c.encode(replacement, forKey: .replacement)
+        case .bodyJSON(let operation):
+            try c.encode(Kind.bodyJSON, forKey: .kind)
             try c.encode(operation, forKey: .json)
         }
     }
@@ -335,28 +365,27 @@ extension MITMOperation: Codable {
 struct MITMRule: Codable, Equatable, Identifiable {
     var id = UUID()
     var phase: MITMPhase
-    /// `NSRegularExpression` over the request target's path-and-query
-    /// that gates the ``operation`` (and doubles as the substitution
-    /// regex for ``MITMOperation/urlReplace``). The set's domain suffixes
-    /// gate the host; this refines by path.
-    var pattern: String
+    /// `NSRegularExpression` over the **whole request URL**
+    /// (`https://host/path?query`) that gates the ``operation``. The set's
+    /// domain suffixes gate the host; this refines against the full URL.
+    var urlPattern: String
     var operation: MITMOperation
 
     init(
         id: UUID = UUID(),
         phase: MITMPhase,
-        pattern: String,
+        urlPattern: String,
         operation: MITMOperation
     ) {
         self.id = id
         self.phase = phase
-        self.pattern = pattern
+        self.urlPattern = urlPattern
         self.operation = operation
     }
 
     private enum CodingKeys: String, CodingKey {
         case phase
-        case pattern
+        case urlPattern
         case operation
     }
 
@@ -364,14 +393,14 @@ struct MITMRule: Codable, Equatable, Identifiable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.id = UUID()
         self.phase = try c.decode(MITMPhase.self, forKey: .phase)
-        self.pattern = try c.decode(String.self, forKey: .pattern)
+        self.urlPattern = try c.decode(String.self, forKey: .urlPattern)
         self.operation = try c.decode(MITMOperation.self, forKey: .operation)
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(phase, forKey: .phase)
-        try c.encode(pattern, forKey: .pattern)
+        try c.encode(urlPattern, forKey: .urlPattern)
         try c.encode(operation, forKey: .operation)
     }
 }

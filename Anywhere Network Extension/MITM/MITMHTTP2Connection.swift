@@ -929,10 +929,10 @@ final class MITMHTTP2Connection {
             originatingRequest = nil
         }
         // Response headers carry no ``:path``, so response-phase rules
-        // gate on the originating request's path. Request-phase rules
+        // gate on the originating request's whole URL. Request-phase rules
         // read the live ``:path`` inside the rewriter instead.
-        let responsePathAndQuery = (direction == .outbound)
-            ? MITMRequestURL.pathAndQuery(from: originatingRequest?.url)
+        let responseURL = (direction == .outbound)
+            ? originatingRequest?.url
             : nil
 
         var rewritten: [(name: String, value: String)]
@@ -942,7 +942,7 @@ final class MITMHTTP2Connection {
             // server-to-client is a response. Pick the matching hook.
             rewritten = (direction == .inbound)
                 ? rewriter.transformRequestHeaders(decoded, streamID: streamID)
-                : rewriter.transformResponseHeaders(decoded, streamID: streamID, pathAndQuery: responsePathAndQuery)
+                : rewriter.transformResponseHeaders(decoded, streamID: streamID, requestURL: responseURL)
         case .pushPromise:
             // PUSH_PROMISE carries the synthesized request that goes
             // with the soon-to-be-pushed response. The rewriter has no
@@ -951,12 +951,12 @@ final class MITMHTTP2Connection {
         }
 
         let endStreamOnHeaders = originalFlags & 0x1 != 0
-        // Request-target the script preflights gate on: the live
-        // (post-url-replace) ``:path`` on inbound requests; the
-        // originating request's path on outbound responses.
-        let gatePathAndQuery = (direction == .inbound)
-            ? MITMHTTP2Rewriter.requestPath(in: rewritten)
-            : responsePathAndQuery
+        // Whole URL the script preflights gate on: built from the live
+        // (post-url-replace) ``:path`` on inbound requests; the originating
+        // request's URL on outbound responses.
+        let gateURL = (direction == .inbound)
+            ? MITMHTTP2Rewriter.requestPath(in: rewritten).map { "https://\(rewriter.host)\($0)" }
+            : responseURL
 
         // Streaming-script mode wins over buffered-script mode when
         // both apply. The trade-off: stream rules see DATA frames
@@ -975,8 +975,8 @@ final class MITMHTTP2Connection {
         // matched.
         if case .headers = kind, !isTrailer, !isInterimResponse,
            !endStreamOnHeaders,
-           rewriter.hasStreamScriptRule(phase: phase, pathAndQuery: gatePathAndQuery) {
-            if rewriter.hasBufferedBodyRule(phase: phase, pathAndQuery: gatePathAndQuery) {
+           rewriter.hasStreamScriptRule(phase: phase, requestURL: gateURL) {
+            if rewriter.hasBufferedBodyRule(phase: phase, requestURL: gateURL) {
                 logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): Stream Script rule wins over buffered body rule")
             }
 
@@ -1014,7 +1014,7 @@ final class MITMHTTP2Connection {
         // an empty body. Skipped for trailers and interim responses
         // for the same reasons as streaming-script above.
         if case .headers = kind, !isTrailer, !isInterimResponse,
-           rewriter.hasBufferedBodyRule(phase: phase, pathAndQuery: gatePathAndQuery),
+           rewriter.hasBufferedBodyRule(phase: phase, requestURL: gateURL),
            shouldBufferStream(headers: rewritten, endStream: endStreamOnHeaders) {
             if !endStreamOnHeaders {
                 warnIfBufferedScriptDeStreams(streamID: streamID, headers: rewritten)
@@ -1734,7 +1734,7 @@ final class MITMHTTP2Connection {
     /// codec and content-length gates make the decision once at HEADERS
     /// time rather than rediscovered per-frame. Rule matching happens
     /// earlier, on the rewriter side via
-    /// ``MITMHTTP2Rewriter/hasBufferedBodyRule(phase:pathAndQuery:)``.
+    /// ``MITMHTTP2Rewriter/hasBufferedBodyRule(phase:requestURL:)``.
     ///
     /// An END_STREAM-on-HEADERS message has no DATA to buffer, so the
     /// content-length / codec gates don't apply — defer unconditionally
