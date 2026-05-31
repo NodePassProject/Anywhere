@@ -3804,6 +3804,12 @@
             "value" : "التنزيل المنفصل"
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Detached Download"
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7906,6 +7912,58 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "加入 Telegram 群组"
+          }
+        }
+      }
+    },
+    "JSON Body" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جسم JSON"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cuerpo JSON"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بدنه JSON"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Тело JSON"
+          }
+        },
+        "tk" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "JSON Beden"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "JSON Gövde"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nội dung JSON"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "JSON 体"
           }
         }
       }
@@ -13629,6 +13687,12 @@
             "value" : "TLS (التنزيل)"
           }
         },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TLS (Download)"
+          }
+        },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13679,6 +13743,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "TLS (الرفع)"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "TLS (Upload)"
           }
         },
         "es" : {
