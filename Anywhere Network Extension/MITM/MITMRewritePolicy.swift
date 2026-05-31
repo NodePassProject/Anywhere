@@ -85,6 +85,14 @@ enum CompiledMITMOperation {
     /// Single-rule runtime semantics apply (see ``.script`` above):
     /// at most one ``.streamScript`` runs per stream by design.
     case streamScript(source: String, sourceKey: Int)
+    /// Native JSON body edit (import op id `6`). Each edit's path and
+    /// value are pre-parsed at rule-load time (see ``MITMJSONPatch``);
+    /// ``MITMScriptTransform`` applies every matching ``jsonBody`` rule to
+    /// the buffered body in rule order. Unlike ``script`` these compose —
+    /// all matching rules fire — and they run in native code without a
+    /// `JSContext`. When a ``script`` also matches, the JSON edits run
+    /// first and the script sees the edited body.
+    case jsonBody(MITMJSONPatch.CompiledOp)
 }
 
 /// Compiled view of a rule set at one trie terminal: the specific suffix
@@ -308,6 +316,15 @@ final class MITMRewritePolicy {
                 return nil
             }
             return .streamScript(source: source, sourceKey: sourceCacheKey(source))
+        case .jsonBody(let operation):
+            // The only compile failure is a malformed JSONPath; values
+            // are lenient (a non-JSON string is taken literally), so a
+            // dropped rule means the author's path couldn't be parsed.
+            guard let compiled = MITMJSONPatch.compile(operation) else {
+                logger.warning("[MITM] jsonBody dropped: malformed JSON path in \(operation.action) (suffix=\(suffix))")
+                return nil
+            }
+            return .jsonBody(compiled)
         }
     }
 

@@ -26,7 +26,7 @@ import JavaScriptCore
 ///   `redirect-302` / `reject-200`, and `content-type`.
 /// - **Rule lines** (`<phase>, <operation>, <field…>`) each describe one
 ///   rewrite. Phase is `0` (request) / `1` (response); operation is
-///   `0`–`5`; the per-op field layout is in the ``parseRuleLine`` switch,
+///   `0`–`6`; the per-op field layout is in the ``parseRuleLine`` switch,
 ///   and fields use CSV quoting (see ``splitCSV``).
 /// - **Comments** start with `#` or `//`.
 ///
@@ -257,6 +257,59 @@ enum MITMRuleSetParser {
                 operation: .streamScript(scriptBase64: b64)
             )
 
+        case 6:  // json-body — fields: pattern, action, <action-specific…>
+            guard args.count >= 2 else { return nil }
+            let pattern = args[0]
+            guard !pattern.isEmpty, isValidRegex(pattern) else { return nil }
+            guard let operation = parseJSONOperation(action: args[1], fields: Array(args.dropFirst(2))) else { return nil }
+            return MITMRule(phase: phase, pattern: pattern, operation: .jsonBody(operation))
+
+        default:
+            return nil
+        }
+    }
+
+    /// Parses the action token and its trailing fields of a `json-body`
+    /// (operation `6`) rule into a ``MITMJSONOperation``. Field layout per
+    /// action (each field CSV-quoted like any other):
+    ///
+    ///     add                      <path>, <value>
+    ///     replace                  <path>, <value>
+    ///     delete                   <path>
+    ///     replace-recursive        <key>, <value>
+    ///     delete-recursive         <key>
+    ///     remove-where-key-exists  <path>, <key>
+    ///     remove-where-field-in    <path>, <field>, <values>
+    ///
+    /// Action tokens are matched case-insensitively and accept both the
+    /// hyphenated form and a bare alias (`replaceRecursive`). `<value>` /
+    /// `<values>` are JSON literals (`true`, `42`, `{"a":1}`); a string
+    /// that isn't valid JSON is taken literally (see ``MITMJSONPatch``).
+    /// Returns nil on an unknown action or the wrong field count, so the
+    /// line is dropped like any other unparseable rule.
+    private static func parseJSONOperation(action rawAction: String, fields: [String]) -> MITMJSONOperation? {
+        switch rawAction.trimmingCharacters(in: .whitespaces).lowercased() {
+        case "add":
+            guard fields.count == 2 else { return nil }
+            return .add(path: fields[0], value: fields[1])
+        case "replace":
+            guard fields.count == 2 else { return nil }
+            return .replace(path: fields[0], value: fields[1])
+        case "delete":
+            guard fields.count == 1 else { return nil }
+            return .delete(path: fields[0])
+        case "replace-recursive", "replacerecursive":
+            guard fields.count == 2 else { return nil }
+            return .replaceRecursive(key: fields[0], value: fields[1])
+        case "delete-recursive", "deleterecursive":
+            guard fields.count == 1 else { return nil }
+            return .deleteRecursive(key: fields[0])
+        case "remove-where-key-exists", "removewherekeyexists":
+            guard fields.count == 2 else { return nil }
+            return .removeWhereKeyExists(path: fields[0], key: fields[1])
+        case "remove-where-field-in", "removewherefieldin":
+            guard fields.count == 3 else { return nil }
+            return .removeWhereFieldIn(path: fields[0], field: fields[1], values: fields[2])
         default:
             return nil
         }

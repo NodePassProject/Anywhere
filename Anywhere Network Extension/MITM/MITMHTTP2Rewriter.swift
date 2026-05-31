@@ -98,22 +98,25 @@ final class MITMHTTP2Rewriter {
 
     // MARK: - Script preflight + application
 
-    /// Whether any buffered script rule applies for this host + phase
-    /// and request-target. Callers should check ``hasStreamScriptRule``
-    /// first — streaming rules take precedence and never coexist with
-    /// buffered mode on the same stream.
-    func hasScriptRule(phase: MITMPhase, pathAndQuery: String?) -> Bool {
-        MITMScriptTransform.hasScriptRule(
-            in: rules(phase: phase),
-            pathAndQuery: pathAndQuery
-        )
-    }
-
     /// Whether any streaming-script rule applies. Streaming rules tell
     /// the connection to emit HEADERS immediately and run scripts
     /// per-frame instead of buffering the full body.
     func hasStreamScriptRule(phase: MITMPhase, pathAndQuery: String?) -> Bool {
         MITMScriptTransform.hasStreamScriptRule(
+            in: rules(phase: phase),
+            pathAndQuery: pathAndQuery
+        )
+    }
+
+    /// Whether any buffered body transform — a script or one/more native
+    /// JSON edits (``MITMOperation/jsonBody``) — applies for this host +
+    /// phase and request-target. The connection gates body buffering on
+    /// this; both kinds need the full decompressed body and are applied
+    /// together by ``applyScripts``. Check ``hasStreamScriptRule`` first —
+    /// streaming rules take precedence and never coexist with buffered
+    /// mode on the same stream.
+    func hasBufferedBodyRule(phase: MITMPhase, pathAndQuery: String?) -> Bool {
+        MITMScriptTransform.hasBufferedBodyRule(
             in: rules(phase: phase),
             pathAndQuery: pathAndQuery
         )
@@ -235,7 +238,7 @@ final class MITMHTTP2Rewriter {
                 current = current.map { entry in
                     entry.name.equalsIgnoringASCIICase(name) ? (name: name, value: value) : entry
                 }
-            case .script, .streamScript:
+            case .script, .streamScript, .jsonBody:
                 continue
             }
         }
