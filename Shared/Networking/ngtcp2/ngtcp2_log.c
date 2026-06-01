@@ -238,7 +238,7 @@ static void log_fr_reset_stream(ngtcp2_log *log, const ngtcp2_pkt_hd *hd,
 static void log_fr_connection_close(ngtcp2_log *log, const ngtcp2_pkt_hd *hd,
                                     const ngtcp2_connection_close *fr,
                                     const char *dir) {
-  size_t reasonlen = ngtcp2_min(255, fr->reasonlen);
+  size_t reasonlen = ngtcp2_min(64, fr->reasonlen);
 
   ngtcp2_log_infof_raw(log, NGTCP2_LOG_EVENT_FRM, NGTCP2_LOG_PKT(dir, hd),
                        " CONNECTION_CLOSE(0x", hex(fr->type), ") error_code=",
@@ -310,7 +310,7 @@ static void log_fr_new_connection_id(ngtcp2_log *log, const ngtcp2_pkt_hd *hd,
                        " NEW_CONNECTION_ID(0x", hex(fr->type),
                        ") seq=", fr->seq, " cid=0x", &fr->cid,
                        " retire_prior_to=", fr->retire_prior_to,
-                       " stateless_reset_token=0x", lbhex(fr->token.data));
+                       " stateless_reset_token=0x", &fr->token);
 }
 
 static void log_fr_stop_sending(ngtcp2_log *log, const ngtcp2_pkt_hd *hd,
@@ -328,7 +328,7 @@ static void log_fr_path_challenge(ngtcp2_log *log, const ngtcp2_pkt_hd *hd,
                                   const char *dir) {
   ngtcp2_log_infof_raw(log, NGTCP2_LOG_EVENT_FRM, NGTCP2_LOG_PKT(dir, hd),
                        " PATH_CHALLENGE(0x", hex(fr->type), ") data=0x",
-                       lbhex(fr->data.data));
+                       &fr->data);
 }
 
 static void log_fr_path_response(ngtcp2_log *log, const ngtcp2_pkt_hd *hd,
@@ -336,7 +336,7 @@ static void log_fr_path_response(ngtcp2_log *log, const ngtcp2_pkt_hd *hd,
                                  const char *dir) {
   ngtcp2_log_infof_raw(log, NGTCP2_LOG_EVENT_FRM, NGTCP2_LOG_PKT(dir, hd),
                        " PATH_RESPONSE(0x", hex(fr->type), ") data=0x",
-                       lbhex(fr->data.data));
+                       &fr->data);
 }
 
 static void log_fr_crypto(ngtcp2_log *log, const ngtcp2_pkt_hd *hd,
@@ -508,8 +508,7 @@ void ngtcp2_log_rx_sr(ngtcp2_log *log, const ngtcp2_pkt_stateless_reset2 *sr) {
   };
 
   ngtcp2_log_infof_raw(log, NGTCP2_LOG_EVENT_PKT, NGTCP2_LOG_PKT("rx", &hd),
-                       " token=0x", lbhex(sr->token.data),
-                       " randlen=", sr->randlen);
+                       " token=0x", &sr->token, " randlen=", sr->randlen);
 }
 
 void ngtcp2_log_remote_tp(ngtcp2_log *log,

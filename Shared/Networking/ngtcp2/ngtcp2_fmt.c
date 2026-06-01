@@ -81,6 +81,19 @@ char *ngtcp2_fmt_write_cid(char *dest, const ngtcp2_cid *cid) {
   return (char *)ngtcp2_encode_hex((uint8_t *)dest, cid->data, cid->datalen);
 }
 
+char *ngtcp2_fmt_write_stateless_reset_token(
+  char *dest, const ngtcp2_stateless_reset_token *token) {
+  return (char *)ngtcp2_encode_hex((uint8_t *)dest, token->data,
+                                   sizeof(token->data));
+}
+
+char *
+ngtcp2_fmt_write_path_challenge_data(char *dest,
+                                     const ngtcp2_path_challenge_data *data) {
+  return (char *)ngtcp2_encode_hex((uint8_t *)dest, data->data,
+                                   sizeof(data->data));
+}
+
 char *ngtcp2_fmt_write_bhex(char *dest, ngtcp2_fmt_bhex f) {
   return (char *)ngtcp2_encode_hex((uint8_t *)dest, f.data, f.len);
 }

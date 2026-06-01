@@ -62,6 +62,8 @@
 
 #define NGTCP2_BBR_PACING_MARGIN_PERCENT 1
 
+#define NGTCP2_BBR_MAX_DRAIN_ROUNDS 3
+
 static void bbr_on_init(ngtcp2_cc_bbr *bbr, ngtcp2_conn_stat *cstat,
                         ngtcp2_tstamp initial_ts);
 
@@ -350,6 +352,7 @@ static void bbr_on_init(ngtcp2_cc_bbr *bbr, ngtcp2_conn_stat *cstat,
   bbr->max_inflight = 0;
 
   bbr->bdp = 0;
+  bbr->drain_start_round = 0;
 
   bbr->undo_state = 0;
   bbr->undo_bw_shortterm = 0;
@@ -681,13 +684,16 @@ static void bbr_enter_drain(ngtcp2_cc_bbr *bbr) {
   bbr->state = NGTCP2_BBR_STATE_DRAIN;
   bbr->pacing_gain_h = NGTCP2_BBR_DRAIN_PACING_GAIN_H;
   bbr->cwnd_gain_h = NGTCP2_BBR_DEFAULT_CWND_GAIN_H;
+  bbr->drain_start_round = bbr->round_count;
 }
 
 static void bbr_check_drain_done(ngtcp2_cc_bbr *bbr,
                                  const ngtcp2_conn_stat *cstat,
                                  ngtcp2_tstamp ts) {
   if (bbr->state == NGTCP2_BBR_STATE_DRAIN &&
-      cstat->bytes_in_flight <= bbr_inflight(bbr, cstat, 100)) {
+      (cstat->bytes_in_flight <= bbr_inflight(bbr, cstat, 100) ||
+       bbr->round_count >
+         bbr->drain_start_round + NGTCP2_BBR_MAX_DRAIN_ROUNDS)) {
     bbr_enter_probe_bw(bbr, ts);
   }
 }

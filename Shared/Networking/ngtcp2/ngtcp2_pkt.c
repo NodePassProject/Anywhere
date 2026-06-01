@@ -408,8 +408,9 @@ ngtcp2_ssize ngtcp2_pkt_encode_hd_long(uint8_t *out, size_t outlen,
   p = out;
 
   *p = (uint8_t)(NGTCP2_HEADER_FORM_BIT |
-                 (ngtcp2_pkt_versioned_type(hd->version, hd->type) << 4) |
-                 (uint8_t)(hd->pkt_numlen - 1));
+                 (uint32_t)(ngtcp2_pkt_versioned_type(hd->version, hd->type)
+                            << 4) |
+                 (uint32_t)(hd->pkt_numlen - 1));
 
   if (!(hd->flags & NGTCP2_PKT_FLAG_FIXED_BIT_CLEAR)) {
     *p |= NGTCP2_FIXED_BIT_MASK;
@@ -2114,7 +2115,7 @@ ngtcp2_ssize ngtcp2_pkt_write_version_negotiation(
 
   p = dest;
 
-  *p++ = 0xC0 | unused_random;
+  *p++ = 0xC0U | unused_random;
   p = ngtcp2_put_uint32be(p, 0);
   *p++ = (uint8_t)dcidlen;
 
@@ -2186,22 +2187,22 @@ int ngtcp2_pkt_decode_retry(ngtcp2_pkt_retry *dest, const uint8_t *payload,
 
 int64_t ngtcp2_pkt_adjust_pkt_num(int64_t max_pkt_num, int64_t pkt_num,
                                   size_t pkt_numlen) {
-  int64_t expected = max_pkt_num + 1;
-  int64_t win = (int64_t)1 << (pkt_numlen * 8);
-  int64_t hwin = win / 2;
-  int64_t mask = win - 1;
-  int64_t cand = (expected & ~mask) | pkt_num;
+  uint64_t expected = (uint64_t)max_pkt_num + 1;
+  uint64_t win = 1ULL << (pkt_numlen * 8);
+  uint64_t hwin = win / 2;
+  uint64_t mask = win - 1;
+  uint64_t cand = (expected & ~mask) | (uint64_t)pkt_num;
 
-  if (cand <= expected - hwin) {
-    assert(cand <= (int64_t)NGTCP2_MAX_VARINT - win);
-    return cand + win;
+  if (cand + hwin <= expected) {
+    assert(cand <= NGTCP2_MAX_VARINT - win);
+    return (int64_t)(cand + win);
   }
 
   if (cand > expected + hwin && cand >= win) {
-    return cand - win;
+    return (int64_t)(cand - win);
   }
 
-  return cand;
+  return (int64_t)cand;
 }
 
 int ngtcp2_pkt_validate_ack(const ngtcp2_ack *fr, int64_t min_pkt_num) {
@@ -2365,7 +2366,7 @@ ngtcp2_ssize ngtcp2_pkt_encode_pseudo_retry(
     return NGTCP2_ERR_NOBUF;
   }
 
-  *p &= 0xF0;
+  *p &= 0xF0U;
   *p |= unused;
 
   p += nwrite;

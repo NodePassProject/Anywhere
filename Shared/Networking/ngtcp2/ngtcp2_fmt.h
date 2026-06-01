@@ -200,6 +200,11 @@ char *ngtcp2_fmt_write_uint64w(char *dest, ngtcp2_fmt_uint64w f);
 char *ngtcp2_fmt_write_hex(char *dest, ngtcp2_fmt_hex f);
 char *ngtcp2_fmt_write_hexw(char *dest, ngtcp2_fmt_hexw f);
 char *ngtcp2_fmt_write_cid(char *dest, const ngtcp2_cid *cid);
+char *ngtcp2_fmt_write_stateless_reset_token(
+  char *dest, const ngtcp2_stateless_reset_token *token);
+char *
+ngtcp2_fmt_write_path_challenge_data(char *dest,
+                                     const ngtcp2_path_challenge_data *data);
 char *ngtcp2_fmt_write_bhex(char *dest, ngtcp2_fmt_bhex f);
 char *ngtcp2_fmt_write_in_addr(char *dest, const ngtcp2_in_addr *addr);
 char *ngtcp2_fmt_write_in6_addr(char *dest, const ngtcp2_in6_addr *addr);
@@ -223,6 +228,11 @@ char *ngtcp2_fmt_write_printable_ascii(char *dest,
     const char *: ngtcp2_fmt_write_str,                                        \
     ngtcp2_cid *: ngtcp2_fmt_write_cid,                                        \
     const ngtcp2_cid *: ngtcp2_fmt_write_cid,                                  \
+    ngtcp2_stateless_reset_token *: ngtcp2_fmt_write_stateless_reset_token,    \
+    const ngtcp2_stateless_reset_token                                         \
+      *: ngtcp2_fmt_write_stateless_reset_token,                               \
+    ngtcp2_path_challenge_data *: ngtcp2_fmt_write_path_challenge_data,        \
+    const ngtcp2_path_challenge_data *: ngtcp2_fmt_write_path_challenge_data,  \
     ngtcp2_in_addr *: ngtcp2_fmt_write_in_addr,                                \
     const ngtcp2_in_addr *: ngtcp2_fmt_write_in_addr,                          \
     ngtcp2_in6_addr *: ngtcp2_fmt_write_in6_addr,                              \

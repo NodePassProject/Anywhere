@@ -30,11 +30,10 @@
 #include "ngtcp2_macro.h"
 
 void ngtcp2_pq_init(ngtcp2_pq *pq, ngtcp2_pq_less less, const ngtcp2_mem *mem) {
-  pq->q = NULL;
-  pq->mem = mem;
-  pq->length = 0;
-  pq->capacity = 0;
-  pq->less = less;
+  *pq = (ngtcp2_pq){
+    .mem = mem,
+    .less = less,
+  };
 }
 
 void ngtcp2_pq_free(ngtcp2_pq *pq) {

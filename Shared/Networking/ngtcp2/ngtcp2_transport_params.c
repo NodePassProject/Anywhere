@@ -587,7 +587,7 @@ int ngtcp2_transport_params_decode_versioned(int transport_params_version,
         return NGTCP2_ERR_MALFORMED_TRANSPORT_PARAM;
       }
       if (params->max_idle_timeout > UINT64_MAX / NGTCP2_MILLISECONDS) {
-        return NGTCP2_ERR_MALFORMED_TRANSPORT_PARAM;
+        params->max_idle_timeout = UINT64_MAX;
       }
       params->max_idle_timeout *= NGTCP2_MILLISECONDS;
       break;
@@ -736,7 +736,7 @@ int ngtcp2_transport_params_decode_versioned(int transport_params_version,
       if ((size_t)(end - p) < valuelen) {
         return NGTCP2_ERR_MALFORMED_TRANSPORT_PARAM;
       }
-      if (valuelen < sizeof(uint32_t) || (valuelen & 0x3)) {
+      if (valuelen < sizeof(uint32_t) || (valuelen & 0x3U)) {
         return NGTCP2_ERR_MALFORMED_TRANSPORT_PARAM;
       }
       p = ngtcp2_get_uint32be(&params->version_info.chosen_version, p);

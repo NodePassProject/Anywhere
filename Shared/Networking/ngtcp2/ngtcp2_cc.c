@@ -322,15 +322,15 @@ void ngtcp2_cc_cubic_cc_on_ack_recv(ngtcp2_cc *cc, ngtcp2_conn_stat *cstat,
     return;
   }
 
+  round_start = ack->pkt_delivered >= cubic->next_round_delivered;
+  if (round_start) {
+    cubic->next_round_delivered = cubic->rst->delivered;
+
+    cubic->rst->is_cwnd_limited = 0;
+  }
+
   if (cstat->cwnd < cstat->ssthresh) {
     /* slow-start */
-    round_start = ack->pkt_delivered >= cubic->next_round_delivered;
-    if (round_start) {
-      cubic->next_round_delivered = cubic->rst->delivered;
-
-      cubic->rst->is_cwnd_limited = 0;
-    }
-
     if (!is_app_limited) {
       if (cubic->hs.css_round) {
         cstat->cwnd += ack->bytes_delivered / NGTCP2_HS_CSS_GROWTH_DIVISOR;

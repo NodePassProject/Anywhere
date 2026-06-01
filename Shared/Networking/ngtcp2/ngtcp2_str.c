@@ -40,6 +40,22 @@ uint8_t *ngtcp2_setmem(uint8_t *dest, uint8_t b, size_t n) {
   return dest + n;
 }
 
+void ngtcp2_secure_clear(void *data, size_t len) {
+#ifdef WIN32
+  SecureZeroMemory(data, len);
+#elif defined(HAVE_EXPLICIT_BZERO)
+  explicit_bzero(data, len);
+#elif defined(HAVE_MEMSET_S)
+  memset_s(data, len, 0, len);
+#else  /* !defined(WIN32) && !defined(HAVE_EXPLICIT_BZERO) &&                  \
+          !defined(HAVE_MEMSET_S) */
+  static void *(*volatile memset_ptr)(void *, int, size_t) = memset;
+
+  memset_ptr(data, 0, len);
+#endif /* !defined(WIN32) && !defined(HAVE_EXPLICIT_BZERO) &&                  \
+          !defined(HAVE_MEMSET_S) */
+}
+
 const void *ngtcp2_get_bytes(void *dest, const void *src, size_t n) {
   memcpy(dest, src, n);
   return (uint8_t *)src + n;
@@ -52,7 +68,7 @@ uint8_t *ngtcp2_encode_hex(uint8_t *dest, const uint8_t *data, size_t len) {
 
   for (i = 0; i < len; ++i) {
     *dest++ = (uint8_t)LOWER_XDIGITS[data[i] >> 4];
-    *dest++ = (uint8_t)LOWER_XDIGITS[data[i] & 0xF];
+    *dest++ = (uint8_t)LOWER_XDIGITS[data[i] & 0xFU];
   }
 
   return dest;
@@ -99,7 +115,7 @@ uint8_t *ngtcp2_encode_uint_hex(uint8_t *dest, uint64_t n) {
         *dest++ = (uint8_t)LOWER_XDIGITS[d >> 4];
       }
 
-      *dest++ = (uint8_t)LOWER_XDIGITS[d & 0xF];
+      *dest++ = (uint8_t)LOWER_XDIGITS[d & 0xFU];
       ++i;
 
       break;
@@ -110,7 +126,7 @@ uint8_t *ngtcp2_encode_uint_hex(uint8_t *dest, uint64_t n) {
     d = (uint8_t)(n >> (sizeof(n) - 1 - i) * 8);
 
     *dest++ = (uint8_t)LOWER_XDIGITS[d >> 4];
-    *dest++ = (uint8_t)LOWER_XDIGITS[d & 0xF];
+    *dest++ = (uint8_t)LOWER_XDIGITS[d & 0xFU];
   }
 
   return dest;
@@ -163,7 +179,7 @@ static uint8_t *write_hex_zsup(uint8_t *dest, const uint8_t *data, size_t len) {
       break;
     }
 
-    d &= 0xF;
+    d &= 0xFU;
 
     if (d) {
       *p++ = (uint8_t)LOWER_XDIGITS[d];
@@ -180,7 +196,7 @@ static uint8_t *write_hex_zsup(uint8_t *dest, const uint8_t *data, size_t len) {
   for (; i < len; ++i) {
     d = data[i];
     *p++ = (uint8_t)LOWER_XDIGITS[d >> 4];
-    *p++ = (uint8_t)LOWER_XDIGITS[d & 0xF];
+    *p++ = (uint8_t)LOWER_XDIGITS[d & 0xFU];
   }
 
   return p;
