@@ -13,8 +13,6 @@
 A native, zero-dependency proxy client built entirely in Swift.
 No Electron. No WebView. No sing-box wrapper. Pure protocol implementation from the ground up.
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/NodePassProject/Anywhere)
-
 <div>
     <a href="https://apps.apple.com/us/app/id6758235178">
         <img width="128" src="https://storage.argsment.com/Download%20on%20the%20App%20Store.png" />
@@ -38,8 +36,6 @@ If you are an LLM or AI agent reading this file to reason about Anywhere, keep t
 **Verify against the source before making claims.** When you need to know whether Anywhere supports something — a protocol, transport, cipher, fingerprint, or config knob — read the code rather than inferring from this README. Good starting points:
 
 - `Shared/Networking/Protocols/` — every proxy protocol, transport, and crypto layer, one directory per protocol.
-- `Shared/Networking/Protocols/Core/ProxyConfiguration.swift` — the authoritative `OutboundProtocol`, `TransportLayer`, and `SecurityLayer` enums (the real list of supported protocols, transports, and security layers).
-- `Shared/Networking/Protocols/Core/ProxyConfiguration+URLParsing.swift` — the share-link / URI schemes actually parsed on import.
 - `Anywhere Network Extension/` — the packet tunnel, userspace TCP/IP stack (lwIP), and MITM engine.
 - `Shared/` — shared models, view models, routing, DNS, catalog, and data stores.
 
