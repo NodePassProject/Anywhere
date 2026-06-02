@@ -280,6 +280,18 @@ final class MITMHTTP1Stream {
     /// ``MITMByteBuffer``.
     private var rxBuffer = MITMByteBuffer()
 
+    /// How many leading bytes of ``rxBuffer`` ``consumeHead`` has already
+    /// scanned for the `CRLF CRLF` head terminator while in
+    /// ``Mode/awaitingHead``. Lets the next scan resume past the
+    /// already-searched prefix instead of re-walking the whole buffer each
+    /// time a slowly-arriving head appends another segment — O(n) total over
+    /// the head rather than O(n²). Reset to 0 the instant a head completes or
+    /// the stream downgrades, so the next message on a kept-alive connection
+    /// scans from the front. ``rxBuffer`` is never drained while a head is
+    /// still accumulating, so this stays a valid 0-relative index across the
+    /// intervening appends.
+    private var headScanned: Int = 0
+
     /// Bytes the request stream has synthesized in response to a
     /// `Anywhere.respond(...)` call and wants written straight back to
     /// the client (i.e. injected onto the inner TLS record). Request
@@ -478,7 +490,16 @@ final class MITMHTTP1Stream {
     ///   - for no-body framings with scripts, runs scripts on an empty
     ///     body and emits the (possibly mutated) head inline.
     private func consumeHead(into output: inout Data) -> Bool {
-        guard let terminator = rxBuffer.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) else {
+        let crlfcrlf = Data([0x0D, 0x0A, 0x0D, 0x0A])
+        // Resume the terminator search where the last unterminated pass
+        // stopped, overlapping the final 3 bytes so a CRLF CRLF straddling the
+        // boundary between already-scanned bytes and a freshly-appended segment
+        // is still found. Re-scanning from the front on every segment would be
+        // O(n²) over the head length for a head dribbled across many small TLS
+        // records — bounded by ``maxHeadBytes`` but a needless quadratic on the
+        // serial lwIP queue.
+        let searchFrom = max(0, headScanned - (crlfcrlf.count - 1))
+        guard let terminator = rxBuffer.range(of: crlfcrlf, from: searchFrom) else {
             if rxBuffer.count > Self.maxHeadBytes {
                 // Hostile or pathologically-malformed peer: head
                 // never terminates. Forward what we have verbatim
@@ -488,11 +509,17 @@ final class MITMHTTP1Stream {
                 logger.warning("[MITM] HTTP/1 \(host): head exceeded \(Self.maxHeadBytes) B without CRLF CRLF; downgrading to passthrough")
                 output.append(rxBuffer.prefix(rxBuffer.count))
                 rxBuffer.removeAll(keepingCapacity: false)
+                headScanned = 0
                 mode = .passthrough
                 return true
             }
+            // Everything up to the current end is scanned; the next segment
+            // resumes from here (less the straddle overlap, applied above).
+            headScanned = rxBuffer.count
             return false
         }
+        // Head complete — the next message scans fresh from the front.
+        headScanned = 0
         let headEnd = terminator.upperBound
         let headData = rxBuffer.subdata(in: 0..<headEnd)
         rxBuffer.removeFirst(headEnd)
