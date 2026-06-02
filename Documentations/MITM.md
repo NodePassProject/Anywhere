@@ -69,7 +69,10 @@ free. Scope `hostname` as tightly as you can.
 > to the same rule set. A script that loops forever, recurses without bound, or
 > triggers catastrophic regex backtracking will wedge **every** tunneled flow,
 > not just its own connection — there is no execution-time watchdog. Keep
-> scripts bounded.
+> scripts bounded. (Awaiting an [`Anywhere.http`](#anywherehttp) fetch is the
+> exception: while it is in flight the connection is parked but the shared
+> runtime is **free**, so other connections' scripts keep running — only
+> CPU-bound work monopolizes the runtime.)
 
 ---
 
@@ -368,6 +371,14 @@ nothing reaches the client until the body is complete, a `script` rule
 wrong for live streams (pointing one at a streaming media type still runs but
 logs a warning recommending `stream-script`).
 
+`process` may be declared **`async`** and `await` an
+[`Anywhere.http`](#anywherehttp) request mid-rewrite; the rewriter waits for the
+returned Promise to settle before reading `ctx.body` back, so the connection
+parks while the fetch is in flight (the shared script runtime stays free for
+other connections). This is the one case where a `script` does more than
+transform the bytes already in hand. `stream-script` has no such facility —
+`Anywhere.http` is unavailable there.
+
 The body is held up to a **4 MiB** cap; larger Content-Length bodies fall back
 to passthrough, and chunked bodies are truncated at the cap.
 
@@ -578,6 +589,66 @@ set is removed or the extension restarts. Scripts must tolerate a missing key.
 `info(msg)`, `warning(msg)`, `error(msg)`, `debug(msg)` — written through the
 shared logger, prefixed `[MITM][JS]`. `debug` is os.log-only.
 
+### `Anywhere.http`
+
+Make an outbound HTTP(S) request from a script and `await` the response — to
+fetch a token, look up data to splice into the body, or call a sidecar API
+mid-rewrite. Available in **`script` rules only** (not `stream-script`), and the
+result must be `await`ed, so declare `process` as `async`:
+
+```js
+async function process(ctx) {
+  const r = await Anywhere.http.get("https://api.example.com/token");
+  if (r.status === 200) {
+    const token = Anywhere.codec.utf8.decode(r.body).trim();
+    ctx.body = Anywhere.codec.utf8.encode(JSON.stringify({ token }));
+  }
+}
+```
+
+- `get(url[, options]) → Promise<Response>`
+- `post(url[, options]) → Promise<Response>`
+- `request(options) → Promise<Response>` — the all-options form; `url` is a
+  field of `options`.
+
+**Response**: `{ status, headers, body, url }` — `status` is the numeric HTTP
+status; `headers` is `[[name, value], …]` like `ctx.headers` (URLSession
+combines duplicate field names, and header order is not preserved); `body` is a
+`Uint8Array`; `url` is the final URL after any followed redirects. The Promise
+**rejects** with an `Error` on a transport failure, a timeout, a cap breach, or
+a non-HTTP response — wrap the `await` in `try/catch` to handle it. An *uncaught*
+rejection reverts the message unchanged, exactly like any other uncaught throw.
+
+**`options`**:
+
+| Field      | Default                 | Meaning |
+| ---------- | ----------------------- | ------- |
+| `method`   | `"GET"` / `"POST"`      | HTTP method. |
+| `headers`  | none                    | `[[name, value], …]` or a `{ name: value }` object. Entries with an invalid field-name or a CR/LF/NUL value are dropped. |
+| `body`     | empty                   | Request body: `Uint8Array`, `ArrayBuffer`, or string. |
+| `timeout`  | 10 000 ms               | Per-request timeout in milliseconds, clamped to 30 000. |
+| `redirect` | `"follow"`              | `"follow"` chases 3xx; `"manual"` returns the 3xx response as-is. |
+| `insecure` | global *Allow Insecure* | `true` accepts self-signed server certificates. |
+
+**Execution model.** A script that `await`s a fetch is *parked* — its
+connection waits for the response — but the shared script runtime is **not**
+blocked: other connections' scripts keep running while this one is in flight
+(unlike a CPU-bound loop, which still monopolizes the runtime — see the
+[performance note](#how-it-works)). The request leaves as the extension's own
+traffic and is **not** itself intercepted by the MITM, so a script may safely
+call a host the rule set also intercepts without looping.
+
+Because other invocations run during an `await`, another connection running the
+**same** rule set can mutate shared `globalThis` state between your `await` and
+its resumption — don't assume exclusive access across a suspension. Per-message
+state lives on `ctx`; cross-connection state belongs in
+[`Anywhere.store`](#anywherestore), whose sharing semantics are already explicit.
+
+> **Security.** A script can make the extension issue arbitrary outbound
+> requests — an SSRF surface: it can reach hosts and internal endpoints the
+> originating client could not, and can exfiltrate body or header data it has
+> read. Author and import rule sets only from sources you trust.
+
 ### Control directives
 
 - `Anywhere.done()` — commit the current `ctx` as the final result and skip any
@@ -618,6 +689,10 @@ If you need composed behavior, consolidate the logic into a single
 | Per-scope `Anywhere.store`         | 1 MiB        | `set` throws `capacity exceeded` |
 | `Anywhere.crypto.randomBytes`      | 64 KiB       | throws |
 | Synthesized response body          | 4 MiB        | truncated |
+| `Anywhere.http` timeout            | 10 s default / 30 s max | Promise rejects |
+| `Anywhere.http` per script         | 4 concurrent / 16 total | Promise rejects |
+| `Anywhere.http` in flight (all scripts) | 32      | Promise rejects |
+| `Anywhere.http` response body      | 4 MiB        | Promise rejects |
 | HTTP/1 request/response head       | 64 KiB       | stream downgrades to passthrough |
 | Typed-array memory (all scripts)   | 16 MiB / 32 MiB | soft → GC hint; hard → empty `Uint8Array` returned |
 
@@ -629,9 +704,16 @@ Other safety properties:
 - **No watchdog.** There is no way to preempt a running script. A runaway
   script wedges only its own connection — other flows keep moving — but it
   monopolizes the shared script runtime, so other connections' scripts wait
-  behind it. Keep loops and regexes bounded.
+  behind it. Keep loops and regexes bounded. (Awaiting an
+  [`Anywhere.http`](#anywherehttp) fetch does not monopolize the runtime — see
+  its execution-model note.)
+- **Outbound requests.** [`Anywhere.http`](#anywherehttp) lets a script make the
+  extension issue arbitrary HTTP(S) requests — an SSRF / exfiltration surface
+  bounded by the per-script and global caps above, but not by destination. Only
+  run rule sets from sources you trust.
 - **Failure is safe-by-default.** A compile failure, a missing `process`, or an
-  uncaught throw passes the original message through unchanged.
+  uncaught throw — including an unhandled `Anywhere.http` rejection — passes the
+  original message through unchanged.
 
 ---
 
@@ -704,6 +786,34 @@ function process(ctx) {
 
 ```
 0, 100, ^/api/feature-flags, <base64>
+```
+
+### Enrich a response with a second request (`Anywhere.http`)
+
+`process` is `async` so it can `await` a fetch. Here it pulls a profile from a
+sidecar API and merges it into the JSON response body, leaving the body
+unchanged if anything fails.
+
+```js
+async function process(ctx) {
+  try {
+    const obj = JSON.parse(Anywhere.codec.utf8.decode(ctx.body));
+    const r = await Anywhere.http.get("https://sidecar.example.com/profile/" + obj.id, {
+      headers: [["accept", "application/json"]],
+      timeout: 3000
+    });
+    if (r.status === 200) {
+      obj.profile = JSON.parse(Anywhere.codec.utf8.decode(r.body));
+      ctx.body = Anywhere.codec.utf8.encode(JSON.stringify(obj));
+    }
+  } catch (e) {
+    Anywhere.log.warning("enrich failed: " + e); // body left unchanged
+  }
+}
+```
+
+```
+1, 100, ^/api/user, <base64>
 ```
 
 ### Redact tokens in a live SSE stream (`stream-script`)
