@@ -68,8 +68,9 @@ free. Scope `hostname` as tightly as you can.
 > single serial queue, and one JavaScript runtime is shared by every connection
 > to the same rule set. A script that loops forever, recurses without bound, or
 > triggers catastrophic regex backtracking will wedge **every** tunneled flow,
-> not just its own connection — there is no execution-time watchdog. Keep
-> scripts bounded. (Awaiting an [`Anywhere.http`](#anywherehttp) fetch is the
+> not just its own connection — CPU-bound execution can't be preempted (the
+> idle-async watchdog under [Limits](#limits-and-safety) doesn't cover a running
+> loop). Keep scripts bounded. (Awaiting an [`Anywhere.http`](#anywherehttp) fetch is the
 > exception: while it is in flight the connection is parked but the shared
 > runtime is **free**, so other connections' scripts keep running — only
 > CPU-bound work monopolizes the runtime.)
@@ -180,7 +181,9 @@ semantics) tested against the **whole request URL** — e.g.
 operations carry their own `search` regex); it does **not** see the method or
 HTTP version. Use `.*` to match every request, or anchor on the scheme/host
 (`^https://api\.example\.com/`) to scope by origin. The rule fires only when the
-URL pattern matches.
+URL pattern matches. The **host** is matched case-insensitively — it is
+lowercased before the test, so write hosts in lowercase — while the path and
+query keep their case.
 
 For **response**-phase rules, the gate is tested against the **originating
 request's** URL (response heads carry no path), so a request and its response
@@ -624,7 +627,7 @@ rejection reverts the message unchanged, exactly like any other uncaught throw.
 | Field      | Default                 | Meaning |
 | ---------- | ----------------------- | ------- |
 | `method`   | `"GET"` / `"POST"`      | HTTP method. |
-| `headers`  | none                    | `[[name, value], …]` or a `{ name: value }` object. Entries with an invalid field-name or a CR/LF/NUL value are dropped. |
+| `headers`  | none                    | `[[name, value], …]` or a `{ name: value }` object. Entries with an invalid field-name, a CR/LF/NUL value, or a forbidden name (`Host`, `Content-Length`, `Connection`, `Transfer-Encoding`, and other framing / hop-by-hop headers) are dropped. |
 | `body`     | empty                   | Request body: `Uint8Array`, `ArrayBuffer`, or string. |
 | `timeout`  | 10 000 ms               | Per-request timeout in milliseconds, clamped to 30 000. |
 | `redirect` | `"follow"`              | `"follow"` chases 3xx; `"manual"` returns the 3xx response as-is. |
@@ -644,10 +647,13 @@ its resumption — don't assume exclusive access across a suspension. Per-messag
 state lives on `ctx`; cross-connection state belongs in
 [`Anywhere.store`](#anywherestore), whose sharing semantics are already explicit.
 
-> **Security.** A script can make the extension issue arbitrary outbound
-> requests — an SSRF surface: it can reach hosts and internal endpoints the
-> originating client could not, and can exfiltrate body or header data it has
-> read. Author and import rule sets only from sources you trust.
+> **Security.** `Anywhere.http` refuses requests to `localhost`, `*.local`, and
+> IP literals in loopback / link-local (incl. the cloud-metadata address) /
+> private / ULA ranges, and re-checks every redirect hop — so a script can't
+> pivot to internal services by literal address. A hostname that *resolves* to
+> an internal address is **not** caught (resolution happens in URLSession), and
+> a script can still exfiltrate data it has read to any public host. Author and
+> import rule sets only from sources you trust.
 
 ### Control directives
 
@@ -695,22 +701,27 @@ If you need composed behavior, consolidate the logic into a single
 | `Anywhere.http` response body      | 4 MiB        | Promise rejects |
 | HTTP/1 request/response head       | 64 KiB       | stream downgrades to passthrough |
 | Typed-array memory (all scripts)   | 16 MiB / 32 MiB | soft → GC hint; hard → empty `Uint8Array` returned |
+| Idle suspended `async` script      | ~60 s no progress | reverted to original, released |
 
 Other safety properties:
 
 - **Wire safety.** Header names, header values, methods, and request targets
   produced by scripts are validated; CR/LF/NUL and other smuggling vectors are
   rejected so a script can't split the wire framing.
-- **No watchdog.** There is no way to preempt a running script. A runaway
-  script wedges only its own connection — other flows keep moving — but it
-  monopolizes the shared script runtime, so other connections' scripts wait
-  behind it. Keep loops and regexes bounded. (Awaiting an
-  [`Anywhere.http`](#anywherehttp) fetch does not monopolize the runtime — see
-  its execution-model note.)
+- **Watchdog (idle async only).** A suspended `async` script that stops making
+  progress — a never-settling Promise or an abandoned `await` — is reverted to
+  the original message and released after an idle stretch longer than the
+  maximum per-fetch timeout (~60 s), so it can't park its connection forever. A
+  **CPU-bound** loop is still *not* preemptible: it wedges its own connection
+  and monopolizes the shared script runtime until it returns, so keep loops and
+  regexes bounded. (Awaiting an [`Anywhere.http`](#anywherehttp) fetch does not
+  monopolize the runtime — see its execution-model note.)
 - **Outbound requests.** [`Anywhere.http`](#anywherehttp) lets a script make the
-  extension issue arbitrary HTTP(S) requests — an SSRF / exfiltration surface
-  bounded by the per-script and global caps above, but not by destination. Only
-  run rule sets from sources you trust.
+  extension issue HTTP(S) requests — an exfiltration surface bounded by the
+  per-script and global caps above. Destinations are restricted: loopback,
+  link-local (incl. cloud-metadata), private, and ULA addresses are refused by
+  literal address (a name resolving to an internal IP is not caught). A script
+  can still reach any public host, so only run rule sets from sources you trust.
 - **Failure is safe-by-default.** A compile failure, a missing `process`, or an
   uncaught throw — including an unhandled `Anywhere.http` rejection — passes the
   original message through unchanged.

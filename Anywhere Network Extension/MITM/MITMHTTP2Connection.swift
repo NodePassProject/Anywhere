@@ -330,6 +330,17 @@ final class MITMHTTP2Connection {
     /// is ~1 KiB of UInt32s + array overhead.
     private static let synthRespondedMaxStreams = 256
 
+    /// Upper bound on the number of streams this connection tracks with
+    /// per-stream MITM state (``pendingMessages`` + ``streamingScripts``). Each
+    /// ``pendingMessages`` entry can buffer up to
+    /// ``MITMBodyCodec/maxBufferedBodyBytes`` (4 MiB), so without a cap a peer
+    /// opening many script/buffered streams it never closes (no END_STREAM /
+    /// RST) would grow these maps until the NE is OOM-killed. Past the cap a
+    /// fresh stream is passed through un-MITM'd — it still works, it just isn't
+    /// rewritten/scripted. Sized well above the spec-default
+    /// SETTINGS_MAX_CONCURRENT_STREAMS (100).
+    private static let maxTrackedStreams = 256
+
     /// The session's serial lwIP queue. Script execution hops off it onto
     /// ``MITMScriptTransform/scriptQueue`` and the engine result is delivered
     /// back here, so the parked frame pump resumes on the same queue all
@@ -1082,8 +1093,23 @@ final class MITMHTTP2Connection {
         // pass-through. Without this gate, a request/response with no
         // body would silently bypass any buffered script that also
         // matched.
+        // Bound the number of streams tracked with per-stream MITM state (see
+        // ``maxTrackedStreams``). The flag is computed only for a fresh HEADERS
+        // (a stream not already tracked); past the cap both the streaming-script
+        // and buffered blocks below are skipped, so the stream falls through to
+        // verbatim pass-through instead of growing the maps without bound.
+        let trackedStreamCapReached: Bool = {
+            guard case .headers = kind, !isTrailer, !isInterimResponse,
+                  streamingScripts[streamID] == nil, pendingMessages[streamID] == nil
+            else { return false }
+            return pendingMessages.count + streamingScripts.count >= Self.maxTrackedStreams
+        }()
+        if trackedStreamCapReached {
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): tracked-stream cap \(Self.maxTrackedStreams) reached; passing through without MITM")
+        }
+
         if case .headers = kind, !isTrailer, !isInterimResponse,
-           !endStreamOnHeaders,
+           !endStreamOnHeaders, !trackedStreamCapReached,
            rewriter.hasStreamScriptRule(phase: phase, requestURL: gateURL) {
             if rewriter.hasBufferedBodyRule(phase: phase, requestURL: gateURL) {
                 logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): Stream Script rule wins over buffered body rule")
@@ -1122,7 +1148,7 @@ final class MITMHTTP2Connection {
         // END_STREAM-on-HEADERS streams the script runs inline against
         // an empty body. Skipped for trailers and interim responses
         // for the same reasons as streaming-script above.
-        if case .headers = kind, !isTrailer, !isInterimResponse,
+        if case .headers = kind, !isTrailer, !isInterimResponse, !trackedStreamCapReached,
            rewriter.hasBufferedBodyRule(phase: phase, requestURL: gateURL),
            shouldBufferStream(headers: rewritten, endStream: endStreamOnHeaders) {
             if !endStreamOnHeaders {

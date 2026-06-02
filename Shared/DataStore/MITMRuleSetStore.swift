@@ -76,6 +76,12 @@ final class MITMRuleSetStore: ObservableObject {
 
     func addRule(_ rule: MITMRule, toRuleSet ruleSetID: UUID) {
         guard let index = ruleSets.firstIndex(where: { $0.id == ruleSetID }) else { return }
+        // Bound local growth like the subscription path (refreshRuleSet) does:
+        // the matcher recompiles every rule on each reload and evaluates them
+        // per request head on the tunnel's serial queue, so an unbounded set
+        // stalls the data path. The editor UI should surface the limit before
+        // calling this.
+        guard ruleSets[index].rules.count < MITMRuleSet.maxRuleCount else { return }
         ruleSets[index].rules.append(rule)
         save()
     }
@@ -133,10 +139,17 @@ final class MITMRuleSetStore: ObservableObject {
         guard parsed.rules.count <= MITMRuleSet.maxRuleCount else {
             throw MITMRuleSetRefreshError.tooManyRules
         }
-        ruleSets[index].domainSuffixes = parsed.domainSuffixes
-        ruleSets[index].rules = parsed.rules
+        // Re-resolve the index after the await. The store is @MainActor, so a
+        // concurrent delete/move during the network fetch could have shifted or
+        // removed the set, leaving the pre-await `index` stale (a wrong write,
+        // or an out-of-bounds trap if the array shrank).
+        guard let writeIndex = ruleSets.firstIndex(where: { $0.id == id }) else {
+            throw MITMRuleSetRefreshError.ruleSetRemoved
+        }
+        ruleSets[writeIndex].domainSuffixes = parsed.domainSuffixes
+        ruleSets[writeIndex].rules = parsed.rules
         save()
-        return ruleSets[index]
+        return ruleSets[writeIndex]
     }
 
     // MARK: - Persistence
@@ -151,6 +164,7 @@ enum MITMRuleSetRefreshError: LocalizedError {
     case invalidStatusCode(Int)
     case undecodableBody
     case tooManyRules
+    case ruleSetRemoved
 
     var errorDescription: String? {
         switch self {
@@ -162,6 +176,8 @@ enum MITMRuleSetRefreshError: LocalizedError {
             return String(localized: "Unknown content.")
         case .tooManyRules:
             return String(localized: "Rule set is too large.")
+        case .ruleSetRemoved:
+            return String(localized: "Rule set was removed.")
         }
     }
 }

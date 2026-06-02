@@ -50,10 +50,19 @@ final class MITMRequestLog {
 
     /// HTTP/2 stream → record map. Set by the inbound (request) leg on
     /// HEADERS, cleared by the outbound (response) leg on the matching
-    /// HEADERS. A stream that closes without a response (RST_STREAM)
-    /// leaves a stale entry — bounded by the connection lifetime, so
-    /// not worth GC'ing here.
+    /// HEADERS. A stream that closes without a response (RST_STREAM) would
+    /// leave a stale entry, so ``recordHTTP2`` caps the map at
+    /// ``maxHTTP2Streams`` and evicts the oldest (lowest, monotonic) stream
+    /// ID when full — otherwise a peer opening many unanswered streams
+    /// (e.g. an HTTP/2 rapid-reset pattern) could grow it without bound for
+    /// the connection's lifetime.
     private var http2Streams: [UInt32: Record] = [:]
+
+    /// Upper bound on ``http2Streams``. Well above the spec-default
+    /// SETTINGS_MAX_CONCURRENT_STREAMS (100) so a saturated connection
+    /// doesn't evict records for streams still awaiting a response. Records
+    /// are tiny (two optional strings), so the cap costs a few tens of KiB.
+    private static let maxHTTP2Streams = 512
 
     init() {}
 
@@ -127,6 +136,13 @@ final class MITMRequestLog {
     // MARK: - HTTP/2
 
     func recordHTTP2(streamID: UInt32, method: String?, url: String?) {
+        if http2Streams[streamID] == nil, http2Streams.count >= Self.maxHTTP2Streams,
+           let oldest = http2Streams.keys.min() {
+            // Evict the oldest tracked stream rather than grow unbounded.
+            // Losing its record only degrades a later response's script
+            // ctx.method/ctx.url to nil — never a crash.
+            http2Streams.removeValue(forKey: oldest)
+        }
         http2Streams[streamID] = Record(method: method, url: url)
     }
 

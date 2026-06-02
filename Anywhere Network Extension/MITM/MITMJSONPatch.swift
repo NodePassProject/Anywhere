@@ -176,6 +176,15 @@ enum MITMJSONPatch {
     /// edit nodes in place and `.fragmentsAllowed` so a top-level scalar
     /// body (`42`, `"x"`, `true`) still parses. Returns nil for empty or
     /// malformed input.
+    ///
+    /// KNOWN LIMITATION: ``JSONSerialization`` decodes every JSON number into
+    /// an ``NSNumber``, so integers beyond 2^53 / full Int64 range and
+    /// high-precision decimals are not preserved exactly on re-serialize — a
+    /// 64-bit ID like `7203685625435718144` can come back altered. Because
+    /// ``applyAll`` re-serializes the whole document, this can reshape numbers
+    /// even in parts of the body no op touched. Exact round-tripping would
+    /// need a number-lexeme-preserving JSON parser (a larger change). Bodies
+    /// that match no rule never reach here, so unmatched traffic is unaffected.
     static func parse(_ data: Data) -> Any? {
         guard !data.isEmpty else { return nil }
         return try? JSONSerialization.jsonObject(with: data, options: [.mutableContainers, .fragmentsAllowed])
@@ -286,7 +295,7 @@ enum MITMJSONPatch {
     static func applyAtPath(_ root: Any, segments: [PathSegment], mode: LeafMode, value: Any?) -> Any {
         if segments.isEmpty {
             switch mode {
-            case .add, .replace: return value.map(deepCopy) ?? root
+            case .add, .replace: return value.map { deepCopy($0) } ?? root
             case .delete: return root
             }
         }
@@ -326,35 +335,45 @@ enum MITMJSONPatch {
         return root
     }
 
+    /// Depth ceiling for the recursive whole-tree walkers below. JSON from an
+    /// untrusted upstream can be nested deeply (within ``JSONSerialization``'s
+    /// own parse limit); recursing that far would overflow the Network
+    /// Extension's small stack and crash it. Past this depth the walkers stop
+    /// descending — a graceful no-op on the deep sub-tree, never a crash.
+    /// Real-world JSON nests far shallower.
+    private static let maxRecursionDepth = 256
+
     /// Overwrites every ``key`` member at any depth with ``value``.
     /// Children are visited before the key is set so the replacement is
     /// never itself descended into; the key is only overwritten where it
     /// already exists (recursive replace, not recursive insert). Each site
     /// receives its own deep copy (see ``applyAtPath``).
-    static func replaceKeyRecursive(_ node: Any?, key: String, value: Any) {
+    static func replaceKeyRecursive(_ node: Any?, key: String, value: Any, depth: Int = 0) {
+        guard depth < maxRecursionDepth else { return }
         if let dictionary = node as? NSMutableDictionary {
             for k in dictionary.allKeys {
                 guard let ks = k as? String, ks != key else { continue }
-                replaceKeyRecursive(dictionary.object(forKey: ks), key: key, value: value)
+                replaceKeyRecursive(dictionary.object(forKey: ks), key: key, value: value, depth: depth + 1)
             }
             if dictionary.object(forKey: key) != nil {
                 dictionary.setObject(deepCopy(value), forKey: key as NSString)
             }
         } else if let array = node as? NSMutableArray {
-            for element in array { replaceKeyRecursive(element, key: key, value: value) }
+            for element in array { replaceKeyRecursive(element, key: key, value: value, depth: depth + 1) }
         }
     }
 
     /// Removes every ``key`` member at any depth, then recurses into what
     /// remains.
-    static func deleteKeyRecursive(_ node: Any?, key: String) {
+    static func deleteKeyRecursive(_ node: Any?, key: String, depth: Int = 0) {
+        guard depth < maxRecursionDepth else { return }
         if let dictionary = node as? NSMutableDictionary {
             dictionary.removeObject(forKey: key)
             for k in dictionary.allKeys {
-                if let ks = k as? String { deleteKeyRecursive(dictionary.object(forKey: ks), key: key) }
+                if let ks = k as? String { deleteKeyRecursive(dictionary.object(forKey: ks), key: key, depth: depth + 1) }
             }
         } else if let array = node as? NSMutableArray {
-            for element in array { deleteKeyRecursive(element, key: key) }
+            for element in array { deleteKeyRecursive(element, key: key, depth: depth + 1) }
         }
     }
 
@@ -373,18 +392,19 @@ enum MITMJSONPatch {
     /// `NSNumber` / `NSNull`) are immutable and returned as-is; only
     /// dictionaries and arrays are duplicated, into their mutable forms so
     /// subsequent edits along the same path still work.
-    private static func deepCopy(_ value: Any) -> Any {
+    private static func deepCopy(_ value: Any, depth: Int = 0) -> Any {
+        guard depth < maxRecursionDepth else { return value }
         switch value {
         case let dictionary as NSDictionary:
             let copy = NSMutableDictionary()
             for key in dictionary.allKeys {
                 guard let key = key as? NSCopying, let child = dictionary.object(forKey: key) else { continue }
-                copy.setObject(deepCopy(child), forKey: key)
+                copy.setObject(deepCopy(child, depth: depth + 1), forKey: key)
             }
             return copy
         case let array as NSArray:
             let copy = NSMutableArray()
-            for element in array { copy.add(deepCopy(element)) }
+            for element in array { copy.add(deepCopy(element, depth: depth + 1)) }
             return copy
         default:
             return value

@@ -316,9 +316,20 @@ enum HPACKEncoder {
         var m = 0
         repeat {
             guard offset < data.endIndex else { return nil }
+            // RFC 7541 §5.1. Every integer this decoder consumes — table
+            // indices, string lengths (≤ frame size), dynamic-table sizes —
+            // fits well within 32 bits. A varint carrying more continuation
+            // bytes than that, or one whose running value would overflow `Int`,
+            // is malformed: reject it instead of letting `value += …` trap.
+            // Without this guard an ~11-byte HEADERS block of 0xFF bytes
+            // overflows and crashes the extension — a remote DoS that takes
+            // down every multiplexed stream on the connection.
+            guard m < 32 else { return nil }
             let b = data[offset]
             offset += 1
-            value += Int(b & 0x7F) << m
+            let (next, overflow) = value.addingReportingOverflow(Int(b & 0x7F) << m)
+            guard !overflow else { return nil }
+            value = next
             m += 7
             if b & 0x80 == 0 { break }
         } while true
@@ -344,7 +355,9 @@ enum HPACKEncoder {
         guard offset < data.endIndex else { return nil }
         let huffman = data[offset] & 0x80 != 0
         guard let length = decodeInteger(from: data, at: &offset, prefixBits: 7) else { return nil }
-        guard offset + length <= data.endIndex else { return nil }
+        // Compute the headroom by subtraction (both operands are valid indices)
+        // so `offset + length` can't overflow `Int` before the bounds check.
+        guard length >= 0, length <= data.endIndex - offset else { return nil }
 
         let stringData = data[offset..<(offset + length)]
         offset += length
