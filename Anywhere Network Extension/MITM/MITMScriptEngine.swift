@@ -21,6 +21,14 @@ private let logger = AnywhereLogger(category: "MITM")
 private nonisolated(unsafe) var mitmScriptTypedArrayBytes: Int = 0
 private let mitmScriptTypedArrayLock = UnfairLock()
 
+/// Running count of ``Anywhere.http`` fetches in flight across every
+/// ``MITMScriptEngine``, bounded by
+/// ``MITMScriptEngine/httpMaxConcurrentGlobal``. File-private so the engine's
+/// static reserve/release helpers can touch it without per-engine state, the
+/// same shape as ``mitmScriptTypedArrayBytes`` above.
+private nonisolated(unsafe) var mitmScriptGlobalFetchCount: Int = 0
+private let mitmScriptGlobalFetchLock = UnfairLock()
+
 /// Per-``MITMSession`` JavaScript runtime for the
 /// ``CompiledMITMOperation/script`` rule. One ``JSContext`` is reused
 /// across every script invocation on the connection; compiled functions
@@ -149,6 +157,76 @@ final class MITMScriptEngine {
         case respond(SynthesizedResponse)
     }
 
+    /// Per-invocation state for one `process(ctx)` run. Because the async
+    /// (``applyAsync``) path lets a script suspend at an `await Anywhere.http`
+    /// call, several invocations can be *suspended at once* on the one shared
+    /// ``JSContext`` while only one executes a synchronous span at any instant.
+    /// Each carries its own scope and directive here, and the `store` /
+    /// control / `http` blocks consult ``currentInvocation`` — the single span
+    /// running right now — so a block always reads the scope and writes the
+    /// directive of the invocation it is actually inside, never a neighbor's.
+    ///
+    /// The sync ``apply`` and ``applyFrame`` paths build a lightweight
+    /// instance (``allowsHTTP`` false, no completion) that lives only for the
+    /// duration of their one synchronous span; the async path's `init`
+    /// carries the readback base, the ctx handle, the result promise, and the
+    /// resume plumbing the network continuation needs.
+    fileprivate final class Invocation {
+        /// `Anywhere.store` scope for this run.
+        let scope: UUID?
+        /// Whether `Anywhere.http` may be called here. False on the
+        /// per-frame ``applyFrame`` path (the head is already on the wire and
+        /// there is no place to suspend a stream) and on the synchronous
+        /// ``apply`` path (it can't await).
+        let allowsHTTP: Bool
+        /// Set by `Anywhere.done` / `exit` / `respond` during a span; read at
+        /// settlement.
+        var directive: Directive?
+
+        // Async buffered-script fields — nil/unused on the sync + frame paths.
+        /// The message as it entered the engine: the revert target and the
+        /// readback base.
+        let original: Message?
+        /// The ctx object handed to `process(ctx)`; read back for `body` when
+        /// the script settles.
+        var ctxValue: JSValue?
+        /// Queue the final ``Outcome`` is delivered on (the connection's lwIP
+        /// queue).
+        let resumeQueue: DispatchQueue?
+        /// Fires exactly once with the final ``Outcome``.
+        let completion: ((Outcome) -> Void)?
+        /// The promise `process` returned, held so JSC keeps its `then`
+        /// reactions alive while the script is suspended.
+        var resultPromise: JSValue?
+        /// Outstanding and lifetime `Anywhere.http` fetch counts, for the
+        /// per-invocation caps.
+        var inFlightFetches = 0
+        var totalFetches = 0
+        /// Set once the final ``Outcome`` has been delivered so a late or
+        /// duplicate settlement is ignored.
+        var delivered = false
+
+        /// Async buffered-script invocation (``applyAsync``).
+        init(scope: UUID?, original: Message, resumeQueue: DispatchQueue, completion: @escaping (Outcome) -> Void) {
+            self.scope = scope
+            self.allowsHTTP = true
+            self.original = original
+            self.resumeQueue = resumeQueue
+            self.completion = completion
+        }
+
+        /// Lightweight synchronous-span invocation (sync ``apply`` /
+        /// ``applyFrame``): carries only scope, the HTTP gate, and the
+        /// directive slot.
+        init(scope: UUID?, allowsHTTP: Bool) {
+            self.scope = scope
+            self.allowsHTTP = allowsHTTP
+            self.original = nil
+            self.resumeQueue = nil
+            self.completion = nil
+        }
+    }
+
     private let context: JSContext
     /// Compiled `process(ctx)` functions keyed by the
     /// ``CompiledMITMOperation``'s ``sourceKey``. The engine is shared by
@@ -172,22 +250,24 @@ final class MITMScriptEngine {
     }
     private var compiled: [Int: CompiledEntry] = [:]
 
-    /// Scope key the `Anywhere.store` globals consult on each call.
-    /// Stashed by ``apply`` immediately before invoking the user
-    /// function and cleared on return so a stray store call from a
-    /// nested or re-entrant invocation cannot leak into the wrong scope.
-    fileprivate var currentScope: UUID?
+    /// The invocation whose synchronous JS span is executing right now, or
+    /// nil between spans — including while one or more async invocations sit
+    /// suspended at an `await`. Set immediately before invoking the user
+    /// function (and re-set before each network-driven resume) and cleared on
+    /// return, so the `store` / control / `http` blocks always resolve to the
+    /// invocation they are actually running inside: a stray or re-entrant
+    /// call can't leak into the wrong scope, and the directive a script sets
+    /// lands on its own invocation. Touched only on the script-execution
+    /// thread (serialized by ``invocationLock`` + the serial script queue),
+    /// so a plain field suffices.
+    private var currentInvocation: Invocation?
 
-    /// Directive set by `Anywhere.done` / `Anywhere.exit` /
-    /// `Anywhere.respond`. ``apply`` inspects this after the JS function
-    /// returns; when set, the directive wins over whatever the function
-    /// returned — including over a tail-end exception. This is
-    /// intentional: a script that already signalled its decision
-    /// before stumbling into a throw (typically an
-    /// ``Anywhere.store.set`` over the per-scope cap) has expressed
-    /// the result it wanted, and rolling back to ``.modified(message)``
-    /// would discard that decision.
-    fileprivate var currentDirective: Directive?
+    /// Async invocations currently suspended at an `await`, retained here from
+    /// suspension (``applyAsync``) until ``deliver`` so they outlive the local
+    /// that created them and the *weak* captures in the fetch-completion and
+    /// promise-settle closures. Keyed by identity. Mutated only under
+    /// ``invocationLock`` on a script span.
+    private var liveInvocations: [ObjectIdentifier: Invocation] = [:]
 
     /// Process-wide JSC heap shared by every ``MITMScriptEngine``. Each
     /// rule set owns one ``JSContext`` (see the engine registry on
@@ -201,18 +281,24 @@ final class MITMScriptEngine {
     /// external lock.
     private static let sharedVM: JSVirtualMachine = JSVirtualMachine()!
 
-    /// Defensive serialization around ``apply``/``applyFrame``. One engine
-    /// is shared by every connection to its rule set, and all invocations
-    /// are funneled through ``MITMScriptTransform``'s single serial script
-    /// queue — off the lwIP queue, so a slow script parks its connection
-    /// instead of stalling packet processing (see
-    /// ``MITMScriptTransform/scriptQueue``). That serial queue already
-    /// serializes calls, but the lock keeps the no-concurrent-re-entry
-    /// contract enforceable at the engine boundary: it guards
-    /// ``currentScope`` / ``currentDirective`` / ``compiled`` against a
-    /// future refactor that runs invocations on a concurrent queue or a
-    /// second VM. Cost is a single uncontended ``NSLock`` acquisition per
-    /// call.
+    /// Serializes the engine's **synchronous JS spans**. One engine is shared
+    /// by every connection to its rule set, and all spans are funneled through
+    /// ``MITMScriptTransform``'s single serial script queue — off the lwIP
+    /// queue, so a slow span parks its connection instead of stalling packet
+    /// processing (see ``MITMScriptTransform/scriptQueue``).
+    ///
+    /// A "span" is one uninterrupted run of JS: a sync ``apply`` /
+    /// ``applyFrame``, or — on the async ``applyAsync`` path — the initial
+    /// `process(ctx)` call and each later resume that resolves an awaited
+    /// ``Anywhere.http`` fetch. The lock is taken at the start of a span and
+    /// released when it ends; it is **never held across an `await`**, so while
+    /// a script is suspended waiting on the network the queue and the lock are
+    /// both free for other connections' spans. That is what makes the async
+    /// path non-blocking. The serial queue already orders spans; the lock keeps
+    /// the one-span-at-a-time contract enforceable at the engine boundary —
+    /// guarding ``currentInvocation`` / ``compiled`` against a future refactor
+    /// that runs spans on a concurrent queue or a second VM. Cost is a single
+    /// uncontended ``NSLock`` acquisition per span.
     private let invocationLock = NSLock()
 
     /// Threshold above which we ask JSC to GC after the next script
@@ -226,6 +312,29 @@ final class MITMScriptEngine {
     /// regardless of GC pressure; the script will see truncated body
     /// bytes which is strictly better than the NE being OOM-killed.
     private static let hardTypedArrayBudget: Int = 32 * 1024 * 1024
+
+    // MARK: Anywhere.http caps
+    //
+    // Bounds on the outbound requests a buffered script can make via
+    // ``Anywhere.http``. Each parked fetch holds the connection (the rewriter
+    // parked it; the shared script queue stays free) and the invocation's ctx
+    // body, so the per-invocation count + the per-request and total wall-clock
+    // timeouts bound how long one connection can stay parked, and the global
+    // in-flight cap bounds the extension's total outbound concurrency.
+
+    /// Default per-request timeout when the script doesn't set `timeout`.
+    private static let httpDefaultTimeout: TimeInterval = 10
+    /// Hard ceiling on the per-request `timeout` option (clamped down to this).
+    private static let httpMaxTimeout: TimeInterval = 30
+    /// Most fetches one invocation may have in flight at once.
+    private static let httpMaxConcurrentPerInvocation = 4
+    /// Most fetches one invocation may make over its whole lifetime.
+    private static let httpMaxTotalPerInvocation = 16
+    /// Largest response body handed back to a script (also bounded by the
+    /// shared typed-array budget). Mirrors the buffered-body cap.
+    private static let httpMaxResponseBytes = 4 * 1024 * 1024
+    /// Most fetches in flight at once across every engine in the extension.
+    private static let httpMaxConcurrentGlobal = 32
 
     /// Re-entrancy guard for ``exceptionHandler``: formatting a thrown
     /// value for the log runs JS ``ToString``, which a script can
@@ -280,49 +389,204 @@ final class MITMScriptEngine {
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(message)
         }
-        currentScope = message.ruleSetID
-        currentDirective = nil
-        defer {
-            currentScope = nil
-            currentDirective = nil
-        }
+        // Synchronous form of ``applyAsync`` — the readback semantics the
+        // async path mirrors (both share ``finalize``). With no suspension
+        // point, ``Anywhere.http`` is unavailable and a `process` that returns
+        // a Promise can't be driven to completion here, so it reverts; the
+        // rewriters run buffered scripts through ``applyAsync``.
+        let inv = Invocation(scope: message.ruleSetID, allowsHTTP: false)
+        currentInvocation = inv
+        defer { currentInvocation = nil }
         let ctxArg = makeContextValue(message)
-        _ = function.call(withArguments: [ctxArg])
+        let returned = function.call(withArguments: [ctxArg])
+        if let returned, isThenable(returned) {
+            logger.warning("[MITM][JS] process(ctx) returned a Promise on the synchronous path; reverting (await / Anywhere.http require a buffered `script` rule run through applyAsync)")
+            context.exception = nil
+            return .modified(message)
+        }
         // The script may have replaced ctx.body with a new typed array,
         // mutated the original in place, or done nothing — read back
         // whatever is on the object now.
         let updated = readBack(message, from: ctxArg)
+        return finalize(original: message, updated: updated, directive: inv.directive)
+    }
+
+    /// Maps a settled buffered-script invocation to an ``Outcome``: the
+    /// shared readback decision used by ``apply`` and the async
+    /// ``finishSuccess``. A directive set by the script wins over a tail-end
+    /// uncaught throw (the script already expressed its decision before
+    /// stumbling — typically into an ``Anywhere.store.set`` over the
+    /// per-scope cap — and rolling back would discard it); a bare uncaught
+    /// throw reverts to ``original`` so a half-formed rewrite never reaches
+    /// the wire. Clears ``context.exception`` either way.
+    private func finalize(original: Message, updated: Message, directive: Directive?) -> Outcome {
         let hadException = context.exception != nil
-        if let directive = currentDirective {
-            context.exception = nil
-            switch directive {
-            case .done: return .done(updated)
-            case .exit: return .exit
-            case .respond(let response):
-                // Only request-phase scripts can synthesize a response;
-                // response-phase scripts can already rewrite the
-                // response via ctx mutations, so ``Anywhere.respond``
-                // there is treated as a no-op.
-                if message.phase == .httpRequest {
-                    return .respond(response)
-                }
-                logger.warning("[MITM][JS] Anywhere.respond ignored on response phase")
-                return .modified(updated)
-            }
+        context.exception = nil
+        if let directive {
+            return outcome(forDirective: directive, original: original, updated: updated)
         }
         if hadException {
-            // Uncaught throw without a directive: revert all ctx
-            // mutations the script made before the throw. The
-            // defensive default is to discard partial work rather than
-            // commit a half-formed rewrite onto the wire; a script
-            // that wants its mutations preserved can wrap the failing
-            // call in try/catch, or signal ``Anywhere.done()``
-            // explicitly before the throw point (the directive branch
-            // above keeps ``updated`` in that case).
-            context.exception = nil
-            return .modified(message)
+            return .modified(original)
         }
         return .modified(updated)
+    }
+
+    /// Turns a control directive into an ``Outcome``. ``Anywhere.respond`` is
+    /// honored only on the request phase; on the response phase the script
+    /// can already rewrite via ctx mutations, so it degrades to ``.modified``.
+    private func outcome(forDirective directive: Directive, original: Message, updated: Message) -> Outcome {
+        switch directive {
+        case .done: return .done(updated)
+        case .exit: return .exit
+        case .respond(let response):
+            if original.phase == .httpRequest {
+                return .respond(response)
+            }
+            logger.warning("[MITM][JS] Anywhere.respond ignored on response phase")
+            return .modified(updated)
+        }
+    }
+
+    /// True when ``value`` is a thenable — an object with a callable `then`
+    /// (an `async function`'s return, or any Promise). The async script path
+    /// branches on this to decide whether to suspend; the sync path uses it
+    /// to detect (and reject) a script it can't await.
+    private func isThenable(_ value: JSValue) -> Bool {
+        guard value.isObject,
+              let thenVal = value.objectForKeyedSubscript("then"),
+              thenVal.isObject,
+              let ref = thenVal.jsValueRef
+        else { return false }
+        let ctxRef = context.jsGlobalContextRef
+        var exception: JSValueRef?
+        guard let obj = JSValueToObject(ctxRef, ref, &exception), exception == nil else {
+            return false
+        }
+        return JSObjectIsFunction(ctxRef, obj)
+    }
+
+    /// Async, non-blocking counterpart to ``apply``. Runs `process(ctx)` and,
+    /// when it returns a thenable (an `async function`, typically because it
+    /// `await`ed an ``Anywhere.http`` call), suspends **without holding**
+    /// ``MITMScriptTransform/scriptQueue``: the span returns, the queue is
+    /// freed for other connections' scripts, and the JS frame stays parked in
+    /// JSC until the awaited fetch resolves. ``completion`` fires exactly once
+    /// on ``resumeQueue`` when the script — and every fetch it awaited —
+    /// settles. A synchronous `process` settles inline, exactly like
+    /// ``apply``.
+    ///
+    /// Must be called on ``MITMScriptTransform/scriptQueue`` (the per-span
+    /// ``invocationLock`` is acquired here and released when the span ends,
+    /// never held across an `await`).
+    func applyAsync(
+        _ message: Message,
+        source: String,
+        sourceKey: Int,
+        resumeOn resumeQueue: DispatchQueue,
+        completion: @escaping (Outcome) -> Void
+    ) {
+        let inv = Invocation(
+            scope: message.ruleSetID,
+            original: message,
+            resumeQueue: resumeQueue,
+            completion: completion
+        )
+        invocationLock.lock()
+        defer {
+            invocationLock.unlock()
+            collectIfBudgetExceeded()
+        }
+        guard let function = compileIfNeeded(source, key: sourceKey) else {
+            deliver(.modified(message), for: inv)
+            return
+        }
+        let ctxArg = makeContextValue(message)
+        inv.ctxValue = ctxArg
+        currentInvocation = inv
+        let returned = function.call(withArguments: [ctxArg])
+        guard let returned, isThenable(returned) else {
+            // Synchronous completion: a plain `process`, or an `async`
+            // one that finished without ever suspending. Read back and
+            // finalize inline — identical to ``apply``.
+            currentInvocation = nil
+            let updated = readBack(message, from: ctxArg)
+            deliver(finalize(original: message, updated: updated, directive: inv.directive), for: inv)
+            return
+        }
+        // The script suspended at an `await`. Hold the returned promise so
+        // JSC keeps its reactions reachable, attach settle handlers, and end
+        // the span — the queue is free now. The handlers run later, on the
+        // scriptQueue span that resolves the awaited fetch (see
+        // ``resumeFetch``); for an already-settled promise they may run
+        // during ``attachSettleHandlers`` below, which is fine.
+        inv.resultPromise = returned
+        liveInvocations[ObjectIdentifier(inv)] = inv
+        currentInvocation = nil
+        attachSettleHandlers(to: returned, for: inv)
+    }
+
+    /// Attaches `then(onFulfilled, onRejected)` to the promise `process`
+    /// returned. The handlers capture ``inv`` weakly: while the script is
+    /// suspended the invocation is kept alive by the in-flight fetch's
+    /// completion closure, and at settlement that closure is still on the
+    /// stack — so a weak capture is always live when a handler fires while
+    /// avoiding an inv→promise→reaction→inv retain cycle.
+    private func attachSettleHandlers(to promise: JSValue, for inv: Invocation) {
+        let onFulfilled: @convention(block) (JSValue) -> Void = { [weak self, weak inv] _ in
+            guard let self, let inv else { return }
+            self.finishSuccess(inv)
+        }
+        let onRejected: @convention(block) (JSValue) -> Void = { [weak self, weak inv] reason in
+            guard let self, let inv else { return }
+            self.finishRejected(inv, reason: reason)
+        }
+        promise.invokeMethod("then", withArguments: [onFulfilled, onRejected])
+        // A throw from inside `then` itself (not from the script) would land
+        // on the context; clear it so it can't contaminate the next span.
+        if context.exception != nil { context.exception = nil }
+    }
+
+    /// The script's returned promise fulfilled. Read back ``ctx.body`` and
+    /// finalize with the same directive/exception precedence as ``apply``.
+    /// Runs on a scriptQueue span (the initial attach, or a fetch
+    /// resolution), so ``context`` access is serialized.
+    private func finishSuccess(_ inv: Invocation) {
+        guard !inv.delivered, let original = inv.original, let ctxArg = inv.ctxValue else { return }
+        let updated = readBack(original, from: ctxArg)
+        deliver(finalize(original: original, updated: updated, directive: inv.directive), for: inv)
+    }
+
+    /// The script's returned promise rejected (an uncaught throw on an async
+    /// path — `await`ing a rejected fetch the script didn't `try/catch`, or a
+    /// throw after the first suspension). Mirrors the sync uncaught-throw
+    /// rule: a directive set before the throw still wins; otherwise revert to
+    /// the original message so nothing half-formed reaches the wire.
+    private func finishRejected(_ inv: Invocation, reason: JSValue?) {
+        guard !inv.delivered, let original = inv.original else { return }
+        let ctxArg = inv.ctxValue ?? makeContextValue(original)
+        let updated = readBack(original, from: ctxArg)
+        context.exception = nil
+        if let directive = inv.directive {
+            deliver(outcome(forDirective: directive, original: original, updated: updated), for: inv)
+        } else {
+            if let reason {
+                logger.warning("[MITM][JS] process(ctx) promise rejected: \(String(describing: reason))")
+            }
+            deliver(.modified(original), for: inv)
+        }
+    }
+
+    /// Delivers the final ``Outcome`` for an async invocation exactly once,
+    /// on its resume queue, and breaks the invocation's hold on JS objects so
+    /// the ctx body and the result promise can be collected promptly.
+    private func deliver(_ outcome: Outcome, for inv: Invocation) {
+        guard !inv.delivered else { return }
+        inv.delivered = true
+        liveInvocations.removeValue(forKey: ObjectIdentifier(inv))
+        inv.resultPromise = nil
+        inv.ctxValue = nil
+        guard let resumeQueue = inv.resumeQueue, let completion = inv.completion else { return }
+        resumeQueue.async { completion(outcome) }
     }
 
     /// Asks JSC to run GC when outstanding ``NoCopy`` Uint8Array bytes
@@ -362,12 +626,13 @@ final class MITMScriptEngine {
         guard let function = compileIfNeeded(source, key: sourceKey) else {
             return .modified(body: frame, state: state)
         }
-        currentScope = ctx.ruleSetID
-        currentDirective = nil
-        defer {
-            currentScope = nil
-            currentDirective = nil
-        }
+        // Per-frame execution is synchronous and ``Anywhere.http`` is
+        // unavailable (the head is already on the wire; there is nowhere to
+        // suspend a live stream). The lightweight invocation just carries the
+        // store scope and the directive slot for this frame.
+        let inv = Invocation(scope: ctx.ruleSetID, allowsHTTP: false)
+        currentInvocation = inv
+        defer { currentInvocation = nil }
         let ctxArg = makeFrameContextValue(ctx, frame: frame, state: state)
         _ = function.call(withArguments: [ctxArg])
         // Pull the body and state back off the ctx; ignore any
@@ -382,7 +647,7 @@ final class MITMScriptEngine {
         }
         let updatedState = ctxArg.objectForKeyedSubscript("state")
         let hadException = context.exception != nil
-        if let directive = currentDirective {
+        if let directive = inv.directive {
             context.exception = nil
             switch directive {
             case .done: return .done(body: body)
@@ -664,6 +929,7 @@ final class MITMScriptEngine {
         installStoreGlobals(on: anywhere)
         installLogGlobals(on: anywhere)
         installControlGlobals(on: anywhere)
+        installHTTPGlobals(on: anywhere)
         context.setObject(anywhere, forKeyedSubscript: "Anywhere" as NSString)
         // Must follow the ``Anywhere`` install: the shim captures
         // ``Anywhere.codec.utf8`` to back the native text codecs.
@@ -1553,14 +1819,14 @@ final class MITMScriptEngine {
         let store = JSValue(newObjectIn: context)!
         let storeGet: @convention(block) (String) -> JSValue = { [weak self] key in
             let ctx = JSContext.current()!
-            guard let scope = self?.currentScope,
+            guard let scope = self?.currentInvocation?.scope,
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key)
             else { return JSValue(undefinedIn: ctx) }
             return Self.makeUint8Array(in: ctx, from: bytes)
         }
         let storeGetString: @convention(block) (String) -> JSValue = { [weak self] key in
             let ctx = JSContext.current()!
-            guard let scope = self?.currentScope,
+            guard let scope = self?.currentInvocation?.scope,
                   let bytes = MITMScriptStore.shared.get(scope: scope, key: key),
                   let str = String(data: bytes, encoding: .utf8)
             else { return JSValue(undefinedIn: ctx) }
@@ -1568,7 +1834,7 @@ final class MITMScriptEngine {
         }
         let storeSet: @convention(block) (String, JSValue) -> Void = { [weak self] key, val in
             let ctx = JSContext.current()!
-            guard let scope = self?.currentScope else { return }
+            guard let scope = self?.currentInvocation?.scope else { return }
             let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
             do {
                 try MITMScriptStore.shared.set(scope: scope, key: key, value: bytes)
@@ -1584,11 +1850,11 @@ final class MITMScriptEngine {
             }
         }
         let storeDelete: @convention(block) (String) -> Void = { [weak self] key in
-            guard let scope = self?.currentScope else { return }
+            guard let scope = self?.currentInvocation?.scope else { return }
             MITMScriptStore.shared.delete(scope: scope, key: key)
         }
         let storeKeys: @convention(block) () -> [String] = { [weak self] in
-            guard let scope = self?.currentScope else { return [] }
+            guard let scope = self?.currentInvocation?.scope else { return [] }
             return MITMScriptStore.shared.keys(scope: scope)
         }
         store.setObject(storeGet, forKeyedSubscript: "get" as NSString)
@@ -1642,10 +1908,10 @@ final class MITMScriptEngine {
         // ``done`` commits the current ctx state as the final message;
         // ``exit`` reverts to the message as it entered the rule chain.
         let doneBlock: @convention(block) () -> Void = { [weak self] in
-            self?.currentDirective = .done
+            self?.currentInvocation?.directive = .done
         }
         let exitBlock: @convention(block) () -> Void = { [weak self] in
-            self?.currentDirective = .exit
+            self?.currentInvocation?.directive = .exit
         }
         anywhere.setObject(doneBlock, forKeyedSubscript: "done" as NSString)
         anywhere.setObject(exitBlock, forKeyedSubscript: "exit" as NSString)
@@ -1662,7 +1928,7 @@ final class MITMScriptEngine {
         let respondBlock: @convention(block) (JSValue) -> Void = { [weak self] spec in
             guard let self else { return }
             guard !spec.isUndefined, !spec.isNull else {
-                self.currentDirective = .respond(
+                self.currentInvocation?.directive = .respond(
                     SynthesizedResponse(status: 200, headers: [], body: Data())
                 )
                 return
@@ -1709,11 +1975,255 @@ final class MITMScriptEngine {
             } else {
                 body = Data()
             }
-            self.currentDirective = .respond(
+            self.currentInvocation?.directive = .respond(
                 SynthesizedResponse(status: status, headers: headers, body: body)
             )
         }
         anywhere.setObject(respondBlock, forKeyedSubscript: "respond" as NSString)
+    }
+
+    // MARK: - Anywhere.http
+
+    /// Installs ``Anywhere.http`` — `get(url[, options])`, `post(url[,
+    /// options])`, and `request(options)`, each returning a Promise that
+    /// resolves to `{ status, headers, body, url }` or rejects with an Error.
+    ///
+    /// Available only inside a buffered `script` rule driven by ``applyAsync``:
+    /// the script is an `async function process(ctx)` that `await`s the call.
+    /// While the fetch is in flight the connection is parked but the shared
+    /// script queue stays free (see ``applyAsync``). The call rejects on the
+    /// synchronous fallback path and in `stream-script`, where there is no
+    /// place to suspend (see ``Invocation/allowsHTTP``).
+    ///
+    /// `options`: `{ method, headers, body, timeout, redirect, insecure }`.
+    /// `headers` is `[[name, value], …]` or a `{ name: value }` object; `body`
+    /// is bytes (Uint8Array / ArrayBuffer / string); `timeout` is milliseconds
+    /// (default ``httpDefaultTimeout``, clamped to ``httpMaxTimeout``);
+    /// `redirect` is `"follow"` (default) or `"manual"`; `insecure` defaults to
+    /// the global Allow-Insecure setting.
+    private func installHTTPGlobals(on anywhere: JSValue) {
+        let http = JSValue(newObjectIn: context)!
+        let getBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlVal, optsVal in
+            let ctx = JSContext.current()!
+            guard let self else { return Self.rejected("Anywhere.http: engine released", in: ctx) }
+            return self.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: optsVal, in: ctx)
+        }
+        let postBlock: @convention(block) (JSValue, JSValue) -> JSValue = { [weak self] urlVal, optsVal in
+            let ctx = JSContext.current()!
+            guard let self else { return Self.rejected("Anywhere.http: engine released", in: ctx) }
+            return self.startHTTP(defaultMethod: "POST", urlVal: urlVal, optsVal: optsVal, in: ctx)
+        }
+        // request({ url, method, … }) — the all-options form; `url` is read
+        // from the spec, which doubles as the options object.
+        let requestBlock: @convention(block) (JSValue) -> JSValue = { [weak self] specVal in
+            let ctx = JSContext.current()!
+            guard let self else { return Self.rejected("Anywhere.http: engine released", in: ctx) }
+            let urlVal: JSValue = specVal.objectForKeyedSubscript("url") ?? JSValue(undefinedIn: ctx)
+            return self.startHTTP(defaultMethod: "GET", urlVal: urlVal, optsVal: specVal, in: ctx)
+        }
+        http.setObject(getBlock, forKeyedSubscript: "get" as NSString)
+        http.setObject(postBlock, forKeyedSubscript: "post" as NSString)
+        http.setObject(requestBlock, forKeyedSubscript: "request" as NSString)
+        anywhere.setObject(http, forKeyedSubscript: "http" as NSString)
+    }
+
+    /// Validates one ``Anywhere.http`` call against the current invocation and
+    /// the caps, builds the `URLRequest`, and returns the Promise handed back
+    /// to the script. The Promise's executor fires the request on
+    /// ``MITMScriptHTTPClient``; its completion hops to ``scriptQueue`` and
+    /// resumes the script through ``resumeFetch``. Runs inside a JS span, so
+    /// ``currentInvocation`` names the awaiting invocation.
+    private func startHTTP(defaultMethod: String, urlVal: JSValue, optsVal: JSValue, in ctx: JSContext) -> JSValue {
+        guard let inv = currentInvocation, inv.allowsHTTP, inv.resumeQueue != nil else {
+            return Self.rejected(
+                "Anywhere.http is only available inside a buffered `script` rule — an `async function process(ctx)` that awaits it. It is unavailable in stream-script and on the synchronous path.",
+                in: ctx
+            )
+        }
+        guard !urlVal.isUndefined, !urlVal.isNull,
+              let urlStr = urlVal.toString(),
+              let url = URL(string: urlStr),
+              let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              url.host != nil
+        else {
+            return Self.rejected("Anywhere.http: expected an absolute http(s) URL", in: ctx)
+        }
+        if inv.totalFetches >= Self.httpMaxTotalPerInvocation {
+            return Self.rejected("Anywhere.http: per-invocation request cap (\(Self.httpMaxTotalPerInvocation)) reached", in: ctx)
+        }
+        if inv.inFlightFetches >= Self.httpMaxConcurrentPerInvocation {
+            return Self.rejected("Anywhere.http: too many concurrent requests in this invocation (max \(Self.httpMaxConcurrentPerInvocation))", in: ctx)
+        }
+        if Self.globalFetchCount() >= Self.httpMaxConcurrentGlobal {
+            return Self.rejected("Anywhere.http: global concurrent request cap (\(Self.httpMaxConcurrentGlobal)) reached", in: ctx)
+        }
+
+        let opts: JSValue? = optsVal.isObject ? optsVal : nil
+        var request = URLRequest(url: url)
+        request.httpMethod = (opts?.objectForKeyedSubscript("method"))
+            .flatMap { $0.isString ? $0.toString() : nil }?
+            .uppercased() ?? defaultMethod
+        if let headersVal = opts?.objectForKeyedSubscript("headers"), !headersVal.isUndefined, !headersVal.isNull {
+            for header in Self.requestHeadersFromValue(headersVal, in: ctx) {
+                request.addValue(header.value, forHTTPHeaderField: header.name)
+            }
+        }
+        if let bodyVal = opts?.objectForKeyedSubscript("body"), !bodyVal.isUndefined, !bodyVal.isNull {
+            request.httpBody = Self.bytesFromValue(bodyVal, in: ctx) ?? Data()
+        }
+        var timeout = Self.httpDefaultTimeout
+        if let tVal = opts?.objectForKeyedSubscript("timeout"), tVal.isNumber {
+            let ms = tVal.toDouble()
+            if ms.isFinite, ms > 0 { timeout = min(ms / 1000.0, Self.httpMaxTimeout) }
+        }
+        request.timeoutInterval = timeout
+        let followRedirects = (opts?.objectForKeyedSubscript("redirect"))
+            .flatMap { $0.isString ? $0.toString() : nil } != "manual"
+        let insecure: Bool
+        if let iVal = opts?.objectForKeyedSubscript("insecure"), iVal.isBoolean {
+            insecure = iVal.toBool()
+        } else {
+            insecure = AWCore.getAllowInsecure()
+        }
+
+        inv.inFlightFetches += 1
+        inv.totalFetches += 1
+        let maxBytes = Self.httpMaxResponseBytes
+
+        let promise = JSValue(newPromiseIn: ctx, fromExecutor: { [weak self, weak inv] resolve, reject in
+            guard let self else {
+                reject?.call(withArguments: [Self.error("Anywhere.http: engine released", in: ctx)])
+                return
+            }
+            // Reserve a global slot for the lifetime of the request; the
+            // completion hop releases it. `self` is captured strongly through
+            // the send completion + resume hop so the engine (and its
+            // JSContext) outlives an in-flight fetch even if the rule set is
+            // reloaded and the engine is purged from the registry.
+            Self.reserveGlobalFetchSlot()
+            MITMScriptHTTPClient.shared.send(
+                request,
+                followRedirects: followRedirects,
+                insecure: insecure,
+                maxBytes: maxBytes
+            ) { result in
+                MITMScriptTransform.scriptQueue.async {
+                    Self.releaseGlobalFetchSlot()
+                    guard let inv else { return }   // delivered/torn down — drop
+                    self.resumeFetch(inv: inv, resolve: resolve, reject: reject, result: result)
+                }
+            }
+        })
+        return promise ?? Self.rejected("Anywhere.http: could not create Promise", in: ctx)
+    }
+
+    /// Resumes a parked script when one of its ``Anywhere.http`` fetches
+    /// completes. Runs on ``scriptQueue`` under ``invocationLock``. Settling
+    /// the fetch's Promise drains JSC's microtasks and runs the script's
+    /// `await` continuation synchronously: it either suspends again at another
+    /// await (a new fetch armed; ``startHTTP`` reads ``currentInvocation``) or
+    /// runs to completion, at which point the top-level settle handler
+    /// (``finishSuccess`` / ``finishRejected``) delivers the Outcome.
+    private func resumeFetch(
+        inv: Invocation,
+        resolve: JSValue?,
+        reject: JSValue?,
+        result: Result<MITMScriptHTTPClient.Response, Error>
+    ) {
+        invocationLock.lock()
+        defer {
+            invocationLock.unlock()
+            collectIfBudgetExceeded()
+        }
+        if inv.inFlightFetches > 0 { inv.inFlightFetches -= 1 }
+        // Settle even if `inv` already delivered (e.g. another awaited leg
+        // rejected `process`): resolving an already-settled sibling Promise is
+        // a JS no-op, and a `Promise.all` the script awaited still needs its
+        // other legs settled to release JSC's references.
+        currentInvocation = inv
+        defer { currentInvocation = nil }
+        switch result {
+        case .success(let response):
+            resolve?.call(withArguments: [Self.makeHTTPResponse(response, in: context)])
+        case .failure(let error):
+            reject?.call(withArguments: [Self.error("Anywhere.http: \(error.localizedDescription)", in: context)])
+        }
+        if context.exception != nil { context.exception = nil }
+    }
+
+    // MARK: Anywhere.http helpers
+
+    private static func error(_ message: String, in ctx: JSContext) -> JSValue {
+        JSValue(newErrorFromMessage: message, in: ctx) ?? JSValue(newObjectIn: ctx)!
+    }
+
+    private static func rejected(_ message: String, in ctx: JSContext) -> JSValue {
+        JSValue(newPromiseRejectedWithReason: error(message, in: ctx) as Any, in: ctx) ?? JSValue(undefinedIn: ctx)
+    }
+
+    /// Builds the JS response object `{ status, headers, body, url }` for a
+    /// resolved ``Anywhere.http`` Promise. `body` goes through
+    /// ``makeUint8Array`` so it counts against the shared typed-array budget;
+    /// `headers` mirrors `ctx.headers` as `[[name, value], …]`.
+    private static func makeHTTPResponse(_ response: MITMScriptHTTPClient.Response, in ctx: JSContext) -> JSValue {
+        let obj = JSValue(newObjectIn: ctx)!
+        obj.setObject(response.status, forKeyedSubscript: "status" as NSString)
+        let pairs: [[String]] = response.headers.map { [$0.name, $0.value] }
+        obj.setObject(pairs, forKeyedSubscript: "headers" as NSString)
+        obj.setObject(makeUint8Array(in: ctx, from: response.body), forKeyedSubscript: "body" as NSString)
+        obj.setObject(response.finalURL as Any, forKeyedSubscript: "url" as NSString)
+        return obj
+    }
+
+    /// Parses request headers from `[[name, value], …]` (via
+    /// ``headersFromValue``) or a `{ name: value }` object, dropping entries
+    /// with an invalid field-name or a value carrying CR / LF / NUL — the same
+    /// validators the ctx-header readback uses.
+    private static func requestHeadersFromValue(_ value: JSValue, in ctx: JSContext) -> [(name: String, value: String)] {
+        if value.isArray {
+            return headersFromValue(value) ?? []
+        }
+        guard value.isObject,
+              let keys = ctx.objectForKeyedSubscript("Object")?.invokeMethod("keys", withArguments: [value]),
+              keys.isArray
+        else { return [] }
+        let length = Int(keys.objectForKeyedSubscript("length")?.toInt32() ?? 0)
+        var out: [(name: String, value: String)] = []
+        out.reserveCapacity(length)
+        for i in 0..<length {
+            guard let keyVal = keys.objectAtIndexedSubscript(i), let name = keyVal.toString(),
+                  let valVal = value.objectForKeyedSubscript(name), !valVal.isUndefined, !valVal.isNull,
+                  let val = valVal.toString()
+            else { continue }
+            guard isValidHeaderName(name) else {
+                logger.warning("[MITM][JS] Anywhere.http: dropping request header with invalid name: \(name)")
+                continue
+            }
+            guard isValidHeaderValue(val) else {
+                logger.warning("[MITM][JS] Anywhere.http: dropping request header \(name) with CR/LF/NUL in value")
+                continue
+            }
+            out.append((name: name, value: val))
+        }
+        return out
+    }
+
+    // MARK: Global Anywhere.http in-flight counter
+
+    private static func reserveGlobalFetchSlot() {
+        mitmScriptGlobalFetchLock.lock()
+        mitmScriptGlobalFetchCount += 1
+        mitmScriptGlobalFetchLock.unlock()
+    }
+    private static func releaseGlobalFetchSlot() {
+        mitmScriptGlobalFetchLock.lock()
+        if mitmScriptGlobalFetchCount > 0 { mitmScriptGlobalFetchCount -= 1 }
+        mitmScriptGlobalFetchLock.unlock()
+    }
+    private static func globalFetchCount() -> Int {
+        mitmScriptGlobalFetchLock.lock()
+        defer { mitmScriptGlobalFetchLock.unlock() }
+        return mitmScriptGlobalFetchCount
     }
 
     // MARK: - Body bridging (static so closures don't capture self)

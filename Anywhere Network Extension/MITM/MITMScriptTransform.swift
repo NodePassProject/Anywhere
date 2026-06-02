@@ -202,29 +202,19 @@ enum MITMScriptTransform {
         }
     }
 
-    /// Applies the buffered body transforms to ``message`` in a fixed
-    /// order: first every matching ``.bodyJSON`` edit in rule order (native,
-    /// composing), then every matching ``.bodyReplace`` edit in rule order
-    /// (native, composing) on the JSON-edited body, then the single matching
-    /// ``.script`` (last-wins) on the already-edited body. Header-only rules
-    /// are no-ops here (they ran at head time). Returns ``Outcome/message``
-    /// carrying the (possibly edited) message when no script matches or
-    /// ``engineProvider`` is nil; returns ``Outcome/synthesizedResponse``
-    /// when a request-phase script called `Anywhere.respond(...)`.
-    static func apply(
+    /// Applies the composing native body transforms — every matching
+    /// ``.bodyJSON`` edit, then every matching ``.bodyReplace`` edit, each in
+    /// rule order — to ``message`` and returns the edited copy. JSON edits run
+    /// before the text replace so the latter operates on the re-serialized
+    /// JSON; both run before any ``.script`` (which sees the already-edited
+    /// body) and survive its ``Anywhere.exit``, mirroring how header rules
+    /// commit before the script. Header-only and script rules are untouched
+    /// here. The async entry point below runs this ahead of the script.
+    private static func applyNativeBodyEdits(
         _ message: MITMScriptEngine.Message,
-        rules: [CompiledMITMRule],
-        engineProvider: MITMScriptEngine.Provider? = nil
-    ) -> Outcome {
+        rules: [CompiledMITMRule]
+    ) -> MITMScriptEngine.Message {
         let requestURL = message.url
-
-        // Native body edits run first and compose: every matching
-        // ``.bodyJSON`` rule, then every matching ``.bodyReplace`` rule,
-        // each in rule order (no JS engine involved). A ``.script`` then
-        // sees the already-edited body. JSON edits run before the text
-        // replace so the latter operates on the re-serialized JSON; both
-        // run before the script and survive its ``Anywhere.exit``, mirroring
-        // how header rules commit before the script.
         var message = message
         let jsonOps = matchingBodyJSONOps(in: rules, requestURL: requestURL)
         if !jsonOps.isEmpty {
@@ -234,21 +224,7 @@ enum MITMScriptTransform {
         if !replaceOps.isEmpty {
             message.body = MITMBodyReplace.applyAll(replaceOps, to: message.body)
         }
-
-        guard let match = lastMatchingScriptSource(in: rules, requestURL: requestURL),
-              let engineProvider
-        else { return .message(message) }
-        let outcome = engineProvider.get().apply(
-            message,
-            source: match.source,
-            sourceKey: match.sourceKey
-        )
-        switch outcome {
-        case .modified(let updated):  return .message(updated)
-        case .done(let updated):      return .message(updated)
-        case .exit:                   return .message(message)
-        case .respond(let response):  return .synthesizedResponse(response)
-        }
+        return message
     }
 
     /// The compiled ``.bodyJSON`` edits whose URL pattern matches the
@@ -286,19 +262,26 @@ enum MITMScriptTransform {
         return ops
     }
 
-    /// Off-queue counterpart to ``apply(_:rules:engineProvider:)``. Runs the
-    /// matching ``.script`` rule on ``scriptQueue`` (never on the caller's
-    /// lwIP queue) and delivers the ``Outcome`` back on ``resumeQueue``.
+    /// The script entry point the HTTP/1 and HTTP/2 rewriters call. Runs the
+    /// native body edits and the matching ``.script`` rule on ``scriptQueue``
+    /// (never on the caller's lwIP queue) and delivers the ``Outcome`` back on
+    /// ``resumeQueue``. The script runs through ``MITMScriptEngine/applyAsync``,
+    /// so an `async function process(ctx)` that `await`s ``Anywhere.http``
+    /// suspends **without holding ``scriptQueue``** — other connections' scripts
+    /// keep running while this one waits on the network — and the connection
+    /// stays parked until its fetch(es) settle. A plain (synchronous) script is
+    /// unaffected: it settles inline before the queue is released.
     ///
     /// Contract the rewriters depend on:
     /// - ``completion`` is invoked **exactly once**, **on ``resumeQueue``**
-    ///   (so the caller's parked driver always resumes on the lwIP queue).
+    ///   (so the caller's parked driver always resumes on the lwIP queue),
+    ///   however long the awaited fetch takes.
     /// - The work always hops: callers reach this only after their own
     ///   head-time gate (`hasScriptRule`) said a script applies, so the
     ///   lwIP-side fast path lives entirely above this call and never pays a
     ///   queue round-trip. A rule that no longer matches once re-checked here
     ///   (e.g. a `rewrite` changed the path) simply yields
-    ///   ``Outcome/message`` unchanged — same as the synchronous variant.
+    ///   ``Outcome/message`` unchanged.
     /// - ``message`` (and its `body` `Data`) is captured by the dispatched
     ///   closure and stays alive for the engine call's duration; it is a
     ///   value copy, never aliased to the caller's receive buffer.
@@ -310,8 +293,36 @@ enum MITMScriptTransform {
         completion: @escaping (Outcome) -> Void
     ) {
         scriptQueue.async {
-            let outcome = apply(message, rules: rules, engineProvider: engineProvider)
-            resumeQueue.async { completion(outcome) }
+            // Native body edits run synchronously here (they never await); the
+            // script then sees the already-edited body.
+            let requestURL = message.url
+            let edited = applyNativeBodyEdits(message, rules: rules)
+            guard let match = lastMatchingScriptSource(in: rules, requestURL: requestURL),
+                  let engineProvider
+            else {
+                resumeQueue.async { completion(.message(edited)) }
+                return
+            }
+            // ``applyAsync`` frees this serial queue while the script awaits an
+            // ``Anywhere.http`` fetch (so other connections' scripts keep
+            // running) and delivers the engine ``Outcome`` on ``resumeQueue``
+            // exactly once — the closure below already runs there and maps
+            // straight to a transform ``Outcome``. ``.exit`` reverts to the
+            // post-native-edit message, since the native edits commit ahead of
+            // the script and survive it.
+            engineProvider.get().applyAsync(
+                edited,
+                source: match.source,
+                sourceKey: match.sourceKey,
+                resumeOn: resumeQueue
+            ) { outcome in
+                switch outcome {
+                case .modified(let updated):  completion(.message(updated))
+                case .done(let updated):      completion(.message(updated))
+                case .exit:                   completion(.message(edited))
+                case .respond(let response):  completion(.synthesizedResponse(response))
+                }
+            }
         }
     }
 
