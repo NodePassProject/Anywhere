@@ -42,12 +42,6 @@
             "value" : "%1$@ %2$@"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%1$@ %2$@"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -95,12 +89,6 @@
           }
         },
         "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%1$@ → %2$@"
-          }
-        },
-        "tk" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "%1$@ → %2$@"
@@ -158,12 +146,6 @@
             "value" : "%1$@:%2$@"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%1$@:%2$@"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -211,12 +193,6 @@
           }
         },
         "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld"
-          }
-        },
-        "tk" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld"
@@ -358,18 +334,6 @@
             }
           }
         },
-        "tk" : {
-          "variations" : {
-            "plural" : {
-              "other" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%lld bayt"
-                }
-              }
-            }
-          }
-        },
         "tr" : {
           "variations" : {
             "plural" : {
@@ -438,12 +402,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld мс"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld ms"
           }
         },
         "tr" : {
@@ -577,18 +535,6 @@
                 "stringUnit" : {
                   "state" : "translated",
                   "value" : "%lld прокси"
-                }
-              }
-            }
-          }
-        },
-        "tk" : {
-          "variations" : {
-            "plural" : {
-              "other" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%lld proksi"
                 }
               }
             }
@@ -748,18 +694,6 @@
             }
           }
         },
-        "tk" : {
-          "variations" : {
-            "plural" : {
-              "other" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%lld düzgün"
-                }
-              }
-            }
-          }
-        },
         "tr" : {
           "variations" : {
             "plural" : {
@@ -830,12 +764,6 @@
             "value" : "302 Перенаправление"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "302 Gönükdirme"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -886,12 +814,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Для цепочки прокси необходимо минимум 2 прокси."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksi zynjyry üçin azyndan 2 proksi gerek."
           }
         },
         "tr" : {
@@ -946,12 +868,6 @@
             "value" : "О приложении"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hakynda"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1002,12 +918,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Благодарности"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Minnetdarlyklar"
           }
         },
         "tr" : {
@@ -1062,12 +972,6 @@
             "value" : "Блокировка рекламы"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mahabat blokirlemek"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1118,12 +1022,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Добавить"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Goş"
           }
         },
         "tr" : {
@@ -1178,12 +1076,6 @@
             "value" : "Добавьте конфигурацию"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Konfigurasiýa goşuň"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1234,12 +1126,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Добавьте не менее 2 прокси для создания цепочки."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Zynjyr döretmek üçin azyndan 2 proksi goşuň."
           }
         },
         "tr" : {
@@ -1294,12 +1180,6 @@
             "value" : "Добавить сертификат"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şahadatnama goş"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1350,12 +1230,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Добавить конфигурацию"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Konfigurasiýa goş"
           }
         },
         "tr" : {
@@ -1410,12 +1284,6 @@
             "value" : "Добавить прокси"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksi goş"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1466,12 +1334,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Добавить правило"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgün goşmak"
           }
         },
         "tr" : {
@@ -1526,12 +1388,6 @@
             "value" : "Добавить набор правил"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgünler toplumyny goş"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1582,12 +1438,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Адрес"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Salgy"
           }
         },
         "tr" : {
@@ -1642,12 +1492,6 @@
             "value" : "Дополнительные настройки"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Giňişleýin sazlamalar"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1698,12 +1542,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Анонсировать IPv6 для приложений"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Programmalara IPv6 mälim et"
           }
         },
         "tr" : {
@@ -1768,12 +1606,6 @@
             "value" : "Все товарные знаки, знаки обслуживания и названия компаний являются собственностью их владельцев."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ähli haryt nyşanlary, hyzmat nyşanlary we kompaniýa atlary degişli eýeleriniň emlägidir."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1826,12 +1658,6 @@
             "value" : "Всё равно разрешить"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şonda-da rugsat ber"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1882,12 +1708,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Разрешить небезопасное"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Howpsuz birikme rugsat ber"
           }
         },
         "tr" : {
@@ -1945,12 +1765,6 @@
             "value" : "Всегда включён"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hemişe açyk"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2001,12 +1815,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Любой ранее установленный профиль MITM перестанет работать, пока вы не переустановите новый сертификат."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Öň gurnalan islendik MITM profili, täze şahadatnamany gaýtadan gurnaýançaňyz işlemegini bes eder."
           }
         },
         "tr" : {
@@ -2067,12 +1875,6 @@
             "value" : "Anywhere — независимый проект, не связанный ни с одной из перечисленных ниже компаний и не одобренный или спонсируемый ими."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Anywhere garaşsyz taslamadyr we aşakda görkezilen kompaniýalaryň hiç biri bilen baglanyşykly, goldanýan ýa-da maliýeleşdirilýän däldir."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2123,12 +1925,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "URL набора правил Anywhere MITM"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Anywhere MITM düzgünler toplumynyň URL-i"
           }
         },
         "tr" : {
@@ -2183,12 +1979,6 @@
             "value" : "Корневой сертификат Anywhere установлен и доверен."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Anywhere kök şahadatnamasy gurnaldy we ynanyldy."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2241,12 +2031,6 @@
             "value" : "URL набора правил маршрутизации Anywhere"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Anywhere ugratma düzgünleri toplumynyň URL-i"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2297,12 +2081,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Приложение"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Programma"
           }
         },
         "tr" : {
@@ -2364,12 +2142,6 @@
             "value" : "Авто"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Awto"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2422,12 +2194,6 @@
             "value" : "Автоматически переподключать VPN при разрыве соединения."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "VPN kesilen wagty awtomatiki täzeden birikdirmek."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2478,12 +2244,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Назад"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Yza"
           }
         },
         "tr" : {
@@ -2544,12 +2304,6 @@
             "value" : "Блокируйте рекламу и трекеры на сетевом уровне для более чистого просмотра."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Arassa görmek tejribesi üçin tor derejesinde mahabatlary we yzarlaýjylary blokirläň."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2600,12 +2354,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Блокировать QUIC"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "QUIC-i blokla"
           }
         },
         "tr" : {
@@ -2660,12 +2408,6 @@
             "value" : "Тело"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Beden"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2716,12 +2458,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Тело JSON"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Beden JSON"
           }
         },
         "tr" : {
@@ -2776,12 +2512,6 @@
             "value" : "Замена тела"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Beden çalşyr"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2832,12 +2562,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Отмена"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýatyr"
           }
         },
         "tr" : {
@@ -2895,12 +2619,6 @@
             "value" : "Цепочки"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Zynjyrlar"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -2953,12 +2671,6 @@
             "value" : "Разделённые запятыми"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Otur bilen aýrylan"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3009,12 +2721,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Конфигурация"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Konfigurasiýa"
           }
         },
         "tr" : {
@@ -3070,12 +2776,6 @@
             "value" : "Контроль перегрузки"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dyknyşyk gözegçiligi"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3126,12 +2826,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Подключено"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Birikdirildi"
           }
         },
         "tr" : {
@@ -3186,12 +2880,6 @@
             "value" : "Подключение..."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Birikdirilýär..."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3242,12 +2930,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Продолжить"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dowam et"
           }
         },
         "tr" : {
@@ -3302,12 +2984,6 @@
             "value" : "Копировать"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Göçür"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3358,12 +3034,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Копия (%lld)"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Göçür (%lld)"
           }
         },
         "tr" : {
@@ -3418,12 +3088,6 @@
             "value" : "Копировать ссылку"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Baglanyşygy göçür"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3476,12 +3140,6 @@
             "value" : "Обход по стране"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýurt aýlaw"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3532,12 +3190,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Пользовательские"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýörite"
           }
         },
         "tr" : {
@@ -3596,12 +3248,6 @@
             "value" : "Данные (Base64)"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Maglumat (Base64)"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3652,12 +3298,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "По умолчанию"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bellenen"
           }
         },
         "tr" : {
@@ -3712,12 +3352,6 @@
             "value" : "Удалить"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Poz"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3768,12 +3402,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Удалить сертификат"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şahadatnamany poz"
           }
         },
         "tr" : {
@@ -3828,12 +3456,6 @@
             "value" : "Раздельная загрузка"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Aýratyn ýükläp almak"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -3884,12 +3506,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Диагностика"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Diagnostika"
           }
         },
         "tr" : {
@@ -3944,12 +3560,6 @@
             "value" : "Прямое"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Göni"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4000,12 +3610,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Отключить"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Öçür"
           }
         },
         "tr" : {
@@ -4064,12 +3668,6 @@
             "value" : "Отключено"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Öçürilen"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4122,12 +3720,6 @@
             "value" : "Отключено"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Aýryldy"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4178,12 +3770,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Отключение..."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Aýrylýar..."
           }
         },
         "tr" : {
@@ -4244,12 +3830,6 @@
             "value" : "DNS-сервер"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "DNS serweri"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4300,12 +3880,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ключевое слово домена"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Domen açar sözi"
           }
         },
         "tr" : {
@@ -4360,12 +3934,6 @@
             "value" : "Суффикс домена"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Domen goşulmasy"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4416,12 +3984,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Суффиксы доменов"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Domen goşulmalary"
           }
         },
         "tr" : {
@@ -4476,12 +4038,6 @@
             "value" : "Готово"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Taýýar"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4532,12 +4088,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Загрузка"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýüklemek"
           }
         },
         "tr" : {
@@ -4593,12 +4143,6 @@
             "value" : "Скорость загрузки"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýükläp almak tizligi"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4649,12 +4193,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Изменить"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Üýtget"
           }
         },
         "tr" : {
@@ -4709,12 +4247,6 @@
             "value" : "Редактировать цепочку"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Zynjyry redaktirle"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4765,12 +4297,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Изменить конфигурацию"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Konfigurasiýany üýtget"
           }
         },
         "tr" : {
@@ -4825,12 +4351,6 @@
             "value" : "Изменить правило"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgüni üýtget"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4881,12 +4401,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Включить"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Işjeňleşdir"
           }
         },
         "tr" : {
@@ -4941,12 +4455,6 @@
             "value" : "Включите %@ для продолжения."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Dowam etmek üçin %@ işjeňleşdiriň."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4997,12 +4505,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Включить блокировку рекламы"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Mahabat blokirlemegi açmak"
           }
         },
         "tr" : {
@@ -5057,12 +4559,6 @@
             "value" : "Всё равно включить"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şonda-da açmak"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5113,12 +4609,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Включено"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Işjeňleşdirilen"
           }
         },
         "tr" : {
@@ -5173,12 +4663,6 @@
             "value" : "Включение зашифрованного DNS увеличит время ожидания подключения и помешает работе правил маршрутизации."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şifrlenen DNS-i açmak birikme wagtyny artdyrar we ugratma düzgünleriniň işlemeginiň öňüni alar."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5231,12 +4715,6 @@
             "value" : "Включение «Скрыть значок VPN» может вызвать нестабильность соединения и отключит IPv6."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "\"VPN nyşanyny gizle\" funksiýasyny açmak birikmäniň durnuksyzlygyna sebäp bolup biler we IPv6-ny öçürer."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5287,12 +4765,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Зашифрованный DNS"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şifrlenen DNS"
           }
         },
         "tr" : {
@@ -5348,12 +4820,6 @@
             "value" : "Шифрование"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şifrlemek"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5404,12 +4870,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Введите SHA-256 отпечаток (64 шестнадцатеричных символа) сертификата для доверия."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ynanylýan şahadatnamanyň SHA-256 barlag belgisini (64 onaltylyk belgi) giriziň."
           }
         },
         "tr" : {
@@ -5464,12 +4924,6 @@
             "value" : "Вход"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Giriş"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5520,12 +4974,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ошибка"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýalňyşlyk"
           }
         },
         "tr" : {
@@ -5580,12 +5028,6 @@
             "value" : "Выход"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Çykyş"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5636,12 +5078,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Экспериментальные функции"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Synag aýratynlyklary"
           }
         },
         "tr" : {
@@ -5696,12 +5132,6 @@
             "value" : "Экспортировать сертификат"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şahadatnamany eksport et"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5752,12 +5182,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Не удалось экспортировать сертификат."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şahadatnamany eksport etmek şowsuz."
           }
         },
         "tr" : {
@@ -5812,12 +5236,6 @@
             "value" : "Не удалось экспортировать профиль."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Profili eksport etmek şowsuz."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5868,12 +5286,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Не удалось открыть установщик профиля."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Profil gurnaýjyny açmak şowsuz."
           }
         },
         "tr" : {
@@ -5935,12 +5347,6 @@
             "value" : "Создайте сертификат, чтобы начать."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Başlamak üçin şahadatnama dörediň."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -5991,12 +5397,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Создать сертификат"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şahadatnama döret"
           }
         },
         "tr" : {
@@ -6051,12 +5451,6 @@
             "value" : "Начать"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Başla"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -6107,12 +5501,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Глобальный"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Global"
           }
         },
         "tr" : {
@@ -6167,12 +5555,6 @@
             "value" : "Глобальный режим"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Global tertip"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -6223,12 +5605,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Перейти в Настройки"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sazlamalara git"
           }
         },
         "tr" : {
@@ -6292,12 +5668,6 @@
             "value" : "Добавить заголовок"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Header goşmak"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -6348,12 +5718,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Удалить заголовок"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Header poz"
           }
         },
         "tr" : {
@@ -6408,12 +5772,6 @@
             "value" : "Имя заголовка"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Header ady"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -6464,12 +5822,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Требуется имя заголовка."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Header ady hökmany."
           }
         },
         "tr" : {
@@ -6524,12 +5876,6 @@
             "value" : "Замена заголовка"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Header çalşyr"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -6580,12 +5926,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Значение заголовка"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Header bahasy"
           }
         },
         "tr" : {
@@ -6640,12 +5980,6 @@
             "value" : "Скрыть значок VPN"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "VPN nyşanyny gizle"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -6698,12 +6032,6 @@
             "value" : "Главная"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Baş sahypa"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -6754,12 +6082,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Хост"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Host"
           }
         },
         "tr" : {
@@ -6816,12 +6138,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "HTTP/2 прокси"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "HTTP/2 Proksi"
           }
         },
         "tr" : {
@@ -6882,12 +6198,6 @@
             "value" : "HTTPS прокси"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "HTTPS Proksi"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -6946,12 +6256,6 @@
             "value" : "Ошибка импорта"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Import şowsuz"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7002,12 +6306,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Импорт набора правил"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgünler toplumyny import et"
           }
         },
         "tr" : {
@@ -7074,12 +6372,6 @@
             "value" : "небезопасно"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "howpsuz"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7130,12 +6422,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Установить сертификат"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şahadatnamany gurnaň"
           }
         },
         "tr" : {
@@ -7190,12 +6476,6 @@
             "value" : "Установите профиль и доверьте ему в Настройках, чтобы использовать MITM."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "MITM ulanmak üçin profili gurnaň we Sazlamalarda oňa ynanyň."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7246,12 +6526,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Недействительный файл набора правил Anywhere MITM."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nädogry Anywhere MITM düzgünler toplumynyň faýly."
           }
         },
         "tr" : {
@@ -7306,12 +6580,6 @@
             "value" : "Недействительный URL набора правил Anywhere MITM."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nädogry Anywhere MITM düzgünler toplumynyň URL-i."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7362,12 +6630,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Недействительный файл набора правил маршрутизации Anywhere."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nädogry Anywhere ugratma düzgünleri toplumynyň faýly."
           }
         },
         "tr" : {
@@ -7422,12 +6684,6 @@
             "value" : "Недействительный URL набора правил маршрутизации Anywhere."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nädogry Anywhere ugratma düzgünleri toplumynyň URL-i."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7478,12 +6734,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Недействительная цепочка — некоторые прокси отсутствуют"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nädogry zynjyr — käbir proksiler ýok"
           }
         },
         "tr" : {
@@ -7538,12 +6788,6 @@
             "value" : "Недействительный отпечаток"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nädogry barlag belgisi"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7594,12 +6838,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Недействительный отпечаток. Должна быть шестнадцатеричная строка из 64 символов, или он уже существует."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nädogry barlag belgisi. 64 belgili onaltylyk setir bolmaly ýa-da eýýäm bar."
           }
         },
         "tr" : {
@@ -7654,12 +6892,6 @@
             "value" : "Недействительный URL подписки."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nädogry abuna URL-i."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7707,12 +6939,6 @@
           }
         },
         "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv4 CIDR"
-          }
-        },
-        "tk" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "IPv4 CIDR"
@@ -7773,12 +6999,6 @@
             "value" : "IPv6 CIDR"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "IPv6 CIDR"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7829,12 +7049,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Присоединиться к группе Telegram"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Telegram toparyna goşulyň"
           }
         },
         "tr" : {
@@ -7893,12 +7107,6 @@
             "value" : "Оставьте пустым для автоматического обнаружения и перехода на зашифрованные DNS-серверы."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şifrlenen DNS serwerleri awtomatiki tapmak we geçmek üçin boş goýuň."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7949,12 +7157,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ссылка"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Salgy"
           }
         },
         "tr" : {
@@ -8009,12 +7211,6 @@
             "value" : "Тип ссылки"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Salgy görnüşi"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -8067,12 +7263,6 @@
             "value" : "Журналы"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Loglar"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -8123,12 +7313,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Вручную"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "El bilen"
           }
         },
         "tr" : {
@@ -8187,12 +7371,6 @@
             "value" : "Метод"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Usul"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -8248,12 +7426,6 @@
             "value" : "Режим"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tertip"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -8304,12 +7476,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ещё"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Köpräk"
           }
         },
         "tr" : {
@@ -8364,12 +7530,6 @@
             "value" : "Переместить вниз"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Aşak süýşür"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -8420,12 +7580,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Переместить вверх"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýokary süýşür"
           }
         },
         "tr" : {
@@ -8491,12 +7645,6 @@
             "value" : "Имя"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ady"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -8547,12 +7695,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Сеть"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tor"
           }
         },
         "tr" : {
@@ -8607,12 +7749,6 @@
             "value" : "Ошибка сети: %@"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tor ýalňyşlygy: %@"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -8663,12 +7799,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Новая цепочка"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Täze zynjyr"
           }
         },
         "tr" : {
@@ -8723,12 +7853,6 @@
             "value" : "Далее"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Indiki"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -8779,12 +7903,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Нет сертификата"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şahadatnama ýok"
           }
         },
         "tr" : {
@@ -8839,12 +7957,6 @@
             "value" : "Нет цепочек"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Zynjyr ýok"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -8895,12 +8007,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Нет прокси"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksi ýok"
           }
         },
         "tr" : {
@@ -8955,12 +8061,6 @@
             "value" : "Нет недавних журналов"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Soňky loglar ýok"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9011,12 +8111,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Нет недавних запросов"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Soňky soraglar ýok"
           }
         },
         "tr" : {
@@ -9071,12 +8165,6 @@
             "value" : "Нет доверенных сертификатов"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ynanylýan şahadatnama ýok"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9127,12 +8215,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "В подписке не найдено допустимых конфигураций."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Abunada dogry sazlamalar tapylmady."
           }
         },
         "tr" : {
@@ -9187,12 +8269,6 @@
             "value" : "Нет"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýok"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9243,12 +8319,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Не настроено"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sazlanmadyk"
           }
         },
         "tr" : {
@@ -9303,12 +8373,6 @@
             "value" : "Недостаточно прокси"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksi ýeterlik däl"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9359,12 +8423,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Не рекомендуется."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Maslahat berilmeýär."
           }
         },
         "tr" : {
@@ -9419,12 +8477,6 @@
             "value" : "Не доверен"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ynanylmaýan"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9475,12 +8527,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Выкл."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Öçük"
           }
         },
         "tr" : {
@@ -9535,12 +8581,6 @@
             "value" : "ОК"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bolýar"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9591,12 +8631,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Вкл."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Açyk"
           }
         },
         "tr" : {
@@ -9651,12 +8685,6 @@
             "value" : "Библиотеки с открытым кодом"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Açyk çeşme kitaphanalary"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9709,12 +8737,6 @@
             "value" : "Операция"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Amal"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9765,12 +8787,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Другое"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Beýleki"
           }
         },
         "tr" : {
@@ -9826,12 +8842,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Пакеты, отправленные на адрес отражения, возвращаются отправителю вместо маршрутизации или проксирования."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Serpikme salgysyna iberilen paketler ugrukdyrylmagyň ýa-da proksiden geçirilmegiň ýerine iberijisine gaýtarylýar."
           }
         },
         "tr" : {
@@ -9894,12 +8904,6 @@
             "value" : "Пароль"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Parol"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -9950,12 +8954,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Путь"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýol"
           }
         },
         "tr" : {
@@ -10014,12 +9012,6 @@
             "value" : "Нет разрешения"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Rugsat berilmedi"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10070,12 +9062,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Фаза"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tapgyr"
           }
         },
         "tr" : {
@@ -10130,12 +9116,6 @@
             "value" : "Порт"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Port"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10186,12 +9166,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Протокол"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Protokol"
           }
         },
         "tr" : {
@@ -10246,12 +9220,6 @@
             "value" : "Прокси"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksiler"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10302,12 +9270,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Прокси"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksi"
           }
         },
         "tr" : {
@@ -10362,12 +9324,6 @@
             "value" : "Режим прокси"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksi tertibi"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10419,12 +9375,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Публичный ключ"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Açyk açar"
           }
         },
         "tr" : {
@@ -10481,12 +9431,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "QR-код"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "QR kod"
           }
         },
         "tr" : {
@@ -10547,12 +9491,6 @@
             "value" : "Переподключение..."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Täzeden birikdirilýär..."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10603,12 +9541,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Отражение"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Serpikme"
           }
         },
         "tr" : {
@@ -10663,12 +9595,6 @@
             "value" : "Адреса отражения"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Serpikme salgylary"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10719,12 +9645,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Создать заново"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Gaýtadan döret"
           }
         },
         "tr" : {
@@ -10779,12 +9699,6 @@
             "value" : "Создать сертификат заново"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şahadatnamany gaýtadan döret"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10835,12 +9749,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Отклонить"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ret et"
           }
         },
         "tr" : {
@@ -10895,12 +9803,6 @@
             "value" : "Отклонить данные"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Maglumat ret et"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10953,12 +9855,6 @@
             "value" : "Отклонить GIF"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "GIF ret et"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11009,12 +9905,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Отклонить текст"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tekst ret et"
           }
         },
         "tr" : {
@@ -11072,12 +9962,6 @@
             "value" : "Удалить"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Aýyrmak"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11128,12 +10012,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Переименовать"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ady üýtgetmek"
           }
         },
         "tr" : {
@@ -11188,12 +10066,6 @@
             "value" : "Переименовать набор правил"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgünler toplumynyň adyny üýtgetmek"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11244,12 +10116,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Изменить порядок прокси"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksileri täzeden tertiplemek"
           }
         },
         "tr" : {
@@ -11304,12 +10170,6 @@
             "value" : "Замена"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Çalyşma"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11360,12 +10220,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Запрос"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sorag"
           }
         },
         "tr" : {
@@ -11420,12 +10274,6 @@
             "value" : "Запросы"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Soraglar"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11478,12 +10326,6 @@
             "value" : "Сбросить"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Täzeden düzmek"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11534,12 +10376,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ответ"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Jogap"
           }
         },
         "tr" : {
@@ -11595,12 +10431,6 @@
             "value" : "Перезапись"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Gaýtadan ýazmak"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11651,12 +10481,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Корневой сертификат"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Kök şahadatnama"
           }
         },
         "tr" : {
@@ -11711,12 +10535,6 @@
             "value" : "Предпросмотр маршрута"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ugur syn"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11767,12 +10585,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Направить к"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ugratmak"
           }
         },
         "tr" : {
@@ -11827,12 +10639,6 @@
             "value" : "Направляйте трафик в вашу страну напрямую, минуя прокси для более быстрого локального доступа."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýerli elýeterliligi çaltlaşdyrmak üçin proksi aýlanyp, traffigi öz ýurduňyza gönüden-göni ugrugyň."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11883,12 +10689,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Маршрутизация"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ugratma"
           }
         },
         "tr" : {
@@ -11943,12 +10743,6 @@
             "value" : "Правила маршрутизации"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ugratma düzgünleri"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -11999,12 +10793,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Правила маршрутизации обновлены"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ugratma düzgünleri täzelendi"
           }
         },
         "tr" : {
@@ -12059,12 +10847,6 @@
             "value" : "Правило"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgün"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12115,12 +10897,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Набор правил"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgünler toplumy"
           }
         },
         "tr" : {
@@ -12175,12 +10951,6 @@
             "value" : "Набор правил слишком велик."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgünler toplumy gaty uly."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12231,12 +11001,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Наборы правил"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgünler toplumlary"
           }
         },
         "tr" : {
@@ -12291,12 +11055,6 @@
             "value" : "Правила"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgünler"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12347,12 +11105,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Сохранить"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sakla"
           }
         },
         "tr" : {
@@ -12407,12 +11159,6 @@
             "value" : "Отсканируйте QR-код"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "QR koduňyzy skanirläň"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12463,12 +11209,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Скрипт"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Skript"
           }
         },
         "tr" : {
@@ -12523,12 +11263,6 @@
             "value" : "Поиск"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Gözleg"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12581,12 +11315,6 @@
             "value" : "Поиск не является допустимым регулярным выражением."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Gözleg dogry yzygiderli aňlatma däl."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12637,12 +11365,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Требуется поиск."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Gözleg hökmany."
           }
         },
         "tr" : {
@@ -12698,12 +11420,6 @@
             "value" : "Безопасность"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Howpsuzlyk"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12754,12 +11470,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Выбрать"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Saýla"
           }
         },
         "tr" : {
@@ -12814,12 +11524,6 @@
             "value" : "Выбрать прокси"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksi saýla"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12870,12 +11574,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Сервер"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Serwer"
           }
         },
         "tr" : {
@@ -12934,12 +11632,6 @@
             "value" : "Настройки"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Sazlamalar"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -12990,12 +11682,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Отпечаток SHA-256"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "SHA-256 barlag yzy"
           }
         },
         "tr" : {
@@ -13066,12 +11752,6 @@
             "value" : "Потоковый скрипт"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Akym skripti"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13127,12 +11807,6 @@
             "value" : "Подписаться"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Abuna bol"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13183,12 +11857,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Подписаться на набор правил"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Düzgünler toplumyna abuna bol"
           }
         },
         "tr" : {
@@ -13243,12 +11911,6 @@
             "value" : "Подписка"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Abuna"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13301,12 +11963,6 @@
             "value" : "Ошибка подписки"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Abuna şowsuz"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13357,12 +12013,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Подписки"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Abunalar"
           }
         },
         "tr" : {
@@ -13420,12 +12070,6 @@
             "value" : "Поддержка ссылок прокси, подписок и Clash"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Proksi, abuna we Clash salgylaryny goldaýar"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13476,12 +12120,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Цель"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Maksat"
           }
         },
         "tr" : {
@@ -13539,12 +12177,6 @@
             "value" : "Проверить все"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Hemmesini barla"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13595,12 +12227,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Проверить задержку"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Gijikdirmäni barla"
           }
         },
         "tr" : {
@@ -13655,12 +12281,6 @@
             "value" : "Прокси, используемый следующими правилами маршрутизации, был удалён. Они сброшены на значение по умолчанию: %@"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Aşakdaky ugratma düzgünleri tarapyndan ulanylýan proksi pozuldy. Olar Bellenen-e gaýtaryldy: %@"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13713,12 +12333,6 @@
             "value" : "Это пропустит проверку сертификата TLS, делая ваши соединения уязвимыми для MITM-атак."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Bu TLS şahadatnamasynyň barlagyndan geçer, birikmeleriňizi MITM hüjümlerine sezewar eder."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13769,12 +12383,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "таймаут"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "wagt gutardy"
           }
         },
         "tr" : {
@@ -13832,12 +12440,6 @@
             "value" : "TLS (загрузка)"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "TLS (ýükläp almak)"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -13888,12 +12490,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "TLS (выгрузка)"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "TLS (ýükleme)"
           }
         },
         "tr" : {
@@ -13948,12 +12544,6 @@
             "value" : "Переключить VPN"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "VPN-i kommutirle"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -14004,12 +12594,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Включить или выключить VPN-соединение."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "VPN baglanyşygyny açyň ýa-da öçüriň."
           }
         },
         "tr" : {
@@ -14064,12 +12648,6 @@
             "value" : "Товарные знаки"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Haryt nyşanlary"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -14120,12 +12698,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Прозрачный"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Şeffaf"
           }
         },
         "tr" : {
@@ -14179,12 +12751,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Транспорт"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Transport"
           }
         },
         "tr" : {
@@ -14242,12 +12808,6 @@
             "value" : "Доверен"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ynanylan"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -14298,12 +12858,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Доверенные сертификаты"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ynanylýan şahadatnamalar"
           }
         },
         "tr" : {
@@ -14358,12 +12912,6 @@
             "value" : "Туннель"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Tunel"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -14414,12 +12962,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Тип"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Görnüşi"
           }
         },
         "tr" : {
@@ -14474,12 +13016,6 @@
             "value" : "Неизвестно"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Näbelli"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -14530,12 +13066,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Неизвестное содержимое."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Näbelli mazmun."
           }
         },
         "tr" : {
@@ -14590,12 +13120,6 @@
             "value" : "Обновить"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Täzele"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -14646,12 +13170,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ошибка обновления"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Täzelemek şowsuz"
           }
         },
         "tr" : {
@@ -14706,12 +13224,6 @@
             "value" : "Выгрузка"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýüklemek"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -14763,12 +13275,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Скорость выгрузки"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ýükleme tizligi"
           }
         },
         "tr" : {
@@ -14826,12 +13332,6 @@
             "value" : "URL недействителен."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL nädogry."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -14882,12 +13382,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Требуется URL."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL hökmany."
           }
         },
         "tr" : {
@@ -14942,12 +13436,6 @@
             "value" : "Шаблон URL"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL nusgasy"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -15000,12 +13488,6 @@
             "value" : "Шаблон URL не является допустимым регулярным выражением."
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL nusgasy dogry yzygiderli aňlatma däl."
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -15056,12 +13538,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Требуется шаблон URL."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "URL nusgasy hökmany."
           }
         },
         "tr" : {
@@ -15119,12 +13595,6 @@
             "value" : "Имя пользователя"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ulanyjy ady"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -15175,12 +13645,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Утилиты"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Kömekçi gurallar"
           }
         },
         "tr" : {
@@ -15245,12 +13709,6 @@
             "value" : "VPN"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "VPN"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -15303,12 +13761,6 @@
             "value" : "VPN включён"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "VPN açyk"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -15359,12 +13811,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Ошибка VPN"
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "VPN ýalňyşlygy"
           }
         },
         "tr" : {
@@ -15429,12 +13875,6 @@
             "value" : "Вы"
           }
         },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Siz"
-          }
-        },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
@@ -15485,12 +13925,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Вам потребуется создать сертификат заново, чтобы снова использовать MITM."
-          }
-        },
-        "tk" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "MITM-i ýene-de ulanmak üçin şahadatnamany gaýtadan döretmeli bolarsyňyz."
           }
         },
         "tr" : {

@@ -593,7 +593,6 @@
 				ru,
 				es,
 				fa,
-				tk,
 				vi,
 				tr,
 			);
