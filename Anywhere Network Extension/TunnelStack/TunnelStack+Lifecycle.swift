@@ -553,11 +553,14 @@ extension TunnelStack {
     /// Handles the "mitmChanged" notification (MITM toggle or rules changed).
     ///
     /// No stack restart is needed — we rebuild the matcher in place on
-    /// `lwipQueue` to serialize against connection accept callbacks. Live
-    /// sessions share the policy object by reference, so they pick up the
-    /// new rules on their next request head; rule-set deletions also drop
-    /// the corresponding ``MITMScriptStore`` buckets. See the
-    /// ``startObservingSettings`` comment for the full picture.
+    /// `lwipQueue` to serialize against connection accept callbacks. Each MITM
+    /// session snapshots its matching rules when the connection opens (see
+    /// ``MITMHTTP1Stream/init`` and the HTTP/2 rewriter), so a reload takes
+    /// effect on the **next new connection**: an already-open keep-alive /
+    /// HTTP/2 / SSE connection keeps the rule snapshot it started with until it
+    /// closes. Rule-set deletions also drop the corresponding
+    /// ``MITMScriptStore`` buckets. See the ``startObservingSettings`` comment
+    /// for the full picture.
     fileprivate func handleMITMChanged() {
         lwipQueue.async { [self] in
             guard running else { return }

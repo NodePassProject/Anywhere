@@ -756,6 +756,18 @@ final class MITMSession {
                         // reached here. Tear down so the client retries it on a
                         // fresh connection rather than misrouting it to the
                         // dialed host.
+                        //
+                        // ARCHITECTURAL LIMITATION (HTTP/2): there is a single
+                        // outer leg per connection, so we cannot proxy two
+                        // authorities over one h2 connection. A rewrite rule
+                        // that sends some requests to a different host will, on
+                        // a coalesced h2 connection, tear the whole connection
+                        // down (cancelling every in-flight stream) the moment
+                        // such a request arrives — the client then re-opens and
+                        // may re-coalesce, so traffic split across hosts by rule
+                        // can thrash. Scoping the teardown to the offending
+                        // stream isn't possible with one upstream leg; a true
+                        // multi-host h2 proxy would need per-authority outer legs.
                         guard self.resolvedUpstreamMatchesDialed() else {
                             logger.warning("[MITM] \(self.dstHost): request resolved an upstream different from the dialed one; tearing down so the client retries")
                             self.cancel(error: nil)

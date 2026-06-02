@@ -206,6 +206,12 @@ final class MITMScriptEngine {
         /// duplicate settlement is ignored.
         var delivered = false
 
+        /// Idle watchdog for the async path: armed when the script suspends
+        /// and re-armed whenever a fetch makes progress. If it fires before the
+        /// promise settles, the invocation is reverted and released so a
+        /// never-settling promise can't park the connection forever.
+        var watchdog: DispatchWorkItem?
+
         /// Async buffered-script invocation (``applyAsync``).
         init(scope: UUID?, original: Message, resumeQueue: DispatchQueue, completion: @escaping (Outcome) -> Void) {
             self.scope = scope
@@ -335,6 +341,14 @@ final class MITMScriptEngine {
     private static let httpMaxResponseBytes = 4 * 1024 * 1024
     /// Most fetches in flight at once across every engine in the extension.
     private static let httpMaxConcurrentGlobal = 32
+
+    /// Idle ceiling for a suspended async ``process(ctx)`` — the longest the
+    /// engine waits with no fetch making progress before it reverts the
+    /// invocation. Comfortably exceeds a single fetch's ``httpMaxTimeout`` so a
+    /// slow-but-progressing request isn't cut off, while bounding a script
+    /// whose returned promise never settles (e.g. `new Promise(() => {})`, or
+    /// an `await` that never resolves) — which the per-fetch timeout can't catch.
+    private static let invocationIdleTimeout: TimeInterval = httpMaxTimeout + 30
 
     /// Re-entrancy guard for ``exceptionHandler``: formatting a thrown
     /// value for the log runs JS ``ToString``, which a script can
@@ -522,6 +536,10 @@ final class MITMScriptEngine {
         inv.resultPromise = returned
         liveInvocations[ObjectIdentifier(inv)] = inv
         currentInvocation = nil
+        // Arm the idle watchdog before attaching handlers: if the promise is
+        // already settled, ``attachSettleHandlers`` delivers synchronously and
+        // ``deliver`` cancels the timer; otherwise it bounds the suspension.
+        armWatchdog(for: inv)
         attachSettleHandlers(to: returned, for: inv)
     }
 
@@ -582,11 +600,33 @@ final class MITMScriptEngine {
     private func deliver(_ outcome: Outcome, for inv: Invocation) {
         guard !inv.delivered else { return }
         inv.delivered = true
+        inv.watchdog?.cancel()
+        inv.watchdog = nil
         liveInvocations.removeValue(forKey: ObjectIdentifier(inv))
         inv.resultPromise = nil
         inv.ctxValue = nil
         guard let resumeQueue = inv.resumeQueue, let completion = inv.completion else { return }
         resumeQueue.async { completion(outcome) }
+    }
+
+    /// (Re)arms ``Invocation/watchdog`` on ``MITMScriptTransform/scriptQueue``.
+    /// Any prior timer is cancelled first. On expiry — only if the invocation
+    /// hasn't already settled — the script is reverted to its original message
+    /// and released. The work item runs on ``scriptQueue`` (serialized with the
+    /// settle handlers) and takes ``invocationLock`` like every other delivery
+    /// path; ``deliver`` cancels the timer, so a normal settlement always wins.
+    private func armWatchdog(for inv: Invocation) {
+        inv.watchdog?.cancel()
+        let item = DispatchWorkItem { [weak self, weak inv] in
+            guard let self, let inv else { return }
+            self.invocationLock.lock()
+            defer { self.invocationLock.unlock() }
+            guard !inv.delivered, let original = inv.original else { return }
+            logger.warning("[MITM][JS] process(ctx) did not settle within \(Self.invocationIdleTimeout)s; reverting")
+            self.deliver(.modified(original), for: inv)
+        }
+        inv.watchdog = item
+        MITMScriptTransform.scriptQueue.asyncAfter(deadline: .now() + Self.invocationIdleTimeout, execute: item)
     }
 
     /// Asks JSC to run GC when outstanding ``NoCopy`` Uint8Array bytes
@@ -2044,9 +2084,12 @@ final class MITMScriptEngine {
               let urlStr = urlVal.toString(),
               let url = URL(string: urlStr),
               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
-              url.host != nil
+              let host = url.host, !host.isEmpty
         else {
             return Self.rejected("Anywhere.http: expected an absolute http(s) URL", in: ctx)
+        }
+        if MITMScriptHTTPClient.isBlockedHost(host) {
+            return Self.rejected("Anywhere.http: host \"\(host)\" is not allowed (loopback, link-local, private, or .local)", in: ctx)
         }
         if inv.totalFetches >= Self.httpMaxTotalPerInvocation {
             return Self.rejected("Anywhere.http: per-invocation request cap (\(Self.httpMaxTotalPerInvocation)) reached", in: ctx)
@@ -2136,6 +2179,10 @@ final class MITMScriptEngine {
             collectIfBudgetExceeded()
         }
         if inv.inFlightFetches > 0 { inv.inFlightFetches -= 1 }
+        // A fetch just resolved — progress. Re-arm the idle watchdog so the
+        // continuation (which may suspend again on another fetch or a
+        // never-settling promise) gets a fresh window.
+        if !inv.delivered { armWatchdog(for: inv) }
         // Settle even if `inv` already delivered (e.g. another awaited leg
         // rejected `process`): resolving an already-settled sibling Promise is
         // a JS no-op, and a `Promise.all` the script awaited still needs its
@@ -2203,10 +2250,24 @@ final class MITMScriptEngine {
                 logger.warning("[MITM][JS] Anywhere.http: dropping request header \(name) with CR/LF/NUL in value")
                 continue
             }
+            guard !Self.forbiddenRequestHeaders.contains(name.lowercased()) else {
+                logger.warning("[MITM][JS] Anywhere.http: dropping forbidden request header: \(name)")
+                continue
+            }
             out.append((name: name, value: val))
         }
         return out
     }
+
+    /// Request headers a script may not set on an ``Anywhere.http`` call.
+    /// `Host` would enable domain-fronting / internal-vhost access (especially
+    /// combined with the SSRF guard in ``MITMScriptHTTPClient``); the rest are
+    /// framing / hop-by-hop controls (request-smuggling vectors) that
+    /// `URLSession` manages itself.
+    private static let forbiddenRequestHeaders: Set<String> = [
+        "host", "content-length", "connection", "transfer-encoding",
+        "upgrade", "keep-alive", "te", "trailer", "expect", "proxy-connection",
+    ]
 
     // MARK: Global Anywhere.http in-flight counter
 

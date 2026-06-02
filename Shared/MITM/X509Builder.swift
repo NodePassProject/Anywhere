@@ -323,13 +323,36 @@ enum X509Builder {
             trimmed = s
         }
         if trimmed.contains("%") { return nil }
-        if let v4 = IPv4Address(trimmed) {
+        // ``IPv4Address`` / ``IPv6Address`` use lenient inet_aton/inet_pton
+        // parsing that accepts non-dotted-quad forms — e.g. IPv4Address("1234")
+        // → 0.0.4.210, "2130706433" → 127.0.0.1, "1.2.3" → 1.2.0.3. Those are
+        // valid DNS hostnames, and mis-encoding one as an ``iPAddress`` SAN
+        // makes the leaf fail SNI hostname matching (the SSL policy treats SNI
+        // as a DNS name and finds no matching dNSName). Gate IPv4 on a strict
+        // 4-octet dotted-quad, and only treat a colon-bearing literal as IPv6;
+        // anything else is encoded as a ``dNSName``.
+        if Self.isDottedQuadIPv4(trimmed), let v4 = IPv4Address(trimmed) {
             return v4.rawValue
         }
-        if let v6 = IPv6Address(trimmed) {
+        if trimmed.contains(":"), let v6 = IPv6Address(trimmed) {
             return v6.rawValue
         }
         return nil
+    }
+
+    /// True only for a canonical IPv4 dotted-quad: exactly four runs of 1–3
+    /// ASCII decimal digits, each 0–255. Rejects the inet_aton shorthands
+    /// (`1234`, `1.2.3`, `0x7f000001`, octal) that ``IPv4Address`` accepts.
+    private static func isDottedQuadIPv4(_ s: String) -> Bool {
+        let parts = s.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        for part in parts {
+            guard (1...3).contains(part.count),
+                  part.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let value = Int(part), value <= 255
+            else { return false }
+        }
+        return true
     }
 
     private static func encodeExtendedKeyUsageServerAuth() -> Data {

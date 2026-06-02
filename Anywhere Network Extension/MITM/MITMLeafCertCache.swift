@@ -33,8 +33,10 @@ final class MITMLeafCertCache {
     private static let validity: TimeInterval = 7 * 24 * 60 * 60         // 7 days
     private static let refreshThreshold: TimeInterval = 24 * 60 * 60     // refresh within 1 day of expiry
 
-    private let lock = NSLock()
+    private let cond = NSCondition()
     private var entries: [String: CacheEntry] = [:]
+    /// Hosts currently being minted, for single-flight dedup (see ``leaf``).
+    private var minting: Set<String> = []
 
     private struct CacheEntry {
         let leaf: Leaf
@@ -55,38 +57,62 @@ final class MITMLeafCertCache {
     /// it as a fatal handshake error.
     func leaf(for hostname: String) throws -> Leaf {
         let normalized = hostname.lowercased()
-        lock.lock()
-
-        if let entry = entries[normalized] {
-            let now = Date()
-            if entry.leaf.expiry.timeIntervalSince(now) > Self.refreshThreshold {
-                // Touch the recency timestamp in place. Storing recency
-                // on the entry keeps the cache-hit path O(1) and defers
-                // the O(n) scan for an eviction victim to eviction time,
-                // which only runs on a cache miss past the cap. On a
-                // browser launch hitting hundreds of hosts the hit path
-                // is hot, so an O(n) update per hit would dominate it.
-                entries[normalized]?.lastAccess = now
-                lock.unlock()
-                return entry.leaf
+        cond.lock()
+        while true {
+            if let entry = entries[normalized] {
+                if entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold {
+                    // Touch the recency timestamp in place. Storing recency
+                    // on the entry keeps the cache-hit path O(1) and defers
+                    // the O(n) scan for an eviction victim to eviction time,
+                    // which only runs on a cache miss past the cap. On a
+                    // browser launch hitting hundreds of hosts the hit path
+                    // is hot, so an O(n) update per hit would dominate it.
+                    entries[normalized]?.lastAccess = Date()
+                    cond.unlock()
+                    return entry.leaf
+                }
+                entries.removeValue(forKey: normalized)
             }
-            entries.removeValue(forKey: normalized)
+            // Single-flight: if another caller is already minting this host,
+            // wait for it rather than duplicating the CA signature and racing
+            // the cache write (common at a browser cold-start that opens many
+            // parallel sockets to the same origin). On wake, re-check the cache.
+            if minting.contains(normalized) {
+                cond.wait()
+                continue
+            }
+            minting.insert(normalized)
+            break
         }
-        lock.unlock()
+        cond.unlock()
 
-        let minted = try mintLeaf(for: normalized)
+        // Mint outside the lock so concurrent callers for *other* hosts aren't
+        // blocked behind this host's signature.
+        let result: Result<Leaf, Error>
+        do {
+            result = .success(try mintLeaf(for: normalized))
+        } catch {
+            result = .failure(error)
+        }
 
-        lock.lock()
-        defer { lock.unlock() }
-        entries[normalized] = CacheEntry(leaf: minted, lastAccess: Date())
-        evictIfNeededUnlocked()
-        return minted
+        cond.lock()
+        minting.remove(normalized)
+        if case .success(let leaf) = result {
+            entries[normalized] = CacheEntry(leaf: leaf, lastAccess: Date())
+            evictIfNeededUnlocked()
+        }
+        // Wake waiters: on success they find the fresh entry; on failure one of
+        // them becomes the new leader and retries.
+        cond.broadcast()
+        cond.unlock()
+
+        return try result.get()
     }
 
     func reset() {
-        lock.lock()
+        cond.lock()
         entries.removeAll()
-        lock.unlock()
+        cond.unlock()
     }
 
     // MARK: - Internals

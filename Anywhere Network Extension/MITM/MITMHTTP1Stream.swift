@@ -34,6 +34,17 @@ final class MITMHTTP1Stream {
     /// abandoned, and the connection survives.
     private static let maxHeadBytes: Int = 64 * 1024
 
+    /// Cap on a single chunk-size line or trailer field-line while the
+    /// reader waits for its terminating CRLF. ``maxHeadBytes`` only guards
+    /// the request/status head; once framing is chunked, a peer that streams
+    /// a size line or trailer line that never ends (e.g. an unbounded run of
+    /// hex digits or chunk-extension bytes with no CRLF) would otherwise grow
+    /// ``rxBuffer`` without bound and exhaust the Network Extension's ~50 MiB
+    /// budget — a remote memory-exhaustion DoS. On exceed the framing is
+    /// treated as malformed (the body is terminated and the stream downgrades
+    /// to passthrough), mirroring the malformed-size-line handling.
+    fileprivate static let maxChunkLineBytes: Int = 16 * 1024
+
     /// Cap on the body size that ``Anywhere.respond`` may emit on the
     /// HTTP/1.1 path. HTTP/1 has no flow-control window so the
     /// constraint here is purely about memory: a script that asks for
@@ -1018,6 +1029,17 @@ final class MITMHTTP1Stream {
             switch currentInner {
             case .sizeLine:
                 guard let lineEnd = rxBuffer.firstCRLF() else {
+                    if rxBuffer.count > Self.maxChunkLineBytes {
+                        // Chunk-size line that never terminates — treat as
+                        // malformed (same handling as a bad size below) so the
+                        // buffer can't grow without bound.
+                        logger.warning("[MITM] HTTP/1 \(host): chunk-size line exceeded \(Self.maxChunkLineBytes) B without CRLF; terminating body and downgrading to passthrough")
+                        output.append(contentsOf: "0\r\n\r\n".utf8)
+                        rxBuffer.removeAll(keepingCapacity: false)
+                        flushSynthAfterResponse(into: &output)
+                        mode = .passthrough
+                        return true
+                    }
                     mode = .streamingChunked(streaming: streaming, inner: .sizeLine)
                     return false
                 }
@@ -1162,6 +1184,16 @@ final class MITMHTTP1Stream {
                 // line verbatim (we don't rewrite trailers) and stop
                 // once we hit the empty terminator.
                 guard let lineEnd = rxBuffer.firstCRLF() else {
+                    if rxBuffer.count > Self.maxChunkLineBytes {
+                        logger.warning("[MITM] HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; terminating body and downgrading to passthrough")
+                        // "0\r\n" was already emitted; close the trailer
+                        // section with the empty line, then downgrade.
+                        output.append(contentsOf: "\r\n".utf8)
+                        rxBuffer.removeAll(keepingCapacity: false)
+                        flushSynthAfterResponse(into: &output)
+                        mode = .passthrough
+                        return true
+                    }
                     mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
                     return false
                 }
@@ -1308,8 +1340,10 @@ final class MITMHTTP1Stream {
         // ``prefix``/``subdata`` range math. Reject negatives; nil flows
         // to the caller's malformed-chunk handling (synthesize the
         // terminator, drop to passthrough), the same as any other
-        // unparseable size line.
-        guard let size = Int(trimmed, radix: 16), size >= 0 else { return nil }
+        // unparseable size line. Also require pure ASCII hex: ``Int(_:radix:)``
+        // admits a leading `+` too, another framing-divergence vector.
+        guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isHexDigit && $0.isASCII }),
+              let size = Int(trimmed, radix: 16), size >= 0 else { return nil }
         return size
     }
 
@@ -1997,7 +2031,12 @@ final class MITMHTTP1Stream {
         }
         if let cl = contentLength {
             let trimmed = cl.trimmingCharacters(in: CharacterSet.whitespaces)
-            if let length = Int(trimmed), length >= 0 {
+            // RFC 9112 §6.3: Content-Length is `1*DIGIT`. ``Int`` also accepts a
+            // leading `+`, so `Content-Length: +5` would parse here yet be
+            // rejected (or read differently) by a stricter peer — a framing
+            // divergence that enables request smuggling. Require pure ASCII digits.
+            if !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && $0.isNumber }),
+               let length = Int(trimmed), length >= 0 {
                 return length == 0 ? .none : .contentLength(length)
             }
         }
@@ -2397,7 +2436,9 @@ private final class ChunkedReader {
         while !buffer.isEmpty {
             switch state {
             case .sizeLine:
-                guard let lineEnd = buffer.firstCRLF() else { return .needMore }
+                guard let lineEnd = buffer.firstCRLF() else {
+                    return buffer.count > MITMHTTP1Stream.maxChunkLineBytes ? .malformed : .needMore
+                }
                 let line = buffer.subdata(in: 0..<lineEnd)
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
@@ -2431,7 +2472,9 @@ private final class ChunkedReader {
             case .trailerOrEnd:
                 // Forward the trailer block (zero or more lines + CRLF)
                 // verbatim until the empty-line terminator.
-                guard let lineEnd = buffer.firstCRLF() else { return .needMore }
+                guard let lineEnd = buffer.firstCRLF() else {
+                    return buffer.count > MITMHTTP1Stream.maxChunkLineBytes ? .malformed : .needMore
+                }
                 let line = buffer.subdata(in: 0..<lineEnd)
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
@@ -2448,7 +2491,9 @@ private final class ChunkedReader {
         while !buffer.isEmpty {
             switch state {
             case .sizeLine:
-                guard let lineEnd = buffer.firstCRLF() else { return .needMore }
+                guard let lineEnd = buffer.firstCRLF() else {
+                    return buffer.count > MITMHTTP1Stream.maxChunkLineBytes ? .malformed : .needMore
+                }
                 let line = buffer.subdata(in: 0..<lineEnd)
                 buffer.removeFirst(lineEnd + 2)
                 guard let size = parseHexSize(line) else { return .malformed }
@@ -2479,7 +2524,9 @@ private final class ChunkedReader {
             case .trailerOrEnd:
                 // Rewritten bodies are re-chunked with empty trailers, so
                 // consume and discard any original trailers here.
-                guard let lineEnd = buffer.firstCRLF() else { return .needMore }
+                guard let lineEnd = buffer.firstCRLF() else {
+                    return buffer.count > MITMHTTP1Stream.maxChunkLineBytes ? .malformed : .needMore
+                }
                 let line = buffer.subdata(in: 0..<lineEnd)
                 buffer.removeFirst(lineEnd + 2)
                 if line.isEmpty {
@@ -2499,8 +2546,10 @@ private final class ChunkedReader {
         // a leading `-`, so a `-1` size line would yield a negative
         // ``remaining`` and a negative ``min(remaining, count)`` ->
         // inverted ``Range`` trap in ``MITMByteBuffer``. Reject negatives
-        // (nil maps to ``.malformed`` in both consumers above).
-        guard let size = Int(trimmed, radix: 16), size >= 0 else { return nil }
+        // (nil maps to ``.malformed`` in both consumers above). Also require
+        // pure ASCII hex: ``Int(_:radix:)`` admits a leading `+` too.
+        guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isHexDigit && $0.isASCII }),
+              let size = Int(trimmed, radix: 16), size >= 0 else { return nil }
         return size
     }
 }

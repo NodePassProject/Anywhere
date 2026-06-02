@@ -20,13 +20,39 @@ struct CompiledMITMRule {
 }
 
 extension CompiledMITMRule {
-    /// Whether this rule's gate matches the given **whole request URL**
-    /// (`https://host/path?query`). A nil URL — it could not be determined
-    /// — fails closed, so the rule is skipped rather than applied blind.
+    /// Cap on the URL length fed to the (untrusted, backtracking) gate regex.
+    /// Real request URLs are far shorter; an over-long one simply isn't matched
+    /// (fail-closed). Bounds the worst case of a catastrophic-backtracking
+    /// pattern shipped in an imported rule set — these run on the tunnel's
+    /// serial `lwipQueue`, so an unbounded match would stall every flow (ReDoS).
+    /// The cap mitigates but does not eliminate ReDoS on a moderately long URL;
+    /// ICU's regex engine has no step limit.
+    static let maxGateURLLength = 8 * 1024
+
+    /// Whether this rule's gate matches the given request URL. The gate is an
+    /// **unanchored substring** regex over the whole `https://host/path?query`
+    /// — e.g. `/admin` matches anywhere in the URL, so anchor with `^…$` in the
+    /// pattern to pin it. The **host** is matched case-insensitively (lowercased
+    /// here, mirroring the host trie), so a lowercase-host pattern matches
+    /// regardless of the SNI's case; the path/query keep their case (RFC 3986
+    /// paths are case-sensitive). A nil or over-long URL fails closed, so the
+    /// rule is skipped rather than applied blind.
     func matchesURL(_ url: String?) -> Bool {
-        guard let url else { return false }
-        let range = NSRange(url.startIndex..., in: url)
-        return urlPatternRegex.firstMatch(in: url, options: [], range: range) != nil
+        guard let url, url.utf16.count <= Self.maxGateURLLength else { return false }
+        let normalized = Self.lowercasingHost(url)
+        let range = NSRange(normalized.startIndex..., in: normalized)
+        return urlPatternRegex.firstMatch(in: normalized, options: [], range: range) != nil
+    }
+
+    /// Lowercases only the authority (`host[:port]`) of a `scheme://authority/…`
+    /// URL, leaving the path/query untouched. The gate URLs this sees are
+    /// always `https://host/target` with no userinfo, so lowercasing the whole
+    /// authority is safe.
+    private static func lowercasingHost(_ url: String) -> String {
+        guard let sep = url.range(of: "://") else { return url }
+        let authStart = sep.upperBound
+        let authEnd = url[authStart...].firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? url.endIndex
+        return url[..<authStart].lowercased() + url[authStart..<authEnd].lowercased() + String(url[authEnd...])
     }
 }
 
