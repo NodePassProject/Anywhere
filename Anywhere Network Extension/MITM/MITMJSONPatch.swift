@@ -8,7 +8,7 @@
 import Foundation
 
 /// Native, declarative JSON body editing — the engine behind
-/// ``MITMOperation/bodyJSON`` (import operation id `7`). It is the
+/// ``MITMOperation/bodyJSON`` (import operation id `5`). It is the
 /// rule-configured analog of the ``Anywhere.json`` script API: the same
 /// edit catalog and the same total / fail-closed contract, expressed as
 /// compiled native code instead of JavaScript so a body rewrite needs no

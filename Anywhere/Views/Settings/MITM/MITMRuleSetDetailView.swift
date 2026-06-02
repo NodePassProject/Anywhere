@@ -16,38 +16,6 @@ private struct MITMDomainSuffixDraft: Identifiable, Equatable {
     var value: String
 }
 
-/// Local picker state. ``disabled`` means "no rewriteTarget"; the other
-/// cases mirror ``MITMRewriteAction`` one-to-one. Kept separate so the
-/// ``Disabled`` choice has somewhere to live without leaking nil into
-/// the model layer.
-private enum MITMRewriteActionChoice: String, Hashable, CaseIterable, Identifiable {
-    case disabled
-    case transparent
-    case redirect302
-    case reject200
-
-    var id: String { rawValue }
-
-    var label: String {
-        switch self {
-        case .disabled:    return String(localized: "Disabled")
-        case .transparent: return String(localized: "Transparent Redirect")
-        case .redirect302: return String(localized: "302 Redirect")
-        case .reject200:   return String(localized: "200 Reject")
-        }
-    }
-}
-
-private extension MITMRejectBody.Kind {
-    var label: String {
-        switch self {
-        case .text: return String(localized: "Text")
-        case .gif:  return String(localized: "Tiny GIF")
-        case .data: return String(localized: "Data")
-        }
-    }
-}
-
 struct MITMRuleSetDetailView: View {
     @Environment(\.editMode) private var editMode
 
@@ -58,12 +26,6 @@ struct MITMRuleSetDetailView: View {
     @State private var name: String = ""
     @State private var enabled: Bool = true
     @State private var suffixDrafts: [MITMDomainSuffixDraft] = []
-    @State private var actionChoice: MITMRewriteActionChoice = .disabled
-    @State private var redirectHost: String = ""
-    @State private var redirectPort: String = ""
-    @State private var rejectBodyKind: MITMRejectBody.Kind = .text
-    @State private var rejectBodyContents: String = ""
-
 
     @State private var rules: [MITMRule] = []
 
@@ -107,18 +69,6 @@ struct MITMRuleSetDetailView: View {
                 subscriptionSection(url: subscriptionURL)
             }
 
-            Section {
-                if isEditing == true {
-                    actionEditor
-                } else {
-                    LabeledContent {
-                        Text(actionChoice.label)
-                    } label: {
-                        TextWithColorfulIcon(title: "Rewrite", comment: "MITM rewrite action", systemName: "arrow.triangle.turn.up.right.circle", foregroundColor: .white, backgroundColor: .purple)
-                    }
-                }
-            }
-            
             if isEditing == true || !suffixDrafts.isEmpty {
                 Section("Domain Suffixes") {
                     ForEach($suffixDrafts) { $draft in
@@ -242,118 +192,21 @@ struct MITMRuleSetDetailView: View {
         }
     }
 
-    @ViewBuilder
-    private var actionEditor: some View {
-        actionPicker
-        switch actionChoice {
-        case .disabled:
-            EmptyView()
-        case .transparent, .redirect302:
-            authorityFields
-        case .reject200:
-            rejectFields
-        }
-    }
-
-    private var actionPicker: some View {
-        LabeledContent {
-            Picker(String(localized: "Rewrite", comment: "MITM rewrite action"), selection: $actionChoice) {
-                ForEach(MITMRewriteActionChoice.allCases) { choice in
-                    Text(choice.label).tag(choice)
-                }
-            }
-            .labelsHidden()
-        } label: {
-            TextWithColorfulIcon(title: "Rewrite", comment: "MITM rewrite action", systemName: "arrow.trianglehead.turn.up.right", foregroundColor: .white, backgroundColor: .purple)
-        }
-    }
-
-    @ViewBuilder
-    private var authorityFields: some View {
-        LabeledContent {
-            TextField(String("everywhere.com"), text: $redirectHost)
-                .keyboardType(.URL)
-                .autocorrectionDisabled()
-                .textInputAutocapitalization(.never)
-                .multilineTextAlignment(.trailing)
-        } label: {
-            TextWithColorfulIcon(title: "Host", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
-        }
-        LabeledContent {
-            TextField(String("443"), text: $redirectPort)
-                .keyboardType(.numberPad)
-                .multilineTextAlignment(.trailing)
-        } label: {
-            TextWithColorfulIcon(title: "Port", comment: nil, systemName: "123.rectangle", foregroundColor: .white, backgroundColor: .cyan)
-        }
-    }
-
-    @ViewBuilder
-    private var rejectFields: some View {
-        LabeledContent {
-            Picker("Body Type", selection: $rejectBodyKind) {
-                Text(MITMRejectBody.Kind.text.label).tag(MITMRejectBody.Kind.text)
-                Text(MITMRejectBody.Kind.gif.label).tag(MITMRejectBody.Kind.gif)
-                Text(MITMRejectBody.Kind.data.label).tag(MITMRejectBody.Kind.data)
-            }
-            .labelsHidden()
-        } label: {
-            TextWithColorfulIcon(title: "Body Type", comment: nil, systemName: "doc.badge.gearshape", foregroundColor: .white, backgroundColor: .purple)
-        }
-        if rejectBodyKind != .gif {
-            LabeledContent {
-                TextField(rejectBodyKind.defaultContents, text: $rejectBodyContents)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .multilineTextAlignment(.trailing)
-            } label: {
-                TextWithColorfulIcon(title: "Content", comment: nil, systemName: "text.alignleft", foregroundColor: .white, backgroundColor: .gray)
-            }
-        }
-    }
-
     private func save() {
         suffixDrafts = suffixDrafts
             .filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         let suffixes = suffixDrafts
             .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-        let target = buildRewriteTarget()
-
         let result = MITMRuleSet(
             id: ruleSet?.id ?? UUID(),
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             enabled: enabled,
             domainSuffixes: suffixes,
-            rewriteTarget: target,
             rules: rules,
             subscriptionURL: currentRuleSet?.subscriptionURL
         )
         store.updateRuleSet(result)
-    }
-
-    /// Translates the editor's local fields into a ``MITMRewriteTarget``,
-    /// or nil when the user picked Disabled / left the required fields
-    /// empty.
-    private func buildRewriteTarget() -> MITMRewriteTarget? {
-        switch actionChoice {
-        case .disabled:
-            return nil
-        case .transparent, .redirect302:
-            let host = redirectHost.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !host.isEmpty else { return nil }
-            let portTrimmed = redirectPort.trimmingCharacters(in: .whitespacesAndNewlines)
-            let port: UInt16? = portTrimmed.isEmpty ? nil : UInt16(portTrimmed)
-            let action: MITMRewriteAction = actionChoice == .redirect302 ? .redirect302 : .transparent
-            return MITMRewriteTarget(action: action, host: host, port: port)
-        case .reject200:
-            let body = MITMRejectBody(
-                kind: rejectBodyKind,
-                contents: rejectBodyKind == .gif ? "" : rejectBodyContents,
-                contentType: nil
-            )
-            return MITMRewriteTarget(action: .reject200, rejectBody: body)
-        }
     }
 
     @ViewBuilder
@@ -400,45 +253,12 @@ struct MITMRuleSetDetailView: View {
     }
 
     /// Populates the editor's local @State from a rule set. Used on appear
-    /// and again after a subscription refresh replaces the content, so it
-    /// resets the action-specific fields rather than assuming defaults.
+    /// and again after a subscription refresh replaces the content.
     private func loadState(from ruleSet: MITMRuleSet) {
         name = ruleSet.name
         enabled = ruleSet.enabled
         suffixDrafts = ruleSet.domainSuffixes.map { MITMDomainSuffixDraft(value: $0) }
         rules = ruleSet.rules
-        redirectHost = ""
-        redirectPort = ""
-        rejectBodyKind = .text
-        rejectBodyContents = ""
-        guard let target = ruleSet.rewriteTarget else {
-            actionChoice = .disabled
-            return
-        }
-        switch target.action {
-        case .transparent:
-            actionChoice = .transparent
-            redirectHost = target.host
-            redirectPort = target.port.map(String.init) ?? ""
-        case .redirect302:
-            actionChoice = .redirect302
-            redirectHost = target.host
-            redirectPort = target.port.map(String.init) ?? ""
-        case .reject200:
-            actionChoice = .reject200
-            if let body = target.rejectBody {
-                rejectBodyKind = body.kind
-                rejectBodyContents = body.contents
-            }
-        }
-    }
-
-    private func defaultContentTypePlaceholder(for kind: MITMRejectBody.Kind) -> String {
-        switch kind {
-        case .text: return "text/plain; charset=utf-8"
-        case .gif:  return "image/gif"
-        case .data: return "application/octet-stream"
-        }
     }
 }
 
@@ -450,8 +270,17 @@ enum MITMRuleSummary {
 
     static func subtitle(for rule: MITMRule) -> String {
         switch rule.operation {
-        case .urlReplace(let search, _):
-            return search
+        case .rewrite(let action):
+            switch action {
+            case .transparent(let url), .redirect302(let url):
+                return url
+            case .reject200Text:
+                return String(localized: "Reject Text")
+            case .reject200Gif:
+                return String(localized: "Reject GIF")
+            case .reject200Data:
+                return String(localized: "Reject Data")
+            }
         case .headerAdd(let name, _):
             return name
         case .headerDelete(let name):

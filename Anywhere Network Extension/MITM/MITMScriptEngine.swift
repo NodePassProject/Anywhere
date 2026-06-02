@@ -54,7 +54,7 @@ final class MITMScriptEngine {
     /// `method`, `url`, `status`, and `headers` are **read-only** (like
     /// `phase`): a script may read them but assigning them is a no-op on
     /// readback. URL and header edits have dedicated rule operations —
-    /// `url-replace` and `header-add` / `header-delete` / `header-replace`
+    /// `rewrite` and `header-add` / `header-delete` / `header-replace`
     /// — so the script surface deliberately doesn't duplicate them. This
     /// also lets the HTTP/2 path open a request stream in stream-ID order
     /// without waiting on the script (see ``MITMHTTP2Connection``'s

@@ -31,9 +31,16 @@ final class MITMHTTP2Rewriter {
     private let responseRules: [CompiledMITMRule]
     private let cachedRuleSetID: UUID?
     /// When set, every request's `:authority` pseudo-header is rewritten to
-    /// this value. Driven by the rule set's ``rewriteTarget``; nil means
+    /// this value. Late-bound: set by the first transparent
+    /// ``MITMOperation/rewrite`` to the replacement's authority; nil means
     /// "leave :authority alone".
-    private let effectiveAuthority: String?
+    private var effectiveAuthority: String?
+
+    /// The upstream the session should dial, surfaced when a transparent
+    /// rewrite resolves a replacement host. nil until then (the session falls
+    /// back to the original destination). Read by the session's deferred-dial
+    /// pump after the first request HEADERS are processed.
+    private(set) var resolvedUpstream: (host: String, port: UInt16?)?
     /// Lazy JS runtime, shared with the HTTP/1 streams of the same
     /// session. Touched only when a script rule fires.
     let scriptEngineProvider: MITMScriptEngine.Provider
@@ -93,6 +100,23 @@ final class MITMHTTP2Rewriter {
     /// list, or nil if absent.
     static func requestPath(in headers: [(name: String, value: String)]) -> String? {
         for (name, value) in headers where name == ":path" { return value }
+        return nil
+    }
+
+    /// Pre-check for a 302 / reject ``MITMOperation/rewrite`` on a request:
+    /// returns the synthesized response when the first matching request-phase
+    /// rewrite rule is a synthesize sub-mode, so the connection can answer on
+    /// the inner leg without opening the stream upstream. Returns nil when the
+    /// first matching rewrite is transparent (handled by
+    /// ``transformRequestHeaders``) or no rewrite rule matches. First match
+    /// wins, mirroring ``applyHeaderRules``.
+    func requestSynthResponse(requestURL: String?) -> MITMScriptEngine.SynthesizedResponse? {
+        for rule in requestRules {
+            guard case .rewrite(let action) = rule.operation else { continue }
+            guard rule.matchesURL(requestURL) else { continue }
+            if case .transparent = action { return nil }
+            return MITMRespondBuilder.response(for: action)
+        }
         return nil
     }
 
@@ -172,8 +196,8 @@ final class MITMHTTP2Rewriter {
     /// RFC 9113 §8.1 forbids pseudo-headers in trailers; strict
     /// receivers (Go, nghttp2) treat any pseudo-header in a trailer
     /// as PROTOCOL_ERROR and RST_STREAM the request mid-body. Without
-    /// this guard, a trailer HEADERS on a request stream with
-    /// ``rewriteTarget`` set would otherwise have ``:authority``
+    /// this guard, a trailer HEADERS on a request stream with an
+    /// effective authority set would otherwise have ``:authority``
     /// injected.
     private func applyAuthorityRewrite(
         _ headers: [(name: String, value: String)]
@@ -211,9 +235,12 @@ final class MITMHTTP2Rewriter {
         guard !rulesForPhase.isEmpty else { return headers }
 
         var current = headers
+        // First matching transparent rewrite wins (the replacement is a literal
+        // full URL, so chaining is meaningless); later rewrite rules are skipped.
+        var rewroteRequest = false
         for rule in rulesForPhase {
             // Request rules gate on the whole URL built from the live
-            // ``:path`` — an earlier url-replace in this same list may have
+            // ``:path`` — an earlier transparent rewrite in this same list may have
             // rewritten it. Response rules gate on the originating request's
             // URL (passed in, since responses carry no ``:path``).
             let gateURL = (phase == .httpRequest)
@@ -221,11 +248,34 @@ final class MITMHTTP2Rewriter {
                 : requestURL
             guard rule.matchesURL(gateURL) else { continue }
             switch rule.operation {
-            case .urlReplace(let search, let replacement):
-                guard phase == .httpRequest else { continue }
+            case .rewrite(let action):
+                // Request-phase only. The 302 / reject sub-modes synthesize on
+                // the inner leg via the connection's pre-check
+                // (``requestSynthResponse``); here we only apply a transparent
+                // rewrite — rewrite ``:path`` to the replacement's request
+                // target and ``:authority`` to its host, and surface the dial
+                // target. Subsequent requests reuse ``effectiveAuthority`` via
+                // ``applyAuthorityRewrite``.
+                guard phase == .httpRequest, !rewroteRequest,
+                      case .transparent(let replacement) = action else { continue }
+                rewroteRequest = true
+                effectiveAuthority = replacement.authority
+                resolvedUpstream = (host: replacement.host, port: replacement.port)
+                var sawAuthority = false
                 current = current.map { entry in
-                    guard entry.name == ":path" else { return entry }
-                    return (name: entry.name, value: entry.value.replacing(search, with: replacement))
+                    if entry.name == ":path" {
+                        return (name: ":path", value: replacement.requestTarget)
+                    }
+                    if entry.name == ":authority" {
+                        sawAuthority = true
+                        return (name: ":authority", value: replacement.authority)
+                    }
+                    return entry
+                }
+                if !sawAuthority {
+                    // RFC 9113 §8.3.1: requests carry :authority. Insert it
+                    // before the regular headers if the client omitted it.
+                    current.insert((name: ":authority", value: replacement.authority), at: 0)
                 }
             case .headerAdd(let name, let value):
                 current.append((name: name, value: value))

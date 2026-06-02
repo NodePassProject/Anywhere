@@ -57,11 +57,6 @@ class TCPConnection {
     /// hostname at accept time; the real-IP path picks it up via the
     /// existing sniffer.
     private var mitmSNI: String?
-    /// Upstream redirect from the matched rule set, captured with
-    /// ``mitmSNI``. ``connectDirect`` and ``connectProxy`` use it for the
-    /// outer destination when present; leaf certificates still use
-    /// ``mitmSNI``.
-    private var mitmRewriteTarget: MITMRewriteTarget?
     private var mitmSession: MITMSession?
 
     // MARK: SNI Sniffing
@@ -520,8 +515,13 @@ class TCPConnection {
     /// no-outer-leg ``MITMSession``.
     private func beginConnecting() {
         guard !closed, !proxyConnecting, proxyConnection == nil, mitmSession == nil else { return }
-        if mitmEnabled, mitmRewriteTarget?.action.synthesizesResponse == true {
-            startSynthesizingMITMSession()
+        // MITM defers the upstream dial: start the session now (inner TLS
+        // handshake first) and let it dial via the ``MITMDialer`` once the
+        // first request resolves the destination — a transparent rewrite may
+        // change the host, and a 302 / reject answers on the inner leg without
+        // dialing at all. Non-MITM dials eagerly.
+        if mitmEnabled {
+            startMITMSession()
             return
         }
         if bypass {
@@ -550,13 +550,12 @@ class TCPConnection {
 
         // MITM policy is evaluated independently of routing: routing selects
         // the upstream leg, while MITM decides whether to intercept TLS.
-        if stack.mitmEnabled, let set = stack.mitmPolicy.set(for: sni) {
+        if stack.mitmEnabled, stack.mitmPolicy.matches(sni) {
             mitmEnabled = true
             mitmSNI = sni
-            // Set-level redirects update the outer connection target and
-            // outer TLS SNI. The inner leaf certificate still uses
-            // ``mitmSNI`` so the client sees the requested hostname.
-            mitmRewriteTarget = set.rewriteTarget
+            // The upstream destination is no longer decided here: a transparent
+            // ``MITMOperation/rewrite`` on the first request can change it, so
+            // the dial is deferred into ``MITMSession`` (see ``startMITMSession``).
         }
 
         guard let action = router.matchDomain(sni) else {
@@ -593,22 +592,15 @@ class TCPConnection {
         guard !proxyConnecting && proxyConnection == nil && !closed else { return }
         proxyConnecting = true
 
-        let mitm = mitmEnabled
-
-        // For MITM the inner pipeline writes its own ClientHello; we keep
-        // pendingData and hand it to MITMSession, which extracts the
-        // ClientHello and starts the inner handshake.
-        let initialData: Data? = mitm ? nil : (pendingData.isEmpty ? nil : pendingData)
-        if !mitm, initialData != nil {
+        let initialData: Data? = pendingData.isEmpty ? nil : pendingData
+        if initialData != nil {
             pendingData.removeAll(keepingCapacity: true)
         }
 
         let transport = RawTCPSocket()
         let connection = DirectProxyConnection(connection: transport)
         self.proxyConnection = connection
-        let upstreamHost = mitmRewriteTarget?.host ?? dstHost
-        let upstreamPort = mitmRewriteTarget?.port ?? dstPort
-        transport.connect(host: upstreamHost, port: upstreamPort) { [weak self] error in
+        transport.connect(host: dstHost, port: dstPort) { [weak self] error in
             guard let self else { return }
 
             self.lwipQueue.async {
@@ -630,11 +622,6 @@ class TCPConnection {
                     self.close()
                 }
 
-                if mitm {
-                    self.startMITMSession(over: connection)
-                    return
-                }
-
                 if let initialData {
                     self.uploadPipeline.buffer.append(initialData)
                 }
@@ -654,18 +641,13 @@ class TCPConnection {
         guard !proxyConnecting && proxyConnection == nil && !closed else { return }
         proxyConnecting = true
 
-        // MITM: the inner pipeline writes its own ClientHello; suppress the
-        // protocol's "initial data carries the user's bytes" optimisation
-        // and don't forward `pendingData` after connect — MITMSession owns it.
-        let mitm = mitmEnabled
-
         // If the protocol can embed the caller's first bytes in its handshake
         // (VLESS + its transports), extract pendingData into initialData here.
         // Otherwise leave pendingData intact so the post-connect send path
         // below forwards it — ``ProxyClient.connectWithCommand`` drops the
         // `initialData` argument for those protocols.
         let initialData: Data?
-        if !mitm, configuration.outboundProtocol.handshakeCarriesInitialData {
+        if configuration.outboundProtocol.handshakeCarriesInitialData {
             initialData = pendingData.isEmpty ? nil : pendingData
             if initialData != nil {
                 pendingData.removeAll(keepingCapacity: true)
@@ -677,9 +659,7 @@ class TCPConnection {
         let client = ProxyClient(configuration: configuration)
         self.proxyClient = client
 
-        let upstreamHost = mitmRewriteTarget?.host ?? dstHost
-        let upstreamPort = mitmRewriteTarget?.port ?? dstPort
-        client.connect(to: upstreamHost, port: upstreamPort, initialData: initialData) { [weak self] result in
+        client.connect(to: dstHost, port: dstPort, initialData: initialData) { [weak self] result in
             guard let self else { return }
 
             self.lwipQueue.async {
@@ -697,11 +677,6 @@ class TCPConnection {
                     ) { [weak self] in
                         guard let self, !self.closed else { return }
                         self.close()
-                    }
-
-                    if mitm {
-                        self.startMITMSession(over: proxyConnection)
-                        return
                     }
 
                     if let initialData {
@@ -726,33 +701,13 @@ class TCPConnection {
 
     // MARK: - MITM Session
 
-    /// Starts MITM and transfers upstream reads/writes to ``MITMSession``.
-    private func startMITMSession(over proxy: ProxyConnection) {
-        startMITMSession(proxy: proxy, transferringClient: true)
-    }
-
-    /// Starts MITM in synthesize-only mode: the rule set's action
-    /// produces its own response (302 / 200 reject), so no upstream
-    /// connection is dialed. The handshake / activity timers that the
-    /// proxy/direct path normally arms on connect are armed here too,
-    /// since we are skipping the dial that would have done it.
-    private func startSynthesizingMITMSession() {
-        handshakeTimer?.cancel()
-        handshakeTimer = nil
-        activityTimer = ActivityTimer(
-            queue: lwipQueue,
-            timeout: TunnelConstants.connectionIdleTimeout
-        ) { [weak self] in
-            guard let self, !self.closed else { return }
-            self.close()
-        }
-        startMITMSession(proxy: nil, transferringClient: false)
-    }
-
-    /// Shared session bootstrap. ``proxy`` is nil in synthesize-only
-    /// mode; in that case ``MITMSession`` skips the outer handshake and
-    /// drives a ``MITMResponseSynthesizer`` after the inner handshake.
-    private func startMITMSession(proxy: ProxyConnection?, transferringClient: Bool) {
+    /// Starts a deferred-dial MITM session. No upstream is dialed yet: the
+    /// inner TLS handshake runs first and ``MITMSession`` calls back through the
+    /// ``MITMDialer`` (see ``makeMITMDialer``) once the first request resolves
+    /// the destination. A 302 / reject rewrite is answered on the inner leg and
+    /// never dials. The handshake timer is disarmed and the activity timer armed
+    /// here, since there is no eager dial to do it.
+    private func startMITMSession() {
         guard let stack = TunnelStack.shared else { abort(); return }
         let sni = mitmSNI ?? dstHost
 
@@ -771,31 +726,28 @@ class TCPConnection {
             }
         }
 
+        handshakeTimer?.cancel()
+        handshakeTimer = nil
+        activityTimer = ActivityTimer(
+            queue: lwipQueue,
+            timeout: TunnelConstants.connectionIdleTimeout
+        ) { [weak self] in
+            guard let self, !self.closed else { return }
+            self.close()
+        }
+
         let initialClientHello = pendingData
         pendingData.removeAll(keepingCapacity: true)
 
-        // Hand off upstream ownership. MITMSession is now the sole party
-        // that may call send/receive on `proxy` or cancel `proxyClient`.
-        let transferredClient: ProxyClient?
-        if transferringClient {
-            transferredClient = proxyClient
-            proxyClient = nil
-        } else {
-            transferredClient = nil
-        }
-        proxyConnection = nil
-
-        // Pass SNI as ``dstHost`` instead of the IP-derived value so
-        // rewriters match the hostname used in configured rules.
+        // Pass SNI as ``dstHost`` instead of the IP-derived value so rewriters
+        // match the hostname used in configured rules.
         let session = MITMSession(
             dstHost: sni,
             dstPort: dstPort,
             clientHello: initialClientHello,
             leafCache: cache,
             policy: stack.mitmPolicy,
-            rewriteTarget: mitmRewriteTarget,
-            proxyClient: transferredClient,
-            proxyConnection: proxy,
+            dialer: makeMITMDialer(),
             lwipQueue: lwipQueue
         )
         // Inner-leg downlink: bytes the inner TLS server writes go straight
@@ -834,6 +786,61 @@ class TCPConnection {
         }
 
         session.start(sni: sni)
+    }
+
+    /// Builds the ``MITMDialer`` the session invokes to dial the upstream once
+    /// it has resolved the destination from the first request. Dials direct or
+    /// via the committed proxy route (``bypass`` / ``configuration`` were fixed
+    /// at ``applySNI`` time); the resulting connection and proxy client are
+    /// handed to — and owned by — the session. The completion runs on
+    /// ``lwipQueue``.
+    private func makeMITMDialer() -> MITMDialer {
+        return { [weak self] host, port, completion in
+            guard let self else { completion(.failure(SocketError.notConnected)); return }
+            self.lwipQueue.async {
+                guard !self.closed else { completion(.failure(SocketError.notConnected)); return }
+                if self.bypass {
+                    let transport = RawTCPSocket()
+                    let connection = DirectProxyConnection(connection: transport)
+                    transport.connect(host: host, port: port) { [weak self] error in
+                        guard let self else {
+                            connection.cancel()
+                            completion(.failure(error ?? SocketError.notConnected))
+                            return
+                        }
+                        self.lwipQueue.async {
+                            if let error {
+                                // The session's ``onTeardown`` reports the
+                                // failure; don't double-report it here.
+                                completion(.failure(error))
+                            } else {
+                                completion(.success(MITMDialResult(connection: connection, proxyClient: nil)))
+                            }
+                        }
+                    }
+                } else {
+                    let client = ProxyClient(configuration: self.configuration)
+                    client.connect(to: host, port: port, initialData: nil) { [weak self] result in
+                        guard let self else {
+                            if case .success(let conn) = result { conn.cancel() }
+                            client.cancel()
+                            completion(.failure(SocketError.notConnected))
+                            return
+                        }
+                        self.lwipQueue.async {
+                            switch result {
+                            case .success(let conn):
+                                completion(.success(MITMDialResult(connection: conn, proxyClient: client)))
+                            case .failure(let error):
+                                // The session's ``onTeardown`` reports the
+                                // failure; don't double-report it here.
+                                completion(.failure(error))
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Proxy Receive Loop

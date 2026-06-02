@@ -62,10 +62,17 @@ final class MITMHTTP1Stream {
     /// lifetime + same caching rationale as ``rules``.
     private let ruleSetID: UUID?
     /// When set, every request's `Host:` header is rewritten to this value
-    /// so the upstream sees a consistent authority. Driven by the rule set's
-    /// ``rewriteTarget``; nil means "leave Host alone". Used only on request
-    /// streams; response streams pass nil.
-    private let effectiveAuthority: String?
+    /// so the upstream sees a consistent authority. Late-bound: set by the
+    /// first transparent ``MITMOperation/rewrite`` to the replacement's
+    /// authority (see ``applyRewrite``); nil means "leave Host alone". Used
+    /// only on request streams; response streams leave it nil.
+    private var effectiveAuthority: String?
+
+    /// The upstream the session should dial, surfaced when a transparent
+    /// rewrite resolves a replacement host. nil until then (the session
+    /// falls back to the original destination). Request phase only; read by
+    /// the session's deferred-dial pump after the first ``transform``.
+    private(set) var resolvedUpstream: (host: String, port: UInt16?)?
     /// Lazy JS runtime, shared across both directions of the same MITM
     /// session. Touched only when a script rule fires.
     private let scriptEngineProvider: MITMScriptEngine.Provider
@@ -209,6 +216,12 @@ final class MITMHTTP1Stream {
         /// the remaining wire chunks are parsed and discarded so the
         /// connection returns to ``awaitingHead`` cleanly.
         case discardingChunked(reader: ChunkedReader)
+
+        /// Discarding a Content-Length request body after a synthesized
+        /// 302 / reject response (``MITMOperation/rewrite``): the synth bytes
+        /// are already queued for the inner leg and nothing goes upstream, so
+        /// the body is read and dropped to keep a kept-alive connection framed.
+        case discardingLength(remaining: Int)
 
         /// Per-chunk streaming-script mode. The head is already
         /// emitted; chunks flow through the script chain one at a
@@ -434,6 +447,9 @@ final class MITMHTTP1Stream {
             mode = .discardingChunked(reader: reader)
             return discardChunked(reader: &reader)
 
+        case .discardingLength(let remaining):
+            return discardLength(remaining: remaining)
+
         case .streamingChunked(var streaming, let inner):
             mode = .streamingChunked(streaming: streaming, inner: inner)
             return driveStreamingChunked(streaming: &streaming, inner: inner, into: &output)
@@ -478,11 +494,22 @@ final class MITMHTTP1Stream {
             return true
         }
 
-        // Apply rewrite rules. URL rules touch the request-target on the
-        // start line (request phase only); header rules touch the
-        // header block. Content-Length is recomputed below if scripts
-        // run.
-        let rewrittenStartLine = applyURLRules(parsed.startLine)
+        // Apply the request-phase "Rewrite" operation. A transparent rewrite
+        // updates the start-line target (and may set the dynamic authority +
+        // dial target); a 302 / reject sub-mode short-circuits the request
+        // with a synthesized response on the inner leg. Header rules below
+        // touch the header block; Content-Length is recomputed if scripts run.
+        let rewrittenStartLine: String
+        switch applyRewrite(parsed.startLine) {
+        case .rewritten(let line):
+            rewrittenStartLine = line
+        case .synthesize(let response):
+            return synthesizeRequestResponse(
+                response,
+                requestHeaders: parsed.headers,
+                into: &output
+            )
+        }
 
         // On the response side, every well-formed final message
         // corresponds to one request previously pushed by the request
@@ -526,7 +553,7 @@ final class MITMHTTP1Stream {
         }
 
         // The whole request URL every rule's gate is tested against:
-        // built from the (already url-replaced) start-line target on
+        // built from the (already rewritten) start-line target on
         // requests, the originating request's URL on responses — so request
         // and response rules in a set gate on the same URL the client asked
         // for. nil fails the gate closed.
@@ -1291,6 +1318,19 @@ final class MITMHTTP1Stream {
     /// need to do is keep the stream parser advancing until the
     /// terminator/trailers and then return to ``awaitingHead`` so the
     /// next message on this connection is parsed normally.
+    /// Reads and drops a Content-Length request body after a synthesized
+    /// 302 / reject. Mirrors ``forwardLength`` but appends nothing — the
+    /// response is already queued for the inner leg and the upstream leg may
+    /// not even exist. Returns to ``awaitingHead`` once the body is drained.
+    private func discardLength(remaining: Int) -> Bool {
+        guard !rxBuffer.isEmpty else { return false }
+        let take = min(remaining, rxBuffer.count)
+        rxBuffer.removeFirst(take)
+        let left = remaining - take
+        mode = left == 0 ? .awaitingHead : .discardingLength(remaining: left)
+        return true
+    }
+
     private func discardChunked(reader: inout ChunkedReader) -> Bool {
         guard !rxBuffer.isEmpty else { return false }
         var sink = Data()
@@ -2006,9 +2046,10 @@ final class MITMHTTP1Stream {
 
     // MARK: - Rule application (head-time)
 
-    /// When the rule set declares a ``rewriteTarget``, the request's Host
-    /// header is forced to the target authority so redirected requests use
-    /// an authority the upstream can route.
+    /// When a transparent ``MITMOperation/rewrite`` has set
+    /// ``effectiveAuthority`` (the replacement changed the host), the
+    /// request's Host header is forced to that authority so the redirected
+    /// request reaches an authority the upstream can route.
     private func applyAuthorityRewrite(_ headers: [Header]) -> [Header] {
         guard phase == .httpRequest, let authority = effectiveAuthority else {
             return headers
@@ -2018,54 +2059,84 @@ final class MITMHTTP1Stream {
         return result
     }
 
-    /// Rewrites the request-target on the start line via any
-    /// ``urlReplace`` rules. Request phase only; no-op on responses,
-    /// asterisk-form (`OPTIONS *`), or unparseable lines. Each rule gates on
-    /// the whole URL, then substitutes its ``search`` regex within the
-    /// path-and-query — not the method or HTTP-version.
-    private func applyURLRules(_ startLine: String) -> String {
-        guard phase == .httpRequest else { return startLine }
+    /// Outcome of applying the request-phase "Rewrite" operation to a start
+    /// line: either continue with a (possibly rewritten) start line, or
+    /// short-circuit the request with a synthesized response (302 / reject).
+    private enum RewriteOutcome {
+        case rewritten(String)
+        case synthesize(MITMScriptEngine.SynthesizedResponse)
+    }
+
+    /// Applies the first matching request-phase ``MITMOperation/rewrite``
+    /// rule. Request phase only; no-op on responses, asterisk-form
+    /// (`OPTIONS *`), or unparseable lines. A `transparent` rule rewrites the
+    /// request-target to the replacement's path+query and sets
+    /// ``effectiveAuthority`` + ``resolvedUpstream`` so the authority is
+    /// rewritten and the session dials the replacement host; the synthesize
+    /// sub-modes return a canned response. First match wins (the replacement
+    /// is a literal full URL, so chaining rewrites is meaningless).
+    private func applyRewrite(_ startLine: String) -> RewriteOutcome {
+        guard phase == .httpRequest else { return .rewritten(startLine) }
         guard rules.contains(where: {
-            if case .urlReplace = $0.operation { return true }
+            if case .rewrite = $0.operation { return true }
             return false
-        }) else { return startLine }
+        }) else { return .rewritten(startLine) }
 
         // Request-line shape: METHOD SP request-target SP HTTP-version.
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-        guard parts.count == 3 else { return startLine }
+        guard parts.count == 3 else { return .rewritten(startLine) }
         let method = String(parts[0])
-        var target = String(parts[1])
+        let target = String(parts[1])
         let version = String(parts[2])
 
-        // Asterisk-form (RFC 9112 section 3.2.4) is reserved for
-        // OPTIONS * and is not a meaningful target for URL rewrites.
-        if target == "*" { return startLine }
+        // Asterisk-form (RFC 9112 section 3.2.4) is reserved for OPTIONS *
+        // and is not a meaningful target for rewrites.
+        if target == "*" { return .rewritten(startLine) }
 
-        var changed = false
         for rule in rules {
-            guard case .urlReplace(let search, let replacement) = rule.operation else {
-                continue
-            }
-            // Gate on the whole URL — built from the live (possibly
-            // already-rewritten) target — then substitute on the target.
+            guard case .rewrite(let action) = rule.operation else { continue }
             guard rule.matchesURL("https://\(host)\(target)") else { continue }
-            let mutated = target.replacing(search, with: replacement)
-            if mutated != target {
-                // The replacement is validated wire-safe at load time, but
-                // splicing it into the live target can still yield an
-                // invalid request-target (e.g. a stray byte left by the
-                // surrounding bytes the match spanned). Re-validate before
-                // committing so a bad result is dropped rather than smuggled
-                // onto the start line as a response-splitting payload.
-                guard Self.isValidRequestTarget(mutated) else {
-                    logger.warning("[MITM] HTTP/1 \(host): URL Replace produced invalid request-target; skipping rule")
+            switch action {
+            case .transparent(let replacement):
+                // The replacement path is validated wire-safe at load time;
+                // re-validate as a backstop before splicing it onto the line.
+                guard Self.isValidRequestTarget(replacement.requestTarget) else {
+                    logger.warning("[MITM] HTTP/1 \(host): rewrite produced an invalid request-target; skipping rule")
                     continue
                 }
-                target = mutated
-                changed = true
+                effectiveAuthority = replacement.authority
+                resolvedUpstream = (host: replacement.host, port: replacement.port)
+                return .rewritten("\(method) \(replacement.requestTarget) \(version)")
+            case .redirect302, .reject200Text, .reject200Gif, .reject200Data:
+                guard let response = MITMRespondBuilder.response(for: action) else { continue }
+                return .synthesize(response)
             }
         }
-        return changed ? "\(method) \(target) \(version)" : startLine
+        return .rewritten(startLine)
+    }
+
+    /// Request-phase short-circuit for a 302 / reject ``MITMOperation/rewrite``:
+    /// queues the synthesized response for the inner leg (the session pump
+    /// drains it via ``drainPendingClientBytes``), emits nothing upstream, and
+    /// consumes the request body per its framing so a kept-alive connection
+    /// parses the next request cleanly. The request is deliberately NOT logged
+    /// to ``requestLog`` — there is no upstream round-trip to correlate, so a
+    /// record would never be popped and would desync the FIFO.
+    private func synthesizeRequestResponse(
+        _ response: MITMScriptEngine.SynthesizedResponse,
+        requestHeaders: [Header],
+        into output: inout Data
+    ) -> Bool {
+        queueSynthesizedResponse(response)
+        switch bodyFraming(startLine: "", headers: requestHeaders, originatingMethod: nil) {
+        case .contentLength(let length) where length > 0:
+            mode = .discardingLength(remaining: length)
+        case .chunked:
+            mode = .discardingChunked(reader: ChunkedReader())
+        case .none, .contentLength, .readUntilClose, .switchingProtocols:
+            mode = .awaitingHead
+        }
+        return true
     }
 
     /// ``requestURL`` is the whole request URL the gate is tested against;
@@ -2084,7 +2155,7 @@ final class MITMHTTP1Stream {
                 current = current.map { entry in
                     entry.name.equalsIgnoringASCIICase(name) ? (name: name, value: value) : entry
                 }
-            case .urlReplace, .script, .streamScript, .bodyReplace, .bodyJSON:
+            case .rewrite, .script, .streamScript, .bodyReplace, .bodyJSON:
                 continue
             }
         }
@@ -2092,7 +2163,7 @@ final class MITMHTTP1Stream {
     }
 
     /// The whole request URL used to gate every rule's ``urlPattern``.
-    /// Request phase: `https://host` joined with the (already url-replaced)
+    /// Request phase: `https://host` joined with the (already rewritten)
     /// start-line target. Response phase: the originating request's URL, so
     /// a response rule gates on the URL the client asked for. nil —
     /// indeterminate — fails the gate closed.

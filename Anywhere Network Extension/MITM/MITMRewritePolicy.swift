@@ -14,9 +14,7 @@ private let logger = AnywhereLogger(category: "MITM")
 struct CompiledMITMRule {
     let phase: MITMPhase
     /// Pre-compiled gate: a regex over the whole request URL. The
-    /// ``operation`` only fires when this matches — it is purely a gate
-    /// (``CompiledMITMOperation/urlReplace`` carries its own substitution
-    /// regex).
+    /// ``operation`` only fires when this matches — it is purely a gate.
     let urlPatternRegex: NSRegularExpression
     let operation: CompiledMITMOperation
 }
@@ -32,13 +30,46 @@ extension CompiledMITMRule {
     }
 }
 
+/// A replacement URL parsed once at compile time, split into the parts the
+/// rewriters need: the upstream ``host``/``port`` (for the deferred dial and
+/// the `Host`/`:authority` rewrite) and the origin-form ``requestTarget``
+/// (path+query) spliced onto the HTTP/1 start line or the HTTP/2 `:path`.
+struct ReplacementURL: Equatable {
+    /// Upstream host for the dial, with any IPv6 URI brackets stripped so it
+    /// matches the form the connect layer's resolver expects.
+    let host: String
+    let port: UInt16?
+    /// path+query in origin form; `/` when the URL carries no path.
+    let requestTarget: String
+
+    /// RFC 9112 §3.2 authority for the Host / `:authority` rewrite: bare host
+    /// (an IPv6 literal is re-bracketed), or `host:port` when a port was given.
+    var authority: String {
+        let h = host.contains(":") ? "[\(host)]" : host
+        if let port { return "\(h):\(port)" }
+        return h
+    }
+}
+
+/// Compiled form of ``MITMRewriteAction`` — the sub-mode of the unified
+/// "Rewrite" operation. ``transparent`` carries the parsed replacement and
+/// drives the request rewrite + deferred dial; the rest carry pre-validated
+/// data for ``MITMRespondBuilder`` to synthesize an inner-leg response.
+enum CompiledRewriteAction {
+    case transparent(ReplacementURL)
+    case redirect302(location: String)
+    case reject200Text(content: String)
+    case reject200Gif
+    case reject200Data(base64: String)
+}
+
 enum CompiledMITMOperation {
-    /// Request-phase regex substitution on the request target: every match
-    /// of ``search`` becomes the literal ``replacement`` (via
-    /// `String.replacing`). The ``CompiledMITMRule/urlPatternRegex`` gate is
-    /// separate — it decides whether the rule fires, this decides what the
-    /// target becomes.
-    case urlReplace(search: Regex<AnyRegexOutput>, replacement: String)
+    /// Request-phase "Rewrite" operation. ``transparent`` rewrites the
+    /// request URL to the replacement and (on a host change) redirects the
+    /// outer dial + authority; the synthesize sub-modes answer on the inner
+    /// leg. The ``CompiledMITMRule/urlPatternRegex`` gate decides whether the
+    /// rule fires.
+    case rewrite(CompiledRewriteAction)
     case headerAdd(name: String, value: String)
     case headerDelete(nameLower: String)
     /// Overwrites the value of every header named ``name`` (matched
@@ -72,7 +103,7 @@ enum CompiledMITMOperation {
     /// Single-rule runtime semantics apply (see ``.script`` above):
     /// at most one ``.streamScript`` runs per stream by design.
     case streamScript(source: String, sourceKey: Int)
-    /// Native regex find-and-replace over the text body (import op id `6`).
+    /// Native regex find-and-replace over the text body (import op id `4`).
     /// The ``search`` pattern is pre-compiled at rule-load time (see
     /// ``MITMBodyReplace``); ``replacement`` is the literal swapped in for
     /// each match. ``MITMScriptTransform`` applies every matching
@@ -80,7 +111,7 @@ enum CompiledMITMOperation {
     /// ``bodyJSON`` these compose and run in native code without a
     /// `JSContext`.
     case bodyReplace(search: Regex<AnyRegexOutput>, replacement: String)
-    /// Native JSON body edit (import op id `7`). Each edit's path and
+    /// Native JSON body edit (import op id `5`). Each edit's path and
     /// value are pre-parsed at rule-load time (see ``MITMJSONPatch``);
     /// ``MITMScriptTransform`` applies every matching ``bodyJSON`` rule to
     /// the buffered body in rule order. Unlike ``script`` these compose —
@@ -91,15 +122,13 @@ enum CompiledMITMOperation {
 }
 
 /// Compiled view of a rule set at one trie terminal: the specific suffix
-/// reached, the optional upstream redirect, and rules ready to apply. A
-/// source set with multiple suffixes produces one of these per suffix,
-/// each sharing the same compiled rules and target. ``id`` is copied
-/// from the source ``MITMRuleSet`` so the runtime can use it as a
-/// stable scope key for ``MITMScriptStore``.
+/// reached and the rules ready to apply. A source set with multiple
+/// suffixes produces one of these per suffix, each sharing the same
+/// compiled rules. ``id`` is copied from the source ``MITMRuleSet`` so the
+/// runtime can use it as a stable scope key for ``MITMScriptStore``.
 struct CompiledMITMRuleSet {
     let id: UUID
     let domainSuffix: String
-    let rewriteTarget: MITMRewriteTarget?
     let rules: [CompiledMITMRule]
 }
 
@@ -209,21 +238,10 @@ final class MITMRewritePolicy {
             return CompiledMITMRule(phase: rule.phase, urlPatternRegex: regex, operation: op)
         }
 
-        // Synthesize-response actions (reject_200 / redirect_302) bypass
-        // the rewriter pipeline entirely and write a canned reply on the
-        // inner leg, so any header / URL / script rules in the same set
-        // never fire. Flag the mismatch at load time so users notice
-        // before debugging "why isn't my script running"; the rule set
-        // is still installed (the synthesize action remains useful).
-        if let target = set.rewriteTarget, target.action.synthesizesResponse, !set.rules.isEmpty {
-            logger.warning("[MITM] Rule set \"\(set.name)\" combines action=\(target.action.rawValue) with \(set.rules.count) rule(s); rules will not fire (action synthesizes the response)")
-        }
-
         for suffix in suffixes {
             let payload = CompiledMITMRuleSet(
                 id: set.id,
                 domainSuffix: suffix,
-                rewriteTarget: set.rewriteTarget,
                 rules: compiledRules
             )
             if trie.insert(suffix: suffix, payload: payload) {
@@ -259,30 +277,13 @@ final class MITMRewritePolicy {
         return set.rules.filter { $0.phase == phase }
     }
 
-    /// Convenience for ``TCPConnection`` and ``MITMSession``: the
-    /// upstream redirect for a host, if any.
-    func rewriteTarget(for host: String) -> MITMRewriteTarget? {
-        set(for: host)?.rewriteTarget
-    }
-
     // MARK: - Compilation
 
     private func compile(_ operation: MITMOperation, suffix: String) -> CompiledMITMOperation? {
         switch operation {
-        case .urlReplace(let search, let replacement):
-            // The replacement lands verbatim on the request target, so it
-            // must be wire-safe (no SP/CR/LF/CTL that would split the start
-            // line); the post-substitution target is re-checked at apply
-            // time as a backstop.
-            guard Self.isValidRequestTargetReplacement(replacement) else {
-                logger.warning("[MITM] urlReplace dropped: replacement contains whitespace or control bytes (suffix=\(suffix))")
-                return nil
-            }
-            guard let regex = try? Regex(search) else {
-                logger.warning("[MITM] urlReplace dropped: search is not a valid regex (suffix=\(suffix))")
-                return nil
-            }
-            return .urlReplace(search: regex, replacement: replacement)
+        case .rewrite(let action):
+            guard let compiled = Self.compileRewrite(action, suffix: suffix) else { return nil }
+            return .rewrite(compiled)
         case .headerAdd(let name, let value):
             guard Self.isValidHeaderName(name) else {
                 logger.warning("[MITM] headerAdd dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
@@ -415,7 +416,7 @@ final class MITMRewritePolicy {
         return true
     }
 
-    /// Conservative check for an ``urlReplace`` replacement. It is spliced
+    /// Conservative check for a rewrite replacement target. It is spliced
     /// into the request-target (HTTP/1 start line or HTTP/2 ``:path``) at
     /// every match site; allowing SP / HTAB / CR / LF / NUL / DEL would
     /// either break HTTP/1's SP-delimited start line or be rejected by
@@ -428,5 +429,72 @@ final class MITMRewritePolicy {
             }
         }
         return true
+    }
+
+    // MARK: - Rewrite compilation
+
+    /// Compiles a ``MITMRewriteAction`` sub-mode, validating the replacement
+    /// URL (transparent / 302) or reject payload. Returns nil to drop the
+    /// rule with a logged diagnostic.
+    private static func compileRewrite(_ action: MITMRewriteAction, suffix: String) -> CompiledRewriteAction? {
+        switch action {
+        case .transparent(let url):
+            guard let parsed = parseReplacementURL(url) else {
+                logger.warning("[MITM] rewrite(transparent) dropped: \"\(url)\" is not an absolute URL with a host (suffix=\(suffix))")
+                return nil
+            }
+            // The path+query is spliced verbatim onto the request-target, so
+            // it must be wire-safe (no SP/CR/LF/CTL that would split the
+            // HTTP/1 start line or trip an HTTP/2 receiver).
+            guard isValidRequestTargetReplacement(parsed.requestTarget) else {
+                logger.warning("[MITM] rewrite(transparent) dropped: replacement path is not wire-safe (suffix=\(suffix))")
+                return nil
+            }
+            return .transparent(parsed)
+        case .redirect302(let url):
+            // The URL lands in a `Location` header value, so it must parse to
+            // an absolute URL and be free of CR/LF/NUL.
+            guard parseReplacementURL(url) != nil, isValidHeaderValue(url) else {
+                logger.warning("[MITM] rewrite(302) dropped: \"\(url)\" is not a valid, wire-safe URL (suffix=\(suffix))")
+                return nil
+            }
+            return .redirect302(location: url)
+        case .reject200Text(let content):
+            return .reject200Text(content: content)
+        case .reject200Gif:
+            return .reject200Gif
+        case .reject200Data(let base64):
+            // Empty → ``MITMRespondBuilder`` substitutes the default payload.
+            if !base64.isEmpty, Data(base64Encoded: base64) == nil {
+                logger.warning("[MITM] rewrite(reject-data) dropped: contents are not valid base64 (suffix=\(suffix))")
+                return nil
+            }
+            return .reject200Data(base64: base64)
+        }
+    }
+
+    /// Parses a full replacement URL into its dial + request-target parts.
+    /// Requires an absolute URL with a host (the replacement is always a full
+    /// URL). The path defaults to `/` when absent; the query is preserved in
+    /// percent-encoded form.
+    static func parseReplacementURL(_ raw: String) -> ReplacementURL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              let comps = URLComponents(string: trimmed),
+              let rawHost = comps.host, !rawHost.isEmpty else { return nil }
+        // Strip the URI brackets from an IPv6 literal so the dial leg receives
+        // the bare address its resolver expects; ``ReplacementURL/authority``
+        // re-adds them for the Host / `:authority` header.
+        var host = rawHost
+        if host.hasPrefix("["), host.hasSuffix("]"), host.count >= 2 {
+            host = String(host.dropFirst().dropLast())
+        }
+        let port = comps.port.flatMap { UInt16(exactly: $0) }
+        var target = comps.percentEncodedPath
+        if target.isEmpty { target = "/" }
+        if let query = comps.percentEncodedQuery, !query.isEmpty {
+            target += "?\(query)"
+        }
+        return ReplacementURL(host: host, port: port, requestTarget: target)
     }
 }

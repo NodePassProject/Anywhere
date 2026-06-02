@@ -19,15 +19,14 @@ import JavaScriptCore
 ///
 ///     name     = My Rule Set
 ///     hostname = example.com, api.example.org
+///     0, 0, ^https://old\.example\.com/, 0, https://new.example.com/
 ///     0, 1, ^/api/, X-Powered-By, Anywhere
 ///
 /// - **Header lines** (`<key> = <value>`, case-insensitive key) supply
-///   set metadata: `name`, `hostname`, one of `redirect` /
-///   `redirect-302` / `reject-200`, and `content-type`.
+///   set metadata: `name` and `hostname`.
 /// - **Rule lines** (`<phase>, <operation>, <field…>`) each describe one
-///   rewrite. Phase is `0` (request) / `1` (response); operation is
-///   `0`–`7`; the per-op field layout is in the ``parseRuleLine`` switch,
-///   and fields use CSV quoting (see ``splitCSV``).
+///   rewrite. Phase is `0` (request) / `1` (response); operation is `0`–`5`
+///   for native edits or `100` / `101` for scripts.
 /// - **Comments** start with `#` or `//`.
 ///
 /// Parsing never fails: a line that is neither a recognized header nor a
@@ -42,8 +41,6 @@ enum MITMRuleSetParser {
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""
         var suffixes: [String] = []
-        var target: MITMRewriteTarget?
-        var contentTypeOverride: String?
         var rules: [MITMRule] = []
 
         for raw in text.components(separatedBy: .newlines) {
@@ -60,14 +57,6 @@ enum MITMRuleSetParser {
                         .split(separator: ",")
                         .map { $0.trimmingCharacters(in: .whitespaces) }
                         .filter { !$0.isEmpty }
-                case "redirect":
-                    target = parseAuthority(header.value, action: .transparent)
-                case "redirect-302":
-                    target = parseAuthority(header.value, action: .redirect302)
-                case "reject-200":
-                    target = parseReject200(header.value)
-                case "content-type":
-                    contentTypeOverride = header.value
                 default:
                     break
                 }
@@ -76,18 +65,9 @@ enum MITMRuleSetParser {
             }
         }
 
-        if let override = contentTypeOverride,
-           !override.isEmpty,
-           target?.action == .reject200,
-           var body = target?.rejectBody {
-            body.contentType = override
-            target?.rejectBody = body
-        }
-
         return MITMRuleSet(
             name: name,
             domainSuffixes: suffixes,
-            rewriteTarget: target,
             rules: rules
         )
     }
@@ -95,10 +75,6 @@ enum MITMRuleSetParser {
     private static let recognizedHeaders: Set<String> = [
         "name",
         "hostname",
-        "redirect",
-        "redirect-302",
-        "reject-200",
-        "content-type",
     ]
 
     /// Splits a `<key> = <value>` line on its first `=`. The key is
@@ -117,78 +93,51 @@ enum MITMRuleSetParser {
         return (key, value)
     }
 
-    /// Parses `host`, `host:port`, `[ipv6]`, or `[ipv6]:port` for the
-    /// transparent and 302 redirect modes. Bracketed IPv6 is the
-    /// canonical URI form (RFC 3986 §3.2.2); unbracketed strings with
-    /// more than one `:` are treated as bare IPv6 hosts with no port,
-    /// since splitting on the last colon would otherwise eat the final
-    /// hextet (``2001:db8::1`` → ``host=2001:db8:`` + ``port=1``).
-    /// Returns nil only when the value is empty after trimming.
-    private static func parseAuthority(_ value: String, action: MITMRewriteAction) -> MITMRewriteTarget? {
-        let trimmed = value.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return nil }
+    // MARK: - Rewrite sub-mode parsing
 
-        // Bracketed IPv6: ``[::1]`` or ``[::1]:443``. The brackets are
-        // URI syntax only; the stored host loses them so it matches the
-        // form upstream resolvers expect.
-        if trimmed.hasPrefix("[") {
-            if let closeBracket = trimmed.firstIndex(of: "]") {
-                let hostStart = trimmed.index(after: trimmed.startIndex)
-                let host = String(trimmed[hostStart..<closeBracket])
-                let afterBracket = trimmed[trimmed.index(after: closeBracket)...]
-                if afterBracket.isEmpty {
-                    return MITMRewriteTarget(action: action, host: host, port: nil)
-                }
-                if afterBracket.hasPrefix(":"),
-                   let port = UInt16(afterBracket.dropFirst()) {
-                    return MITMRewriteTarget(action: action, host: host, port: port)
-                }
-            }
-            // Malformed bracketed input — keep as-is rather than guessing.
-            return MITMRewriteTarget(action: action, host: trimmed, port: nil)
+    /// Parses the numeric sub-mode and trailing fields of a `rewrite`
+    /// (operation `0`) rule into a ``MITMRewriteAction``:
+    ///
+    ///     0  transparent       <full-url>     rewrite the URL (+ dial on host change)
+    ///     1  302 redirect      <full-url>     synthesize a 302 to the URL
+    ///     2  200 reject (text) [<content>]    synthesize a text/plain 200
+    ///     3  200 reject (gif)                 synthesize the canned 1×1 GIF
+    ///     4  200 reject (data) [<base64>]     synthesize an octet-stream 200
+    ///
+    /// Returns nil on an unknown sub-mode, a missing/invalid URL (modes 0/1),
+    /// or the wrong field count, so the line is dropped like any other
+    /// unparseable rule.
+    private static func parseRewriteAction(subMode: String, fields: [String]) -> MITMRewriteAction? {
+        switch subMode.trimmingCharacters(in: .whitespaces) {
+        case "0":
+            guard fields.count == 1, let url = validRewriteURL(fields[0]) else { return nil }
+            return .transparent(url: url)
+        case "1":
+            guard fields.count == 1, let url = validRewriteURL(fields[0]) else { return nil }
+            return .redirect302(url: url)
+        case "2":
+            guard fields.count <= 1 else { return nil }
+            return .reject200Text(content: fields.first ?? "")
+        case "3":
+            guard fields.isEmpty else { return nil }
+            return .reject200Gif
+        case "4":
+            guard fields.count <= 1 else { return nil }
+            return .reject200Data(base64: fields.first ?? "")
+        default:
+            return nil
         }
-
-        // Unbracketed. Exactly one ``:`` means ``host:port``; more than
-        // one means an IPv6 literal the user wrote without brackets.
-        var colonCount = 0
-        for ch in trimmed where ch == ":" { colonCount += 1 }
-        if colonCount == 1, let colon = trimmed.lastIndex(of: ":") {
-            let hostPart = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
-            let portPart = String(trimmed[trimmed.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-            if !hostPart.isEmpty, let port = UInt16(portPart) {
-                return MITMRewriteTarget(action: action, host: hostPart, port: port)
-            }
-        }
-        return MITMRewriteTarget(action: action, host: trimmed, port: nil)
     }
 
-    /// Parses a `reject-200` value of the form `<kind>` or
-    /// `<kind> <content>`. Kind is `text`, `gif`, or `data`; the first
-    /// space separates it from the content, and everything after that
-    /// space is the content, taken verbatim. An unknown or missing kind
-    /// falls back to ``MITMRejectBody/Kind/text``. The content is decoded
-    /// and interpreted only when the response is synthesized — literal
-    /// UTF-8 for `text`, base64 for `data`, ignored for `gif` — so this
-    /// stage neither validates nor decodes it. An empty value yields an
-    /// empty ``MITMRejectBody`` of kind `text`.
-    private static func parseReject200(_ value: String) -> MITMRewriteTarget {
-        let trimmed = value.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else {
-            return MITMRewriteTarget(action: .reject200, rejectBody: MITMRejectBody())
-        }
-        let parts = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
-        let rawKind = parts.first.map(String.init)?.lowercased() ?? "text"
-        let content = parts.count > 1 ? String(parts[1]) : ""
-        let kind: MITMRejectBody.Kind
-        switch rawKind {
-        case "gif": kind = .gif
-        case "data": kind = .data
-        default: kind = .text
-        }
-        return MITMRewriteTarget(
-            action: .reject200,
-            rejectBody: MITMRejectBody(kind: kind, contents: content)
-        )
+    /// Validates that ``raw`` is an absolute URL with a host (the replacement
+    /// is always a full URL). Returns the trimmed string, or nil. The runtime
+    /// re-parses and wire-safety-validates it in ``MITMRewritePolicy``.
+    private static func validRewriteURL(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              let comps = URLComponents(string: trimmed),
+              let host = comps.host, !host.isEmpty else { return nil }
+        return trimmed
     }
 
     // MARK: - Rule line parsing
@@ -202,16 +151,14 @@ enum MITMRuleSetParser {
         let args = Array(fields.dropFirst(2))
 
         // Every rule leads with a URL pattern (a regex over the whole
-        // request URL) that gates whether the operation fires. The replace
-        // operations carry their own `search` regex separately.
+        // request URL) that gates whether the operation fires.
         switch opInt {
-        case 0:  // url-replace — fields: urlPattern, search, replacement
-            guard args.count == 3 else { return nil }
+        case 0:  // rewrite — fields: urlPattern, subMode (0–4), <sub-mode args>
+            guard args.count >= 2 else { return nil }
             let urlPattern = args[0]
-            let search = args[1]
-            guard !urlPattern.isEmpty, isValidRegex(urlPattern),
-                  !search.isEmpty, isValidSearchRegex(search) else { return nil }
-            return MITMRule(phase: .httpRequest, urlPattern: urlPattern, operation: .urlReplace(search: search, replacement: args[2]))
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
+            guard let action = parseRewriteAction(subMode: args[1], fields: Array(args.dropFirst(2))) else { return nil }
+            return MITMRule(phase: .httpRequest, urlPattern: urlPattern, operation: .rewrite(action))
 
         case 1:  // header-add
             guard args.count == 3 else { return nil }
@@ -227,14 +174,31 @@ enum MITMRuleSetParser {
             guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerDelete(name: name))
 
-        case 3:  // header-replace, by name (the old header-value match is gone)
+        case 3:  // header-replace — fields: urlPattern, name, value
             guard args.count == 3 else { return nil }
             let urlPattern = args[0]
             let name = args[1]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern), !name.isEmpty else { return nil }
             return MITMRule(phase: phase, urlPattern: urlPattern, operation: .headerReplace(name: name, value: args[2]))
 
-        case 4:  // script — fields: urlPattern, base64
+        case 4:  // body-replace — fields: urlPattern, search, replacement
+            guard args.count == 3 else { return nil }
+            let urlPattern = args[0]
+            let search = args[1]
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern),
+                  !search.isEmpty, isValidSearchRegex(search) else { return nil }
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyReplace(search: search, replacement: args[2]))
+
+        case 5:  // body-json — fields: urlPattern, action, <action-specific…>
+            guard args.count >= 2 else { return nil }
+            let urlPattern = args[0]
+            guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
+            guard let operation = parseJSONOperation(action: args[1], fields: Array(args.dropFirst(2))) else { return nil }
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyJSON(operation))
+
+        // Scripting operations live in a separate 100+ id range, set apart from
+        // the native edits above.
+        case 100:  // script — fields: urlPattern, base64
             guard args.count == 2 else { return nil }
             let urlPattern = args[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
@@ -246,7 +210,7 @@ enum MITMRuleSetParser {
                 operation: .script(scriptBase64: b64)
             )
 
-        case 5:  // stream-script — fields: urlPattern, base64
+        case 101:  // stream-script — fields: urlPattern, base64
             guard args.count == 2 else { return nil }
             let urlPattern = args[0]
             guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
@@ -258,28 +222,13 @@ enum MITMRuleSetParser {
                 operation: .streamScript(scriptBase64: b64)
             )
 
-        case 6:  // body-replace — fields: urlPattern, search, replacement
-            guard args.count == 3 else { return nil }
-            let urlPattern = args[0]
-            let search = args[1]
-            guard !urlPattern.isEmpty, isValidRegex(urlPattern),
-                  !search.isEmpty, isValidSearchRegex(search) else { return nil }
-            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyReplace(search: search, replacement: args[2]))
-
-        case 7:  // body-json — fields: urlPattern, action, <action-specific…>
-            guard args.count >= 2 else { return nil }
-            let urlPattern = args[0]
-            guard !urlPattern.isEmpty, isValidRegex(urlPattern) else { return nil }
-            guard let operation = parseJSONOperation(action: args[1], fields: Array(args.dropFirst(2))) else { return nil }
-            return MITMRule(phase: phase, urlPattern: urlPattern, operation: .bodyJSON(operation))
-
         default:
             return nil
         }
     }
 
     /// Parses the action token and its trailing fields of a `body-json`
-    /// (operation `7`) rule into a ``MITMJSONOperation``. Field layout per
+    /// (operation `5`) rule into a ``MITMJSONOperation``. Field layout per
     /// action (each field CSV-quoted like any other):
     ///
     ///     add                      <path>, <value>

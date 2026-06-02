@@ -21,11 +21,15 @@ struct MITMRuleEditorView: View {
     @State private var urlPattern: String = ""
     @State private var replacement: String = ""
     @State private var searchText: String = ""
+    @State private var rewriteMode: RewriteMode = .transparent
+    @State private var rewriteURL: String = ""
+    @State private var rejectText: String = ""
+    @State private var rejectData: String = ""
 
     @State private var validationError: String?
 
     private enum OperationKind: String, CaseIterable, Identifiable {
-        case urlReplace
+        case rewrite
         case headerAdd
         case headerDelete
         case headerReplace
@@ -34,7 +38,7 @@ struct MITMRuleEditorView: View {
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .urlReplace:    return String(localized: "URL Replace")
+            case .rewrite:       return String(localized: "Rewrite")
             case .headerAdd:     return String(localized: "Header Add")
             case .headerDelete:  return String(localized: "Header Delete")
             case .headerReplace: return String(localized: "Header Replace")
@@ -42,13 +46,34 @@ struct MITMRuleEditorView: View {
             }
         }
 
-        /// URL rewrites only make sense in the request phase. The editor
-        /// hides the phase picker when this is true and pins phase to
+        /// The Rewrite operation only makes sense in the request phase. The
+        /// editor hides the phase picker when this is true and pins phase to
         /// httpRequest at save time.
         var requestPhaseOnly: Bool {
             switch self {
-            case .urlReplace: return true
-            default:          return false
+            case .rewrite: return true
+            default:       return false
+            }
+        }
+    }
+
+    /// Sub-mode of the unified "Rewrite" operation (matches the import
+    /// sub-mode ids `0`–`4`).
+    private enum RewriteMode: String, CaseIterable, Identifiable {
+        case transparent
+        case redirect302
+        case reject200Text
+        case reject200Gif
+        case reject200Data
+
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .transparent:   return String(localized: "Transparent")
+            case .redirect302:   return String(localized: "302 Redirect")
+            case .reject200Text: return String(localized: "Reject Text")
+            case .reject200Gif:  return String(localized: "Reject GIF")
+            case .reject200Data: return String(localized: "Reject Data")
             }
         }
     }
@@ -82,7 +107,7 @@ struct MITMRuleEditorView: View {
 
             Section {
                 LabeledContent {
-                    TextField(String("^\\/anywhere$"), text: $urlPattern)
+                    TextField(String("^https://argsment\\.com/"), text: $urlPattern)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .multilineTextAlignment(.trailing)
@@ -91,22 +116,44 @@ struct MITMRuleEditorView: View {
                 }
 
                 switch operationKind {
-                case .urlReplace:
-                    LabeledContent {
-                        TextField(String("\\/old\\/"), text: $searchText)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
+                case .rewrite:
+                    Picker(selection: $rewriteMode) {
+                        ForEach(RewriteMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
                     } label: {
-                        TextWithColorfulIcon(title: "Search", comment: nil, systemName: "magnifyingglass", foregroundColor: .white, backgroundColor: .gray)
+                        TextWithColorfulIcon(title: "Mode", comment: nil, systemName: "gearshape.fill", foregroundColor: .white, backgroundColor: .purple)
                     }
-                    LabeledContent {
-                        TextField(String("/new/"), text: $replacement)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .multilineTextAlignment(.trailing)
-                    } label: {
-                        TextWithColorfulIcon(title: "Replacement", comment: nil, systemName: "point.topleft.down.to.point.bottomright.curvepath", foregroundColor: .white, backgroundColor: .blue)
+                    switch rewriteMode {
+                    case .transparent, .redirect302:
+                        LabeledContent {
+                            TextField(String("https://argsment.com/anywhere"), text: $rewriteURL)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "URL", comment: nil, systemName: "link", foregroundColor: .white, backgroundColor: .blue)
+                        }
+                    case .reject200Text:
+                        LabeledContent {
+                            TextField(String("Success from Anywhere"), text: $rejectText)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Body", comment: nil, systemName: "text.cursor", foregroundColor: .white, backgroundColor: .gray)
+                        }
+                    case .reject200Gif:
+                        EmptyView()
+                    case .reject200Data:
+                        LabeledContent {
+                            TextField(String("QW55d2hlcmU="), text: $rejectData)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .multilineTextAlignment(.trailing)
+                        } label: {
+                            TextWithColorfulIcon(title: "Data (Base64)", comment: nil, systemName: "cylinder.split.1x2.fill", foregroundColor: .white, backgroundColor: .gray)
+                        }
                     }
                 case .headerAdd:
                     LabeledContent {
@@ -123,7 +170,7 @@ struct MITMRuleEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Header Value", comment: nil, systemName: "textformat", foregroundColor: .white, backgroundColor: .gray)
+                        TextWithColorfulIcon(title: "Header Value", comment: nil, systemName: "text.cursor", foregroundColor: .white, backgroundColor: .gray)
                     }
                 case .headerDelete:
                     LabeledContent {
@@ -149,11 +196,11 @@ struct MITMRuleEditorView: View {
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Header Value", comment: nil, systemName: "textformat", foregroundColor: .white, backgroundColor: .gray)
+                        TextWithColorfulIcon(title: "Header Value", comment: nil, systemName: "text.cursor", foregroundColor: .white, backgroundColor: .gray)
                     }
                 case .bodyReplace:
                     LabeledContent {
-                        TextField(String("anywhere"), text: $searchText)
+                        TextField(String("Anywhere"), text: $searchText)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
@@ -161,12 +208,12 @@ struct MITMRuleEditorView: View {
                         TextWithColorfulIcon(title: "Search", comment: nil, systemName: "magnifyingglass", foregroundColor: .white, backgroundColor: .gray)
                     }
                     LabeledContent {
-                        TextField(String("everywhere"), text: $replacement)
+                        TextField(String("Everywhere"), text: $replacement)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                             .multilineTextAlignment(.trailing)
                     } label: {
-                        TextWithColorfulIcon(title: "Replacement", comment: nil, systemName: "textformat", foregroundColor: .white, backgroundColor: .gray)
+                        TextWithColorfulIcon(title: "Replacement", comment: nil, systemName: "text.cursor", foregroundColor: .white, backgroundColor: .gray)
                     }
                 }
             } footer: {
@@ -197,8 +244,6 @@ struct MITMRuleEditorView: View {
     // MARK: - Save
 
     private func save() {
-        // The URL pattern gates every operation, so validate it once up
-        // front.
         guard !urlPattern.isEmpty else {
             validationError = String(localized: "URL Pattern is required.")
             return
@@ -210,10 +255,30 @@ struct MITMRuleEditorView: View {
 
         let operation: MITMOperation
         switch operationKind {
-        case .urlReplace, .bodyReplace:
-            // The search is used raw like ``urlPattern`` — never trimmed:
-            // whitespace can be a meaningful part of the regex. It runs
-            // through `String.replacing`, so validate it as a Swift ``Regex``.
+        case .rewrite:
+            switch rewriteMode {
+            case .transparent, .redirect302:
+                let url = rewriteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !url.isEmpty else {
+                    validationError = String(localized: "URL is required.")
+                    return
+                }
+                guard let comps = URLComponents(string: url),
+                      let host = comps.host, !host.isEmpty else {
+                    validationError = String(localized: "URL is not valid.")
+                    return
+                }
+                operation = .rewrite(rewriteMode == .transparent
+                    ? .transparent(url: url)
+                    : .redirect302(url: url))
+            case .reject200Text:
+                operation = .rewrite(.reject200Text(content: rejectText))
+            case .reject200Gif:
+                operation = .rewrite(.reject200Gif)
+            case .reject200Data:
+                operation = .rewrite(.reject200Data(base64: rejectData))
+            }
+        case .bodyReplace:
             guard !searchText.isEmpty else {
                 validationError = String(localized: "Search is required.")
                 return
@@ -222,9 +287,7 @@ struct MITMRuleEditorView: View {
                 validationError = String(localized: "Search is not a valid regular expression.")
                 return
             }
-            operation = operationKind == .urlReplace
-                ? .urlReplace(search: searchText, replacement: replacement)
-                : .bodyReplace(search: searchText, replacement: replacement)
+            operation = .bodyReplace(search: searchText, replacement: replacement)
         case .headerAdd:
             let headerName = self.headerName.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !headerName.isEmpty else {
@@ -265,10 +328,24 @@ struct MITMRuleEditorView: View {
         phase = rule.phase
         urlPattern = rule.urlPattern
         switch rule.operation {
-        case .urlReplace(let search, let replacement):
-            operationKind = .urlReplace
-            self.searchText = search
-            self.replacement = replacement
+        case .rewrite(let action):
+            operationKind = .rewrite
+            switch action {
+            case .transparent(let url):
+                rewriteMode = .transparent
+                rewriteURL = url
+            case .redirect302(let url):
+                rewriteMode = .redirect302
+                rewriteURL = url
+            case .reject200Text(let content):
+                rewriteMode = .reject200Text
+                rejectText = content
+            case .reject200Gif:
+                rewriteMode = .reject200Gif
+            case .reject200Data(let base64):
+                rewriteMode = .reject200Data
+                rejectData = base64
+            }
         case .headerAdd(let name, let value):
             operationKind = .headerAdd
             headerName = name

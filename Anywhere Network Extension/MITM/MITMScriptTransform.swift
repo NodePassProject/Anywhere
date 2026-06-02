@@ -70,7 +70,7 @@ enum MITMScriptTransform {
                 switch rule.operation {
                 case .script(let source, let sourceKey), .streamScript(let source, let sourceKey):
                     return seen.insert(sourceKey).inserted ? (source: source, sourceKey: sourceKey) : nil
-                case .urlReplace, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
+                case .rewrite, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
                     return nil
                 }
             }
@@ -113,7 +113,7 @@ enum MITMScriptTransform {
             switch rule.operation {
             case .script:
                 return rule.matchesURL(requestURL)
-            case .streamScript, .urlReplace, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
+            case .streamScript, .rewrite, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
                 return false
             }
         }
@@ -129,7 +129,7 @@ enum MITMScriptTransform {
             switch rule.operation {
             case .streamScript:
                 return rule.matchesURL(requestURL)
-            case .script, .urlReplace, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
+            case .script, .rewrite, .headerAdd, .headerDelete, .headerReplace, .bodyReplace, .bodyJSON:
                 return false
             }
         }
@@ -297,7 +297,7 @@ enum MITMScriptTransform {
     ///   head-time gate (`hasScriptRule`) said a script applies, so the
     ///   lwIP-side fast path lives entirely above this call and never pays a
     ///   queue round-trip. A rule that no longer matches once re-checked here
-    ///   (e.g. a `url-replace` moved the path) simply yields
+    ///   (e.g. a `rewrite` changed the path) simply yields
     ///   ``Outcome/message`` unchanged — same as the synchronous variant.
     /// - ``message`` (and its `body` `Data`) is captured by the dispatched
     ///   closure and stays alive for the engine call's duration; it is a

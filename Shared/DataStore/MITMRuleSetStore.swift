@@ -134,7 +134,6 @@ final class MITMRuleSetStore: ObservableObject {
             throw MITMRuleSetRefreshError.tooManyRules
         }
         ruleSets[index].domainSuffixes = parsed.domainSuffixes
-        ruleSets[index].rewriteTarget = parsed.rewriteTarget
         ruleSets[index].rules = parsed.rules
         save()
         return ruleSets[index]

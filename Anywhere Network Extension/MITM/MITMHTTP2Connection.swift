@@ -80,6 +80,17 @@ final class MITMHTTP2Connection {
     /// stalled half of the connection and eventually GOAWAYs.
     private static let maxReceivedFramePayloadSize: Int = 1 * 1024 * 1024
 
+    /// Cap on ``pendingUpstreamSetup`` — the inbound connection-management
+    /// output (preface + SETTINGS + WINDOW_UPDATE …) held while the upstream
+    /// dial is deferred until the first request resolves its destination.
+    /// Legitimate setup is a few hundred bytes; the cap exists so a client
+    /// that floods connection-management frames without ever opening a stream
+    /// can't grow this buffer against the Network Extension's ~50 MiB budget.
+    /// On overflow the leg flips ``parseError`` and stops processing — the
+    /// same stalled-half failure mode the other frame caps rely on the peer
+    /// to GOAWAY out of. 256 KiB is far above any real h2 start.
+    private static let maxPendingUpstreamSetupBytes: Int = 256 * 1024
+
     // MARK: - Raw frame
 
     /// Format-preserving frame view — keeps the wire-level type byte so
@@ -105,6 +116,13 @@ final class MITMHTTP2Connection {
     /// synchronously on the shared serial lwIP queue, from the frame pump
     /// (``process(_:)`` or a parked script's resume).
     var onObservedPeerHeaderTableSize: ((Int) -> Void)?
+
+    /// The most recent value passed to ``onObservedPeerHeaderTableSize``,
+    /// retained so it can be replayed to the opposing leg when that leg is
+    /// created late — the deferred dial means the inbound leg may observe the
+    /// client's SETTINGS before the outbound leg exists. nil until the peer
+    /// advertises a non-default header-table size.
+    private(set) var lastObservedPeerHeaderTableSize: Int?
 
     /// Bounds this leg's HPACK decoder to the dynamic-table limit the peer
     /// advertised to the encoder we mirror (RFC 7541 §4.2). Called via the
@@ -246,6 +264,41 @@ final class MITMHTTP2Connection {
     /// immediately after each ``process(_:)`` call.
     private var pendingClientBytes = Data()
 
+    // MARK: Deferred-dial connection setup (inbound only)
+    //
+    // The upstream dial is deferred until the first request resolves its
+    // destination, so the inbound leg must not forward the client's h2
+    // connection setup (preface + SETTINGS + WINDOW_UPDATE …) until it knows a
+    // request actually needs the upstream. It holds that output here and either
+    // flushes it ahead of the first forwarded request, or — when the first
+    // request is answered locally (a 302 / reject ``rewrite`` synth) — never
+    // forwards it, so a synth-only connection never dials.
+
+    /// Held upstream-bound output produced before the first request was
+    /// forwarded (the connection preface and any connection-management frames).
+    private var pendingUpstreamSetup = Data()
+    /// True once the held setup has been flushed ahead of the first forwarded
+    /// request; afterwards the leg forwards normally.
+    private var upstreamSetupForwarded = false
+    /// Set when a request that needs the upstream has been seen this connection
+    /// (so the held setup is flushed and the dial is triggered).
+    private var didForwardUpstreamRequest = false
+    /// Set when a request has actually been committed upstream (via
+    /// ``logHTTP2Request``). Distinct from ``didForwardUpstreamRequest``, which
+    /// is set at HEADERS time before a buffered request might instead resolve to
+    /// a synthesized reply. Drives a pre-establishment synth's GOAWAY
+    /// last-stream-id so a co-batched proxy stream that the one-shot close drops
+    /// is reported as un-processed and retried rather than assumed handled.
+    private var forwardedRequestUpstream = false
+    /// Whether a server connection preface (empty SETTINGS + a SETTINGS ACK for
+    /// the client's SETTINGS) has been emitted to the client. Only used for a
+    /// pre-establishment synth reply, where no upstream relays one.
+    private var serverPrefaceSentToClient = false
+    /// Set after a pre-establishment synth has emitted its GOAWAY: the
+    /// connection is one-shot, so further client frames are swallowed and
+    /// nothing is dialed.
+    private var inboundClosed = false
+
     /// Stream IDs whose request was synthesized via
     /// `Anywhere.respond(...)` and never reached the upstream. The
     /// outer leg has no record of these stream IDs, so the inner
@@ -381,9 +434,40 @@ final class MITMHTTP2Connection {
             pendingPreParkOutput = output
             return
         }
+        var finalOutput = output
+        // Deferred-dial gating for the inbound leg: hold the client's
+        // connection setup until a request actually needs the upstream, so a
+        // synth-only first request never dials (and a host-changing rewrite
+        // dials the rewritten host, not the original).
+        if direction == .inbound, !upstreamSetupForwarded {
+            if inboundClosed {
+                // One-shot synth is terminating; nothing goes upstream.
+                finalOutput = Data()
+            } else if didForwardUpstreamRequest {
+                // First upstream request: send the held setup (preface +
+                // SETTINGS + any pre-request connection-management frames)
+                // ahead of it so the upstream sees a well-formed h2 start.
+                finalOutput = pendingUpstreamSetup + output
+                pendingUpstreamSetup = Data()
+                upstreamSetupForwarded = true
+            } else if pendingUpstreamSetup.count + output.count > Self.maxPendingUpstreamSetupBytes {
+                // A client flooding connection-management frames without ever
+                // opening a stream would otherwise grow this buffer without
+                // bound. Give up safely — like the other frame caps, stop
+                // processing and let the stalled half time out / GOAWAY.
+                logger.warning("[MITM] HTTP/2 \(rewriter.host): pre-dial setup buffer would exceed \(Self.maxPendingUpstreamSetupBytes) B without a request; marking parseError")
+                parseError = true
+                pendingUpstreamSetup = Data()
+                finalOutput = Data()
+            } else {
+                // No upstream request yet — hold connection-management output.
+                pendingUpstreamSetup.append(output)
+                finalOutput = Data()
+            }
+        }
         let completion = parkedCompletion
         parkedCompletion = nil
-        completion?(output)
+        completion?(finalOutput)
     }
 
     /// Drains and returns any client-bound bytes synthesized by
@@ -403,6 +487,10 @@ final class MITMHTTP2Connection {
     // MARK: - Frame dispatch
 
     private func handleFrame(_ frame: RawFrame, into output: inout Data) -> Bool {
+        // One-shot synth (302 / reject before any upstream): we've sent the
+        // response + GOAWAY on the inner leg, so swallow every further client
+        // frame — nothing more goes upstream and the client will close.
+        if inboundClosed { return false }
         // RFC 9113 §6.10: between a HEADERS/PUSH_PROMISE without
         // END_HEADERS and its terminating CONTINUATION, the peer is
         // forbidden from sending any other frame type — including
@@ -487,6 +575,7 @@ final class MITMHTTP2Connection {
                         | (UInt32(payload[i + 3]) << 16)
                         | (UInt32(payload[i + 4]) << 8)
                         | UInt32(payload[i + 5])
+                    lastObservedPeerHeaderTableSize = Int(value)
                     onObservedPeerHeaderTableSize?(Int(value))
                 }
                 i += 6
@@ -935,6 +1024,26 @@ final class MITMHTTP2Connection {
             ? originatingRequest?.url
             : nil
 
+        // Native 302 / reject ``MITMOperation/rewrite``: synthesize the
+        // response on the inner leg and short-circuit before the stream is
+        // opened upstream. Gates on the original request URL; the transparent
+        // sub-mode (which rewrites ``:path`` in ``transformRequestHeaders``) is
+        // mutually exclusive with synth — first matching rewrite rule wins.
+        // Reuses the same machinery as a request-phase ``Anywhere.respond``.
+        if case .headers = kind, direction == .inbound, !isTrailer {
+            let requestGateURL = MITMHTTP2Rewriter.requestPath(in: decoded)
+                .map { "https://\(rewriter.host)\($0)" }
+            if let synth = rewriter.requestSynthResponse(requestURL: requestGateURL) {
+                queueSynthesizedResponse(streamID: streamID, response: synth)
+                return false
+            }
+            // Not a native synth: the connection may need the upstream, so let
+            // the held setup flush and the dial proceed. (A buffered-script
+            // request that later calls Anywhere.respond is handled as a synth,
+            // which suppresses the flush via ``inboundClosed``.)
+            didForwardUpstreamRequest = true
+        }
+
         var rewritten: [(name: String, value: String)]
         switch kind {
         case .headers:
@@ -952,7 +1061,7 @@ final class MITMHTTP2Connection {
 
         let endStreamOnHeaders = originalFlags & 0x1 != 0
         // Whole URL the script preflights gate on: built from the live
-        // (post-url-replace) ``:path`` on inbound requests; the originating
+        // (post-rewrite) ``:path`` on inbound requests; the originating
         // request's URL on outbound responses.
         let gateURL = (direction == .inbound)
             ? MITMHTTP2Rewriter.requestPath(in: rewritten).map { "https://\(rewriter.host)\($0)" }
@@ -1878,13 +1987,65 @@ final class MITMHTTP2Connection {
         if !body.isEmpty {
             out.append(emitDataFrames(streamID: streamID, payload: body, endStream: true))
         }
-        pendingClientBytes.append(out)
+        if !upstreamSetupForwarded {
+            // Pre-establishment synth (302 / reject before any upstream leg):
+            // the client has not received a server connection preface, and none
+            // will be relayed (this connection won't dial), so make this a
+            // self-contained h2 exchange — server SETTINGS + a SETTINGS ACK for
+            // the client's SETTINGS, the response, then GOAWAY. One-shot:
+            // ``inboundClosed`` makes ``handleFrame`` swallow further frames and
+            // ``finishPumpPass`` forward nothing upstream, so the client
+            // reconnects for anything else (a 302 follow-up or a fresh request).
+            if !serverPrefaceSentToClient {
+                pendingClientBytes.append(serverConnectionPreface())
+                serverPrefaceSentToClient = true
+            }
+            pendingClientBytes.append(out)
+            // GOAWAY last-stream-id is the highest stream this endpoint
+            // processed. A proxy stream co-batched ahead of this synth is
+            // dropped by the one-shot close, so report 0 (nothing reliably
+            // processed) to make the client retry it on a fresh connection;
+            // otherwise this synth stream is the highest processed.
+            pendingClientBytes.append(goAwayFrame(lastStreamID: forwardedRequestUpstream ? 0 : streamID))
+            inboundClosed = true
+        } else {
+            // Post-establishment synth (a request-phase Anywhere.respond on an
+            // already-open connection): the client's h2 connection is already
+            // set up via the upstream's relayed preface, so just inject the
+            // response frames.
+            pendingClientBytes.append(out)
+        }
         // Record so follow-up frames from the client (trailers, DATA, or
         // the RST some clients send after consuming a response they
         // didn't expect to get on their own initiative) aren't forwarded
         // upstream on an idle stream. See ``handleFrame`` /
         // ``handleRSTStream``.
         markSynthResponded(streamID)
+    }
+
+    /// The server half of the h2 connection preface used for a
+    /// pre-establishment synth reply (when no upstream relays one): an empty
+    /// SETTINGS frame followed by a SETTINGS ACK for the client's SETTINGS.
+    private func serverConnectionPreface() -> Data {
+        var d = Data()
+        appendFrameHeader(typeCode: FrameTypeCode.settings, flags: 0, streamID: 0, payloadLength: 0, into: &d)
+        appendFrameHeader(typeCode: FrameTypeCode.settings, flags: 0x1, streamID: 0, payloadLength: 0, into: &d)
+        return d
+    }
+
+    /// A GOAWAY (NO_ERROR) naming ``lastStreamID`` as the highest processed
+    /// stream, ending a one-shot synth connection cleanly so the client retries
+    /// any higher streams on a fresh connection.
+    private func goAwayFrame(lastStreamID: UInt32) -> Data {
+        var d = Data()
+        appendFrameHeader(typeCode: FrameTypeCode.goaway, flags: 0, streamID: 0, payloadLength: 8, into: &d)
+        let sid = lastStreamID & 0x7FFFFFFF
+        d.append(UInt8((sid >> 24) & 0xFF))
+        d.append(UInt8((sid >> 16) & 0xFF))
+        d.append(UInt8((sid >> 8) & 0xFF))
+        d.append(UInt8(sid & 0xFF))
+        d.append(contentsOf: [0, 0, 0, 0]) // error code: NO_ERROR
+        return d
     }
 
     /// Inserts ``streamID`` into ``synthRespondedStreams`` and the
@@ -2055,6 +2216,9 @@ final class MITMHTTP2Connection {
     /// ctx.method / ctx.url. Inbound HEADERS only.
     private func logHTTP2Request(streamID: UInt32, headers: [(name: String, value: String)]) {
         guard direction == .inbound else { return }
+        // A request has been committed upstream — recorded so a later
+        // pre-establishment synth sets its GOAWAY last-stream-id correctly.
+        forwardedRequestUpstream = true
         let method = firstHeaderValue(headers, name: ":method")
         var url: String?
         if let path = firstHeaderValue(headers, name: ":path") {

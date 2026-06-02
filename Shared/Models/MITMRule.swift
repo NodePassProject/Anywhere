@@ -190,15 +190,19 @@ extension MITMJSONOperation: Codable {
 /// A single rewrite operation. The associated values carry only the
 /// fields that operation needs; the ``MITMRule/urlPattern`` that gates
 /// every rule lives one level up on ``MITMRule``, uniform across
-/// operations, and the upstream destination is separate again on
-/// ``MITMRuleSet/rewriteTarget``. See ``MITMRuleSetParser`` for the text
-/// import format and the per-operation field layout.
+/// operations. See ``MITMRuleSetParser`` for the text import format and
+/// the per-operation field layout.
 enum MITMOperation: Equatable {
-    /// Request-phase only. Substitutes ``search`` (a regex) with the literal
-    /// ``replacement`` in the request target (path-and-query) — independent
-    /// of the rule's ``MITMRule/urlPattern``, which only gates whether the
-    /// rule fires.
-    case urlReplace(search: String, replacement: String)
+    /// Request-phase only. The unified "Rewrite" operation (import op id
+    /// `0`): rewrites the request URL to a full replacement URL, redirects
+    /// with a synthesized `302`, or rejects with a synthesized `200`. The
+    /// specific behavior is carried by the ``MITMRewriteAction`` sub-mode.
+    /// When the sub-mode is ``MITMRewriteAction/transparent(url:)`` the outer
+    /// leg is dialed to the replacement host and `Host`/`:authority` is
+    /// rewritten to match; the other sub-modes synthesize the response on the
+    /// inner leg without an upstream dial. Gated, like every operation, by
+    /// ``MITMRule/urlPattern``.
+    case rewrite(MITMRewriteAction)
     case headerAdd(name: String, value: String)
     case headerDelete(name: String)
     /// Overwrites the value of every header named ``name``
@@ -225,9 +229,8 @@ enum MITMOperation: Equatable {
     /// match ``script`` — at most one fires per stream, last match wins.
     case streamScript(scriptBase64: String)
     /// Native regex find-and-replace over the decompressed text body
-    /// (import op id `6`). ``search`` is a regex and ``replacement`` the
-    /// literal swapped in for each match — exactly like ``urlReplace`` but
-    /// applied to the body instead of the request target. Buffered like
+    /// (import op id `4`). ``search`` is a regex and ``replacement`` the
+    /// literal swapped in for each match, applied to the body. Buffered like
     /// ``bodyJSON`` (the body is accumulated, decompressed, edited, and
     /// re-emitted with a fresh length) and, like it, **every** matching
     /// ``bodyReplace`` rule fires in rule order so edits compose. Total /
@@ -250,8 +253,8 @@ enum MITMOperation: Equatable {
 extension MITMOperation: CustomStringConvertible {
     var description: String {
         switch self {
-        case .urlReplace:
-            String(localized: "URL Replace")
+        case .rewrite:
+            String(localized: "Rewrite")
         case .headerAdd:
             String(localized: "Header Add")
         case .headerDelete:
@@ -272,7 +275,7 @@ extension MITMOperation: CustomStringConvertible {
 
 extension MITMOperation: Codable {
     private enum Kind: String, Codable {
-        case urlReplace
+        case rewrite
         case headerAdd
         case headerDelete
         case headerReplace
@@ -290,17 +293,15 @@ extension MITMOperation: Codable {
         case search
         case script
         case json
+        case rewrite
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let kind = try c.decode(Kind.self, forKey: .kind)
         switch kind {
-        case .urlReplace:
-            self = .urlReplace(
-                search: try c.decode(String.self, forKey: .search),
-                replacement: try c.decode(String.self, forKey: .replacement)
-            )
+        case .rewrite:
+            self = .rewrite(try c.decode(MITMRewriteAction.self, forKey: .rewrite))
         case .headerAdd:
             self = .headerAdd(
                 name: try c.decode(String.self, forKey: .name),
@@ -330,10 +331,9 @@ extension MITMOperation: Codable {
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .urlReplace(let search, let replacement):
-            try c.encode(Kind.urlReplace, forKey: .kind)
-            try c.encode(search, forKey: .search)
-            try c.encode(replacement, forKey: .replacement)
+        case .rewrite(let action):
+            try c.encode(Kind.rewrite, forKey: .kind)
+            try c.encode(action, forKey: .rewrite)
         case .headerAdd(let name, let value):
             try c.encode(Kind.headerAdd, forKey: .kind)
             try c.encode(name, forKey: .name)
@@ -405,135 +405,94 @@ struct MITMRule: Codable, Equatable, Identifiable {
     }
 }
 
-/// Action applied to traffic matched by a rule set. See
-/// ``MITMRuleSetParser`` for how each is written in import text and
-/// ``MITMResponseSynthesizer`` for the synthesized wire format.
+/// The sub-mode of the unified "Rewrite" operation (``MITMOperation/rewrite``).
+/// Maps 1:1 to the numeric sub-mode in the import format (see
+/// ``MITMRuleSetParser``); ``MITMRespondBuilder`` produces the synthesized
+/// wire response for the non-transparent sub-modes.
 ///
-/// - ``transparent``: dial the outer leg to ``host``:``port`` instead of
-///   the original destination and rewrite the request authority; the
-///   client still sees the original SNI on the leaf certificate. A nil
-///   ``port`` keeps the original.
-/// - ``redirect302``: no outer leg; synthesize a `302 Found` redirecting
-///   to the target.
-/// - ``reject200``: no outer leg; synthesize a `200 OK` from the
-///   configured ``rejectBody`` and optional Content-Type override.
-enum MITMRewriteAction: String, Codable {
-    case transparent
-    case redirect302
-    case reject200
-
-    /// True for actions that synthesize the response on the inner leg
-    /// without ever opening an outer connection. The lwIP/MITM glue uses
-    /// this to skip the proxy/direct dial entirely.
-    var synthesizesResponse: Bool {
-        switch self {
-        case .transparent: return false
-        case .redirect302, .reject200: return true
-        }
-    }
+/// - ``transparent(url:)`` (0): rewrite the request URL to ``url`` (a full
+///   URL). The outer leg is dialed to ``url``'s host and `Host`/`:authority`
+///   is rewritten to match (a no-op in effect when ``url`` keeps the original
+///   host); the client still sees the original SNI on the leaf certificate.
+/// - ``redirect302(url:)`` (1): no outer leg; synthesize a `302 Found`
+///   whose `Location` is ``url``.
+/// - ``reject200Text(content:)`` (2): no outer leg; synthesize a `200 OK`
+///   with a `text/plain` body (empty ``content`` → a default line).
+/// - ``reject200Gif`` (3): no outer leg; synthesize a `200 OK` carrying the
+///   canned 1×1 GIF.
+/// - ``reject200Data(base64:)`` (4): no outer leg; synthesize a `200 OK`
+///   with an `application/octet-stream` body decoded from ``base64`` (empty
+///   → a default payload).
+enum MITMRewriteAction: Equatable {
+    case transparent(url: String)
+    case redirect302(url: String)
+    case reject200Text(content: String)
+    case reject200Gif
+    case reject200Data(base64: String)
 }
 
-/// Canned response body for ``MITMRewriteAction/reject200``; see
-/// ``MITMRuleSetParser`` for how kind and contents are written in import
-/// text. ``contentType`` overrides the per-kind default Content-Type
-/// (empty/nil keeps it): ``text`` → `text/plain; charset=utf-8`, ``gif``
-/// → `image/gif`, ``data`` → `application/octet-stream`.
-struct MITMRejectBody: Codable, Equatable {
-    enum Kind: String, Codable {
-        case text
-        case gif
-        case data
-
-        /// Body to use when the user left ``MITMRejectBody/contents``
-        /// blank. Substituted at response-synthesis time so the wire
-        /// reply is never zero-length (some upstream apps treat an empty
-        /// 200 response as an error). The stored model keeps the empty
-        /// string so the editor doesn't show a fabricated value.
-        ///
-        /// - ``text``: a short ASCII line.
-        /// - ``data``: base64 for the literal "Anywhere".
-        /// - ``gif``: empty — the synthesizer always emits the canned
-        ///   1×1 GIF for this kind, regardless of ``contents``.
-        var defaultContents: String {
-            switch self {
-            case .text: return "Success from Anywhere"
-            case .data: return "QW55d2hlcmU="
-            case .gif:  return ""
-            }
-        }
-    }
-
-    var kind: Kind
-    var contents: String
-    var contentType: String?
-
-    init(kind: Kind = .text, contents: String = "", contentType: String? = nil) {
-        self.kind = kind
-        self.contents = contents
-        self.contentType = contentType
-    }
-}
-
-/// Per-rule-set redirect/reject configuration. The ``action`` field
-/// selects the mode; ``host``/``port`` only apply to ``transparent`` and
-/// ``redirect302``; ``rejectBody`` only applies to ``reject200``.
-///
-/// Codable is backward-compatible: persisted blobs that predate the
-/// ``action`` field decode as ``transparent``, preserving the host/port
-/// the user originally configured.
-struct MITMRewriteTarget: Codable, Equatable {
-    var action: MITMRewriteAction
-    var host: String
-    var port: UInt16?
-    var rejectBody: MITMRejectBody?
-
-    init(
-        action: MITMRewriteAction = .transparent,
-        host: String = "",
-        port: UInt16? = nil,
-        rejectBody: MITMRejectBody? = nil
-    ) {
-        self.action = action
-        self.host = host
-        self.port = port
-        self.rejectBody = rejectBody
+extension MITMRewriteAction: Codable {
+    private enum Kind: String, Codable {
+        case transparent
+        case redirect302
+        case reject200Text
+        case reject200Gif
+        case reject200Data
     }
 
     private enum CodingKeys: String, CodingKey {
-        case action
-        case host
-        case port
-        case rejectBody
+        case kind
+        case url
+        case content
+        case base64
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.action = try c.decodeIfPresent(MITMRewriteAction.self, forKey: .action) ?? .transparent
-        self.host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
-        self.port = try c.decodeIfPresent(UInt16.self, forKey: .port)
-        self.rejectBody = try c.decodeIfPresent(MITMRejectBody.self, forKey: .rejectBody)
+        switch try c.decode(Kind.self, forKey: .kind) {
+        case .transparent:
+            self = .transparent(url: try c.decode(String.self, forKey: .url))
+        case .redirect302:
+            self = .redirect302(url: try c.decode(String.self, forKey: .url))
+        case .reject200Text:
+            self = .reject200Text(content: try c.decode(String.self, forKey: .content))
+        case .reject200Gif:
+            self = .reject200Gif
+        case .reject200Data:
+            self = .reject200Data(base64: try c.decode(String.self, forKey: .base64))
+        }
     }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
-        try c.encode(action, forKey: .action)
-        try c.encode(host, forKey: .host)
-        try c.encodeIfPresent(port, forKey: .port)
-        try c.encodeIfPresent(rejectBody, forKey: .rejectBody)
+        switch self {
+        case .transparent(let url):
+            try c.encode(Kind.transparent, forKey: .kind)
+            try c.encode(url, forKey: .url)
+        case .redirect302(let url):
+            try c.encode(Kind.redirect302, forKey: .kind)
+            try c.encode(url, forKey: .url)
+        case .reject200Text(let content):
+            try c.encode(Kind.reject200Text, forKey: .kind)
+            try c.encode(content, forKey: .content)
+        case .reject200Gif:
+            try c.encode(Kind.reject200Gif, forKey: .kind)
+        case .reject200Data(let base64):
+            try c.encode(Kind.reject200Data, forKey: .kind)
+            try c.encode(base64, forKey: .base64)
+        }
     }
 }
 
 /// An ordered group of rewrite rules identified by a user-supplied name
-/// and applied to any host matching one of ``domainSuffixes``. The
-/// optional ``rewriteTarget`` gives the set a coherent upstream; if set,
-/// every connection covered by the set is redirected to the target,
-/// regardless of which rule fires.
+/// and applied to any host matching one of ``domainSuffixes``. Redirect /
+/// reject / host-rewrite behavior lives on individual ``rules`` via the
+/// ``MITMOperation/rewrite`` operation, not on the set.
 ///
-/// When ``subscriptionURL`` is set, the suffixes, rewrite target, and
-/// rules are sourced from a remote `.amrs` file and replaced on refresh;
-/// the set's ``id`` (its ``MITMScriptStore`` scope key) and user-given
-/// ``name`` are preserved across refreshes so the scope and any rename
-/// stick.
+/// When ``subscriptionURL`` is set, the suffixes and rules are sourced
+/// from a remote `.amrs` file and replaced on refresh; the set's ``id``
+/// (its ``MITMScriptStore`` scope key) and user-given ``name`` are
+/// preserved across refreshes so the scope and any rename stick.
 struct MITMRuleSet: Codable, Equatable, Identifiable {
     static let maxRuleCount = 10000
 
@@ -544,7 +503,6 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
     /// until re-enabled. Blobs predating this field decode as enabled.
     var enabled: Bool
     var domainSuffixes: [String]
-    var rewriteTarget: MITMRewriteTarget?
     var rules: [MITMRule]
     /// When set, the set's content is sourced from a remote `.amrs` file
     /// and replaced on refresh.
@@ -555,7 +513,6 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         name: String,
         enabled: Bool = true,
         domainSuffixes: [String] = [],
-        rewriteTarget: MITMRewriteTarget? = nil,
         rules: [MITMRule] = [],
         subscriptionURL: URL? = nil
     ) {
@@ -563,7 +520,6 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         self.name = name
         self.enabled = enabled
         self.domainSuffixes = domainSuffixes
-        self.rewriteTarget = rewriteTarget
         self.rules = rules
         self.subscriptionURL = subscriptionURL
     }
@@ -574,7 +530,6 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         case enabled
         case domainSuffix       // legacy: single-suffix shape predating named sets
         case domainSuffixes
-        case rewriteTarget
         case rules
         case subscriptionURL
     }
@@ -596,7 +551,6 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         }
         self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? legacySuffix ?? ""
         self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
-        self.rewriteTarget = try c.decodeIfPresent(MITMRewriteTarget.self, forKey: .rewriteTarget)
         // A single corrupt rule shouldn't take down the whole set.
         self.rules = try c.decodeSkippingInvalid([MITMRule].self, forKey: .rules)
         self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
@@ -608,7 +562,6 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         try c.encode(name, forKey: .name)
         try c.encode(enabled, forKey: .enabled)
         try c.encode(domainSuffixes, forKey: .domainSuffixes)
-        try c.encodeIfPresent(rewriteTarget, forKey: .rewriteTarget)
         try c.encode(rules, forKey: .rules)
         try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
     }

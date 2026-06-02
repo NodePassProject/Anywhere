@@ -181,7 +181,6 @@ struct MITMSettingsView: View {
             let ruleSet = MITMRuleSet(
                 name: name,
                 domainSuffixes: parsed.domainSuffixes,
-                rewriteTarget: parsed.rewriteTarget,
                 rules: parsed.rules
             )
             store.addRuleSet(ruleSet)
@@ -217,7 +216,6 @@ struct MITMSettingsView: View {
                 let ruleSet = MITMRuleSet(
                     name: name,
                     domainSuffixes: parsed.domainSuffixes,
-                    rewriteTarget: parsed.rewriteTarget,
                     rules: parsed.rules,
                     subscriptionURL: url
                 )
@@ -230,19 +228,6 @@ struct MITMSettingsView: View {
 
     private func summary(for ruleSet: MITMRuleSet) -> String {
         let count = ruleSet.rules.count
-        let rulesPart = String(localized: "\(count) rule(s)")
-        guard let target = ruleSet.rewriteTarget else {
-            return rulesPart
-        }
-        switch target.action {
-        case .transparent:
-            let authority = target.port.map { "\(target.host):\($0)" } ?? target.host
-            return "→ \(authority) · \(rulesPart)"
-        case .redirect302:
-            let authority = target.port.map { "\(target.host):\($0)" } ?? target.host
-            return "302 → \(authority) · \(rulesPart)"
-        case .reject200:
-            return "Reject 200 · \(rulesPart)"
-        }
+        return String(localized: "\(count) rule(s)")
     }
 }

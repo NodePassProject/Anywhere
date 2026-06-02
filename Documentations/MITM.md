@@ -17,7 +17,6 @@ UI.
 - [How it works](#how-it-works)
 - [Rule sets](#rule-sets)
 - [The import format](#the-import-format)
-- [Rewrite actions](#rewrite-actions)
 - [Rule operations](#rule-operations)
 - [Scripting: `script`](#scripting-script)
 - [Scripting: `stream-script`](#scripting-stream-script)
@@ -36,10 +35,15 @@ A connection is intercepted when its TLS ClientHello SNI host matches a
 configured rule set. Anywhere then:
 
 1. Mints a leaf certificate for the requested host (cached) and completes the
-   **inner** TLS handshake with the client.
-2. Opens the **outer** leg to the upstream (or to a redirect target) and runs
-   its own handshake there.
-3. Decrypts each direction, runs the matching rules, and re-encrypts to the
+   **inner** TLS handshake with the client, negotiating ALPN from the client's
+   own offer.
+2. Reads the first request and applies the matching rules. A `rewrite` rule can
+   answer on the inner leg (302 / reject) — no upstream at all — or change the
+   destination host.
+3. **Defers** opening the **outer** leg until the destination is known, then
+   dials it (the rewritten host when set, otherwise the original) and runs its
+   own handshake there, following the inner ALPN.
+4. Decrypts each direction, runs the matching rules, and re-encrypts to the
    opposite leg.
 
 Traffic is processed in two **phases**:
@@ -77,8 +81,7 @@ A rule set is the unit of configuration:
 | ---------------- | ----------------------------------------------------------------------- |
 | `name`           | Display name. Required, non-empty.                                      |
 | `domainSuffixes` | Hosts to intercept, matched by **suffix**. `example.com` covers `www.example.com`. No wildcards. |
-| `rewriteTarget`  | Optional upstream redirect / synthesized-response action (see [Rewrite actions](#rewrite-actions)). |
-| `rules`          | Ordered list of rewrite rules.                                          |
+| `rules`          | Ordered list of rewrite rules. Redirect / reject / host-rewrite are per-rule via the [`rewrite` operation](#rewrite-0--request-only). |
 
 Suffix matching is **most-specific-win**: if both `example.com` and
 `api.example.com` are configured, a request to `api.example.com` uses only the
@@ -101,10 +104,9 @@ can.
 # A complete example
 name        = My Rule Set
 hostname    = example.com, api.example.org
-redirect    = upstream.example.com:443
 
-# request: rewrite the /old/ prefix to /new/
-0, 0, .*, ^/old/, /new/
+# request: transparently rewrite the whole URL to a new host (dials it + rewrites Host)
+0, 0, ^https://example\.com/old, 0, https://upstream.example.com/new
 # request: add a header on /api/ paths
 0, 1, ^/api/, X-Powered-By, Anywhere
 ```
@@ -118,15 +120,10 @@ otherwise kept verbatim.
 | -------------- | ---------------------------------------------------------------------------------------- |
 | `name`         | Display name (required).                                                                 |
 | `hostname`     | Comma-separated domain suffixes.                                                         |
-| `redirect`     | Transparent upstream redirect: `host` or `host:port` (see [Rewrite actions](#rewrite-actions)). |
-| `redirect-302` | Synthesize a `302 Found`: `host` or `host:port`.                                         |
-| `reject-200`   | Synthesize a `200 OK`: `<kind>` or `<kind> <content>`.                                   |
-| `content-type` | Content-Type override, applied to `reject-200` only.                                     |
 
-`redirect`, `redirect-302`, and `reject-200` are mutually exclusive; if more
-than one appears, the last wins. Unrecognized keys are ignored. For IPv6 hosts,
-use bracket form (`[::1]` or `[::1]:443`); an unbracketed address with multiple
-colons is treated as a host with no port.
+Unrecognized keys are ignored. Redirect / reject / host-rewrite are configured
+per-rule via the [`rewrite` operation](#rewrite-0--request-only), not as
+set-level headers.
 
 ### Rule lines
 
@@ -139,22 +136,27 @@ Shape:
 - **Phase**: `0` = request, `1` = response.
 - **Operation** and its trailing fields:
 
-| ID  | Operation        | Phase        | Fields                  |
-| --- | ---------------- | ------------ | ----------------------- |
-| `0` | `url-replace`    | request only | `url-pattern`, `search`, `replacement` |
-| `1` | `header-add`     | both         | `url-pattern`, `name`, `value` |
-| `2` | `header-delete`  | both         | `url-pattern`, `name`       |
-| `3` | `header-replace` | both         | `url-pattern`, `name`, `value` |
-| `4` | `script`         | both         | `url-pattern`, `base64`     |
-| `5` | `stream-script`  | both         | `url-pattern`, `base64`     |
-| `6` | `body-replace`   | both         | `url-pattern`, `search`, `replacement` |
-| `7` | `body-json`      | both         | `url-pattern`, `action`, …  |
+| ID    | Operation        | Phase        | Fields                                       |
+| ----- | ---------------- | ------------ | -------------------------------------------- |
+| `0`   | `rewrite`        | request only | `url-pattern`, `sub-mode`, `<sub-mode args>` |
+| `1`   | `header-add`     | both         | `url-pattern`, `name`, `value` |
+| `2`   | `header-delete`  | both         | `url-pattern`, `name`       |
+| `3`   | `header-replace` | both         | `url-pattern`, `name`, `value` |
+| `4`   | `body-replace`   | both         | `url-pattern`, `search`, `replacement` |
+| `5`   | `body-json`      | both         | `url-pattern`, `action`, `<action args>`  |
+| `100` | `script`         | both         | `url-pattern`, `base64`     |
+| `101` | `stream-script`  | both         | `url-pattern`, `base64`     |
 
-`url-replace` is always request-phase regardless of the phase column. A rule
-whose field count does not match the table, or whose `url-pattern` is empty or
-fails to compile as a regex, is dropped. For `url-replace` and `body-replace`
-the `search` field must also be a valid regex; for `body-json` the trailing
-fields depend on `action` — see [`body-json` (7)](#body-json-7).
+Scripting operations use a separate `100`+ id range, set apart from the native
+edits.
+
+`rewrite` (op `0`) is always request-phase regardless of the phase column. Its
+second field is a numeric **sub-mode**; the remaining fields depend on it — see
+[`rewrite` (0)](#rewrite-0--request-only). A rule whose field count does not
+match, or whose `url-pattern` is empty or fails to compile as a regex, is
+dropped. For `body-replace` the `search` field must also be a valid regex; for
+`body-json` the trailing fields depend on `action` — see
+[`body-json` (5)](#body-json-5).
 
 ### Fields and quoting
 
@@ -183,68 +185,48 @@ can be matched by the same URL pattern.
 
 ---
 
-## Rewrite actions
-
-Set on the rule set via `redirect` / `redirect-302` / `reject-200`. The latter
-two synthesize the reply on the inner leg and **never open an upstream
-connection**, so any rule lines in the same set never fire.
-
-### `redirect` — transparent
-
-```
-redirect = upstream.example.com:8443
-```
-
-Dials the outer leg to `host[:port]` instead of the original destination and
-rewrites the request authority (`Host` / `:authority`) to match. A nil port
-keeps the original. The client still sees the **original** host on the leaf
-certificate, so this is invisible to it. Rules still run normally.
-
-### `redirect-302`
-
-```
-redirect-302 = www.example.com
-```
-
-Synthesizes a `302 Found` whose `Location` is
-`https://<host>[:<port>]<original-request-target>` (the port is emitted only
-when set and not 443).
-
-### `reject-200`
-
-```
-reject-200   = gif
-reject-200   = text Service unavailable
-reject-200   = data QW55d2hlcmU=
-content-type = application/json
-```
-
-Synthesizes a `200 OK`. The value is `<kind>` or `<kind> <content>`:
-
-| Kind   | Content                | Default Content-Type            |
-| ------ | ---------------------- | ------------------------------- |
-| `text` | literal UTF-8 body     | `text/plain; charset=utf-8`     |
-| `gif`  | ignored (1×1 GIF emitted) | `image/gif`                  |
-| `data` | base64, decoded at send | `application/octet-stream`     |
-
-Empty content yields a short non-empty default body (some apps treat an empty
-200 as an error). `content-type` overrides the per-kind default.
-
----
-
 ## Rule operations
 
-### `url-replace` (0) — request only
+### `rewrite` (0) — request only
 
-Regex substitution on the request target (path-and-query): every match of the
-`search` regex becomes the **literal** `replacement` (no `$1` capture expansion
-— the substitution runs through `String.replacing`). The `url-pattern` gate is
-separate — it decides whether the rule fires. A rule whose `search` is empty or
-won't compile is dropped, and a post-substitution target that isn't a valid
-request-target is skipped. Example — strip an API version prefix:
+The unified rewrite operation. Its second field is a numeric **sub-mode**; the
+remaining field(s) depend on it. When the `url-pattern` gate matches, the
+**first** matching `rewrite` rule wins.
+
+| Sub-mode | Name             | Args          | Effect |
+| -------- | ---------------- | ------------- | ------ |
+| `0`      | transparent      | `<full-url>`  | Replace the whole request URL with `<full-url>` (literal). The request-target becomes the replacement's path+query; the outer leg is dialed to the replacement **host** and `Host` / `:authority` is rewritten to match it (a no-op in effect when the host is unchanged). The client still sees the **original** host on the leaf certificate. |
+| `1`      | 302 redirect     | `<full-url>`  | Synthesize a `302 Found` whose `Location` is `<full-url>`. No upstream dial. |
+| `2`      | reject 200 text  | `[<content>]` | Synthesize a `200 OK` with a `text/plain; charset=utf-8` body. Empty `<content>` → a short default line. No upstream dial. |
+| `3`      | reject 200 gif   | *(none)*      | Synthesize a `200 OK` carrying the canned 1×1 `image/gif`. No upstream dial. |
+| `4`      | reject 200 data  | `[<base64>]`  | Synthesize a `200 OK` with an `application/octet-stream` body decoded from `<base64>`. Empty → a default payload. No upstream dial. |
+
+For sub-modes `0` and `1` the URL must be a full absolute URL with a host
+(`https://host[:port]/path?query`); a URL with no path uses `/`. The replacement
+is **literal** — there is no `$1` capture expansion, so every URL matching the
+`url-pattern` maps to the one exact replacement URL. Author the `url-pattern`
+specifically.
+
+Because a transparent rewrite can change the dial target, the upstream dial is
+**deferred**: the inner TLS handshake completes first (negotiating ALPN from the
+client), the first request is read and rewritten, and only then is the upstream
+dialed — to the rewritten host when one is set, otherwise the original. A `302` /
+reject sub-mode answers on the inner leg and never dials. (Consequence: the
+inner ALPN is client-driven; if the client negotiates `h2` but the upstream
+can't, the connection is torn down and the client retries — typically
+downgrading. The connection's upstream is fixed by the first request — for both
+HTTP/1.1 and HTTP/2 — so a later request on the same connection whose transparent
+rewrite resolves a *different* host/port can't be reached on the already-dialed
+leg; rather than misroute it, the connection is torn down and the client retries
+it on a fresh connection.)
+
+Examples — transparently send one host's traffic to another, redirect with a
+`302`, and block an ad path with a tiny GIF:
 
 ```
-0, 0, .*, ^/v1/, /
+0, 0, ^https://a\.example\.com/, 0, https://b.example.com/
+0, 0, ^https://old\.example\.com/page, 1, https://new.example.com/page
+0, 0, .*/ads/, 3
 ```
 
 ### `header-add` (1)
@@ -272,20 +254,15 @@ A header that is not present is left alone — it does **not** add it:
 1, 3, .*, Cache-Control, no-store
 ```
 
-### `script` (4) / `stream-script` (5)
+### `body-replace` (4)
 
-JavaScript transforms. The field is base64-encoded UTF-8 source defining
-`function process(ctx)`. See the next sections.
-
-### `body-replace` (6)
-
-Regex find-and-replace over the text body in **native code** — the body-side
-analog of `url-replace`, without writing any JavaScript. Its fields are
-`url-pattern` (the URL gate), a `search` regex, and a `replacement`:
+Regex find-and-replace over the text body in **native code**, without writing
+any JavaScript. Its fields are `url-pattern` (the URL gate), a `search` regex,
+and a `replacement`:
 
 ```
-1, 6, .*, http://, https://
-1, 6, .*, (?i)debug=true, debug=false
+1, 4, .*, http://, https://
+1, 4, .*, (?i)debug=true, debug=false
 ```
 
 `search` is a Swift `Regex` (default Unicode semantics) matched against the
@@ -308,7 +285,7 @@ When several body transforms match the same message they run in a fixed order:
 `body-json` edits first, then `body-replace`, then a `script` (so the script
 sees the fully-edited body).
 
-### `body-json` (7)
+### `body-json` (5)
 
 Declarative JSON body editing in **native code** — the same edits as the
 [`Anywhere.json`](#anywherejson) script API, without writing any JavaScript. One
@@ -344,9 +321,9 @@ the script sees the already-edited body (after any `body-replace` edits).
 Examples — flip a flag, drop a field, and filter an array on the response:
 
 ```
-1, 7, ^/api/user, add, $.user.vip, true
-1, 7, ^/api/user, delete, $.user.password
-1, 7, ^/api/feed, remove-where-field-in, $.items, status, expired
+1, 5, ^/api/user, add, $.user.vip, true
+1, 5, ^/api/user, delete, $.user.password
+1, 5, ^/api/feed, remove-where-field-in, $.items, status, expired
 ```
 
 A `value` / `values` that contains a comma — a multi-element array or a
@@ -355,17 +332,22 @@ since the field separator is also `,`. So matching several values is either one
 quoted array or one rule per value (they compose):
 
 ```
-1, 7, ^/api/feed, remove-where-field-in, $.items, status, "[""expired"",""deleted""]"
-1, 7, ^/api/profile, add, $.meta, "{""beta"":true,""tier"":2}"
+1, 5, ^/api/feed, remove-where-field-in, $.items, status, "[""expired"",""deleted""]"
+1, 5, ^/api/profile, add, $.meta, "{""beta"":true,""tier"":2}"
 ```
 
 Set a string value (CSV-quote it when it contains a comma) and redact a token
 wherever it appears:
 
 ```
-1, 7, ^/api/profile, replace, $.tier, "gold, platinum"
-1, 7, .*, replace-recursive, access_token, "***"
+1, 5, ^/api/profile, replace, $.tier, "gold, platinum"
+1, 5, .*, replace-recursive, access_token, "***"
 ```
+
+### `script` (100) / `stream-script` (101)
+
+JavaScript transforms. The field is base64-encoded UTF-8 source defining
+`function process(ctx)`. See the next sections.
 
 ---
 
@@ -374,7 +356,7 @@ wherever it appears:
 Use `script` whenever the rewrite needs the **whole message at once**: rewriting
 a body as a unit (JSON, protobuf, JWT, a regex over the full text) or
 short-circuiting a request with `Anywhere.respond(...)`. The head is read-only —
-URL and header edits have dedicated rules (`url-replace`, `header-add` /
+URL and header edits have dedicated rules (`rewrite`, `header-add` /
 `header-delete` / `header-replace`), and `ctx.method` / `ctx.status` aren't
 script-writable either — so a `script` rule's job is the body (plus the
 `Anywhere.done` / `exit` / `respond` control directives).
@@ -392,7 +374,7 @@ to passthrough, and chunked bodies are truncated at the cap.
 Authoring a script rule:
 
 ```
-1, 4, ^/api/user, <base64 of the JS source>
+1, 100, ^/api/user, <base64 of the JS source>
 ```
 
 To produce the base64 from a source file:
@@ -432,10 +414,10 @@ Per-frame context adds:
 - `ctx.state` — a JS object persisted **across frames of the same stream**.
   Mutate it to accumulate state; it starts as `{}`.
 
-Authoring is identical to `script` but with op `5`:
+Authoring is identical to `script` but with op `101`:
 
 ```
-1, 5, ^/events, <base64>
+1, 101, ^/events, <base64>
 ```
 
 ---
@@ -449,7 +431,7 @@ only one read back is `ctx.body` — replace it or mutate it in place.
 | ------------- | ------------------------- | --------- | ------- | ----- |
 | `ctx.phase`   | `"request"` / `"response"`| both      | no      | Reassigning is a no-op. |
 | `ctx.method`  | string or `null`          | both      | no      | Read-only. On response, the originating request's method. |
-| `ctx.url`     | string or `null`          | both      | no      | Read-only — use a `url-replace` rule. Absolute URL; on response, the originating request's URL. |
+| `ctx.url`     | string or `null`          | both      | no      | Read-only — use a `rewrite` rule. Absolute URL; on response, the originating request's URL. |
 | `ctx.status`  | number or `null`          | response  | no      | Read-only. `null` on request. |
 | `ctx.headers` | array of `[name, value]`  | both      | no      | Read-only — use `header-add` / `header-delete` / `header-replace` rules. Pairs; preserves duplicates and order. |
 | `ctx.body`    | `Uint8Array`              | both      | yes     | Backed by native memory; element-wise writes propagate. |
@@ -457,7 +439,7 @@ only one read back is `ctx.body` — replace it or mutate it in place.
 Only `ctx.body` is mutable — in both `script` and `stream-script` (the latter
 also reads back `ctx.state`). Every head field (`method`, `url`, `status`,
 `headers`, `phase`) is **read-only**: assigning it is ignored on readback. URL
-and header edits have dedicated rule operations — `url-replace` and `header-add`
+and header edits have dedicated rule operations — `rewrite` and `header-add`
 / `header-delete` / `header-replace` — so scripts don't duplicate them; `method`
 and `status` have no script-side write at all. Keeping the head read-only also
 lets the HTTP/2 path open a request stream in stream-ID order without waiting on
@@ -571,7 +553,7 @@ Paths use JSONPath like `$.data.items[0].id` (leading `$` optional; dotted keys
 and `[index]` / `["key"]` brackets). Recursive methods take a bare key name.
 
 > For these same edits **without** a script — declared as a rule and run in
-> native code — use the [`body-json` (7)](#body-json-7) operation. A `script` is
+> native code — use the [`body-json` (5)](#body-json-5) operation. A `script` is
 > only needed when the edit must be conditional, computed, or combined with
 > `Anywhere.respond` / control directives.
 
@@ -624,7 +606,7 @@ match, **`stream-script` wins**.
 
 If you need composed behavior, consolidate the logic into a single
 `process(ctx)` rather than splitting it across rules. Static operations
-(`url-replace`, `header-*`) are not capped — all matching ones apply in order.
+(`rewrite`, `header-*`) are not capped — all matching ones apply in order.
 
 ---
 
@@ -663,20 +645,20 @@ hostname = api.example.com
 0, 1, ^/v2/, X-Trace-Id, anywhere
 ```
 
-### Redirect an old path (request-phase URL rewrite)
+### Redirect an old path (transparent URL rewrite)
 
 ```
 name     = Path Migration
 hostname = example.com
-0, 0, .*, ^/old/, /new/
+0, 0, ^https://example\.com/old/, 0, https://example.com/new/
 ```
 
 ### Block a host with a 1×1 GIF
 
 ```
-name       = Block Tracker
-hostname   = tracker.example.com
-reject-200 = gif
+name     = Block Tracker
+hostname = tracker.example.com
+0, 0, .*, 3
 ```
 
 ### Edit a JSON response body (`script`)
@@ -705,7 +687,7 @@ printf '%s' "$(cat flag.js)" | base64
 ```
 name     = VIP Flag
 hostname = api.example.com
-1, 4, ^/v1/profile, eyAuLi4gfQ==
+1, 100, ^/v1/profile, eyAuLi4gfQ==
 ```
 
 ### Mock an endpoint without hitting upstream (`Anywhere.respond`)
@@ -721,7 +703,7 @@ function process(ctx) {
 ```
 
 ```
-0, 4, ^/api/feature-flags, <base64>
+0, 100, ^/api/feature-flags, <base64>
 ```
 
 ### Redact tokens in a live SSE stream (`stream-script`)
@@ -737,7 +719,7 @@ function process(ctx) {
 ```
 name     = Redact SSE
 hostname = api.example.com
-1, 5, ^/events, <base64>
+1, 101, ^/events, <base64>
 ```
 
 ### Count requests across connections (`Anywhere.store`)
@@ -753,7 +735,7 @@ function process(ctx) {
 ```
 
 ```
-0, 4, .*, <base64>
+0, 100, .*, <base64>
 ```
 
 > A script can't add the count as a request header (`ctx.headers` is read-only);

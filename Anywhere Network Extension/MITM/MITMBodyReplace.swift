@@ -8,11 +8,10 @@
 import Foundation
 
 /// Native regex find-and-replace over a text message body — the engine
-/// behind ``MITMOperation/bodyReplace`` (import operation id `6`). It is the
-/// body-side analog of ``MITMOperation/urlReplace``: a compiled ``Regex``
-/// matched anywhere in the body, with each match swapped for the **literal**
-/// replacement string (no `$1` capture expansion — the substitution goes
-/// through `String.replacing(_:with:)`).
+/// behind ``MITMOperation/bodyReplace`` (import operation id `4`): a compiled
+/// ``Regex`` matched anywhere in the body, with each match swapped for the
+/// **literal** replacement string (no `$1` capture expansion — the
+/// substitution goes through `String.replacing(_:with:)`).
 ///
 /// **Bytes in, bytes out.** ``applyAll`` decodes the body as UTF-8 once,
 /// applies every compiled edit in rule order against the running string, and
