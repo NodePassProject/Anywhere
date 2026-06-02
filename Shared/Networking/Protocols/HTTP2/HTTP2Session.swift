@@ -15,9 +15,8 @@ private let logger = AnywhereLogger(category: "HTTP2Session")
 /// connection-level flow control, and a persistent read loop that
 /// demultiplexes incoming frames to individual ``HTTP2Stream`` instances.
 ///
-/// Modelled after Chromium's `SpdySession`: one TCP/TLS connection carries
-/// many independent CONNECT streams, each with its own flow-control window
-/// and padding state.
+/// One TCP/TLS connection carries many independent CONNECT streams, each with
+/// its own flow-control window.
 nonisolated class HTTP2Session: PoolableSession {
 
     // MARK: - State
@@ -41,8 +40,11 @@ nonisolated class HTTP2Session: PoolableSession {
     let port: UInt16
     let sni: String
 
-    private let transport: NaiveTLSTransport
-    private let configuration: NaiveConfiguration
+    private let transport: TLSStreamTransport
+    /// Supplies the per-CONNECT request headers (proxy auth, User-Agent,
+    /// padding, …). Injected so the session stays protocol-neutral; invoked
+    /// once per stream so randomized values (e.g. padding) differ per request.
+    private let connectHeaders: () -> [(name: String, value: String)]
 
     private(set) var state: State = .idle
 
@@ -86,12 +88,12 @@ nonisolated class HTTP2Session: PoolableSession {
     // MARK: - Initialization
 
     init(host: String, port: UInt16, sni: String, tunnel: ProxyConnection?,
-         configuration: NaiveConfiguration) {
+         connectHeaders: @escaping () -> [(name: String, value: String)]) {
         self.host = host
         self.port = port
         self.sni = sni
-        self.configuration = configuration
-        self.transport = NaiveTLSTransport(
+        self.connectHeaders = connectHeaders
+        self.transport = TLSStreamTransport(
             host: host,
             port: port,
             sni: sni,
@@ -195,7 +197,6 @@ nonisolated class HTTP2Session: PoolableSession {
         let stream = HTTP2Stream(
             streamID: streamID,
             session: self,
-            configuration: configuration,
             destination: destination
         )
         streams[streamID] = stream
@@ -214,16 +215,13 @@ nonisolated class HTTP2Session: PoolableSession {
 
     private static let connectionPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".data(using: .ascii)!
 
-    /// Chrome-like User-Agent for CONNECT requests.
-    static let userAgent = "Mozilla/5.0 (iPhone16,2; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Resorts/4.7.5"
-
     private func sendConnectionPreface() {
         var data = Data()
 
         // Connection preface
         data.append(Self.connectionPreface)
 
-        // SETTINGS matching Chrome/NaiveProxy defaults
+        // SETTINGS chosen to match a common browser profile (probe resistance)
         let settings = HTTP2Framer.settingsFrame([
             (id: 0x1, value: 65536),     // HEADER_TABLE_SIZE
             (id: 0x2, value: 0),         // ENABLE_PUSH
@@ -399,13 +397,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
     /// Sends CONNECT HEADERS for a stream.
     func sendConnect(stream: HTTP2Stream, completion: @escaping (Error?) -> Void) {
-        var extraHeaders: [(name: String, value: String)] = []
-
-        if let auth = configuration.basicAuth {
-            extraHeaders.append((name: "proxy-authorization", value: "Basic \(auth)"))
-        }
-        extraHeaders.append((name: "user-agent", value: Self.userAgent))
-        extraHeaders.append(contentsOf: NaivePaddingNegotiator.requestHeaders())
+        let extraHeaders = connectHeaders()
 
         let headerBlock = HPACKEncoder.encodeConnectRequest(
             authority: stream.destination,

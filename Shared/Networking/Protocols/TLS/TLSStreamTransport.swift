@@ -1,5 +1,5 @@
 //
-//  NaiveTLSTransport.swift
+//  TLSStreamTransport.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/9/26.
@@ -7,34 +7,35 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "NaiveTLS")
+private let logger = AnywhereLogger(category: "TLSStream")
 
 // MARK: - Error
 
-enum NaiveTLSError: Error, LocalizedError {
+enum TLSStreamError: Error, LocalizedError {
     case connectionFailed(String)
     case notConnected
 
     var errorDescription: String? {
         switch self {
-        case .connectionFailed(let msg): return "Naive TLS connection failed: \(msg)"
-        case .notConnected: return "Naive TLS not connected"
+        case .connectionFailed(let msg): return "TLS stream connection failed: \(msg)"
+        case .notConnected: return "TLS stream not connected"
         }
     }
 }
 
-// MARK: - NaiveTLSTransport
+// MARK: - TLSStreamTransport
 
-/// TLS transport for NaiveProxy connections using ``RawTCPSocket`` + ``TLSClient``.
+/// A reusable TLS-over-TCP stream transport built on ``RawTCPSocket`` + ``TLSClient``.
 ///
-/// Reuses Anywhere's existing TLS infrastructure to establish a TLS 1.3 connection
-/// to the proxy server. The ALPN protocol list is configurable (e.g. `["h2"]` for
-/// HTTP/2, `["http/1.1"]` for HTTP/1.1). After the handshake, all I/O goes through
-/// a ``TLSRecordConnection`` which handles TLS record encryption/decryption.
+/// Establishes a TLS 1.3 connection to a server with a configurable ALPN list
+/// (e.g. `["h2"]` for HTTP/2, `["http/1.1"]` for HTTP/1.1). After the handshake,
+/// all I/O flows through a ``TLSRecordConnection`` which handles TLS record
+/// encryption/decryption. Protocol-neutral: any layer needing a TLS byte stream
+/// (HTTP/1.1, HTTP/2, …) can build on it.
 ///
 /// Supports both direct connections and connections tunneled through an existing
 /// ``ProxyConnection`` (for proxy chaining).
-nonisolated class NaiveTLSTransport {
+nonisolated class TLSStreamTransport {
 
     private let host: String
     private let port: UInt16
@@ -115,7 +116,7 @@ nonisolated class NaiveTLSTransport {
     ///   - completion: Called with `nil` on success or an error on failure.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         guard let tlsConnection, isReady else {
-            completion(NaiveTLSError.notConnected)
+            completion(TLSStreamError.notConnected)
             return
         }
         tlsConnection.send(data: data, completion: completion)
@@ -129,7 +130,7 @@ nonisolated class NaiveTLSTransport {
     ///   or `(nil, error)` on failure.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         guard let tlsConnection, isReady else {
-            completion(nil, NaiveTLSError.notConnected)
+            completion(nil, TLSStreamError.notConnected)
             return
         }
         tlsConnection.receive(completion: completion)

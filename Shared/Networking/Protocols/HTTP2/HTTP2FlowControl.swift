@@ -9,16 +9,16 @@ import Foundation
 
 /// Tracks HTTP/2 send and receive flow-control windows for a single connection + stream.
 ///
-/// Window sizing matches NaiveProxy's bandwidth-delay product calculation:
-/// - `kMaxBandwidthMBps = 125`, `kTypicalRttSecond = 0.256`
-/// - `kMaxBdpMB = 32 MB`, `kTypicalWindow = 64 MB` (2× BDP)
-/// - Session max receive window = 128 MB (2× stream window)
+/// Windows are sized for high bandwidth-delay-product links so a single stream
+/// can saturate fast, high-latency paths:
+/// - ~32 MB BDP at 125 MB/s over a 0.256 s RTT
+/// - 64 MB stream window (2× BDP), 128 MB connection window (2× stream)
 struct HTTP2FlowControl {
     /// HTTP/2 default initial window size (RFC 7540 §6.9.2).
     static let defaultInitialWindowSize = 65_535
-    /// NaiveProxy's stream initial window size (64 MB).
+    /// Per-stream initial receive window (64 MB), sized for high-BDP links.
     static let naiveInitialWindowSize = 67_108_864
-    /// NaiveProxy's session (connection) max receive window (128 MB).
+    /// Connection (session) max receive window (128 MB).
     static let naiveSessionMaxRecvWindow = 134_217_728
 
     /// WINDOW_UPDATE increment to send on stream 0 after SETTINGS exchange.

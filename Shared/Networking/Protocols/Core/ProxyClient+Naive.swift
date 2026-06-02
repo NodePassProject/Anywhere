@@ -52,19 +52,19 @@ extension ProxyClient {
 
         switch scheme {
         case .http11:
-            let transport = NaiveTLSTransport(
+            let transport = TLSStreamTransport(
                 host: proxyHost,
                 port: configuration.serverPort,
                 sni: naiveConfig.effectiveSNI,
                 alpn: ["http/1.1"],
                 tunnel: self.tunnel
             )
-            let tunnel = HTTP11Connection(
+            let http11 = HTTP11Connection(
                 transport: transport,
-                configuration: naiveConfig,
+                extraHeaders: NaiveProxyHeaders.http11(basicAuth: naiveConfig.basicAuth),
                 destination: destination
             )
-            openTunnelAndWrap(tunnel, completion: completion)
+            openTunnelAndWrap(NaiveTunnelAdapter(http11), completion: completion)
 
         case .http2:
             HTTP2SessionPool.shared.acquireStream(
@@ -72,10 +72,10 @@ extension ProxyClient {
                 port: configuration.serverPort,
                 sni: naiveConfig.effectiveSNI,
                 tunnel: self.tunnel,
-                configuration: naiveConfig,
+                connectHeaders: { NaiveProxyHeaders.http2(basicAuth: naiveConfig.basicAuth) },
                 destination: destination
             ) { [self] stream in
-                openTunnelAndWrap(stream, completion: completion)
+                openTunnelAndWrap(NaiveTunnelAdapter(stream), completion: completion)
             }
 
         case .http3:

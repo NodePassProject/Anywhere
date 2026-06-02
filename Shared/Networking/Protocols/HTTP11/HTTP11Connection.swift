@@ -11,27 +11,32 @@ private let logger = AnywhereLogger(category: "HTTP11")
 
 // MARK: - HTTP11Connection
 
-/// HTTP/1.1 CONNECT tunnel through a TLS proxy, conforming to ``NaiveTunnel``.
+/// HTTP/1.1 CONNECT tunnel through a TLS proxy, conforming to ``HTTPTunnel``.
 ///
 /// Handles the full HTTP/1.1 CONNECT lifecycle:
-/// 1. TLS connection to the proxy server (via ``NaiveTLSTransport``)
-/// 2. Send CONNECT request with Host, Proxy-Connection, User-Agent, and auth headers
+/// 1. TLS connection to the proxy server (via ``TLSStreamTransport``)
+/// 2. Send CONNECT request with Host, Proxy-Connection, plus caller-supplied
+///    headers (User-Agent, auth, …)
 /// 3. Parse the HTTP/1.1 response and validate status
 /// 4. Bidirectional raw data relay through the tunnel
 ///
-/// Matches Chromium/NaiveProxy's CONNECT request format:
+/// Request shape:
 /// - `Proxy-Connection: keep-alive` for HTTP/1.0 proxy compatibility
-/// - `User-Agent` header for probe resistance
 /// - HTTP version validation on the response
 /// - Rejects extraneous data after the 200 response (security hardening)
 ///
-/// Does not support NaiveProxy padding (HTTP/1.1 tunnels always use `.none`).
-nonisolated class HTTP11Connection: NaiveTunnel {
+/// Parses only a status line, so ``responseHeaders`` is always empty — a proxy
+/// layer wrapping it therefore negotiates `.none` (HTTP/1.1 carries no padding).
+nonisolated class HTTP11Connection: HTTPTunnel {
 
     // MARK: Properties
 
-    private let transport: NaiveTLSTransport
-    private let configuration: NaiveConfiguration
+    private let transport: TLSStreamTransport
+    /// Extra CONNECT request headers (User-Agent, proxy auth, …) supplied by the
+    /// caller, keeping this type free of any proxy-protocol specifics. Names are
+    /// emitted verbatim so the caller controls header casing, letting it mimic a
+    /// specific client's on-the-wire shape.
+    private let extraHeaders: [(name: String, value: String)]
     /// The target `host:port` for the CONNECT tunnel.
     private let destination: String
 
@@ -40,14 +45,11 @@ nonisolated class HTTP11Connection: NaiveTunnel {
     /// `.userInitiated`: data-plane queue, same priority as the rest of the chain.
     private let queue = DispatchQueue(label: "com.argsment.Anywhere.http11", qos: .userInitiated)
 
-    /// HTTP/1.1 CONNECT does not support NaiveProxy padding.
-    private(set) var negotiatedPaddingType = NaivePaddingNegotiator.PaddingType.none
+    /// HTTP/1.1 parses only a status line, so no response headers are exposed.
+    let responseHeaders: [(name: String, value: String)] = []
 
     /// Whether the tunnel is open and ready for data transfer.
     var isConnected: Bool { connected }
-
-    /// Chrome-like User-Agent for the CONNECT request.
-    private static let userAgent = "Mozilla/5.0 (iPhone16,2; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Resorts/4.7.5"
 
     // MARK: Initialization
 
@@ -55,11 +57,13 @@ nonisolated class HTTP11Connection: NaiveTunnel {
     ///
     /// - Parameters:
     ///   - transport: The TLS transport to the proxy server (ALPN `["http/1.1"]`).
-    ///   - configuration: NaiveProxy configuration (credentials, etc.).
+    ///   - extraHeaders: Extra CONNECT request headers (User-Agent, auth, …),
+    ///     emitted in order with names verbatim.
     ///   - destination: The target `host:port` for the CONNECT tunnel.
-    init(transport: NaiveTLSTransport, configuration: NaiveConfiguration, destination: String) {
+    init(transport: TLSStreamTransport, extraHeaders: [(name: String, value: String)],
+         destination: String) {
         self.transport = transport
-        self.configuration = configuration
+        self.extraHeaders = extraHeaders
         self.destination = destination
     }
 
@@ -117,17 +121,15 @@ nonisolated class HTTP11Connection: NaiveTunnel {
 
     // MARK: - CONNECT Request
 
-    /// Sends the HTTP/1.1 CONNECT request with headers matching Chromium/NaiveProxy.
+    /// Sends the CONNECT request: request line, Host, Proxy-Connection, then
+    /// the caller-supplied headers.
     private func sendConnectRequest(completion: @escaping (Error?) -> Void) {
         var request = "CONNECT \(destination) HTTP/1.1\r\n"
         request += "Host: \(destination)\r\n"
         request += "Proxy-Connection: keep-alive\r\n"
-        request += "User-Agent: \(Self.userAgent)\r\n"
-
-        if let auth = configuration.basicAuth {
-            request += "Proxy-Authorization: Basic \(auth)\r\n"
+        for header in extraHeaders {
+            request += "\(header.name): \(header.value)\r\n"
         }
-
         request += "\r\n"
 
         transport.send(data: Data(request.utf8)) { [weak self] error in
@@ -153,7 +155,7 @@ nonisolated class HTTP11Connection: NaiveTunnel {
             }
 
             guard let data, !data.isEmpty else {
-                completion(NaiveTLSError.connectionFailed("Connection closed during CONNECT"))
+                completion(TLSStreamError.connectionFailed("Connection closed during CONNECT"))
                 return
             }
 
@@ -170,38 +172,38 @@ nonisolated class HTTP11Connection: NaiveTunnel {
             // Parse status line
             let headerData = accumulated[..<headerEnd]
             guard let headerString = String(data: headerData, encoding: .utf8) else {
-                completion(NaiveTLSError.connectionFailed("Invalid CONNECT response encoding"))
+                completion(TLSStreamError.connectionFailed("Invalid CONNECT response encoding"))
                 return
             }
 
             let statusLine = headerString.prefix(while: { $0 != "\r" && $0 != "\n" })
             let parts = statusLine.split(separator: " ", maxSplits: 2)
             guard parts.count >= 2 else {
-                completion(NaiveTLSError.connectionFailed("Malformed CONNECT status line"))
+                completion(TLSStreamError.connectionFailed("Malformed CONNECT status line"))
                 return
             }
 
-            // Validate HTTP version (require HTTP/1.x, matching Chromium)
+            // Require HTTP/1.x; reject anything else as a malformed response.
             guard parts[0].hasPrefix("HTTP/1.") else {
-                completion(NaiveTLSError.connectionFailed("Invalid HTTP version in CONNECT response"))
+                completion(TLSStreamError.connectionFailed("Invalid HTTP version in CONNECT response"))
                 return
             }
 
             let statusCode = String(parts[1])
             guard statusCode == "200" else {
                 if statusCode == "407" {
-                    completion(NaiveTLSError.connectionFailed("Proxy authentication required (407)"))
+                    completion(TLSStreamError.connectionFailed("Proxy authentication required (407)"))
                 } else {
-                    completion(NaiveTLSError.connectionFailed("CONNECT failed with status \(statusCode)"))
+                    completion(TLSStreamError.connectionFailed("CONNECT failed with status \(statusCode)"))
                 }
                 return
             }
 
-            // Reject extraneous data after the headers (matching Chromium's security check).
-            // The proxy should not send data before the tunnel is established.
+            // Reject extraneous data after the headers: the proxy must not send
+            // anything before the tunnel is established (security hardening).
             let afterHeaders = headerEnd + 4  // skip \r\n\r\n
             if afterHeaders < accumulated.count {
-                completion(NaiveTLSError.connectionFailed("Proxy sent extraneous data after CONNECT response"))
+                completion(TLSStreamError.connectionFailed("Proxy sent extraneous data after CONNECT response"))
                 return
             }
 

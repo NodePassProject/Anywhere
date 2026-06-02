@@ -7,6 +7,30 @@
 
 import Foundation
 
+// MARK: - Error
+
+enum HTTP2Error: Error, LocalizedError {
+    case notReady
+    case connectionFailed(String)
+    case protocolError(String)
+    case tunnelFailed(statusCode: String)
+    case authenticationRequired
+    case goaway
+    case streamReset(UInt32)
+
+    var errorDescription: String? {
+        switch self {
+        case .notReady: return "HTTP/2 connection not ready"
+        case .connectionFailed(let msg): return "HTTP/2 connection failed: \(msg)"
+        case .protocolError(let msg): return "HTTP/2 protocol error: \(msg)"
+        case .tunnelFailed(let code): return "HTTP/2 CONNECT tunnel failed with status \(code)"
+        case .authenticationRequired: return "HTTP/2 proxy authentication required (407)"
+        case .goaway: return "HTTP/2 GOAWAY received"
+        case .streamReset(let sid): return "HTTP/2 stream \(sid) reset"
+        }
+    }
+}
+
 // MARK: - Frame Types and Flags
 
 /// HTTP/2 frame types (RFC 7540 §6).

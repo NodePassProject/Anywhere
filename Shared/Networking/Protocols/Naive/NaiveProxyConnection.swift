@@ -11,11 +11,14 @@ private let logger = AnywhereLogger(category: "NaiveProxy")
 
 // MARK: - NaiveTunnel Protocol
 
-/// Abstraction over the underlying HTTP connection used for a CONNECT tunnel.
+/// Abstraction over the underlying HTTP connection used for a CONNECT tunnel,
+/// layering NaiveProxy's padding negotiation (``negotiatedPaddingType``) on top.
 ///
-/// Implemented by ``HTTP11Connection`` (HTTP/1.1), ``HTTP2Connection`` (HTTP/2),
-/// and ``HTTP3Connection`` (HTTP/3). ``NaiveProxyConnection`` uses this protocol
-/// to send and receive data through the tunnel regardless of the HTTP version.
+/// HTTP/1.1 and HTTP/2 are provided by the generic ``HTTPTunnel`` implementations
+/// (``HTTP11Connection``, ``HTTP2Stream``) wrapped in a ``NaiveTunnelAdapter``;
+/// HTTP/3 is NaiveProxy-specific glue (``HTTP3Stream``) that conforms directly.
+/// ``NaiveProxyConnection`` uses this protocol to relay data regardless of the
+/// HTTP version.
 protocol NaiveTunnel: AnyObject {
     var isConnected: Bool { get }
     var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType { get }

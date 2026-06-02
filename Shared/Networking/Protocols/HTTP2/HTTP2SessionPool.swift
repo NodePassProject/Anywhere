@@ -13,8 +13,7 @@ private let logger = AnywhereLogger(category: "HTTP2Pool")
 ///
 /// Sessions are keyed by `host:port:sni`. When a new stream is requested the
 /// pool returns an existing session with available capacity, or creates a new
-/// one. This mirrors Chromium's `SpdySessionPool`, which lets many CONNECT
-/// tunnels share a single TCP/TLS connection.
+/// one, letting many CONNECT tunnels share a single TCP/TLS connection.
 ///
 /// When a session receives GOAWAY or the transport closes, the pool evicts it
 /// automatically via the session's `onClose` callback.
@@ -44,7 +43,9 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
     ///   - port: Proxy server port.
     ///   - sni: TLS SNI value.
     ///   - tunnel: Optional outer proxy connection (for proxy chaining).
-    ///   - configuration: NaiveProxy configuration (credentials, etc.).
+    ///   - connectHeaders: Supplies the per-CONNECT request headers (proxy
+    ///     auth, User-Agent, padding, …); invoked once per stream so randomized
+    ///     values differ per request.
     ///   - destination: The `host:port` target for the CONNECT tunnel.
     ///   - completion: Called with the ready-to-use stream.
     func acquireStream(
@@ -52,7 +53,7 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
         port: UInt16,
         sni: String,
         tunnel: ProxyConnection?,
-        configuration: NaiveConfiguration,
+        connectHeaders: @escaping () -> [(name: String, value: String)],
         destination: String,
         completion: @escaping (HTTP2Stream) -> Void
     ) {
@@ -60,7 +61,7 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
         if tunnel != nil {
             let session = HTTP2Session(
                 host: host, port: port, sni: sni,
-                tunnel: tunnel, configuration: configuration
+                tunnel: tunnel, connectHeaders: connectHeaders
             )
             let sessionID = ObjectIdentifier(session)
             lock.lock()
@@ -99,7 +100,7 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
         } else {
             let new = HTTP2Session(
                 host: host, port: port, sni: sni,
-                tunnel: nil, configuration: configuration
+                tunnel: nil, connectHeaders: connectHeaders
             )
             let capturedKey = key
             new.onClose = { [weak self, weak new] in

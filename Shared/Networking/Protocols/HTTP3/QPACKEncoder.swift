@@ -332,6 +332,11 @@ enum QPACKEncoder {
     /// `offset` is **relative to `data.startIndex`**, so slices (e.g. the
     /// `payload` view returned by `HTTP3Framer.parseFrame`) work without
     /// rebasing. Indexing a slice as `data[0]` would trap.
+    /// QPACK integers are bounded by 2^62 − 1 (RFC 9204 §4.1.1). Any encoding
+    /// that exceeds this — or that would overflow `UInt64` while accumulating —
+    /// is malformed input, not a crash.
+    private static let qpackIntMax: UInt64 = (1 << 62) - 1
+
     private static func decodeVarIntPrefix(from data: Data, offset: Int, prefixBits: Int) -> (UInt64, Int)? {
         guard offset < data.count else { return nil }
         let base = data.startIndex
@@ -347,13 +352,19 @@ enum QPACKEncoder {
         var pos = offset + 1
         while pos < data.count {
             let byte = data[base + pos]
-            value += UInt64(byte & 0x7F) << shift
+            let add = UInt64(byte & 0x7F)
+            // Guard BEFORE shifting/adding: Swift's `+=` traps on overflow, so a
+            // crafted continuation byte (e.g. 0xFF…) would otherwise crash the
+            // process instead of being rejected as malformed.
+            if shift > 62 || (qpackIntMax >> shift) < add { return nil }
+            let shifted = add << shift
+            if qpackIntMax - shifted < value { return nil }
+            value += shifted
             pos += 1
             if byte & 0x80 == 0 {
                 return (value, pos - offset)
             }
             shift += 7
-            if shift > 63 { return nil }
         }
         return nil
     }
@@ -418,15 +429,28 @@ enum QPACKEncoder {
         case 23: return (":scheme", "https")
         case 24: return (":status", "103")
         case 25: return (":status", "200")
-        case 26: return (":status", "204")
-        case 27: return (":status", "206")
-        case 28: return (":status", "304")
-        case 29: return (":status", "400")
-        case 30: return (":status", "403")
-        case 31: return (":status", "404")
-        case 32: return (":status", "421")
-        case 33: return (":status", "425")
-        case 34: return (":status", "500")
+        case 26: return (":status", "304")
+        case 27: return (":status", "404")
+        case 28: return (":status", "503")
+        case 29: return ("accept", "*/*")
+        case 30: return ("accept", "application/dns-message")
+        case 31: return ("accept-encoding", "gzip, deflate, br")
+        case 32: return ("accept-ranges", "bytes")
+        case 33: return ("access-control-allow-headers", "cache-control")
+        case 34: return ("access-control-allow-headers", "content-type")
+        // Status 100/204/206/302/400/403/421/425/500 live at 63–71 in RFC 9204
+        // Appendix A (not contiguous with 24–28). A server may send any of them
+        // as an indexed field line, so they must resolve to the right code
+        // rather than be skipped (which would surface as a missing `:status`).
+        case 63: return (":status", "100")
+        case 64: return (":status", "204")
+        case 65: return (":status", "206")
+        case 66: return (":status", "302")
+        case 67: return (":status", "400")
+        case 68: return (":status", "403")
+        case 69: return (":status", "421")
+        case 70: return (":status", "425")
+        case 71: return (":status", "500")
         default: return nil
         }
     }

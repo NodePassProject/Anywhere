@@ -11,11 +11,12 @@ private let logger = AnywhereLogger(category: "HTTP2Stream")
 
 /// A single CONNECT tunnel multiplexed on an ``HTTP2Session``.
 ///
-/// Conforms to ``NaiveTunnel`` so it can be wrapped by ``NaiveProxyConnection``
-/// identically to the old single-stream ``HTTP2Connection``.  Each stream has
-/// its own flow-control window and padding negotiation, matching NaiveProxy's
-/// per-stream `NaivePaddingSocket` architecture.
-nonisolated class HTTP2Stream: NaiveTunnel {
+/// Conforms to ``HTTPTunnel`` so a proxy layer can wrap it (NaiveProxy does so
+/// via ``NaiveTunnelAdapter``). Each stream has its own flow-control window; the
+/// CONNECT response headers are exposed via ``responseHeaders`` so the proxy
+/// layer can run its own negotiation (e.g. NaiveProxy padding), keeping this
+/// type free of any proxy-protocol specifics.
+nonisolated class HTTP2Stream: HTTPTunnel {
 
     // MARK: - State
 
@@ -34,7 +35,6 @@ nonisolated class HTTP2Stream: NaiveTunnel {
     let destination: String
 
     private weak var session: HTTP2Session?
-    private let configuration: NaiveConfiguration
 
     private var state: StreamState = .idle
 
@@ -54,23 +54,22 @@ nonisolated class HTTP2Stream: NaiveTunnel {
     // CONNECT handshake callback
     private var connectCompletion: ((Error?) -> Void)?
 
-    // Padding (negotiated per-stream via CONNECT response headers)
-    private(set) var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType = .none
+    /// CONNECT response headers, set when the 200 response arrives. The proxy
+    /// layer reads these to run its own negotiation (e.g. NaiveProxy padding).
+    private(set) var responseHeaders: [(name: String, value: String)] = []
 
     var isConnected: Bool { state == .open }
 
     // MARK: - Init
 
-    init(streamID: UInt32, session: HTTP2Session, configuration: NaiveConfiguration,
-         destination: String) {
+    init(streamID: UInt32, session: HTTP2Session, destination: String) {
         self.streamID = streamID
         self.session = session
-        self.configuration = configuration
         self.destination = destination
         self.sendWindow = HTTP2FlowControl.defaultInitialWindowSize
     }
 
-    // MARK: - NaiveTunnel
+    // MARK: - HTTPTunnel
 
     func openTunnel(completion: @escaping (Error?) -> Void) {
         guard let session else {
@@ -201,7 +200,7 @@ nonisolated class HTTP2Stream: NaiveTunnel {
 
         if state == .connectSent {
             if status == "200" {
-                negotiatedPaddingType = NaivePaddingNegotiator.parseResponse(headers: headers)
+                responseHeaders = headers
                 state = .open
                 let cb = connectCompletion
                 connectCompletion = nil
