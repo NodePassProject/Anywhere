@@ -697,7 +697,8 @@ If you need composed behavior, consolidate the logic into a single
 | Synthesized response body          | 4 MiB        | truncated |
 | `Anywhere.http` timeout            | 10 s default / 30 s max | Promise rejects |
 | `Anywhere.http` per script         | 4 concurrent / 16 total | Promise rejects |
-| `Anywhere.http` in flight (all scripts) | 32      | Promise rejects |
+| `Anywhere.http` concurrent requests (all scripts) | 32 | Promise rejects |
+| `Anywhere.http` in-flight body bytes (all scripts) | 16 MiB | Promise rejects |
 | `Anywhere.http` response body      | 4 MiB        | Promise rejects |
 | HTTP/1 request/response head       | 64 KiB       | stream downgrades to passthrough |
 | Typed-array memory (all scripts)   | 16 MiB / 32 MiB | soft → GC hint; hard → empty `Uint8Array` returned |

@@ -69,11 +69,20 @@ struct MITMByteBuffer {
         return storage.subdata(in: (s + range.lowerBound)..<(s + range.upperBound))
     }
 
-    /// Returns the 0-relative range of the first occurrence of
-    /// ``pattern`` in the consumable region, or nil when absent.
-    func range(of pattern: Data) -> Range<Int>? {
+    /// Returns the 0-relative range of the first occurrence of ``pattern``
+    /// at or after the 0-relative index ``start``, or nil when absent.
+    ///
+    /// ``start`` lets a caller re-scanning a buffer that only grows at the end
+    /// (an HTTP head accumulating across TLS records, say) resume past the
+    /// region it already searched instead of re-walking the whole buffer on
+    /// every append — turning a repeated O(n²) scan into O(n). To stay correct
+    /// the caller must overlap by ``pattern.count - 1`` bytes so a match
+    /// straddling the boundary between already-scanned and freshly-appended
+    /// bytes is still found. ``start`` is clamped to the consumable region.
+    func range(of pattern: Data, from start: Int = 0) -> Range<Int>? {
         let s = storage.startIndex + offset
-        guard let r = storage.range(of: pattern, in: s..<storage.endIndex) else {
+        let clamped = Swift.max(0, Swift.min(start, count))
+        guard let r = storage.range(of: pattern, in: (s + clamped)..<storage.endIndex) else {
             return nil
         }
         return (r.lowerBound - s)..<(r.upperBound - s)
