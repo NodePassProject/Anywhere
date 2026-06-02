@@ -233,6 +233,12 @@ final class MITMSession {
 
     private let h2Rewriter: MITMHTTP2Rewriter
 
+    /// Tracks the client's HTTP/2 receive windows so synth (`Anywhere.respond`)
+    /// bodies are paced to them rather than truncated. Shared by both h2 legs;
+    /// constructed unconditionally (cheap) and only exercised once the legs
+    /// exist. See ``MITMHTTP2FlowController``.
+    private let h2FlowController = MITMHTTP2FlowController()
+
     /// Handle to the JavaScript runtime for this session's rule set,
     /// shared by both HTTP/1 streams and the HTTP/2 rewriter. The engine
     /// itself is shared across every connection to the same rule set and
@@ -544,7 +550,7 @@ final class MITMSession {
     /// is set.
     private func finishDialAndShuttle(inner: TLSRecordConnection, outer: TLSRecordConnection) {
         if inner.negotiatedALPN == "h2", outer.negotiatedALPN == "h2", let inLeg = inboundH2 {
-            let outLeg = MITMHTTP2Connection(direction: .outbound, rewriter: h2Rewriter, lwipQueue: lwipQueue)
+            let outLeg = MITMHTTP2Connection(direction: .outbound, rewriter: h2Rewriter, flowController: h2FlowController, lwipQueue: lwipQueue)
             // SETTINGS_HEADER_TABLE_SIZE advertised by one endpoint bounds the
             // *peer's* HPACK encoder, which the opposing leg decodes (RFC 7541
             // §4.2). Weak captures break the otherwise-mutual leg retain cycle;
@@ -959,7 +965,7 @@ extension MITMSession: TLSServerDelegate {
         // outer leg is dialed. The outbound translator is created after the
         // dial in ``finishDialAndShuttle``. http/1.1 uses ``requestStream``.
         if record.negotiatedALPN == "h2" {
-            inboundH2 = MITMHTTP2Connection(direction: .inbound, rewriter: h2Rewriter, lwipQueue: lwipQueue)
+            inboundH2 = MITMHTTP2Connection(direction: .inbound, rewriter: h2Rewriter, flowController: h2FlowController, lwipQueue: lwipQueue)
         }
         startInboundPump(inner: record)
     }

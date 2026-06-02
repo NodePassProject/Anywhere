@@ -47,6 +47,7 @@ final class MITMHTTP2Connection {
         static let settings: UInt8     = 0x4
         static let pushPromise: UInt8  = 0x5
         static let goaway: UInt8       = 0x7
+        static let windowUpdate: UInt8 = 0x8
         static let continuation: UInt8 = 0x9
     }
 
@@ -106,6 +107,12 @@ final class MITMHTTP2Connection {
 
     let direction: Direction
     private let rewriter: MITMHTTP2Rewriter
+    /// Shared (cross-leg) tracker of the client's flow-control windows. The
+    /// outbound leg debits the connection window for the real DATA it forwards;
+    /// the inbound leg observes the client's SETTINGS/WINDOW_UPDATEs and paces
+    /// synth (`Anywhere.respond`) bodies against the windows. See
+    /// ``MITMHTTP2FlowController``.
+    private let flowController: MITMHTTP2FlowController
     private let decoder = HPACKDecoder()
 
     /// Invoked when this leg observes a ``SETTINGS_HEADER_TABLE_SIZE`` in a
@@ -330,6 +337,45 @@ final class MITMHTTP2Connection {
     /// is ~1 KiB of UInt32s + array overhead.
     private static let synthRespondedMaxStreams = 256
 
+    /// A request-phase `Anywhere.respond` body that did not fit the client's
+    /// flow-control windows in one shot and is being paced out as the client
+    /// grants more window via WINDOW_UPDATE. Inbound leg only; keyed by stream
+    /// ID. Created by ``queueSynthesizedResponse`` when a remainder is left
+    /// after the first emission and drained by ``flushPendingSynth``. The
+    /// entry's presence means "this stream still owes the client DATA".
+    private struct PendingSynthBody {
+        /// Body bytes not yet emitted to the client.
+        var remaining: Data
+        /// This stream's remaining per-stream window (RFC 9113 §6.9.1). Signed:
+        /// a client SETTINGS_INITIAL_WINDOW_SIZE decrease (§6.9.2) can push it
+        /// negative, which simply withholds emission until a WINDOW_UPDATE
+        /// brings it positive.
+        var streamWindow: Int
+        /// True for a pre-establishment one-shot synth (no upstream dialed):
+        /// the terminating GOAWAY + ``inboundClosed`` are deferred until the
+        /// body fully flushes (see ``oneShotSynthPacing``).
+        let isPreEstablishment: Bool
+        /// last-stream-id for the deferred pre-establishment GOAWAY, fixed at
+        /// queue time — it reports 0 when a proxy stream was co-batched ahead of
+        /// this synth (so the client retries that stream), which is knowable
+        /// only at the moment the synth is queued.
+        let goAwayLastStreamID: UInt32
+    }
+
+    /// Per-stream paced synth bodies (see ``PendingSynthBody``). A streamID is
+    /// present only while it still owes the client bytes; the entry is removed
+    /// the moment its body fully flushes (END_STREAM emitted).
+    private var pendingSynthBodies: [UInt32: PendingSynthBody] = [:]
+
+    /// True while a pre-establishment one-shot synth is mid-pacing — its body
+    /// is buffered in ``pendingSynthBodies`` and the terminating GOAWAY is
+    /// deferred. While set, connection-level WINDOW_UPDATEs are consumed for
+    /// pacing and dropped rather than emitted: this connection will never dial
+    /// an upstream to forward them to, and letting them accumulate in
+    /// ``pendingUpstreamSetup`` (via ``finishPumpPass``) would trip
+    /// ``maxPendingUpstreamSetupBytes``. Cleared when the body completes.
+    private var oneShotSynthPacing = false
+
     /// Upper bound on the number of streams this connection tracks with
     /// per-stream MITM state (``pendingMessages`` + ``streamingScripts``). Each
     /// ``pendingMessages`` entry can buffer up to
@@ -363,9 +409,15 @@ final class MITMHTTP2Connection {
 
     // MARK: - Init
 
-    init(direction: Direction, rewriter: MITMHTTP2Rewriter, lwipQueue: DispatchQueue) {
+    init(
+        direction: Direction,
+        rewriter: MITMHTTP2Rewriter,
+        flowController: MITMHTTP2FlowController,
+        lwipQueue: DispatchQueue
+    ) {
         self.direction = direction
         self.rewriter = rewriter
+        self.flowController = flowController
         self.prefaceRemaining = (direction == .inbound) ? 24 : 0
         self.lwipQueue = lwipQueue
     }
@@ -376,6 +428,11 @@ final class MITMHTTP2Connection {
         torn = true
         parkedCompletion = nil
         pendingPreParkOutput = Data()
+        // Drop any buffered (un-paced) synth bodies proactively — they can hold
+        // up to 4 MiB each against the extension's memory budget until ARC
+        // releases the connection.
+        pendingSynthBodies.removeAll()
+        oneShotSynthPacing = false
     }
 
     // MARK: - Public API
@@ -502,6 +559,26 @@ final class MITMHTTP2Connection {
         // response + GOAWAY on the inner leg, so swallow every further client
         // frame — nothing more goes upstream and the client will close.
         if inboundClosed { return false }
+        // A pre-establishment one-shot synth whose body is still being paced to
+        // the client (the terminating GOAWAY is deferred until it finishes,
+        // ``queueSynthesizedResponse``). Only the frames that drive or cancel
+        // the in-flight synth stream are processed; any new request stream is
+        // swallowed because this connection is closing and will never dial an
+        // upstream — the client retries those on a fresh connection after the
+        // GOAWAY. WINDOW_UPDATE drives pacing; RST_STREAM lets the client abort.
+        if oneShotSynthPacing {
+            switch frame.typeCode {
+            case FrameTypeCode.windowUpdate:
+                // Consume for pacing side-effects only; this connection never
+                // dials, so nothing is ever forwarded upstream.
+                _ = handleWindowUpdate(frame)
+            case FrameTypeCode.rstStream:
+                _ = handleRSTStream(frame) // evict bookkeeping; nothing to forward
+            default:
+                break
+            }
+            return false
+        }
         // RFC 9113 §6.10: between a HEADERS/PUSH_PROMISE without
         // END_HEADERS and its terminating CONTINUATION, the peer is
         // forbidden from sending any other frame type — including
@@ -522,11 +599,13 @@ final class MITMHTTP2Connection {
         // Synth-responded short-circuit: frames on streams whose
         // request was answered by ``Anywhere.respond`` never reach the
         // upstream. RST_STREAM is allowed through so the eviction
-        // logic in ``handleRSTStream`` can run, but every other frame
-        // type is swallowed.
+        // logic in ``handleRSTStream`` can run, and WINDOW_UPDATE so
+        // ``handleWindowUpdate`` can drive synth pacing; every other
+        // frame type is swallowed.
         if frame.streamID != 0,
            synthRespondedStreams.contains(frame.streamID),
-           frame.typeCode != FrameTypeCode.rstStream {
+           frame.typeCode != FrameTypeCode.rstStream,
+           frame.typeCode != FrameTypeCode.windowUpdate {
             // Evict the streamID when the swallowed frame carries
             // END_STREAM (bit 0x1 of DATA or HEADERS flags). The
             // client is done with the stream on its side, so pinning
@@ -561,6 +640,9 @@ final class MITMHTTP2Connection {
         case FrameTypeCode.settings:
             output.append(handleSettings(frame))
             return false
+        case FrameTypeCode.windowUpdate:
+            output.append(handleWindowUpdate(frame))
+            return false
         default:
             output.append(serializeFrame(frame))
             return false
@@ -581,18 +663,44 @@ final class MITMHTTP2Connection {
             var i = payload.startIndex
             while i + 6 <= payload.endIndex {
                 let identifier = (UInt16(payload[i]) << 8) | UInt16(payload[i + 1])
-                if identifier == 0x1 { // SETTINGS_HEADER_TABLE_SIZE
-                    let value = (UInt32(payload[i + 2]) << 24)
-                        | (UInt32(payload[i + 3]) << 16)
-                        | (UInt32(payload[i + 4]) << 8)
-                        | UInt32(payload[i + 5])
+                let value = (UInt32(payload[i + 2]) << 24)
+                    | (UInt32(payload[i + 3]) << 16)
+                    | (UInt32(payload[i + 4]) << 8)
+                    | UInt32(payload[i + 5])
+                switch identifier {
+                case 0x1: // SETTINGS_HEADER_TABLE_SIZE
                     lastObservedPeerHeaderTableSize = Int(value)
                     onObservedPeerHeaderTableSize?(Int(value))
+                case 0x4 where direction == .inbound: // SETTINGS_INITIAL_WINDOW_SIZE
+                    // The client's per-stream receive-window initializer governs
+                    // synth DATA the inbound leg sends back; observe it so synth
+                    // pacing starts from the right window (and adjusts open
+                    // synth streams when it changes mid-connection).
+                    applyClientInitialWindowSize(Int(value))
+                default:
+                    break
                 }
                 i += 6
             }
         }
         return serializeFrame(frame)
+    }
+
+    /// Records a new client ``SETTINGS_INITIAL_WINDOW_SIZE`` on the shared flow
+    /// controller and applies the RFC 9113 §6.9.2 retroactive adjustment — the
+    /// delta `(new - old)` is added to every open synth stream's window — then
+    /// flushes any stream the change just unblocked. The controller always
+    /// records the new value (future synth streams start from it) even when no
+    /// stream is currently open.
+    private func applyClientInitialWindowSize(_ newValue: Int) {
+        let delta = flowController.updateInitialStreamWindow(newValue)
+        guard delta != 0 else { return }
+        for id in pendingSynthBodies.keys {
+            pendingSynthBodies[id]?.streamWindow += delta
+        }
+        if delta > 0, !pendingSynthBodies.isEmpty {
+            flushAllPendingSynth()
+        }
     }
 
     /// Cleans up per-stream bookkeeping for streams above the GOAWAY's
@@ -633,6 +741,12 @@ final class MITMHTTP2Connection {
         for id in abandonedSynth {
             _ = clearSynthResponded(id)
         }
+        // Drop any paced synth body for an abandoned stream — the peer
+        // guarantees it won't process the stream, so we'll never see the
+        // WINDOW_UPDATEs that would drain it.
+        for id in pendingSynthBodies.keys where id > lastStreamID {
+            pendingSynthBodies.removeValue(forKey: id)
+        }
         return serializeFrame(frame)
     }
 
@@ -664,6 +778,8 @@ final class MITMHTTP2Connection {
         }
         pendingMessages.removeValue(forKey: frame.streamID)
         streamingScripts.removeValue(forKey: frame.streamID)
+        // Abort pacing of a synth body the client cancelled mid-stream.
+        pendingSynthBodies.removeValue(forKey: frame.streamID)
         _ = rewriter.requestLog.popHTTP2(streamID: frame.streamID)
         // Swallow RST_STREAMs for streams the upstream never saw — the
         // request was synthesized on the inner leg via Anywhere.respond
@@ -1914,24 +2030,14 @@ final class MITMHTTP2Connection {
         logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): buffered Script on a streaming response. Switch to Stream Script to rewrite frames as they arrive.")
     }
 
-    /// HTTP/2's default initial flow-control window (RFC 9113 §6.9.2).
-    /// A synthesized response body larger than this would overflow the
-    /// client's window before any WINDOW_UPDATE could arrive — we don't
-    /// track windows on the MITM path, so the conservative move is to
-    /// cap the body. 64 KiB comfortably covers the common
-    /// ``Anywhere.respond`` use cases (mocked JSON, redirect bodies,
-    /// canned error pages) and matches the cap an unconfigured peer
-    /// would enforce anyway.
-    private static let maxSynthesizedResponseBodyBytes: Int = 65_535
-
     /// Per-stream cap on how many bytes a buffered ``.script`` rewrite
     /// may add to the original body before the rewrite is abandoned in
     /// favour of emitting the unmodified payload. Original bytes are
     /// already budgeted by the original sender's flow-control accounting
     /// — those can't trip ``FLOW_CONTROL_ERROR``. Extra bytes can, since
     /// the receiver's window decrements by what *we* send, not by what
-    /// the original sender intended. Without per-stream window tracking
-    /// in the MITM the safest cap is the spec-default initial window
+    /// the original sender intended. With no per-stream window tracking for
+    /// forwarded streams, the safest cap is the spec-default initial window
     /// (RFC 9113 §6.9.2 = 65,535 B), so a single rewrite emission stays
     /// within one worst-case window's worth of unaccounted growth. A
     /// script that grows further falls back to the original payload via
@@ -1954,22 +2060,26 @@ final class MITMHTTP2Connection {
     private static let maxStreamingRewriteGrowthBytes: Int = 65_535
 
     /// Serializes a request-phase `Anywhere.respond(...)` payload as an
-    /// HTTP/2 HEADERS (+ optional DATA) frame sequence ending with
-    /// END_STREAM, and appends it to ``pendingClientBytes`` for the
-    /// session pump to inject onto the inner TLS record. Inbound leg
-    /// only — the outbound leg never reaches this path. ``:status`` is
-    /// taken from ``response.status``; any pseudo-headers the script
-    /// accidentally populated under ``headers`` are dropped so the
-    /// HPACK encoder never emits duplicates. ``content-length`` is
-    /// likewise dropped since END_STREAM is the source of truth in
-    /// HTTP/2 and a user-supplied value would risk disagreeing with
-    /// the actual body size.
+    /// HTTP/2 HEADERS frame followed by DATA frames **paced to the client's
+    /// flow-control windows**, appending the bytes to ``pendingClientBytes``
+    /// for the session pump to inject onto the inner TLS record. Inbound leg
+    /// only — the outbound leg never reaches this path.
     ///
-    /// Header names are checked against RFC 9110 §5.6.2 (token chars
-    /// only) and values against RFC 9113 §8.2.1 (no CR/LF/NUL). Entries
-    /// that violate either are dropped with a warning so a malicious
-    /// or accidental script can't desynchronise the HPACK decoder or
-    /// inject extra header lines.
+    /// HEADERS go out immediately (headers are not flow-controlled, RFC 9113
+    /// §6.9.1). The body is emitted as far as the connection and per-stream
+    /// windows currently allow; any remainder is buffered in
+    /// ``pendingSynthBodies`` and drained by ``flushPendingSynth`` as the
+    /// client grants window via WINDOW_UPDATE. END_STREAM lands only on the
+    /// final byte, so a body spanning several WINDOW_UPDATE rounds still
+    /// terminates the stream exactly once.
+    ///
+    /// ``:status`` is taken from ``response.status``; pseudo-headers the
+    /// script populated under ``headers`` are dropped so the HPACK encoder
+    /// never emits duplicates. ``content-length``/``transfer-encoding`` are
+    /// dropped since END_STREAM is the source of truth in HTTP/2.
+    ///
+    /// Header names are checked against RFC 9110 §5.6.2 (token chars only) and
+    /// values against RFC 9113 §8.2.1 (no CR/LF/NUL); violators are dropped.
     private func queueSynthesizedResponse(
         streamID: UInt32,
         response: MITMScriptEngine.SynthesizedResponse
@@ -1994,59 +2104,226 @@ final class MITMHTTP2Connection {
         }
         let block = HPACKEncoder.encodeHeaderBlock(headers)
 
-        let body: Data
-        if response.body.count > Self.maxSynthesizedResponseBodyBytes {
-            logger.warning("[MITM][JS] HTTP/2 \(rewriter.host): Anywhere.respond body \(response.body.count) B exceeds initial flow-control window; truncating to \(Self.maxSynthesizedResponseBodyBytes) B")
-            let end = response.body.startIndex + Self.maxSynthesizedResponseBodyBytes
-            body = response.body.subdata(in: response.body.startIndex..<end)
-        } else {
-            body = response.body
+        // Cap the buffered body to the per-message body budget
+        // (``MITMBodyCodec/maxBufferedBodyBytes``, 4 MiB), matching the HTTP/1
+        // synth path. This bounds only the extension's memory; the wire stays
+        // within the client's flow-control window via the pacing below, not
+        // this cap.
+        var body = response.body
+        if body.count > MITMBodyCodec.maxBufferedBodyBytes {
+            logger.warning("[MITM][JS] HTTP/2 \(rewriter.host): Anywhere.respond body \(body.count) B exceeds memory cap \(MITMBodyCodec.maxBufferedBodyBytes) B; truncating")
+            let end = body.startIndex + MITMBodyCodec.maxBufferedBodyBytes
+            body = body.subdata(in: body.startIndex..<end)
         }
 
-        let endStreamOnHeaders = body.isEmpty
-        var out = emitHeaderBlock(
+        // HEADERS first (END_STREAM only when there is no body to follow).
+        let out = emitHeaderBlock(
             streamID: streamID,
             block: block,
-            endStream: endStreamOnHeaders,
+            endStream: body.isEmpty,
             kind: .headers
         )
-        if !body.isEmpty {
-            out.append(emitDataFrames(streamID: streamID, payload: body, endStream: true))
+        let isPreEstablishment = !upstreamSetupForwarded
+        if isPreEstablishment, !serverPrefaceSentToClient {
+            // Pre-establishment synth (302 / reject / respond before any
+            // upstream leg): the client never received a server preface and
+            // none will be relayed (this connection won't dial), so open with a
+            // self-contained server SETTINGS + a SETTINGS ACK for the client's.
+            pendingClientBytes.append(serverConnectionPreface())
+            serverPrefaceSentToClient = true
         }
-        if !upstreamSetupForwarded {
-            // Pre-establishment synth (302 / reject before any upstream leg):
-            // the client has not received a server connection preface, and none
-            // will be relayed (this connection won't dial), so make this a
-            // self-contained h2 exchange — server SETTINGS + a SETTINGS ACK for
-            // the client's SETTINGS, the response, then GOAWAY. One-shot:
-            // ``inboundClosed`` makes ``handleFrame`` swallow further frames and
-            // ``finishPumpPass`` forward nothing upstream, so the client
-            // reconnects for anything else (a 302 follow-up or a fresh request).
-            if !serverPrefaceSentToClient {
-                pendingClientBytes.append(serverConnectionPreface())
-                serverPrefaceSentToClient = true
-            }
-            pendingClientBytes.append(out)
-            // GOAWAY last-stream-id is the highest stream this endpoint
-            // processed. A proxy stream co-batched ahead of this synth is
-            // dropped by the one-shot close, so report 0 (nothing reliably
-            // processed) to make the client retry it on a fresh connection;
-            // otherwise this synth stream is the highest processed.
-            pendingClientBytes.append(goAwayFrame(lastStreamID: forwardedRequestUpstream ? 0 : streamID))
-            inboundClosed = true
-        } else {
-            // Post-establishment synth (a request-phase Anywhere.respond on an
-            // already-open connection): the client's h2 connection is already
-            // set up via the upstream's relayed preface, so just inject the
-            // response frames.
-            pendingClientBytes.append(out)
-        }
-        // Record so follow-up frames from the client (trailers, DATA, or
-        // the RST some clients send after consuming a response they
-        // didn't expect to get on their own initiative) aren't forwarded
-        // upstream on an idle stream. See ``handleFrame`` /
-        // ``handleRSTStream``.
+        pendingClientBytes.append(out)
+
+        // Record before any DATA so the client's follow-up frames (trailers,
+        // DATA, WINDOW_UPDATE, or the RST some clients send after consuming an
+        // unsolicited response) aren't forwarded upstream on an idle stream.
+        // See ``handleFrame`` / ``handleRSTStream``.
         markSynthResponded(streamID)
+
+        guard !body.isEmpty else {
+            // Done at HEADERS. A pre-establishment one-shot still needs its
+            // terminating GOAWAY now — there is no body to pace. last-stream-id
+            // reports 0 when a proxy stream was co-batched ahead of this synth
+            // (it gets dropped by the close, so the client must retry it);
+            // otherwise this synth stream is the highest processed.
+            if isPreEstablishment {
+                pendingClientBytes.append(goAwayFrame(lastStreamID: forwardedRequestUpstream ? 0 : streamID))
+                inboundClosed = true
+            }
+            return
+        }
+
+        // Buffer the whole body, then emit the first window's worth now. Any
+        // remainder — and, for the one-shot path, the deferred GOAWAY — is left
+        // to ``flushPendingSynth``, driven by the client's WINDOW_UPDATEs.
+        pendingSynthBodies[streamID] = PendingSynthBody(
+            remaining: body,
+            streamWindow: flowController.clientInitialStreamWindow,
+            isPreEstablishment: isPreEstablishment,
+            goAwayLastStreamID: forwardedRequestUpstream ? 0 : streamID
+        )
+        flushPendingSynth(streamID: streamID)
+    }
+
+    /// Emits as much of stream `streamID`'s buffered synth body as the
+    /// connection and per-stream windows currently allow, appending DATA to
+    /// ``pendingClientBytes`` and doing the window accounting. When the body
+    /// finishes, END_STREAM lands on the last frame, the buffer is dropped, and
+    /// a pre-establishment one-shot sends its deferred GOAWAY. A flush that can
+    /// emit nothing (windows exhausted) leaves the entry for the next
+    /// WINDOW_UPDATE to retry.
+    private func flushPendingSynth(streamID: UInt32) {
+        guard var entry = pendingSynthBodies[streamID] else { return }
+        let available = max(0, min(flowController.connectionWindow, entry.streamWindow, entry.remaining.count))
+        if available > 0 {
+            let chunkEnd = entry.remaining.startIndex + available
+            let chunk = entry.remaining.subdata(in: entry.remaining.startIndex..<chunkEnd)
+            let didFinish = available == entry.remaining.count
+            // ``emitDataFrames`` only auto-debits the connection window on the
+            // outbound leg; this is the inbound (synth) leg, so account here.
+            pendingClientBytes.append(emitDataFrames(streamID: streamID, payload: chunk, endStream: didFinish))
+            flowController.debitConnection(available)
+            entry.streamWindow -= available
+            // Post-establishment synth shares the connection window with real
+            // upstream traffic, so its bytes are withheld from the connection
+            // WINDOW_UPDATEs we forward upstream (see ``handleWindowUpdate``). A
+            // one-shot pre-establishment synth never dials, so there is no
+            // upstream credit to compensate and nothing to record.
+            if !entry.isPreEstablishment {
+                flowController.addSynthDebt(available)
+            }
+            entry.remaining.removeFirst(available)
+            if didFinish {
+                completeSynthStream(streamID: streamID, entry: entry)
+                return
+            }
+        }
+        // Still owes the client bytes (window exhausted, or none was
+        // available). Keep the entry for the next WINDOW_UPDATE. A
+        // pre-establishment one-shot is now mid-pacing: flag it so connection
+        // WINDOW_UPDATEs are consumed-and-dropped rather than buffered toward
+        // an upstream that will never dial (see ``oneShotSynthPacing``).
+        pendingSynthBodies[streamID] = entry
+        if entry.isPreEstablishment {
+            oneShotSynthPacing = true
+        }
+    }
+
+    /// Flushes every buffered synth body in ``synthRespondedOrder`` (FIFO)
+    /// order until the shared connection window is exhausted — used when a
+    /// connection-level WINDOW_UPDATE grows the window shared across streams.
+    /// FIFO keeps a stream that missed one grant at the front of the next, so
+    /// no synth stream starves across rounds.
+    private func flushAllPendingSynth() {
+        guard !pendingSynthBodies.isEmpty else { return }
+        for streamID in synthRespondedOrder {
+            if flowController.connectionWindow <= 0 { break }
+            if pendingSynthBodies[streamID] != nil {
+                flushPendingSynth(streamID: streamID)
+            }
+        }
+    }
+
+    /// Finalizes a synth stream whose body has fully reached the client: drops
+    /// the buffer and, for a pre-establishment one-shot, emits the deferred
+    /// GOAWAY and closes the connection (the client reconnects for anything
+    /// else). See ``queueSynthesizedResponse`` for why the GOAWAY is deferred.
+    private func completeSynthStream(streamID: UInt32, entry: PendingSynthBody) {
+        pendingSynthBodies.removeValue(forKey: streamID)
+        if entry.isPreEstablishment {
+            pendingClientBytes.append(goAwayFrame(lastStreamID: entry.goAwayLastStreamID))
+            inboundClosed = true
+            oneShotSynthPacing = false
+        }
+    }
+
+    /// Parses a WINDOW_UPDATE (RFC 9113 §6.9), updates the client flow-control
+    /// window we track for it, drives any synth pacing the new window unblocks
+    /// (appending DATA to ``pendingClientBytes``), and returns the bytes to emit
+    /// toward upstream — empty when the frame is consumed/swallowed.
+    ///
+    /// The windows tracked here govern data flowing *to the client*, which only
+    /// the client's own WINDOW_UPDATEs replenish — and those arrive on the
+    /// inbound leg. The outbound leg's WINDOW_UPDATEs are the server's, governing
+    /// the upstream's receive window, so they are forwarded to the client
+    /// verbatim and never touch the synth accounting.
+    ///
+    /// Connection-level (stream 0) WINDOW_UPDATEs credit the shared window and
+    /// are forwarded upstream minus the synth connection-debt (so the upstream
+    /// is credited only for bytes it actually sent); a frame whose increment is
+    /// fully withheld is dropped, since a zero-increment WINDOW_UPDATE is a
+    /// PROTOCOL_ERROR (§6.9.1). A pre-establishment one-shot has no upstream, so
+    /// its connection WINDOW_UPDATEs are swallowed. Per-stream WINDOW_UPDATEs on
+    /// a synth (MITM-owned) stream drive that stream's pacing and are swallowed
+    /// (the upstream never saw the stream); on a real stream they forward
+    /// verbatim (upstream's flow control is its own concern).
+    private func handleWindowUpdate(_ frame: RawFrame) -> Data {
+        guard direction == .inbound else { return serializeFrame(frame) }
+        let increment = Self.windowUpdateIncrement(frame.payload)
+
+        if frame.streamID == 0 {
+            // Capture before flushing: completing a one-shot synth in
+            // ``flushAllPendingSynth`` clears ``oneShotSynthPacing``, but this
+            // very frame still belongs to the never-dialing connection and must
+            // not be forwarded.
+            let wasOneShotPacing = oneShotSynthPacing
+            if let increment, increment > 0 {
+                flowController.creditConnection(increment)
+            }
+            flushAllPendingSynth()
+            // A pre-establishment one-shot never dials — there is nothing to
+            // forward the frame to, and buffering it would pressure
+            // ``maxPendingUpstreamSetupBytes``. Swallow it.
+            if wasOneShotPacing { return Data() }
+            // Malformed (nil) or zero increment: don't compensate; forward
+            // verbatim and let the real peer enforce the §6.9.1 error.
+            guard let increment, increment > 0 else { return serializeFrame(frame) }
+            let forwarded = flowController.withholdSynthDebt(from: increment)
+            if forwarded == increment { return serializeFrame(frame) }
+            if forwarded == 0 { return Data() }
+            return windowUpdateFrame(streamID: 0, increment: forwarded)
+        }
+
+        // Per-stream. A synth stream is MITM-owned; its WINDOW_UPDATE paces the
+        // buffered body and is never forwarded (matching the synth-swallow).
+        let isSynthStream = pendingSynthBodies[frame.streamID] != nil
+            || synthRespondedStreams.contains(frame.streamID)
+        if isSynthStream {
+            if let increment, increment > 0, pendingSynthBodies[frame.streamID] != nil {
+                pendingSynthBodies[frame.streamID]?.streamWindow += increment
+                flushPendingSynth(streamID: frame.streamID)
+            }
+            return Data()
+        }
+        return serializeFrame(frame)
+    }
+
+    /// Decodes a WINDOW_UPDATE payload's 31-bit increment (RFC 9113 §6.9.1,
+    /// reserved high bit masked). Returns nil for a malformed (non-4-byte)
+    /// payload so the caller forwards it verbatim for the real peer to reject.
+    private static func windowUpdateIncrement(_ payload: Data) -> Int? {
+        guard payload.count == 4 else { return nil }
+        let s = payload.startIndex
+        let b0 = UInt32(payload[s]) & 0x7F
+        let b1 = UInt32(payload[s + 1])
+        let b2 = UInt32(payload[s + 2])
+        let b3 = UInt32(payload[s + 3])
+        let value: UInt32 = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+        return Int(value)
+    }
+
+    /// Builds a connection- or stream-level WINDOW_UPDATE frame carrying
+    /// `increment` — for forwarding a connection WINDOW_UPDATE whose increment
+    /// was reduced by the withheld synth debt.
+    private func windowUpdateFrame(streamID: UInt32, increment: Int) -> Data {
+        var d = Data()
+        appendFrameHeader(typeCode: FrameTypeCode.windowUpdate, flags: 0, streamID: streamID, payloadLength: 4, into: &d)
+        let v = UInt32(truncatingIfNeeded: increment) & 0x7FFF_FFFF
+        d.append(UInt8((v >> 24) & 0xFF))
+        d.append(UInt8((v >> 16) & 0xFF))
+        d.append(UInt8((v >> 8) & 0xFF))
+        d.append(UInt8(v & 0xFF))
+        return d
     }
 
     /// The server half of the h2 connection preface used for a
@@ -2089,6 +2366,10 @@ final class MITMHTTP2Connection {
         if synthRespondedOrder.count > Self.synthRespondedMaxStreams {
             let evicted = synthRespondedOrder.removeFirst()
             synthRespondedStreams.remove(evicted)
+            // Keep the paced-body map consistent with the FIFO: an evicted
+            // stream is no longer swallow-protected, so a stale buffered body
+            // (and any further WINDOW_UPDATEs for it) could not be drained.
+            pendingSynthBodies.removeValue(forKey: evicted)
         }
     }
 
@@ -2353,6 +2634,17 @@ final class MITMHTTP2Connection {
     /// ``serializeFrame`` round-trip would incur — 256 throwaway
     /// allocations for a 4 MiB body split into 256 frames.
     private func emitDataFrames(streamID: UInt32, payload: Data, endStream: Bool) -> Data {
+        // Debit the client's shared connection-level flow-control window for
+        // real server→client DATA the outbound leg forwards or rewrites — this
+        // is the single chokepoint every such DATA byte routes through, so the
+        // window stays in step with what the client has actually received. The
+        // synth (`Anywhere.respond`) path debits the window itself as it paces,
+        // and the inbound leg's other ``emitDataFrames`` calls produce
+        // upstream-bound *request* DATA that the client window must not see, so
+        // gate on direction.
+        if direction == .outbound {
+            flowController.debitConnection(payload.count)
+        }
         if payload.isEmpty {
             var output = Data(capacity: 9)
             var flags: UInt8 = 0
