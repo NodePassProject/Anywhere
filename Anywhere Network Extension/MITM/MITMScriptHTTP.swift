@@ -78,7 +78,15 @@ final class MITMScriptHTTPClient {
     /// delegate re-applies this check to every hop, and the stronger mitigation
     /// is gating ``Anywhere/http`` behind a per-rule-set opt-in.
     static func isBlockedHost(_ host: String) -> Bool {
-        let h = host.lowercased()
+        var h = host.lowercased()
+        // A trailing dot is an FQDN-root anchor the resolver honors —
+        // `127.0.0.1.`, `localhost.`, and `foo.local.` all resolve to the same
+        // target as their dotless form — but it defeats every check below
+        // (`IPv4Address` won't parse a trailing-dot literal, and the name
+        // suffixes stop matching). Strip a single trailing dot so the canonical
+        // form is what we test; `..`-style empty trailing labels don't resolve,
+        // so one is enough.
+        if h.hasSuffix(".") { h.removeLast() }
         if h == "localhost" || h.hasSuffix(".localhost") || h.hasSuffix(".local") { return true }
         // Strip IPv6 URI brackets before attempting a literal parse.
         let bare = (h.hasPrefix("[") && h.hasSuffix("]")) ? String(h.dropFirst().dropLast()) : h

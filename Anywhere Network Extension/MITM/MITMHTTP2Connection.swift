@@ -271,6 +271,16 @@ final class MITMHTTP2Connection {
     /// immediately after each ``process(_:)`` call.
     private var pendingClientBytes = Data()
 
+    /// Sender-bound flow-control credit (WINDOW_UPDATE frames) the MITM issues
+    /// to the **upstream** while buffering a response for a rewrite rule, so the
+    /// server keeps sending instead of stalling at its initial window on a body
+    /// the client hasn't seen yet (see ``creditBufferedDataToSender``). The
+    /// outbound (response) leg's analogue of ``pendingClientBytes``: populated
+    /// on the outbound leg only and drained by the session's outbound pump via
+    /// ``drainPendingServerBytes()`` immediately after each ``process(_:)``,
+    /// written straight onto the outer TLS record toward the server.
+    private var pendingServerBytes = Data()
+
     // MARK: Deferred-dial connection setup (inbound only)
     //
     // The upstream dial is deferred until the first request resolves its
@@ -549,6 +559,18 @@ final class MITMHTTP2Connection {
     func drainPendingClientBytes() -> Data {
         let bytes = pendingClientBytes
         pendingClientBytes.removeAll(keepingCapacity: false)
+        return bytes
+    }
+
+    /// Drains and returns any upstream-bound flow-control credit the outbound
+    /// leg issued for buffered response DATA (see ``creditBufferedDataToSender``
+    /// / ``pendingServerBytes``). The session's outbound pump writes these onto
+    /// the outer TLS record toward the server right after each ``process(_:)``.
+    /// The inbound leg never populates this — call sites guard with
+    /// ``direction == .outbound``.
+    func drainPendingServerBytes() -> Data {
+        let bytes = pendingServerBytes
+        pendingServerBytes.removeAll(keepingCapacity: false)
         return bytes
     }
 
@@ -1415,6 +1437,14 @@ final class MITMHTTP2Connection {
 
         // Buffering path: accumulate until END_STREAM.
         pending.data.append(body)
+        // Nothing reaches the receiver until END_STREAM, so the receiver won't
+        // emit the WINDOW_UPDATEs a relay would forward back to the sender —
+        // credit the sender ourselves so it keeps sending instead of stalling
+        // at its initial window (which would wedge this stream and, via the
+        // shared connection window, others). ``emitBufferedDataFrames`` records
+        // the matching debt when the buffered body is emitted. The full on-wire
+        // payload length (incl. any padding) is what the sender debited.
+        creditBufferedDataToSender(streamID: streamID, flowControlledLength: frame.payload.count)
 
         // Mid-stream cap check. Only reachable for identity bodies
         // (compressed streams are pre-gated when content-length is
@@ -1720,7 +1750,7 @@ final class MITMHTTP2Connection {
         // the buffered body prefix; subsequent DATA forwards verbatim.
         if pending.headersAlreadyEmitted {
             pendingMessages[streamID] = pending
-            return emitDataFrames(streamID: streamID, payload: prefix, endStream: false)
+            return emitBufferedDataFrames(streamID: streamID, payload: prefix, endStream: false)
         }
         // Inbound HEADERS need to be logged for the response side to
         // populate ctx.method/url even though scripts won't run.
@@ -1734,7 +1764,7 @@ final class MITMHTTP2Connection {
             endStream: false,
             kind: .headers
         )
-        out.append(emitDataFrames(streamID: streamID, payload: prefix, endStream: false))
+        out.append(emitBufferedDataFrames(streamID: streamID, payload: prefix, endStream: false))
         pendingMessages[streamID] = pending
         return out
     }
@@ -1763,7 +1793,7 @@ final class MITMHTTP2Connection {
             kind: .headers
         )
         if !body.isEmpty {
-            out.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
+            out.append(emitBufferedDataFrames(streamID: streamID, payload: body, endStream: endStream))
         }
         return out
     }
@@ -1807,7 +1837,7 @@ final class MITMHTTP2Connection {
                     // encoded-passthrough HEADERS. Emit the buffered body to
                     // close the stream — a rare decode failure degrades to one
                     // unparseable request, not a connection-wide reset.
-                    output.append(emitDataFrames(streamID: streamID, payload: pending.data, endStream: endStream))
+                    output.append(emitBufferedDataFrames(streamID: streamID, payload: pending.data, endStream: endStream))
                 } else {
                     output.append(emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream))
                 }
@@ -1896,7 +1926,7 @@ final class MITMHTTP2Connection {
                 logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): Anywhere.respond ignored on an already-opened request stream; forwarding original body")
                 body = plaintext
             }
-            output.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
+            output.append(emitBufferedDataFrames(streamID: streamID, payload: body, endStream: endStream))
             return
         }
 
@@ -1974,7 +2004,7 @@ final class MITMHTTP2Connection {
             kind: .headers
         ))
         if !body.isEmpty {
-            output.append(emitDataFrames(streamID: streamID, payload: body, endStream: endStream))
+            output.append(emitBufferedDataFrames(streamID: streamID, payload: body, endStream: endStream))
         }
     }
 
@@ -2258,7 +2288,25 @@ final class MITMHTTP2Connection {
     /// (the upstream never saw the stream); on a real stream they forward
     /// verbatim (upstream's flow control is its own concern).
     private func handleWindowUpdate(_ frame: RawFrame) -> Data {
-        guard direction == .inbound else { return serializeFrame(frame) }
+        if direction == .outbound {
+            // The outbound leg relays the server's WINDOW_UPDATEs to the client.
+            // A connection-level (stream 0) one credits the client's connection
+            // window; if the inbound leg credited the client directly for request
+            // DATA it buffered (``creditBufferedDataToSender``), withhold that
+            // here so the client isn't credited twice — the request-direction
+            // mirror of the inbound leg's synth-debt withholding below. A
+            // per-stream, malformed, or zero-increment frame forwards verbatim
+            // for the real peer to handle.
+            guard frame.streamID == 0,
+                  let increment = Self.windowUpdateIncrement(frame.payload),
+                  increment > 0 else {
+                return serializeFrame(frame)
+            }
+            let forwarded = flowController.withholdClientRequestDebt(from: increment)
+            if forwarded == increment { return serializeFrame(frame) }
+            if forwarded == 0 { return Data() }  // fully withheld → drop (zero WU is a PROTOCOL_ERROR)
+            return windowUpdateFrame(streamID: 0, increment: forwarded)
+        }
         let increment = Self.windowUpdateIncrement(frame.payload)
 
         if frame.streamID == 0 {
@@ -2623,6 +2671,61 @@ final class MITMHTTP2Connection {
         buffer.removeFirst(total)
 
         return RawFrame(typeCode: type, flags: flags, streamID: streamID, payload: payload)
+    }
+
+    /// Issues the DATA **sender** its own flow-control credit for a frame the
+    /// MITM is buffering (a `script` / `body-json` / `body-replace` rule holds
+    /// the whole message before re-emitting it). A relaying proxy lets the
+    /// receiver's WINDOW_UPDATEs flow back to the sender, but a buffered stream
+    /// emits nothing to the receiver until the body is complete — so the
+    /// receiver never credits, and the sender stalls at its initial window,
+    /// wedging the stream (and, via the shared connection window, others) until
+    /// timeout. While it buffers, the MITM **is** the receiver, so it credits
+    /// the sender itself: a per-stream WINDOW_UPDATE keeps this stream's window
+    /// open and a connection-level one keeps the shared window open.
+    /// ``emitBufferedDataFrames`` records the matching debt so the receiver's
+    /// eventual credit for the emitted body is withheld from the relay and the
+    /// sender is not credited twice — leaving its window netting to the same
+    /// value a pure relay would. The credit goes to the sender's own leg: the
+    /// client on the inbound (request) leg, the server on the outbound
+    /// (response) leg. `flowControlledLength` is the DATA frame's full on-wire
+    /// payload length (including any padding), which is what the sender debited.
+    private func creditBufferedDataToSender(streamID: UInt32, flowControlledLength: Int) {
+        guard flowControlledLength > 0 else { return }
+        let streamCredit = windowUpdateFrame(streamID: streamID, increment: flowControlledLength)
+        let connectionCredit = windowUpdateFrame(streamID: 0, increment: flowControlledLength)
+        switch direction {
+        case .inbound:
+            pendingClientBytes.append(streamCredit)
+            pendingClientBytes.append(connectionCredit)
+        case .outbound:
+            pendingServerBytes.append(streamCredit)
+            pendingServerBytes.append(connectionCredit)
+        }
+    }
+
+    /// ``emitDataFrames`` for DATA that originates from the MITM's **buffer**
+    /// for a body-rewrite stream (a rewrite result, the abandon prefix, or a
+    /// decompression-fail passthrough) rather than being relayed frame-for-frame
+    /// from the sender. While the stream was buffered,
+    /// ``creditBufferedDataToSender`` gave the sender its own WINDOW_UPDATEs; the
+    /// receiver now credits what it receives here and those credits are relayed
+    /// back to the sender on the opposite leg, so without compensation the
+    /// sender would be credited twice. Recording the emitted byte count as debt
+    /// makes the opposite leg withhold exactly that much from the relay (mirror
+    /// of the synth path's ``addSynthDebt``). Direction selects the relay that
+    /// withholds it: a response body (outbound) is credited by the client and
+    /// relayed to the server on the inbound leg (``withholdSynthDebt``); a
+    /// request body (inbound) is credited by the server and relayed to the
+    /// client on the outbound leg (``withholdClientRequestDebt``).
+    private func emitBufferedDataFrames(streamID: UInt32, payload: Data, endStream: Bool) -> Data {
+        if !payload.isEmpty {
+            switch direction {
+            case .outbound: flowController.addSynthDebt(payload.count)
+            case .inbound:  flowController.addClientRequestDebt(payload.count)
+            }
+        }
+        return emitDataFrames(streamID: streamID, payload: payload, endStream: endStream)
     }
 
     /// Emits one or more DATA frames whose payloads each fit within

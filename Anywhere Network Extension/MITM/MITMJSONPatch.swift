@@ -126,16 +126,28 @@ enum MITMJSONPatch {
 
     /// Applies every compiled edit, in order, to ``body``. Parses once,
     /// mutates one shared document, serializes once. Returns the body
-    /// **unchanged** when the list is empty, the body isn't JSON, or the
-    /// edited document can't be re-serialized — matching ``Anywhere.json``'s
-    /// total contract so a rule that fires on an unexpected body shape
-    /// degrades to a no-op rather than corrupting the wire.
+    /// **unchanged** when the list is empty, the body isn't JSON, no op
+    /// actually changed the document, or the edited document can't be
+    /// re-serialized — matching ``Anywhere.json``'s total contract so a rule
+    /// that fires on an unexpected body shape degrades to a no-op rather than
+    /// corrupting the wire.
     static func applyAll(_ ops: [CompiledOp], to body: Data) -> Data {
         guard !ops.isEmpty else { return body }
         guard var root = parse(body) else { return body }
+        // Snapshot the parsed document so we can tell whether any op actually
+        // changed it. A rule that merely *matched* — its path didn't resolve,
+        // its predicate removed nothing, its replacement equalled what was
+        // already there — must leave the body byte-for-byte identical.
+        // Re-serializing an unchanged document would round-trip every number
+        // through ``JSONSerialization`` and could reshape 64-bit IDs /
+        // high-precision decimals *anywhere* in the body (see ``parse``), so a
+        // no-op rule would silently corrupt untouched data. Returning the
+        // original bytes when nothing changed avoids that entirely.
+        let before = deepCopy(root)
         for op in ops {
             apply(op, to: &root)
         }
+        guard !documentsEqual(before, root) else { return body }
         guard let out = serialize(root) else { return body }
         return out
     }
@@ -180,11 +192,14 @@ enum MITMJSONPatch {
     /// KNOWN LIMITATION: ``JSONSerialization`` decodes every JSON number into
     /// an ``NSNumber``, so integers beyond 2^53 / full Int64 range and
     /// high-precision decimals are not preserved exactly on re-serialize — a
-    /// 64-bit ID like `7203685625435718144` can come back altered. Because
-    /// ``applyAll`` re-serializes the whole document, this can reshape numbers
-    /// even in parts of the body no op touched. Exact round-tripping would
-    /// need a number-lexeme-preserving JSON parser (a larger change). Bodies
-    /// that match no rule never reach here, so unmatched traffic is unaffected.
+    /// 64-bit ID like `7203685625435718144` can come back altered. ``applyAll``
+    /// returns the original bytes untouched whenever no op actually changed the
+    /// document (so a rule that merely *matched* can no longer reshape numbers
+    /// in parts of the body it never edited), but once an op *does* change the
+    /// document the whole thing is re-serialized and numbers elsewhere in it may
+    /// still be reshaped. Exact round-tripping for the edited case would need a
+    /// number-lexeme-preserving JSON parser (a larger change). Bodies that match
+    /// no rule never reach here, so unmatched traffic is unaffected.
     static func parse(_ data: Data) -> Any? {
         guard !data.isEmpty else { return nil }
         return try? JSONSerialization.jsonObject(with: data, options: [.mutableContainers, .fragmentsAllowed])
@@ -384,6 +399,19 @@ enum MITMJSONPatch {
     /// `isEqual` is exactly right — and it treats `1` and `1.0` as equal,
     /// which is what a rule comparing against a numeric literal expects.
     static func valueEquals(_ lhs: Any, _ rhs: Any) -> Bool {
+        return (lhs as AnyObject).isEqual(rhs)
+    }
+
+    /// Deep structural equality for two parsed JSON documents, used by
+    /// ``applyAll`` to decide whether any op actually changed the document.
+    /// Both sides are Foundation JSON graphs (`NSDictionary` / `NSArray` /
+    /// `NSNumber` / `NSString` / `NSNull`), whose `isEqual:` already compares
+    /// recursively — so this answers the question *without* re-serializing
+    /// (which would itself perturb numbers). Comparing post-parse graphs is
+    /// apples-to-apples (both carry the same `NSNumber` representation), so an
+    /// untouched document always compares equal and its original bytes are
+    /// returned verbatim.
+    private static func documentsEqual(_ lhs: Any, _ rhs: Any) -> Bool {
         return (lhs as AnyObject).isEqual(rhs)
     }
 

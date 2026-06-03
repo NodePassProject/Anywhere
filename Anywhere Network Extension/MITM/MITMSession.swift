@@ -915,6 +915,18 @@ final class MITMSession {
                 // bytes to the client, then re-arms the read.
                 let handle: (Data) -> Void = { [weak self] transformed in
                     guard let self, !self.torn else { return }
+                    // Drain any upstream-bound flow-control credit the outbound
+                    // leg issued for a buffered response body and send it to the
+                    // server, so the server keeps sending while the body is held
+                    // instead of stalling at its window (mirrors the inbound
+                    // leg's pendingClientBytes drain). HTTP/1 has no such credit.
+                    let serverCredit = self.outboundH2?.drainPendingServerBytes() ?? Data()
+                    if !serverCredit.isEmpty {
+                        self.sendChunked(serverCredit, via: outer) { [weak self] sendError in
+                            guard let self, let sendError else { return }
+                            self.lwipQueue.async { self.cancel(error: sendError) }
+                        }
+                    }
                     guard !transformed.isEmpty else {
                         self.startOutboundPump(inner: inner, outer: outer)
                         return

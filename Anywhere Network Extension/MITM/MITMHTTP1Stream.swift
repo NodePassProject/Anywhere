@@ -1729,6 +1729,7 @@ final class MITMHTTP1Stream {
         if Self.containsControlChars(startLine) { return nil }
         var headers: [Header] = []
         var contentLengthValues: [String] = []
+        var transferEncodingValues: [String] = []
         var hasTEChunked = false
         for line in lines.dropFirst() {
             if line.isEmpty { continue }
@@ -1760,16 +1761,43 @@ final class MITMHTTP1Stream {
                     value.trimmingCharacters(in: CharacterSet.whitespaces)
                 )
             } else if name.equalsIgnoringASCIICase("transfer-encoding") {
-                // RFC 9112 §6.1: in a request/response, `chunked` MUST
-                // be the final transfer-coding. Split the comma list,
-                // trim each, and compare the last token to "chunked".
-                let parts = value.split(separator: ",", omittingEmptySubsequences: false)
-                if let last = parts.last?.trimmingCharacters(in: CharacterSet.whitespaces),
-                   last.equalsIgnoringASCIICase("chunked") {
-                    hasTEChunked = true
-                }
+                // Collect every Transfer-Encoding field line; the combined
+                // coding list is validated once after the loop so this head's
+                // implied framing matches what ``bodyFraming`` later applies.
+                transferEncodingValues.append(value)
             }
             headers.append((name: name, value: value))
+        }
+        // Every Content-Length we forward verbatim must be a shape
+        // ``bodyFraming`` will honor (a single in-range non-negative integer).
+        // A value like `+5`, `5 5`, or a 30-digit overflow is forwarded
+        // verbatim here but framed as bodyless by ``bodyFraming`` — the same
+        // proxy/upstream framing divergence the conflicting-header guards below
+        // close, and a request-smuggling vector. Refuse the head so the bytes
+        // flow through untouched for the receiver to adjudicate, rather than us
+        // imposing a framing the wire contradicts.
+        if contentLengthValues.contains(where: { !Self.isCleanContentLength($0) }) {
+            return nil
+        }
+        // Transfer-Encoding: combine the field lines into one ordered coding
+        // list (RFC 9112 §6.1) and require `chunked` to be the final coding for
+        // chunked framing — decided exactly as ``bodyFraming`` so the framing
+        // this head implies always matches the framing we apply.
+        if !transferEncodingValues.isEmpty {
+            // Multiple TE field lines let the per-line and combined-list
+            // readings diverge (and are a known smuggling vector); don't rewrite.
+            if transferEncodingValues.count > 1 { return nil }
+            let tokens = transferEncodingValues[0]
+                .split(separator: ",", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: CharacterSet.whitespaces) }
+            guard tokens.last?.equalsIgnoringASCIICase("chunked") == true else {
+                // TE present but not chunked-final: unframeable for a request
+                // (RFC 9112 §6.1) and exotic for a response. Refuse to rewrite so
+                // the bytes pass through verbatim rather than under a framing the
+                // forwarded Transfer-Encoding contradicts.
+                return nil
+            }
+            hasTEChunked = true
         }
         // RFC 9112 §6.3.5: multiple Content-Length values that differ
         // is malformed and a primary smuggling vector. Distinct
@@ -1803,6 +1831,20 @@ final class MITMHTTP1Stream {
             headers = filtered
         }
         return ParsedHead(startLine: startLine, headers: headers)
+    }
+
+    /// True when an end-trimmed Content-Length field value is a single,
+    /// in-range, non-negative integer — the only shape ``bodyFraming`` honors
+    /// as a body length. ``parseHead`` refuses any head carrying a value of
+    /// another shape (`+5`, `5 5`, an interior space, a value that overflows
+    /// ``Int``) so the length forwarded verbatim can never disagree with the
+    /// framing applied — that divergence is a request-smuggling vector
+    /// (RFC 9112 §6.3). Both call sites go through this one predicate so they
+    /// cannot drift apart.
+    static func isCleanContentLength(_ trimmed: String) -> Bool {
+        guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && $0.isNumber }) else { return false }
+        guard let length = Int(trimmed), length >= 0 else { return false }
+        return true
     }
 
     /// True when ``s`` contains a lone CR, lone LF, or NUL — any byte
@@ -2061,9 +2103,9 @@ final class MITMHTTP1Stream {
             // RFC 9112 §6.3: Content-Length is `1*DIGIT`. ``Int`` also accepts a
             // leading `+`, so `Content-Length: +5` would parse here yet be
             // rejected (or read differently) by a stricter peer — a framing
-            // divergence that enables request smuggling. Require pure ASCII digits.
-            if !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && $0.isNumber }),
-               let length = Int(trimmed), length >= 0 {
+            // divergence that enables request smuggling. ``isCleanContentLength``
+            // (the same gate ``parseHead`` rejects on) requires pure ASCII digits.
+            if Self.isCleanContentLength(trimmed), let length = Int(trimmed) {
                 return length == 0 ? .none : .contentLength(length)
             }
         }

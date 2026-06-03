@@ -856,6 +856,26 @@ final class MITMScriptEngine {
         return msg
     }
 
+    /// Reads a JS array's `length` as a safe, non-negative element count, or
+    /// nil when it is missing / non-finite / negative / implausibly large.
+    ///
+    /// `JSValue.toInt32()` applies ECMAScript ToInt32, which **wraps** a length
+    /// of 2^31 or more to a *negative* `Int` — and `0..<negative` traps,
+    /// crashing the whole extension (every tunnelled flow) from a one-line
+    /// untrusted script such as `new Array(2**31)`. Reading the true length as
+    /// a double and bounding it closes both the crash and the multi-billion-
+    /// iteration spin a merely-non-negative huge length would cause. `max` is
+    /// generous — far above any real header list / message — since the point is
+    /// only to reject the pathological.
+    private static func validatedArrayLength(_ value: JSValue, max: Int) -> Int? {
+        guard let lengthVal = value.objectForKeyedSubscript("length"), lengthVal.isNumber else {
+            return nil
+        }
+        let raw = lengthVal.toDouble()
+        guard raw.isFinite, raw >= 0, raw <= Double(max) else { return nil }
+        return Int(raw)
+    }
+
     /// Decodes a JS `[[name, value], ...]` array into the Swift header
     /// list, returning nil when the input isn't array-shaped at all
     /// (so the caller can keep the original headers instead of wiping
@@ -873,6 +893,7 @@ final class MITMScriptEngine {
     /// silently wipe every header on the message, since every entry
     /// fails the ``pair.count == 2`` shape check. Reverting forces the
     /// drop warnings into the log path the caller can act on.
+
     private static func headersFromValue(_ value: JSValue) -> [(name: String, value: String)]? {
         // Iterate the ``JSValue`` array and call ``toString()`` on each
         // leaf so JSC's standard ``ToString`` runs (numbers → ``"42"``,
@@ -884,7 +905,10 @@ final class MITMScriptEngine {
         // values that then fail ``isValidHeaderName`` (dropping the
         // entry) or land on the wire verbatim from value position.
         guard value.isArray else { return nil }
-        let length = Int(value.objectForKeyedSubscript("length")?.toInt32() ?? 0)
+        guard let length = Self.validatedArrayLength(value, max: 100_000) else {
+            logger.warning("[MITM][JS] dropping ctx.headers: length missing, negative, or implausibly large")
+            return nil
+        }
         if length == 0 { return [] }
         var result: [(name: String, value: String)] = []
         result.reserveCapacity(length)
@@ -2234,7 +2258,7 @@ final class MITMScriptEngine {
               let keys = ctx.objectForKeyedSubscript("Object")?.invokeMethod("keys", withArguments: [value]),
               keys.isArray
         else { return [] }
-        let length = Int(keys.objectForKeyedSubscript("length")?.toInt32() ?? 0)
+        guard let length = Self.validatedArrayLength(keys, max: 100_000) else { return [] }
         var out: [(name: String, value: String)] = []
         out.reserveCapacity(length)
         for i in 0..<length {
@@ -2598,11 +2622,9 @@ final class MITMScriptEngine {
         guard val.isArray else {
             throw ProtobufError(description: "expected an array of {field, wire, value} entries")
         }
-        let lengthVal = val.objectForKeyedSubscript("length")
-        guard let lengthVal, lengthVal.isNumber else {
-            throw ProtobufError(description: "input array has no length")
+        guard let count = Self.validatedArrayLength(val, max: 10_000_000) else {
+            throw ProtobufError(description: "input array length is missing, negative, or too large")
         }
-        let count = Int(lengthVal.toInt32())
         var entries: [ProtobufEntry] = []
         entries.reserveCapacity(count)
         for idx in 0..<count {

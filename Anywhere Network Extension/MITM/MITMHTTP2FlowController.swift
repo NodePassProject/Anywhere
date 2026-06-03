@@ -46,14 +46,32 @@ final class MITMHTTP2FlowController {
     /// each stream the MITM synthesizes toward the client. Default 65,535.
     private(set) var clientInitialStreamWindow: Int = 65_535
 
-    /// Connection-level bytes the MITM has injected toward the client as synth
-    /// DATA that have not yet been withheld from a forwarded client→upstream
-    /// connection WINDOW_UPDATE. The client replenishes its connection window
-    /// for everything it consumes — including synth bytes the upstream never
-    /// sent — so forwarding those WINDOW_UPDATEs verbatim would over-grant the
-    /// upstream's send window. ``withholdSynthDebt(from:)`` subtracts this so
-    /// the upstream is credited only for bytes it actually sent.
+    /// Connection-level bytes the MITM has put toward the client that the
+    /// upstream did **not** itself send on the wire, and that have not yet been
+    /// withheld from a forwarded client→upstream connection WINDOW_UPDATE. Two
+    /// sources feed it: synth DATA (request-phase `Anywhere.respond`) the
+    /// upstream never sent at all, and the body the MITM emits toward the client
+    /// after **buffering** a response for a rewrite rule (the upstream sent the
+    /// original, possibly-compressed bytes; the client sees and credits the
+    /// rewritten identity body — a different byte count it must not relay back
+    /// to the upstream as-is). The client replenishes its connection window for
+    /// everything it consumes, so forwarding those WINDOW_UPDATEs verbatim would
+    /// over-grant the upstream's send window. ``withholdSynthDebt(from:)``
+    /// subtracts this so the upstream is credited only for bytes it actually
+    /// sent (the buffered stream's sender was instead credited directly while
+    /// the body was held — see ``MITMHTTP2Connection.creditBufferedDataToSender``).
     private(set) var synthConnectionDebt: Int = 0
+
+    /// The request-direction mirror of ``synthConnectionDebt``: connection-level
+    /// bytes the MITM credited to the **client** directly while buffering a
+    /// request for a rewrite rule (the client would otherwise stall at its
+    /// initial window, since the upstream hasn't seen the held body and so
+    /// sends no WINDOW_UPDATE to relay back). The upstream later credits the
+    /// rewritten request it receives, and the outbound leg relays those
+    /// upstream→client WINDOW_UPDATEs; ``withholdClientRequestDebt(from:)``
+    /// subtracts this there so the client is not credited twice for the same
+    /// logical bytes.
+    private(set) var clientRequestConnectionDebt: Int = 0
 
     /// Debits the connection window by `n` client-bound DATA bytes (real or
     /// synth). May drive the window negative; that just gates synth emission.
@@ -67,11 +85,31 @@ final class MITMHTTP2FlowController {
         connectionWindow = min(Self.maxWindow, connectionWindow &+ increment)
     }
 
-    /// Records `n` synth connection-level DATA bytes for later compensation
-    /// (post-establishment synth only — a pre-establishment one-shot synth
-    /// never dials an upstream, so there is nothing to over-grant).
+    /// Records `n` client-bound connection-level DATA bytes for later
+    /// compensation against the client→upstream WINDOW_UPDATE relay — synth
+    /// DATA (post-establishment only; a pre-establishment one-shot never dials,
+    /// so there is nothing to over-grant) or a buffered response body emitted
+    /// to the client.
     func addSynthDebt(_ n: Int) {
         synthConnectionDebt += n
+    }
+
+    /// Records `n` connection-level bytes credited to the client while buffering
+    /// a request, for later compensation against the upstream→client
+    /// WINDOW_UPDATE relay (see ``clientRequestConnectionDebt``).
+    func addClientRequestDebt(_ n: Int) {
+        clientRequestConnectionDebt += n
+    }
+
+    /// Given an upstream connection-level WINDOW_UPDATE increment about to be
+    /// relayed to the client, withholds the portion attributable to request
+    /// bytes the MITM already credited the client for directly while buffering.
+    /// Returns the increment to actually forward; `0` means **drop** the frame
+    /// (a zero-increment WINDOW_UPDATE is a PROTOCOL_ERROR, RFC 9113 §6.9.1).
+    func withholdClientRequestDebt(from increment: Int) -> Int {
+        let withheld = min(increment, clientRequestConnectionDebt)
+        clientRequestConnectionDebt -= withheld
+        return increment - withheld
     }
 
     /// Given a client connection-level WINDOW_UPDATE increment about to be

@@ -319,7 +319,10 @@ Like `script`, `body-json` is a **buffered body transform**: the rewriter
 accumulates the body (auto-decoding `gzip` / `deflate` / `br`, up to the same
 **4 MiB** cap), edits it, and re-emits with a corrected `Content-Length`. The
 contract is **total** — a body that isn't JSON, a path that doesn't resolve, or
-a non-serializable result leaves the body **unchanged**. Unlike `script`,
+a non-serializable result leaves the body **unchanged** (byte-for-byte; a rule
+that matches but changes nothing never reshapes the body). A *successful* edit,
+though, re-serializes the whole document, so a JSON integer beyond 2^53 anywhere
+in it can lose precision. Unlike `script`,
 **every** matching `body-json` rule fires, in rule order, so edits compose; when
 a `script` rule also matches the same message, the JSON edits run **first** and
 the script sees the already-edited body (after any `body-replace` edits).
@@ -550,7 +553,8 @@ Byte-oriented JSON editing: every method is **bytes-in / bytes-out** (first arg
 is the body; returns a fresh `Uint8Array` of re-serialized compact JSON). The
 contract is **total** — a body that isn't JSON, a path that doesn't resolve, a
 type mismatch, or a non-serializable value all yield the body **unchanged**
-rather than throwing.
+(byte-for-byte) rather than throwing. A *successful* edit re-serializes the whole
+document, so a JSON integer beyond 2^53 anywhere in it can lose precision.
 
 - `add(body, path, value)` — upsert at a JSONPath.
 - `replace(body, path, value)` — modify only if the member/index already exists.
