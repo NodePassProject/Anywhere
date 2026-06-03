@@ -143,7 +143,7 @@ enum MITMJSONPatch {
         // high-precision decimals *anywhere* in the body (see ``parse``), so a
         // no-op rule would silently corrupt untouched data. Returning the
         // original bytes when nothing changed avoids that entirely.
-        let before = deepCopy(root)
+        let before = snapshot(root)
         for op in ops {
             apply(op, to: &root)
         }
@@ -394,25 +394,63 @@ enum MITMJSONPatch {
 
     // MARK: - Helpers
 
-    /// JSON-value equality for the `removeWhere…` predicates. Both sides
-    /// are Foundation JSON leaves (`NSNumber` / `NSString` / `NSNull`), so
-    /// `isEqual` is exactly right — and it treats `1` and `1.0` as equal,
-    /// which is what a rule comparing against a numeric literal expects.
+    /// True when ``value`` is a JSON boolean (`true`/`false`), which Foundation
+    /// backs with `CFBoolean` rather than a numeric `NSNumber`. JSON `true` and
+    /// `1` (and `false`/`0`) are distinct values, but `NSNumber(bool:)` `isEqual`
+    /// `NSNumber(1)` is `true` on Apple platforms — so the comparisons below must
+    /// reject a boolean-vs-number mismatch before deferring to `isEqual`.
+    private static func isBooleanNumber(_ value: Any) -> Bool {
+        return CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID()
+    }
+
+    /// JSON-value equality for the `removeWhere…` predicates and the leaf level
+    /// of ``documentsEqual``. `isEqual` is exactly right for `NSString`/`NSNull`
+    /// and treats `1` and `1.0` as equal (what a numeric-literal rule expects),
+    /// but it also equates `true`/`false` with `1`/`0`, which JSON does not.
+    /// Reject a boolean-vs-number mismatch first, then defer to `isEqual`.
     static func valueEquals(_ lhs: Any, _ rhs: Any) -> Bool {
+        if isBooleanNumber(lhs) != isBooleanNumber(rhs) { return false }
         return (lhs as AnyObject).isEqual(rhs)
     }
 
-    /// Deep structural equality for two parsed JSON documents, used by
-    /// ``applyAll`` to decide whether any op actually changed the document.
-    /// Both sides are Foundation JSON graphs (`NSDictionary` / `NSArray` /
-    /// `NSNumber` / `NSString` / `NSNull`), whose `isEqual:` already compares
-    /// recursively — so this answers the question *without* re-serializing
-    /// (which would itself perturb numbers). Comparing post-parse graphs is
-    /// apples-to-apples (both carry the same `NSNumber` representation), so an
-    /// untouched document always compares equal and its original bytes are
-    /// returned verbatim.
-    private static func documentsEqual(_ lhs: Any, _ rhs: Any) -> Bool {
-        return (lhs as AnyObject).isEqual(rhs)
+    /// A structural snapshot of a parsed JSON document so a caller can tell
+    /// whether a later mutation actually changed anything — letting an unchanged
+    /// document be returned as its original bytes instead of re-serialized (which
+    /// would perturb 64-bit numbers). Used by ``applyAll`` and the scripted
+    /// `Anywhere.json` bridge in ``MITMScriptEngine``.
+    static func snapshot(_ value: Any) -> Any {
+        return deepCopy(value)
+    }
+
+    /// Deep structural equality for two parsed JSON documents, used to decide
+    /// whether any op changed the document. Both sides are Foundation JSON
+    /// graphs (`NSDictionary` / `NSArray` / `NSNumber` / `NSString` / `NSNull`).
+    /// It recurses with ``valueEquals`` at the leaves rather than a blanket
+    /// `isEqual:` so a `true`↔`1` (or `false`↔`0`) edit is NOT misclassified as
+    /// a no-op and silently dropped. Comparing post-parse graphs is
+    /// apples-to-apples, so an untouched document always compares equal and its
+    /// original bytes are returned verbatim.
+    static func documentsEqual(_ lhs: Any, _ rhs: Any, depth: Int = 0) -> Bool {
+        guard depth < maxRecursionDepth else { return (lhs as AnyObject).isEqual(rhs) }
+        switch (lhs, rhs) {
+        case let (l as NSDictionary, r as NSDictionary):
+            guard l.count == r.count else { return false }
+            for key in l.allKeys {
+                guard let lv = l.object(forKey: key), let rv = r.object(forKey: key),
+                      documentsEqual(lv, rv, depth: depth + 1) else { return false }
+            }
+            return true
+        case let (l as NSArray, r as NSArray):
+            guard l.count == r.count else { return false }
+            for i in 0..<l.count where !documentsEqual(l[i], r[i], depth: depth + 1) {
+                return false
+            }
+            return true
+        default:
+            // Leaves (or a container-vs-scalar / dict-vs-array type mismatch,
+            // which valueEquals correctly reports unequal).
+            return valueEquals(lhs, rhs)
+        }
     }
 
     /// Recursively copies JSON containers so an inserted value shares no

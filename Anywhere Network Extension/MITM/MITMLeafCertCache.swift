@@ -112,6 +112,16 @@ final class MITMLeafCertCache {
     func reset() {
         cond.lock()
         entries.removeAll()
+        // Also clear in-flight single-flight markers and wake any waiters, so a
+        // reset never strands a waiter blocked on a ``minting`` entry whose
+        // (now-abandoned) leader won't clear it. NB: this does not invalidate a
+        // leader minting *outside the lock right now* — its post-mint write
+        // would still land a leaf signed by the pre-reset CA. No caller invokes
+        // reset() today; if one is wired to a CA rotation, add a generation (or
+        // CA-fingerprint) check on the ``leaf`` cache write so an in-flight mint
+        // started under the old CA can't repopulate the cache.
+        minting.removeAll()
+        cond.broadcast()
         cond.unlock()
     }
 

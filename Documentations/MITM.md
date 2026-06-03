@@ -67,10 +67,13 @@ free. Scope `hostname` as tightly as you can.
 > **Performance note.** All script execution across all connections runs on a
 > single serial queue, and one JavaScript runtime is shared by every connection
 > to the same rule set. A script that loops forever, recurses without bound, or
-> triggers catastrophic regex backtracking will wedge **every** tunneled flow,
-> not just its own connection — CPU-bound execution can't be preempted (the
-> idle-async watchdog under [Limits](#limits-and-safety) doesn't cover a running
-> loop). Keep scripts bounded. (Awaiting an [`Anywhere.http`](#anywherehttp) fetch is the
+> triggers catastrophic regex backtracking will stall **every** other script
+> sharing that runtime, not just its own connection — CPU-bound execution can't
+> be preempted (the idle-async watchdog under [Limits](#limits-and-safety)
+> doesn't cover a running loop; a separate hard-cap watchdog crashes and
+> relaunches the extension after ~30 s, so a runaway self-recovers rather than
+> wedging for the process's life). Keep scripts bounded. (Awaiting an
+> [`Anywhere.http`](#anywherehttp) fetch is the
 > exception: while it is in flight the connection is parked but the shared
 > runtime is **free**, so other connections' scripts keep running — only
 > CPU-bound work monopolizes the runtime.)
@@ -655,9 +658,10 @@ state lives on `ctx`; cross-connection state belongs in
 > IP literals in loopback / link-local (incl. the cloud-metadata address) /
 > private / ULA ranges, and re-checks every redirect hop — so a script can't
 > pivot to internal services by literal address. A hostname that *resolves* to
-> an internal address is **not** caught (resolution happens in URLSession), and
-> a script can still exfiltrate data it has read to any public host. Author and
-> import rule sets only from sources you trust.
+> an internal address is also refused: the host is resolved and checked before
+> the request leaves the device (a sub-TTL DNS rebind that flips *after* that
+> check is a residual gap). A script can still exfiltrate data it has read to any
+> public host. Author and import rule sets only from sources you trust.
 
 ### Control directives
 
@@ -707,26 +711,31 @@ If you need composed behavior, consolidate the logic into a single
 | HTTP/1 request/response head       | 64 KiB       | stream downgrades to passthrough |
 | Typed-array memory (all scripts)   | 16 MiB / 32 MiB | soft → GC hint; hard → empty `Uint8Array` returned |
 | Idle suspended `async` script      | ~60 s no progress | reverted to original, released |
+| Runaway synchronous JS span        | ~30 s        | extension crashes & relaunches clean |
 
 Other safety properties:
 
 - **Wire safety.** Header names, header values, methods, and request targets
   produced by scripts are validated; CR/LF/NUL and other smuggling vectors are
   rejected so a script can't split the wire framing.
-- **Watchdog (idle async only).** A suspended `async` script that stops making
-  progress — a never-settling Promise or an abandoned `await` — is reverted to
-  the original message and released after an idle stretch longer than the
-  maximum per-fetch timeout (~60 s), so it can't park its connection forever. A
-  **CPU-bound** loop is still *not* preemptible: it wedges its own connection
-  and monopolizes the shared script runtime until it returns, so keep loops and
-  regexes bounded. (Awaiting an [`Anywhere.http`](#anywherehttp) fetch does not
+- **Watchdogs.** Two cover a stuck script. *Idle async:* a suspended `async`
+  script that stops making progress — a never-settling Promise or an abandoned
+  `await` — is reverted to the original message and released after an idle
+  stretch longer than the maximum per-fetch timeout (~60 s), so it can't park
+  its connection forever. *Runaway sync:* a **CPU-bound** loop or pathological
+  regex still *can't* be preempted, so it wedges its own connection and stalls
+  the scripts queued behind it — but a synchronous span that runs past a ~30 s
+  hard cap crashes the extension so the OS relaunches it clean, rather than
+  letting the wedge last the process's life. Either way, keep loops and regexes
+  bounded. (Awaiting an [`Anywhere.http`](#anywherehttp) fetch does not
   monopolize the runtime — see its execution-model note.)
 - **Outbound requests.** [`Anywhere.http`](#anywherehttp) lets a script make the
   extension issue HTTP(S) requests — an exfiltration surface bounded by the
   per-script and global caps above. Destinations are restricted: loopback,
-  link-local (incl. cloud-metadata), private, and ULA addresses are refused by
-  literal address (a name resolving to an internal IP is not caught). A script
-  can still reach any public host, so only run rule sets from sources you trust.
+  link-local (incl. cloud-metadata), private, and ULA addresses are refused both
+  as literal addresses and as hostnames that resolve to one (checked before the
+  request leaves; a sub-TTL DNS rebind is a residual gap). A script can still
+  reach any public host, so only run rule sets from sources you trust.
 - **Failure is safe-by-default.** A compile failure, a missing `process`, or an
   uncaught throw — including an unhandled `Anywhere.http` rejection — passes the
   original message through unchanged.

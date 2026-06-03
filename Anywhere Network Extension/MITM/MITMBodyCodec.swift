@@ -29,6 +29,20 @@ enum MITMBodyCodec {
     /// else the extension is doing concurrently.
     static let maxBufferedBodyBytes: Int = 4 * 1024 * 1024
 
+    /// Largest number of stacked `Content-Encoding` codings the rewriter will
+    /// decode. Real responses carry one coding (occasionally two, e.g. a CDN
+    /// that gzips then brotlis); a longer chain is almost always a crafted
+    /// `Content-Encoding: gzip, gzip, gzip, …` whose only purpose is to force
+    /// one ``maxBufferedBodyBytes``-capped decode pass per token. Bounded only
+    /// by the head size cap, that token count can reach the tens of thousands —
+    /// a CPU-amplification DoS on the serial lwIP / script queue, and cheap for
+    /// the attacker since re-compressing already-compressed bytes barely grows
+    /// the wire body. A chain longer than this fails the plan as *unsupported*,
+    /// so the body is forwarded verbatim (the client decodes it) instead of
+    /// being decoded for rewriting — fail-closed, the same posture an
+    /// unrecognised coding already takes.
+    static let maxCodecChainLength = 4
+
     /// One token in a `Content-Encoding` chain. The wire order is the
     /// order the server applied codings; decoding walks this list in
     /// reverse.
@@ -81,6 +95,13 @@ enum MITMBodyCodec {
             default:
                 supported = false
             }
+        }
+        // A chain longer than ``maxCodecChainLength`` is treated as unsupported
+        // (fail-closed → the body is forwarded verbatim, the same posture an
+        // unrecognised coding takes), bounding the per-token decode amplification
+        // a crafted ``gzip, gzip, …`` chain would otherwise force.
+        if codecs.count > maxCodecChainLength {
+            supported = false
         }
         return Plan(codecs: codecs, supported: supported)
     }
@@ -233,6 +254,12 @@ enum MITMBodyCodec {
         /// body + trailer), so the caller can advance to the next member.
         case success(decoded: Data, consumed: Int)
         case failure(GzipMemberFailure)
+        /// The cumulative decompressed output — this member plus everything
+        /// ``gunzip`` already decoded — would exceed ``maxBufferedBodyBytes``.
+        /// Kept distinct from ``failure`` so ``gunzip`` aborts the whole body
+        /// (the decompression-bomb guard) instead of treating it as a
+        /// recoverable malformed trailing member and returning a truncated body.
+        case capExceeded
     }
 
     /// Parses one or more concatenated gzip members per RFC 1952 §2.2.
@@ -249,7 +276,15 @@ enum MITMBodyCodec {
         var cursor = data.startIndex
         let end = data.endIndex
         while cursor < end {
-            switch gunzipOneMember(data, from: cursor) {
+            // Pass the running output total as the per-member decode budget so
+            // a member is bounded by ``maxBufferedBodyBytes - combined.count``
+            // rather than the full cap. Without this each member could decode up
+            // to the full cap while ``combined`` already held nearly the cap,
+            // letting peak resident memory reach ~2× the intended ceiling.
+            switch gunzipOneMember(data, from: cursor, producedSoFar: combined.count) {
+            case .capExceeded:
+                logger.warning("[MITM] gzip multi-member output would exceed cap \(maxBufferedBodyBytes) B; aborting")
+                return (nil, .capExceeded)
             case .failure(let reason):
                 // Malformed member: if we already decoded at least one
                 // earlier member, return what we have rather than dropping
@@ -258,10 +293,8 @@ enum MITMBodyCodec {
                 // member means the whole body is undecodable; surface why.
                 return combined.isEmpty ? (nil, .firstMember(reason)) : (combined, nil)
             case .success(let memberBytes, let consumed):
-                if combined.count + memberBytes.count > maxBufferedBodyBytes {
-                    logger.warning("[MITM] gzip multi-member output would exceed cap \(maxBufferedBodyBytes) B; aborting")
-                    return (nil, .capExceeded)
-                }
+                // The per-member budget above already bounded cumulative output
+                // to the cap, so this append can't breach it.
                 combined.append(memberBytes)
                 cursor = data.index(cursor, offsetBy: consumed)
             }
@@ -275,7 +308,8 @@ enum MITMBodyCodec {
     /// which ``gunzip`` surfaces when it's the first member.
     private static func gunzipOneMember(
         _ data: Data,
-        from offset: Data.Index
+        from offset: Data.Index,
+        producedSoFar: Int
     ) -> GzipMemberOutcome {
         let end = data.endIndex
         // Minimum: 10-byte fixed header + 8-byte trailer.
@@ -292,8 +326,11 @@ enum MITMBodyCodec {
         if flags & 0x04 != 0 { // FEXTRA
             guard data.distance(from: idx, to: end) >= 2 else { return .failure(.truncatedHeaderField("FEXTRA")) }
             let xlen = Int(data[idx]) | (Int(data[data.index(idx, offsetBy: 1)]) << 8)
+            // Distance-check the full 2-byte XLEN + extra-field span before
+            // forming the index. ``index(_:offsetBy:)`` overshooting ``end`` is a
+            // precondition violation that can trap, so never advance past ``end``.
+            guard data.distance(from: idx, to: end) >= 2 + xlen else { return .failure(.truncatedHeaderField("FEXTRA")) }
             idx = data.index(idx, offsetBy: 2 + xlen)
-            guard idx <= end else { return .failure(.truncatedHeaderField("FEXTRA")) }
         }
         if flags & 0x08 != 0 { // FNAME (NUL-terminated)
             while idx < end, data[idx] != 0 { idx = data.index(after: idx) }
@@ -306,8 +343,10 @@ enum MITMBodyCodec {
             idx = data.index(after: idx)
         }
         if flags & 0x02 != 0 { // FHCRC
+            // Distance-check before advancing — see the FEXTRA note on why
+            // overshooting ``end`` with ``index(_:offsetBy:)`` must be avoided.
+            guard data.distance(from: idx, to: end) >= 2 else { return .failure(.truncatedHeaderField("FHCRC")) }
             idx = data.index(idx, offsetBy: 2)
-            guard idx <= end else { return .failure(.truncatedHeaderField("FHCRC")) }
         }
         // Decode the deflate body, also returning how many input bytes the
         // deflate stream actually consumed so we can find this member's
@@ -315,14 +354,14 @@ enum MITMBodyCodec {
         let deflateInput = data.subdata(in: idx..<end)
         let decoded: Data
         let deflateConsumed: Int
-        switch streamDecodeMember(deflateInput, algorithm: COMPRESSION_ZLIB) {
+        switch streamDecodeMember(deflateInput, algorithm: COMPRESSION_ZLIB, budgetUsed: producedSoFar) {
         case .success(let d, let c):
             decoded = d
             deflateConsumed = c
         case .failure(let status, let consumedInput, let producedOutput):
             return .failure(.deflate(status: status, consumed: consumedInput, of: deflateInput.count, produced: producedOutput))
-        case .capExceeded(let producedOutput):
-            return .failure(.deflate(status: "cap-exceeded", consumed: deflateInput.count, of: deflateInput.count, produced: producedOutput))
+        case .capExceeded:
+            return .capExceeded
         }
         // Trailer is the 8 bytes following the deflate stream.
         let trailerStart = data.index(idx, offsetBy: deflateConsumed)
@@ -398,7 +437,8 @@ enum MITMBodyCodec {
     /// would be noise.
     private static func streamDecodeMember(
         _ data: Data,
-        algorithm: compression_algorithm
+        algorithm: compression_algorithm,
+        budgetUsed: Int = 0
     ) -> StreamDecodeOutcome {
         guard !data.isEmpty else { return .success(decoded: Data(), consumed: 0) }
         let stream = UnsafeMutablePointer<compression_stream>.allocate(capacity: 1)
@@ -431,7 +471,10 @@ enum MITMBodyCodec {
                 case COMPRESSION_STATUS_OK, COMPRESSION_STATUS_END:
                     let written = bufferSize - stream.pointee.dst_size
                     if written > 0 {
-                        if output.count + written > maxBufferedBodyBytes {
+                        // ``budgetUsed`` is output already produced by earlier
+                        // gzip members in the same body, so the cap bounds the
+                        // *cumulative* multi-member output, not just this member.
+                        if budgetUsed + output.count + written > maxBufferedBodyBytes {
                             logger.warning("[MITM] decompress output would exceed cap \(maxBufferedBodyBytes) B; aborting")
                             return .capExceeded(producedOutput: output.count)
                         }

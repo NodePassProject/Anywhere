@@ -15,18 +15,19 @@ struct CompiledMITMRule {
     let phase: MITMPhase
     /// Pre-compiled gate: a regex over the whole request URL. The
     /// ``operation`` only fires when this matches — it is purely a gate.
-    let urlPatternRegex: NSRegularExpression
+    /// Matching is bounded and memoized via ``MITMGateRegex`` so an untrusted
+    /// catastrophic-backtracking pattern can't stall the tunnel (ReDoS).
+    let gate: MITMGateRegex
     let operation: CompiledMITMOperation
 }
 
 extension CompiledMITMRule {
-    /// Cap on the URL length fed to the (untrusted, backtracking) gate regex.
-    /// Real request URLs are far shorter; an over-long one simply isn't matched
-    /// (fail-closed). Bounds the worst case of a catastrophic-backtracking
-    /// pattern shipped in an imported rule set — these run on the tunnel's
-    /// serial `lwipQueue`, so an unbounded match would stall every flow (ReDoS).
-    /// The cap mitigates but does not eliminate ReDoS on a moderately long URL;
-    /// ICU's regex engine has no step limit.
+    /// Cap on the URL length the gate regex is run against. Real request URLs
+    /// are far shorter; an over-long one fails closed (unmatched) without
+    /// running the matcher at all — a cheap first bound on per-match work. The
+    /// real ReDoS containment, keeping an untrusted catastrophic-backtracking
+    /// pattern from running unbounded on the serial lwIP queue, lives in
+    /// ``MITMGateRegex``; this cap only limits the input that reaches it.
     static let maxGateURLLength = 8 * 1024
 
     /// Whether this rule's gate matches the given request URL. The gate is an
@@ -39,9 +40,11 @@ extension CompiledMITMRule {
     /// rule is skipped rather than applied blind.
     func matchesURL(_ url: String?) -> Bool {
         guard let url, url.utf16.count <= Self.maxGateURLLength else { return false }
-        let normalized = Self.lowercasingHost(url)
-        let range = NSRange(normalized.startIndex..., in: normalized)
-        return urlPatternRegex.firstMatch(in: normalized, options: [], range: range) != nil
+        // Delegate to the bounded, memoized gate so an untrusted
+        // catastrophic-backtracking pattern can't run unbounded on the lwIP
+        // queue and freeze the tunnel. The host is lowercased here (the gate's
+        // memo keys on this normalized form).
+        return gate.matches(Self.lowercasingHost(url))
     }
 
     /// Lowercases only the authority (`host[:port]`) of a `scheme://authority/…`
@@ -93,8 +96,7 @@ enum CompiledMITMOperation {
     /// Request-phase "Rewrite" operation. ``transparent`` rewrites the
     /// request URL to the replacement and (on a host change) redirects the
     /// outer dial + authority; the synthesize sub-modes answer on the inner
-    /// leg. The ``CompiledMITMRule/urlPatternRegex`` gate decides whether the
-    /// rule fires.
+    /// leg. The ``CompiledMITMRule/gate`` decides whether the rule fires.
     case rewrite(CompiledRewriteAction)
     case headerAdd(name: String, value: String)
     case headerDelete(nameLower: String)
@@ -256,12 +258,12 @@ final class MITMRewritePolicy {
         guard !suffixes.isEmpty else { return nil }
 
         let compiledRules = set.rules.compactMap { rule -> CompiledMITMRule? in
-            guard let regex = try? NSRegularExpression(pattern: rule.urlPattern, options: []) else {
+            guard let gate = MITMGateRegex(pattern: rule.urlPattern) else {
                 logger.warning("[MITM] rule URL pattern failed to compile (suffix=\(set.name)): \(rule.urlPattern)")
                 return nil
             }
             guard let op = compile(rule.operation, suffix: set.name) else { return nil }
-            return CompiledMITMRule(phase: rule.phase, urlPatternRegex: regex, operation: op)
+            return CompiledMITMRule(phase: rule.phase, gate: gate, operation: op)
         }
 
         for suffix in suffixes {
@@ -272,6 +274,13 @@ final class MITMRewritePolicy {
             )
             if trie.insert(suffix: suffix, payload: payload) {
                 setCount += 1
+            } else {
+                // Two enabled rule sets declared the same domain suffix; the
+                // later one (this set, in user list order) overwrites the
+                // earlier payload. Surface it — the precedence contract above
+                // promises this warning, and without it, reordering sets in the
+                // UI silently changes which rules apply for the suffix.
+                logger.warning("[MITM] duplicate domain suffix \"\(suffix)\": rule set \"\(set.name)\" overrides an earlier set's rules for it")
             }
         }
         return compiledRules
@@ -315,6 +324,10 @@ final class MITMRewritePolicy {
                 logger.warning("[MITM] headerAdd dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
+            guard !Self.isFramingHeader(name) else {
+                logger.warning("[MITM] headerAdd dropped: \"\(name)\" controls message framing and can't be set by a header rule (suffix=\(suffix))")
+                return nil
+            }
             guard Self.isValidHeaderValue(value) else {
                 logger.warning("[MITM] headerAdd dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
                 return nil
@@ -329,6 +342,10 @@ final class MITMRewritePolicy {
         case .headerReplace(let name, let value):
             guard Self.isValidHeaderName(name) else {
                 logger.warning("[MITM] headerReplace dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
+                return nil
+            }
+            guard !Self.isFramingHeader(name) else {
+                logger.warning("[MITM] headerReplace dropped: \"\(name)\" controls message framing and can't be set by a header rule (suffix=\(suffix))")
                 return nil
             }
             guard Self.isValidHeaderValue(value) else {
@@ -440,6 +457,21 @@ final class MITMRewritePolicy {
             }
         }
         return true
+    }
+
+    /// Headers that determine message framing (RFC 9112 §6). A header rule that
+    /// adds or replaces one of these would let the serialized head's framing
+    /// diverge from the body the proxy actually streams — a duplicate or
+    /// mismatched ``Content-Length`` / ``Transfer-Encoding`` is the classic
+    /// request/response-smuggling (CL.CL / CL.TE) primitive, and the inbound
+    /// parser works hard to reject exactly that divergence. Letting a rule
+    /// re-introduce it on the way out would reopen the hole, so framing headers
+    /// aren't settable by add/replace. (``headerDelete`` is left alone: removing
+    /// a framing header only ever makes the message *more* conservatively
+    /// framed, never divergent.)
+    private static func isFramingHeader(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower == "content-length" || lower == "transfer-encoding"
     }
 
     /// Conservative check for a rewrite replacement target. It is spliced

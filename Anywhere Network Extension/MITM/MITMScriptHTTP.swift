@@ -125,6 +125,68 @@ final class MITMScriptHTTPClient {
         return false
     }
 
+    /// Background queue for the synchronous ``getaddrinfo`` rebinding check, so
+    /// the lookup (which blocks until it settles, up to the resolver timeout)
+    /// never runs on the caller's shared script queue.
+    private static let resolutionQueue = DispatchQueue(
+        label: "com.anywhere.mitm.script-http.resolve",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+
+    /// Whether `host` *resolves* to any blocked (loopback / link-local /
+    /// private / ULA / CGNAT / metadata) address — the DNS-rebinding case
+    /// ``isBlockedHost`` cannot see from the name alone (it only judges IP
+    /// literals). Resolves with `getaddrinfo` and returns true if **any**
+    /// returned address is non-public, so a name pointed at (or round-robining
+    /// through) an internal IP — e.g. a rebinding domain aimed at
+    /// `169.254.169.254` — is refused before the request leaves the device.
+    ///
+    /// A resolution *failure* returns false (don't block): we refuse only on a
+    /// positive internal-address match and let a genuinely unresolvable host
+    /// fail naturally in `URLSession`. A residual TOCTOU remains — `URLSession`
+    /// re-resolves when it connects, so a sub-TTL flip could still land
+    /// internally after this passes — but this defeats the common static
+    /// rebinding-to-metadata pivot; full closure would require pinning the
+    /// resolved IP through a custom connection path. Blocking: call off the
+    /// shared script queue (see ``resolutionQueue``).
+    static func resolvesToBlockedAddress(_ host: String) -> Bool {
+        var h = host.lowercased()
+        if h.hasSuffix(".") { h.removeLast() }
+        let bare = (h.hasPrefix("[") && h.hasSuffix("]")) ? String(h.dropFirst().dropLast()) : h
+
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(bare, nil, &hints, &result) == 0, let head = result else {
+            if result != nil { freeaddrinfo(result) }
+            return false
+        }
+        defer { freeaddrinfo(head) }
+
+        var node: UnsafeMutablePointer<addrinfo>? = head
+        while let n = node {
+            defer { node = n.pointee.ai_next }
+            guard let sa = n.pointee.ai_addr else { continue }
+            switch n.pointee.ai_family {
+            case AF_INET:
+                let bytes = sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { p in
+                    withUnsafeBytes(of: p.pointee.sin_addr) { Array($0) }
+                }
+                if isBlockedIPv4(bytes) { return true }
+            case AF_INET6:
+                let bytes = sa.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { p in
+                    withUnsafeBytes(of: p.pointee.sin6_addr) { Array($0) }
+                }
+                if isBlockedIPv6(bytes) { return true }
+            default:
+                continue
+            }
+        }
+        return false
+    }
+
     /// One HTTP response handed back to a script. `headers` are flattened to
     /// pairs (URLSession combines duplicate field names); `finalURL` is the
     /// URL after any followed redirects.
@@ -139,6 +201,7 @@ final class MITMScriptHTTPClient {
         case notHTTP
         case responseTooLarge(Int)
         case globalBudgetExceeded(Int)
+        case blockedHost(String)
 
         var errorDescription: String? {
             switch self {
@@ -148,6 +211,8 @@ final class MITMScriptHTTPClient {
                 return "response body exceeds the \(cap)-byte cap"
             case .globalBudgetExceeded(let cap):
                 return "aggregate in-flight response bytes exceed the \(cap)-byte global budget; retry once other requests finish"
+            case .blockedHost(let host):
+                return "host \"\(host)\" resolves to a blocked (loopback/link-local/private) address"
             }
         }
     }
@@ -175,18 +240,33 @@ final class MITMScriptHTTPClient {
         maxBytes: Int,
         completion: @escaping (Result<Response, Error>) -> Void
     ) {
-        let delegate = SessionDelegate(
-            followRedirects: followRedirects,
-            insecure: insecure,
-            maxBytes: maxBytes,
-            completion: completion
-        )
-        // The session strongly retains the delegate, and the running task
-        // retains the session, until the terminal `didCompleteWithError`
-        // callback calls `finishTasksAndInvalidate` — so nothing here needs to
-        // outlive the call.
-        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-        session.dataTask(with: request).resume()
+        // DNS-rebinding guard, off the shared script queue. ``isBlockedHost``
+        // (applied by the caller and the redirect delegate) only sees IP
+        // literals; a hostname resolving to an internal address slips past it.
+        // Resolve and refuse before the task starts. ``getaddrinfo`` blocks
+        // until the lookup settles, so it runs on ``resolutionQueue`` — never
+        // the caller's scriptQueue, where it would wedge every other script.
+        // ``completion`` still fires exactly once; the caller re-hops it to the
+        // script queue regardless of which queue it arrives on.
+        Self.resolutionQueue.async {
+            if let host = request.url?.host,
+               MITMScriptHTTPClient.resolvesToBlockedAddress(host) {
+                completion(.failure(ClientError.blockedHost(host)))
+                return
+            }
+            let delegate = SessionDelegate(
+                followRedirects: followRedirects,
+                insecure: insecure,
+                maxBytes: maxBytes,
+                completion: completion
+            )
+            // The session strongly retains the delegate, and the running task
+            // retains the session, until the terminal `didCompleteWithError`
+            // callback calls `finishTasksAndInvalidate` — so nothing here needs
+            // to outlive the call.
+            let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+            session.dataTask(with: request).resume()
+        }
     }
 
     /// Per-request delegate. Applies the redirect + TLS-trust policy, caps the
@@ -351,8 +431,25 @@ final class MITMScriptHTTPClient {
             completionHandler: @escaping (URLRequest?) -> Void
         ) {
             // Re-apply the SSRF guard to the redirect target: a 3xx must not be
-            // followed into a blocked host (loopback/link-local/private/.local).
-            if let host = request.url?.host, MITMScriptHTTPClient.isBlockedHost(host) {
+            // followed into a blocked host (loopback/link-local/private/.local),
+            // including one reached by DNS rebinding (a name that resolves to an
+            // internal address). This delegate runs on the per-request serial
+            // delegate queue, so the blocking ``getaddrinfo`` here only delays
+            // this one redirect — never the shared script queue.
+            //
+            // Fail closed on a target we can't vet — no URL, no host, or a
+            // non-http(s) scheme. A nil host slips past an `if let host` bind
+            // entirely, so without this guard such a redirect would be followed
+            // with no SSRF evaluation at all.
+            guard let url = request.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  let host = url.host else {
+                completionHandler(nil)
+                return
+            }
+            if MITMScriptHTTPClient.isBlockedHost(host)
+                || MITMScriptHTTPClient.resolvesToBlockedAddress(host) {
                 completionHandler(nil)
                 return
             }

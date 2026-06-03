@@ -58,7 +58,34 @@ final class MITMCertificateStore {
         if let existing = try? loadCAUnlocked() {
             return existing
         }
-        return try generateCAUnlocked()
+        do {
+            return try generateCAUnlocked()
+        } catch {
+            // Generation failed. The CA keychain items are shared between the
+            // app and the extension via the App Group, and the ``NSLock`` above
+            // only serializes one process — so the usual cause is a CA private
+            // key that already exists without a matching cert:
+            //   • a concurrent generator in the other process won the race and
+            //     persisted both items between our load and our generate, or
+            //   • an earlier run left the key stranded (its cert add failed or
+            //     the cert item was independently evicted).
+            // ``generatePrivateKey`` then trips ``errSecDuplicateItem`` on the
+            // existing tag and every retry wedges MITM until a manual
+            // ``regenerate()``. Recover automatically:
+            //   1. Re-read — covers the race where the other process just
+            //      finished writing both items.
+            if let existing = try? loadCAUnlocked() {
+                return existing
+            }
+            //   2. A key present with the cert still missing is genuinely
+            //      orphaned: drop it and generate once more so a fresh,
+            //      cert-matched key replaces it. (A non-duplicate failure leaves
+            //      no key here, so surface the real error instead of retrying
+            //      pointlessly.)
+            guard (try? readPrivateKeyUnlocked()) != nil else { throw error }
+            deletePrivateKey()
+            return try generateCAUnlocked()
+        }
     }
 
     /// Returns the persisted CA cert + private key, or `nil` if neither has
@@ -212,9 +239,8 @@ final class MITMCertificateStore {
         let notAfter = Calendar(identifier: .gregorian).date(byAdding: .year, value: 10, to: now) ?? now.addingTimeInterval(60 * 60 * 24 * 365 * 10)
         let serial = randomSerial()
 
-        let certDER: Data
         do {
-            certDER = try X509Builder.buildCACertificate(
+            let certDER = try X509Builder.buildCACertificate(
                 privateKey: privateKey,
                 subjectCN: Self.caSubjectCN,
                 organization: Self.caOrganization,
@@ -222,13 +248,18 @@ final class MITMCertificateStore {
                 notBefore: now.addingTimeInterval(-60 * 60),
                 notAfter: notAfter
             )
+            try writeCertificateUnlocked(certDER)
+            return (privateKey, certDER)
         } catch {
-            // Leave the keychain item alone — caller can retry.
+            // ``generatePrivateKey`` already persisted the key
+            // (kSecAttrIsPermanent), but building or storing its certificate
+            // failed — leaving a key with no matching cert. Deleting it is
+            // required for recovery: the next generateCAUnlocked() re-adds the
+            // same kSecAttrApplicationTag and would otherwise fail with
+            // errSecDuplicateItem, wedging MITM until a manual regenerate().
+            deletePrivateKey()
             throw MITMCertificateStoreError.certificateBuildFailed(error)
         }
-
-        try writeCertificateUnlocked(certDER)
-        return (privateKey, certDER)
     }
 
     private func deleteUnlocked() {
@@ -400,10 +431,20 @@ final class MITMCertificateStore {
     // MARK: - Helpers
 
     private func randomSerial() -> Data {
-        var bytes = Data(count: 16)
-        bytes.withUnsafeMutableBytes { ptr in
-            _ = SecRandomCopyBytes(kSecRandomDefault, 16, ptr.baseAddress!)
+        for _ in 0..<3 {
+            var bytes = Data(count: 16)
+            let status = bytes.withUnsafeMutableBytes { ptr in
+                SecRandomCopyBytes(kSecRandomDefault, 16, ptr.baseAddress!)
+            }
+            if status == errSecSuccess {
+                return bytes
+            }
         }
-        return bytes
+        // SecRandomCopyBytes failed repeatedly (extremely rare). Returning the
+        // zero-filled buffer would let ``normalizeSerial`` collapse every such
+        // serial to 1, guaranteeing (issuer, serial) collisions that strict
+        // validators reject. Fall back to a v4 UUID's 122 random bits — sourced
+        // independently of SecRandom and never all-zero in practice.
+        return withUnsafeBytes(of: UUID().uuid) { Data($0) }
     }
 }

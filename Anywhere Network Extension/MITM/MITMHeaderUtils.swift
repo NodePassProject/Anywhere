@@ -7,6 +7,24 @@
 
 import Foundation
 
+/// Parses an HTTP status code as exactly three ASCII digits (RFC 9112 §4
+/// status-code / RFC 9113 §8.3.2 `:status`). Returns nil for anything else —
+/// `+200`, `0204`, `2xx`, `99999`, or any token that isn't three digits — so a
+/// malformed status can't be leniently coerced (as bare `Int(_:)` would) into a
+/// body-framing decision that diverges from how a strict peer frames the same
+/// wire bytes. Surrounding ASCII whitespace is tolerated: an HTTP/1 status token
+/// is already split on SP, and HTTP/2 `:status` carries none.
+func parseHTTPStatusCode(_ raw: some StringProtocol) -> Int? {
+    let trimmed = String(raw).trimmingCharacters(in: .whitespaces)
+    guard trimmed.utf8.count == 3 else { return nil }
+    var value = 0
+    for byte in trimmed.utf8 {
+        guard (0x30...0x39).contains(byte) else { return nil }
+        value = value * 10 + Int(byte - 0x30)
+    }
+    return value
+}
+
 extension String {
 
     /// Case-insensitive ASCII comparison. Returns true iff the two

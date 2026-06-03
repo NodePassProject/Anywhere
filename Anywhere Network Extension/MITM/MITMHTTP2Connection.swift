@@ -224,9 +224,11 @@ final class MITMHTTP2Connection {
         /// later streams open first (RFC 9113 §5.1.1 regression →
         /// PROTOCOL_ERROR GOAWAY). So we open the stream in order up front
         /// and buffer only the body; the flush then emits just the
-        /// script-rewritten body. Script mutations to method/url/headers and
-        /// ``Anywhere.respond`` can't take effect once the stream is open and
-        /// are ignored on this path.
+        /// script-rewritten body. Scripts only ever rewrite the body
+        /// (method/url/status/headers writes are ignored everywhere), so the
+        /// one capability lost on this path is a request-phase
+        /// ``Anywhere.respond``, which can't short-circuit a stream already
+        /// open upstream.
         var headersAlreadyEmitted: Bool = false
     }
     private var pendingMessages: [UInt32: PendingMessage] = [:]
@@ -460,6 +462,18 @@ final class MITMHTTP2Connection {
     /// ``drainPendingClientBytes()`` right after the completion fires.
     func process(_ data: Data, completion: @escaping (Data) -> Void) {
         assert(parkedCompletion == nil, "process re-entered while a script hop is outstanding")
+        guard parkedCompletion == nil else {
+            // Should-never-happen: the pump only re-arms its receive after the
+            // previous completion fires. Overwriting the stashed completion
+            // would drop the prior read's re-arm callback and hang the
+            // connection half-open forever (a dual-leg leak) with no crash and
+            // no log in release builds (where the ``assert`` is compiled out).
+            // Fail closed and loud: fire only the new completion (empty),
+            // leaving the stashed one intact so it still resumes exactly once.
+            logger.error("[MITM] HTTP/2 \(rewriter.host): process re-entered while a script hop is outstanding; dropping this chunk to preserve the parked completion (one-read-in-flight invariant violated)")
+            completion(Data())
+            return
+        }
         // Once an oversized frame has broken the parse state, stay
         // broken — dropping further bytes on the floor is strictly
         // safer than misparsing them as a new frame's preamble.
@@ -830,28 +844,32 @@ final class MITMHTTP2Connection {
             rxBuffer = MITMByteBuffer()
             return false
         }
-        // RFC 9113 §5.1.1: client-initiated stream IDs MUST be odd and
-        // strictly monotonically increasing. Only the inbound leg
-        // carries that invariant — outbound responses/pushes arrive on
-        // already-open streams in arbitrary order. A HEADERS frame opens
-        // a NEW stream only when its ID advances past the highest opened
-        // on this leg; a HEADERS at or below that high-water mark is a
-        // trailer on a previously-opened stream (§8.1), which is legal
-        // and MUST skip new-stream validation. (Trailers on streams we
-        // still track never reach here — they take the
-        // follow-on-HEADERS flush path in finalizeHeaderBlock. A
-        // backwards or reused ID on an untracked stream collides with no
-        // state, since pass-through streams hold none, so we let it
-        // through for the peer/upstream to reject.)
+        // RFC 9113 §5.1.1: client-initiated stream IDs MUST be odd (even IDs are
+        // reserved for server push, which only ever arrives on the outbound
+        // server→proxy leg, never inbound). Reject ANY inbound HEADERS on an
+        // even stream — not only one that advances the high-water mark below —
+        // so a client that (mis)uses an even ID at or below the mark is
+        // contained here instead of forwarded upstream, where it would trip a
+        // PROTOCOL_ERROR + GOAWAY that tears down every other multiplexed stream
+        // on the shared connection. (The inbound leg never tracks an even
+        // stream, so this can't reject a legitimate trailer.)
+        if direction == .inbound, frame.streamID % 2 == 0 {
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): inbound (client) HEADERS has server (even) parity; marking parseError")
+            parseError = true
+            rxBuffer = MITMByteBuffer()
+            return false
+        }
+        // Stream IDs are also strictly monotonically increasing (§5.1.1). A
+        // HEADERS frame opens a NEW stream only when its ID advances past the
+        // highest opened on this leg; one at or below that high-water mark is a
+        // trailer on a previously-opened stream (§8.1), which is legal and skips
+        // new-stream bookkeeping. (Trailers on streams we still track never
+        // reach here — they take the follow-on-HEADERS flush path in
+        // finalizeHeaderBlock. A backwards/reused ID on an untracked stream
+        // collides with no state, since pass-through streams hold none.)
         if direction == .inbound,
            frame.streamID > highestInboundStreamID,
            isFreshHeadersFrame(streamID: frame.streamID) {
-            guard frame.streamID % 2 == 1 else {
-                logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): client-initiated HEADERS has server (even) parity; marking parseError")
-                parseError = true
-                rxBuffer = MITMByteBuffer()
-                return false
-            }
             highestInboundStreamID = frame.streamID
         }
 
@@ -1062,7 +1080,7 @@ final class MITMHTTP2Connection {
                 isInterimResponse = false
             case .outbound:
                 if let raw = firstHeaderValue(decoded, name: ":status"),
-                   let status = Int(raw.trimmingCharacters(in: .whitespaces)) {
+                   let status = parseHTTPStatusCode(raw) {
                     isTrailer = false
                     isInterimResponse = (100..<200).contains(status) && status != 101
                 } else {
@@ -1279,13 +1297,16 @@ final class MITMHTTP2Connection {
             return false
         }
 
-        // Buffered-script mode: defer HEADERS emission. The script may
-        // mutate any field on the message, including pseudo-headers,
-        // so the wire HEADERS frame waits until scripts have run. For
-        // bodied streams the deferral also drives body buffering; for
-        // END_STREAM-on-HEADERS streams the script runs inline against
-        // an empty body. Skipped for trailers and interim responses
-        // for the same reasons as streaming-script above.
+        // Buffered-script mode: defer HEADERS emission. Scripts read back only
+        // ``ctx.body`` — method/url/status/headers writes are ignored by design
+        // (see ``MITMScriptEngine.readBack``) — but the wire HEADERS frame still
+        // waits until the body is known so body-driven header changes can be
+        // reflected (drop/recompute content-length, drop content-encoding after
+        // decompression) and so a request-phase ``Anywhere.respond`` can suppress
+        // the stream before it opens upstream. For bodied streams the deferral
+        // also drives body buffering; for END_STREAM-on-HEADERS streams the
+        // script runs inline against an empty body. Skipped for trailers and
+        // interim responses for the same reasons as streaming-script above.
         if case .headers = kind, !isTrailer, !isInterimResponse, !trackedStreamCapReached,
            rewriter.hasBufferedBodyRule(phase: phase, requestURL: gateURL),
            shouldBufferStream(headers: rewritten, endStream: endStreamOnHeaders) {
@@ -1733,7 +1754,7 @@ final class MITMHTTP2Connection {
     private func parseStatus(_ headers: [(name: String, value: String)]) -> Int? {
         guard phase == .httpResponse,
               let raw = firstHeaderValue(headers, name: ":status"),
-              let code = Int(raw.trimmingCharacters(in: .whitespaces))
+              let code = parseHTTPStatusCode(raw)
         else { return nil }
         return code
     }
@@ -1905,9 +1926,10 @@ final class MITMHTTP2Connection {
         into output: inout Data
     ) {
         // Early-open path: this stream's HEADERS already went on the wire in
-        // stream-ID order, so only the body can still change. Emit just the
-        // script-rewritten body; the script's method/url/header mutations and
-        // ``Anywhere.respond`` can't apply once the stream is open.
+        // stream-ID order, so only the body can still change (scripts only ever
+        // rewrite the body — see ``MITMScriptEngine.readBack``). Emit just the
+        // script-rewritten body; a request-phase ``Anywhere.respond`` can't
+        // short-circuit a stream already open upstream and is ignored here.
         if pending.headersAlreadyEmitted {
             let body: Data
             switch outcome {
@@ -2411,14 +2433,28 @@ final class MITMHTTP2Connection {
     private func markSynthResponded(_ streamID: UInt32) {
         guard synthRespondedStreams.insert(streamID).inserted else { return }
         synthRespondedOrder.append(streamID)
-        if synthRespondedOrder.count > Self.synthRespondedMaxStreams {
-            let evicted = synthRespondedOrder.removeFirst()
-            synthRespondedStreams.remove(evicted)
-            // Keep the paced-body map consistent with the FIFO: an evicted
-            // stream is no longer swallow-protected, so a stale buffered body
-            // (and any further WINDOW_UPDATEs for it) could not be drained.
-            pendingSynthBodies.removeValue(forKey: evicted)
-        }
+        guard synthRespondedOrder.count > Self.synthRespondedMaxStreams else { return }
+        // Over the cap — evict one. Prefer the oldest *settled* stream (no live
+        // ``pendingSynthBodies`` entry): evicting a stream that still owes the
+        // client DATA would orphan a half-delivered response — the client never
+        // gets END_STREAM, and the now-unprotected stream's later frames would
+        // be forwarded upstream on an idle stream → GOAWAY. A settled stream's
+        // only residual risk is a late RST_STREAM after completion, the bounded
+        // tradeoff this cap has always carried. Only when every tracked stream
+        // is still paced (degenerate: 256+ concurrently stalled bodies) do we
+        // fall back to the oldest, since something must go to bound the set.
+        //
+        // Exclude the stream just appended: its caller sets ``pendingSynthBodies``
+        // *after* this returns, so it looks settled here and must never be the
+        // one evicted (that would unprotect the response we're mid-way through
+        // queuing). It's the newest entry, so the ``?? 0`` (oldest) fallback
+        // can't select it either.
+        let evictIdx = synthRespondedOrder.firstIndex {
+            $0 != streamID && pendingSynthBodies[$0] == nil
+        } ?? 0
+        let evicted = synthRespondedOrder.remove(at: evictIdx)
+        synthRespondedStreams.remove(evicted)
+        pendingSynthBodies.removeValue(forKey: evicted)
     }
 
     /// Removes ``streamID`` from both ``synthRespondedStreams`` and the
@@ -2499,7 +2535,7 @@ final class MITMHTTP2Connection {
             }
         case .httpResponse:
             if let raw = firstHeaderValue(headers, name: ":status"),
-               let code = Int(raw.trimmingCharacters(in: .whitespaces)) {
+               let code = parseHTTPStatusCode(raw) {
                 status = code
             }
             method = originatingRequest?.method
@@ -2685,11 +2721,24 @@ final class MITMHTTP2Connection {
     /// open and a connection-level one keeps the shared window open.
     /// ``emitBufferedDataFrames`` records the matching debt so the receiver's
     /// eventual credit for the emitted body is withheld from the relay and the
-    /// sender is not credited twice — leaving its window netting to the same
-    /// value a pure relay would. The credit goes to the sender's own leg: the
-    /// client on the inbound (request) leg, the server on the outbound
-    /// (response) leg. `flowControlledLength` is the DATA frame's full on-wire
-    /// payload length (including any padding), which is what the sender debited.
+    /// sender is not credited twice **at the connection level** — leaving the
+    /// shared window netting to the same value a pure relay would. The credit
+    /// goes to the sender's own leg: the client on the inbound (request) leg,
+    /// the server on the outbound (response) leg. `flowControlledLength` is the
+    /// DATA frame's full on-wire payload length (including any padding), which
+    /// is what the sender debited.
+    ///
+    /// NOTE: the debt withholding (``withholdSynthDebt`` /
+    /// ``withholdClientRequestDebt``) is **connection-level only** (it gates on
+    /// stream 0). The per-stream WINDOW_UPDATE issued here is *not* later
+    /// withheld, so when the real peer relays its own per-stream credit for the
+    /// emitted body the sender's *stream* window is briefly over-credited by the
+    /// buffered byte count. This is benign: a request/response stream is
+    /// half-closed once END_STREAM is sent, so the surplus stream credit is
+    /// never spent, and it can't overflow 2³¹ (bounded by the 4 MiB buffer cap).
+    /// A long-lived bidirectional stream that keeps sending is bounded by the
+    /// same cap → ``abandonPending`` path, after which frames forward verbatim
+    /// and the real per-stream WINDOW_UPDATEs govern flow control again.
     private func creditBufferedDataToSender(streamID: UInt32, flowControlledLength: Int) {
         guard flowControlledLength > 0 else { return }
         let streamCredit = windowUpdateFrame(streamID: streamID, increment: flowControlledLength)

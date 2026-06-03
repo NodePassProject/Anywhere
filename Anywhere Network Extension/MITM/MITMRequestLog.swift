@@ -48,6 +48,17 @@ final class MITMRequestLog {
     /// client does happen to pipeline.
     private var http1Queue: [Record] = []
 
+    /// Upper bound on ``http1Queue``. HTTP/1 correlation is FIFO with no
+    /// per-request key on the wire, so a push/pop imbalance — e.g. a request
+    /// whose response downgrades to read-until-close or a protocol upgrade and
+    /// never pops, on a client that also pipelines — would otherwise let the
+    /// queue grow for the connection's lifetime. Real pipelining depth is tiny;
+    /// this is a memory safety bound mirroring ``maxHTTP2Streams``. Past it the
+    /// oldest unmatched record is dropped, which only degrades a later
+    /// response's ctx.method/ctx.url (and any synth-after it held) — never a
+    /// crash or unbounded growth.
+    private static let maxHTTP1Queue = 256
+
     /// HTTP/2 stream → record map. Set by the inbound (request) leg on
     /// HEADERS, cleared by the outbound (response) leg on the matching
     /// HEADERS. A stream that closes without a response (RST_STREAM) would
@@ -69,6 +80,12 @@ final class MITMRequestLog {
     // MARK: - HTTP/1
 
     func recordHTTP1(method: String?, url: String?) {
+        if http1Queue.count >= Self.maxHTTP1Queue {
+            // Desync safety valve (see ``maxHTTP1Queue``): drop the oldest
+            // unmatched record rather than grow without bound. Only reachable
+            // when responses have stopped popping in step with requests.
+            http1Queue.removeFirst()
+        }
         http1Queue.append(Record(method: method, url: url))
     }
 

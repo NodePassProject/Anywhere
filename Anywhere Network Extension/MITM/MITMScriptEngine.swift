@@ -34,24 +34,23 @@ private let mitmScriptGlobalFetchLock = UnfairLock()
 /// across every script invocation on the connection; compiled functions
 /// are cached by source content so duplicate scripts share work.
 ///
-/// No execution-time watchdog. Preempting a runaway JS call from
-/// another thread requires ``JSContextGroupSetExecutionTimeLimit``,
-/// which lives in WebKit's ``JSContextRefPrivate.h`` — SPI that App
-/// Review's automated scan flags on sight (the symbol name appears
-/// verbatim in the Mach-O import table no matter how the call site
-/// is wrapped), with no public-API substitute that preempts a
-/// synchronous call already running in JSC. We accept the consequence
-/// by design, but its blast radius is bounded: invocations run off the
-/// lwIP queue on ``MITMScriptTransform``'s serial script queue (the
-/// calling connection parks while its JS runs), so a user-authored
-/// ``process(ctx)`` that loops forever, recurses without bound, or
-/// backtracks a pathological regex wedges only *its own* MITM
-/// connection — every other flow in the tunnel keeps moving on the lwIP
-/// queue. It does monopolize the shared JavaScript runtime, so other
-/// connections' scripts queue behind it (their packet flow is
-/// unaffected). Mitigation is on the authoring side — keep scripts
-/// simple and bounded; the engine still reverts uncaught throws so a
-/// script that fails partway leaves the wire untouched.
+/// A runaway JS call can't be *preempted* from another thread:
+/// ``JSContextGroupSetExecutionTimeLimit`` (WebKit SPI in
+/// ``JSContextRefPrivate.h``) is the only API that would, and its symbol trips
+/// App Review's scanner on sight — it appears verbatim in the Mach-O import
+/// table however the call site is wrapped — with no public substitute that
+/// stops a synchronous call already running in JSC. So a user ``process(ctx)``
+/// that loops forever, recurses without bound, or backtracks a pathological
+/// regex can't be interrupted; instead it is *contained* and *recovered from*.
+/// Invocations run off the lwIP queue on ``MITMScriptTransform``'s serial
+/// script queue, so a runaway parks its own connection and stalls the scripts
+/// queued behind it but never the tunnel's packet flow. And because it can't be
+/// interrupted it is watched: a synchronous span that outruns its hard cap
+/// trips ``MITMScriptWatchdog``, which crashes the extension for a clean OS
+/// relaunch, while an async script whose promise never settles is reverted by
+/// the ``invocationIdleTimeout`` watchdog — so an otherwise-unbounded wedge
+/// becomes a bounded, self-recovering one. The engine also reverts uncaught
+/// throws, so a script that fails partway leaves the wire untouched.
 final class MITMScriptEngine {
 
     /// View of the in-flight HTTP message handed to `function process(ctx)`.
@@ -390,6 +389,22 @@ final class MITMScriptEngine {
         installAnywhereGlobals()
     }
 
+    /// Runs one synchronous JSC execution span under ``MITMScriptWatchdog`` so a
+    /// user script that loops or recurses without bound — which JSC cannot
+    /// preempt — is detected from the monitor queue and crashes the extension
+    /// past the hard cap instead of silently wedging the shared script queue
+    /// forever. ``label`` is a cheap identifier (the script source, by
+    /// reference) for the crash report. The watchdog brackets the *entire*
+    /// synchronous span, so any built-in JS the Swift bridge invokes during it
+    /// (``JSON.parse``, ``BigInt`` …) is already covered and needs no separate
+    /// guard.
+    @inline(__always)
+    private func runUserScript<T>(_ label: String, _ body: () -> T) -> T {
+        MITMScriptWatchdog.begin(label)
+        defer { MITMScriptWatchdog.end() }
+        return body()
+    }
+
     /// Runs ``source`` against ``message``. Returns the post-script
     /// message, or ``message`` unchanged when the script throws or
     /// otherwise fails to compile. ``sourceKey`` is the cache key
@@ -412,7 +427,7 @@ final class MITMScriptEngine {
         currentInvocation = inv
         defer { currentInvocation = nil }
         let ctxArg = makeContextValue(message)
-        let returned = function.call(withArguments: [ctxArg])
+        let returned = runUserScript(source) { function.call(withArguments: [ctxArg]) }
         if let returned, isThenable(returned) {
             logger.warning("[MITM][JS] process(ctx) returned a Promise on the synchronous path; reverting (await / Anywhere.http require a buffered `script` rule run through applyAsync)")
             context.exception = nil
@@ -517,7 +532,7 @@ final class MITMScriptEngine {
         let ctxArg = makeContextValue(message)
         inv.ctxValue = ctxArg
         currentInvocation = inv
-        let returned = function.call(withArguments: [ctxArg])
+        let returned = runUserScript(source) { function.call(withArguments: [ctxArg]) }
         guard let returned, isThenable(returned) else {
             // Synchronous completion: a plain `process`, or an `async`
             // one that finished without ever suspending. Read back and
@@ -674,7 +689,7 @@ final class MITMScriptEngine {
         currentInvocation = inv
         defer { currentInvocation = nil }
         let ctxArg = makeFrameContextValue(ctx, frame: frame, state: state)
-        _ = function.call(withArguments: [ctxArg])
+        _ = runUserScript(source) { function.call(withArguments: [ctxArg]) }
         // Pull the body and state back off the ctx; ignore any
         // mutations to method/url/status/headers — HEADERS are on the
         // wire already, so they can't take effect.
@@ -739,7 +754,9 @@ final class MITMScriptEngine {
         // own scope; we capture the function as the IIFE return value
         // rather than polluting globalThis.
         let wrapped = "(function(){\n\(source)\nreturn process;\n})()"
-        let value = context.evaluateScript(wrapped)
+        // The IIFE runs the user's top-level code immediately, so a `while(true)`
+        // outside `process` would hang here — guard the compile span too.
+        let value = runUserScript(source) { context.evaluateScript(wrapped) }
         if context.exception != nil {
             context.exception = nil
             return nil
@@ -1837,7 +1854,19 @@ final class MITMScriptEngine {
         guard var root = MITMJSONPatch.parse(original) else {
             return makeUint8Array(in: ctx, from: original)
         }
+        // No-op guard, mirroring ``MITMJSONPatch.applyAll``: snapshot the parsed
+        // document, run the edit, and if nothing actually changed return the
+        // ORIGINAL bytes rather than re-serializing. JSONSerialization
+        // round-trips reshape 64-bit IDs / high-precision decimals *anywhere* in
+        // the body, so an op that resolved nothing (e.g. a `$.missing` path or a
+        // predicate that matched no element) must not be allowed to silently
+        // corrupt untouched numbers — the same guard the native ``applyAll``
+        // path applies.
+        let before = MITMJSONPatch.snapshot(root)
         mutate(&root)
+        guard !MITMJSONPatch.documentsEqual(before, root) else {
+            return makeUint8Array(in: ctx, from: original)
+        }
         guard let out = MITMJSONPatch.serialize(root) else {
             logger.warning("[MITM][JS] Anywhere.json: edited value is not serializable; body unchanged")
             return makeUint8Array(in: ctx, from: original)
@@ -2213,11 +2242,16 @@ final class MITMScriptEngine {
         // other legs settled to release JSC's references.
         currentInvocation = inv
         defer { currentInvocation = nil }
-        switch result {
-        case .success(let response):
-            resolve?.call(withArguments: [Self.makeHTTPResponse(response, in: context)])
-        case .failure(let error):
-            reject?.call(withArguments: [Self.error("Anywhere.http: \(error.localizedDescription)", in: context)])
+        // Settling the promise runs the script's `await` continuation
+        // synchronously (user code after the await), so guard it like the other
+        // spans — a `while(true)` after an `Anywhere.http` await wedges here.
+        runUserScript("async script (Anywhere.http resume continuation)") {
+            switch result {
+            case .success(let response):
+                resolve?.call(withArguments: [Self.makeHTTPResponse(response, in: context)])
+            case .failure(let error):
+                reject?.call(withArguments: [Self.error("Anywhere.http: \(error.localizedDescription)", in: context)])
+            }
         }
         if context.exception != nil { context.exception = nil }
     }
@@ -2252,7 +2286,20 @@ final class MITMScriptEngine {
     /// validators the ctx-header readback uses.
     private static func requestHeadersFromValue(_ value: JSValue, in ctx: JSContext) -> [(name: String, value: String)] {
         if value.isArray {
-            return headersFromValue(value) ?? []
+            // ``headersFromValue`` validates the field-name token and rejects
+            // CR/LF/NUL in values, but does NOT apply ``forbiddenRequestHeaders``
+            // — only the object branch below did, so the array form could set
+            // ``Host`` (internal-vhost access / domain-fronting, especially
+            // behind the SSRF guard) and the framing / hop-by-hop headers the
+            // filter exists to block. Apply the same filter here so both header
+            // forms agree.
+            return (headersFromValue(value) ?? []).filter { entry in
+                guard !Self.forbiddenRequestHeaders.contains(entry.name.lowercased()) else {
+                    logger.warning("[MITM][JS] Anywhere.http: dropping forbidden request header: \(entry.name)")
+                    return false
+                }
+                return true
+            }
         }
         guard value.isObject,
               let keys = ctx.objectForKeyedSubscript("Object")?.invokeMethod("keys", withArguments: [value]),
@@ -2808,13 +2855,19 @@ extension MITMScriptEngine {
     /// state it stashes on ``globalThis`` are built once per rule set and
     /// reused across connections instead of rebuilt per connection.
     ///
-    /// Sharing across connections is safe because every rule application
-    /// runs on the single serial lwIP queue (see ``MITMSession``), so no
-    /// two scripts ever execute concurrently. Creation happens under
-    /// ``registryLock`` so two callers racing to first-use a rule set
-    /// can't build two engines for it — that would split the ``compiled``
-    /// cache and ``globalThis`` state and produce silent, hard-to-diagnose
-    /// crosstalk within the rule set.
+    /// Sharing across connections is safe because every script invocation runs
+    /// on ``MITMScriptTransform/scriptQueue`` — a single process-wide serial
+    /// queue — and each engine additionally guards its ``JSContext`` with
+    /// ``invocationLock``, so no two scripts ever touch one engine's context
+    /// concurrently. (NOTE: serialization comes from that script queue, NOT the
+    /// lwIP queue — the lwIP queue only *dispatches* the work onto it. A caller
+    /// that ran ``apply``/``applyFrame`` synchronously on the lwIP queue would
+    /// break this invariant and run two contexts of the same engine — or the
+    /// same context from two queues — concurrently.) Creation happens under
+    /// ``registryLock`` so two callers racing to first-use a rule set can't
+    /// build two engines for it — that would split the ``compiled`` cache and
+    /// ``globalThis`` state and produce silent, hard-to-diagnose crosstalk
+    /// within the rule set.
     private static var engines: [UUID: MITMScriptEngine] = [:]
     /// Engine for the degenerate nil-scope case (a script fired for a host
     /// whose matched set has no id). Scripts always belong to a rule set,

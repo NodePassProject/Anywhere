@@ -128,9 +128,10 @@ final class MITMHTTP1Stream {
 
     /// Snapshot of the rewritten head (start line + headers) plus the
     /// originating request context (looked up from ``MITMRequestLog`` on
-    /// response phase). Saved when we decide to defer head emission so
-    /// the body-completion path can rebuild the final head from script
-    /// mutations.
+    /// response phase). Saved when we decide to defer head emission so the
+    /// body-completion path can rebuild the final head once the post-script
+    /// body is known — its size sets ``Content-Length`` and decompression
+    /// drops ``Content-Encoding``. Scripts mutate only the body, not the head.
     private struct PendingHead {
         let startLine: String
         let headers: [Header]
@@ -221,18 +222,34 @@ final class MITMHTTP1Stream {
         /// the remainder through verbatim.
         case rewritingUntilClose(pending: PendingHead, accumulator: Data)
 
-        /// Reached when a chunked body has overflowed
-        /// ``MITMBodyCodec/maxBufferedBodyBytes`` mid-rewrite. The
-        /// head + truncated rewritten body have already been emitted;
-        /// the remaining wire chunks are parsed and discarded so the
-        /// connection returns to ``awaitingHead`` cleanly.
-        case discardingChunked(reader: ChunkedReader)
+        /// Parsing and discarding a chunked body. Two callers, distinguished by
+        /// ``afterSynth``: a chunked body that overflowed
+        /// ``MITMBodyCodec/maxBufferedBodyBytes`` mid-rewrite (`false` — head +
+        /// truncated body already emitted, the remaining wire chunks are drained
+        /// so the connection returns to ``awaitingHead`` cleanly), and a chunked
+        /// request body whose response was synthesized locally (`true` — the
+        /// request was answered here, so nothing goes upstream). The flag only
+        /// changes malformed-framing recovery: a rewrite tail falls to
+        /// ``passthrough`` (forward verbatim), but a post-synth body whose
+        /// framing breaks must NOT forward the now-unframable bytes upstream, so
+        /// it falls to ``draining`` instead.
+        case discardingChunked(reader: ChunkedReader, afterSynth: Bool)
 
         /// Discarding a Content-Length request body after a synthesized
         /// 302 / reject response (``MITMOperation/rewrite``): the synth bytes
         /// are already queued for the inner leg and nothing goes upstream, so
         /// the body is read and dropped to keep a kept-alive connection framed.
         case discardingLength(remaining: Int)
+
+        /// Terminal fail-closed blackhole. Reached when a chunked request body
+        /// being discarded after a local synth response (``discardingChunked``
+        /// with ``afterSynth``) hits a framing error: the message boundary is
+        /// lost (so the next request can't be found) and the request was already
+        /// answered locally, so every further client byte is swallowed rather
+        /// than forwarded upstream — which ``passthrough`` would do, leaking
+        /// bytes the reject/302 rule meant to keep off the wire. The client
+        /// retries on a fresh connection after it times out.
+        case draining
 
         /// Per-chunk streaming-script mode. The head is already
         /// emitted; chunks flow through the script chain one at a
@@ -322,6 +339,7 @@ final class MITMHTTP1Stream {
     /// ``drainPendingClientBytes()`` right after the completion fires.
     func transform(_ data: Data, completion: @escaping (Data) -> Void) {
         assert(parkedCompletion == nil, "transform re-entered while a script hop is outstanding")
+        guard parkedCompletion == nil else { return failClosedReentry(completion) }
         if case .passthrough = mode {
             completion(data)
             return
@@ -359,6 +377,21 @@ final class MITMHTTP1Stream {
         pendingPreParkOutput = Data()
     }
 
+    /// Fail-closed handler for the should-never-happen case where
+    /// ``transform``/``finish`` is re-entered while a script hop is still parked
+    /// (``parkedCompletion != nil``). The session pump only re-arms its receive
+    /// after the previous completion fires, so this can't happen today; the
+    /// guard exists so a future regression surfaces loudly instead of silently
+    /// overwriting the stashed completion — which would drop the prior read's
+    /// re-arm callback and hang the connection half-open forever (a dual-leg
+    /// leak), with no crash and no log in release builds where the paired
+    /// ``assert`` is compiled out. Fires only the new completion (empty) and
+    /// leaves the stashed one intact so it still resumes exactly once.
+    private func failClosedReentry(_ completion: (Data) -> Void) {
+        logger.error("[MITM] HTTP/1 \(host): transform/finish re-entered while a script hop is outstanding; dropping this chunk to preserve the parked completion (one-read-in-flight invariant violated)")
+        completion(Data())
+    }
+
     /// Drains and returns any client-bound bytes synthesized by
     /// request-phase scripts that called `Anywhere.respond(...)` since
     /// the last call. The session pump writes these directly to the
@@ -380,6 +413,7 @@ final class MITMHTTP1Stream {
     /// second call (or stray late bytes) produces nothing.
     func finish(completion: @escaping (Data) -> Void) {
         assert(parkedCompletion == nil, "finish re-entered while a script hop is outstanding")
+        guard parkedCompletion == nil else { return failClosedReentry(completion) }
         guard case .rewritingUntilClose(let pending, let accumulator) = mode else {
             completion(Data())
             return
@@ -466,12 +500,19 @@ final class MITMHTTP1Stream {
             mode = .rewritingUntilClose(pending: pending, accumulator: accumulator)
             return rewriteUntilClose(pending: pending, accumulator: &accumulator, into: &output)
 
-        case .discardingChunked(var reader):
-            mode = .discardingChunked(reader: reader)
-            return discardChunked(reader: &reader)
+        case .discardingChunked(var reader, let afterSynth):
+            mode = .discardingChunked(reader: reader, afterSynth: afterSynth)
+            return discardChunked(reader: &reader, afterSynth: afterSynth, into: &output)
 
         case .discardingLength(let remaining):
             return discardLength(remaining: remaining)
+
+        case .draining:
+            // Terminal blackhole: swallow everything, forward nothing. See the
+            // ``Mode/draining`` doc — a post-synth body whose framing broke must
+            // not leak further bytes upstream.
+            rxBuffer.removeAll(keepingCapacity: false)
+            return false
 
         case .streamingChunked(var streaming, let inner):
             mode = .streamingChunked(streaming: streaming, inner: inner)
@@ -985,7 +1026,7 @@ final class MITMHTTP1Stream {
                     pending: pending,
                     rawBody: accumulator,
                     originalSizes: [accumulator.count],
-                    resumeMode: .discardingChunked(reader: reader),
+                    resumeMode: .discardingChunked(reader: reader, afterSynth: false),
                     into: &output
                 )
                 return !parked
@@ -1350,7 +1391,7 @@ final class MITMHTTP1Stream {
         guard phase == .httpResponse else { return nil }
         let parts = streaming.startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2 else { return nil }
-        return Int(parts[1])
+        return parseHTTPStatusCode(parts[1])
     }
 
     /// Parses the hex size from a chunked size line (ignoring any
@@ -1392,27 +1433,38 @@ final class MITMHTTP1Stream {
         return true
     }
 
-    private func discardChunked(reader: inout ChunkedReader) -> Bool {
+    private func discardChunked(reader: inout ChunkedReader, afterSynth: Bool, into output: inout Data) -> Bool {
         guard !rxBuffer.isEmpty else { return false }
         var sink = Data()
         let result = reader.consumeBuffered(&rxBuffer, into: &sink)
         switch result {
         case .needMore:
-            mode = .discardingChunked(reader: reader)
+            mode = .discardingChunked(reader: reader, afterSynth: afterSynth)
             return false
         case .complete:
-            // Best-effort flush: the truncated rewritten body has
-            // already gone on the wire and the trailers are drained,
-            // so this is the cleanest boundary for synth bytes
-            // attached to this response. We can't pass them via
-            // ``output`` from a no-op transition function (the signature
-            // is bare), but the synth flush belongs on the next
-            // ``drive`` iteration's output anyway — capture it on
-            // re-entry to ``awaitingHead`` via the natural fall-through.
+            // The truncated rewritten body has already gone on the wire and the
+            // trailers are drained, so this is the response's last wire byte —
+            // the correct boundary to release any synth-after bytes attached to
+            // this response. ``afterSynth`` discards are request streams (which
+            // never carry synth-after); only the over-cap rewrite tail
+            // (``afterSynth == false``) is a response stream that can owe them.
+            // Flush here rather than relying on a *next* response arriving to
+            // carry the flush: if this is the last response on the connection,
+            // no later ``drive`` iteration would ever emit them and the
+            // synthesized (e.g. pipelined) response would be silently dropped.
+            if !afterSynth {
+                flushSynthAfterResponse(into: &output)
+            }
             mode = .awaitingHead
             return true
         case .malformed:
-            mode = .passthrough
+            // Framing is irrecoverable — the next message boundary is lost. A
+            // rewrite tail-discard forwards the remainder verbatim, but a body
+            // discarded after a LOCAL synth response was already answered here
+            // and must never reach the upstream, so blackhole it rather than
+            // passing through (which would dial/forward the leftover bytes —
+            // the leak this distinction exists to prevent).
+            mode = afterSynth ? .draining : .passthrough
             return true
         }
     }
@@ -1638,7 +1690,7 @@ final class MITMHTTP1Stream {
         guard startLine.hasPrefix("HTTP/") else { return nil }
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count >= 2 else { return nil }
-        return Int(parts[1])
+        return parseHTTPStatusCode(parts[1])
     }
 
     /// Strips framing-related headers that we re-emit ourselves
@@ -1733,6 +1785,17 @@ final class MITMHTTP1Stream {
         var hasTEChunked = false
         for line in lines.dropFirst() {
             if line.isEmpty { continue }
+            // RFC 9112 §5.2: reject obs-fold (a field-line beginning with SP or
+            // HTAB — the deprecated line-folding continuation of the previous
+            // field). It is already refused below (a folded line has no colon, or
+            // yields a leading-whitespace field-name that ``isValidHeaderName``
+            // rejects), but reject it explicitly here so the protection can't
+            // silently lapse if that name check is ever relaxed: folding lets a
+            // lax downstream peer reassemble a value we treated as a separate
+            // line, a smuggling vector.
+            if let first = line.utf8.first, first == 0x20 || first == 0x09 {
+                return nil
+            }
             // RFC 9112 §5.1: a header field-line MUST contain a colon.
             // A line without a colon is a syntax error — silently
             // dropping it is unsafe because a lax downstream parser
@@ -1787,10 +1850,7 @@ final class MITMHTTP1Stream {
             // Multiple TE field lines let the per-line and combined-list
             // readings diverge (and are a known smuggling vector); don't rewrite.
             if transferEncodingValues.count > 1 { return nil }
-            let tokens = transferEncodingValues[0]
-                .split(separator: ",", omittingEmptySubsequences: false)
-                .map { $0.trimmingCharacters(in: CharacterSet.whitespaces) }
-            guard tokens.last?.equalsIgnoringASCIICase("chunked") == true else {
+            guard Self.transferEncodingIsChunked(transferEncodingValues[0]) else {
                 // TE present but not chunked-final: unframeable for a request
                 // (RFC 9112 §6.1) and exotic for a response. Refuse to rewrite so
                 // the bytes pass through verbatim rather than under a framing the
@@ -1847,6 +1907,22 @@ final class MITMHTTP1Stream {
         return true
     }
 
+    /// True when a single Transfer-Encoding field value has ``chunked`` as its
+    /// final comma-separated transfer-coding (RFC 9112 §6.1) — the only TE shape
+    /// that frames as chunked. Only the last trimmed token is compared, so a
+    /// value like ``x-chunked-encoding`` does not false-match. ``parseHead`` (to
+    /// validate/normalize the head) and ``bodyFraming`` (to apply the framing)
+    /// both decide chunked framing through this one predicate, so the head's
+    /// implied framing can never drift from the framing actually applied — that
+    /// divergence is a request-smuggling vector.
+    static func transferEncodingIsChunked(_ value: String) -> Bool {
+        let last = value
+            .split(separator: ",", omittingEmptySubsequences: false)
+            .last?
+            .trimmingCharacters(in: CharacterSet.whitespaces)
+        return last?.equalsIgnoringASCIICase("chunked") == true
+    }
+
     /// True when ``s`` contains a lone CR, lone LF, or NUL — any byte
     /// that would split or terminate an HTTP/1 head line on the wire if
     /// re-emitted via ``serializeHead``. Intentionally tighter than the
@@ -1888,23 +1964,40 @@ final class MITMHTTP1Stream {
     private func isInterimResponseStartLine(_ startLine: String) -> Bool {
         guard startLine.hasPrefix("HTTP/1.") else { return false }
         let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-        guard parts.count >= 2, let status = Int(parts[1]) else { return false }
+        guard parts.count >= 2, let status = parseHTTPStatusCode(parts[1]) else { return false }
         return (100..<200).contains(status) && status != 101
     }
 
     private func serializeHead(startLine: String, headers: [Header]) -> Data {
+        // Defense in depth against response-splitting: never put a header whose
+        // name or value carries CR / LF / NUL on the wire. Every current caller
+        // already feeds validated headers (``parseHead`` rejects them on the
+        // original path; the synth / ``Anywhere.respond`` paths validate; and
+        // script readback is body-only, so a script's ``ctx.headers`` write
+        // never reaches here), so this drops nothing in practice — it just makes
+        // the no-splitting invariant local to the one function that emits the
+        // head, so a future change that lets a script mutate headers can't
+        // silently reopen a splitting hole at this boundary.
+        let safeHeaders = headers.filter { entry in
+            guard !Self.containsControlChars(entry.name),
+                  !Self.containsControlChars(entry.value) else {
+                logger.warning("[MITM] HTTP/1 \(host): dropping header with CR/LF/NUL from serialized head: \(entry.name)")
+                return false
+            }
+            return true
+        }
         // Total bytes: start line + CRLF, then each header as
         // `name: value` + CRLF, then a final CRLF. Reserving up front
         // skips the `Data` reallocation chain a head with many
         // headers would otherwise trigger.
         var size = startLine.utf8.count + 4
-        for (name, value) in headers {
+        for (name, value) in safeHeaders {
             size += name.utf8.count + 2 + value.utf8.count + 2
         }
         var out = Data(capacity: size)
         out.append(contentsOf: startLine.utf8)
         out.append(0x0D); out.append(0x0A)
-        for (name, value) in headers {
+        for (name, value) in safeHeaders {
             out.append(contentsOf: name.utf8)
             out.append(0x3A); out.append(0x20) // ": "
             out.append(contentsOf: value.utf8)
@@ -2064,7 +2157,7 @@ final class MITMHTTP1Stream {
             }
             // Status line: "HTTP/1.x SSS Reason"
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-            if parts.count >= 2, let status = Int(parts[1]) {
+            if parts.count >= 2, let status = parseHTTPStatusCode(parts[1]) {
                 if status == 101 { return .switchingProtocols }
                 if status == 204 || status == 304 { return .none }
                 if status >= 100 && status < 200 { return .none }
@@ -2085,16 +2178,13 @@ final class MITMHTTP1Stream {
             }
         }
         if let te = transferEncoding {
-            // RFC 9112 §6.1: ``chunked`` MUST be the final transfer-
-            // coding. ``Transfer-Encoding: gzip`` (no chunked) frames as
-            // read-until-close for a response; for a request it is a
-            // protocol error. Comparing only the last comma-separated,
-            // trimmed token avoids a substring-match overreach — a bare
-            // ``contains("chunked")`` would also match values like
-            // ``x-chunked-encoding``.
-            let parts = te.split(separator: ",", omittingEmptySubsequences: false)
-            if let last = parts.last?.trimmingCharacters(in: CharacterSet.whitespaces),
-               last.equalsIgnoringASCIICase("chunked") {
+            // RFC 9112 §6.1: ``chunked`` MUST be the final transfer-coding.
+            // ``Transfer-Encoding: gzip`` (no chunked) frames as read-until-close
+            // for a response; for a request it is a protocol error. Decided via
+            // the same ``transferEncodingIsChunked`` predicate ``parseHead``
+            // validates with, so the framing applied here can never drift from
+            // the head's implied framing (a smuggling-vector divergence).
+            if Self.transferEncodingIsChunked(te) {
                 return .chunked
             }
         }
@@ -2240,7 +2330,7 @@ final class MITMHTTP1Stream {
         case .contentLength(let length) where length > 0:
             mode = .discardingLength(remaining: length)
         case .chunked:
-            mode = .discardingChunked(reader: ChunkedReader())
+            mode = .discardingChunked(reader: ChunkedReader(), afterSynth: true)
         case .none, .contentLength, .readUntilClose, .switchingProtocols:
             mode = .awaitingHead
         }
@@ -2315,7 +2405,7 @@ final class MITMHTTP1Stream {
             }
         case .httpResponse:
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
-            if parts.count >= 2, let code = Int(parts[1]) {
+            if parts.count >= 2, let code = parseHTTPStatusCode(parts[1]) {
                 status = code
             }
             method = originatingRequest?.method
