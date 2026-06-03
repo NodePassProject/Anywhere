@@ -2359,8 +2359,14 @@ final class MITMHTTP2Connection {
         let isSynthStream = pendingSynthBodies[frame.streamID] != nil
             || synthRespondedStreams.contains(frame.streamID)
         if isSynthStream {
-            if let increment, increment > 0, pendingSynthBodies[frame.streamID] != nil {
-                pendingSynthBodies[frame.streamID]?.streamWindow += increment
+            if let increment, increment > 0, let current = pendingSynthBodies[frame.streamID]?.streamWindow {
+                // Clamp to 2^31-1 (RFC 9113 §6.9.1) so a hostile/buggy
+                // WINDOW_UPDATE can't make us model an impossible per-stream
+                // window — matching the connection-window clamp in
+                // ``MITMHTTP2FlowController``. A legitimately-negative window
+                // (client lowered SETTINGS mid-stream) stays negative and keeps
+                // gating emission.
+                pendingSynthBodies[frame.streamID]?.streamWindow = min(MITMHTTP2FlowController.maxWindow, current + increment)
                 flushPendingSynth(streamID: frame.streamID)
             }
             return Data()
@@ -2438,20 +2444,28 @@ final class MITMHTTP2Connection {
         // ``pendingSynthBodies`` entry): evicting a stream that still owes the
         // client DATA would orphan a half-delivered response — the client never
         // gets END_STREAM, and the now-unprotected stream's later frames would
-        // be forwarded upstream on an idle stream → GOAWAY. A settled stream's
-        // only residual risk is a late RST_STREAM after completion, the bounded
-        // tradeoff this cap has always carried. Only when every tracked stream
-        // is still paced (degenerate: 256+ concurrently stalled bodies) do we
-        // fall back to the oldest, since something must go to bound the set.
+        // be forwarded upstream on an idle stream → GOAWAY for the whole
+        // connection. A settled stream's only residual risk is a late
+        // RST_STREAM after completion, the bounded tradeoff this cap has always
+        // carried.
         //
         // Exclude the stream just appended: its caller sets ``pendingSynthBodies``
         // *after* this returns, so it looks settled here and must never be the
         // one evicted (that would unprotect the response we're mid-way through
-        // queuing). It's the newest entry, so the ``?? 0`` (oldest) fallback
-        // can't select it either.
-        let evictIdx = synthRespondedOrder.firstIndex {
+        // queuing).
+        guard let evictIdx = synthRespondedOrder.firstIndex(where: {
             $0 != streamID && pendingSynthBodies[$0] == nil
-        } ?? 0
+        }) else {
+            // Degenerate: every tracked synth stream still owes the client a
+            // paced body (256+ concurrently stalled responses). None is safe to
+            // evict — dropping any would orphan a live response and risk a
+            // connection-wide GOAWAY (see above) — so keep them all rather than
+            // unconditionally evicting the oldest. The set is then bounded by
+            // the concurrent live-body count (itself capped by the buffered-body
+            // budget and the tracked-stream cap) instead of this FIFO; each body
+            // removes itself from the set as it finishes flushing.
+            return
+        }
         let evicted = synthRespondedOrder.remove(at: evictIdx)
         synthRespondedStreams.remove(evicted)
         pendingSynthBodies.removeValue(forKey: evicted)

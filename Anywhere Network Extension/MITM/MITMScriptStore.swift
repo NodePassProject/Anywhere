@@ -26,10 +26,15 @@ import Foundation
 /// pressure; scripts that depend on store contents have to handle a
 /// missing key anyway.
 ///
-/// Capacity: a hard per-scope cap of ``maxBytesPerScope``. Writes that
-/// would push a scope over the cap throw ``StoreError/capacityExceeded``;
+/// Capacity: a hard per-scope cap of ``maxBytesPerScope`` *and* a
+/// process-wide aggregate cap of ``maxTotalBytes`` across all scopes.
+/// Either ceiling rejects a write with ``StoreError/capacityExceeded``;
 /// the engine surfaces that as a JS `Error` so user code can catch and
-/// shed entries via ``delete(scope:key:)``.
+/// shed entries via ``delete(scope:key:)``. The aggregate cap bounds the
+/// store's total footprint between rule-set reloads — without it, a bundle
+/// of many rule sets (each filling its own 1 MiB scope) could pin tens of
+/// MiB against the Network Extension's ~50 MiB budget until the next
+/// ``purgeExcept(activeIDs:)``.
 final class MITMScriptStore {
 
     static let shared = MITMScriptStore()
@@ -39,12 +44,21 @@ final class MITMScriptStore {
     /// rule sets.
     static let maxBytesPerScope: Int = 1 * 1024 * 1024
 
+    /// Process-wide ceiling on the sum of every scope's bytes. Generous
+    /// versus the per-scope cap (room for many full scopes) while bounding
+    /// the store's worst-case footprint so a bundle of many rule sets can't
+    /// accumulate unboundedly against the NE memory budget between reloads.
+    static let maxTotalBytes: Int = 16 * 1024 * 1024
+
     enum StoreError: Error {
         case capacityExceeded
     }
 
     private let lock = NSLock()
     private var buckets: [UUID: [String: Data]] = [:]
+    /// Running sum of every scope's bytes (``bucketSizes.values``), kept
+    /// incrementally so ``set`` can check the aggregate cap in O(1).
+    private var totalBytes: Int = 0
     /// Running per-scope size in bytes (sum of key.utf8.count + value.count
     /// over every entry). Mirrors ``buckets`` so ``set`` can compute the
     /// cap-check projection in O(1) instead of rescanning the bucket on
@@ -60,8 +74,8 @@ final class MITMScriptStore {
     }
 
     /// Replaces (or inserts) the value for ``key`` within ``scope``.
-    /// Throws when the post-write byte total would exceed the per-scope
-    /// cap; the prior value is left untouched in that case.
+    /// Throws when the write would exceed the per-scope cap or the process-wide
+    /// aggregate cap; the prior value is left untouched in that case.
     func set(scope: UUID, key: String, value: Data) throws {
         lock.lock(); defer { lock.unlock() }
         var bucket = buckets[scope] ?? [:]
@@ -69,14 +83,20 @@ final class MITMScriptStore {
         let keyBytes = key.utf8.count
         let oldEntryBytes = existing.map { $0.count + keyBytes } ?? 0
         let newEntryBytes = value.count + keyBytes
+        let delta = newEntryBytes - oldEntryBytes
         let currentTotal = bucketSizes[scope] ?? 0
-        let projected = currentTotal - oldEntryBytes + newEntryBytes
+        let projected = currentTotal + delta
         if projected > Self.maxBytesPerScope {
+            throw StoreError.capacityExceeded
+        }
+        let projectedTotal = totalBytes + delta
+        if projectedTotal > Self.maxTotalBytes {
             throw StoreError.capacityExceeded
         }
         bucket[key] = value
         buckets[scope] = bucket
         bucketSizes[scope] = projected
+        totalBytes = projectedTotal
     }
 
     func delete(scope: UUID, key: String) {
@@ -85,6 +105,7 @@ final class MITMScriptStore {
         if let existing = bucket[key] {
             let delta = existing.count + key.utf8.count
             bucketSizes[scope] = (bucketSizes[scope] ?? 0) - delta
+            totalBytes -= delta
         }
         bucket.removeValue(forKey: key)
         if bucket.isEmpty {
@@ -114,6 +135,7 @@ final class MITMScriptStore {
         lock.lock(); defer { lock.unlock() }
         let stale = buckets.keys.filter { !activeIDs.contains($0) }
         for id in stale {
+            totalBytes -= (bucketSizes[id] ?? 0)
             buckets.removeValue(forKey: id)
             bucketSizes.removeValue(forKey: id)
         }

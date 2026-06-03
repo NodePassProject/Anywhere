@@ -73,9 +73,11 @@ enum MITMBodyReplace {
     /// forever. ``boundedReplace`` runs the substitution on ``watchdogQueue``
     /// and abandons it after this budget so a runaway can't wedge
     /// ``MITMScriptTransform/scriptQueue``, the single serial queue every
-    /// connection's rules share. Generous versus any legitimate replace over
-    /// the 4 MiB body cap, which finishes in well under a second.
-    private static let substitutionTimeLimit: DispatchTimeInterval = .seconds(2)
+    /// connection's rules share — and so a merely slow (not catastrophic)
+    /// substitution can't head-of-line block every other connection's rules for
+    /// more than this. Generous versus any legitimate replace over the 4 MiB
+    /// body cap, which finishes in well under a second.
+    private static let substitutionTimeLimit: DispatchTimeInterval = .seconds(1)
 
     /// Hard wall-clock cap on a substitution that already blew its soft
     /// ``substitutionTimeLimit``. A ``Regex`` match is uninterruptible, so one

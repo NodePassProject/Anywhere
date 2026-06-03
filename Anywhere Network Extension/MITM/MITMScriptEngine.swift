@@ -2141,9 +2141,6 @@ final class MITMScriptEngine {
         else {
             return Self.rejected("Anywhere.http: expected an absolute http(s) URL", in: ctx)
         }
-        if MITMScriptHTTPClient.isBlockedHost(host) {
-            return Self.rejected("Anywhere.http: host \"\(host)\" is not allowed (loopback, link-local, private, or .local)", in: ctx)
-        }
         if inv.totalFetches >= Self.httpMaxTotalPerInvocation {
             return Self.rejected("Anywhere.http: per-invocation request cap (\(Self.httpMaxTotalPerInvocation)) reached", in: ctx)
         }
