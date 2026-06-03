@@ -571,30 +571,51 @@ enum HPACKHuffman {
         return nodes
     }()
 
-    /// Decodes Huffman-encoded bytes into raw bytes.
+    /// Decodes Huffman-encoded bytes into raw bytes, returning nil on any
+    /// RFC 7541 §5.2 violation: a bit that leaves the code tree, an explicit
+    /// EOS symbol in the data, or trailing padding that isn't the all-ones EOS
+    /// prefix (or runs to 8+ bits). Strict decoding matters here because the
+    /// MITM re-emits the decoded value, so accepting malformed input would
+    /// "launder" a header a strict endpoint would have rejected.
     static func decode(_ data: some Collection<UInt8>) -> [UInt8]? {
         var result: [UInt8] = []
         var nodeIdx = 0
+        // Bits consumed since the last completed symbol, and whether they were
+        // all 1-bits — used to validate the trailing padding after the loop.
+        var bitsSinceSymbol = 0
+        var paddingAllOnes = true
 
         for byte in data {
             for bitPos in stride(from: 7, through: 0, by: -1) {
                 let bit = (byte >> bitPos) & 1
+                bitsSinceSymbol += 1
+                if bit == 0 { paddingAllOnes = false }
                 let next = bit == 0 ? tree[nodeIdx].left : tree[nodeIdx].right
                 guard next >= 0 else { return nil }
                 nodeIdx = Int(next)
 
                 let sym = tree[nodeIdx].symbol
                 if sym >= 0 {
-                    if sym == 256 { return result }  // EOS
+                    // RFC 7541 §5.2: the EOS symbol (256) MUST NOT appear in the
+                    // encoded data; its presence is a decoding error, not a
+                    // clean end-of-string.
+                    if sym == 256 { return nil }
                     result.append(UInt8(sym))
                     nodeIdx = 0
+                    bitsSinceSymbol = 0
+                    paddingAllOnes = true
                 }
             }
         }
 
-        // Remaining bits must be padding (all 1-bits, < 8 bits).
-        // If we're at root, no padding needed.
-        // If we're partway through, it's valid if we're on an all-1s path.
+        // RFC 7541 §5.2: any bits left after the last complete symbol must be
+        // padding — the most-significant bits of the all-ones EOS code, and
+        // strictly fewer than 8 bits. nodeIdx == 0 means we ended exactly on a
+        // symbol boundary (no padding); otherwise the partial trailing path
+        // must be all-ones and < 8 bits, else it's malformed or over-long pad.
+        if nodeIdx != 0 {
+            guard paddingAllOnes, bitsSinceSymbol < 8 else { return nil }
+        }
         return result
     }
 

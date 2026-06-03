@@ -241,14 +241,20 @@ final class MITMHTTP1Stream {
         /// the body is read and dropped to keep a kept-alive connection framed.
         case discardingLength(remaining: Int)
 
-        /// Terminal fail-closed blackhole. Reached when a chunked request body
-        /// being discarded after a local synth response (``discardingChunked``
-        /// with ``afterSynth``) hits a framing error: the message boundary is
-        /// lost (so the next request can't be found) and the request was already
-        /// answered locally, so every further client byte is swallowed rather
-        /// than forwarded upstream — which ``passthrough`` would do, leaking
-        /// bytes the reject/302 rule meant to keep off the wire. The client
-        /// retries on a fresh connection after it times out.
+        /// Terminal fail-closed blackhole: swallow every further byte on this
+        /// leg, forward nothing. Reached when a chunked body being discarded
+        /// (``discardingChunked``) hits a framing error — the message boundary
+        /// is lost — on either leg:
+        ///   - a request body discarded after a local synth response: the
+        ///     request was already answered locally, so further client bytes
+        ///     must not reach the upstream (which ``passthrough`` would do,
+        ///     leaking bytes the reject/302 rule meant to keep off the wire);
+        ///   - the over-cap rewrite tail: the truncated response already went
+        ///     out as a complete Content-Length unit, so the leftover original
+        ///     chunk bytes must not be forwarded to the receiver (which would
+        ///     parse them as the next response and desync the connection).
+        /// Either way the client retries on a fresh connection after it times
+        /// out.
         case draining
 
         /// Per-chunk streaming-script mode. The head is already
@@ -1458,13 +1464,20 @@ final class MITMHTTP1Stream {
             mode = .awaitingHead
             return true
         case .malformed:
-            // Framing is irrecoverable — the next message boundary is lost. A
-            // rewrite tail-discard forwards the remainder verbatim, but a body
-            // discarded after a LOCAL synth response was already answered here
-            // and must never reach the upstream, so blackhole it rather than
-            // passing through (which would dial/forward the leftover bytes —
-            // the leak this distinction exists to prevent).
-            mode = afterSynth ? .draining : .passthrough
+            // Framing is irrecoverable — the next message boundary is lost, so
+            // the leftover bytes must be blackholed on BOTH legs, never
+            // forwarded. A request body discarded after a LOCAL synth response
+            // must not reach the upstream (which ``passthrough`` would do,
+            // leaking the bytes the reject/302 rule meant to keep off the wire).
+            // And the over-cap rewrite tail (``afterSynth == false``) follows a
+            // truncated response already emitted as a *complete* Content-Length
+            // unit (see ``rewriteChunked``): forwarding the remaining original
+            // chunk bytes verbatim would make the receiver parse them as the
+            // next response's start line, desyncing the connection. The over-cap
+            // path already intends these chunks to be drained server-side and
+            // the ``.complete`` case above does exactly that — ``.malformed``
+            // must too, not fall through to ``passthrough``.
+            mode = .draining
             return true
         }
     }
@@ -2619,14 +2632,19 @@ private final class ChunkedReader {
                     state = .chunkData(remaining: left, originalSize: originalSize)
                     return .needMore
                 }
-            case .dataCRLF(let originalSize):
+            case .dataCRLF:
                 guard buffer.count >= 2 else { return .needMore }
                 guard buffer[0] == 0x0D, buffer[1] == 0x0A else {
                     return .malformed
                 }
                 output.append(0x0D); output.append(0x0A)
                 buffer.removeFirst(2)
-                sizes.append(originalSize)
+                // Forward mode never re-chunks, so it has no use for the
+                // original chunk sizes; appending one ``Int`` per chunk here
+                // would grow ``sizes`` for the whole body with nothing ever
+                // reading it — an unbounded accumulation a small-chunk stream
+                // can amplify. Only ``consumeBuffered`` (which returns them for
+                // re-chunking) tracks sizes.
                 state = .sizeLine
             case .trailerOrEnd:
                 // Forward the trailer block (zero or more lines + CRLF)

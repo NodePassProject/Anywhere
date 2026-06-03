@@ -586,8 +586,9 @@ Per-rule-set persistent key/value state, scoped by rule-set id.
 
 - `get(key) → Uint8Array | undefined`
 - `getString(key) → string | undefined`
-- `set(key, value)` — value is bytes. **Throws** when the scope would exceed its
-  1 MiB cap (catch it and shed entries with `delete`).
+- `set(key, value)` — value is bytes. **Throws** when the write would exceed the
+  scope's 1 MiB cap or the 16 MiB process-wide store cap (catch it and shed
+  entries with `delete`).
 - `delete(key)`
 - `keys() → [string]`
 
@@ -656,14 +657,13 @@ its resumption — don't assume exclusive access across a suspension. Per-messag
 state lives on `ctx`; cross-connection state belongs in
 [`Anywhere.store`](#anywherestore), whose sharing semantics are already explicit.
 
-> **Security.** `Anywhere.http` refuses requests to `localhost`, `*.local`, and
-> IP literals in loopback / link-local (incl. the cloud-metadata address) /
-> private / ULA ranges, and re-checks every redirect hop — so a script can't
-> pivot to internal services by literal address. A hostname that *resolves* to
-> an internal address is also refused: the host is resolved and checked before
-> the request leaves the device (a sub-TTL DNS rebind that flips *after* that
-> check is a residual gap). A script can still exfiltrate data it has read to any
-> public host. Author and import rule sets only from sources you trust.
+> **Security.** `Anywhere.http` performs **no destination filtering** — a script
+> can reach any address the device can, including `localhost`, `*.local`, and
+> loopback / link-local (incl. the cloud-metadata address) / private / ULA
+> ranges, on the physical interface outside the tunnel. It is both an
+> exfiltration surface (a script can send data it has read to any host) and a
+> pivot into on-device and on-network services. Author and import rule sets only
+> from sources you trust.
 
 ### Control directives
 
@@ -703,6 +703,7 @@ If you need composed behavior, consolidate the logic into a single
 | ---------------------------------- | ------------ | ---------------- |
 | Buffered body (`script`)           | 4 MiB        | Content-Length → passthrough; chunked → truncated |
 | Per-scope `Anywhere.store`         | 1 MiB        | `set` throws `capacity exceeded` |
+| Total `Anywhere.store` (all scopes)| 16 MiB       | `set` throws `capacity exceeded` |
 | `Anywhere.crypto.randomBytes`      | 64 KiB       | throws |
 | Synthesized response body          | 4 MiB        | truncated |
 | `Anywhere.http` timeout            | 10 s default / 30 s max | Promise rejects |
@@ -732,12 +733,11 @@ Other safety properties:
   bounded. (Awaiting an [`Anywhere.http`](#anywherehttp) fetch does not
   monopolize the runtime — see its execution-model note.)
 - **Outbound requests.** [`Anywhere.http`](#anywherehttp) lets a script make the
-  extension issue HTTP(S) requests — an exfiltration surface bounded by the
-  per-script and global caps above. Destinations are restricted: loopback,
-  link-local (incl. cloud-metadata), private, and ULA addresses are refused both
-  as literal addresses and as hostnames that resolve to one (checked before the
-  request leaves; a sub-TTL DNS rebind is a residual gap). A script can still
-  reach any public host, so only run rule sets from sources you trust.
+  extension issue HTTP(S) requests — an exfiltration and pivot surface bounded
+  only by the per-script and global concurrency / size caps above, **not** by
+  destination: any address is reachable, including loopback, link-local (incl.
+  cloud-metadata), private, and ULA ranges, on the physical interface outside
+  the tunnel. Only run rule sets from sources you trust.
 - **Failure is safe-by-default.** A compile failure, a missing `process`, or an
   uncaught throw — including an unhandled `Anywhere.http` rejection — passes the
   original message through unchanged.
