@@ -34,15 +34,10 @@ nonisolated class TLSProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        tlsConnection.receive { data, error in
-            // Reality passes decryption-failure data through so upstream
-            // can attempt recovery on malformed/fake records.
-            if let error, case RealityError.decryptionFailed = error {
-                completion(data, error)
-                return
-            }
-            completion(data, error)
-        }
+        // Plain TLS has no Reality/Vision direct-copy concept, so record-layer
+        // failures — including AEAD authentication failures — surface verbatim
+        // with their real ``TLSRecordError`` description.
+        tlsConnection.receive(completion: completion)
     }
 
     override func cancel() {
