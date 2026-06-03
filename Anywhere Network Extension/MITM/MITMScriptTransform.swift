@@ -338,6 +338,11 @@ enum MITMScriptTransform {
     /// matching rules don't run on this stream and so can't trample
     /// the slot.
     final class FrameCursor {
+        /// The script's persistent per-stream state object, threaded frame
+        /// to frame. A ``JSValue`` bound to the process-wide shared
+        /// ``MITMScriptEngine`` VM; it is **only ever read or written on
+        /// ``scriptQueue``** (inside the engine's ``applyFrame``). Its
+        /// release is hopped to ``scriptQueue`` by ``deinit`` — see there.
         var state: JSValue?
         /// True once a script directive said "we're done with this
         /// stream" — subsequent frames bypass the script entirely.
@@ -352,6 +357,22 @@ enum MITMScriptTransform {
         /// matches"; `.some(.some)` carries the matched script.
         fileprivate var resolvedMatch: ScriptMatch??
         init() {}
+
+        deinit {
+            // ``state``'s final release calls JSValueUnprotect, which mutates
+            // GC / protected-set bookkeeping on the process-wide shared
+            // JSVirtualMachine. That must run on ``scriptQueue`` — the one
+            // queue that touches the VM — not on whatever queue drops the last
+            // reference to this cursor (typically the lwIP queue on stream
+            // teardown, or ARC during connection teardown), where it would
+            // race another connection's in-flight script span on the same VM
+            // and risk heap corruption. Handing the value to ``scriptQueue``
+            // moves the 0-refcount release (the actual JSValueUnprotect) there;
+            // the stored-property release during this deinit only decrements to
+            // the closure's reference, so no VM bookkeeping happens off-queue.
+            guard let state else { return }
+            MITMScriptTransform.scriptQueue.async { withExtendedLifetime(state) {} }
+        }
     }
 
     /// Result of running the matching streaming-script rule on one

@@ -431,7 +431,13 @@ enum MITMJSONPatch {
     /// apples-to-apples, so an untouched document always compares equal and its
     /// original bytes are returned verbatim.
     static func documentsEqual(_ lhs: Any, _ rhs: Any, depth: Int = 0) -> Bool {
-        guard depth < maxRecursionDepth else { return (lhs as AnyObject).isEqual(rhs) }
+        // Past the recursion ceiling, fail toward "changed" rather than a
+        // blanket ``isEqual:`` — which re-equates true↔1 / false↔0 and would
+        // silently drop a bool↔number edit nested this deep (the very
+        // misclassification this function exists to avoid). Treating an
+        // unverifiable-depth document as changed only costs a re-serialization
+        // of pathologically-deep JSON.
+        guard depth < maxRecursionDepth else { return false }
         switch (lhs, rhs) {
         case let (l as NSDictionary, r as NSDictionary):
             guard l.count == r.count else { return false }

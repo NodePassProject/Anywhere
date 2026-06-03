@@ -73,6 +73,25 @@ final class MITMGateRegex: @unchecked Sendable {
     /// The source pattern, retained only for the quarantine / strike log lines.
     private let pattern: String
 
+    /// True when ``pattern`` is a non-empty plain literal — it contains no ICU
+    /// regex metacharacter, so it can't backtrack and its match is an
+    /// unanchored, case-sensitive substring search exactly equivalent to
+    /// ``regex``'s ``firstMatch`` under the empty option set. Such gates match
+    /// inline on the calling queue (see ``matches(_:)``), skipping the memo, the
+    /// worker-queue hop, and the deadline machinery entirely — the common shape
+    /// for host / path-prefix gates, and the bulk of per-request gate
+    /// evaluations on the shared lwIP queue. (An empty pattern is excluded:
+    /// ``firstMatch`` matches it at every position, but ``String/range(of:)``
+    /// finds nothing for an empty needle, so it falls to the regex path to
+    /// preserve behavior.)
+    private let isLiteral: Bool
+
+    /// ICU regex metacharacters. A pattern containing none of these is a plain
+    /// literal — see ``isLiteral``.
+    private static let regexMetacharacters: Set<Character> = [
+        "\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}"
+    ]
+
     /// Shared concurrent executor for bounded matching. Concurrent is load-
     /// bearing: an abandoned runaway holds one worker thread until it finishes,
     /// and matches dispatched from the lwIP queue and the script queue must not
@@ -94,10 +113,15 @@ final class MITMGateRegex: @unchecked Sendable {
     )
 
     /// Wall-clock budget for one match. A real URL-gate match is microseconds,
-    /// so this sits orders of magnitude above the legitimate cost: a device
-    /// hiccup (GC pause, CPU contention) won't false-trip it, while a runaway is
-    /// still bounded to a brief, one-off blip on the calling queue.
-    static let matchDeadlineMillis = 250
+    /// so this sits orders of magnitude above the legitimate cost — a device
+    /// hiccup (GC pause, CPU contention) won't false-trip it — while bounding
+    /// the worst-case block a pathological pattern can impose on the shared lwIP
+    /// queue. Literal gates never reach here (see ``isLiteral``); only genuine
+    /// regex patterns pay this, only on a cache miss, and only ``strikeLimit``
+    /// times before the pattern is quarantined and stops running the matcher at
+    /// all — so the aggregate stall a pathological pattern can impose before
+    /// being declawed stays in the low hundreds of milliseconds, one-off.
+    static let matchDeadlineMillis = 100
 
     /// Hard wall-clock cap on an *abandoned* match. A match that blows the soft
     /// ``matchDeadlineMillis`` keeps spinning on its worker thread — an
@@ -142,6 +166,8 @@ final class MITMGateRegex: @unchecked Sendable {
         }
         self.regex = regex
         self.pattern = pattern
+        self.isLiteral = !pattern.isEmpty
+            && !pattern.contains { Self.regexMetacharacters.contains($0) }
     }
 
     /// Whether the gate matches ``normalizedURL`` (the caller has already
@@ -149,6 +175,15 @@ final class MITMGateRegex: @unchecked Sendable {
     /// quarantine-gated per the type doc; always fail-closed on any
     /// budget/quarantine outcome.
     func matches(_ normalizedURL: String) -> Bool {
+        // A plain-literal gate can't backtrack, so match it inline on the
+        // calling queue — no memo, no worker-queue hop, no deadline wait —
+        // sparing the shared lwIP queue a cross-queue round-trip on the common
+        // gate shape. ``.literal`` gives code-unit-exact, unanchored matching
+        // equivalent to ``regex.firstMatch`` under empty options (see
+        // ``isLiteral``).
+        if isLiteral {
+            return normalizedURL.range(of: pattern, options: .literal) != nil
+        }
         lock.lock()
         if quarantined {
             lock.unlock()

@@ -127,8 +127,13 @@ final class MITMHTTP2FlowController {
     /// `(new - old)` the caller must apply to every open synth stream window
     /// (RFC 9113 §6.9.2 retroactive adjustment). The delta may be negative.
     func updateInitialStreamWindow(_ newValue: Int) -> Int {
-        let delta = newValue - clientInitialStreamWindow
-        clientInitialStreamWindow = newValue
+        // RFC 9113 §6.5.2: a SETTINGS_INITIAL_WINDOW_SIZE above 2^31-1 is a
+        // FLOW_CONTROL_ERROR. The SETTINGS frame is forwarded verbatim, so the
+        // real peer rejects an illegal value; clamp our own model too so synth
+        // pacing never tracks an impossible window.
+        let clamped = min(newValue, Self.maxWindow)
+        let delta = clamped - clientInitialStreamWindow
+        clientInitialStreamWindow = clamped
         return delta
     }
 }
