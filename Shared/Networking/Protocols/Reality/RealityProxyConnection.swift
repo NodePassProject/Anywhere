@@ -34,16 +34,16 @@ nonisolated class RealityProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        realityConnection.receive { [weak self] data, error in
-            guard let self else {
-                completion(nil, ProxyError.connectionFailed("Connection deallocated"))
-                return
-            }
-
+        realityConnection.receive { data, error in
             if let error {
-                // Pass through decryption failures with raw data for Vision direct copy mode
-                if case RealityError.decryptionFailed = error {
-                    completion(data, error)
+                // An AEAD authentication failure on a Reality connection means
+                // the record no longer decrypts with the handshake-derived keys
+                // — the server may have switched to Vision direct-copy. Surface
+                // the Reality-specific diagnostic for that one case; every other
+                // record-layer error (MAC, padding, malformed framing, alerts)
+                // propagates with its real description.
+                if case TLSRecordError.recordAuthenticationFailed = error {
+                    completion(nil, RealityError.decryptionFailed)
                     return
                 }
                 completion(nil, error)
