@@ -210,7 +210,7 @@ nonisolated class TLSRecordConnection {
         sendLock.lock()
         guard let connection else {
             sendLock.unlock()
-            completion(RealityError.connectionFailed("Connection cancelled"))
+            completion(TLSRecordError.connectionUnavailable)
             return
         }
         do {
@@ -248,9 +248,11 @@ nonisolated class TLSRecordConnection {
     /// Uses buffered reading to process multiple TLS records per network read,
     /// reducing system call overhead.
     ///
-    /// - Parameter completion: Called with decrypted data or an error.
-    ///   On decryption failure, both raw data and the error are provided
-    ///   so the caller (Vision) can switch to direct-copy mode.
+    /// - Parameter completion: Called with decrypted data, or an error naming
+    ///   the precise record-layer failure (authentication, MAC, padding,
+    ///   malformed framing, or a peer alert). The Reality layer maps an AEAD
+    ///   authentication failure to its direct-copy diagnostic; see
+    ///   ``RealityProxyConnection``.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         receiveLock.lock()
         let processed = processBuffer()
@@ -266,8 +268,6 @@ nonisolated class TLSRecordConnection {
                 fetchMore(completion: completion)
             case .skip:
                 self.receive(completion: completion)
-            case .decryptionFailed(let rawData):
-                completion(rawData, RealityError.decryptionFailed)
             }
             return
         }
@@ -294,7 +294,7 @@ nonisolated class TLSRecordConnection {
         receiveLock.unlock()
 
         guard let connection else {
-            completion(nil, RealityError.connectionFailed("Connection cancelled"))
+            completion(nil, TLSRecordError.connectionUnavailable)
             return
         }
         connection.receive() { [weak self] data, isComplete, error in
@@ -323,7 +323,7 @@ nonisolated class TLSRecordConnection {
     ///   - completion: Called with `nil` on success or an error on failure.
     func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         guard let connection else {
-            completion(RealityError.connectionFailed("Connection cancelled"))
+            completion(TLSRecordError.connectionUnavailable)
             return
         }
         connection.send(data: data, completion: completion)
@@ -388,13 +388,12 @@ nonisolated class TLSRecordConnection {
         case error(Error)
         case needMore
         case skip
-        case decryptionFailed(Data)
     }
 
     /// Fetches more data from the network and processes it.
     private func fetchMore(completion: @escaping (Data?, Error?) -> Void) {
         guard let connection else {
-            completion(nil, RealityError.connectionFailed("Connection cancelled"))
+            completion(nil, TLSRecordError.connectionUnavailable)
             return
         }
         connection.receive() { [weak self] data, isComplete, error in
@@ -432,8 +431,6 @@ nonisolated class TLSRecordConnection {
                     self.fetchMore(completion: completion)
                 case .skip:
                     self.receive(completion: completion)
-                case .decryptionFailed(let rawData):
-                    completion(rawData, RealityError.decryptionFailed)
                 }
             } else {
                 self.fetchMore(completion: completion)
@@ -456,7 +453,10 @@ nonisolated class TLSRecordConnection {
         var batchedData = Data(capacity: receiveBuffer.count)
         var hasError: Error? = nil
         var recordsProcessed = 0
-        var failedRecordData: Data? = nil
+        // The failing record (+ any trailing bytes) held back so cleanly
+        // decrypted records earlier in this batch can be delivered first; the
+        // next read re-attempts these bytes and surfaces the failure.
+        var bytesPendingReplay: Data? = nil
 
         // Track how many bytes from the front have been consumed
         var consumed = 0
@@ -503,27 +503,34 @@ nonisolated class TLSRecordConnection {
                         batchedData.append(decrypted)
                     }
                 } catch {
-                    // A genuine TLS alert (peer rejected the connection) is a
-                    // hard error, not the Reality direct-copy fallback. Don't
-                    // stash raw bytes for replay — surface it as `.error` so
-                    // the teardown names the alert.
-                    if case RealityError.tlsAlert = error {
+                    // Surface every decrypt failure with its real cause —
+                    // authentication, MAC, padding, malformed framing, or a
+                    // named alert. Classifying an authentication failure as a
+                    // possible direct-copy switch is the Reality layer's job
+                    // (``RealityProxyConnection``), not this generic record
+                    // layer's.
+                    //
+                    // A TLS alert is terminal and names itself, so there's no
+                    // point holding it back behind buffered data. Every other
+                    // failure keeps the failing record (+ trailing bytes) so we
+                    // can flush already-decrypted records first, then re-raise
+                    // on the next read.
+                    if case TLSRecordError.tlsAlert = error {
                         receiveBuffer.removeAll()
                         consumed = 0
                         hasError = error
                         break
                     }
-                    // Reconstruct full record + any trailing data for fallback (rare path)
-                    let failed = Data(receiveBuffer[(base + consumed)...])
+                    let pending = Data(receiveBuffer[(base + consumed)...])
                     receiveBuffer.removeAll()
                     consumed = 0
-                    failedRecordData = failed
+                    bytesPendingReplay = pending
                     hasError = error
                     break
                 }
             } else if contentType == 0x15 { // Alert
                 consumed += totalLen
-                hasError = RealityError.connectionFailed("TLS Alert received")
+                hasError = TLSRecordError.unexpectedAlert
                 break
             } else {
                 // Other content types (ChangeCipherSpec, etc.) are skipped
@@ -542,13 +549,12 @@ nonisolated class TLSRecordConnection {
 
         if let error = hasError {
             if !batchedData.isEmpty {
-                if let failedData = failedRecordData {
-                    receiveBuffer = failedData
+                // Deliver the records that decrypted cleanly; the held-back
+                // bytes surface the failure on the next read.
+                if let pending = bytesPendingReplay {
+                    receiveBuffer = pending
                 }
                 return .data(batchedData)
-            }
-            if let rawData = failedRecordData {
-                return .decryptionFailed(rawData)
             }
             return .error(error)
         }
@@ -648,19 +654,19 @@ nonisolated class TLSRecordConnection {
     /// TLS 1.3 record decryption.
     private func decryptTLS13Record(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
         guard ciphertext.count >= 16 else {
-            throw RealityError.handshakeFailed("Ciphertext too short")
+            throw TLSRecordError.ciphertextTooShort
         }
 
         var nonce = ingressIV
         xorSeqIntoNonce(&nonce, seqNum: seqNum)
-        
+
         let ct = ciphertext.prefix(ciphertext.count - 16)
         let tag = ciphertext.suffix(16)
 
         let decrypted = try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: header, key: ingressSymmetricKey)
 
         guard !decrypted.isEmpty else {
-            throw RealityError.handshakeFailed("Empty decrypted data")
+            throw TLSRecordError.emptyDecryptedData
         }
 
         // Strip inner content type and padding (RFC 8446 §5.4)
@@ -675,7 +681,7 @@ nonisolated class TLSRecordConnection {
         }
 
         guard contentLen >= 0 else {
-            throw RealityError.handshakeFailed("No content type found")
+            throw TLSRecordError.noContentTypeFound
         }
 
         // Skip handshake records (e.g. NewSessionTicket)
@@ -696,7 +702,7 @@ nonisolated class TLSRecordConnection {
             if description == 0 { // close_notify — orderly shutdown, drain to EOF
                 return Data()
             }
-            throw RealityError.tlsAlert(level: level, description: description)
+            throw TLSRecordError.tlsAlert(level: level, description: description)
         }
 
         return decrypted.prefix(Int(contentLen))
@@ -819,7 +825,7 @@ nonisolated class TLSRecordConnection {
         // Generate random IV
         var iv = Data(count: blockSize)
         guard iv.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, blockSize, $0.baseAddress!) }) == errSecSuccess else {
-            throw RealityError.handshakeFailed("Failed to generate IV")
+            throw TLSRecordError.ivGenerationFailed
         }
 
         // AES-CBC encrypt (no PKCS7 padding — we handle it ourselves)
@@ -879,7 +885,7 @@ nonisolated class TLSRecordConnection {
         let contentType = header.first ?? 0x17
 
         guard ciphertext.count >= explicitNonceLen + 16 else {
-            throw RealityError.handshakeFailed("Ciphertext too short for TLS 1.2 AEAD")
+            throw TLSRecordError.ciphertextTooShort
         }
 
         // Extract explicit nonce and payload
@@ -921,7 +927,7 @@ nonisolated class TLSRecordConnection {
         let contentType = header.first ?? 0x17
 
         guard ciphertext.count >= blockSize * 2 else {
-            throw RealityError.handshakeFailed("Ciphertext too short for CBC")
+            throw TLSRecordError.ciphertextTooShort
         }
 
         // Extract IV (first block) and encrypted data
@@ -929,7 +935,7 @@ nonisolated class TLSRecordConnection {
         let encrypted = Data(ciphertext.suffix(from: ciphertext.startIndex + blockSize))
 
         guard encrypted.count % blockSize == 0 else {
-            throw RealityError.handshakeFailed("CBC ciphertext not aligned")
+            throw TLSRecordError.malformedRecord("CBC ciphertext not block-aligned")
         }
 
         // AES-CBC decrypt
@@ -956,7 +962,7 @@ nonisolated class TLSRecordConnection {
         }
 
         guard status == kCCSuccess, numBytesDecrypted > 0 else {
-            throw RealityError.handshakeFailed("CBC decryption failed")
+            throw TLSRecordError.malformedRecord("CBC decryption failed")
         }
 
         decrypted = decrypted.prefix(numBytesDecrypted)
@@ -976,7 +982,7 @@ nonisolated class TLSRecordConnection {
         }
 
         guard paddingGood == 0 else {
-            throw RealityError.handshakeFailed("Invalid CBC padding")
+            throw TLSRecordError.invalidPadding
         }
 
         decrypted = decrypted.prefix(decrypted.count - paddingLen)
@@ -984,7 +990,7 @@ nonisolated class TLSRecordConnection {
         // Determine MAC size
         let macSize = TLSCipherSuite.macLength(cipherSuite)
         guard decrypted.count >= macSize else {
-            throw RealityError.handshakeFailed("Decrypted data too short for MAC")
+            throw TLSRecordError.malformedRecord("decrypted record too short for MAC")
         }
 
         // Extract and verify MAC
@@ -1012,7 +1018,7 @@ nonisolated class TLSRecordConnection {
         // Constant-time comparison to prevent timing attacks
         guard receivedMAC.count == expectedMAC.count,
               constantTimeEqual(receivedMAC, expectedMAC) else {
-            throw RealityError.handshakeFailed("MAC verification failed")
+            throw TLSRecordError.macVerificationFailed
         }
 
         return payload
@@ -1044,15 +1050,24 @@ nonisolated class TLSRecordConnection {
     }
 
     /// Opens ciphertext with the appropriate AEAD.
+    ///
+    /// A tag-verification failure is normalized to
+    /// ``TLSRecordError/recordAuthenticationFailed`` so callers can distinguish
+    /// "the keys no longer match these bytes" (which Reality reads as a possible
+    /// direct-copy switch) from genuinely malformed input.
     private func openAEAD(ciphertext: Data, tag: Data, nonce: Data, aad: Data, key: SymmetricKey) throws -> Data {
-        if TLSCipherSuite.isChaCha20(cipherSuite) {
-            let nonceObj = try ChaChaPoly.Nonce(data: nonce)
-            let sealedBox = try ChaChaPoly.SealedBox(nonce: nonceObj, ciphertext: ciphertext, tag: tag)
-            return Data(try ChaChaPoly.open(sealedBox, using: key, authenticating: aad))
-        } else {
-            let nonceObj = try AES.GCM.Nonce(data: nonce)
-            let sealedBox = try AES.GCM.SealedBox(nonce: nonceObj, ciphertext: ciphertext, tag: tag)
-            return Data(try AES.GCM.open(sealedBox, using: key, authenticating: aad))
+        do {
+            if TLSCipherSuite.isChaCha20(cipherSuite) {
+                let nonceObj = try ChaChaPoly.Nonce(data: nonce)
+                let sealedBox = try ChaChaPoly.SealedBox(nonce: nonceObj, ciphertext: ciphertext, tag: tag)
+                return Data(try ChaChaPoly.open(sealedBox, using: key, authenticating: aad))
+            } else {
+                let nonceObj = try AES.GCM.Nonce(data: nonce)
+                let sealedBox = try AES.GCM.SealedBox(nonce: nonceObj, ciphertext: ciphertext, tag: tag)
+                return Data(try AES.GCM.open(sealedBox, using: key, authenticating: aad))
+            }
+        } catch CryptoKitError.authenticationFailure {
+            throw TLSRecordError.recordAuthenticationFailed
         }
     }
 
