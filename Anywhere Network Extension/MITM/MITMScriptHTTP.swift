@@ -110,6 +110,7 @@ final class MITMScriptHTTPClient {
         followRedirects: Bool,
         insecure: Bool,
         maxBytes: Int,
+        timeout: TimeInterval,
         completion: @escaping (Result<Response, Error>) -> Void
     ) {
         // No host-level SSRF filtering: Anywhere.http may reach any address,
@@ -127,7 +128,16 @@ final class MITMScriptHTTPClient {
         // callback calls `finishTasksAndInvalidate` — so nothing here needs to
         // outlive the call. Creating the session and resuming the task are
         // non-blocking, so this runs inline on the caller's queue.
-        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        let configuration = URLSessionConfiguration.ephemeral
+        // `request.timeoutInterval` (set by the caller) bounds *inactivity*: a
+        // slow-drip server that dribbles a byte before each interval elapses
+        // never trips it, so a fetch could outlive its documented `timeout` and
+        // park the script's connection up to the engine's idle watchdog.
+        // `timeoutIntervalForResource` is a wall-clock cap on total duration;
+        // each fetch has its own ephemeral session, so it is effectively
+        // per-request. Both are set to the same clamped `timeout`.
+        configuration.timeoutIntervalForResource = timeout
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         session.dataTask(with: request).resume()
     }
 

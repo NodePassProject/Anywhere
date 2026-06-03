@@ -694,8 +694,10 @@ final class MITMHTTP2Connection {
     /// error the receiver will catch; we parse whole entries and ignore any
     /// trailing remainder rather than re-deriving that error here.
     private func handleSettings(_ frame: RawFrame) -> Data {
+        var frame = frame
         if frame.streamID == 0, frame.flags & 0x1 == 0 {
-            let payload = frame.payload
+            var payload = frame.payload
+            var clampedMaxFrameSize = false
             var i = payload.startIndex
             while i + 6 <= payload.endIndex {
                 let identifier = (UInt16(payload[i]) << 8) | UInt16(payload[i + 1])
@@ -713,10 +715,34 @@ final class MITMHTTP2Connection {
                     // pacing starts from the right window (and adjusts open
                     // synth streams when it changes mid-connection).
                     applyClientInitialWindowSize(Int(value))
+                case 0x5: // SETTINGS_MAX_FRAME_SIZE
+                    // This setting tells the *peer* how large a frame it may
+                    // send. We sit in the middle and parse every frame with a
+                    // fixed receive cap (``maxReceivedFramePayloadSize``): if a
+                    // peer were allowed to advertise a larger value, its
+                    // counterpart could send a spec-legal frame we then reject at
+                    // parse time, silently stalling that half of the connection.
+                    // Clamp the forwarded value down to our cap so neither peer
+                    // is ever told it may exceed what we can read. Our cap (1 MiB)
+                    // is far above the 16 KiB default, so this only lowers an
+                    // unusually large negotiated value. Patches 4 bytes in place,
+                    // so the SETTINGS payload length is unchanged.
+                    if Int(value) > Self.maxReceivedFramePayloadSize {
+                        let capped = UInt32(Self.maxReceivedFramePayloadSize)
+                        payload[i + 2] = UInt8(truncatingIfNeeded: capped >> 24)
+                        payload[i + 3] = UInt8(truncatingIfNeeded: capped >> 16)
+                        payload[i + 4] = UInt8(truncatingIfNeeded: capped >> 8)
+                        payload[i + 5] = UInt8(truncatingIfNeeded: capped)
+                        clampedMaxFrameSize = true
+                    }
                 default:
                     break
                 }
                 i += 6
+            }
+            if clampedMaxFrameSize {
+                frame.payload = payload
+                logger.warning("[MITM] HTTP/2 \(rewriter.host): clamped peer SETTINGS_MAX_FRAME_SIZE down to receive cap \(Self.maxReceivedFramePayloadSize) B")
             }
         }
         return serializeFrame(frame)

@@ -160,6 +160,12 @@ final class MITMHTTP1Stream {
         /// thus whether the held chunk was the last one). nil before
         /// any chunk has completed.
         var pendingChunk: Data? = nil
+        /// Resume cursor for the chunk-size / trailer CRLF scan, so a line
+        /// dribbling in across many TLS records isn't re-scanned from the
+        /// front on every append (O(n²) → O(n)). Holds the first index not
+        /// yet checked as a CR candidate; reset to 0 the moment a line is
+        /// consumed, advanced only on a no-progress (`needMore`) return.
+        var lineScanCursor: Int = 0
         let cursor: MITMScriptTransform.FrameCursor
     }
 
@@ -1102,7 +1108,7 @@ final class MITMHTTP1Stream {
         while true {
             switch currentInner {
             case .sizeLine:
-                guard let lineEnd = rxBuffer.firstCRLF() else {
+                guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
                     if rxBuffer.count > Self.maxChunkLineBytes {
                         // Chunk-size line that never terminates — treat as
                         // malformed (same handling as a bad size below) so the
@@ -1114,11 +1120,13 @@ final class MITMHTTP1Stream {
                         mode = .passthrough
                         return true
                     }
+                    streaming.lineScanCursor = max(0, rxBuffer.count - 1)
                     mode = .streamingChunked(streaming: streaming, inner: .sizeLine)
                     return false
                 }
                 let line = rxBuffer.subdata(in: 0..<lineEnd)
                 rxBuffer.removeFirst(lineEnd + 2)
+                streaming.lineScanCursor = 0
                 guard let size = Self.parseHexSize(line) else {
                     // Head was already emitted with ``Transfer-Encoding:
                     // chunked``, so the receiver is waiting for
@@ -1257,7 +1265,7 @@ final class MITMHTTP1Stream {
                 // field-lines terminated by an empty line. Forward each
                 // line verbatim (we don't rewrite trailers) and stop
                 // once we hit the empty terminator.
-                guard let lineEnd = rxBuffer.firstCRLF() else {
+                guard let lineEnd = rxBuffer.firstCRLF(from: streaming.lineScanCursor) else {
                     if rxBuffer.count > Self.maxChunkLineBytes {
                         logger.warning("[MITM] HTTP/1 \(host): chunk trailer line exceeded \(Self.maxChunkLineBytes) B without CRLF; terminating body and downgrading to passthrough")
                         // "0\r\n" was already emitted; close the trailer
@@ -1268,11 +1276,13 @@ final class MITMHTTP1Stream {
                         mode = .passthrough
                         return true
                     }
+                    streaming.lineScanCursor = max(0, rxBuffer.count - 1)
                     mode = .streamingChunked(streaming: streaming, inner: .trailerOrEnd)
                     return false
                 }
                 let line = rxBuffer.subdata(in: 0..<lineEnd)
                 rxBuffer.removeFirst(lineEnd + 2)
+                streaming.lineScanCursor = 0
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
                 if line.isEmpty {
@@ -2591,6 +2601,13 @@ private final class ChunkedReader {
 
     private var state: State = .sizeLine
     private var sizes: [Int] = []
+    /// Resume cursor for the chunk-size / trailer CRLF scan so a line arriving
+    /// across many records isn't re-scanned from the front each call (O(n²) →
+    /// O(n)). First index not yet checked as a CR candidate; reset to 0 when a
+    /// line is consumed, advanced only on a `needMore` (no-consume) return. The
+    /// buffer is presented 0-indexed and only grows at the end while a line is
+    /// pending, so the cursor stays valid across appends/compaction.
+    private var scanCursor = 0
 
     enum ForwardResult {
         case needMore
@@ -2608,14 +2625,17 @@ private final class ChunkedReader {
         while !buffer.isEmpty {
             switch state {
             case .sizeLine:
-                guard let lineEnd = buffer.firstCRLF() else {
-                    return buffer.count > MITMHTTP1Stream.maxChunkLineBytes ? .malformed : .needMore
+                guard let lineEnd = buffer.firstCRLF(from: scanCursor) else {
+                    if buffer.count > MITMHTTP1Stream.maxChunkLineBytes { return .malformed }
+                    scanCursor = max(0, buffer.count - 1)
+                    return .needMore
                 }
                 let line = buffer.subdata(in: 0..<lineEnd)
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
                 buffer.removeFirst(lineEnd + 2)
-                guard let size = parseHexSize(line) else { return .malformed }
+                scanCursor = 0
+                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
                 if size == 0 {
                     state = .trailerOrEnd
                 } else {
@@ -2649,13 +2669,16 @@ private final class ChunkedReader {
             case .trailerOrEnd:
                 // Forward the trailer block (zero or more lines + CRLF)
                 // verbatim until the empty-line terminator.
-                guard let lineEnd = buffer.firstCRLF() else {
-                    return buffer.count > MITMHTTP1Stream.maxChunkLineBytes ? .malformed : .needMore
+                guard let lineEnd = buffer.firstCRLF(from: scanCursor) else {
+                    if buffer.count > MITMHTTP1Stream.maxChunkLineBytes { return .malformed }
+                    scanCursor = max(0, buffer.count - 1)
+                    return .needMore
                 }
                 let line = buffer.subdata(in: 0..<lineEnd)
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
                 buffer.removeFirst(lineEnd + 2)
+                scanCursor = 0
                 if line.isEmpty {
                     return .complete
                 }
@@ -2668,12 +2691,15 @@ private final class ChunkedReader {
         while !buffer.isEmpty {
             switch state {
             case .sizeLine:
-                guard let lineEnd = buffer.firstCRLF() else {
-                    return buffer.count > MITMHTTP1Stream.maxChunkLineBytes ? .malformed : .needMore
+                guard let lineEnd = buffer.firstCRLF(from: scanCursor) else {
+                    if buffer.count > MITMHTTP1Stream.maxChunkLineBytes { return .malformed }
+                    scanCursor = max(0, buffer.count - 1)
+                    return .needMore
                 }
                 let line = buffer.subdata(in: 0..<lineEnd)
                 buffer.removeFirst(lineEnd + 2)
-                guard let size = parseHexSize(line) else { return .malformed }
+                scanCursor = 0
+                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
                 if size == 0 {
                     state = .trailerOrEnd
                 } else {
@@ -2701,32 +2727,19 @@ private final class ChunkedReader {
             case .trailerOrEnd:
                 // Rewritten bodies are re-chunked with empty trailers, so
                 // consume and discard any original trailers here.
-                guard let lineEnd = buffer.firstCRLF() else {
-                    return buffer.count > MITMHTTP1Stream.maxChunkLineBytes ? .malformed : .needMore
+                guard let lineEnd = buffer.firstCRLF(from: scanCursor) else {
+                    if buffer.count > MITMHTTP1Stream.maxChunkLineBytes { return .malformed }
+                    scanCursor = max(0, buffer.count - 1)
+                    return .needMore
                 }
                 let line = buffer.subdata(in: 0..<lineEnd)
                 buffer.removeFirst(lineEnd + 2)
+                scanCursor = 0
                 if line.isEmpty {
                     return .complete(sizes: sizes)
                 }
             }
         }
         return .needMore
-    }
-
-    private func parseHexSize(_ data: Data) -> Int? {
-        guard let raw = String(data: data, encoding: .ascii) else { return nil }
-        // "size" or "size;ext..."; only the leading hex is needed.
-        let head = raw.split(separator: ";", maxSplits: 1).first.map(String.init) ?? raw
-        let trimmed = head.trimmingCharacters(in: CharacterSet.whitespaces)
-        // RFC 9112 §7.1: chunk-size is unsigned. ``Int(_:radix:)`` admits
-        // a leading `-`, so a `-1` size line would yield a negative
-        // ``remaining`` and a negative ``min(remaining, count)`` ->
-        // inverted ``Range`` trap in ``MITMByteBuffer``. Reject negatives
-        // (nil maps to ``.malformed`` in both consumers above). Also require
-        // pure ASCII hex: ``Int(_:radix:)`` admits a leading `+` too.
-        guard !trimmed.isEmpty, trimmed.allSatisfy({ $0.isHexDigit && $0.isASCII }),
-              let size = Int(trimmed, radix: 16), size >= 0 else { return nil }
-        return size
     }
 }

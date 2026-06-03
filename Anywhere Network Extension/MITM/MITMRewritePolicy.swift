@@ -547,7 +547,20 @@ final class MITMRewritePolicy {
         if host.hasPrefix("["), host.hasSuffix("]"), host.count >= 2 {
             host = String(host.dropFirst().dropLast())
         }
-        let port = comps.port.flatMap { UInt16(exactly: $0) }
+        // Distinguish "no port given" (dial the scheme default) from "a port was
+        // given but is out of range" (a malformed rule). The latter is dropped
+        // rather than silently collapsing to the default port, which would mask
+        // the author's error and dial somewhere they didn't write.
+        let port: UInt16?
+        if let rawPort = comps.port {
+            guard let valid = UInt16(exactly: rawPort) else {
+                logger.warning("[MITM] rewrite replacement URL dropped: port \(rawPort) out of range (0–65535)")
+                return nil
+            }
+            port = valid
+        } else {
+            port = nil
+        }
         var target = comps.percentEncodedPath
         if target.isEmpty { target = "/" }
         if let query = comps.percentEncodedQuery, !query.isEmpty {

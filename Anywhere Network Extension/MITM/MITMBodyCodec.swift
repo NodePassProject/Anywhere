@@ -211,11 +211,17 @@ enum MITMBodyCodec {
         /// ``maxBufferedBodyBytes`` — a decompression-bomb guard tripping,
         /// not a malformed stream.
         case capExceeded
+        /// The first member decoded but the whole-body trailer ISIZE doesn't
+        /// match the decoded size — effectively always a concatenated
+        /// multi-member body, which the framework's raw-deflate decoder can't
+        /// split (it decodes only member 1). Fail closed: forward verbatim.
+        case multiMember
 
         var description: String {
             switch self {
             case .firstMember(let reason): return reason.description
             case .capExceeded:             return "output exceeded \(maxBufferedBodyBytes) B cap"
+            case .multiMember:             return "multi-member gzip unsupported; forwarding verbatim"
             }
         }
     }
@@ -262,15 +268,19 @@ enum MITMBodyCodec {
         case capExceeded
     }
 
-    /// Parses one or more concatenated gzip members per RFC 1952 §2.2.
-    /// Each member is `<10-byte header><optional fields><deflate body>
-    /// <8-byte trailer>`. Loops until the input is exhausted rather than
-    /// stopping after the first member: some CDNs and the bgzf format
-    /// emit concatenated members, and decoding only the first would
-    /// silently drop the rest of the body.
+    /// Decodes a gzip body per RFC 1952. Each member is `<10-byte header>
+    /// <optional fields><deflate body><8-byte trailer>`.
+    ///
+    /// NOTE: in practice only a **single** member is decoded — the Compression
+    /// framework's raw-deflate decoder swallows the whole input (the trailer and
+    /// any following members) while emitting just member 1, so the loop can't
+    /// advance. The trailing-ISIZE guard at the end turns what would otherwise
+    /// be a silent truncation of a genuine multi-member body into a fail-closed
+    /// pass-through (rationale at the check).
+    ///
     /// Returns the decoded bytes, plus — when nothing was produced — the
-    /// reason the first member failed, which ``decompress`` logs for
-    /// diagnosis. ``decoded`` is non-nil (possibly empty) on success.
+    /// reason it failed, which ``decompress`` logs for diagnosis. ``decoded``
+    /// is non-nil (possibly empty) on success.
     private static func gunzip(_ data: Data) -> (decoded: Data?, failure: GzipFailure?) {
         var combined = Data()
         var cursor = data.startIndex
@@ -299,7 +309,34 @@ enum MITMBodyCodec {
                 cursor = data.index(cursor, offsetBy: consumed)
             }
         }
+        // The raw-deflate decoder consumes the entire remaining input — deflate
+        // body, trailer, and any concatenated members — while decoding only the
+        // first, so the loop above can't reach a second member and a multi-member
+        // body would be silently truncated to member 1. The boundaries are
+        // unrecoverable, but the case is detectable: the whole-body gzip trailer's
+        // ISIZE (RFC 1952 §2.3.1 — uncompressed size mod 2^32, little-endian)
+        // equals the decoded size for a true single member but not for a
+        // member-1-only decode. On mismatch, fail closed so the caller forwards
+        // the body verbatim and the client decodes every member itself, rather
+        // than emitting a truncated one. Bodies are capped well under 2^32, so the
+        // comparison is exact.
+        guard gzipTrailerISIZE(data) == UInt32(truncatingIfNeeded: combined.count) else {
+            return (nil, .multiMember)
+        }
         return (combined, nil)
+    }
+
+    /// The little-endian ISIZE field (RFC 1952 §2.3.1) from the last four bytes
+    /// of a gzip body — the uncompressed size of the final member, mod 2^32.
+    /// Returns 0 for a body too short to hold a trailer (which then mismatches
+    /// any non-empty decode and fails closed, the safe direction).
+    private static func gzipTrailerISIZE(_ data: Data) -> UInt32 {
+        guard data.count >= 4 else { return 0 }
+        let e = data.endIndex
+        return UInt32(data[data.index(e, offsetBy: -4)])
+            | (UInt32(data[data.index(e, offsetBy: -3)]) << 8)
+            | (UInt32(data[data.index(e, offsetBy: -2)]) << 16)
+            | (UInt32(data[data.index(e, offsetBy: -1)]) << 24)
     }
 
     /// Decodes one gzip member starting at ``offset`` in ``data``. On

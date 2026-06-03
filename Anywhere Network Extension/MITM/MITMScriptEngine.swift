@@ -1470,6 +1470,10 @@ final class MITMScriptEngine {
                     ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: nonce must be Uint8Array/ArrayBuffer/string", in: ctx)
                     return JSValue(undefinedIn: ctx)
                 }
+                guard n.count == 12 else {
+                    ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.encrypt: nonce must be 12 bytes", in: ctx)
+                    return JSValue(undefinedIn: ctx)
+                }
                 nonceData = n
             } else {
                 nonceData = nil
@@ -1520,8 +1524,9 @@ final class MITMScriptEngine {
                 ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: key must be a Uint8Array of length 16, 24, or 32", in: ctx)
                 return JSValue(undefinedIn: ctx)
             }
-            guard let nonce = Self.bytesFromValue(spec.objectForKeyedSubscript("nonce"), in: ctx) else {
-                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: nonce must be Uint8Array/ArrayBuffer/string", in: ctx)
+            guard let nonce = Self.bytesFromValue(spec.objectForKeyedSubscript("nonce"), in: ctx),
+                  nonce.count == 12 else {
+                ctx.exception = JSValue(newErrorFromMessage: "Anywhere.crypto.aesGCM.decrypt: nonce must be a Uint8Array of length 12", in: ctx)
                 return JSValue(undefinedIn: ctx)
             }
             guard let ciphertext = Self.bytesFromValue(spec.objectForKeyedSubscript("ciphertext"), in: ctx) else {
@@ -2153,9 +2158,18 @@ final class MITMScriptEngine {
 
         let opts: JSValue? = optsVal.isObject ? optsVal : nil
         var request = URLRequest(url: url)
-        request.httpMethod = (opts?.objectForKeyedSubscript("method"))
+        let method = (opts?.objectForKeyedSubscript("method"))
             .flatMap { $0.isString ? $0.toString() : nil }?
             .uppercased() ?? defaultMethod
+        // Validate the method against the RFC 9110 token alphabet (identical to
+        // a header field-name). URLSession would itself reject a control-char
+        // method, but checking here makes the doc's "methods produced by
+        // scripts are validated" guarantee hold at this layer and rejects a
+        // CR/LF smuggling attempt with a clear error.
+        guard Self.isValidHeaderName(method) else {
+            return Self.rejected("Anywhere.http: invalid method token", in: ctx)
+        }
+        request.httpMethod = method
         if let headersVal = opts?.objectForKeyedSubscript("headers"), !headersVal.isUndefined, !headersVal.isNull {
             for header in Self.requestHeadersFromValue(headersVal, in: ctx) {
                 request.addValue(header.value, forHTTPHeaderField: header.name)
@@ -2179,8 +2193,6 @@ final class MITMScriptEngine {
             insecure = AWCore.getAllowInsecure()
         }
 
-        inv.inFlightFetches += 1
-        inv.totalFetches += 1
         let maxBytes = Self.httpMaxResponseBytes
 
         let promise = JSValue(newPromiseIn: ctx, fromExecutor: { [weak self, weak inv] resolve, reject in
@@ -2188,17 +2200,29 @@ final class MITMScriptEngine {
                 reject?.call(withArguments: [Self.error("Anywhere.http: engine released", in: ctx)])
                 return
             }
-            // Reserve a global slot for the lifetime of the request; the
-            // completion hop releases it. `self` is captured strongly through
-            // the send completion + resume hop so the engine (and its
-            // JSContext) outlives an in-flight fetch even if the rule set is
-            // reloaded and the engine is purged from the registry.
+            // `inv` is alive here — the executor runs synchronously as the
+            // Promise is constructed — so bind it under a fresh name, leaving the
+            // weak `inv` capture intact for the completion below, which needs it
+            // weak to drop a delivered (e.g. idle-watchdog-reverted) or torn-down
+            // invocation instead of resuming it. Counting the fetch and reserving
+            // the global slot inside the executor keeps them on the same path the
+            // completion's decrement/release undoes, so a Promise that fails to
+            // construct leaks nothing. `self` is strong through the completion +
+            // resume hop so the engine and its JSContext outlive an in-flight
+            // fetch.
+            guard let liveInv = inv else {
+                reject?.call(withArguments: [Self.error("Anywhere.http: invocation released", in: ctx)])
+                return
+            }
+            liveInv.inFlightFetches += 1
+            liveInv.totalFetches += 1
             Self.reserveGlobalFetchSlot()
             MITMScriptHTTPClient.shared.send(
                 request,
                 followRedirects: followRedirects,
                 insecure: insecure,
-                maxBytes: maxBytes
+                maxBytes: maxBytes,
+                timeout: timeout
             ) { result in
                 MITMScriptTransform.scriptQueue.async {
                     Self.releaseGlobalFetchSlot()
@@ -2795,6 +2819,12 @@ final class MITMScriptEngine {
     fileprivate static func decodeBase64URL(_ str: String) -> Data? {
         var s = str.replacingOccurrences(of: "-", with: "+")
         s = s.replacingOccurrences(of: "_", with: "/")
+        // Drop ASCII whitespace / newlines first: wrapped or pretty-printed
+        // tokens in the wild carry them, and they'd otherwise throw off the
+        // padding math below (and `Data(base64Encoded:)` rejects them without
+        // `.ignoreUnknownCharacters`). Stripping here keeps decode lenient as
+        // documented while the padding count stays correct.
+        s = s.filter { !$0.isWhitespace }
         let mod = s.count % 4
         if mod > 0 {
             s += String(repeating: "=", count: 4 - mod)

@@ -498,7 +498,7 @@ Encoder/decoder pairs.
 | `Anywhere.codec.brotli`         | `encode(bytes) → Uint8Array` | `decode(bytes) → Uint8Array`    |
 
 `base64url` emits unpadded RFC 4648 §5; decode accepts either alphabet, padded
-or not. The compression codecs are for payloads the pipeline doesn't already
+or not, and ignores embedded whitespace. The compression codecs are for payloads the pipeline doesn't already
 handle (a gzipped blob nested in a JSON field, re-compressing a body for
 `Anywhere.respond`, etc.) — the outer `Content-Encoding` is auto-decoded for
 `script` rules already. `decode` throws on malformed input or output exceeding
@@ -531,8 +531,9 @@ Hashes and HMAC return raw digest bytes (`Uint8Array`); compose with
 - `aesGCM.encrypt(spec) → { nonce, ciphertext, tag }` and
   `aesGCM.decrypt(spec) → Uint8Array`. The spec object:
   - `key`: `Uint8Array` of 16 / 24 / 32 bytes (AES-128/192/256).
-  - `nonce`: 12-byte `Uint8Array`. On encrypt, omit it to have a fresh random
-    nonce generated and returned in the result.
+  - `nonce`: 12-byte `Uint8Array` — exactly 12 bytes; any other length throws.
+    On encrypt, omit it to have a fresh random nonce generated and returned in
+    the result.
   - `plaintext` / `ciphertext`: bytes.
   - `tag`: 16-byte `Uint8Array` (decrypt only).
   - `aad`: optional additional authenticated data.
@@ -885,6 +886,8 @@ function process(ctx) {
 - **Content-Encoding.** For `script` rules the body is decompressed before the
   script runs and re-emitted as identity with `Content-Encoding` dropped and a
   fresh `Content-Length`. `stream-script` rules see raw, still-compressed frames.
+  A rare concatenated multi-member `gzip` body is left compressed and forwarded
+  unrewritten rather than risk corrupting it.
 - **HEAD responses.** A response to `HEAD` never carries a body; its framing
   headers are preserved and a script that writes `ctx.body` has that write
   dropped on the wire.

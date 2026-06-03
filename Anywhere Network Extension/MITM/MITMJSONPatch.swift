@@ -190,16 +190,19 @@ enum MITMJSONPatch {
     /// malformed input.
     ///
     /// KNOWN LIMITATION: ``JSONSerialization`` decodes every JSON number into
-    /// an ``NSNumber``, so integers beyond 2^53 / full Int64 range and
-    /// high-precision decimals are not preserved exactly on re-serialize — a
-    /// 64-bit ID like `7203685625435718144` can come back altered. ``applyAll``
-    /// returns the original bytes untouched whenever no op actually changed the
-    /// document (so a rule that merely *matched* can no longer reshape numbers
-    /// in parts of the body it never edited), but once an op *does* change the
-    /// document the whole thing is re-serialized and numbers elsewhere in it may
-    /// still be reshaped. Exact round-tripping for the edited case would need a
-    /// number-lexeme-preserving JSON parser (a larger change). Bodies that match
-    /// no rule never reach here, so unmatched traffic is unaffected.
+    /// an ``NSNumber``. Current Foundation backs large/precise literals with
+    /// ``NSDecimalNumber`` and round-trips integers past 2^53, full Int64/UInt64,
+    /// and high-precision decimals exactly — but this is not contractual and may
+    /// not hold on every OS version, so an edited document is still re-serialized
+    /// without a precision guarantee. ``applyAll`` returns the original bytes
+    /// untouched whenever no op actually changed the document (so a rule that
+    /// merely *matched* never reshapes numbers in parts of the body it never
+    /// edited); once an op *does* change the document the whole thing is
+    /// re-serialized and numbers elsewhere in it ride whatever fidelity the
+    /// running OS's ``JSONSerialization`` provides. Exact, guaranteed
+    /// round-tripping would need a number-lexeme-preserving JSON parser (a larger
+    /// change). Bodies that match no rule never reach here, so unmatched traffic
+    /// is unaffected.
     static func parse(_ data: Data) -> Any? {
         guard !data.isEmpty else { return nil }
         return try? JSONSerialization.jsonObject(with: data, options: [.mutableContainers, .fragmentsAllowed])
@@ -208,11 +211,53 @@ enum MITMJSONPatch {
     /// `JSON.stringify` via Foundation. Compact, slashes left unescaped to
     /// match how servers actually emit URLs in JSON, and
     /// `.fragmentsAllowed` to round-trip a scalar root. Returns nil when the
-    /// graph can't be represented as JSON (a NaN/∞ `NSNumber`, a non-string
-    /// dictionary key), which the caller turns into a body-unchanged
-    /// pass-through.
+    /// graph can't be represented as JSON, which the caller turns into a
+    /// body-unchanged pass-through.
+    ///
+    /// IMPORTANT: ``JSONSerialization/data(withJSONObject:options:)`` does not
+    /// merely *throw* on an invalid graph — for a non-finite ``NSNumber`` (NaN /
+    /// ±Infinity) or a non-string dictionary key it **raises an Objective-C
+    /// `NSException`**, which Swift's `try?` cannot catch, crashing the whole
+    /// Network Extension (every tunneled connection with it). A scripted
+    /// ``Anywhere.json`` value rides ``JSValue/toObject`` and can carry a
+    /// `NaN`/`Infinity` (`0/0`, `1/0`, `Number.MAX_VALUE*10`, …), so the graph
+    /// is validated up front and rejected to a body-unchanged pass-through,
+    /// honoring the total / never-throws contract.
     static func serialize(_ object: Any) -> Data? {
+        guard isJSONEncodable(object) else { return nil }
         return try? JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+    }
+
+    /// Recursively verifies a Foundation object graph holds only values
+    /// ``JSONSerialization`` can encode *without raising*: every ``NSNumber``
+    /// must be finite (a non-finite one raises, not throws) and every
+    /// dictionary key must be a string. Errs toward `false` for any unexpected
+    /// type — the caller maps that to a safe body-unchanged pass-through, the
+    /// same outcome `try?` would give for a merely-throwing graph. Bounded by
+    /// ``maxRecursionDepth`` like the other tree walkers.
+    private static func isJSONEncodable(_ object: Any, depth: Int = 0) -> Bool {
+        guard depth < maxRecursionDepth else { return false }
+        switch object {
+        case let number as NSNumber:
+            // A boolean is a CFBoolean-backed NSNumber whose doubleValue is
+            // 0/1 (finite), so it passes; a real number must be finite to
+            // serialize without raising.
+            return number.doubleValue.isFinite
+        case is NSString:
+            return true
+        case is NSNull:
+            return true
+        case let array as NSArray:
+            for element in array where !isJSONEncodable(element, depth: depth + 1) { return false }
+            return true
+        case let dictionary as NSDictionary:
+            for (key, value) in dictionary {
+                guard key is NSString, isJSONEncodable(value, depth: depth + 1) else { return false }
+            }
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - JSONPath
@@ -272,10 +317,13 @@ enum MITMJSONPatch {
     }
 
     /// Descends one segment. Object keys index a dictionary; numeric
-    /// segments index an array (bounds-checked). Any other pairing — a key
-    /// into an array, an index into an object, a step off the end, a step
-    /// into a scalar — returns nil, which unwinds the whole walk to a
-    /// no-op.
+    /// segments index an array (bounds-checked). Indices are non-negative
+    /// only: a negative index (e.g. `[-1]`) is **not** "last element" — it
+    /// fails the bounds check and resolves to nil (a no-op), matching the
+    /// fail-closed contract rather than silently editing the wrong element.
+    /// Any other pairing — a key into an array, an index into an object, a
+    /// step off the end, a step into a scalar — returns nil, which unwinds the
+    /// whole walk to a no-op.
     private static func childNode(_ node: Any?, _ segment: PathSegment) -> Any? {
         guard let node else { return nil }
         switch segment {

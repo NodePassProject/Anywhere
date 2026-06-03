@@ -88,13 +88,23 @@ struct MITMByteBuffer {
         return (r.lowerBound - s)..<(r.upperBound - s)
     }
 
-    /// Index of the CR in the first CRLF sequence, or nil when no
-    /// CRLF is present. Specialized scanner used by the HTTP/1 stream
-    /// parsers; faster than ``range(of:)`` for the short CRLF pattern
-    /// since it avoids the Foundation pattern-search setup.
-    func firstCRLF() -> Int? {
+    /// Index of the CR in the first CRLF sequence at or after the
+    /// 0-relative index ``start``, or nil when no CRLF is present.
+    /// Specialized scanner used by the HTTP/1 stream parsers; faster
+    /// than ``range(of:)`` for the short CRLF pattern since it avoids
+    /// the Foundation pattern-search setup.
+    ///
+    /// ``start`` lets a caller re-scanning a buffer that only grows at the end
+    /// (a chunk-size line or trailer line dribbling in across TLS records)
+    /// resume past the bytes it already searched instead of re-walking the
+    /// whole prefix on every append — turning a repeated O(n²) scan into O(n).
+    /// Pass the index of the first byte not yet checked as a CR candidate
+    /// (i.e. the prior ``count - 1``); the boundary byte is re-checked so a
+    /// CRLF straddling the old end and a freshly-appended byte is still found.
+    /// ``start`` is clamped to the consumable region.
+    func firstCRLF(from start: Int = 0) -> Int? {
         guard count >= 2 else { return nil }
-        var i = 0
+        var i = Swift.max(0, Swift.min(start, count))
         let last = count - 1
         while i < last {
             if self[i] == 0x0D, self[i + 1] == 0x0A {

@@ -278,10 +278,20 @@ final class MITMHTTP2Rewriter {
                     current.insert((name: ":authority", value: replacement.authority), at: 0)
                 }
             case .headerAdd(let name, let value):
+                // Pseudo-headers (`:`-prefixed) are part of the read-only head
+                // per the doc's contract. A user header rule must not touch
+                // them: adding one duplicates `:authority`/`:path` or smuggles an
+                // invalid pseudo-header, and deleting `:method`/`:scheme`/`:path`/
+                // `:status` leaves a HEADERS block a strict peer rejects with
+                // PROTOCOL_ERROR (RFC 9113 §8.3). The pass-through path emits
+                // `applyHeaderRules`'s output directly, so the guard belongs here.
+                guard !name.hasPrefix(":") else { continue }
                 current.append((name: name, value: value))
             case .headerDelete(let nameLower):
+                guard !nameLower.hasPrefix(":") else { continue }
                 current.removeAll { $0.name.equalsIgnoringASCIICase(nameLower) }
             case .headerReplace(let name, let value):
+                guard !name.hasPrefix(":") else { continue }
                 current = current.map { entry in
                     entry.name.equalsIgnoringASCIICase(name) ? (name: name, value: value) : entry
                 }

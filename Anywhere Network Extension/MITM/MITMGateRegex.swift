@@ -168,6 +168,23 @@ final class MITMGateRegex: @unchecked Sendable {
         self.pattern = pattern
         self.isLiteral = !pattern.isEmpty
             && !pattern.contains { Self.regexMetacharacters.contains($0) }
+        Self.warnIfHostRegionHasUppercase(pattern)
+    }
+
+    /// Warns once, at compile time, when a pattern's authority region carries an
+    /// uppercase ASCII letter. The gate is matched against a URL whose host has
+    /// been lowercased, so an uppercase host in the pattern
+    /// (`https://API.example.com/`) silently never matches — a dead rule with no
+    /// runtime diagnostic. Best effort: only the `scheme://authority` shape is
+    /// inspected (the region between `://` and the next `/`), where the host
+    /// unambiguously lives; path and query keep their case on both sides and are
+    /// not flagged.
+    private static func warnIfHostRegionHasUppercase(_ pattern: String) {
+        guard let schemeRange = pattern.range(of: "://") else { return }
+        let authority = pattern[schemeRange.upperBound...].prefix { $0 != "/" }
+        if authority.contains(where: { $0.isASCII && $0.isUppercase }) {
+            logger.warning("[MITM] gate pattern \"\(pattern)\" has an uppercase letter in its host region; the URL host is matched lowercased, so this rule will never fire — write the host in lowercase")
+        }
     }
 
     /// Whether the gate matches ``normalizedURL`` (the caller has already
