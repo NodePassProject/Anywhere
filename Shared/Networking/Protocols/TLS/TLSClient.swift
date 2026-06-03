@@ -264,7 +264,7 @@ nonisolated class TLSClient {
             } else if contentType == 0x15 { // Alert
                 let alertLevel = buffer.count > 5 ? buffer[5] : 0
                 let alertDesc = buffer.count > 6 ? buffer[6] : 0
-                completion(.failure(TLSError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")))
+                completion(.failure(TLSError.alert(level: alertLevel, description: alertDesc)))
             } else {
                 completion(.failure(TLSError.handshakeFailed("Unexpected content type: \(contentType)")))
             }

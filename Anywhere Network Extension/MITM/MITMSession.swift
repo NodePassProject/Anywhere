@@ -149,6 +149,11 @@ final class MITMSession {
     private let leafCache: MITMLeafCertCache
     private let policy: MITMRewritePolicy
 
+    /// Shared, cross-session memory of upstreams that can't bridge `h2`. Read
+    /// when choosing the inner leg's ALPN (to avoid committing to `h2` for a
+    /// known HTTP/1.1-only origin) and written when the outer leg discovers one.
+    private let originCapabilities: MITMOriginCapabilityCache
+
     /// Performs the deferred upstream dial. Invoked once the first request's
     /// rewrite resolves the upstream host/port; the implementation
     /// (``TCPConnection``) returns the connected pipe and transfers the
@@ -269,6 +274,7 @@ final class MITMSession {
         dstPort: UInt16,
         clientHello: Data,
         leafCache: MITMLeafCertCache,
+        originCapabilities: MITMOriginCapabilityCache,
         policy: MITMRewritePolicy,
         dialer: @escaping MITMDialer,
         lwipQueue: DispatchQueue
@@ -277,6 +283,7 @@ final class MITMSession {
         self.dstPort = dstPort
         self.pendingClientBytes = clientHello
         self.leafCache = leafCache
+        self.originCapabilities = originCapabilities
         self.policy = policy
         self.dialer = dialer
         self.lwipQueue = lwipQueue
@@ -448,17 +455,27 @@ final class MITMSession {
         }
     }
 
-    /// Inner-first entry point. Picks the ALPN + TLS-version sets from the
-    /// client's offer alone and starts the inner handshake. Both ``http/1.1``
-    /// and ``h2`` are accepted; the client's preference order wins. Falls back
-    /// to ``http/1.1`` when the client offered no ALPN.
+    /// Inner-first entry point. Picks the inner handshake's ALPN + TLS-version
+    /// sets from the client's offer — its preference order wins — but withholds
+    /// `h2` for origins a prior session recorded as HTTP/1.1-only (see
+    /// ``originCapabilities``), since committing to it would only force a
+    /// teardown once the outer leg can't match it. Falls back to ``http/1.1``
+    /// when no usable ALPN remains.
     private func startInnerHandshakeFromClientOffer(
         sni: String,
         clientALPNs: [String],
         clientSupportsTLS13: Bool
     ) {
         let supported: Set<String> = ["h2", "http/1.1"]
-        let intersected = clientALPNs.filter { supported.contains($0) }
+        var intersected = clientALPNs.filter { supported.contains($0) }
+        // If a prior session learned this origin can't bridge `h2` (see
+        // ``startOuterHandshakeAfterDial``), don't commit the inner leg to it
+        // again: the outer leg would only rediscover the mismatch and tear the
+        // session down. Dropping `h2` here makes the client negotiate
+        // `http/1.1`, which the upstream accepts — no teardown, no retry loop.
+        if originCapabilities.isHTTP1Only(sni) {
+            intersected.removeAll { $0 == "h2" }
+        }
         let alpns: [String] = intersected.isEmpty ? ["http/1.1"] : intersected
         var tlsVersions: Set<UInt16> = [0x0303]
         if clientSupportsTLS13 { tlsVersions.insert(0x0304) }
@@ -473,8 +490,10 @@ final class MITMSession {
     /// client and the outer leg follows it. On success the buffered first
     /// request is flushed and shuttling begins. An ALPN the upstream can't
     /// honor (e.g. inner `h2` vs an http/1.1-only origin) can't be bridged, so
-    /// the session tears down and the client retries (typically downgrading on
-    /// the retry).
+    /// the origin is recorded as HTTP/1.1-only and the session tears down. The
+    /// client retries, and because the inner leg now declines to offer `h2` for
+    /// that origin (see ``startInnerHandshakeFromClientOffer``) the retry
+    /// negotiates `http/1.1` and completes — no loop.
     private func startOuterHandshakeAfterDial(
         over connection: ProxyConnection,
         host: String,
@@ -517,13 +536,24 @@ final class MITMSession {
                         outerOK = record.negotiatedALPN.isEmpty || record.negotiatedALPN == "http/1.1"
                     }
                     guard outerOK else {
-                        logger.warning("[MITM] \(self.dstHost): upstream ALPN \"\(record.negotiatedALPN)\" can't bridge inner \"\(innerALPN)\"; tearing down so the client retries")
+                        self.originCapabilities.markHTTP1Only(self.dstHost)
+                        logger.warning("[MITM] \(self.dstHost): upstream ALPN \"\(record.negotiatedALPN)\" can't bridge inner \"\(innerALPN)\"; recorded http/1.1-only, tearing down so the client retries")
                         self.cancel(error: nil)
                         return
                     }
                     self.outerRecord = record
                     self.finishDialAndShuttle(inner: inner, outer: record)
                 case .failure(let error):
+                    // `no_application_protocol` (alert 120) is the strict-RFC
+                    // counterpart of the empty-ALPN case above: an upstream that
+                    // rejected our h2-only offer outright. Record it so the
+                    // client's retry negotiates http/1.1 and succeeds instead of
+                    // looping on h2. Gated on `innerALPN == "h2"` — a 120 when we
+                    // offered http/1.1 means the origin speaks neither, which the
+                    // http/1.1-only verdict would misrepresent.
+                    if innerALPN == "h2", case TLSError.alert(level: _, description: 120) = error {
+                        self.originCapabilities.markHTTP1Only(self.dstHost)
+                    }
                     self.cancel(error: error)
                 }
             }

@@ -113,6 +113,12 @@ enum TLSError: Error, LocalizedError {
     case certificateValidationFailed(String)
     case connectionFailed(String)
     case unsupportedTLSVersion
+    /// A fatal TLS alert received from the peer during the handshake.
+    /// `description` is the RFC 8446 §6 alert code — e.g. 120 is
+    /// `no_application_protocol` (the peer rejected every offered ALPN).
+    /// Carried structurally rather than folded into ``handshakeFailed`` so
+    /// callers can react to a specific alert without parsing a message string.
+    case alert(level: UInt8, description: UInt8)
 
     var errorDescription: String? {
         switch self {
@@ -124,6 +130,8 @@ enum TLSError: Error, LocalizedError {
             return "TLS connection failed: \(reason)"
         case .unsupportedTLSVersion:
             return "Server TLS version not supported"
+        case .alert(let level, let description):
+            return "TLS alert: level=\(level), description=\(description)"
         }
     }
 }

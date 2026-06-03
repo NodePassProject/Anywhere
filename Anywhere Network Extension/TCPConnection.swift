@@ -746,6 +746,7 @@ class TCPConnection {
             dstPort: dstPort,
             clientHello: initialClientHello,
             leafCache: cache,
+            originCapabilities: stack.mitmOriginCapabilities,
             policy: stack.mitmPolicy,
             dialer: makeMITMDialer(),
             lwipQueue: lwipQueue

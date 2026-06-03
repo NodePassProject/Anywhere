@@ -222,8 +222,10 @@ client), the first request is read and rewritten, and only then is the upstream
 dialed — to the rewritten host when one is set, otherwise the original. A `302` /
 reject sub-mode answers on the inner leg and never dials. (Consequence: the
 inner ALPN is client-driven; if the client negotiates `h2` but the upstream
-can't, the connection is torn down and the client retries — typically
-downgrading. The connection's upstream is fixed by the first request — for both
+can't, the connection is torn down once and the origin is remembered as
+HTTP/1.1-only, so the retry — and later connections to that host — offer the
+client only `http/1.1` and succeed. The connection's upstream is fixed by the
+first request — for both
 HTTP/1.1 and HTTP/2 — so a later request on the same connection whose transparent
 rewrite resolves a *different* host/port can't be reached on the already-dialed
 leg; rather than misroute it, the connection is torn down and the client retries
