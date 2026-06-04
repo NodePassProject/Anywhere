@@ -55,7 +55,18 @@ extension CompiledMITMRule {
         guard let sep = url.range(of: "://") else { return url }
         let authStart = sep.upperBound
         let authEnd = url[authStart...].firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? url.endIndex
-        return url[..<authStart].lowercased() + url[authStart..<authEnd].lowercased() + String(url[authEnd...])
+        var authority = url[authStart..<authEnd].lowercased()
+        // Strip a single trailing FQDN dot (`example.com.` → `example.com`). A
+        // ClientHello SNI may carry one (and the host trie tolerates it, since
+        // ``FlatLabelTrie`` skips the empty final label), but the gate regex is
+        // run against this literal authority, so a dot-free user pattern like
+        // `https://example.com/` would otherwise never match the dotted host.
+        // Gate URLs carry no port/userinfo, so the dot sits at the authority's
+        // end when present. NB: only the URL (literal) side is stripped — the
+        // pattern side (``MITMGateRegex``) is a regex where a trailing `.` is the
+        // any-char metacharacter, so stripping it there would alter its meaning.
+        if authority.hasSuffix(".") { authority.removeLast() }
+        return url[..<authStart].lowercased() + authority + String(url[authEnd...])
     }
 }
 
@@ -278,8 +289,8 @@ final class MITMRewritePolicy {
                 // Two enabled rule sets declared the same domain suffix; the
                 // later one (this set, in user list order) overwrites the
                 // earlier payload. Surface it — the precedence contract above
-                // promises this warning, and without it, reordering sets in the
-                // UI silently changes which rules apply for the suffix.
+                // promises this warning, so a reordering-induced override of
+                // which rules apply isn't silent.
                 logger.warning("[MITM] duplicate domain suffix \"\(suffix)\": rule set \"\(set.name)\" overrides an earlier set's rules for it")
             }
         }
@@ -479,12 +490,18 @@ final class MITMRewritePolicy {
             return .transparent(parsed)
         case .redirect302(let url):
             // The URL lands in a `Location` header value, so it must parse to
-            // an absolute URL and be free of CR/LF/NUL.
-            guard parseReplacementURL(url) != nil, isValidHTTPHeaderValue(url) else {
+            // an absolute URL and be free of CR/LF/NUL. Trim surrounding
+            // whitespace first and store the trimmed form: ``isValidHTTPHeaderValue``
+            // only bans CR/LF/NUL (SP/HTAB pass), and ``parseReplacementURL``
+            // trims internally, so an untrimmed value would validate yet emit a
+            // `Location` with stray leading/trailing whitespace that some clients
+            // mishandle. Validate and store the same trimmed string.
+            let trimmed = url.trimmingCharacters(in: .whitespaces)
+            guard parseReplacementURL(trimmed) != nil, isValidHTTPHeaderValue(trimmed) else {
                 logger.warning("[MITM] rewrite(302) dropped: \"\(url)\" is not a valid, wire-safe URL (suffix=\(suffix))")
                 return nil
             }
-            return .redirect302(location: url)
+            return .redirect302(location: trimmed)
         case .reject200Text(let content):
             return .reject200Text(content: content)
         case .reject200Gif:

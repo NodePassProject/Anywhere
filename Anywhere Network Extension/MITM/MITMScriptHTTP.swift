@@ -36,9 +36,9 @@ final class MITMScriptHTTPClient {
     /// 32 concurrent × 4 MiB = 128 MiB without it. ``SessionDelegate`` enforces
     /// it as bytes stream in: a chunk that would push the running total over the
     /// budget cancels the fetch that received it
-    /// (``ClientError/globalBudgetExceeded``) rather than risking an OOM-kill of
-    /// the whole tunnel. Sized to the script engine's soft typed-array budget so
-    /// the two MITM memory pools stay aligned, and ≥ one full per-request cap so
+    /// (``ClientError/globalBudgetExceeded``). Sized to the script engine's soft
+    /// typed-array budget so the two MITM memory pools stay aligned, and ≥ one
+    /// full per-request cap so
     /// any single fetch can still complete.
     static let maxGlobalInFlightBytes: Int = 16 * 1024 * 1024
 
@@ -101,16 +101,15 @@ final class MITMScriptHTTPClient {
     /// the entire body in memory before handing it back, so a size check there
     /// only fires once the bytes are already resident — a large, slow, or
     /// hostile response (including a gzip bomb `URLSession` transparently
-    /// inflates) could pressure the Network Extension's ~50 MiB budget and
-    /// OOM-kill the tunnel before the cap could reject it. The delegate below
-    /// instead tallies bytes per chunk and cancels the task the moment the
+    /// inflates) could exhaust memory before the cap could reject it. The
+    /// delegate below tallies bytes per chunk and cancels the task the moment the
     /// running total crosses `maxBytes`, so peak memory stays near the cap.
     func send(
         _ request: URLRequest,
         followRedirects: Bool,
         insecure: Bool,
         maxBytes: Int,
-        timeout: TimeInterval,
+        resourceTimeout: TimeInterval,
         completion: @escaping (Result<Response, Error>) -> Void
     ) {
         // No host-level SSRF filtering: Anywhere.http may reach any address,
@@ -129,14 +128,16 @@ final class MITMScriptHTTPClient {
         // outlive the call. Creating the session and resuming the task are
         // non-blocking, so this runs inline on the caller's queue.
         let configuration = URLSessionConfiguration.ephemeral
-        // `request.timeoutInterval` (set by the caller) bounds *inactivity*: a
-        // slow-drip server that dribbles a byte before each interval elapses
-        // never trips it, so a fetch could outlive its documented `timeout` and
-        // park the script's connection up to the engine's idle watchdog.
-        // `timeoutIntervalForResource` is a wall-clock cap on total duration;
-        // each fetch has its own ephemeral session, so it is effectively
-        // per-request. Both are set to the same clamped `timeout`.
-        configuration.timeoutIntervalForResource = timeout
+        // `request.timeoutInterval` (set by the caller) bounds *inactivity*:
+        // the documented per-request `timeout`, tripped when no data arrives for
+        // that long. `timeoutIntervalForResource` is a separate, larger
+        // wall-clock cap on *total* duration so a slow-but-progressing response
+        // (one that keeps dribbling data, never going idle) isn't cut off at the
+        // inactivity bound — only a true slow-drip that runs past the cap is. The
+        // caller passes the engine's invocation idle ceiling here, so a single
+        // fetch can't outlive the whole invocation's backstop. Each fetch has its
+        // own ephemeral session, so this is effectively per-request.
+        configuration.timeoutIntervalForResource = resourceTimeout
         let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
         session.dataTask(with: request).resume()
     }
@@ -201,8 +202,14 @@ final class MITMScriptHTTPClient {
         ) {
             // The final response after any followed redirects. Reset any bytes
             // a prior response on this task delivered so `buffer` reflects only
-            // the body we hand back.
+            // the body we hand back — and release their global-budget
+            // reservation, since those bytes are being discarded. Without this,
+            // a redirect whose intermediate 3xx delivered a body would keep that
+            // body counted against ``maxGlobalInFlightBytes`` for the rest of
+            // this fetch, under-reporting free capacity to concurrent fetches.
             buffer.removeAll(keepingCapacity: false)
+            MITMScriptHTTPClient.releaseInFlight(reservedBytes)
+            reservedBytes = 0
             self.response = response as? HTTPURLResponse
             // Early reject: when the server already declares a body larger than
             // the cap, fail before downloading a single body byte. A missing /

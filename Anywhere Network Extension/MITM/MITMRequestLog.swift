@@ -139,11 +139,9 @@ final class MITMRequestLog {
         let idx = http1Queue.count - 1
         let projected = http1Queue[idx].synthAfter.count + bytes.count
         if projected > Self.maxSynthAfterBytes {
-            // Drop with a warning rather than crashing the NE. The
-            // session that owns this log is already at risk of
-            // running out of memory; a partial pipeline result is
-            // strictly better than an OOM kill that takes down
-            // every other tunneled session.
+            // Drop with a warning rather than grow without bound: a
+            // partial pipeline result is better than risking the
+            // session's memory.
             logger.warning("[MITM] synthAfter buffer would reach \(projected) B, over cap \(Self.maxSynthAfterBytes) B; dropping \(bytes.count) B of pipelined synth response")
             return
         }

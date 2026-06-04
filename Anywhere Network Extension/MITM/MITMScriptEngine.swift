@@ -293,8 +293,8 @@ final class MITMScriptEngine {
     /// Hard cap on outstanding typed-array bytes. Past this we refuse
     /// new allocations and hand the script an empty Uint8Array.
     /// Bounds the worst-case NE memory cost across all engines
-    /// regardless of GC pressure; the script will see truncated body
-    /// bytes which is strictly better than the NE being OOM-killed.
+    /// regardless of GC pressure; the script sees truncated body bytes,
+    /// better than running out of memory.
     private static let hardTypedArrayBudget: Int = 32 * 1024 * 1024
 
     // MARK: Anywhere.http caps
@@ -384,40 +384,11 @@ final class MITMScriptEngine {
         return body()
     }
 
-    /// Runs ``source`` against ``message``. Returns the post-script
-    /// message, or ``message`` unchanged when the script throws or
-    /// otherwise fails to compile. ``sourceKey`` is the cache key
-    /// computed at rule-compile time; equal keys imply equal sources.
-    func apply(_ message: Message, source: String, sourceKey: Int) -> Outcome {
-        invocationLock.lock()
-        defer {
-            invocationLock.unlock()
-            collectIfBudgetExceeded()
-        }
-        guard let function = compileIfNeeded(source, key: sourceKey) else {
-            return .modified(message)
-        }
-        // Synchronous form of ``applyAsync`` — the readback semantics the
-        // async path mirrors (both share ``finalize``). With no suspension
-        // point, ``Anywhere.http`` is unavailable and a `process` that returns
-        // a Promise can't be driven to completion here, so it reverts; the
-        // rewriters run buffered scripts through ``applyAsync``.
-        let inv = Invocation(scope: message.ruleSetID, allowsHTTP: false)
-        currentInvocation = inv
-        defer { currentInvocation = nil }
-        let ctxArg = makeContextValue(message)
-        let returned = runUserScript(source) { function.call(withArguments: [ctxArg]) }
-        if let returned, isThenable(returned) {
-            logger.warning("[MITM][JS] process(ctx) returned a Promise on the synchronous path; reverting (await / Anywhere.http require a buffered `script` rule run through applyAsync)")
-            context.exception = nil
-            return .modified(message)
-        }
-        // The script may have replaced ctx.body with a new typed array,
-        // mutated the original in place, or done nothing — read back
-        // whatever is on the object now.
-        let updated = readBack(message, from: ctxArg)
-        return finalize(original: message, updated: updated, directive: inv.directive)
-    }
+    // NB: there is intentionally no synchronous `apply(_:source:sourceKey:)`.
+    // Every rewriter call site goes through ``MITMScriptTransform/apply`` →
+    // ``applyAsync`` so a slow or `await`-ing script parks its connection off
+    // the lwIP queue. A sync variant existed and was unused (dead code that
+    // could silently drift from the async path it mirrored); it was removed.
 
     /// Maps a settled buffered-script invocation to an ``Outcome``: the
     /// shared readback decision used by ``apply`` and the async
@@ -627,9 +598,8 @@ final class MITMScriptEngine {
     /// have crossed ``softTypedArrayBudget``. JSC's GC scheduler is
     /// otherwise driven by JS-heap accounting only and has no idea
     /// the native ``NoCopy`` buffers are pinning megabytes of host
-    /// memory — without the explicit hint a chatty stream can fill
-    /// the Network Extension's ~50 MiB budget long before JSC decides
-    /// to collect on its own.
+    /// memory, so we ask it explicitly before a chatty stream's pins
+    /// pile up.
     private func collectIfBudgetExceeded() {
         let snapshot: Int = {
             mitmScriptTypedArrayLock.lock()
@@ -718,6 +688,23 @@ final class MITMScriptEngine {
         invocationLock.lock()
         defer { invocationLock.unlock() }
         _ = compileIfNeeded(source, key: sourceKey)
+    }
+
+    /// Drops compiled-function cache entries whose ``sourceKey`` is not in
+    /// ``keep`` — the set of script sources still active for this engine's rule
+    /// set after a reload. Editing a script's source in place changes its
+    /// content-hash key, so a new entry is compiled while the old one would
+    /// otherwise linger for the engine's lifetime (the engine is retained
+    /// across edits since its rule-set id is stable — see
+    /// ``MITMRewritePolicy/load`` / ``purgeEngines``), accumulating a pinned
+    /// JSC function per edit. Called from ``MITMScriptTransform/prewarm`` on the
+    /// script queue right after the set's current sources are (re)compiled, so
+    /// the dropped ``JSValue`` functions release on the VM-owning queue.
+    func pruneCompiled(keeping keep: Set<Int>) {
+        invocationLock.lock()
+        defer { invocationLock.unlock() }
+        let stale = compiled.keys.filter { !keep.contains($0) }
+        for key in stale { compiled.removeValue(forKey: key) }
     }
 
     private func compileIfNeeded(_ source: String, key: Int) -> JSValue? {
@@ -1044,7 +1031,11 @@ final class MITMScriptEngine {
         }
         let base64Decode: @convention(block) (String) -> JSValue = { str in
             let ctx = JSContext.current()!
-            return Self.makeUint8Array(in: ctx, from: Data(base64Encoded: str) ?? Data())
+            // Lenient, matching ``base64url.decode``: ``.ignoreUnknownCharacters``
+            // skips embedded whitespace / newlines so wrapped or pretty-printed
+            // base64 decodes instead of silently yielding an empty array (plain
+            // ``Data(base64Encoded:)`` rejects any whitespace).
+            return Self.makeUint8Array(in: ctx, from: Data(base64Encoded: str, options: .ignoreUnknownCharacters) ?? Data())
         }
         base64.setObject(base64Encode, forKeyedSubscript: "encode" as NSString)
         base64.setObject(base64Decode, forKeyedSubscript: "decode" as NSString)
@@ -2167,7 +2158,12 @@ final class MITMScriptEngine {
                 followRedirects: followRedirects,
                 insecure: insecure,
                 maxBytes: maxBytes,
-                timeout: timeout
+                // `request.timeoutInterval = timeout` above is the inactivity
+                // bound (the documented per-request `timeout`); the total
+                // wall-clock cap is the invocation idle ceiling so a
+                // slow-but-progressing fetch isn't cut off at the inactivity
+                // bound while still never outliving the invocation's backstop.
+                resourceTimeout: Self.invocationIdleTimeout
             ) { result in
                 MITMScriptTransform.scriptQueue.async {
                     Self.releaseGlobalFetchSlot()
@@ -2331,10 +2327,9 @@ final class MITMScriptEngine {
         // Hard cap: if we've already pinned ``hardTypedArrayBudget``
         // bytes across all engines, refuse the allocation and return
         // an empty view. JSC's GC may free the existing pins shortly,
-        // but until it does, growing further risks an NE OOM-kill
-        // (which would take down every active tunnel session). The
-        // script sees a smaller-than-expected body, which the user
-        // can debug; the alternative is a hard crash.
+        // but until it does, growing further risks an out-of-memory
+        // crash. The script sees a smaller-than-expected body, which the
+        // user can debug.
         let projected: Int = {
             mitmScriptTypedArrayLock.lock()
             defer { mitmScriptTypedArrayLock.unlock() }
@@ -2583,14 +2578,17 @@ final class MITMScriptEngine {
                     throw ProtobufError(description: "truncated length for field \(field)")
                 }
                 idx = n
-                let needed = Int(len)
-                // The Int conversion above truncates on UInt64 ≥ 2^63;
-                // a length that large is itself malformed (it can't fit
-                // in the remaining bytes). Guard both: non-negative
-                // after the cast, and within the message.
-                guard needed >= 0, idx + needed <= end else {
+                // Bound the length in UInt64 space BEFORE narrowing to Int.
+                // ``Int(len)`` TRAPS (it does not truncate) for len ≥ 2^63, and
+                // even a sub-2^63 len can overflow the ``idx + needed`` addition —
+                // either crashes the extension on crafted wire. ``end - idx`` is
+                // the remaining byte count (always ≥ 0, since ``readVarint``
+                // returns an index ≤ end), so a length within it narrows to a
+                // valid in-range Int and the subdata range below can't overrun.
+                guard len <= UInt64(end - idx) else {
                     throw ProtobufError(description: "length-delimited field \(field) (len=\(len)) exceeds message")
                 }
+                let needed = Int(len)
                 entries.append(ProtobufEntry(field: field, wire: 2, value: .bytes(data.subdata(in: idx..<idx + needed))))
                 idx += needed
             case 5:

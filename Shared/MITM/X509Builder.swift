@@ -98,7 +98,16 @@ enum X509Builder {
         let leafSPKI = try buildECP256SPKI(publicKeyX963: leafPublicKey.x963Representation)
         let caComponents = try parseCAComponents(certDER: caCertificateDER)
 
-        let subject = encodeName(commonName: hostname, organization: "Anywhere")
+        // Strip IPv6 URI brackets for the CN so it matches the bracket-free
+        // address the SAN emits. Cosmetic — the CN is ignored when a SAN is
+        // present — but keeps the two consistent.
+        let cnHostname: String
+        if hostname.hasPrefix("["), hostname.hasSuffix("]"), hostname.count >= 2 {
+            cnHostname = String(hostname.dropFirst().dropLast())
+        } else {
+            cnHostname = hostname
+        }
+        let subject = encodeName(commonName: cnHostname, organization: "Anywhere")
         let validity = encodeValidity(notBefore: notBefore, notAfter: notAfter)
 
         let extensions = encodeExtensions([
@@ -302,7 +311,16 @@ enum X509Builder {
         if let ipBytes = parseIPAddress(hostname) {
             generalName = ASN1.contextSpecific(tag: 7, constructed: false, content: ipBytes)
         } else {
-            let nameBytes = Data(hostname.utf8)
+            // dNSName is [2] IA5String — ASCII only. A U-label hostname
+            // (`café.example.com`) written verbatim puts non-ASCII bytes inside
+            // an IA5String: malformed DER that fails SecTrust hostname matching,
+            // so interception silently breaks. Convert to the IDNA A-label
+            // (Punycode) first. A real ClientHello SNI is already an A-label
+            // (RFC 6066); this covers a U-label arriving via a configured
+            // destination host. Falls back to the original on the (unreachable
+            // for real hostnames) Punycode-overflow case — no worse than before.
+            let asciiHost = Self.idnaASCII(hostname) ?? hostname
+            let nameBytes = Data(asciiHost.utf8)
             generalName = ASN1.contextSpecific(tag: 2, constructed: false, content: nameBytes)
         }
         let value = ASN1.sequence(generalName)
@@ -353,6 +371,89 @@ enum X509Builder {
             else { return false }
         }
         return true
+    }
+
+    /// Converts ``hostname`` to its IDNA ASCII (A-label) form for use in an
+    /// IA5String dNSName: every dot-separated label containing a non-ASCII
+    /// character is Punycode-encoded and prefixed with `xn--`; an all-ASCII
+    /// hostname (or label) is returned unchanged. Returns nil only if a label's
+    /// Punycode encode overflows — unreachable for any real hostname.
+    private static func idnaASCII(_ hostname: String) -> String? {
+        guard hostname.contains(where: { !$0.isASCII }) else { return hostname }
+        var labels: [String] = []
+        for label in hostname.split(separator: ".", omittingEmptySubsequences: false) {
+            if label.allSatisfy({ $0.isASCII }) {
+                labels.append(String(label))
+            } else {
+                guard let puny = punycodeEncode(String(label)) else { return nil }
+                labels.append("xn--" + puny)
+            }
+        }
+        return labels.joined(separator: ".")
+    }
+
+    /// RFC 3492 Punycode encode of a single label (without the `xn--` prefix).
+    /// Returns nil on the bias/delta overflow guard — not reachable for a real
+    /// DNS label, but checked so a hostile input can't trap.
+    private static func punycodeEncode(_ input: String) -> String? {
+        let base = 36, tmin = 1, tmax = 26, skew = 38, damp = 700
+        let initialBias = 72, initialN = 128
+        func adapt(_ delta: Int, _ numPoints: Int, _ firstTime: Bool) -> Int {
+            var delta = firstTime ? delta / damp : delta / 2
+            delta += delta / numPoints
+            var k = 0
+            while delta > ((base - tmin) * tmax) / 2 {
+                delta /= (base - tmin)
+                k += base
+            }
+            return k + (((base - tmin + 1) * delta) / (delta + skew))
+        }
+        // 0…25 → 'a'…'z', 26…35 → '0'…'9'.
+        func digit(_ d: Int) -> Character {
+            Character(UnicodeScalar(UInt8(d < 26 ? d + 97 : d - 26 + 48)))
+        }
+        let scalars = Array(input.unicodeScalars)
+        var output = ""
+        var n = initialN, delta = 0, bias = initialBias
+        var basic = 0
+        for s in scalars where s.value < 0x80 {
+            output.append(Character(s))
+            basic += 1
+        }
+        if basic > 0 { output.append("-") }
+        var handled = basic
+        while handled < scalars.count {
+            var m = Int.max
+            for s in scalars where Int(s.value) >= n && Int(s.value) < m { m = Int(s.value) }
+            if m - n > (Int.max - delta) / (handled + 1) { return nil }
+            delta += (m - n) * (handled + 1)
+            n = m
+            for s in scalars {
+                let c = Int(s.value)
+                if c < n {
+                    delta += 1
+                    if delta == 0 { return nil }
+                }
+                if c == n {
+                    var q = delta
+                    var k = base
+                    while true {
+                        let t = k <= bias ? tmin : (k >= bias + tmax ? tmax : k - bias)
+                        if q < t { break }
+                        output.append(digit(t + (q - t) % (base - t)))
+                        q = (q - t) / (base - t)
+                        k += base
+                    }
+                    output.append(digit(q))
+                    bias = adapt(delta, handled + 1, handled == basic)
+                    delta = 0
+                    handled += 1
+                }
+            }
+            delta += 1
+            n += 1
+        }
+        return output
     }
 
     private static func encodeExtendedKeyUsageServerAuth() -> Data {
@@ -527,7 +628,13 @@ enum X509Builder {
         while trimmed.count > 1 && trimmed.first == 0x00 {
             trimmed = trimmed.dropFirst()
         }
-        if trimmed.isEmpty { trimmed = Data([0x01]) }
+        // The strip loop stops at one byte, so an all-zero (or empty) input
+        // collapses to a single 0x00 — which would encode as INTEGER 0, a serial
+        // RFC 5280 §4.1.2.2 forbids and strict validators reject. Treat a lone
+        // 0x00 (and the never-reached empty case) as "no serial" and substitute 1.
+        if trimmed.isEmpty || (trimmed.count == 1 && trimmed.first == 0x00) {
+            trimmed = Data([0x01])
+        }
         // If top bit set, prepend 0x00 to keep INTEGER positive.
         if let first = trimmed.first, first & 0x80 != 0 {
             var prefixed = Data([0x00])
@@ -765,8 +872,12 @@ private struct ASN1Parser {
     /// Returns the content bytes of a tag-length-value blob (skips the
     /// tag and length header).
     static func contentOf(_ tlv: Data) throws -> Data {
-        guard !tlv.isEmpty else {
-            throw X509BuilderError.asn1ParseFailed("Empty TLV")
+        // Need at least a tag + a length octet: ``tlv[startIndex + 1]`` below
+        // would trap on a 1-byte input. Every current caller passes a full TLV
+        // from ``readNextWithHeader`` (≥ 2 bytes), so this is a defensive
+        // backstop, not a reachable path today.
+        guard tlv.count >= 2 else {
+            throw X509BuilderError.asn1ParseFailed("TLV too short")
         }
         let lengthByte = tlv[tlv.startIndex + 1]
         let lengthHeaderBytes: Int

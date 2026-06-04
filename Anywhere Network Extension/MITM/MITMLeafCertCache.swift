@@ -33,10 +33,8 @@ final class MITMLeafCertCache {
     private static let validity: TimeInterval = 7 * 24 * 60 * 60         // 7 days
     private static let refreshThreshold: TimeInterval = 24 * 60 * 60     // refresh within 1 day of expiry
 
-    private let cond = NSCondition()
+    private let lock = NSLock()
     private var entries: [String: CacheEntry] = [:]
-    /// Hosts currently being minted, for single-flight dedup (see ``leaf``).
-    private var minting: Set<String> = []
 
     private struct CacheEntry {
         let leaf: Leaf
@@ -57,56 +55,40 @@ final class MITMLeafCertCache {
     /// it as a fatal handshake error.
     func leaf(for hostname: String) throws -> Leaf {
         let normalized = hostname.lowercased()
-        cond.lock()
-        while true {
-            if let entry = entries[normalized] {
-                if entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold {
-                    // Touch the recency timestamp in place. Storing recency
-                    // on the entry keeps the cache-hit path O(1) and defers
-                    // the O(n) scan for an eviction victim to eviction time,
-                    // which only runs on a cache miss past the cap. On a
-                    // browser launch hitting hundreds of hosts the hit path
-                    // is hot, so an O(n) update per hit would dominate it.
-                    entries[normalized]?.lastAccess = Date()
-                    cond.unlock()
-                    return entry.leaf
-                }
-                entries.removeValue(forKey: normalized)
-            }
-            // Single-flight: if another caller is already minting this host,
-            // wait for it rather than duplicating the CA signature and racing
-            // the cache write (common at a browser cold-start that opens many
-            // parallel sockets to the same origin). On wake, re-check the cache.
-            if minting.contains(normalized) {
-                cond.wait()
-                continue
-            }
-            minting.insert(normalized)
-            break
+        lock.lock()
+        if let entry = entries[normalized],
+           entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold {
+            // Touch the recency timestamp in place. Storing recency on the
+            // entry keeps the cache-hit path O(1) and defers the O(n) scan for
+            // an eviction victim to eviction time, which only runs on a cache
+            // miss past the cap. On a browser launch hitting hundreds of hosts
+            // the hit path is hot, so an O(n) update per hit would dominate it.
+            entries[normalized]?.lastAccess = Date()
+            let leaf = entry.leaf
+            lock.unlock()
+            return leaf
         }
-        cond.unlock()
+        lock.unlock()
 
-        // Mint outside the lock so concurrent callers for *other* hosts aren't
-        // blocked behind this host's signature.
-        let result: Result<Leaf, Error>
-        do {
-            result = .success(try mintLeaf(for: normalized))
-        } catch {
-            result = .failure(error)
-        }
+        // Mint outside the lock so a slow CA signature (worst case a
+        // Secure-Enclave key) doesn't block lookups for *other* hosts. This is
+        // the sole caller path and runs on the shared serial lwIP queue
+        // (``MITMSession.start`` is documented "Must be called on lwipQueue"),
+        // so there is no concurrency to dedup. A prior NSCondition single-flight
+        // here was unreachable on a serial queue, and would have *deadlocked*
+        // the whole tunnel the day ``leaf(for:)`` was ever called from a second
+        // thread (a waiter blocking the very queue the leader needs to finish
+        // on). If a second caller is ever added, two racing mints for the same
+        // host each produce a valid leaf and the later store wins — harmless
+        // duplicate work, never a deadlock.
+        let leaf = try mintLeaf(for: normalized)
 
-        cond.lock()
-        minting.remove(normalized)
-        if case .success(let leaf) = result {
-            entries[normalized] = CacheEntry(leaf: leaf, lastAccess: Date())
-            evictIfNeededUnlocked()
-        }
-        // Wake waiters: on success they find the fresh entry; on failure one of
-        // them becomes the new leader and retries.
-        cond.broadcast()
-        cond.unlock()
+        lock.lock()
+        entries[normalized] = CacheEntry(leaf: leaf, lastAccess: Date())
+        evictIfNeededUnlocked()
+        lock.unlock()
 
-        return try result.get()
+        return leaf
     }
 
     // NB: there is intentionally no `reset()`. CA rotation is not wired today,
