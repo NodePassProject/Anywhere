@@ -53,33 +53,12 @@ private let mitmScriptGlobalFetchLock = UnfairLock()
 /// throws, so a script that fails partway leaves the wire untouched.
 final class MITMScriptEngine {
 
-    /// View of the in-flight HTTP message handed to `function process(ctx)`.
-    /// Only `body` is read back: scripts replace it or mutate it in place
-    /// (`ctx.body` is a Uint8Array backed by Swift-owned memory, so
-    /// element-wise writes propagate without a return value).
-    ///
-    /// `method`, `url`, `status`, and `headers` are **read-only** (like
-    /// `phase`): a script may read them but assigning them is a no-op on
-    /// readback. URL and header edits have dedicated rule operations —
-    /// `rewrite` and `header-add` / `header-delete` / `header-replace`
-    /// — so the script surface deliberately doesn't duplicate them. This
-    /// also lets the HTTP/2 path open a request stream in stream-ID order
-    /// without waiting on the script (see ``MITMHTTP2Connection``'s
-    /// early-open path) and makes request-line / header / URL injection
-    /// from a rule set structurally impossible.
-    ///
-    /// `method` and `url` are populated on both request and response
-    /// phases (response carries the originating request's values, looked
-    /// up via ``MITMRequestLog``). `status` is populated on response only.
-    struct Message {
-        let phase: MITMPhase
-        var method: String?
-        var url: String?
-        var status: Int?
-        var headers: [(name: String, value: String)]
-        var body: Data
-        let ruleSetID: UUID?
-    }
+    /// Engine-local spelling of ``HTTPMessage`` — the protocol-agnostic message
+    /// the rewriters build, scripts mutate, and the rewriters re-emit. Aliased
+    /// rather than renamed throughout the engine so the internals keep reading
+    /// as `Message`, while the shared type lives at top level for the HTTP/1 and
+    /// HTTP/2 rewriters (and a future shared rewrite pipeline) to build against.
+    typealias Message = HTTPMessage
 
     /// Synthesized response produced when a request-phase script calls
     /// `Anywhere.respond(...)`. The runtime drops the request before it
@@ -919,7 +898,7 @@ final class MITMScriptEngine {
         // through ``value.toArray()`` instead would funnel each leaf
         // through the Obj-C bridge, which stringifies a JS number as
         // ``"Optional(42)"`` or a raw ``JSValue`` debug description —
-        // values that then fail ``isValidHeaderName`` (dropping the
+        // values that then fail ``isValidHTTPHeaderName`` (dropping the
         // entry) or land on the wire verbatim from value position.
         guard value.isArray else { return nil }
         guard let length = Self.validatedArrayLength(value, max: 100_000) else {
@@ -948,11 +927,11 @@ final class MITMScriptEngine {
                 logger.warning("[MITM][JS] dropping ctx.headers entry with null/undefined/non-stringifiable component")
                 continue
             }
-            guard isValidHeaderName(name) else {
+            guard isValidHTTPHeaderName(name) else {
                 logger.warning("[MITM][JS] dropping header with invalid name: \(name)")
                 continue
             }
-            guard isValidHeaderValue(val) else {
+            guard isValidHTTPHeaderValue(val) else {
                 logger.warning("[MITM][JS] dropping header \(name) with CR/LF/NUL in value")
                 continue
             }
@@ -963,40 +942,6 @@ final class MITMScriptEngine {
             return nil
         }
         return result
-    }
-
-    /// RFC 9110 §5.6.2: header field-name and method token alphabet.
-    /// Duplicated from ``MITMHTTP1Stream`` / ``MITMHTTP2Connection``
-    /// rather than shared via a helper type so the engine stays
-    /// dependency-free of the wire layers.
-    private static func isValidHeaderName(_ name: String) -> Bool {
-        guard !name.isEmpty else { return false }
-        for byte in name.utf8 {
-            switch byte {
-            case 0x21, 0x23, 0x24, 0x25, 0x26, 0x27,
-                 0x2A, 0x2B, 0x2D, 0x2E,
-                 0x5E, 0x5F, 0x60, 0x7C, 0x7E:
-                continue
-            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A:
-                continue
-            default:
-                return false
-            }
-        }
-        return true
-    }
-
-    /// RFC 9110 §5.5: header field-value must not contain CR / LF /
-    /// NUL. Same rule applies to anything we splice onto an HTTP/1
-    /// start line — those characters are exactly what splits a wire
-    /// message into two.
-    private static func isValidHeaderValue(_ value: String) -> Bool {
-        for byte in value.utf8 {
-            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
-                return false
-            }
-        }
-        return true
     }
 
     // MARK: - Anywhere globals
@@ -2166,7 +2111,7 @@ final class MITMScriptEngine {
         // method, but checking here makes the doc's "methods produced by
         // scripts are validated" guarantee hold at this layer and rejects a
         // CR/LF smuggling attempt with a clear error.
-        guard Self.isValidHeaderName(method) else {
+        guard isValidHTTPHeaderName(method) else {
             return Self.rejected("Anywhere.http: invalid method token", in: ctx)
         }
         request.httpMethod = method
@@ -2334,11 +2279,11 @@ final class MITMScriptEngine {
                   let valVal = value.objectForKeyedSubscript(name), !valVal.isUndefined, !valVal.isNull,
                   let val = valVal.toString()
             else { continue }
-            guard isValidHeaderName(name) else {
+            guard isValidHTTPHeaderName(name) else {
                 logger.warning("[MITM][JS] Anywhere.http: dropping request header with invalid name: \(name)")
                 continue
             }
-            guard isValidHeaderValue(val) else {
+            guard isValidHTTPHeaderValue(val) else {
                 logger.warning("[MITM][JS] Anywhere.http: dropping request header \(name) with CR/LF/NUL in value")
                 continue
             }

@@ -236,6 +236,22 @@ final class MITMSession {
     private var inboundH2: MITMHTTP2Connection?
     private var outboundH2: MITMHTTP2Connection?
 
+    /// The active inbound (client→server) rewriter: the HTTP/2 connection once
+    /// the inner leg negotiated `h2`, otherwise the always-present HTTP/1
+    /// request stream. Lets the pumps shuttle bytes without branching on the
+    /// negotiated protocol at every step.
+    private var inbound: any MITMMessageRewriter {
+        if let inboundH2 { return inboundH2 }
+        return requestStream
+    }
+
+    /// The active outbound (server→client) rewriter: the HTTP/2 connection once
+    /// both legs are `h2`, otherwise the HTTP/1 response stream.
+    private var outbound: any MITMMessageRewriter {
+        if let outboundH2 { return outboundH2 }
+        return responseStream
+    }
+
     private let h2Rewriter: MITMHTTP2Rewriter
 
     /// Tracks the client's HTTP/2 receive windows so synth (`Anywhere.respond`)
@@ -770,8 +786,7 @@ final class MITMSession {
                 // keep the one-read-in-flight back-pressure intact across a park.
                 let handle: (Data) -> Void = { [weak self] transformed in
                     guard let self, !self.torn else { return }
-                    let injected = self.inboundH2?.drainPendingClientBytes()
-                        ?? self.requestStream.drainPendingClientBytes()
+                    let injected = self.inbound.drainPendingClientBytes()
                     if !injected.isEmpty {
                         self.sendChunked(injected, via: inner) { [weak self] sendError in
                             guard let self, let sendError else { return }
@@ -824,11 +839,7 @@ final class MITMSession {
                         self.bufferUpstreamAndDial(transformed, inner: inner)
                     }
                 }
-                if let inboundH2 = self.inboundH2 {
-                    inboundH2.process(data, completion: handle)
-                } else {
-                    self.requestStream.transform(data, completion: handle)
-                }
+                self.inbound.feed(data, completion: handle)
             }
         }
     }
@@ -863,7 +874,7 @@ final class MITMSession {
         // First-request-wins for the connection's upstream: a transparent
         // rewrite on the first request surfaces the replacement host/port,
         // otherwise dial the original destination.
-        let resolved = (inboundH2 != nil) ? h2Rewriter.resolvedUpstream : requestStream.resolvedUpstream
+        let resolved = inbound.resolvedUpstream
         let host = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort
         dialedHost = host
@@ -899,7 +910,7 @@ final class MITMSession {
     /// resolved with. True before the dial — there is nothing to diverge from.
     private func resolvedUpstreamMatchesDialed() -> Bool {
         guard let dialedHost, let dialedPort else { return true }
-        let resolved = (inboundH2 != nil) ? h2Rewriter.resolvedUpstream : requestStream.resolvedUpstream
+        let resolved = inbound.resolvedUpstream
         return (resolved?.host ?? dstHost) == dialedHost
             && (resolved?.port ?? dstPort) == dialedPort
     }
@@ -950,7 +961,7 @@ final class MITMSession {
                     // server, so the server keeps sending while the body is held
                     // instead of stalling at its window (mirrors the inbound
                     // leg's pendingClientBytes drain). HTTP/1 has no such credit.
-                    let serverCredit = self.outboundH2?.drainPendingServerBytes() ?? Data()
+                    let serverCredit = self.outbound.drainPendingServerBytes()
                     if !serverCredit.isEmpty {
                         self.sendChunked(serverCredit, via: outer) { [weak self] sendError in
                             guard let self, let sendError else { return }
@@ -970,11 +981,7 @@ final class MITMSession {
                         self.startOutboundPump(inner: inner, outer: outer)
                     }
                 }
-                if let outboundH2 = self.outboundH2 {
-                    outboundH2.process(data, completion: handle)
-                } else {
-                    self.responseStream.transform(data, completion: handle)
-                }
+                self.outbound.feed(data, completion: handle)
             }
         }
     }

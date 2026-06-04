@@ -320,7 +320,7 @@ final class MITMRewritePolicy {
             guard let compiled = Self.compileRewrite(action, suffix: suffix) else { return nil }
             return .rewrite(compiled)
         case .headerAdd(let name, let value):
-            guard Self.isValidHeaderName(name) else {
+            guard isValidHTTPHeaderName(name) else {
                 logger.warning("[MITM] headerAdd dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
@@ -328,19 +328,19 @@ final class MITMRewritePolicy {
                 logger.warning("[MITM] headerAdd dropped: \"\(name)\" controls message framing and can't be set by a header rule (suffix=\(suffix))")
                 return nil
             }
-            guard Self.isValidHeaderValue(value) else {
+            guard isValidHTTPHeaderValue(value) else {
                 logger.warning("[MITM] headerAdd dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
             return .headerAdd(name: name, value: value)
         case .headerDelete(let name):
-            guard Self.isValidHeaderName(name) else {
+            guard isValidHTTPHeaderName(name) else {
                 logger.warning("[MITM] headerDelete dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
             return .headerDelete(nameLower: name.lowercased())
         case .headerReplace(let name, let value):
-            guard Self.isValidHeaderName(name) else {
+            guard isValidHTTPHeaderName(name) else {
                 logger.warning("[MITM] headerReplace dropped: invalid header name \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
@@ -348,7 +348,7 @@ final class MITMRewritePolicy {
                 logger.warning("[MITM] headerReplace dropped: \"\(name)\" controls message framing and can't be set by a header rule (suffix=\(suffix))")
                 return nil
             }
-            guard Self.isValidHeaderValue(value) else {
+            guard isValidHTTPHeaderValue(value) else {
                 logger.warning("[MITM] headerReplace dropped: CR/LF/NUL in value for header \"\(name)\" (suffix=\(suffix))")
                 return nil
             }
@@ -427,38 +427,6 @@ final class MITMRewritePolicy {
     // ``MITMScriptEngine``; this closes the gap for statically-
     // configured rules.
 
-    /// RFC 9110 §5.6.2: header field-name and method token alphabet.
-    /// Duplicated from the wire layers rather than shared via a helper
-    /// type so the policy stays dependency-free of them.
-    private static func isValidHeaderName(_ name: String) -> Bool {
-        guard !name.isEmpty else { return false }
-        for byte in name.utf8 {
-            switch byte {
-            case 0x21, 0x23, 0x24, 0x25, 0x26, 0x27,
-                 0x2A, 0x2B, 0x2D, 0x2E,
-                 0x5E, 0x5F, 0x60, 0x7C, 0x7E:
-                continue
-            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A:
-                continue
-            default:
-                return false
-            }
-        }
-        return true
-    }
-
-    /// RFC 9110 §5.5: header field-value must not contain CR / LF /
-    /// NUL — those bytes are exactly what splits a wire message into
-    /// two.
-    private static func isValidHeaderValue(_ value: String) -> Bool {
-        for byte in value.utf8 {
-            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
-                return false
-            }
-        }
-        return true
-    }
-
     /// Headers that determine message framing (RFC 9112 §6). A header rule that
     /// adds or replaces one of these would let the serialized head's framing
     /// diverge from the body the proxy actually streams — a duplicate or
@@ -512,7 +480,7 @@ final class MITMRewritePolicy {
         case .redirect302(let url):
             // The URL lands in a `Location` header value, so it must parse to
             // an absolute URL and be free of CR/LF/NUL.
-            guard parseReplacementURL(url) != nil, isValidHeaderValue(url) else {
+            guard parseReplacementURL(url) != nil, isValidHTTPHeaderValue(url) else {
                 logger.warning("[MITM] rewrite(302) dropped: \"\(url)\" is not a valid, wire-safe URL (suffix=\(suffix))")
                 return nil
             }

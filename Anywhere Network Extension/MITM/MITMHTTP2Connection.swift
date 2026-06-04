@@ -2069,7 +2069,7 @@ final class MITMHTTP2Connection {
             return
         }
 
-        let result: MITMScriptEngine.Message
+        let result: HTTPMessage
         switch outcome {
         case .message(let updated):
             result = updated
@@ -2177,15 +2177,6 @@ final class MITMHTTP2Connection {
         return !codec.requiresDecompression
     }
 
-    /// Returns the first header value matching ``name`` (case-insensitive),
-    /// or nil when absent.
-    private func firstHeaderValue(_ headers: [(name: String, value: String)], name: String) -> String? {
-        for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
-            return v
-        }
-        return nil
-    }
-
     /// HTTP/2 analogue of the HTTP/1 advisory: warns when a buffered
     /// ``.script`` rule will hold a streaming response (SSE and friends;
     /// see ``MITMScriptTransform/isStreamingMediaType(_:)``) until
@@ -2256,21 +2247,12 @@ final class MITMHTTP2Connection {
         var headers: [(name: String, value: String)] = [
             (name: ":status", value: String(response.status))
         ]
-        for entry in response.headers {
-            let n = entry.name.lowercased()
-            if n.hasPrefix(":") { continue }
-            if n == "content-length" || n == "transfer-encoding" { continue }
-            guard Self.isValidHeaderName(n),
-                  Self.isValidHTTP2HeaderValue(entry.value)
-            else {
-                logger.warning("[MITM][JS] HTTP/2 \(rewriter.host): Anywhere.respond dropping invalid header: \(entry.name)")
-                continue
-            }
-            // HTTP/2 forbids uppercase header names (RFC 9113 §8.2.1);
-            // normalize defensively so a careless script can't blow up
-            // the client's decoder.
-            headers.append((name: n, value: entry.value))
-        }
+        // Script/rule headers are lowercased (RFC 9113 §8.2.1 forbids uppercase
+        // field-names), pseudo-headers dropped (we build our own ``:status``),
+        // and validated against CR/LF/NUL injection — all shared with HTTP/1.
+        headers.append(contentsOf: response.sanitizedHeaders(lowercaseNames: true) { name in
+            logger.warning("[MITM][JS] HTTP/2 \(rewriter.host): Anywhere.respond dropping invalid header: \(name)")
+        })
         let block = HPACKEncoder.encodeHeaderBlock(headers)
 
         // Cap the buffered body to the per-message body budget
@@ -2278,11 +2260,8 @@ final class MITMHTTP2Connection {
         // synth path. This bounds only the extension's memory; the wire stays
         // within the client's flow-control window via the pacing below, not
         // this cap.
-        var body = response.body
-        if body.count > MITMBodyCodec.maxBufferedBodyBytes {
-            logger.warning("[MITM][JS] HTTP/2 \(rewriter.host): Anywhere.respond body \(body.count) B exceeds memory cap \(MITMBodyCodec.maxBufferedBodyBytes) B; truncating")
-            let end = body.startIndex + MITMBodyCodec.maxBufferedBodyBytes
-            body = body.subdata(in: body.startIndex..<end)
+        let body = response.truncatedBody(cap: MITMBodyCodec.maxBufferedBodyBytes) { size in
+            logger.warning("[MITM][JS] HTTP/2 \(rewriter.host): Anywhere.respond body \(size) B exceeds memory cap \(MITMBodyCodec.maxBufferedBodyBytes) B; truncating")
         }
 
         // HEADERS first (END_STREAM only when there is no body to follow).
@@ -2601,43 +2580,9 @@ final class MITMHTTP2Connection {
         return true
     }
 
-    /// RFC 9110 §5.6.2: header field-name is a `token` — one or more of
-    /// `tchar` (alphanumerics plus a fixed punctuation set). Empty
-    /// names are rejected. Used to gate user-supplied headers from
-    /// ``Anywhere.respond`` before they reach the HPACK encoder.
-    private static func isValidHeaderName(_ name: String) -> Bool {
-        guard !name.isEmpty else { return false }
-        for byte in name.utf8 {
-            switch byte {
-            case 0x21, 0x23, 0x24, 0x25, 0x26, 0x27,
-                 0x2A, 0x2B, 0x2D, 0x2E,
-                 0x5E, 0x5F, 0x60, 0x7C, 0x7E:
-                continue
-            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A:
-                continue
-            default:
-                return false
-            }
-        }
-        return true
-    }
-
-    /// HTTP/2 disallows CR, LF, and NUL in header field values (RFC
-    /// 9113 §8.2.1). A scriptable inject path would otherwise let a
-    /// careless or malicious script slip extra header lines into the
-    /// re-encoded block via the decoder's string handling.
-    private static func isValidHTTP2HeaderValue(_ value: String) -> Bool {
-        for byte in value.utf8 {
-            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
-                return false
-            }
-        }
-        return true
-    }
-
     // MARK: - Message build / header rebuild
 
-    /// Builds the ``MITMScriptEngine/Message`` the script chain
+    /// Builds the ``HTTPMessage`` the script chain
     /// receives. HTTP/2 pseudo-headers (`:method`, `:authority`,
     /// `:path`, `:scheme`, `:status`) are stripped here and projected
     /// into the scalar `method` / `url` / `status` fields so the script
@@ -2648,7 +2593,7 @@ final class MITMHTTP2Connection {
         headers: [(name: String, value: String)],
         body: Data,
         originatingRequest: MITMRequestLog.Record?
-    ) -> MITMScriptEngine.Message {
+    ) -> HTTPMessage {
         var method: String?
         var url: String?
         var status: Int?
@@ -2673,7 +2618,7 @@ final class MITMHTTP2Connection {
             url = originatingRequest?.url
         }
         let regularHeaders = headers.filter { !$0.name.hasPrefix(":") }
-        return MITMScriptEngine.Message(
+        return HTTPMessage(
             phase: phase,
             method: method,
             url: url,
@@ -2692,7 +2637,7 @@ final class MITMHTTP2Connection {
     /// the message lacks (e.g. ``:scheme`` on requests, original
     /// authority when the script cleared the URL).
     private func rebuildHeaders(
-        from message: MITMScriptEngine.Message,
+        from message: HTTPMessage,
         fallback: [(name: String, value: String)]
     ) -> [(name: String, value: String)] {
         var pseudos: [(name: String, value: String)] = []
@@ -3090,4 +3035,20 @@ final class MITMHTTP2Connection {
         out.append(frame.payload)
         return out
     }
+}
+
+// MARK: - MITMMessageRewriter
+
+extension MITMHTTP2Connection: MITMMessageRewriter {
+
+    /// Unified entry point for ``MITMSession``'s pumps; forwards to
+    /// ``process(_:completion:)``, the HTTP/2 frame translator's feed.
+    func feed(_ data: Data, completion: @escaping (Data) -> Void) {
+        process(data, completion: completion)
+    }
+
+    /// The transparent-rewrite upstream is tracked by the shared header rewriter
+    /// (the same ``MITMHTTP2Rewriter`` the session injected at init), so surface
+    /// it here for the session to read uniformly across protocols.
+    var resolvedUpstream: (host: String, port: UInt16?)? { rewriter.resolvedUpstream }
 }

@@ -93,7 +93,7 @@ enum MITMScriptTransform {
     enum Outcome {
         /// Use the (possibly mutated) message as the rewrite result;
         /// emit to the upstream leg as usual.
-        case message(MITMScriptEngine.Message)
+        case message(HTTPMessage)
         /// Request-phase script called `Anywhere.respond(...)`. Drop
         /// the request without forwarding upstream and synthesize this
         /// response back to the client.
@@ -211,9 +211,9 @@ enum MITMScriptTransform {
     /// commit before the script. Header-only and script rules are untouched
     /// here. The async entry point below runs this ahead of the script.
     private static func applyNativeBodyEdits(
-        _ message: MITMScriptEngine.Message,
+        _ message: HTTPMessage,
         rules: [CompiledMITMRule]
-    ) -> MITMScriptEngine.Message {
+    ) -> HTTPMessage {
         let requestURL = message.url
         var message = message
         let jsonOps = matchingBodyJSONOps(in: rules, requestURL: requestURL)
@@ -286,7 +286,7 @@ enum MITMScriptTransform {
     ///   closure and stays alive for the engine call's duration; it is a
     ///   value copy, never aliased to the caller's receive buffer.
     static func apply(
-        _ message: MITMScriptEngine.Message,
+        _ message: HTTPMessage,
         rules: [CompiledMITMRule],
         engineProvider: MITMScriptEngine.Provider?,
         resumeOn resumeQueue: DispatchQueue,

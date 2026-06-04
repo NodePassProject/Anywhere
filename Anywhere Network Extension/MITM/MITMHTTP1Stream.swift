@@ -1651,7 +1651,7 @@ final class MITMHTTP1Stream {
     /// script accidentally populated one.
     private func emitScriptedHead(
         fallbackStartLine: String,
-        result: MITMScriptEngine.Message,
+        result: HTTPMessage,
         codecRequiresDecompression: Bool,
         originatingMethod: String?,
         into output: inout Data
@@ -1811,7 +1811,7 @@ final class MITMHTTP1Stream {
             // RFC 9112 §5.2: reject obs-fold (a field-line beginning with SP or
             // HTAB — the deprecated line-folding continuation of the previous
             // field). It is already refused below (a folded line has no colon, or
-            // yields a leading-whitespace field-name that ``isValidHeaderName``
+            // yields a leading-whitespace field-name that ``isValidHTTPHeaderName``
             // rejects), but reject it explicitly here so the protection can't
             // silently lapse if that name check is ever relaxed: folding lets a
             // lax downstream peer reassemble a value we treated as a separate
@@ -1835,7 +1835,7 @@ final class MITMHTTP1Stream {
             // smuggling vector: SP inside a name lets an attacker craft
             // headers that we ignore but a lax downstream peer honors
             // (the classic obfuscated-TE smuggling trick).
-            guard Self.isValidHeaderName(name) else { return nil }
+            guard isValidHTTPHeaderName(name) else { return nil }
             // Field-value: CR/LF/NUL are forbidden anywhere; allowing
             // any would let a value split into two header lines on
             // re-emission (response-splitting).
@@ -2047,28 +2047,11 @@ final class MITMHTTP1Stream {
     private func queueSynthesizedResponse(_ response: MITMScriptEngine.SynthesizedResponse) {
         let reason = canonicalReasonPhrase(for: response.status)
         let startLine = "HTTP/1.1 \(response.status) \(reason)"
-        var headers: [Header] = []
-        headers.reserveCapacity(response.headers.count + 1)
-        for entry in response.headers {
-            if entry.name.equalsIgnoringASCIICase("content-length")
-                || entry.name.equalsIgnoringASCIICase("transfer-encoding") {
-                continue
-            }
-            guard Self.isValidHeaderName(entry.name),
-                  Self.isValidHeaderValue(entry.value)
-            else {
-                logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond dropping invalid header: \(entry.name)")
-                continue
-            }
-            headers.append((name: entry.name, value: entry.value))
+        var headers = response.sanitizedHeaders(lowercaseNames: false) { name in
+            logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond dropping invalid header: \(name)")
         }
-        let body: Data
-        if response.body.count > Self.maxSynthesizedResponseBodyBytes {
-            logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond body \(response.body.count) B exceeds memory cap \(Self.maxSynthesizedResponseBodyBytes) B; truncating")
-            let end = response.body.startIndex + Self.maxSynthesizedResponseBodyBytes
-            body = response.body.subdata(in: response.body.startIndex..<end)
-        } else {
-            body = response.body
+        let body = response.truncatedBody(cap: Self.maxSynthesizedResponseBodyBytes) { size in
+            logger.warning("[MITM][JS] HTTP/1 \(host): Anywhere.respond body \(size) B exceeds memory cap \(Self.maxSynthesizedResponseBodyBytes) B; truncating")
         }
         headers.append((name: "Content-Length", value: String(body.count)))
         var bytes = serializeHead(startLine: startLine, headers: headers)
@@ -2093,48 +2076,13 @@ final class MITMHTTP1Stream {
         }
     }
 
-    /// RFC 9110 §5.6.2: a header field-name is a `token` — one or more
-    /// `tchar` (alphanumerics plus a fixed punctuation set). Anything
-    /// outside that set (whitespace, CTL, `:`, CR, LF, …) would either
-    /// be misparsed by the receiver or, worst case, let an injected CR
-    /// LF break out of the current line.
-    private static func isValidHeaderName(_ name: String) -> Bool {
-        guard !name.isEmpty else { return false }
-        for byte in name.utf8 {
-            switch byte {
-            case 0x21, 0x23, 0x24, 0x25, 0x26, 0x27,
-                 0x2A, 0x2B, 0x2D, 0x2E,
-                 0x5E, 0x5F, 0x60, 0x7C, 0x7E:
-                continue
-            case 0x30...0x39, 0x41...0x5A, 0x61...0x7A:
-                continue
-            default:
-                return false
-            }
-        }
-        return true
-    }
-
-    /// RFC 9110 §5.5: field-value is a sequence of visible / SP / HTAB
-    /// chars. CR, LF, and NUL are forbidden anywhere in the value;
-    /// allowing any of them would split the response head into two
-    /// (response-splitting) when the value is written verbatim.
-    private static func isValidHeaderValue(_ value: String) -> Bool {
-        for byte in value.utf8 {
-            if byte == 0x0D || byte == 0x0A || byte == 0x00 {
-                return false
-            }
-        }
-        return true
-    }
-
     /// RFC 9110 §9.1: a method name is a `token` — the same tchar+
     /// alphabet as header field-names. Scripts can write
     /// ``ctx.method`` to any string; without validation a value like
     /// ``"GET /attacker HTTP/1.1\r\nHost: a"`` smuggles a full request
     /// line into the start position.
     private static func isValidMethodToken(_ s: String) -> Bool {
-        return isValidHeaderName(s)
+        return isValidHTTPHeaderName(s)
     }
 
     /// RFC 9112 §3.2: a request-target's syntax forbids SP, HTAB, CR,
@@ -2223,13 +2171,6 @@ final class MITMHTTP1Stream {
             }
         }
         return phase == .httpRequest ? .none : .readUntilClose
-    }
-
-    private func firstHeaderValue(_ headers: [Header], name: String) -> String? {
-        for (n, v) in headers where n.equalsIgnoringASCIICase(name) {
-            return v
-        }
-        return nil
     }
 
     /// Advisory log for when a buffered ``.script`` rule is about to
@@ -2406,7 +2347,7 @@ final class MITMHTTP1Stream {
 
     // MARK: - Message build / head rebuild
 
-    /// Builds a ``MITMScriptEngine/Message`` from the in-flight head
+    /// Builds a ``HTTPMessage`` from the in-flight head
     /// state. On response phase, fills in `method`/`url` from the
     /// originating request (looked up via ``MITMRequestLog`` by the
     /// caller).
@@ -2415,7 +2356,7 @@ final class MITMHTTP1Stream {
         headers: [Header],
         body: Data,
         originatingRequest: MITMRequestLog.Record?
-    ) -> MITMScriptEngine.Message {
+    ) -> HTTPMessage {
         var method: String?
         var url: String?
         var status: Int?
@@ -2434,7 +2375,7 @@ final class MITMHTTP1Stream {
             method = originatingRequest?.method
             url = originatingRequest?.url
         }
-        return MITMScriptEngine.Message(
+        return HTTPMessage(
             phase: phase,
             method: method,
             url: url,
@@ -2455,7 +2396,7 @@ final class MITMHTTP1Stream {
     /// session. Falls back to the original line when the message
     /// lacks the fields needed to rebuild.
     private func rebuildStartLine(
-        from message: MITMScriptEngine.Message,
+        from message: HTTPMessage,
         fallback: String
     ) -> String {
         let parts = fallback.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
@@ -2742,4 +2683,19 @@ private final class ChunkedReader {
         }
         return .needMore
     }
+}
+
+// MARK: - MITMMessageRewriter
+
+extension MITMHTTP1Stream: MITMMessageRewriter {
+
+    /// Unified entry point for ``MITMSession``'s pumps; forwards to
+    /// ``transform(_:completion:)``, the HTTP/1 framing state machine's feed.
+    func feed(_ data: Data, completion: @escaping (Data) -> Void) {
+        transform(data, completion: completion)
+    }
+
+    /// HTTP/1 has no per-stream flow-control windows, so there is no
+    /// upstream-bound credit to drain — the concept is HTTP/2-only.
+    func drainPendingServerBytes() -> Data { Data() }
 }

@@ -172,7 +172,7 @@ final class MITMHTTP2Rewriter {
     /// script called `Anywhere.respond(...)` — the caller must suppress
     /// upstream emission and inject the response on the inner leg instead.
     func applyScripts(
-        _ message: MITMScriptEngine.Message,
+        _ message: HTTPMessage,
         phase: MITMPhase,
         resumeOn resumeQueue: DispatchQueue,
         completion: @escaping (MITMScriptTransform.Outcome) -> Void
