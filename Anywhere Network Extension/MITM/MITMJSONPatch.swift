@@ -286,6 +286,22 @@ enum MITMJSONPatch {
             } else if c == "[" {
                 chars = chars.dropFirst()
                 var inner = ""
+                // A quoted bracket key may legitimately contain `]`. When the
+                // token opens with a quote, scan to the MATCHING closing quote
+                // (keeping the quotes in ``inner`` so the strip below removes
+                // them) before looking for `]` — otherwise `["a]b"]` truncates at
+                // the first `]` to the key `"a` plus trailing garbage.
+                if let quote = chars.first, quote == "\"" || quote == "'" {
+                    inner.append(quote)
+                    chars = chars.dropFirst()
+                    while let d = chars.first, d != quote {
+                        inner.append(d)
+                        chars = chars.dropFirst()
+                    }
+                    guard chars.first == quote else { return nil } // unterminated
+                    inner.append(quote)
+                    chars = chars.dropFirst()
+                }
                 while let d = chars.first, d != "]" {
                     inner.append(d)
                     chars = chars.dropFirst()
@@ -296,7 +312,15 @@ enum MITMJSONPatch {
                 if token.count >= 2,
                    (token.first == "\"" && token.last == "\"") || (token.first == "'" && token.last == "'") {
                     segments.append(.key(String(token.dropFirst().dropLast())))
-                } else if let index = Int(token) {
+                } else if !token.isEmpty, token.allSatisfy({ $0.isASCII && $0.isNumber }) {
+                    // A bare all-digits token is an array index. ``Int(_:)``
+                    // failing on an all-digits token means the literal overflows
+                    // ``Int`` — reject the path as malformed rather than silently
+                    // falling through to ``.key`` and addressing an object member
+                    // literally named "9999999999999999999999" (which then
+                    // resolves to nil — a silent mis-address the contract above
+                    // promises to warn on instead).
+                    guard let index = Int(token) else { return nil }
                     segments.append(.index(index))
                 } else if !token.isEmpty {
                     segments.append(.key(token))
@@ -398,13 +422,22 @@ enum MITMJSONPatch {
         return root
     }
 
-    /// Depth ceiling for the recursive whole-tree walkers below. JSON from an
-    /// untrusted upstream can be nested deeply (within ``JSONSerialization``'s
-    /// own parse limit); recursing that far would overflow the Network
-    /// Extension's small stack and crash it. Past this depth the walkers stop
-    /// descending — a graceful no-op on the deep sub-tree, never a crash.
-    /// Real-world JSON nests far shallower.
-    private static let maxRecursionDepth = 256
+    /// Depth ceiling for the recursive whole-tree walkers below. Kept *above*
+    /// ``JSONSerialization``'s own parse-depth limit (empirically 512 for both
+    /// nested arrays and objects on Apple platforms) so every document the
+    /// parser accepts can be walked in full: a ceiling below it would let the
+    /// walkers bail mid-tree on a body the parser handled, and since
+    /// ``isJSONEncodable`` / ``documentsEqual`` walk the whole document, even a
+    /// shallow edit on a body that merely *contains* one too-deep sub-tree would
+    /// silently no-op — a fail-closed JSON-rewrite-evasion vector an upstream
+    /// could trigger by burying deep nesting in an otherwise-normal body. 600
+    /// clears the parse limit with margin while staying far within the Network
+    /// Extension's worker-thread stack (each frame is tiny — ~600 levels is
+    /// ≈120 KiB, safe even on a 512 KiB stack). A document deeper than the
+    /// parser's own limit never reaches these walkers (``parse`` rejects it
+    /// first); past this depth they stop descending — a graceful no-op on the
+    /// deep sub-tree, never a crash.
+    private static let maxRecursionDepth = 600
 
     /// Overwrites every ``key`` member at any depth with ``value``.
     /// Children are visited before the key is set so the replacement is

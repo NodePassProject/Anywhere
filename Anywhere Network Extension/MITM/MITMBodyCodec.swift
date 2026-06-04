@@ -22,11 +22,7 @@ private let logger = AnywhereLogger(category: "MITM")
 /// browser does.
 enum MITMBodyCodec {
 
-    /// Largest body the rewriter will buffer. iOS network extensions
-    /// run under a tight memory budget (~50 MiB), and a single misfire
-    /// here can crash the tunnel. 4 MiB comfortably covers HTML, JSON,
-    /// and JavaScript responses while leaving headroom for everything
-    /// else the extension is doing concurrently.
+    /// Largest body the rewriter will buffer.
     static let maxBufferedBodyBytes: Int = 4 * 1024 * 1024
 
     /// Largest number of stacked `Content-Encoding` codings the rewriter will
@@ -320,7 +316,20 @@ enum MITMBodyCodec {
         // the body verbatim and the client decodes every member itself, rather
         // than emitting a truncated one. Bodies are capped well under 2^32, so the
         // comparison is exact.
-        guard gzipTrailerISIZE(data) == UInt32(truncatingIfNeeded: combined.count) else {
+        // ISIZE alone collides when concatenated members happen to share an
+        // uncompressed size (mod 2^32) — a member-1-only decode then looks valid
+        // and the trailing members are silently dropped. Also verify the trailer
+        // CRC-32 (RFC 1952 §2.3.1) over the decoded bytes: a member-1-only decode
+        // of a multi-member body carries the *last* member's CRC in the trailing
+        // 8 bytes, which won't match member 1's checksum, so the equal-size
+        // collision that slips past the ISIZE check is caught here and the whole
+        // body is forwarded verbatim (the client decodes every member itself).
+        // Both must match for a genuine single member. (A multi-member body the
+        // loop happened to decode fully would also fail this check, since the
+        // trailer CRC covers only the last member — fail-closed to verbatim,
+        // never corrupt.)
+        guard gzipTrailerISIZE(data) == UInt32(truncatingIfNeeded: combined.count),
+              gzipTrailerCRC32(data) == crc32(combined) else {
             return (nil, .multiMember)
         }
         return (combined, nil)
@@ -338,6 +347,23 @@ enum MITMBodyCodec {
             | (UInt32(data[data.index(e, offsetBy: -2)]) << 16)
             | (UInt32(data[data.index(e, offsetBy: -1)]) << 24)
     }
+
+    /// The little-endian CRC-32 field (RFC 1952 §2.3.1): the 4 bytes preceding
+    /// ISIZE — i.e. bytes 8…5 from the end of a gzip body. Returns 0 for a body
+    /// too short to hold a full 8-byte trailer, which then mismatches any
+    /// non-trivial decode and fails closed (the safe direction).
+    private static func gzipTrailerCRC32(_ data: Data) -> UInt32 {
+        guard data.count >= 8 else { return 0 }
+        let e = data.endIndex
+        return UInt32(data[data.index(e, offsetBy: -8)])
+            | (UInt32(data[data.index(e, offsetBy: -7)]) << 8)
+            | (UInt32(data[data.index(e, offsetBy: -6)]) << 16)
+            | (UInt32(data[data.index(e, offsetBy: -5)]) << 24)
+    }
+    // NB: the CRC-32 itself reuses the existing ``crc32(_:)`` / ``crc32Table``
+    // defined below (built for ``gzipWrap``'s encoder trailer) — same gzip
+    // polynomial and parameters, so the decode-side check and the encode-side
+    // trailer can't drift.
 
     /// Decodes one gzip member starting at ``offset`` in ``data``. On
     /// success returns the decoded bytes plus the total input bytes consumed
@@ -426,10 +452,21 @@ enum MITMBodyCodec {
     /// RFC 1950's zlib-wrapped requirement). Falls back to stripping
     /// the 2-byte zlib header + 4-byte adler32 footer when raw fails.
     private static func inflateDeflate(_ data: Data) -> Data? {
+        // An empty input has no valid deflate decode; fail closed (the caller
+        // forwards the body verbatim) rather than returning the empty
+        // ``streamDecodeMember`` produces for empty input — which would silently
+        // replace the body with nothing.
+        guard !data.isEmpty else { return nil }
         if let raw = streamDecode(data, algorithm: COMPRESSION_ZLIB) {
             return raw
         }
-        guard data.count >= 6 else { return nil }
+        // zlib-wrapped fallback: strip the 2-byte header + 4-byte adler32
+        // footer and retry as raw deflate. Require *more* than 6 bytes so the
+        // stripped middle is non-empty: a 6-byte (or shorter) input strips to an
+        // empty slice that ``streamDecodeMember`` reports as a successful empty
+        // decode, which would silently empty a malformed body instead of failing
+        // closed to a verbatim pass-through.
+        guard data.count > 6 else { return nil }
         let body = data.subdata(in: (data.startIndex + 2)..<(data.endIndex - 4))
         return streamDecode(body, algorithm: COMPRESSION_ZLIB)
     }
@@ -450,14 +487,7 @@ enum MITMBodyCodec {
     /// Wraps `compression_stream_*` for unknown output sizes. Pulls
     /// 64 KiB at a time until the stream finalises or errors. Returns
     /// nil if the cumulative decompressed output would exceed
-    /// ``maxBufferedBodyBytes`` — without the cap a 1 MiB gzip of
-    /// zeros decompresses to ~1 GiB and exhausts the Network
-    /// Extension's ~50 MiB budget (decompression-bomb DoS). The cap
-    /// matches the rewriter's buffer limit so a body the rest of the
-    /// pipeline couldn't act on anyway never gets fully materialised
-    /// in memory; callers that hit the cap fall back to forwarding the
-    /// original compressed bytes verbatim, same as a malformed-payload
-    /// decode failure.
+    /// ``maxBufferedBodyBytes``.
     private static func streamDecode(_ data: Data, algorithm: compression_algorithm) -> Data? {
         if case .success(let decoded, _) = streamDecodeMember(data, algorithm: algorithm) {
             return decoded

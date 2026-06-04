@@ -194,6 +194,18 @@ final class MITMSession {
     /// inner negotiation).
     private var clientSupportsTLS13 = false
 
+    /// The SNI the inner leg negotiated against — the key under which the
+    /// shared ``originCapabilities`` cache is both read (when choosing the
+    /// inner ALPN) and written (when the outer leg discovers an h2 mismatch).
+    /// MUST match the read key: ``MITMOriginCapabilityCache`` is documented as
+    /// keyed by SNI, and the SNI is what's stable across the client's retries
+    /// (the destination ``dstHost`` can be a bare IP when the client dialed by
+    /// address while sending a hostname SNI, so keying the write on ``dstHost``
+    /// would store the verdict under a key the next session never checks —
+    /// re-offering h2 forever and looping the connection). Captured in
+    /// ``start(sni:)``.
+    private var handshakeSNI: String?
+
     /// Bytes received from the client before the inner ``TLSServer`` was
     /// created. Always begins with a complete ClientHello; may also
     /// contain bytes the client pushed while we were finishing the outer
@@ -207,9 +219,7 @@ final class MITMSession {
     /// in real flows; the cap exists to defend against a hostile or
     /// buggy local app that dumps arbitrary data into the SOCKS leg
     /// before TLS negotiation completes. Without a cap, that traffic
-    /// would accumulate against the Network Extension's ~50 MiB memory
-    /// ceiling and crash the extension, taking down every other in-
-    /// flight tunneled session. 256 KiB is generous (multi-KB JA3
+    /// would accumulate without bound. 256 KiB is generous (multi-KB JA3
     /// extensions, large GREASE blocks) while still catching abuse.
     private static let maxPendingClientBytes: Int = 256 * 1024
 
@@ -348,6 +358,10 @@ final class MITMSession {
     /// ALPN. Requests fully answered by a 302 / reject rewrite (or
     /// `Anywhere.respond`) never trigger a dial. Must be called on `lwipQueue`.
     func start(sni: String) {
+        // Capture the SNI as the origin-capability cache key so the later
+        // ``markHTTP1Only`` write uses the same key as the ``isHTTP1Only`` read
+        // below (see ``handshakeSNI``).
+        handshakeSNI = sni
         let parsed = parseClientHello(pendingClientBytes)
         let clientALPNs = parsed?.alpnProtocols ?? []
         // Fail-closed default: when the ClientHello fails to parse we assume
@@ -552,7 +566,7 @@ final class MITMSession {
                         outerOK = record.negotiatedALPN.isEmpty || record.negotiatedALPN == "http/1.1"
                     }
                     guard outerOK else {
-                        self.originCapabilities.markHTTP1Only(self.dstHost)
+                        self.originCapabilities.markHTTP1Only(self.handshakeSNI ?? self.dstHost)
                         logger.warning("[MITM] \(self.dstHost): upstream ALPN \"\(record.negotiatedALPN)\" can't bridge inner \"\(innerALPN)\"; recorded http/1.1-only, tearing down so the client retries")
                         self.cancel(error: nil)
                         return
@@ -568,7 +582,7 @@ final class MITMSession {
                     // offered http/1.1 means the origin speaks neither, which the
                     // http/1.1-only verdict would misrepresent.
                     if innerALPN == "h2", case TLSError.alert(level: _, description: 120) = error {
-                        self.originCapabilities.markHTTP1Only(self.dstHost)
+                        self.originCapabilities.markHTTP1Only(self.handshakeSNI ?? self.dstHost)
                     }
                     self.cancel(error: error)
                 }
@@ -607,6 +621,19 @@ final class MITMSession {
             }
             outLeg.onObservedPeerHeaderTableSize = { [weak inLeg] size in
                 inLeg?.configureDecoderTableSize(size)
+            }
+            // A buffered-rewrite RESPONSE whose body exceeds the client's
+            // flow-control window is handed from the outbound leg to the inbound
+            // leg — which receives the client's WINDOW_UPDATEs and owns the
+            // client-bound buffer — for paced delivery, so a large rewritten body
+            // can't overflow the window into a connection-wide GOAWAY (see
+            // ``MITMHTTP2Connection.onPacedResponse`` / ``queuePacedClientResponse``).
+            // Weak capture: same mutual-retain-cycle break as above; the call is
+            // synchronous on the shared lwipQueue from the outbound flush.
+            outLeg.onPacedResponse = { [weak inLeg] streamID, headerBlock, body, endStream in
+                // nil (inbound leg gone — teardown) declines, so the outbound leg
+                // emits inline; harmless since teardown suppresses emission anyway.
+                inLeg?.queuePacedClientResponse(streamID: streamID, headerBlock: headerBlock, body: body, endStream: endStream) ?? false
             }
             // The inbound leg may have already decoded the client's SETTINGS
             // (the h2 preface arrives before the dial completes); replay the
@@ -964,6 +991,25 @@ final class MITMSession {
                     let serverCredit = self.outbound.drainPendingServerBytes()
                     if !serverCredit.isEmpty {
                         self.sendChunked(serverCredit, via: outer) { [weak self] sendError in
+                            guard let self, let sendError else { return }
+                            self.lwipQueue.async { self.cancel(error: sendError) }
+                        }
+                    }
+                    // A buffered-rewrite response body that overflowed the
+                    // client's flow-control window was handed to the inbound leg
+                    // during this outbound feed (see
+                    // ``MITMHTTP2Connection.onPacedResponse``). Its HEADERS + first
+                    // window now sit in the inbound leg's client-bound buffer;
+                    // flush them toward the client now rather than waiting on the
+                    // next inbound read — which may never come if the client is
+                    // blocked awaiting this very response. The remainder drains
+                    // later as the client's WINDOW_UPDATEs arrive on the inbound
+                    // pump. Inner-leg sends are serialized, so this and the
+                    // ``transformed`` bytes (other streams) keep their wire order.
+                    // nil/empty for HTTP/1 and whenever no handoff occurred.
+                    let pacedInit = self.inboundH2?.drainPendingClientBytes() ?? Data()
+                    if !pacedInit.isEmpty {
+                        self.sendChunked(pacedInit, via: inner) { [weak self] sendError in
                             guard let self, let sendError else { return }
                             self.lwipQueue.async { self.cancel(error: sendError) }
                         }

@@ -34,6 +34,14 @@ final class MITMHTTP2Rewriter {
     /// this value. Late-bound: set by the first transparent
     /// ``MITMOperation/rewrite`` to the replacement's authority; nil means
     /// "leave :authority alone".
+    ///
+    /// Sticky by design (mirrors HTTP/1's ``effectiveAuthority``): once a
+    /// transparent rewrite changes the host, the connection's single upstream
+    /// leg is committed to it, so every later request on the connection —
+    /// including ones matching no rewrite rule — is routed to the replacement
+    /// authority. A request resolving a *different* host tears the connection
+    /// down instead (see ``MITMSession``'s h2 multi-host note), rather than
+    /// thrashing teardowns by clearing the authority per request.
     private var effectiveAuthority: String?
 
     /// The upstream the session should dial, surfaced when a transparent
@@ -99,8 +107,14 @@ final class MITMHTTP2Rewriter {
     /// The `:path` pseudo-header (request-target) from a decoded header
     /// list, or nil if absent.
     static func requestPath(in headers: [(name: String, value: String)]) -> String? {
-        for (name, value) in headers where name == ":path" { return value }
-        return nil
+        // ASCII-case-insensitive on purpose: HPACK carries field-names verbatim
+        // and the decoder does not lowercase them, so a peer that literal-encodes
+        // ``:Path`` would otherwise make this return nil — collapsing the gate URL
+        // to nil and silently bypassing every request-phase rule (a `rewrite`
+        // block/redirect included), with the request then forwarded upstream.
+        // Reuses the same case-folding helper the rest of the flow reads
+        // pseudo-headers through (``buildMessage`` / ``firstHeaderValue``).
+        return firstHeaderValue(headers, name: ":path")
     }
 
     /// Pre-check for a 302 / reject ``MITMOperation/rewrite`` on a request:
@@ -208,11 +222,14 @@ final class MITMHTTP2Rewriter {
         // classifies trailers via the same predicate before invoking
         // us, but the defensive check here makes the
         // pseudo-header-safety invariant local to the function.
-        let hasMethod = headers.contains { $0.name == ":method" }
+        let hasMethod = headers.contains { $0.name.equalsIgnoringASCIICase(":method") }
         guard hasMethod else { return headers }
         var sawAuthority = false
         var result = headers.map { entry -> (name: String, value: String) in
-            if entry.name == ":authority" {
+            // Case-insensitive match, lowercased on rewrite (RFC 9113 §8.2.1
+            // forbids uppercase field-names on the wire), so a peer's mis-cased
+            // ``:Authority`` is both recognised and normalised here.
+            if entry.name.equalsIgnoringASCIICase(":authority") {
                 sawAuthority = true
                 return (name: ":authority", value: authority)
             }
@@ -263,10 +280,13 @@ final class MITMHTTP2Rewriter {
                 resolvedUpstream = (host: replacement.host, port: replacement.port)
                 var sawAuthority = false
                 current = current.map { entry in
-                    if entry.name == ":path" {
+                    // Case-insensitive match, lowercased on rewrite (RFC 9113
+                    // §8.2.1) — same reason as ``applyAuthorityRewrite``: match a
+                    // mis-cased pseudo-header and normalise it on the way out.
+                    if entry.name.equalsIgnoringASCIICase(":path") {
                         return (name: ":path", value: replacement.requestTarget)
                     }
-                    if entry.name == ":authority" {
+                    if entry.name.equalsIgnoringASCIICase(":authority") {
                         sawAuthority = true
                         return (name: ":authority", value: replacement.authority)
                     }

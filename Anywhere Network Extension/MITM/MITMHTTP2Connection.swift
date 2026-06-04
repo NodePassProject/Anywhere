@@ -57,8 +57,7 @@ final class MITMHTTP2Connection {
     /// Cap on cumulative bytes accumulated in
     /// ``PendingHeaders.fragments`` across a HEADERS / PUSH_PROMISE
     /// frame plus its CONTINUATION chain. RFC 9113 has no spec-level
-    /// limit, so a peer can chain CONTINUATIONs without bound and
-    /// exhaust the Network Extension's ~50 MiB memory budget. 256 KiB
+    /// limit, so a peer can chain CONTINUATIONs without bound. 256 KiB
     /// fits the largest real-world request heads (JWT-bearing tokens,
     /// multi-kilobyte cookies) with margin while leaving no
     /// per-stream pressure path open. On overflow the pending state
@@ -86,8 +85,8 @@ final class MITMHTTP2Connection {
     /// dial is deferred until the first request resolves its destination.
     /// Legitimate setup is a few hundred bytes; the cap exists so a client
     /// that floods connection-management frames without ever opening a stream
-    /// can't grow this buffer against the Network Extension's ~50 MiB budget.
-    /// On overflow the leg flips ``parseError`` and stops processing — the
+    /// can't grow this buffer without bound. On overflow the leg flips
+    /// ``parseError`` and stops processing — the
     /// same stalled-half failure mode the other frame caps rely on the peer
     /// to GOAWAY out of. 256 KiB is far above any real h2 start.
     private static let maxPendingUpstreamSetupBytes: Int = 256 * 1024
@@ -123,6 +122,20 @@ final class MITMHTTP2Connection {
     /// synchronously on the shared serial lwIP queue, from the frame pump
     /// (``process(_:)`` or a parked script's resume).
     var onObservedPeerHeaderTableSize: ((Int) -> Void)?
+
+    /// Hands a buffered-rewrite RESPONSE body that exceeds the client's current
+    /// flow-control window to the opposing (inbound) leg for paced delivery. The
+    /// inbound leg receives the client's WINDOW_UPDATEs and owns the client-bound
+    /// buffer, so only it can pace and emit the body without overflowing the
+    /// window (see ``emitFlushResult`` / ``queuePacedClientResponse``).
+    /// ``MITMSession`` wires this on the outbound leg to the inbound leg.
+    /// Outbound leg only; nil on the inbound leg and before the legs are paired,
+    /// in which case the body is emitted inline without pacing.
+    /// Invoked synchronously on the shared serial lwIP queue from the frame pump.
+    /// Returns true when the inbound leg accepted the body for paced delivery;
+    /// false when it declined (its client-bound buffer is over budget), in which
+    /// case the outbound leg emits the body inline.
+    var onPacedResponse: ((_ streamID: UInt32, _ headerBlock: Data, _ body: Data, _ endStream: Bool) -> Bool)?
 
     /// The most recent value passed to ``onObservedPeerHeaderTableSize``,
     /// retained so it can be replayed to the opposing leg when that leg is
@@ -267,12 +280,14 @@ final class MITMHTTP2Connection {
     }
     private var streamingScripts: [UInt32: StreamingState] = [:]
 
-    /// Bytes synthesized by request-phase scripts that called
-    /// `Anywhere.respond(...)` and need to be written straight back to
-    /// the client (i.e. injected onto the inner TLS record). Populated
-    /// on the inbound leg only; the outbound leg never touches it.
-    /// Drained by the session pump via ``drainPendingClientBytes()``
-    /// immediately after each ``process(_:)`` call.
+    /// Client-bound bytes the inbound leg writes straight back to the client
+    /// (i.e. injected onto the inner TLS record), bypassing the outbound
+    /// translator: a request-phase `Anywhere.respond(...)` reply, and the
+    /// HEADERS + paced DATA of a buffered-rewrite response the outbound leg
+    /// handed over for flow-control pacing (see ``queuePacedClientResponse``).
+    /// Populated on the inbound leg only; the outbound leg never touches it.
+    /// Drained by the session pump via ``drainPendingClientBytes()`` immediately
+    /// after each ``process(_:)`` call.
     private var pendingClientBytes = Data()
 
     /// Sender-bound flow-control credit (WINDOW_UPDATE frames) the MITM issues
@@ -343,10 +358,8 @@ final class MITMHTTP2Connection {
     /// it when it sees an END_STREAM on a DATA / HEADERS frame, and a
     /// FIFO cap (see ``synthRespondedMaxStreams``) evicts the oldest
     /// entry when neither happens. Clients are not required to RST
-    /// after consuming a synthesized response — most just stop sending
-    /// — so without the cap the set would grow unbounded for the
-    /// connection's lifetime on every script that fires
-    /// ``Anywhere.respond``.
+    /// after consuming a synthesized response — most just stop sending —
+    /// so the FIFO cap is what reclaims those lingering entries.
     private var synthRespondedStreams: Set<UInt32> = []
     /// Insertion order mirror of ``synthRespondedStreams`` so the cap's
     /// eviction picks the oldest streamID without losing the O(1)
@@ -360,12 +373,15 @@ final class MITMHTTP2Connection {
     /// is ~1 KiB of UInt32s + array overhead.
     private static let synthRespondedMaxStreams = 256
 
-    /// A request-phase `Anywhere.respond` body that did not fit the client's
-    /// flow-control windows in one shot and is being paced out as the client
-    /// grants more window via WINDOW_UPDATE. Inbound leg only; keyed by stream
-    /// ID. Created by ``queueSynthesizedResponse`` when a remainder is left
-    /// after the first emission and drained by ``flushPendingSynth``. The
-    /// entry's presence means "this stream still owes the client DATA".
+    /// A client-bound body being paced out as the client grants window via
+    /// WINDOW_UPDATE, because it didn't fit the flow-control windows in one shot.
+    /// Two sources, both inbound-leg only and keyed by stream ID: a request-phase
+    /// `Anywhere.respond` reply (``queueSynthesizedResponse``) and a
+    /// buffered-rewrite response handed over from the outbound leg
+    /// (``queuePacedClientResponse``). Drained by ``flushPendingSynth``; the
+    /// entry's presence means "this stream still owes the client DATA". The
+    /// ``isPreEstablishment`` / ``goAwayLastStreamID`` fields apply only to the
+    /// synth one-shot case (a rewrite response leaves them false / 0).
     private struct PendingSynthBody {
         /// Body bytes not yet emitted to the client.
         var remaining: Data
@@ -385,9 +401,11 @@ final class MITMHTTP2Connection {
         let goAwayLastStreamID: UInt32
     }
 
-    /// Per-stream paced synth bodies (see ``PendingSynthBody``). A streamID is
-    /// present only while it still owes the client bytes; the entry is removed
-    /// the moment its body fully flushes (END_STREAM emitted).
+    /// Per-stream paced client-bound bodies (see ``PendingSynthBody``) — both
+    /// `Anywhere.respond` synth replies and handed-over buffered-rewrite
+    /// responses. A streamID is present only while it still owes the client
+    /// bytes; the entry is removed the moment its body fully flushes (END_STREAM
+    /// emitted).
     private var pendingSynthBodies: [UInt32: PendingSynthBody] = [:]
 
     /// True while a pre-establishment one-shot synth is mid-pacing — its body
@@ -402,10 +420,10 @@ final class MITMHTTP2Connection {
     /// Upper bound on the number of streams this connection tracks with
     /// per-stream MITM state (``pendingMessages`` + ``streamingScripts``). Each
     /// ``pendingMessages`` entry can buffer up to
-    /// ``MITMBodyCodec/maxBufferedBodyBytes`` (4 MiB), so without a cap a peer
-    /// opening many script/buffered streams it never closes (no END_STREAM /
-    /// RST) would grow these maps until the NE is OOM-killed. Past the cap a
-    /// fresh stream is passed through un-MITM'd — it still works, it just isn't
+    /// ``MITMBodyCodec/maxBufferedBodyBytes`` (4 MiB), and a peer can open many
+    /// script/buffered streams it never closes (no END_STREAM / RST), so the
+    /// maps need bounding. Past the cap a fresh stream is passed through
+    /// un-MITM'd — it still works, it just isn't
     /// rewritten/scripted. Sized well above the spec-default
     /// SETTINGS_MAX_CONCURRENT_STREAMS (100).
     private static let maxTrackedStreams = 256
@@ -926,9 +944,9 @@ final class MITMHTTP2Connection {
         }
 
         // Single-frame HEADERS cap. ``handleContinuation`` enforces
-        // the same bound on chained CONTINUATIONs; without this check
-        // a peer can put the entire ``maxHeaderBlockFragmentBytes``
-        // budget into one frame and bypass the chain-side guard.
+        // the same bound on chained CONTINUATIONs; this stops a peer
+        // putting the entire ``maxHeaderBlockFragmentBytes`` budget into
+        // one frame to bypass the chain-side guard.
         if body.count > Self.maxHeaderBlockFragmentBytes {
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(frame.streamID): HEADERS payload \(body.count) B exceeded cap \(Self.maxHeaderBlockFragmentBytes); dropping")
             return false
@@ -1248,8 +1266,8 @@ final class MITMHTTP2Connection {
         // rule's URL gate can be tested against the originating
         // request's path) and before any script-mode dispatch. Doing
         // it here (rather than inside each script branch) ensures the
-        // streamID→record map drains for pass-through responses too —
-        // without this it leaks until connection close. Interim 1xx
+        // streamID→record map drains for pass-through responses too,
+        // which would otherwise leak until connection close. Interim 1xx
         // responses peek so the record stays live for the matching
         // final response that follows on the same stream.
         let originatingRequest: MITMRequestLog.Record?
@@ -1879,9 +1897,22 @@ final class MITMHTTP2Connection {
         let prefix = pending.data
         pending.data = Data()
         pending.abandoned = true
-        // Early-open stream: HEADERS already opened it in order, so emit only
-        // the buffered body prefix; subsequent DATA forwards verbatim.
+        // Early-open stream: HEADERS already opened it in order.
         if pending.headersAlreadyEmitted {
+            if pending.codec.requiresDecompression {
+                // Those HEADERS announced identity (the buffered body was to be
+                // re-emitted decompressed), but the rewrite is being abandoned
+                // with the body still compressed — forwarding the compressed
+                // prefix verbatim would contradict the identity framing. Reset
+                // the stream on both legs and swallow the rest (mark
+                // synth-responded) instead of emitting a mislabeled body.
+                pendingMessages.removeValue(forKey: streamID)
+                markSynthResponded(streamID)
+                pendingClientBytes.append(rstStreamFrame(streamID: streamID, errorCode: Self.errorCodeInternal))
+                return rstStreamFrame(streamID: streamID, errorCode: Self.errorCodeInternal)
+            }
+            // Identity body: the announced framing matches, so emit the buffered
+            // prefix and forward subsequent DATA verbatim.
             pendingMessages[streamID] = pending
             return emitBufferedDataFrames(streamID: streamID, payload: prefix, endStream: false)
         }
@@ -1970,12 +2001,21 @@ final class MITMHTTP2Connection {
             // in ``applyScriptsAndEmit``.
             guard let decoded = MITMBodyCodec.decompress(pending.data, plan: pending.codec, host: rewriter.host) else {
                 if pending.headersAlreadyEmitted {
-                    // Early-open stream: its HEADERS (announced identity) are
-                    // already on the wire, so we can't fall back to the
-                    // encoded-passthrough HEADERS. Emit the buffered body to
-                    // close the stream — a rare decode failure degrades to one
-                    // unparseable request, not a connection-wide reset.
-                    output.append(emitBufferedDataFrames(streamID: streamID, payload: pending.data, endStream: endStream))
+                    // Early-open stream: its HEADERS (announced identity, because
+                    // the buffered body was to be re-emitted decompressed) are
+                    // already on the wire upstream, so we can't relabel them back
+                    // to the original content-encoding. Emitting the still-
+                    // compressed buffered bytes would hand the peer a body that
+                    // contradicts the identity framing it was promised — an
+                    // undecodable, mislabeled message. Reset the stream on both
+                    // legs instead so the one failed request fails cleanly (the
+                    // client can retry) rather than delivering a corrupt body, and
+                    // mark it synth-responded so any already-buffered follow-on
+                    // frames for the stream are swallowed rather than forwarded
+                    // onto the now-reset stream.
+                    output.append(rstStreamFrame(streamID: streamID, errorCode: Self.errorCodeInternal))
+                    pendingClientBytes.append(rstStreamFrame(streamID: streamID, errorCode: Self.errorCodeInternal))
+                    markSynthResponded(streamID)
                 } else {
                     output.append(emitPassthroughDeferred(streamID: streamID, pending: pending, endStream: endStream))
                 }
@@ -2136,6 +2176,37 @@ final class MITMHTTP2Connection {
         // DATA frame (body case). HTTP/2 requires DATA to follow HEADERS
         // when there's a body; an empty body is fine on HEADERS alone.
         let headersHaveEndStream = endStream && body.isEmpty
+        // Flow-control pacing for a MITM-buffered RESPONSE body. While the
+        // response was buffered the client received nothing on this stream, so
+        // its per-stream receive window is still at the client's initial value;
+        // the rewritten/decompressed body can far exceed it (decompression alone
+        // routinely multiplies a gzipped body several-fold), and emitting it
+        // whole would overflow the window — a FLOW_CONTROL_ERROR the client
+        // answers with a connection-wide GOAWAY that tears down every stream. The
+        // synth (`Anywhere.respond`) path already paces to the client's windows;
+        // a buffered rewrite must too. When the body doesn't fit the currently
+        // available window, hand it to the inbound leg — which receives the
+        // client's WINDOW_UPDATEs and owns the client-bound buffer — for paced
+        // delivery (``queuePacedClientResponse``); a body that fits the window is
+        // emitted inline below.
+        //
+        // Gated on ``endStream``: a buffered response that ends with trailers
+        // flushes here with ``endStream == false`` and its trailer HEADERS are
+        // emitted on THIS (outbound) leg right after, while a paced body drains
+        // over later WINDOW_UPDATEs on the inbound leg — so pacing would let the
+        // trailer race ahead of the body. Buffered rewrites of trailer-bearing
+        // responses are rare (gRPC streams use streamScript, not buffering), so a
+        // trailer-bearing response is emitted inline and only stream-ending
+        // bodies are paced.
+        let pacingWindow = Swift.max(0, Swift.min(flowController.connectionWindow, flowController.clientInitialStreamWindow))
+        if direction == .outbound, endStream, !body.isEmpty, body.count > pacingWindow,
+           let onPacedResponse,
+           onPacedResponse(streamID, reencoded, body, endStream) {
+            // Accepted for paced delivery on the inbound leg. A `false` return
+            // (inbound client-bound buffer over budget) falls through to the
+            // inline emission below rather than pacing.
+            return
+        }
         output.append(emitHeaderBlock(
             streamID: streamID,
             block: reencoded,
@@ -2313,6 +2384,70 @@ final class MITMHTTP2Connection {
         flushPendingSynth(streamID: streamID)
     }
 
+    /// Upper bound on bytes held in ``pendingSynthBodies`` for client-bound
+    /// pacing (synth + handed-over rewrite responses) before a new paced
+    /// response is declined — a paced body lingers until the client's windows
+    /// drain it, so this caps what a slow client with many concurrent large
+    /// rewrites can hold at once. 8 MiB is 2× the per-body cap.
+    private static let maxPacedClientBufferBytes: Int = 2 * MITMBodyCodec.maxBufferedBodyBytes
+
+    /// Inbound-leg entry point for a buffered-rewrite RESPONSE handed over from
+    /// the outbound leg (``onPacedResponse``) because its body exceeds the
+    /// client's current flow-control window. Emits the already-final HEADERS to
+    /// the client-bound buffer immediately, then paces the body to the client's
+    /// windows through the same machinery `Anywhere.respond` uses —
+    /// ``pendingSynthBodies`` + ``flushPendingSynth`` (and ``flushAllPendingSynth``
+    /// on a connection WINDOW_UPDATE). The entry is created with
+    /// ``isPreEstablishment`` false, so ``completeSynthStream`` just drops it on
+    /// the last byte (no GOAWAY) and the connection-debt accounting matches the
+    /// inline ``emitBufferedDataFrames`` path (the body-fits path): both add the
+    /// emitted byte count as synth debt, withheld from the client→upstream WINDOW_UPDATE
+    /// relay so the upstream — already credited for the bytes it sent via
+    /// ``creditBufferedDataToSender`` — isn't credited twice.
+    ///
+    /// Deliberately does NOT ``markSynthResponded``: the upstream opened this
+    /// stream, so a later client RST_STREAM/trailer must still reach it
+    /// (``handleRSTStream`` forwards it because the stream isn't in
+    /// ``synthRespondedStreams``); the client's per-stream WINDOW_UPDATEs are
+    /// still consumed for pacing via the ``pendingSynthBodies`` membership check
+    /// in ``handleWindowUpdate``. Inbound leg only; runs synchronously on the
+    /// shared lwIP queue from the outbound leg's flush, and the session flushes
+    /// the HEADERS + first window toward the client right after the outbound pass
+    /// so they aren't stranded awaiting the next inbound read.
+    ///
+    /// Precondition (enforced by the one call site in ``emitFlushResult``): the
+    /// body ends the stream (``endStream`` true, non-empty body). A
+    /// trailer-bearing response is never paced — ``flushPendingSynth`` puts
+    /// END_STREAM on the last DATA frame, which would be wrong if a trailer
+    /// followed.
+    @discardableResult
+    func queuePacedClientResponse(streamID: UInt32, headerBlock: Data, body: Data, endStream: Bool) -> Bool {
+        // Decline when the client-bound pacing buffer is already at budget; the
+        // outbound leg then emits inline instead — accepting the overflow risk
+        // only past the cap, and only for a connection already flooding us. The
+        // common case (a few rewrites draining promptly) stays well under it.
+        let held = pendingSynthBodies.values.reduce(0) { $0 + $1.remaining.count }
+        guard held + body.count <= Self.maxPacedClientBufferBytes else {
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): paced client buffer would reach \(held + body.count) B over cap \(Self.maxPacedClientBufferBytes) B; emitting response inline (unpaced)")
+            return false
+        }
+        pendingClientBytes.append(emitHeaderBlock(
+            streamID: streamID,
+            block: headerBlock,
+            endStream: endStream && body.isEmpty,
+            kind: .headers
+        ))
+        guard !body.isEmpty else { return true }
+        pendingSynthBodies[streamID] = PendingSynthBody(
+            remaining: body,
+            streamWindow: flowController.clientInitialStreamWindow,
+            isPreEstablishment: false,
+            goAwayLastStreamID: 0
+        )
+        flushPendingSynth(streamID: streamID)
+        return true
+    }
+
     /// Emits as much of stream `streamID`'s buffered synth body as the
     /// connection and per-stream windows currently allow, appending DATA to
     /// ``pendingClientBytes`` and doing the window accounting. When the body
@@ -2357,14 +2492,20 @@ final class MITMHTTP2Connection {
         }
     }
 
-    /// Flushes every buffered synth body in ``synthRespondedOrder`` (FIFO)
-    /// order until the shared connection window is exhausted — used when a
-    /// connection-level WINDOW_UPDATE grows the window shared across streams.
-    /// FIFO keeps a stream that missed one grant at the front of the next, so
-    /// no synth stream starves across rounds.
+    /// Flushes every buffered client-bound body — `Anywhere.respond` synth
+    /// responses AND handed-over buffered-rewrite responses
+    /// (``queuePacedClientResponse``) — until the shared connection window is
+    /// exhausted, used when a connection-level WINDOW_UPDATE grows the window
+    /// shared across streams. Iterates ``pendingSynthBodies`` in stream-ID order
+    /// (≈ arrival order, so no stream starves across rounds) rather than
+    /// ``synthRespondedOrder``: a paced rewrite response lives in
+    /// ``pendingSynthBodies`` but is NOT synth-responded, so a
+    /// ``synthRespondedOrder`` walk would skip it and strand its body. ``keys``
+    /// is snapshotted by ``sorted()`` before the loop, so a ``flushPendingSynth``
+    /// that completes (and removes) an entry mid-iteration is safe.
     private func flushAllPendingSynth() {
         guard !pendingSynthBodies.isEmpty else { return }
-        for streamID in synthRespondedOrder {
+        for streamID in pendingSynthBodies.keys.sorted() {
             if flowController.connectionWindow <= 0 { break }
             if pendingSynthBodies[streamID] != nil {
                 flushPendingSynth(streamID: streamID)
@@ -2520,6 +2661,27 @@ final class MITMHTTP2Connection {
         d.append(UInt8((sid >> 8) & 0xFF))
         d.append(UInt8(sid & 0xFF))
         d.append(contentsOf: [0, 0, 0, 0]) // error code: NO_ERROR
+        return d
+    }
+
+    /// INTERNAL_ERROR (RFC 9113 §7) — the error code for a stream the MITM
+    /// resets because it can no longer faithfully relay it.
+    private static let errorCodeInternal: UInt32 = 0x2
+
+    /// A RST_STREAM (RFC 9113 §6.4) carrying ``errorCode`` for ``streamID``.
+    /// Aborts a single stream the MITM can no longer faithfully relay — e.g. an
+    /// early-opened request whose buffered body can't be re-emitted as the
+    /// identity framing its already-sent HEADERS announced — without tearing
+    /// down the whole connection. Emitted toward upstream (via the pump output)
+    /// and toward the client (via ``pendingClientBytes``) so both peers release
+    /// the stream cleanly.
+    private func rstStreamFrame(streamID: UInt32, errorCode: UInt32) -> Data {
+        var d = Data()
+        appendFrameHeader(typeCode: FrameTypeCode.rstStream, flags: 0, streamID: streamID, payloadLength: 4, into: &d)
+        d.append(UInt8((errorCode >> 24) & 0xFF))
+        d.append(UInt8((errorCode >> 16) & 0xFF))
+        d.append(UInt8((errorCode >> 8) & 0xFF))
+        d.append(UInt8(errorCode & 0xFF))
         return d
     }
 
@@ -2835,9 +2997,9 @@ final class MITMHTTP2Connection {
     /// from the sender. While the stream was buffered,
     /// ``creditBufferedDataToSender`` gave the sender its own WINDOW_UPDATEs; the
     /// receiver now credits what it receives here and those credits are relayed
-    /// back to the sender on the opposite leg, so without compensation the
-    /// sender would be credited twice. Recording the emitted byte count as debt
-    /// makes the opposite leg withhold exactly that much from the relay (mirror
+    /// back to the sender on the opposite leg, double-crediting it. Recording
+    /// the emitted byte count as debt makes the opposite leg withhold exactly
+    /// that much from the relay (mirror
     /// of the synth path's ``addSynthDebt``). Direction selects the relay that
     /// withholds it: a response body (outbound) is credited by the client and
     /// relayed to the server on the inbound leg (``withholdSynthDebt``); a

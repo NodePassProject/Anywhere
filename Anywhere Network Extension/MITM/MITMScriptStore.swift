@@ -31,10 +31,9 @@ import Foundation
 /// Either ceiling rejects a write with ``StoreError/capacityExceeded``;
 /// the engine surfaces that as a JS `Error` so user code can catch and
 /// shed entries via ``delete(scope:key:)``. The aggregate cap bounds the
-/// store's total footprint between rule-set reloads — without it, a bundle
-/// of many rule sets (each filling its own 1 MiB scope) could pin tens of
-/// MiB against the Network Extension's ~50 MiB budget until the next
-/// ``purgeExcept(activeIDs:)``.
+/// store's total footprint between rule-set reloads: a bundle of many rule
+/// sets (each filling its own 1 MiB scope) could otherwise pin tens of MiB
+/// until the next ``purgeExcept(activeIDs:)``.
 final class MITMScriptStore {
 
     static let shared = MITMScriptStore()
@@ -78,14 +77,17 @@ final class MITMScriptStore {
     /// aggregate cap; the prior value is left untouched in that case.
     func set(scope: UUID, key: String, value: Data) throws {
         lock.lock(); defer { lock.unlock() }
-        var bucket = buckets[scope] ?? [:]
-        let existing = bucket[key]
+        // Read the prior entry's byte cost without binding the bucket to a
+        // local: `var bucket = buckets[scope]` would alias the bucket's COW
+        // storage, so the later `bucket[key] = value` would copy the *whole*
+        // bucket — O(N) per write, O(N²) for a script storing N keys over a
+        // request. Computing the delta from a transient read and then mutating
+        // through `buckets[scope, default:]` keeps the write in-place (O(1)).
         let keyBytes = key.utf8.count
-        let oldEntryBytes = existing.map { $0.count + keyBytes } ?? 0
+        let oldEntryBytes = buckets[scope]?[key].map { $0.count + keyBytes } ?? 0
         let newEntryBytes = value.count + keyBytes
         let delta = newEntryBytes - oldEntryBytes
-        let currentTotal = bucketSizes[scope] ?? 0
-        let projected = currentTotal + delta
+        let projected = (bucketSizes[scope] ?? 0) + delta
         if projected > Self.maxBytesPerScope {
             throw StoreError.capacityExceeded
         }
@@ -93,8 +95,7 @@ final class MITMScriptStore {
         if projectedTotal > Self.maxTotalBytes {
             throw StoreError.capacityExceeded
         }
-        bucket[key] = value
-        buckets[scope] = bucket
+        buckets[scope, default: [:]][key] = value
         bucketSizes[scope] = projected
         totalBytes = projectedTotal
     }
@@ -123,11 +124,9 @@ final class MITMScriptStore {
 
     /// Drops every bucket whose scope is not in ``activeIDs``. Called
     /// from ``MITMRewritePolicy/load`` when the user edits their rule
-    /// set list; without this, the buckets of deleted rule sets
-    /// persist for the Network Extension's lifetime since the store
-    /// has no other GC trigger. With the 1 MiB per-scope cap that
-    /// adds up — a user who churns rule sets while debugging can
-    /// pile on hundreds of MiB of dead scopes before the NE recycles.
+    /// set list — the store's only GC trigger, so a user churning rule
+    /// sets while debugging would otherwise accumulate dead scopes
+    /// (1 MiB each) until the NE recycles.
     /// Returns the number of buckets dropped so the caller can log
     /// the reclaim.
     @discardableResult

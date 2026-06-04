@@ -81,6 +81,10 @@ enum MITMScriptTransform {
                 for script in scripts {
                     engine.precompile(source: script.source, sourceKey: script.sourceKey)
                 }
+                // Drop compiled entries for sources no longer in this set so an
+                // in-place script edit (a new content-hash key) doesn't leave its
+                // prior compilation pinned in the cache for the engine's lifetime.
+                engine.pruneCompiled(keeping: Set(scripts.map { $0.sourceKey }))
             }
         }
     }

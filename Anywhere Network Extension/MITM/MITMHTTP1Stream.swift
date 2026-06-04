@@ -28,8 +28,7 @@ final class MITMHTTP1Stream {
     /// 8 KiB and 64 KiB by default; legitimate traffic stays well
     /// under both. A hostile or malformed peer that streams bytes
     /// without ever closing the head would otherwise grow the buffer
-    /// without bound and exhaust the Network Extension's ~50 MiB
-    /// budget. On cap exceed we permanently downgrade the stream to
+    /// without bound. On cap exceed we permanently downgrade the stream to
     /// passthrough — the bytes are forwarded verbatim, the rewrite is
     /// abandoned, and the connection survives.
     private static let maxHeadBytes: Int = 64 * 1024
@@ -39,9 +38,8 @@ final class MITMHTTP1Stream {
     /// the request/status head; once framing is chunked, a peer that streams
     /// a size line or trailer line that never ends (e.g. an unbounded run of
     /// hex digits or chunk-extension bytes with no CRLF) would otherwise grow
-    /// ``rxBuffer`` without bound and exhaust the Network Extension's ~50 MiB
-    /// budget — a remote memory-exhaustion DoS. On exceed the framing is
-    /// treated as malformed (the body is terminated and the stream downgrades
+    /// ``rxBuffer`` without bound — a remote memory-exhaustion DoS. On exceed
+    /// the framing is treated as malformed (the body is terminated and the stream downgrades
     /// to passthrough), mirroring the malformed-size-line handling.
     fileprivate static let maxChunkLineBytes: Int = 16 * 1024
 
@@ -77,6 +75,17 @@ final class MITMHTTP1Stream {
     /// first transparent ``MITMOperation/rewrite`` to the replacement's
     /// authority (see ``applyRewrite``); nil means "leave Host alone". Used
     /// only on request streams; response streams leave it nil.
+    ///
+    /// Sticky by design: once a transparent rewrite changes the host, the
+    /// connection's single upstream leg is committed to it, so this stays set
+    /// and EVERY later request on the same kept-alive connection — including
+    /// ones that match no rewrite rule — is routed to (and has its `Host`
+    /// rewritten to) the replacement authority, never the original. A request
+    /// that resolves a *different* host is torn down instead (see
+    /// ``MITMSession/resolvedUpstreamMatchesDialed``); clearing the authority
+    /// per-request to send unmatched requests to the original host would force a
+    /// teardown + retry on every such request (connection thrash), which the
+    /// one-upstream-per-connection model trades away for a stable authority.
     private var effectiveAuthority: String?
 
     /// The upstream the session should dial, surfaced when a transparent
@@ -1183,11 +1192,9 @@ final class MITMHTTP1Stream {
                 // its accumulator at ``maxBufferedBodyBytes``; the
                 // streaming path must too. A single declared chunk size
                 // can be arbitrarily large (sizes up to ``Int.max``
-                // parse), so without a bound a hostile or buggy upstream
-                // could grow this accumulator past the NE's ~50 MiB
-                // budget mid-chunk and OOM-kill the extension (taking
-                // down every tunneled flow). On overflow we stop trying
-                // to hand the script whole frames: flush any held chunk,
+                // parse), so a hostile or buggy upstream could otherwise grow
+                // this accumulator without bound mid-chunk. On overflow we stop
+                // trying to hand the script whole frames: flush any held chunk,
                 // switch the stream to bypass, and emit the buffered
                 // bytes verbatim as their own wire chunk. Re-chunking is
                 // transparent to the receiver (it concatenates chunk
@@ -2077,10 +2084,10 @@ final class MITMHTTP1Stream {
     }
 
     /// RFC 9110 §9.1: a method name is a `token` — the same tchar+
-    /// alphabet as header field-names. Scripts can write
-    /// ``ctx.method`` to any string; without validation a value like
-    /// ``"GET /attacker HTTP/1.1\r\nHost: a"`` smuggles a full request
-    /// line into the start position.
+    /// alphabet as header field-names. Scripts can write ``ctx.method``
+    /// to any string, so validating it blocks a value like
+    /// ``"GET /attacker HTTP/1.1\r\nHost: a"`` from smuggling a full
+    /// request line into the start position.
     private static func isValidMethodToken(_ s: String) -> Bool {
         return isValidHTTPHeaderName(s)
     }
@@ -2572,11 +2579,16 @@ private final class ChunkedReader {
                     return .needMore
                 }
                 let line = buffer.subdata(in: 0..<lineEnd)
+                // Validate the size line *before* forwarding it. On a malformed
+                // size the caller synthesizes a clean ``0\r\n\r\n`` terminator —
+                // but that only frames cleanly if we haven't already emitted the
+                // unparseable size line ahead of it. Return ``.malformed`` with
+                // the bytes still in the buffer (the caller clears them).
+                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
                 output.append(line)
                 output.append(0x0D); output.append(0x0A)
                 buffer.removeFirst(lineEnd + 2)
                 scanCursor = 0
-                guard let size = MITMHTTP1Stream.parseHexSize(line) else { return .malformed }
                 if size == 0 {
                     state = .trailerOrEnd
                 } else {

@@ -86,6 +86,14 @@ final class MITMGateRegex: @unchecked Sendable {
     /// preserve behavior.)
     private let isLiteral: Bool
 
+    /// The pattern the literal fast path matches against. For a literal
+    /// ``scheme://authority/…`` pattern the authority region is lowercased (the
+    /// URL's host is matched lowercased), so a gate written `https://API.example.com/`
+    /// still fires instead of silently never matching. Equal to ``pattern`` for
+    /// non-literal (regex) patterns, where lowercasing could corrupt a
+    /// case-sensitive escape like `\D`.
+    private let literalPattern: String
+
     /// ICU regex metacharacters. A pattern containing none of these is a plain
     /// literal — see ``isLiteral``.
     private static let regexMetacharacters: Set<Character> = [
@@ -166,9 +174,35 @@ final class MITMGateRegex: @unchecked Sendable {
         }
         self.regex = regex
         self.pattern = pattern
-        self.isLiteral = !pattern.isEmpty
+        let literal = !pattern.isEmpty
             && !pattern.contains { Self.regexMetacharacters.contains($0) }
-        Self.warnIfHostRegionHasUppercase(pattern)
+        self.isLiteral = literal
+        if literal {
+            // Lowercase the host region so a literal gate written with an
+            // uppercase host still matches the host-lowercased URL. A pure
+            // substring rewrite, safe for literals (no escapes to corrupt).
+            self.literalPattern = Self.lowercasingHostRegion(pattern)
+        } else {
+            self.literalPattern = pattern
+            // A regex's host region can't be safely auto-lowercased (it might
+            // carry a case-sensitive escape like `\D`), so warn the author
+            // instead when an uppercase host would make the rule dead.
+            Self.warnIfHostRegionHasUppercase(pattern)
+        }
+    }
+
+    /// Lowercases the authority (`host[:port]`) of a `scheme://authority/…`
+    /// pattern, leaving the scheme and path/query untouched. Returns the pattern
+    /// unchanged when it carries no `://` (a bare-authority or path-only pattern,
+    /// where the host can't be unambiguously located). Mirrors
+    /// ``MITMRewritePolicy``'s URL host-lowercasing so pattern and URL agree.
+    private static func lowercasingHostRegion(_ pattern: String) -> String {
+        guard let sep = pattern.range(of: "://") else { return pattern }
+        let authStart = sep.upperBound
+        let authEnd = pattern[authStart...].firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) ?? pattern.endIndex
+        return pattern[..<authStart].lowercased()
+            + pattern[authStart..<authEnd].lowercased()
+            + String(pattern[authEnd...])
     }
 
     /// Warns once, at compile time, when a pattern's authority region carries an
@@ -199,7 +233,7 @@ final class MITMGateRegex: @unchecked Sendable {
         // equivalent to ``regex.firstMatch`` under empty options (see
         // ``isLiteral``).
         if isLiteral {
-            return normalizedURL.range(of: pattern, options: .literal) != nil
+            return normalizedURL.range(of: literalPattern, options: .literal) != nil
         }
         lock.lock()
         if quarantined {
