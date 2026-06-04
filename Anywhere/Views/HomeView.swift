@@ -39,10 +39,10 @@ struct HomeView: View {
     var body: some View {
         ZStack {
             if #available(iOS 26.0, *) {
-                backgroundGradient
+                background
                     .ignoresSafeArea()
             } else {
-                backgroundGradient
+                background
                     .ignoresSafeArea(edges: .horizontal)
                     .ignoresSafeArea(edges: .top)
             }
@@ -50,27 +50,11 @@ struct HomeView: View {
             GeometryReader { geometry in
                 ScrollView {
                     VStack(spacing: 0) {
-                        Picker("Proxy Mode", selection: $proxyMode) {
-                            Text("Rule").tag(ProxyMode.rule)
-                            Text("Global").tag(ProxyMode.global)
-                        }
-                        .pickerStyle(.segmented)
-                        .fixedSize()
-                        .padding(.top, 10)
-                        .onAppear {
-                            proxyMode = AWCore.getProxyMode()
-                        }
-                        
                         Spacer()
                         
                         VStack(spacing: 10) {
                             powerButton
-                            
-                            Text(viewModel.statusText)
-                                .font(.system(size: 20, weight: .medium))
-                                .foregroundStyle(isConnected ? .white : .secondary)
-                                .contentTransition(.interpolate)
-                                .animation(.easeInOut, value: viewModel.vpnStatus)
+                            statusText
                         }
                         .padding(.bottom, 50)
                         
@@ -86,13 +70,25 @@ struct HomeView: View {
                         
                         Rectangle()
                             .fill(.clear)
-                            .frame(height: 30)
+                            .frame(height: geometry.size.height / 8)
                     }
                     .padding(.horizontal, 24)
                     .frame(minHeight: geometry.size.height)
                     .animation(.easeInOut(duration: 0.4), value: isConnected)
                 }
             }
+        }
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Picker("Proxy Mode", selection: $proxyMode) {
+                    Text("Rule").tag(ProxyMode.rule)
+                    Text("Global").tag(ProxyMode.global)
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+        .onAppear {
+            proxyMode = AWCore.getProxyMode()
         }
         .onChange(of: proxyMode) {
             AWCore.setProxyMode(proxyMode)
@@ -121,19 +117,19 @@ struct HomeView: View {
     // MARK: - Background
 
     @ViewBuilder
-    private var backgroundGradient: some View {
+    private var background: some View {
         if isConnected {
             LinearGradient(
-                colors: [Color("GradientStart"), Color("GradientEnd")],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+                colors: [Color.connectedBackgroundStart, Color.connectedBackgroundEnd],
+                startPoint: .top,
+                endPoint: .bottom
             )
             .transition(.blurReplace)
         } else {
             LinearGradient(
-                colors: [Color("GradientDisconnectedStart"), Color("GradientDisconnectedEnd")],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+                colors: [Color.disconnectedBackgroundStart, Color.disconnectedBackgroundEnd],
+                startPoint: .top,
+                endPoint: .bottom
             )
             .transition(.blurReplace)
         }
@@ -141,6 +137,7 @@ struct HomeView: View {
 
     // MARK: - Power Button
 
+    @ViewBuilder
     private var powerButton: some View {
         Button {
             if viewModel.hasConfigurations {
@@ -200,9 +197,21 @@ struct HomeView: View {
         .sensoryFeedback(.impact(weight: .medium), trigger: isConnected)
         .animation(.easeInOut(duration: 0.6), value: isConnected)
     }
+    
+    // MARK: - Status Text
+    
+    @ViewBuilder
+    private var statusText: some View {
+        Text(viewModel.statusText)
+            .font(.system(size: 20, weight: .medium))
+            .foregroundStyle(isConnected ? .white : .secondary)
+            .contentTransition(.interpolate)
+            .animation(.easeInOut, value: viewModel.vpnStatus)
+    }
 
     // MARK: - Traffic Stats
 
+    @ViewBuilder
     private var trafficStats: some View {
         cardContent {
             TrafficStatsContent()
@@ -220,6 +229,7 @@ struct HomeView: View {
         }
     }
 
+    @ViewBuilder
     private func selectedConfigurationCard(_ configuration: ProxyConfiguration) -> some View {
         Menu {
             ForEach(viewModel.standalonePickerItems) { item in
@@ -273,6 +283,7 @@ struct HomeView: View {
         .buttonStyle(.plain)
     }
 
+    @ViewBuilder
     private var emptyStateCard: some View {
         Button {
             showingAddSheet = true

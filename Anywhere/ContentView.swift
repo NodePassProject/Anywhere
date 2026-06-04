@@ -23,85 +23,89 @@ struct ContentView: View {
     }
 
     var body: some View {
-        Group {
-            if #available(iOS 18.0, *) {
-                TabView(selection: $selectedTab) {
-                    Tab("Home", systemImage: "house", value: .home) {
-                        NavigationStack {
-                            HomeView()
-                        }
-                    }
-
-                    Tab("Proxies", systemImage: "network", value: .proxies) {
-                        NavigationStack {
-                            ProxyListView()
-                        }
-                    }
-
-                    Tab("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill", value: .chains) {
-                        NavigationStack {
-                            ChainListView()
-                        }
-                    }
-
-                    Tab("Settings", systemImage: "gearshape", value: .settings) {
-                        NavigationStack {
-                            SettingsView()
-                        }
-                    }
+        tabView
+            .onChange(of: deepLinkManager.url) { _, newValue in
+                if let url = newValue {
+                    selectedTab = .proxies
+                    pendingDeepLinkURL = url
+                    deepLinkManager.url = nil
+                    showingDeepLinkAddSheet = true
                 }
-                .tabViewStyle(.sidebarAdaptable)
-            } else {
-                TabView(selection: $selectedTab) {
+            }
+            .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
+                DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
+                    AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)
+                }
+            }
+            .sheet(isPresented: $showingManualAddSheet) {
+                ProxyEditorView { configuration in
+                    viewModel.addConfiguration(configuration)
+                }
+            }
+            .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
+                Button(String(localized: "OK")) {}
+            } message: {
+                let names = viewModel.orphanedRuleSetNames.joined(separator: ", ")
+                Text("The proxy used by the following routing rules was deleted. They have been reset to Default: \(names)")
+            }
+    }
+    
+    @ViewBuilder
+    private var tabView: some View {
+        if #available(iOS 18.0, *) {
+            TabView(selection: $selectedTab) {
+                Tab("Home", systemImage: "house", value: .home) {
                     NavigationStack {
                         HomeView()
                     }
-                    .tabItem { Label("Home", systemImage: "house") }
-                    .tag(AppTab.home)
+                    .colorScheme(.dark)
+                }
 
+                Tab("Proxies", systemImage: "network", value: .proxies) {
                     NavigationStack {
                         ProxyListView()
                     }
-                    .tabItem { Label("Proxies", systemImage: "network") }
-                    .tag(AppTab.proxies)
+                }
 
+                Tab("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill", value: .chains) {
                     NavigationStack {
                         ChainListView()
                     }
-                    .tabItem { Label("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill") }
-                    .tag(AppTab.chains)
+                }
 
+                Tab("Settings", systemImage: "gearshape", value: .settings) {
                     NavigationStack {
                         SettingsView()
                     }
-                    .tabItem { Label("Settings", systemImage: "gearshape") }
-                    .tag(AppTab.settings)
                 }
             }
-        }
-        .onChange(of: deepLinkManager.url) { _, newValue in
-            if let url = newValue {
-                selectedTab = .proxies
-                pendingDeepLinkURL = url
-                deepLinkManager.url = nil
-                showingDeepLinkAddSheet = true
+            .tabViewStyle(.sidebarAdaptable)
+        } else {
+            TabView(selection: $selectedTab) {
+                NavigationStack {
+                    HomeView()
+                }
+                .tabItem { Label("Home", systemImage: "house") }
+                .tag(AppTab.home)
+
+                NavigationStack {
+                    ProxyListView()
+                }
+                .tabItem { Label("Proxies", systemImage: "network") }
+                .tag(AppTab.proxies)
+
+                NavigationStack {
+                    ChainListView()
+                }
+                .tabItem { Label("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill") }
+                .tag(AppTab.chains)
+
+                NavigationStack {
+                    SettingsView()
+                }
+                .tabItem { Label("Settings", systemImage: "gearshape") }
+                .tag(AppTab.settings)
             }
-        }
-        .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
-            DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)
-            }
-        }
-        .sheet(isPresented: $showingManualAddSheet) {
-            ProxyEditorView { configuration in
-                viewModel.addConfiguration(configuration)
-            }
-        }
-        .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
-            Button(String(localized: "OK")) {}
-        } message: {
-            let names = viewModel.orphanedRuleSetNames.joined(separator: ", ")
-            Text("The proxy used by the following routing rules was deleted. They have been reset to Default: \(names)")
         }
     }
 }
