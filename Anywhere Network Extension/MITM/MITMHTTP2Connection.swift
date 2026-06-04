@@ -228,7 +228,9 @@ final class MITMHTTP2Connection {
         /// (method/url/status/headers writes are ignored everywhere), so the
         /// one capability lost on this path is a request-phase
         /// ``Anywhere.respond``, which can't short-circuit a stream already
-        /// open upstream.
+        /// open upstream. The first request to open the upstream is exempt:
+        /// nothing has opened ahead of it, so its HEADERS are withheld
+        /// (``deferredFirstStreamID``) to keep ``Anywhere.respond`` working.
         var headersAlreadyEmitted: Bool = false
     }
     private var pendingMessages: [UInt32: PendingMessage] = [:]
@@ -309,6 +311,15 @@ final class MITMHTTP2Connection {
     /// last-stream-id so a co-batched proxy stream that the one-shot close drops
     /// is reported as un-processed and retried rather than assumed handled.
     private var forwardedRequestUpstream = false
+    /// Stream ID of the first inbound bodied request whose opening HEADERS we
+    /// withheld — instead of early-opening it (see ``processFreshHeaderBlock``) —
+    /// so a request-phase ``Anywhere.respond`` can still short-circuit it. Safe
+    /// only because it's the first stream to open the upstream: nothing has
+    /// opened ahead of it, so deferring its HEADERS can't violate stream-ID
+    /// order (RFC 9113 §5.1.1). nil once it resolves (forwarded or
+    /// synth-responded) or is force-committed by a higher-numbered stream via
+    /// ``commitDeferredFirstRequestIfNeeded``.
+    private var deferredFirstStreamID: UInt32?
     /// Whether a server connection preface (empty SETTINGS + a SETTINGS ACK for
     /// the client's SETTINGS) has been emitted to the client. Only used for a
     /// pre-establishment synth reply, where no upstream relays one.
@@ -795,6 +806,11 @@ final class MITMHTTP2Connection {
         for id in abandonedPending {
             pendingMessages.removeValue(forKey: id)
         }
+        // The withheld first request, if it's among the abandoned streams, won't
+        // resolve either — drop its tracking with the rest.
+        if let deferred = deferredFirstStreamID, deferred > lastStreamID {
+            deferredFirstStreamID = nil
+        }
         let abandonedStreaming = streamingScripts.keys.filter { $0 > lastStreamID }
         for id in abandonedStreaming {
             streamingScripts.removeValue(forKey: id)
@@ -843,13 +859,17 @@ final class MITMHTTP2Connection {
         // Abort pacing of a synth body the client cancelled mid-stream.
         pendingSynthBodies.removeValue(forKey: frame.streamID)
         _ = rewriter.requestLog.popHTTP2(streamID: frame.streamID)
-        // Swallow RST_STREAMs for streams the upstream never saw — the
-        // request was synthesized on the inner leg via Anywhere.respond
-        // and no HEADERS / DATA ever went on the wire upstream.
-        // Forwarding the RST in that case is a PROTOCOL_ERROR per RFC
-        // 9113 §5.4.1 (RST_STREAM on an idle stream → connection-level
-        // error), which the upstream answers with GOAWAY and kills
-        // every other stream on the connection.
+        // Swallow RST_STREAMs for streams the upstream never saw, so we don't
+        // reset an idle stream — a PROTOCOL_ERROR per RFC 9113 §5.4.1 that the
+        // upstream answers with a connection-wide GOAWAY, killing every other
+        // stream. Two kinds never reached the wire: a request synthesized on the
+        // inner leg via Anywhere.respond, and the first request whose HEADERS are
+        // still withheld. The latter's ID is cleared once its HEADERS do go out,
+        // so a later RST on an opened stream is forwarded normally.
+        if deferredFirstStreamID == frame.streamID {
+            deferredFirstStreamID = nil
+            return Data()
+        }
         if clearSynthResponded(frame.streamID) {
             return Data()
         }
@@ -1176,6 +1196,38 @@ final class MITMHTTP2Connection {
         )
     }
 
+    /// Emits the deferred first request's withheld opening HEADERS now, in
+    /// stream-ID order, because ``streamID`` is a higher-numbered stream about
+    /// to open upstream and HTTP/2 requires streams to open in increasing-ID
+    /// order (RFC 9113 §5.1.1). This converts the first request to the
+    /// early-open path: its body stays buffered for the script, but a
+    /// request-phase ``Anywhere.respond`` can no longer short-circuit it (the
+    /// same trade-off a natively early-opened bodied request makes). A no-op
+    /// when nothing is deferred, when the deferred stream is the one now
+    /// opening, or when it has already been emitted/abandoned.
+    private func commitDeferredFirstRequestIfNeeded(before streamID: UInt32, into output: inout Data) {
+        guard let deferred = deferredFirstStreamID, deferred != streamID else { return }
+        deferredFirstStreamID = nil
+        guard var pending = pendingMessages[deferred],
+              !pending.headersAlreadyEmitted, !pending.abandoned else { return }
+        // Mirror the early-open emission: drop content-encoding if the buffered
+        // body will be re-emitted as identity, log, and open the stream.
+        var openingHeaders = pending.headers
+        if pending.codec.requiresDecompression {
+            openingHeaders.removeAll { $0.name.equalsIgnoringASCIICase("content-encoding") }
+        }
+        logHTTP2Request(streamID: deferred, headers: openingHeaders)
+        output.append(emitHeaderBlock(
+            streamID: deferred,
+            block: HPACKEncoder.encodeHeaderBlock(openingHeaders),
+            endStream: false,
+            kind: .headers
+        ))
+        pending.headers = openingHeaders
+        pending.headersAlreadyEmitted = true
+        pendingMessages[deferred] = pending
+    }
+
     /// Processes a freshly-arrived header block once any deferred script
     /// state for the stream has been flushed. Pops/peeks the originating
     /// request, runs header rules, and either enters streaming-script mode,
@@ -1217,6 +1269,13 @@ final class MITMHTTP2Connection {
             ? originatingRequest?.url
             : nil
 
+        // Whether this is the first request to open the upstream on this
+        // connection — captured before ``didForwardUpstreamRequest`` is set
+        // below. Used at the buffered-body branch to withhold the first bodied
+        // request's HEADERS (so a request-phase ``Anywhere.respond`` can still
+        // short-circuit it) instead of early-opening it.
+        var isFirstUpstreamRequest = false
+
         // Native 302 / reject ``MITMOperation/rewrite``: synthesize the
         // response on the inner leg and short-circuit before the stream is
         // opened upstream. Gates on the original request URL; the transparent
@@ -1224,12 +1283,19 @@ final class MITMHTTP2Connection {
         // mutually exclusive with synth — first matching rewrite rule wins.
         // Reuses the same machinery as a request-phase ``Anywhere.respond``.
         if case .headers = kind, direction == .inbound, !isTrailer {
+            isFirstUpstreamRequest = !didForwardUpstreamRequest
             let requestGateURL = MITMHTTP2Rewriter.requestPath(in: decoded)
                 .map { "https://\(rewriter.host)\($0)" }
             if let synth = rewriter.requestSynthResponse(requestURL: requestGateURL) {
                 queueSynthesizedResponse(streamID: streamID, response: synth)
                 return false
             }
+            // A higher-numbered stream is about to open upstream. If the first
+            // request is still deferred (its HEADERS withheld so a request-phase
+            // ``Anywhere.respond`` could short-circuit it), commit it now —
+            // HTTP/2 streams must open in increasing-ID order (RFC 9113 §5.1.1),
+            // so this one can't open ahead of it.
+            commitDeferredFirstRequestIfNeeded(before: streamID, into: &output)
             // Not a native synth: the connection may need the upstream, so let
             // the held setup flush and the dial proceed. (A buffered-script
             // request that later calls Anywhere.respond is handled as a synth,
@@ -1349,7 +1415,7 @@ final class MITMHTTP2Connection {
             // try to decode the original payload.
             rewritten.removeAll { $0.name.equalsIgnoringASCIICase("content-length") }
 
-            // Inbound bodied request: open the stream now, in stream-ID
+            // Inbound bodied request: normally open the stream now, in stream-ID
             // order, instead of deferring HEADERS until the body is buffered.
             // See ``PendingMessage/headersAlreadyEmitted`` for why the order
             // matters and the trade-off it costs. Only the body is buffered
@@ -1357,7 +1423,16 @@ final class MITMHTTP2Connection {
             // block because that body is re-emitted as identity. A no-body
             // request falls through to the deferred path below, which can
             // still rewrite the head.
-            if direction == .inbound, !endStreamOnHeaders {
+            //
+            // EXCEPTION — the first request to open the upstream: nothing has
+            // opened ahead of it, so we can withhold its HEADERS and take the
+            // deferred path too, preserving a request-phase ``Anywhere.respond``
+            // (the one capability early-open costs). The dial already started
+            // (``didForwardUpstreamRequest`` flushed the connection setup), so
+            // the overlap is kept; only this stream's HEADERS wait. If a
+            // higher-numbered stream needs to open before the script runs,
+            // ``commitDeferredFirstRequestIfNeeded`` emits these HEADERS first.
+            if direction == .inbound, !endStreamOnHeaders, !isFirstUpstreamRequest {
                 var openingHeaders = rewritten
                 if codec.requiresDecompression {
                     openingHeaders.removeAll { $0.name.equalsIgnoringASCIICase("content-encoding") }
@@ -1377,6 +1452,12 @@ final class MITMHTTP2Connection {
                     headersAlreadyEmitted: true
                 )
                 return false
+            }
+            if direction == .inbound, !endStreamOnHeaders, isFirstUpstreamRequest {
+                // Deferred first request: record it so a later higher-numbered
+                // stream can force these HEADERS out in order, then fall through
+                // to the buffered path so the body is buffered for the script.
+                deferredFirstStreamID = streamID
             }
 
             // ``originatingRequest`` was popped once at the top of
@@ -1790,6 +1871,11 @@ final class MITMHTTP2Connection {
     /// so subsequent DATA frames forward verbatim. Used when the body
     /// overflows the buffer cap mid-stream.
     private func abandonPending(streamID: UInt32, pending: inout PendingMessage) -> Data {
+        if deferredFirstStreamID == streamID {
+            // A withheld first request whose body overflowed: its HEADERS go on
+            // the wire below, so it's no longer a still-deferred stream.
+            deferredFirstStreamID = nil
+        }
         let prefix = pending.data
         pending.data = Data()
         pending.abandoned = true
@@ -1864,6 +1950,11 @@ final class MITMHTTP2Connection {
     ) -> Bool {
         guard let pending = pendingMessages.removeValue(forKey: streamID) else {
             return continuation(&output)
+        }
+        if deferredFirstStreamID == streamID {
+            // The deferred first request is resolving now (forwarded or
+            // synth-responded), so it no longer needs an in-order force-commit.
+            deferredFirstStreamID = nil
         }
         if pending.abandoned {
             return continuation(&output)
