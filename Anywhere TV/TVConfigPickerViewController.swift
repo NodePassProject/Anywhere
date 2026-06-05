@@ -33,15 +33,15 @@ class TVConfigPickerViewController: UITableViewController {
     /// chains (under "Chains"), then one section per non-empty subscription.
     private static func buildSections(viewModel: VPNViewModel) -> [(header: String?, items: [PickerItem])] {
         var sections: [(header: String?, items: [PickerItem])] = []
-        let standalone = viewModel.standalonePickerItems
+        let standalone = ConfigurationStore.shared.standalonePickerItems
         if !standalone.isEmpty {
             sections.append((nil, standalone))
         }
-        let chains = viewModel.chainPickerItems
+        let chains = ChainStore.shared.pickerItems
         if !chains.isEmpty {
             sections.append((String(localized: "Chains"), chains))
         }
-        for sub in viewModel.subscriptionPickerSections {
+        for sub in SubscriptionStore.shared.pickerSections {
             sections.append((sub.header, sub.items))
         }
         return sections
@@ -99,10 +99,10 @@ class TVConfigPickerViewController: UITableViewController {
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         let item = sections[indexPath.section].items[indexPath.row]
-        if let configuration = viewModel.configurations.first(where: { $0.id == item.id }) {
+        if let configuration = ConfigurationStore.shared.configurations.first(where: { $0.id == item.id }) {
             viewModel.selectedConfiguration = configuration
-        } else if let chain = viewModel.chains.first(where: { $0.id == item.id }) {
-            viewModel.selectChain(chain)
+        } else if let chain = ChainStore.shared.chains.first(where: { $0.id == item.id }) {
+            viewModel.selectChain(chain, configurations: ConfigurationStore.shared.configurations)
         }
         dismiss(animated: true)
     }

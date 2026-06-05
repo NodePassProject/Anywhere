@@ -9,7 +9,7 @@ import Foundation
 import SwiftUI
 
 struct OnboardingView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Binding var onboardingCompleted: Bool
 
     @State private var bypassCountryCode = AWCore.getBypassCountryCode()
@@ -224,14 +224,9 @@ struct OnboardingView: View {
             }
         }
 
-        // Sync routing to network extension
-        Task { await viewModel.syncRoutingConfigurationToNE() }
-
-        // Persist country bypass and notify the tunnel.
-        AWCore.setBypassCountryCode(bypassCountryCode)
-        if !bypassCountryCode.isEmpty {
-            AWCore.notifyTunnelSettingsChanged()
-        }
+        // Persist the country bypass; the store re-syncs routing and restarts the tunnel.
+        // (The AD-block assignment above re-syncs itself via `updateAssignment`.)
+        ruleSetStore.bypassCountryCode = bypassCountryCode
 
         AWCore.setOnboardingCompleted(true)
 

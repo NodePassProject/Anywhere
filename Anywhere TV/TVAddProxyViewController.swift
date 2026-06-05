@@ -167,7 +167,7 @@ class TVAddProxyViewController: UITableViewController {
                 dismiss(animated: true) { [weak self] in
                     guard let self else { return }
                     let editor = TVProxyEditorViewController { config in
-                        self.viewModel.addConfiguration(config)
+                        ConfigurationStore.shared.add(config); self.viewModel.selectIfNone(config)
                     }
                     let nav = UINavigationController(rootViewController: editor)
                     nav.modalPresentationStyle = .fullScreen
@@ -271,7 +271,7 @@ class TVAddProxyViewController: UITableViewController {
             }
             do {
                 let config = try ProxyConfiguration.parse(url: trimmed, naiveProtocol: naiveProtocol)
-                viewModel.addConfiguration(config)
+                ConfigurationStore.shared.add(config); self.viewModel.selectIfNone(config)
                 dismiss(animated: true)
             } catch {
                 showError(error.localizedDescription)
@@ -291,7 +291,7 @@ class TVAddProxyViewController: UITableViewController {
                         total: result.total,
                         expire: result.expire
                     )
-                    viewModel.addSubscription(configurations: result.configurations, subscription: subscription)
+                    SubscriptionStore.shared.add(subscription, configurations: result.configurations)
                     dismiss(animated: true)
                 } catch {
                     showError(error.localizedDescription)

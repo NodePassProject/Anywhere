@@ -9,7 +9,10 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct RuleSetListView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(RoutingRuleSetStore.self) private var ruleSetStore
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(ChainStore.self) private var chainStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
 
     private static let importAllowedContentTypes: [UTType] = [UTType(filenameExtension: "arrs") ?? .data]
 
@@ -50,7 +53,6 @@ struct RuleSetListView: View {
                             RoutingRuleSetStore.shared.removeCustomRuleSet(customRuleSets[offset].id)
                         }
                         self.customRuleSets = RoutingRuleSetStore.shared.customRuleSets
-                        Task { await viewModel.syncRoutingConfigurationToNE() }
                     }
                 }
             }
@@ -80,7 +82,6 @@ struct RuleSetListView: View {
                     Button {
                         RoutingRuleSetStore.shared.resetAssignments()
                         builtInServiceRuleSets = RoutingRuleSetStore.shared.builtInServiceRuleSets
-                        Task { await viewModel.syncRoutingConfigurationToNE() }
                     } label: {
                         Label("Reset", systemImage: "arrow.clockwise")
                     }
@@ -88,16 +89,12 @@ struct RuleSetListView: View {
             }
         }
         .onChange(of: builtInServiceRuleSets) { oldValue, newValue in
-            var routingChanged: Bool = false
+            // Each `updateAssignment` re-syncs routing itself.
             for currentRuleSet in newValue {
                 let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
                 if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
                     RoutingRuleSetStore.shared.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
-                    routingChanged = true
                 }
-            }
-            if routingChanged {
-                Task { await viewModel.syncRoutingConfigurationToNE() }
             }
         }
         .onAppear {
@@ -195,7 +192,6 @@ struct RuleSetListView: View {
             let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules)
             RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet)
             customRuleSets = RoutingRuleSetStore.shared.customRuleSets
-            Task { await viewModel.syncRoutingConfigurationToNE() }
         } catch {
             importError = error.localizedDescription
         }
@@ -228,7 +224,6 @@ struct RuleSetListView: View {
                 let ruleSet = CustomRoutingRuleSet(name: name, rules: parsed.rules, subscriptionURL: url)
                 RoutingRuleSetStore.shared.addCustomRuleSet(ruleSet)
                 customRuleSets = RoutingRuleSetStore.shared.customRuleSets
-                await viewModel.syncRoutingConfigurationToNE()
             } catch {
                 subscribeError = error.localizedDescription
             }
@@ -241,19 +236,19 @@ struct RuleSetListView: View {
             Text("Default").tag(nil as String?)
             Text("DIRECT").tag("DIRECT" as String?)
             Text("REJECT").tag("REJECT" as String?)
-            ForEach(viewModel.standalonePickerItems) { item in
+            ForEach(configStore.standalonePickerItems) { item in
                 Text(item.name).tag(item.id.uuidString as String?)
             }
-            if !viewModel.chainPickerItems.isEmpty {
+            if !chainStore.pickerItems.isEmpty {
                 Section {
-                    ForEach(viewModel.chainPickerItems) { item in
+                    ForEach(chainStore.pickerItems) { item in
                         Text(item.name).tag(item.id.uuidString as String?)
                     }
                 } header: {
                     Text("Chains")
                 }
             }
-            ForEach(viewModel.subscriptionPickerSections) { section in
+            ForEach(subscriptionStore.pickerSections) { section in
                 Section {
                     ForEach(section.items) { item in
                         Text(item.name).tag(item.id.uuidString as String?)
@@ -278,9 +273,9 @@ struct RuleSetListView: View {
                     Text("DIRECT")
                 } else if assignedId == "REJECT" {
                     Text("REJECT")
-                } else if let config = viewModel.configurations.first(where: { $0.id.uuidString == assignedId }) {
+                } else if let config = configStore.configurations.first(where: { $0.id.uuidString == assignedId }) {
                     Text(config.name)
-                } else if let chain = viewModel.chains.first(where: { $0.id.uuidString == assignedId }) {
+                } else if let chain = chainStore.chains.first(where: { $0.id.uuidString == assignedId }) {
                     Text(chain.name)
                 } else {
                     Text("Default")

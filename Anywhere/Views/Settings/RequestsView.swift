@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct RequestsView: View {
-    @ObservedObject private var requestsModel = RequestsModel.shared
+    @Environment(RequestsModel.self) private var requestsModel
     @State private var selection = Set<UUID>()
     @State private var editMode: EditMode = .inactive
 

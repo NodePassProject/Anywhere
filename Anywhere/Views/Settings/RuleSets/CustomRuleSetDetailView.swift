@@ -9,8 +9,10 @@ import SwiftUI
 
 struct CustomRuleSetDetailView: View {
     let customRuleSetId: UUID
-    @ObservedObject private var ruleSetStore = RoutingRuleSetStore.shared
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(RoutingRuleSetStore.self) private var ruleSetStore
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(ChainStore.self) private var chainStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
 
     @State private var showAddRuleSheet = false
     @State private var showRenameAlert = false
@@ -47,7 +49,6 @@ struct CustomRuleSetDetailView: View {
                     .onDelete { offsets in
                         guard customRuleSet.subscriptionURL == nil else { return }
                         ruleSetStore.removeRules(from: customRuleSetId, at: Array(offsets))
-                        Task { await viewModel.syncRoutingConfigurationToNE() }
                     }
                 }
             }
@@ -123,7 +124,6 @@ struct CustomRuleSetDetailView: View {
             defer { isUpdating = false }
             do {
                 try await ruleSetStore.refreshCustomRuleSet(customRuleSetId)
-                await viewModel.syncRoutingConfigurationToNE()
             } catch {
                 updateError = error.localizedDescription
             }
@@ -152,25 +152,24 @@ struct CustomRuleSetDetailView: View {
             get: { ruleSet.assignedConfigurationId },
             set: { newValue in
                 ruleSetStore.updateAssignment(ruleSet, configurationId: newValue)
-                Task { await viewModel.syncRoutingConfigurationToNE() }
             }
         )) {
             Text("Default").tag(nil as String?)
             Text("DIRECT").tag("DIRECT" as String?)
             Text("REJECT").tag("REJECT" as String?)
-            ForEach(viewModel.standalonePickerItems) { item in
+            ForEach(configStore.standalonePickerItems) { item in
                 Text(item.name).tag(item.id.uuidString as String?)
             }
-            if !viewModel.chainPickerItems.isEmpty {
+            if !chainStore.pickerItems.isEmpty {
                 Section {
-                    ForEach(viewModel.chainPickerItems) { item in
+                    ForEach(chainStore.pickerItems) { item in
                         Text(item.name).tag(item.id.uuidString as String?)
                     }
                 } header: {
                     Text("Chains")
                 }
             }
-            ForEach(viewModel.subscriptionPickerSections) { section in
+            ForEach(subscriptionStore.pickerSections) { section in
                 Section {
                     ForEach(section.items) { item in
                         Text(item.name).tag(item.id.uuidString as String?)
@@ -204,8 +203,7 @@ struct CustomRuleSetDetailView: View {
 
 private struct AddRoutingRuleView: View {
     let customRuleSetId: UUID
-    @ObservedObject private var ruleSetStore = RoutingRuleSetStore.shared
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Environment(\.dismiss) private var dismiss
 
     @State private var routingRuleValue = ""
@@ -238,7 +236,6 @@ private struct AddRoutingRuleView: View {
                         let value = routingRuleValue.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !value.isEmpty else { return }
                         ruleSetStore.addRule(to: customRuleSetId, rule: RoutingRule(type: routingRuleType, value: normalizeValue(value, type: routingRuleType)))
-                        Task { await viewModel.syncRoutingConfigurationToNE() }
                         dismiss()
                     }
                     .disabled(routingRuleValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)

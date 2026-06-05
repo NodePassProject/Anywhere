@@ -6,10 +6,11 @@
 //
 
 import Foundation
-import Combine
+import Observation
 
-final class DeepLinkManager: ObservableObject {
-    @Published var url: String?
+@Observable
+final class DeepLinkManager {
+    var url: String?
 
     // Supported deep link schemes:
     // anywhere://add-proxy?link=<link>

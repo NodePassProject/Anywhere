@@ -6,21 +6,22 @@
 //
 
 import Foundation
-import Combine
+import Observation
 import SwiftUI
 
 @MainActor
-final class MITMRuleSetStore: ObservableObject {
+@Observable
+final class MITMRuleSetStore {
     static let shared = MITMRuleSetStore()
 
-    @Published var enabled: Bool {
+    var enabled: Bool {
         didSet {
             guard enabled != oldValue else { return }
             save()
         }
     }
 
-    @Published private(set) var ruleSets: [MITMRuleSet]
+    private(set) var ruleSets: [MITMRuleSet]
 
     private init() {
         let snapshot = MITMSnapshot.load()
