@@ -52,13 +52,16 @@ struct AddProxyView: View {
     @State private var errorMessage = ""
     @State private var showingRemnawaveHWIDAlert = false
     @State private var pendingSubscriptionURL = ""
+    @State private var pendingSubscriptionHost: String?
+    @State private var deepLinkHost: String?
 
-    init(showingManualAddSheet: Binding<Bool>, deepLinkURL: String? = nil) {
+    init(showingManualAddSheet: Binding<Bool>, deepLinkURL: String? = nil, deepLinkHost: String? = nil) {
         _showingManualAddSheet = showingManualAddSheet
         if let deepLinkURL {
             _selectedMethod = State(initialValue: .link)
             _linkURL = State(initialValue: deepLinkURL)
         }
+        _deepLinkHost = State(initialValue: deepLinkHost)
     }
 
     var body: some View {
@@ -96,7 +99,7 @@ struct AddProxyView: View {
         }
         .alert("Remnawave HWID", isPresented: $showingRemnawaveHWIDAlert) {
             Button("Enable") {
-                fetchSubscription(url: pendingSubscriptionURL, withRemnawaveHWID: true)
+                fetchSubscription(url: pendingSubscriptionURL, host: pendingSubscriptionHost, withRemnawaveHWID: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -249,7 +252,7 @@ struct AddProxyView: View {
         guard let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
         // Accept any single-proxy URL the parser knows, plus `http://` for
         // subscription URLs (the only scheme that's never a single proxy).
-        if ProxyConfiguration.canParseURL(clip) || clip.hasPrefix("http://") {
+        if ProxyConfiguration.canParseURL(clip) || clip.hasPrefix("http://") || clip.hasPrefix("anywhere://add-proxy") {
             linkURL = clip
         }
     }
@@ -271,6 +274,11 @@ struct AddProxyView: View {
     private func importFromString(_ string: String) {
         let trimmedURL = string.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        if let fronting = AnywhereProxyLink.parse(trimmedURL) {
+            importSubscription(url: fronting.link, host: fronting.host)
+            return
+        }
+
         // `https://` is ambiguous — Naive HTTP proxy or subscription — so the
         // user's `httpsLinkType` choice overrides the parser's.
         let isHTTPSAsSubscription = trimmedURL.hasPrefix("https://") && httpsLinkType == .subscription
@@ -289,22 +297,26 @@ struct AddProxyView: View {
                 showingError = true
             }
         } else {
-            // Treat as subscription URL
-            let requiresRemnawaveHWID = SubscriptionDomainHelper.shouldRequireRemnawaveHWID(for: trimmedURL)
-            if requiresRemnawaveHWID && !AWCore.getRemnawaveHWIDEnabled() {
-                pendingSubscriptionURL = trimmedURL
-                showingRemnawaveHWIDAlert = true
-                return
-            }
-            fetchSubscription(url: trimmedURL, withRemnawaveHWID: requiresRemnawaveHWID)
+            importSubscription(url: trimmedURL, host: deepLinkHost)
         }
     }
 
-    private func fetchSubscription(url: String, withRemnawaveHWID: Bool) {
+    private func importSubscription(url: String, host: String?) {
+        let requiresRemnawaveHWID = SubscriptionDomainHelper.shouldRequireRemnawaveHWID(for: url)
+        if requiresRemnawaveHWID && !AWCore.getRemnawaveHWIDEnabled() {
+            pendingSubscriptionURL = url
+            pendingSubscriptionHost = host
+            showingRemnawaveHWIDAlert = true
+            return
+        }
+        fetchSubscription(url: url, host: host, withRemnawaveHWID: requiresRemnawaveHWID)
+    }
+
+    private func fetchSubscription(url: String, host: String?, withRemnawaveHWID: Bool) {
         isLoading = true
         Task {
             do {
-                let result = try await SubscriptionFetcher.fetch(url: url, withRemnawaveHWID: withRemnawaveHWID)
+                let result = try await SubscriptionFetcher.fetch(url: url, host: host, withRemnawaveHWID: withRemnawaveHWID)
                 let subscription = Subscription(
                     name: result.name ?? URL(string: url)?.host ?? String(localized: "Subscription"),
                     url: url,
@@ -312,7 +324,8 @@ struct AddProxyView: View {
                     upload: result.upload,
                     download: result.download,
                     total: result.total,
-                    expire: result.expire
+                    expire: result.expire,
+                    frontHost: host
                 )
                 viewModel.addSubscription(configurations: result.configurations, subscription: subscription)
                 dismiss()

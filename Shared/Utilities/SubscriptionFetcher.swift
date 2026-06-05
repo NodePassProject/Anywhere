@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Security
 
 struct SubscriptionFetcher {
     struct Result {
@@ -34,7 +35,7 @@ struct SubscriptionFetcher {
         }
     }
 
-    static func fetch(url urlString: String, withRemnawaveHWID: Bool = false) async throws -> Result {
+    static func fetch(url urlString: String, host: String? = nil, withRemnawaveHWID: Bool = false) async throws -> Result {
         guard let url = URL(string: urlString) else {
             throw FetchError.invalidURL
         }
@@ -44,9 +45,19 @@ struct SubscriptionFetcher {
         if withRemnawaveHWID {
             request.setValue(AWCore.getIdentifier(), forHTTPHeaderField: "x-hwid")
         }
+        if let host, !host.isEmpty {
+            request.setValue(host, forHTTPHeaderField: "Host")
+        }
 
         let allowInsecure = AWCore.getAllowInsecure()
-        let delegate: InsecureSessionDelegate? = allowInsecure ? InsecureSessionDelegate() : nil
+        let delegate: URLSessionDelegate?
+        if let host, !host.isEmpty, let frontDomain = url.host {
+            delegate = FrontingSessionDelegate(frontDomain: frontDomain, allowInsecure: allowInsecure)
+        } else if allowInsecure {
+            delegate = InsecureSessionDelegate()
+        } else {
+            delegate = nil
+        }
         let (data, response): (Data, URLResponse)
         do {
             (data, response) = try await URLSession(configuration: .default, delegate: delegate, delegateQueue: nil).data(for: request)
@@ -176,5 +187,33 @@ private final class InsecureSessionDelegate: NSObject, URLSessionDelegate {
             return (.useCredential, URLCredential(trust: trust))
         }
         return (.performDefaultHandling, nil)
+    }
+}
+
+// MARK: - URLSession delegate for domain fronting (validates trust against the front domain)
+
+private final class FrontingSessionDelegate: NSObject, URLSessionDelegate {
+    private let frontDomain: String
+    private let allowInsecure: Bool
+
+    init(frontDomain: String, allowInsecure: Bool) {
+        self.frontDomain = frontDomain
+        self.allowInsecure = allowInsecure
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust else {
+            return (.performDefaultHandling, nil)
+        }
+        if allowInsecure {
+            return (.useCredential, URLCredential(trust: trust))
+        }
+        let policy = SecPolicyCreateSSL(true, frontDomain as CFString)
+        SecTrustSetPolicies(trust, policy)
+        if SecTrustEvaluateWithError(trust, nil) {
+            return (.useCredential, URLCredential(trust: trust))
+        }
+        return (.cancelAuthenticationChallenge, nil)
     }
 }
