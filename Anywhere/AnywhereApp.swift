@@ -10,19 +10,32 @@ import SwiftUI
 @main
 struct AnywhereApp: App {
     @State private var onboardingCompleted = AWCore.getOnboardingCompleted()
-    @StateObject private var deepLinkManager = DeepLinkManager()
+    @State private var deepLinkManager = DeepLinkManager()
 
     var body: some Scene {
         WindowGroup {
-            if onboardingCompleted {
-                ContentView()
-                    .environmentObject(deepLinkManager)
-                    .onOpenURL { url in
-                        deepLinkManager.handle(url: url)
-                    }
-            } else {
-                OnboardingView(onboardingCompleted: $onboardingCompleted)
+            Group {
+                if onboardingCompleted {
+                    ContentView()
+                        .onOpenURL { url in
+                            deepLinkManager.handle(url: url)
+                        }
+                } else {
+                    OnboardingView(onboardingCompleted: $onboardingCompleted)
+                }
             }
+            .environment(VPNViewModel.shared)
+            .environment(ConfigurationStore.shared)
+            .environment(SubscriptionStore.shared)
+            .environment(ChainStore.shared)
+            .environment(ConnectionStatsModel.shared)
+            .environment(RequestsModel.shared)
+            .environment(LogsModel.shared)
+            .environment(RoutingRuleSetStore.shared)
+            .environment(CertificateStore.shared)
+            .environment(MITMRuleSetStore.shared)
+            .environment(MITMCertificateController.shared)
+            .environment(deepLinkManager)
         }
     }
 }

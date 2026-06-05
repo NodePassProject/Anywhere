@@ -9,16 +9,18 @@ import Foundation
 import NetworkExtension
 import Combine
 import SwiftUI
+import Observation
 
 private let logger = AnywhereLogger(category: "VPNViewModel")
 
 /// ViewModel managing VPN connection state and operations
 @MainActor
-class VPNViewModel: ObservableObject {
+@Observable
+class VPNViewModel {
     static let shared = VPNViewModel()
 
-    @Published var vpnStatus: NEVPNStatus = .disconnected
-    @Published var selectedConfiguration: ProxyConfiguration? {
+    var vpnStatus: NEVPNStatus = .disconnected
+    var selectedConfiguration: ProxyConfiguration? {
         didSet {
             if !_suppressSelectionPersistence {
                 // Direct proxy selection — clear any chain selection
@@ -34,31 +36,20 @@ class VPNViewModel: ObservableObject {
             }
         }
     }
-    @Published private(set) var configurations: [ProxyConfiguration] = []
-    @Published private(set) var subscriptions: [Subscription] = []
-    @Published private(set) var chains: [ProxyChain] = []
     /// Non-nil when a chain is the active selection.
-    @Published private(set) var selectedChainId: UUID?
-    @Published var latencyResults: [UUID: LatencyResult] = [:]
-    @Published var chainLatencyResults: [UUID: LatencyResult] = [:]
-    @Published var startError: String?
-    @Published var orphanedRuleSetNames: [String] = []
+    private(set) var selectedChainId: UUID?
+    var latencyResults: [UUID: LatencyResult] = [:]
+    var chainLatencyResults: [UUID: LatencyResult] = [:]
+    var startError: String?
 
-    private let store = ConfigurationStore.shared
-    private let subscriptionStore = SubscriptionStore.shared
-    private let chainStore = ChainStore.shared
-    private let ruleSetStore = RoutingRuleSetStore.shared
-    @Published private(set) var isManagerReady = false
-    private var vpnManager: NETunnelProviderManager?
-    private var statusObserver: AnyCancellable?
-    private var storeCancellable: AnyCancellable?
-    private var subscriptionStoreCancellable: AnyCancellable?
-    private var chainStoreCancellable: AnyCancellable?
-    @Published private(set) var pendingReconnect = false
+    private(set) var isManagerReady = false
+    @ObservationIgnored private var vpnManager: NETunnelProviderManager?
+    @ObservationIgnored private var statusObserver: AnyCancellable?
+    private(set) var pendingReconnect = false
     /// Read by `selectedConfiguration.didSet` to skip the default behavior that clears
     /// `selectedChainId`. Set only via `withoutSelectionPersistence` so the flag always
     /// resets, even if the assignment inside the block throws.
-    private var _suppressSelectionPersistence = false
+    @ObservationIgnored private var _suppressSelectionPersistence = false
 
     /// Assign to `selectedConfiguration` without triggering the chain-clearing branch
     /// of its didSet. Used when restoring a chain selection or re-resolving an already
@@ -70,14 +61,23 @@ class VPNViewModel: ObservableObject {
     }
 
     init() {
-        configurations = store.configurations
-        subscriptions = subscriptionStore.subscriptions
-        chains = chainStore.chains
+        setupStatusObserver()
+        setupVPNManager()
+    }
 
-        // Restore selection from UserDefaults — chain takes priority
+    // MARK: - Selection
+    //
+    // This view model owns only the *active* selection and VPN connection — the proxy /
+    // subscription / chain data lives in the stores (read by views via `@Environment`).
+    // A view that owns those stores feeds their data into the calls below.
+
+    /// Restores the persisted selection (chain takes priority) against the current data.
+    /// Called by ``revalidateSelection(configurations:chains:)`` when no selection is active.
+    private func restoreSelection(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
+        guard selectedConfiguration == nil, selectedChainId == nil else { return }
         if let savedChainId = AWCore.getSelectedChainId(),
            let chain = chains.first(where: { $0.id == savedChainId }),
-           let resolved = resolveChain(chain) {
+           let resolved = chain.resolveComposite(from: configurations) {
             selectedChainId = savedChainId
             withoutSelectionPersistence { selectedConfiguration = resolved }
         } else if let savedConfigurationId = AWCore.getSelectedConfigurationId(),
@@ -86,75 +86,47 @@ class VPNViewModel: ObservableObject {
         } else {
             selectedConfiguration = configurations.first
         }
+    }
 
-        storeCancellable = store.$configurations
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] newConfigurations in
-                guard let self else { return }
-                self.configurations = newConfigurations
-
-                if self.selectedChainId != nil {
-                    // Re-resolve chain in case underlying proxies changed
-                    self.reResolveSelectedChain()
+    /// Re-validates the active selection against current data: restores the persisted
+    /// selection when none is active yet (launch), re-resolves a selected chain (or falls back
+    /// if it/its proxies were deleted), or refreshes/falls-back the selected proxy. The stores
+    /// drive this from their `coordinate()` whenever configurations or chains change.
+    func revalidateSelection(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
+        if selectedConfiguration == nil, selectedChainId == nil {
+            restoreSelection(configurations: configurations, chains: chains)
+            return
+        }
+        if let chainId = selectedChainId {
+            if let chain = chains.first(where: { $0.id == chainId }),
+               let resolved = chain.resolveComposite(from: configurations) {
+                withoutSelectionPersistence { selectedConfiguration = resolved }
+            } else {
+                // Chain (or its proxies) gone — fall back to the first proxy.
+                selectedChainId = nil
+                AWCore.setSelectedChainId(nil)
+                selectedConfiguration = configurations.first
+            }
+        } else {
+            if let selected = selectedConfiguration {
+                if let refreshed = configurations.first(where: { $0.id == selected.id }) {
+                    if refreshed != selected { selectedConfiguration = refreshed }
                 } else {
-                    // Keep selection valid and refreshed
-                    if let selected = self.selectedConfiguration {
-                        if let refreshed = newConfigurations.first(where: { $0.id == selected.id }) {
-                            if refreshed != selected {
-                                self.selectedConfiguration = refreshed
-                            }
-                        } else {
-                            self.selectedConfiguration = newConfigurations.first
-                        }
-                    }
-                    if self.selectedConfiguration == nil {
-                        self.selectedConfiguration = newConfigurations.first
-                    }
+                    selectedConfiguration = configurations.first
                 }
-
-                // Reset routing rules that reference deleted configs/chains
-                self.clearOrphanedRuleSetAssignments(
-                    configIds: Set(newConfigurations.map { $0.id.uuidString }),
-                    chainIds: Set(self.chains.map { $0.id.uuidString })
-                )
-
             }
-
-        subscriptionStoreCancellable = subscriptionStore.$subscriptions
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] newSubscriptions in
-                self?.subscriptions = newSubscriptions
+            if selectedConfiguration == nil {
+                selectedConfiguration = configurations.first
             }
+        }
+    }
 
-        chainStoreCancellable = chainStore.$chains
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] newChains in
-                guard let self else { return }
-                self.chains = newChains
-                // If selected chain was deleted, fall back to first proxy
-                if let chainId = self.selectedChainId,
-                   !newChains.contains(where: { $0.id == chainId }) {
-                    self.selectedChainId = nil
-                    AWCore.setSelectedChainId(nil)
-                    self.selectedConfiguration = self.configurations.first
-                }
-
-                // Reset routing rules that reference deleted chains
-                self.clearOrphanedRuleSetAssignments(
-                    configIds: Set(self.configurations.map { $0.id.uuidString }),
-                    chainIds: Set(newChains.map { $0.id.uuidString })
-                )
-            }
-
-        setupStatusObserver()
-        setupVPNManager()
+    /// Selects `configuration` only if nothing is currently selected (used after adding one).
+    func selectIfNone(_ configuration: ProxyConfiguration) {
+        if selectedConfiguration == nil { selectedConfiguration = configuration }
     }
 
     // MARK: - Computed Properties
-
-    var hasConfigurations: Bool {
-        !configurations.isEmpty
-    }
 
     var statusColor: Color {
         switch vpnStatus {
@@ -190,205 +162,24 @@ class VPNViewModel: ObservableObject {
         }
     }
 
-    var isButtonDisabled: Bool {
+    /// The connect/disconnect button is disabled while no manager is ready, there are no
+    /// configurations (passed in by the view that owns ``ConfigurationStore``), or a
+    /// transition is in flight.
+    func isButtonDisabled(hasConfigurations: Bool) -> Bool {
         !isManagerReady || !hasConfigurations || vpnStatus.isTransitioning
     }
 
-    // MARK: - Configuration CRUD
+    // MARK: - Chain Selection
 
-    func addConfiguration(_ configuration: ProxyConfiguration) {
-        store.add(configuration)
-        if selectedConfiguration == nil {
-            selectedConfiguration = configuration
-        }
-    }
-
-    func updateConfiguration(_ configuration: ProxyConfiguration) {
-        store.update(configuration)
-        if selectedConfiguration?.id == configuration.id {
-            selectedConfiguration = configuration
-        }
-    }
-
-    func deleteConfiguration(_ configuration: ProxyConfiguration) {
-        store.delete(configuration)
-    }
-
-    // MARK: - Chain CRUD & Selection
-
-    func addChain(_ chain: ProxyChain) {
-        chainStore.add(chain)
-    }
-
-    func updateChain(_ chain: ProxyChain) {
-        chainStore.update(chain)
-        // Re-resolve if this is the active chain
-        if selectedChainId == chain.id {
-            if let resolved = resolveChain(chain) {
-                withoutSelectionPersistence { selectedConfiguration = resolved }
-            }
-        }
-    }
-
-    func deleteChain(_ chain: ProxyChain) {
-        chainStore.delete(chain)
-    }
-
-    /// Selects a chain as the working configuration.
-    func selectChain(_ chain: ProxyChain) {
-        guard let resolved = resolveChain(chain) else { return }
+    /// Selects a chain as the active configuration, resolving it against `configurations`.
+    func selectChain(_ chain: ProxyChain, configurations: [ProxyConfiguration]) {
+        guard let resolved = chain.resolveComposite(from: configurations) else { return }
         selectedChainId = chain.id
         AWCore.setSelectedChainId(chain.id)
         AWCore.setSelectedConfigurationId(nil)
         withoutSelectionPersistence { selectedConfiguration = resolved }
         // Tell NE to re-filter routing rules against the new default.
         AWCore.notifyRoutingChanged()
-    }
-
-    /// Resolves a chain into a composite ProxyConfiguration.
-    ///
-    /// The last proxy becomes the main config; preceding proxies fill the `chain` field.
-    func resolveChain(_ chain: ProxyChain) -> ProxyConfiguration? {
-        chain.resolveComposite(from: configurations)
-    }
-
-    /// Re-resolves the currently selected chain after underlying configs change.
-    private func reResolveSelectedChain() {
-        guard let chainId = selectedChainId,
-              let chain = chains.first(where: { $0.id == chainId }) else {
-            // Chain itself was deleted — handled by chain store sink
-            return
-        }
-        if let resolved = resolveChain(chain) {
-            withoutSelectionPersistence { selectedConfiguration = resolved }
-        } else {
-            // Chain is broken (proxies deleted), fall back
-            selectedChainId = nil
-            AWCore.setSelectedChainId(nil)
-            selectedConfiguration = configurations.first
-        }
-    }
-
-    // MARK: - Subscription CRUD
-
-    func addSubscription(configurations newConfigurations: [ProxyConfiguration], subscription: Subscription) {
-        // Persist subscription first so an interrupted import never leaves orphan proxies.
-        subscriptionStore.add(subscription)
-
-        let tagged = newConfigurations.map { configuration in
-            ProxyConfiguration(
-                id: configuration.id, name: configuration.name,
-                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
-                subscriptionId: subscription.id,
-                outbound: configuration.outbound
-            )
-        }
-        // Single batch write + single @Published emission.
-        store.replaceConfigurations(for: subscription.id, with: tagged)
-
-        if selectedConfiguration == nil {
-            selectedConfiguration = store.configurations.last
-        }
-    }
-
-    func updateSubscription(_ subscription: Subscription) async throws {
-        let result = try await SubscriptionFetcher.fetch(url: subscription.url)
-
-        // Check if selection pointed to a configuration in this subscription
-        let selectedWasInSubscription = selectedConfiguration.flatMap { $0.subscriptionId == subscription.id } ?? false
-
-        // Match new configurations against old ones by name to preserve IDs (and routing rules).
-        // When multiple configs share the same name, they are matched positionally within that group.
-        let oldConfigurations = configurations(for: subscription)
-
-        // Group old configs by name, preserving order within each group
-        var oldByName: [String: [ProxyConfiguration]] = [:]
-        for old in oldConfigurations {
-            oldByName[old.name, default: []].append(old)
-        }
-        // Track how many old configs per name have been consumed
-        var oldNameCursor: [String: Int] = [:]
-
-        var newConfigurations: [ProxyConfiguration] = []
-
-        for configuration in result.configurations {
-            let name = configuration.name
-            let cursor = oldNameCursor[name, default: 0]
-            let id: UUID
-            if let group = oldByName[name], cursor < group.count {
-                id = group[cursor].id
-                oldNameCursor[name] = cursor + 1
-            } else {
-                id = configuration.id
-            }
-            newConfigurations.append(ProxyConfiguration(
-                id: id, name: configuration.name,
-                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
-                subscriptionId: subscription.id,
-                outbound: configuration.outbound
-            ))
-        }
-
-        // Atomically replace old configurations with new ones (single publisher emission)
-        store.replaceConfigurations(for: subscription.id, with: newConfigurations)
-
-        // Update subscription metadata
-        var updated = subscription
-        updated.lastUpdate = Date()
-        updated.upload = result.upload ?? subscription.upload
-        updated.download = result.download ?? subscription.download
-        updated.total = result.total ?? subscription.total
-        updated.expire = result.expire ?? subscription.expire
-        if let name = result.name, !updated.isNameCustomized {
-            updated.name = name
-        }
-        subscriptionStore.update(updated)
-
-        // Fix selection if it was pointing to a configuration in this subscription
-        if selectedWasInSubscription {
-            if let selectedId = selectedConfiguration?.id,
-               let preserved = newConfigurations.first(where: { $0.id == selectedId }) {
-                selectedConfiguration = preserved
-            } else {
-                selectedConfiguration = newConfigurations.first ?? configurations.first
-            }
-        }
-    }
-
-    func toggleSubscriptionCollapsed(_ subscription: Subscription) {
-        var updated = subscription
-        updated.collapsed.toggle()
-        subscriptionStore.update(updated)
-    }
-
-    func renameSubscription(_ subscription: Subscription, to newName: String) {
-        var updated = subscription
-        updated.name = newName
-        updated.isNameCustomized = true
-        subscriptionStore.update(updated)
-    }
-
-    func deleteSubscription(_ subscription: Subscription) {
-        subscriptionStore.delete(subscription, configurationStore: store)
-    }
-
-    func moveSubscriptions(fromOffsets source: IndexSet, toOffset destination: Int) {
-        subscriptionStore.move(fromOffsets: source, toOffset: destination)
-    }
-
-    func moveStandaloneConfigurations(fromOffsets source: IndexSet, toOffset destination: Int) {
-        store.moveStandaloneConfigurations(fromOffsets: source, toOffset: destination)
-    }
-
-    /// Returns the subscription that owns this configuration, if any.
-    func subscription(for configuration: ProxyConfiguration) -> Subscription? {
-        guard let subId = configuration.subscriptionId else { return nil }
-        return subscriptions.first { $0.id == subId }
-    }
-
-    /// Returns all configurations belonging to a subscription.
-    func configurations(for subscription: Subscription) -> [ProxyConfiguration] {
-        configurations.filter { $0.subscriptionId == subscription.id }
     }
 
     // MARK: - Latency Testing
@@ -403,7 +194,7 @@ class VPNViewModel: ObservableObject {
     //   - VPN off:        Dial the proxy from the main-app process directly
     //                     via the shared ``LatencyTester``.
 
-    private var latencyTask: Task<Void, Never>?
+    @ObservationIgnored private var latencyTask: Task<Void, Never>?
 
     /// Cap on simultaneous in-flight test requests.
     private static let maxConcurrentLatencyTests = 4
@@ -419,16 +210,15 @@ class VPNViewModel: ObservableObject {
         }
     }
 
-    func testLatencies(for targets: [ProxyConfiguration]? = nil) {
+    func testLatencies(for targets: [ProxyConfiguration]) {
         latencyTask?.cancel()
-        let configs = targets ?? configurations
-        for config in configs {
+        for config in targets {
             latencyResults[config.id] = .testing
         }
         let useIPC = vpnStatus == .connected
         let session = useIPC ? providerSession : nil
         latencyTask = Task { [weak self] in
-            await Self.runLatencyTests(configs, viaIPC: useIPC, session: session) { id, result in
+            await Self.runLatencyTests(targets, viaIPC: useIPC, session: session) { id, result in
                 await MainActor.run { self?.latencyResults[id] = result }
             }
         }
@@ -436,10 +226,10 @@ class VPNViewModel: ObservableObject {
 
     // MARK: - Chain Latency Testing
 
-    private var chainLatencyTask: Task<Void, Never>?
+    @ObservationIgnored private var chainLatencyTask: Task<Void, Never>?
 
-    func testChainLatency(for chain: ProxyChain) {
-        guard let resolved = resolveChain(chain) else { return }
+    func testChainLatency(for chain: ProxyChain, configurations: [ProxyConfiguration]) {
+        guard let resolved = chain.resolveComposite(from: configurations) else { return }
         chainLatencyResults[chain.id] = .testing
         let chainId = chain.id
         let useIPC = vpnStatus == .connected
@@ -451,11 +241,11 @@ class VPNViewModel: ObservableObject {
         }
     }
 
-    func testAllChainLatencies() {
+    func testAllChainLatencies(chains: [ProxyChain], configurations: [ProxyConfiguration]) {
         chainLatencyTask?.cancel()
         var chainData: [(UUID, ProxyConfiguration)] = []
         for chain in chains {
-            if let resolved = resolveChain(chain) {
+            if let resolved = chain.resolveComposite(from: configurations) {
                 chainLatencyResults[chain.id] = .testing
                 chainData.append((chain.id, resolved))
             }
@@ -638,8 +428,8 @@ class VPNViewModel: ObservableObject {
               let configuration = selectedConfiguration else { return }
 
         Task {
-            // Routing sync (file I/O + DNS off main actor)
-            await syncRoutingConfigurationToNE()
+            // Routing config is kept current by the stores — every change runs
+            // coordinate()/scheduleSync() — so the extension reads up-to-date rules at start.
 
             // Pre-resolve the main proxy address off main actor
             let resolvedIP = await Task.detached {
@@ -768,179 +558,6 @@ class VPNViewModel: ObservableObject {
         DNSResolver.shared.resolveHost(address)
     }
 
-    // MARK: - Routing Sync
-
-    /// Builds routing configuration from rulesets and writes to App Group for the NE.
-    func syncRoutingConfigurationToNE() async {
-        await ruleSetStore.syncToAppGroup(configurations: configurations, chains: chains, serializeConfiguration: VPNViewModel.serializeConfiguration)
-    }
-
-    /// Drops rule-set assignments whose target (proxy or chain) no longer exists,
-    /// surfaces the affected names for UI, and re-syncs routing.
-    private func clearOrphanedRuleSetAssignments(configIds: Set<String>, chainIds: Set<String>) {
-        let affected = ruleSetStore.clearOrphanedAssignments(availableIds: configIds.union(chainIds))
-        guard !affected.isEmpty else { return }
-        orphanedRuleSetNames = affected
-        Task { await syncRoutingConfigurationToNE() }
-    }
-
-    // MARK: - Configuration Serialization
-
-    nonisolated static func serializeConfiguration(_ configuration: ProxyConfiguration) -> [String: Any] {
-        let vlessUUID: UUID
-        let vlessEncryption: String
-        let vlessFlow: String?
-        if case .vless(let u, let enc, let fl, _, _, _, _) = configuration.outbound {
-            vlessUUID = u; vlessEncryption = enc; vlessFlow = fl
-        } else {
-            vlessUUID = configuration.id; vlessEncryption = "none"; vlessFlow = nil
-        }
-        var configurationDict: [String: Any] = [
-            "name": configuration.name,
-            "serverAddress": configuration.serverAddress,
-            "serverPort": configuration.serverPort,
-            "uuid": vlessUUID.uuidString,
-            "encryption": vlessEncryption,
-            "flow": vlessFlow ?? "",
-            "security": configuration.securityLayer.tag,
-            "muxEnabled": configuration.muxEnabled,
-            "xudpEnabled": configuration.xudpEnabled,
-            "outboundProtocol": configuration.outboundProtocol.rawValue,
-        ]
-
-        // Add protocol-specific credential fields
-        switch configuration.outbound {
-        case .vless: break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
-            configurationDict["hysteriaPassword"] = password
-            configurationDict["hysteriaCongestionControl"] = congestionControl.rawValue
-            configurationDict["hysteriaUploadMbps"] = uploadMbps
-            configurationDict["hysteriaDownloadMbps"] = downloadMbps
-            configurationDict["hysteriaSNI"] = sni
-        case .nowhere(let key):
-            configurationDict["nowhereKey"] = key
-        case .trojan(let password, let tls):
-            configurationDict["trojanPassword"] = password
-            configurationDict["trojanSNI"] = tls.serverName
-            if let alpn = tls.alpn, !alpn.isEmpty {
-                configurationDict["trojanALPN"] = alpn.joined(separator: ",")
-            }
-            configurationDict["trojanFingerprint"] = tls.fingerprint.rawValue
-        case .anytls(let password, let ici, let it, let mis, let tls):
-            configurationDict["anytlsPassword"] = password
-            configurationDict["anytlsIdleCheckInterval"] = ici
-            configurationDict["anytlsIdleTimeout"] = it
-            configurationDict["anytlsMinIdleSession"] = mis
-            configurationDict["anytlsSNI"] = tls.serverName
-            if let alpn = tls.alpn, !alpn.isEmpty {
-                configurationDict["anytlsALPN"] = alpn.joined(separator: ",")
-            }
-            configurationDict["anytlsFingerprint"] = tls.fingerprint.rawValue
-        case .shadowsocks(let password, let method):
-            configurationDict["ssPassword"] = password
-            configurationDict["ssMethod"] = method
-        case .socks5(let username, let password):
-            if let username { configurationDict["socks5Username"] = username }
-            if let password { configurationDict["socks5Password"] = password }
-        case .sudoku(let sudoku):
-            configurationDict["sudokuKey"] = sudoku.key
-            configurationDict["sudokuAEADMethod"] = sudoku.aeadMethod.rawValue
-            configurationDict["sudokuPaddingMin"] = sudoku.paddingMin
-            configurationDict["sudokuPaddingMax"] = sudoku.paddingMax
-            configurationDict["sudokuASCIIMode"] = sudoku.asciiMode.rawValue
-            configurationDict["sudokuCustomTables"] = sudoku.customTables
-            configurationDict["sudokuEnablePureDownlink"] = sudoku.enablePureDownlink
-            configurationDict["sudokuHTTPMaskDisable"] = sudoku.httpMask.disable
-            configurationDict["sudokuHTTPMaskMode"] = sudoku.httpMask.mode.rawValue
-            configurationDict["sudokuHTTPMaskTLS"] = sudoku.httpMask.tls
-            configurationDict["sudokuHTTPMaskHost"] = sudoku.httpMask.host
-            configurationDict["sudokuHTTPMaskPathRoot"] = sudoku.httpMask.pathRoot
-            configurationDict["sudokuHTTPMaskMultiplex"] = sudoku.httpMask.multiplex.rawValue
-        case .http11(let username, let password):
-            configurationDict["http11Username"] = username
-            configurationDict["http11Password"] = password
-        case .http2(let username, let password):
-            configurationDict["http2Username"] = username
-            configurationDict["http2Password"] = password
-        case .http3(let username, let password):
-            configurationDict["http3Username"] = username
-            configurationDict["http3Password"] = password
-        }
-
-        // Add Reality configuration if present
-        if case .reality(let reality) = configuration.securityLayer {
-            configurationDict["realityServerName"] = reality.serverName
-            configurationDict["realityPublicKey"] = reality.publicKey.base64EncodedString()
-            configurationDict["realityShortId"] = reality.shortId.map { String(format: "%02x", $0) }.joined()
-            configurationDict["realityFingerprint"] = reality.fingerprint.rawValue
-        }
-
-        // Add TLS configuration if present
-        if case .tls(let tls) = configuration.securityLayer {
-            configurationDict["tlsServerName"] = tls.serverName
-            if let alpn = tls.alpn {
-                configurationDict["tlsAlpn"] = alpn.joined(separator: ",")
-            }
-            configurationDict["tlsFingerprint"] = tls.fingerprint.rawValue
-        }
-        
-        if configuration.outboundProtocol == .vless {
-            configurationDict["transport"] = configuration.transportLayer.tag
-            if case .ws(let ws) = configuration.transportLayer {
-                configurationDict["wsHost"] = ws.host
-                configurationDict["wsPath"] = ws.path
-                if !ws.headers.isEmpty {
-                    configurationDict["wsHeaders"] = ws.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
-                }
-                configurationDict["wsMaxEarlyData"] = ws.maxEarlyData
-                configurationDict["wsEarlyDataHeaderName"] = ws.earlyDataHeaderName
-            }
-
-            if case .httpUpgrade(let hu) = configuration.transportLayer {
-                configurationDict["huHost"] = hu.host
-                configurationDict["huPath"] = hu.path
-                if !hu.headers.isEmpty {
-                    configurationDict["huHeaders"] = hu.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
-                }
-            }
-            
-            if case .grpc(let grpc) = configuration.transportLayer {
-                configurationDict["grpcServiceName"] = grpc.serviceName
-                configurationDict["grpcAuthority"] = grpc.authority
-                configurationDict["grpcMultiMode"] = grpc.multiMode
-                configurationDict["grpcUserAgent"] = grpc.userAgent
-                configurationDict["grpcInitialWindowsSize"] = grpc.initialWindowsSize
-                configurationDict["grpcIdleTimeout"] = grpc.idleTimeout
-                configurationDict["grpcHealthCheckTimeout"] = grpc.healthCheckTimeout
-                configurationDict["grpcPermitWithoutStream"] = grpc.permitWithoutStream
-            }
-
-            if case .xhttp(let xhttp) = configuration.transportLayer {
-                configurationDict["xhttpHost"] = xhttp.host
-                configurationDict["xhttpPath"] = xhttp.path
-                configurationDict["xhttpMode"] = xhttp.mode.rawValue
-                if !xhttp.headers.isEmpty {
-                    configurationDict["xhttpHeaders"] = xhttp.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
-                }
-                configurationDict["xhttpNoGRPCHeader"] = xhttp.noGRPCHeader
-                // Up/download detach: carry the whole settings as one JSON value
-                // (lossless) rather than flattening each field. (Other advanced
-                // XHTTP fields are not serialized on this routing-rule path.)
-                if let ds = xhttp.downloadSettings,
-                   let data = try? JSONEncoder().encode(ds),
-                   let json = String(data: data, encoding: .utf8) {
-                    configurationDict["xhttpDownloadSettings"] = json
-                }
-            }
-        }
-
-        // Add proxy chain if present
-        if let chain = configuration.chain, !chain.isEmpty {
-            configurationDict["chain"] = chain.map { Self.serializeConfiguration($0) }
-        }
-
-        return configurationDict
-    }
 }
 
 extension NEVPNStatus {

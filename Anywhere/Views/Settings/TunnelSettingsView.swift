@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct TunnelSettingsView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(VPNViewModel.self) private var viewModel
 
     @State private var includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()
     @State private var includeLocalNetworks = AWCore.getTunnelIncludeLocalNetworks()

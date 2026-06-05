@@ -6,16 +6,19 @@
 //
 
 import Foundation
-import Combine
+import Observation
 
 @MainActor
-class ChainStore: ObservableObject {
+@Observable
+class ChainStore {
     static let shared = ChainStore()
 
-    @Published private(set) var chains: [ProxyChain] = []
+    private(set) var chains: [ProxyChain] = []
 
     private init() {
         chains = Self.load()
+        // Coordinate dependent state once at launch (deferred so init finishes first).
+        Task { @MainActor in self.coordinate() }
     }
 
     // MARK: - CRUD
@@ -23,18 +26,33 @@ class ChainStore: ObservableObject {
     func add(_ chain: ProxyChain) {
         chains.append(chain)
         save()
+        coordinate()
     }
 
     func update(_ chain: ProxyChain) {
         if let index = chains.firstIndex(where: { $0.id == chain.id }) {
             chains[index] = chain
             save()
+            coordinate()
         }
     }
 
     func delete(_ chain: ProxyChain) {
         chains.removeAll { $0.id == chain.id }
         save()
+        coordinate()
+    }
+
+    // MARK: - Coordination
+
+    /// After any change to the chain list, keep dependent state consistent: re-validate the
+    /// VPN's active selection and drop orphaned routing-rule assignments, then re-sync routing
+    /// to the Network Extension. This coordination lives in the store, not in views.
+    private func coordinate() {
+        let configurations = ConfigurationStore.shared.configurations
+        VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
+        RoutingRuleSetStore.shared.clearOrphans(configurations: configurations, chains: chains)
+        Task { await RoutingRuleSetStore.shared.syncToAppGroup() }
     }
 
     // MARK: - Persistence
@@ -52,6 +70,19 @@ class ChainStore: ObservableObject {
             JSONBlobStore.shared.save(.chains, data: data)
         } catch {
             print("Failed to save chains: \(error)")
+        }
+    }
+}
+
+extension ChainStore {
+    /// Valid chains (those resolving to ≥2 proxies) as picker items.
+    /// Reads `ConfigurationStore.shared` to resolve each chain's proxies.
+    var pickerItems: [PickerItem] {
+        let configurations = ConfigurationStore.shared.configurations
+        return chains.compactMap { chain in
+            let proxies = chain.resolveProxies(from: configurations)
+            guard proxies.count == chain.proxyIds.count, proxies.count >= 2 else { return nil }
+            return PickerItem(id: chain.id, name: chain.name)
         }
     }
 }

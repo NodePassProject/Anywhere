@@ -8,7 +8,10 @@
 import SwiftUI
 
 struct ChainListView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(ChainStore.self) private var chainStore
+    @Environment(ConfigurationStore.self) private var configStore
+    private let coordinator = ChainRowCoordinator.shared
 
     @State private var showingAddSheet = false
     @State private var showingNotEnoughProxiesAlert = false
@@ -16,12 +19,24 @@ struct ChainListView: View {
 
     var body: some View {
         List {
-            ForEach(viewModel.chains) { chain in
-                chainRow(chain)
+            ForEach(coordinator.models) { item in
+                ChainRowView(
+                    item: item,
+                    onSelect: {
+                        guard item.isValid, let chain = chain(item.id) else { return }
+                        viewModel.selectChain(chain, configurations: configStore.configurations)
+                    },
+                    onTestLatency: {
+                        guard let chain = chain(item.id) else { return }
+                        viewModel.testChainLatency(for: chain, configurations: configStore.configurations)
+                    },
+                    onEdit: { chainToEdit = chain(item.id) },
+                    onDelete: { if let chain = chain(item.id) { chainStore.delete(chain) } }
+                )
             }
         }
         .overlay {
-            if viewModel.chains.isEmpty {
+            if coordinator.models.isEmpty {
                 ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
             }
         }
@@ -29,14 +44,14 @@ struct ChainListView: View {
         .toolbar {
             ToolbarItem {
                 Button {
-                    viewModel.testAllChainLatencies()
+                    viewModel.testAllChainLatencies(chains: chainStore.chains, configurations: configStore.configurations)
                 } label: {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
                 }
             }
             ToolbarItem {
                 Button {
-                    if viewModel.configurations.count < 2 {
+                    if configStore.configurations.count < 2 {
                         showingNotEnoughProxiesAlert = true
                     } else {
                         showingAddSheet = true
@@ -48,12 +63,12 @@ struct ChainListView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             ChainEditorView { chain in
-                viewModel.addChain(chain)
+                chainStore.add(chain)
             }
         }
         .sheet(item: $chainToEdit) { chain in
             ChainEditorView(chain: chain) { updated in
-                viewModel.updateChain(updated)
+                chainStore.update(updated)
             }
         }
         .alert("Not Enough Proxies", isPresented: $showingNotEnoughProxiesAlert) {
@@ -63,41 +78,43 @@ struct ChainListView: View {
         }
     }
 
-    // MARK: - Chain Row
+    private func chain(_ id: UUID) -> ProxyChain? {
+        chainStore.chains.first { $0.id == id }
+    }
+}
 
-    @ViewBuilder
-    private func chainRow(_ chain: ProxyChain) -> some View {
-        let proxies = chain.resolveProxies(from: viewModel.configurations)
-        let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
-        let isSelected = viewModel.selectedChainId == chain.id
-        let latency = viewModel.chainLatencyResults[chain.id]
+// MARK: - Chain Row
 
-        Button {
-            if isValid {
-                viewModel.selectChain(chain)
-            }
-        } label: {
+private struct ChainRowView: View {
+    let item: ChainListItem
+    let onSelect: () -> Void
+    let onTestLatency: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text(chain.name)
+                        Text(item.name)
                             .font(.body.weight(.medium))
-                        if isSelected {
+                        if item.isSelected {
                             Image(systemName: "checkmark")
                                 .font(.caption.bold())
                                 .foregroundStyle(.tint)
                         }
                     }
 
-                    if isValid {
+                    if item.isValid {
                         // Route preview
                         HStack(spacing: 4) {
-                            ForEach(Array(proxies.enumerated()), id: \.element.id) { index, proxy in
+                            ForEach(Array(item.proxyNames.enumerated()), id: \.offset) { index, proxyName in
                                 if index > 0 {
                                     Image(systemName: "arrow.right")
                                         .font(.system(size: 8))
                                 }
-                                Text(proxy.name)
+                                Text(proxyName)
                                     .lineLimit(1)
                             }
                         }
@@ -110,10 +127,10 @@ struct ChainListView: View {
                     }
 
                     HStack(spacing: 4) {
-                        Text("\(proxies.count) proxie(s)")
-                        if let entry = proxies.first, let exit = proxies.last, proxies.count >= 2 {
+                        Text("\(item.proxyNames.count) proxie(s)")
+                        if let entry = item.entryAddress, let exit = item.exitAddress {
                             Text("·")
-                            Text("\(entry.serverAddress) → \(exit.serverAddress)")
+                            Text("\(entry) → \(exit)")
                                 .lineLimit(1)
                         }
                     }
@@ -123,86 +140,36 @@ struct ChainListView: View {
 
                 Spacer()
 
-                if isValid {
-                    latencyView(latency)
-                        .onTapGesture {
-                            viewModel.testChainLatency(for: chain)
-                        }
+                if item.isValid {
+                    LatencyLabel(latency: item.latency)
+                        .onTapGesture(perform: onTestLatency)
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .opacity(isValid ? 1 : 0.6)
+        .opacity(item.isValid ? 1 : 0.6)
         .contextMenu {
-            if isValid {
-                Button {
-                    viewModel.testChainLatency(for: chain)
-                } label: {
+            if item.isValid {
+                Button(action: onTestLatency) {
                     Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
                 }
             }
-
-            Button {
-                chainToEdit = chain
-            } label: {
+            Button(action: onEdit) {
                 Label("Edit", systemImage: "pencil")
             }
-
-            Button(role: .destructive) {
-                viewModel.deleteChain(chain)
-            } label: {
+            Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
             }
         }
         .swipeActions(edge: .trailing) {
-            Button(role: .destructive) {
-                viewModel.deleteChain(chain)
-            } label: {
+            Button(role: .destructive, action: onDelete) {
                 Label("Delete", systemImage: "trash")
             }
-            Button {
-                chainToEdit = chain
-            } label: {
+            Button(action: onEdit) {
                 Label("Edit", systemImage: "pencil")
             }
             .tint(.orange)
         }
-    }
-
-    // MARK: - Latency
-
-    @ViewBuilder
-    private func latencyView(_ latency: LatencyResult?) -> some View {
-        switch latency {
-        case .testing:
-            ProgressView()
-                .controlSize(.small)
-                .frame(width: 50, alignment: .trailing)
-        case .success(let ms):
-            Text("\(ms) ms")
-                .font(.caption)
-                .monospacedDigit()
-                .foregroundStyle(latencyColor(ms))
-                .frame(minWidth: 50, alignment: .trailing)
-        case .failed:
-            Text("timeout")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 50, alignment: .trailing)
-        case .insecure:
-            Text("insecure")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 50, alignment: .trailing)
-        case nil:
-            EmptyView()
-        }
-    }
-
-    private func latencyColor(_ ms: Int) -> Color {
-        if ms < 300 { return .green }
-        if ms < 500 { return .yellow }
-        return .red
     }
 }

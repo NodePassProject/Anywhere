@@ -8,10 +8,11 @@
 import SwiftUI
 
 struct ReorderProxiesView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
     
     private var standaloneConfigurations: [ProxyConfiguration] {
-        viewModel.configurations.filter { $0.subscriptionId == nil }
+        configStore.configurations.filter { $0.subscriptionId == nil }
     }
 
     var body: some View {
@@ -30,14 +31,14 @@ struct ReorderProxiesView: View {
                         }
                     }
                     .onMove { source, destination in
-                        viewModel.moveStandaloneConfigurations(fromOffsets: source, toOffset: destination)
+                        configStore.moveStandaloneConfigurations(fromOffsets: source, toOffset: destination)
                     }
                 }
             }
             
-            if viewModel.subscriptions.count > 1 {
+            if subscriptionStore.subscriptions.count > 1 {
                 Section("Subscriptions") {
-                    ForEach(viewModel.subscriptions) { subscription in
+                    ForEach(subscriptionStore.subscriptions) { subscription in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(subscription.name)
                                 .font(.body.weight(.medium))
@@ -49,7 +50,7 @@ struct ReorderProxiesView: View {
                         }
                     }
                     .onMove { source, destination in
-                        viewModel.moveSubscriptions(fromOffsets: source, toOffset: destination)
+                        subscriptionStore.move(fromOffsets: source, toOffset: destination)
                     }
                 }
             }

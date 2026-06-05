@@ -6,12 +6,12 @@
 //
 
 import UIKit
-import Combine
 
 class TVChainListViewController: UITableViewController {
 
     private let viewModel = VPNViewModel.shared
-    private var cancellables = Set<AnyCancellable>()
+    private let coordinator = ChainRowCoordinator.shared
+    private var dataSource: UITableViewDiffableDataSource<Int, UUID>!
 
     // MARK: - Lifecycle
 
@@ -25,66 +25,39 @@ class TVChainListViewController: UITableViewController {
 
         let addButton = UIBarButtonItem(barButtonSystemItem: .add, target: self, action: #selector(addTapped))
         addButton.tintColor = .label
-        
+
         let testAllButton = UIBarButtonItem(title: String(localized: "Test All"), style: .plain, target: self, action: #selector(testAllTapped))
         testAllButton.tintColor = .label
-        
-        navigationItem.rightBarButtonItems = [
-            addButton,
-            testAllButton,
-        ]
 
-        bindViewModel()
+        navigationItem.rightBarButtonItems = [addButton, testAllButton]
+
+        configureDataSource()
+    }
+    
+    override func updateProperties() {
+        super.updateProperties()
+        applySnapshot(coordinator.models)
     }
 
-    private func bindViewModel() {
-        // Structural changes — full reload
-        viewModel.$chains
-            .combineLatest(viewModel.$configurations, viewModel.$selectedChainId)
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.tableView.reloadData()
+    private func configureDataSource() {
+        dataSource = UITableViewDiffableDataSource<Int, UUID>(tableView: tableView) { tableView, indexPath, id in
+            let cell = tableView.dequeueReusableCell(withIdentifier: TVChainCell.reuseIdentifier, for: indexPath) as! TVChainCell
+            guard let model = ChainRowCoordinator.shared.model(for: id) else { return cell }
+            cell.configurationUpdateHandler = { cell, _ in
+                (cell as? TVChainCell)?.configure(model)
             }
-            .store(in: &cancellables)
-
-        // Latency changes — update only visible cells
-        viewModel.$chainLatencyResults
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.updateVisibleLatencyAccessories()
-            }
-            .store(in: &cancellables)
-    }
-
-    // MARK: - Table View
-
-    override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        viewModel.chains.count
-    }
-
-    override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let cell = tableView.dequeueReusableCell(withIdentifier: TVChainCell.reuseIdentifier, for: indexPath) as! TVChainCell
-        let chain = viewModel.chains[indexPath.row]
-        let proxies = chain.resolveProxies(from: viewModel.configurations)
-        let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
-        let isSelected = viewModel.selectedChainId == chain.id
-
-        var infoText = String(localized: "\(proxies.count) proxie(s)")
-        if let entry = proxies.first, let exit = proxies.last {
-            infoText += " · \(entry.serverAddress) → \(exit.serverAddress)"
+            return cell
         }
+        dataSource.defaultRowAnimation = .fade
+    }
 
-        cell.configure(
-            name: chain.name,
-            isSelected: isSelected,
-            proxyNames: proxies.map(\.name),
-            isValid: isValid,
-            infoText: infoText
-        )
-
-        applyLatencyAccessory(to: cell, chainId: chain.id, isValid: isValid)
-
-        return cell
+    private func applySnapshot(_ models: [ChainListItem]) {
+        var snapshot = NSDiffableDataSourceSnapshot<Int, UUID>()
+        snapshot.appendSections([0])
+        snapshot.appendItems(models.map(\.id), toSection: 0)
+        let animate = !dataSource.snapshot().itemIdentifiers.isEmpty
+        dataSource.apply(snapshot, animatingDifferences: animate)
+        updateEmptyState(isEmpty: models.isEmpty)
     }
 
     // MARK: - Focus
@@ -104,20 +77,21 @@ class TVChainListViewController: UITableViewController {
     // MARK: - Selection
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        let chain = viewModel.chains[indexPath.row]
-        let proxies = chain.resolveProxies(from: viewModel.configurations)
-        let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
-        if isValid {
-            viewModel.selectChain(chain)
+        defer { tableView.deselectRow(at: indexPath, animated: true) }
+        guard let id = dataSource.itemIdentifier(for: indexPath), let chain = chain(id) else { return }
+        let configurations = ConfigurationStore.shared.configurations
+        let proxies = chain.resolveProxies(from: configurations)
+        if proxies.count == chain.proxyIds.count && proxies.count >= 2 {
+            viewModel.selectChain(chain, configurations: configurations)
         }
-        tableView.deselectRow(at: indexPath, animated: true)
     }
 
     // MARK: - Context Menu
 
     override func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
-        let chain = viewModel.chains[indexPath.row]
-        let proxies = chain.resolveProxies(from: viewModel.configurations)
+        guard let id = dataSource.itemIdentifier(for: indexPath), let chain = chain(id) else { return nil }
+        let configurations = ConfigurationStore.shared.configurations
+        let proxies = chain.resolveProxies(from: configurations)
         let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
 
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
@@ -126,7 +100,7 @@ class TVChainListViewController: UITableViewController {
 
             if isValid {
                 actions.append(UIAction(title: String(localized: "Test Latency"), image: UIImage(systemName: "gauge.with.dots.needle.67percent")) { _ in
-                    self.viewModel.testChainLatency(for: chain)
+                    self.viewModel.testChainLatency(for: chain, configurations: configurations)
                 })
             }
 
@@ -135,7 +109,7 @@ class TVChainListViewController: UITableViewController {
             })
 
             actions.append(UIAction(title: String(localized: "Delete"), image: UIImage(systemName: "trash"), attributes: .destructive) { _ in
-                self.viewModel.deleteChain(chain)
+                ChainStore.shared.delete(chain)
             })
 
             return UIMenu(children: actions)
@@ -145,7 +119,7 @@ class TVChainListViewController: UITableViewController {
     // MARK: - Actions
 
     @objc private func addTapped() {
-        if viewModel.configurations.count < 2 {
+        if ConfigurationStore.shared.configurations.count < 2 {
             let alert = UIAlertController(
                 title: String(localized: "Not Enough Proxies"),
                 message: String(localized: "A proxy chain needs at least 2 proxies."),
@@ -159,15 +133,15 @@ class TVChainListViewController: UITableViewController {
     }
 
     @objc private func testAllTapped() {
-        viewModel.testAllChainLatencies()
+        viewModel.testAllChainLatencies(chains: ChainStore.shared.chains, configurations: ConfigurationStore.shared.configurations)
     }
 
     private func presentEditor(for chain: ProxyChain?) {
-        let editor = TVChainEditorViewController(chain: chain) { [weak self] newChain in
+        let editor = TVChainEditorViewController(chain: chain) { newChain in
             if chain != nil {
-                self?.viewModel.updateChain(newChain)
+                ChainStore.shared.update(newChain)
             } else {
-                self?.viewModel.addChain(newChain)
+                ChainStore.shared.add(newChain)
             }
         }
         let nav = UINavigationController(rootViewController: editor)
@@ -175,66 +149,22 @@ class TVChainListViewController: UITableViewController {
         present(nav, animated: true)
     }
 
-    // MARK: - Latency Accessories
-
-    private func applyLatencyAccessory(to cell: UITableViewCell, chainId: UUID, isValid: Bool) {
-        guard isValid, let result = viewModel.chainLatencyResults[chainId] else {
-            cell.accessoryView = nil
-            return
-        }
-        switch result {
-        case .testing:
-            let spinner = UIActivityIndicatorView(style: .medium)
-            spinner.startAnimating()
-            cell.accessoryView = spinner
-        case .success(let ms):
-            let label = UILabel()
-            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
-            label.text = String(localized: "\(ms) ms")
-            label.textColor = ms < 300 ? .systemGreen : ms < 500 ? .systemYellow : .systemRed
-            label.sizeToFit()
-            cell.accessoryView = label
-        case .failed:
-            let label = UILabel()
-            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
-            label.text = String(localized: "timeout")
-            label.textColor = .secondaryLabel
-            label.sizeToFit()
-            cell.accessoryView = label
-        case .insecure:
-            let label = UILabel()
-            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
-            label.text = String(localized: "insecure")
-            label.textColor = .secondaryLabel
-            label.sizeToFit()
-            cell.accessoryView = label
-        }
-    }
-
-    private func updateVisibleLatencyAccessories() {
-        for cell in tableView.visibleCells {
-            guard let indexPath = tableView.indexPath(for: cell) else { continue }
-            guard indexPath.row < viewModel.chains.count else { continue }
-            let chain = viewModel.chains[indexPath.row]
-            let proxies = chain.resolveProxies(from: viewModel.configurations)
-            let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
-            applyLatencyAccessory(to: cell, chainId: chain.id, isValid: isValid)
-        }
+    private func chain(_ id: UUID) -> ProxyChain? {
+        ChainStore.shared.chains.first { $0.id == id }
     }
 
     // MARK: - Empty State
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        if viewModel.chains.isEmpty {
-            let emptyLabel = UILabel()
-            emptyLabel.text = String(localized: "No Chains")
-            emptyLabel.textColor = .secondaryLabel
-            emptyLabel.font = .systemFont(ofSize: 32, weight: .medium)
-            emptyLabel.textAlignment = .center
-            tableView.backgroundView = emptyLabel
-        } else {
+    private func updateEmptyState(isEmpty: Bool) {
+        guard isEmpty else {
             tableView.backgroundView = nil
+            return
         }
+        let emptyLabel = UILabel()
+        emptyLabel.text = String(localized: "No Chains")
+        emptyLabel.textColor = .secondaryLabel
+        emptyLabel.font = .systemFont(ofSize: 32, weight: .medium)
+        emptyLabel.textAlignment = .center
+        tableView.backgroundView = emptyLabel
     }
 }

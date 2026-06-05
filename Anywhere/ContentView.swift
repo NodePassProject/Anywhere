@@ -8,8 +8,10 @@
 import SwiftUI
 
 struct ContentView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
-    @EnvironmentObject private var deepLinkManager: DeepLinkManager
+    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(RoutingRuleSetStore.self) private var ruleSetStore
+    @Environment(DeepLinkManager.self) private var deepLinkManager
     @State private var selectedTab: AppTab = .home
     @State private var showingDeepLinkAddSheet = false
     @State private var showingManualAddSheet = false
@@ -17,8 +19,8 @@ struct ContentView: View {
 
     private var showOrphanedAlert: Binding<Bool> {
         Binding(
-            get: { !viewModel.orphanedRuleSetNames.isEmpty },
-            set: { if !$0 { viewModel.orphanedRuleSetNames = [] } }
+            get: { !ruleSetStore.orphanedRuleSetNames.isEmpty },
+            set: { if !$0 { ruleSetStore.acknowledgeOrphans() } }
         )
     }
 
@@ -39,17 +41,18 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showingManualAddSheet) {
                 ProxyEditorView { configuration in
-                    viewModel.addConfiguration(configuration)
+                    configStore.add(configuration)
+                    viewModel.selectIfNone(configuration)
                 }
             }
             .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
                 Button(String(localized: "OK")) {}
             } message: {
-                let names = viewModel.orphanedRuleSetNames.joined(separator: ", ")
+                let names = ruleSetStore.orphanedRuleSetNames.joined(separator: ", ")
                 Text("The proxy used by the following routing rules was deleted. They have been reset to Default: \(names)")
             }
     }
-    
+
     @ViewBuilder
     private var tabView: some View {
         if #available(iOS 18.0, *) {

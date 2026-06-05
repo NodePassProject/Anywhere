@@ -97,24 +97,11 @@ class TVProxyCell: UITableViewCell {
 
     // MARK: - Configuration
 
-    func configure(
-        name: String,
-        isSelected: Bool,
-        protocolName: String,
-        transport: String?,
-        security: String,
-        flow: String?
-    ) {
-        nameLabel.text = name
-        checkmarkView.isHidden = !isSelected
+    func configure(_ item: ProxyListItem) {
+        nameLabel.text = item.name
+        checkmarkView.isHidden = !item.isSelected
 
-        // Build tag list
-        var tags = [protocolName]
-        if let transport, !transport.isEmpty { tags.append(transport.uppercased()) }
-        let sec = security.uppercased()
-        if sec != "NONE" { tags.append(sec) }
-        if let flow, flow.uppercased().contains("VISION") { tags.append("Vision") }
-
+        let tags = item.tags
         for (index, pair) in tagContainers.enumerated() {
             if index < tags.count {
                 pair.label.text = tags[index]
@@ -122,6 +109,42 @@ class TVProxyCell: UITableViewCell {
             } else {
                 pair.container.isHidden = true
             }
+        }
+
+        applyLatency(item.latency)
+    }
+
+    private func applyLatency(_ latency: LatencyResult?) {
+        guard let latency else {
+            accessoryView = nil
+            return
+        }
+        switch latency {
+        case .testing:
+            let spinner = UIActivityIndicatorView(style: .medium)
+            spinner.startAnimating()
+            accessoryView = spinner
+        case .success(let ms):
+            let label = UILabel()
+            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
+            label.text = String(localized: "\(ms) ms")
+            label.textColor = ms < 300 ? .systemGreen : ms < 500 ? .systemYellow : .systemRed
+            label.sizeToFit()
+            accessoryView = label
+        case .failed:
+            let label = UILabel()
+            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
+            label.text = String(localized: "timeout")
+            label.textColor = .secondaryLabel
+            label.sizeToFit()
+            accessoryView = label
+        case .insecure:
+            let label = UILabel()
+            label.font = .monospacedDigitSystemFont(ofSize: 22, weight: .regular)
+            label.text = String(localized: "insecure")
+            label.textColor = .secondaryLabel
+            label.sizeToFit()
+            accessoryView = label
         }
     }
 

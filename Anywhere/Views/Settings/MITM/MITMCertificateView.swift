@@ -6,18 +6,19 @@
 //
 
 import SwiftUI
-import Combine
+import Observation
 import UIKit
 import UniformTypeIdentifiers
 
 @MainActor
-final class MITMCertificateController: ObservableObject {
+@Observable
+final class MITMCertificateController {
     static let shared = MITMCertificateController()
 
-    private let store = MITMCertificateStore()
+    @ObservationIgnored private let store = MITMCertificateStore()
 
-    @Published private(set) var hasCA: Bool = false
-    @Published private(set) var trusted: Bool = false
+    private(set) var hasCA: Bool = false
+    private(set) var trusted: Bool = false
 
     private init() {
         refresh()
@@ -56,7 +57,7 @@ final class MITMCertificateController: ObservableObject {
 struct MITMCertificateView: View {
     @Environment(\.scenePhase) private var scenePhase
 
-    @StateObject private var controller = MITMCertificateController.shared
+    @Environment(MITMCertificateController.self) private var controller
 
     @State private var exportingCer = false
     @State private var showRegenerateConfirm = false

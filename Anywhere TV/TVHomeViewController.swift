@@ -7,14 +7,13 @@
 
 import UIKit
 import NetworkExtension
-import Combine
 
 class TVHomeViewController: UIViewController {
 
     // MARK: - Properties
 
     private let viewModel = VPNViewModel.shared
-    private var cancellables = Set<AnyCancellable>()
+    private var lastRenderedConnectedState: Bool?
 
     private let gradientLayer = CAGradientLayer()
 
@@ -59,8 +58,8 @@ class TVHomeViewController: UIViewController {
         setupConfigCard()
         setupEmptyCard()
         setupLayout()
-        bindViewModel()
         updateUI()
+        lastRenderedConnectedState = isConnected
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in
             self.updateGradientColors(animated: false)
         }
@@ -84,11 +83,11 @@ class TVHomeViewController: UIViewController {
         let start: UIColor
         let end: UIColor
         if isConnected {
-            start = UIColor(named: "GradientStart") ?? .black
-            end = UIColor(named: "GradientEnd") ?? .black
+            start = UIColor.connectedBackgroundStart
+            end = UIColor.connectedBackgroundEnd
         } else {
-            start = UIColor(named: "GradientDisconnectedStart") ?? .black
-            end = UIColor(named: "GradientDisconnectedEnd") ?? .black
+            start = UIColor.disconnectedBackgroundStart
+            end = UIColor.disconnectedBackgroundEnd
         }
 
         if animated {
@@ -337,47 +336,31 @@ class TVHomeViewController: UIViewController {
 
     // MARK: - Bindings
 
-    private func bindViewModel() {
-        viewModel.$vpnStatus
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateUI() }
-            .store(in: &cancellables)
+    /// Applies all view-model– and stats-driven state to the views.
+    override func updateProperties() {
+        super.updateProperties()
+        updatePowerButton()    // isManagerReady, hasConfigurations, vpnStatus
+        updateStatusLabel()    // vpnStatus
+        updateConfigCard()     // selectedConfiguration
+        updateTrafficStats()   // ConnectionStatsModel.bytesIn/bytesOut + vpnStatus
 
-        viewModel.$selectedConfiguration
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateConfigCard() }
-            .store(in: &cancellables)
-
-        ConnectionStatsModel.shared.$bytesIn
-            .combineLatest(ConnectionStatsModel.shared.$bytesOut)
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateTrafficStats() }
-            .store(in: &cancellables)
-
-        viewModel.$isManagerReady
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updatePowerButton() }
-            .store(in: &cancellables)
-
-        viewModel.$configurations
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateConfigCard() }
-            .store(in: &cancellables)
-
-        viewModel.$startError
-            .compactMap { $0 }
-            .receive(on: RunLoop.main)
-            .sink { [weak self] message in
-                self?.presentStartError(message)
-            }
-            .store(in: &cancellables)
+        // Animate the gradient only when the connected state actually flips, so the
+        // once-per-second traffic-stats updates don't restart its 0.6s color animation.
+        let connected = isConnected
+        if connected != lastRenderedConnectedState {
+            lastRenderedConnectedState = connected
+            updateGradientColors(animated: true)
+        }
+        
+        if let startError = viewModel.startError {
+            viewModel.startError = nil
+            presentStartError(startError)
+        }
     }
 
     private func presentStartError(_ message: String) {
         let alert = UIAlertController(title: "VPN Error", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
-            self?.viewModel.startError = nil
-        })
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
     }
 
@@ -392,7 +375,7 @@ class TVHomeViewController: UIViewController {
     }
 
     private func updatePowerButton() {
-        let disabled = viewModel.hasConfigurations && (!viewModel.isManagerReady || viewModel.vpnStatus.isTransitioning)
+        let disabled = ConfigurationStore.shared.hasConfigurations && (!viewModel.isManagerReady || viewModel.vpnStatus.isTransitioning)
         powerButton.isEnabled = !disabled
         powerButton.alpha = disabled ? 0.5 : 1.0
 
@@ -445,7 +428,7 @@ class TVHomeViewController: UIViewController {
     // MARK: - Actions
 
     @objc private func powerButtonTapped() {
-        guard viewModel.hasConfigurations else {
+        guard ConfigurationStore.shared.hasConfigurations else {
             addConfigTapped()
             return
         }

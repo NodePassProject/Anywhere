@@ -19,7 +19,7 @@ private struct MITMDomainSuffixDraft: Identifiable, Equatable {
 struct MITMRuleSetDetailView: View {
     @Environment(\.editMode) private var editMode
 
-    @StateObject private var store = MITMRuleSetStore.shared
+    @Environment(MITMRuleSetStore.self) private var store
 
     let ruleSet: MITMRuleSet?
 
