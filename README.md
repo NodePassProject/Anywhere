@@ -116,6 +116,22 @@ anywhere://add-proxy?link=<link>
 
 > **Note:** The `link` parameter is parsed by taking everything after `?link=` verbatim, so the inner URL does **not** need to be percent-encoded. For example, `anywhere://add-proxy?link=https://example.com/sub?token=abc&foo=bar` works as expected.
 
+#### Domain Fronting
+
+To fetch a subscription through a CDN front domain (so SNI-based DPI cannot block it), add a `host` parameter before `link`:
+
+```
+anywhere://add-proxy?host=<realHost>&link=<frontedURL>
+```
+
+| Part | Role |
+|------|------|
+| `link` host | TLS **SNI** / front domain in the ClientHello (also the connect target) |
+| `host` | real HTTP **`Host:`** header — the actual CDN origin |
+| `link` path | sent as-is to the real origin |
+
+The request connects to the front domain (SNI set to it) and sends the path with `Host: <realHost>`. When `host` is omitted, behavior is unchanged. The `link` value may be passed plainly or base64-encoded; if it base64-decodes to a supported URL, the decoded value is used. This link works both as a deep link and when pasted into the Add Proxy link field.
+
 ### Proxy URI Schemes
 
 Tapping any of the following links on iOS will open Anywhere and pre-fill the full URI in the Add Proxy view for import:

@@ -18,8 +18,9 @@ struct Subscription: Identifiable, Codable {
     var expire: Date?
     var collapsed: Bool
     var isNameCustomized: Bool
+    var frontHost: String?
 
-    init(id: UUID = UUID(), name: String, url: String, lastUpdate: Date? = nil, upload: Int64? = nil, download: Int64? = nil, total: Int64? = nil, expire: Date? = nil, collapsed: Bool = false, isNameCustomized: Bool = false) {
+    init(id: UUID = UUID(), name: String, url: String, lastUpdate: Date? = nil, upload: Int64? = nil, download: Int64? = nil, total: Int64? = nil, expire: Date? = nil, collapsed: Bool = false, isNameCustomized: Bool = false, frontHost: String? = nil) {
         self.id = id
         self.name = name
         self.url = url
@@ -30,6 +31,7 @@ struct Subscription: Identifiable, Codable {
         self.expire = expire
         self.collapsed = collapsed
         self.isNameCustomized = isNameCustomized
+        self.frontHost = frontHost
     }
 
     init(from decoder: Decoder) throws {
@@ -44,5 +46,6 @@ struct Subscription: Identifiable, Codable {
         expire = try container.decodeIfPresent(Date.self, forKey: .expire)
         collapsed = (try? container.decode(Bool.self, forKey: .collapsed)) ?? false
         isNameCustomized = (try? container.decode(Bool.self, forKey: .isNameCustomized)) ?? false
+        frontHost = try container.decodeIfPresent(String.self, forKey: .frontHost)
     }
 }

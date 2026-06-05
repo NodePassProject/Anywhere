@@ -292,7 +292,7 @@ class VPNViewModel: ObservableObject {
     }
 
     func updateSubscription(_ subscription: Subscription) async throws {
-        let result = try await SubscriptionFetcher.fetch(url: subscription.url)
+        let result = try await SubscriptionFetcher.fetch(url: subscription.url, host: subscription.frontHost)
 
         // Check if selection pointed to a configuration in this subscription
         let selectedWasInSubscription = selectedConfiguration.flatMap { $0.subscriptionId == subscription.id } ?? false

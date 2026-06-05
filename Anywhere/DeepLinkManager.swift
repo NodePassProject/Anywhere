@@ -10,9 +10,11 @@ import Combine
 
 final class DeepLinkManager: ObservableObject {
     @Published var url: String?
+    var host: String?
 
     // Supported deep link schemes:
     // anywhere://add-proxy?link=<link>
+    // anywhere://add-proxy?host=<host>&link=<link>
     // vless://<...>
     // ss://<...>
     // sudoku://<...>
@@ -21,6 +23,7 @@ final class DeepLinkManager: ObservableObject {
         case "anywhere":
             handleAnywhereScheme(url)
         case "vless", "hysteria2", "hy2", "nowhere", "trojan", "anytls", "ss", "quic", "sudoku":
+            self.host = nil
             self.url = url.absoluteString
         default:
             break
@@ -28,12 +31,8 @@ final class DeepLinkManager: ObservableObject {
     }
 
     private func handleAnywhereScheme(_ url: URL) {
-        guard url.host == "add-proxy" else { return }
-        // Take everything after "?link="
-        let string = url.absoluteString
-        guard let range = string.range(of: "?link=") else { return }
-        let rawLink = String(string[range.upperBound...])
-        guard !rawLink.isEmpty else { return }
-        self.url = rawLink.removingPercentEncoding ?? rawLink
+        guard url.host == "add-proxy", let parsed = AnywhereProxyLink.parse(url.absoluteString) else { return }
+        self.host = parsed.host
+        self.url = parsed.link
     }
 }

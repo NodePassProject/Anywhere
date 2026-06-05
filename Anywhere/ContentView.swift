@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var showingDeepLinkAddSheet = false
     @State private var showingManualAddSheet = false
     @State private var pendingDeepLinkURL: String?
+    @State private var pendingDeepLinkHost: String?
 
     private var showOrphanedAlert: Binding<Bool> {
         Binding(
@@ -28,13 +29,15 @@ struct ContentView: View {
                 if let url = newValue {
                     selectedTab = .proxies
                     pendingDeepLinkURL = url
+                    pendingDeepLinkHost = deepLinkManager.host
                     deepLinkManager.url = nil
+                    deepLinkManager.host = nil
                     showingDeepLinkAddSheet = true
                 }
             }
-            .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
+            .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil; pendingDeepLinkHost = nil }) {
                 DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                    AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)
+                    AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL, deepLinkHost: pendingDeepLinkHost)
                 }
             }
             .sheet(isPresented: $showingManualAddSheet) {
