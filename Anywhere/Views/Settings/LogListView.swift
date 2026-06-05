@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct LogListView: View {
-    @ObservedObject private var logsModel = LogsModel.shared
+    @Environment(LogsModel.self) private var logsModel
     @State private var selection = Set<UUID>()
     @State private var editMode: EditMode = .inactive
     

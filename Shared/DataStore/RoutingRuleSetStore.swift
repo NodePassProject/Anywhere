@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import Combine
+import Observation
 
 private let logger = AnywhereLogger(category: "RoutingRuleSetStore")
 
@@ -66,11 +66,23 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
 }
 
 @MainActor
-class RoutingRuleSetStore: ObservableObject {
+@Observable
+class RoutingRuleSetStore {
     static let shared = RoutingRuleSetStore()
 
-    @Published private(set) var ruleSets: [RoutingRuleSet] = []
-    @Published private(set) var customRuleSets: [CustomRoutingRuleSet] = []
+    private(set) var ruleSets: [RoutingRuleSet] = []
+    private(set) var customRuleSets: [CustomRoutingRuleSet] = []
+    /// Names of rule sets whose assigned proxy/chain was deleted, surfaced once for the UI.
+    private(set) var orphanedRuleSetNames: [String] = []
+    
+    var bypassCountryCode: String {
+        didSet {
+            guard bypassCountryCode != oldValue else { return }
+            AWCore.setBypassCountryCode(bypassCountryCode)
+            scheduleSync()
+            AWCore.notifyTunnelSettingsChanged()
+        }
+    }
 
     var adBlockRuleSet: RoutingRuleSet? {
         ruleSets.first(where: { $0.name == "ADBlock" })
@@ -87,6 +99,7 @@ class RoutingRuleSetStore: ObservableObject {
     private static let serviceCatalog = ServiceCatalog.load()
 
     private init() {
+        bypassCountryCode = AWCore.getBypassCountryCode()
         let assignments = AWCore.getRuleSetAssignments()
 
         // Load custom rulesets
@@ -128,6 +141,7 @@ class RoutingRuleSetStore: ObservableObject {
         guard let index = ruleSets.firstIndex(where: { $0.id == ruleSet.id }) else { return }
         ruleSets[index].assignedConfigurationId = configurationId
         saveAssignments()
+        scheduleSync()
     }
 
     func resetAssignments() {
@@ -140,6 +154,7 @@ class RoutingRuleSetStore: ObservableObject {
             ruleSets[index].assignedConfigurationId = nil
         }
         saveAssignments()
+        scheduleSync()
     }
 
     /// Resets any rule set assignments that reference UUIDs (configuration or chain)
@@ -382,6 +397,204 @@ class RoutingRuleSetStore: ObservableObject {
         if let data = try? JSONEncoder().encode(customRuleSets) {
             JSONBlobStore.shared.save(.customRuleSets, data: data)
         }
+        scheduleSync()
+    }
+
+    /// Schedules a routing re-sync to the Network Extension after a rule / assignment / bypass
+    /// change. Keeping it here means views never trigger routing syncs themselves.
+    private func scheduleSync() {
+        Task { await syncToAppGroup() }
+    }
+}
+
+// MARK: - App Group Sync & Orphan Cleanup (convenience)
+
+extension RoutingRuleSetStore {
+    /// Builds routing config from the given data + current rule sets and writes it to the
+    /// App Group for the Network Extension. Uses the built-in ``serializeConfiguration``.
+    func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain]) async {
+        await syncToAppGroup(configurations: configurations, chains: chains, serializeConfiguration: Self.serializeConfiguration)
+    }
+
+    /// Convenience that reads the current configurations and chains from their stores.
+    func syncToAppGroup() async {
+        await syncToAppGroup(configurations: ConfigurationStore.shared.configurations,
+                             chains: ChainStore.shared.chains)
+    }
+
+    /// Clears assignments whose target proxy/chain no longer exists and records the affected
+    /// names for the UI. Called from the stores' `coordinate()` when configurations or chains
+    /// change, which re-syncs routing afterwards.
+    func clearOrphans(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
+        let availableIds = Set(configurations.map { $0.id.uuidString })
+            .union(chains.map { $0.id.uuidString })
+        let affected = clearOrphanedAssignments(availableIds: availableIds)
+        if !affected.isEmpty { orphanedRuleSetNames = affected }
+    }
+
+    /// Dismisses the orphaned-rule-set notice.
+    func acknowledgeOrphans() {
+        orphanedRuleSetNames = []
+    }
+
+    // MARK: - Configuration Serialization
+
+    /// Serializes a configuration into the `[String: Any]` shape the Network Extension's
+    /// routing layer expects. Moved here from `VPNViewModel` so routing stays self-contained.
+    nonisolated static func serializeConfiguration(_ configuration: ProxyConfiguration) -> [String: Any] {
+        let vlessUUID: UUID
+        let vlessEncryption: String
+        let vlessFlow: String?
+        if case .vless(let u, let enc, let fl, _, _, _, _) = configuration.outbound {
+            vlessUUID = u; vlessEncryption = enc; vlessFlow = fl
+        } else {
+            vlessUUID = configuration.id; vlessEncryption = "none"; vlessFlow = nil
+        }
+        var configurationDict: [String: Any] = [
+            "name": configuration.name,
+            "serverAddress": configuration.serverAddress,
+            "serverPort": configuration.serverPort,
+            "uuid": vlessUUID.uuidString,
+            "encryption": vlessEncryption,
+            "flow": vlessFlow ?? "",
+            "security": configuration.securityLayer.tag,
+            "muxEnabled": configuration.muxEnabled,
+            "xudpEnabled": configuration.xudpEnabled,
+            "outboundProtocol": configuration.outboundProtocol.rawValue,
+        ]
+
+        // Add protocol-specific credential fields
+        switch configuration.outbound {
+        case .vless: break
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
+            configurationDict["hysteriaPassword"] = password
+            configurationDict["hysteriaCongestionControl"] = congestionControl.rawValue
+            configurationDict["hysteriaUploadMbps"] = uploadMbps
+            configurationDict["hysteriaDownloadMbps"] = downloadMbps
+            configurationDict["hysteriaSNI"] = sni
+        case .nowhere(let key):
+            configurationDict["nowhereKey"] = key
+        case .trojan(let password, let tls):
+            configurationDict["trojanPassword"] = password
+            configurationDict["trojanSNI"] = tls.serverName
+            if let alpn = tls.alpn, !alpn.isEmpty {
+                configurationDict["trojanALPN"] = alpn.joined(separator: ",")
+            }
+            configurationDict["trojanFingerprint"] = tls.fingerprint.rawValue
+        case .anytls(let password, let ici, let it, let mis, let tls):
+            configurationDict["anytlsPassword"] = password
+            configurationDict["anytlsIdleCheckInterval"] = ici
+            configurationDict["anytlsIdleTimeout"] = it
+            configurationDict["anytlsMinIdleSession"] = mis
+            configurationDict["anytlsSNI"] = tls.serverName
+            if let alpn = tls.alpn, !alpn.isEmpty {
+                configurationDict["anytlsALPN"] = alpn.joined(separator: ",")
+            }
+            configurationDict["anytlsFingerprint"] = tls.fingerprint.rawValue
+        case .shadowsocks(let password, let method):
+            configurationDict["ssPassword"] = password
+            configurationDict["ssMethod"] = method
+        case .socks5(let username, let password):
+            if let username { configurationDict["socks5Username"] = username }
+            if let password { configurationDict["socks5Password"] = password }
+        case .sudoku(let sudoku):
+            configurationDict["sudokuKey"] = sudoku.key
+            configurationDict["sudokuAEADMethod"] = sudoku.aeadMethod.rawValue
+            configurationDict["sudokuPaddingMin"] = sudoku.paddingMin
+            configurationDict["sudokuPaddingMax"] = sudoku.paddingMax
+            configurationDict["sudokuASCIIMode"] = sudoku.asciiMode.rawValue
+            configurationDict["sudokuCustomTables"] = sudoku.customTables
+            configurationDict["sudokuEnablePureDownlink"] = sudoku.enablePureDownlink
+            configurationDict["sudokuHTTPMaskDisable"] = sudoku.httpMask.disable
+            configurationDict["sudokuHTTPMaskMode"] = sudoku.httpMask.mode.rawValue
+            configurationDict["sudokuHTTPMaskTLS"] = sudoku.httpMask.tls
+            configurationDict["sudokuHTTPMaskHost"] = sudoku.httpMask.host
+            configurationDict["sudokuHTTPMaskPathRoot"] = sudoku.httpMask.pathRoot
+            configurationDict["sudokuHTTPMaskMultiplex"] = sudoku.httpMask.multiplex.rawValue
+        case .http11(let username, let password):
+            configurationDict["http11Username"] = username
+            configurationDict["http11Password"] = password
+        case .http2(let username, let password):
+            configurationDict["http2Username"] = username
+            configurationDict["http2Password"] = password
+        case .http3(let username, let password):
+            configurationDict["http3Username"] = username
+            configurationDict["http3Password"] = password
+        }
+
+        // Add Reality configuration if present
+        if case .reality(let reality) = configuration.securityLayer {
+            configurationDict["realityServerName"] = reality.serverName
+            configurationDict["realityPublicKey"] = reality.publicKey.base64EncodedString()
+            configurationDict["realityShortId"] = reality.shortId.map { String(format: "%02x", $0) }.joined()
+            configurationDict["realityFingerprint"] = reality.fingerprint.rawValue
+        }
+
+        // Add TLS configuration if present
+        if case .tls(let tls) = configuration.securityLayer {
+            configurationDict["tlsServerName"] = tls.serverName
+            if let alpn = tls.alpn {
+                configurationDict["tlsAlpn"] = alpn.joined(separator: ",")
+            }
+            configurationDict["tlsFingerprint"] = tls.fingerprint.rawValue
+        }
+
+        if configuration.outboundProtocol == .vless {
+            configurationDict["transport"] = configuration.transportLayer.tag
+            if case .ws(let ws) = configuration.transportLayer {
+                configurationDict["wsHost"] = ws.host
+                configurationDict["wsPath"] = ws.path
+                if !ws.headers.isEmpty {
+                    configurationDict["wsHeaders"] = ws.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+                }
+                configurationDict["wsMaxEarlyData"] = ws.maxEarlyData
+                configurationDict["wsEarlyDataHeaderName"] = ws.earlyDataHeaderName
+            }
+
+            if case .httpUpgrade(let hu) = configuration.transportLayer {
+                configurationDict["huHost"] = hu.host
+                configurationDict["huPath"] = hu.path
+                if !hu.headers.isEmpty {
+                    configurationDict["huHeaders"] = hu.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+                }
+            }
+
+            if case .grpc(let grpc) = configuration.transportLayer {
+                configurationDict["grpcServiceName"] = grpc.serviceName
+                configurationDict["grpcAuthority"] = grpc.authority
+                configurationDict["grpcMultiMode"] = grpc.multiMode
+                configurationDict["grpcUserAgent"] = grpc.userAgent
+                configurationDict["grpcInitialWindowsSize"] = grpc.initialWindowsSize
+                configurationDict["grpcIdleTimeout"] = grpc.idleTimeout
+                configurationDict["grpcHealthCheckTimeout"] = grpc.healthCheckTimeout
+                configurationDict["grpcPermitWithoutStream"] = grpc.permitWithoutStream
+            }
+
+            if case .xhttp(let xhttp) = configuration.transportLayer {
+                configurationDict["xhttpHost"] = xhttp.host
+                configurationDict["xhttpPath"] = xhttp.path
+                configurationDict["xhttpMode"] = xhttp.mode.rawValue
+                if !xhttp.headers.isEmpty {
+                    configurationDict["xhttpHeaders"] = xhttp.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+                }
+                configurationDict["xhttpNoGRPCHeader"] = xhttp.noGRPCHeader
+                // Up/download detach: carry the whole settings as one JSON value
+                // (lossless) rather than flattening each field. (Other advanced
+                // XHTTP fields are not serialized on this routing-rule path.)
+                if let ds = xhttp.downloadSettings,
+                   let data = try? JSONEncoder().encode(ds),
+                   let json = String(data: data, encoding: .utf8) {
+                    configurationDict["xhttpDownloadSettings"] = json
+                }
+            }
+        }
+
+        // Add proxy chain if present
+        if let chain = configuration.chain, !chain.isEmpty {
+            configurationDict["chain"] = chain.map { Self.serializeConfiguration($0) }
+        }
+
+        return configurationDict
     }
 }
 

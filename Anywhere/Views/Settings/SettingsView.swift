@@ -19,7 +19,8 @@ import SwiftUI
 ///
 /// - "alwaysOnEnabled": triggers VPN reconnect (if connected) so on-demand rules update immediately.
 struct SettingsView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     
     @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
 
@@ -27,12 +28,12 @@ struct SettingsView: View {
     
     @State private var proxyMode = AWCore.getProxyMode()
     @State private var adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
-    @State private var bypassCountryCode = AWCore.getBypassCountryCode()
-    
+
     @State private var allowInsecure = AWCore.getAllowInsecure()
     @State private var showInsecureAlert = false
 
     var body: some View {
+        @Bindable var ruleSetStore = ruleSetStore
         Form {
             Section("VPN") {
                 Toggle(isOn: $alwaysOnEnabled) {
@@ -53,7 +54,7 @@ struct SettingsView: View {
                     Toggle(isOn: $adBlockEnabled) {
                         TextWithColorfulIcon(title: "AD Blocking", comment: nil, systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
                     }
-                    Picker(selection: $bypassCountryCode) {
+                    Picker(selection: $ruleSetStore.bypassCountryCode) {
                         Text("Disable").tag("")
                         ForEach(CountryBypassCatalog.shared.supportedCountryCodes, id: \.self) { code in
                             Text("\(flag(for: code)) \(Locale.current.localizedString(forRegionCode: code) ?? code)").tag(code)
@@ -146,20 +147,9 @@ struct SettingsView: View {
             AWCore.notifyTunnelSettingsChanged()
         }
         .onChange(of: adBlockEnabled) { _, newValue in
+            // `updateAssignment` re-syncs routing itself.
             if let adBlockRuleSet = RoutingRuleSetStore.shared.adBlockRuleSet {
-                if newValue {
-                    RoutingRuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: "REJECT")
-                } else {
-                    RoutingRuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: nil)
-                }
-            }
-            Task { await viewModel.syncRoutingConfigurationToNE() }
-        }
-        .onChange(of: bypassCountryCode) { _, newValue in
-            AWCore.setBypassCountryCode(newValue)
-            Task {
-                await viewModel.syncRoutingConfigurationToNE()
-                AWCore.notifyTunnelSettingsChanged()
+                RoutingRuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
             }
         }
         .alert("Allow Insecure", isPresented: $showInsecureAlert) {
@@ -179,8 +169,7 @@ struct SettingsView: View {
             
             proxyMode = AWCore.getProxyMode()
             adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
-            bypassCountryCode = AWCore.getBypassCountryCode()
-            
+
             allowInsecure = AWCore.getAllowInsecure()
         }
     }

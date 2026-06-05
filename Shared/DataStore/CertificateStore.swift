@@ -6,7 +6,7 @@
 //
 
 import Foundation
-import Combine
+import Observation
 import SwiftUI
 
 /// Manages user-trusted certificate SHA-256 fingerprints.
@@ -15,10 +15,11 @@ import SwiftUI
 /// and the Network Extension can access them. TLSClient checks these
 /// when system trust evaluation fails.
 @MainActor
-final class CertificateStore: ObservableObject {
+@Observable
+final class CertificateStore {
     static let shared = CertificateStore()
 
-    @Published private(set) var fingerprints: [String] = []
+    private(set) var fingerprints: [String] = []
 
     private init() {
         fingerprints = AWCore.getTrustedCertificateFingerprints()

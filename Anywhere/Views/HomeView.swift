@@ -9,8 +9,11 @@ import SwiftUI
 import NetworkExtension
 
 struct HomeView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
-    
+    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(ChainStore.self) private var chainStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
+
     @State private var proxyMode = AWCore.getProxyMode()
 
     @State private var showingAddSheet = false
@@ -27,9 +30,9 @@ struct HomeView: View {
             get: { viewModel.selectedChainId ?? viewModel.selectedConfiguration?.id },
             set: { newId in
                 guard let id = newId else { return }
-                if let chain = viewModel.chains.first(where: { $0.id == id }) {
-                    viewModel.selectChain(chain)
-                } else if let configuration = viewModel.configurations.first(where: { $0.id == id }) {
+                if let chain = chainStore.chains.first(where: { $0.id == id }) {
+                    viewModel.selectChain(chain, configurations: configStore.configurations)
+                } else if let configuration = configStore.configurations.first(where: { $0.id == id }) {
                     viewModel.selectedConfiguration = configuration
                 }
             }
@@ -85,6 +88,7 @@ struct HomeView: View {
                     Text("Global").tag(ProxyMode.global)
                 }
                 .pickerStyle(.segmented)
+                .frame(minWidth: 120)
             }
         }
         .onAppear {
@@ -101,7 +105,7 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showingManualAddSheet) {
             ProxyEditorView { configuration in
-                viewModel.addConfiguration(configuration)
+                configStore.add(configuration); viewModel.selectIfNone(configuration)
             }
         }
         .alert("VPN Error", isPresented: Binding(
@@ -140,7 +144,7 @@ struct HomeView: View {
     @ViewBuilder
     private var powerButton: some View {
         Button {
-            if viewModel.hasConfigurations {
+            if configStore.hasConfigurations {
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
                     viewModel.toggleVPN()
                 }
@@ -193,7 +197,7 @@ struct HomeView: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isButtonDisabled && viewModel.hasConfigurations)
+        .disabled(viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations) && configStore.hasConfigurations)
         .sensoryFeedback(.impact(weight: .medium), trigger: isConnected)
         .animation(.easeInOut(duration: 0.6), value: isConnected)
     }
@@ -232,14 +236,14 @@ struct HomeView: View {
     @ViewBuilder
     private func selectedConfigurationCard(_ configuration: ProxyConfiguration) -> some View {
         Menu {
-            ForEach(viewModel.standalonePickerItems) { item in
+            ForEach(configStore.standalonePickerItems) { item in
                 Button(item.name) {
                     selectedPickerId.wrappedValue = item.id
                 }
             }
-            if !viewModel.chainPickerItems.isEmpty {
+            if !chainStore.pickerItems.isEmpty {
                 Section {
-                    ForEach(viewModel.chainPickerItems) { item in
+                    ForEach(chainStore.pickerItems) { item in
                         Button(item.name) {
                             selectedPickerId.wrappedValue = item.id
                         }
@@ -248,7 +252,7 @@ struct HomeView: View {
                     Text("Chains")
                 }
             }
-            ForEach(viewModel.subscriptionPickerSections) { section in
+            ForEach(subscriptionStore.pickerSections) { section in
                 Section {
                     ForEach(section.items) { item in
                         Button(item.name) {
@@ -329,7 +333,7 @@ struct HomeView: View {
 /// Observes ``ConnectionStatsModel`` independently so that the
 /// 1-second stats poll only invalidates this sub-tree, not all of HomeView.
 private struct TrafficStatsContent: View {
-    @ObservedObject private var stats = ConnectionStatsModel.shared
+    @Environment(ConnectionStatsModel.self) private var stats
 
     var body: some View {
         HStack {

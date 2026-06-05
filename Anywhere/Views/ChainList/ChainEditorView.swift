@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct ChainEditorView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(ConfigurationStore.self) private var configStore
     @Environment(\.dismiss) private var dismiss
 
     /// Existing chain to edit, or `nil` for a new chain.
@@ -23,7 +23,7 @@ struct ChainEditorView: View {
 
     private var selectedProxies: [ProxyConfiguration] {
         selectedProxyIds.compactMap { id in
-            viewModel.configurations.first(where: { $0.id == id })
+            configStore.configurations.first(where: { $0.id == id })
         }
     }
 
@@ -188,19 +188,20 @@ struct ChainEditorView: View {
 // MARK: - Proxy Picker
 
 private struct ProxyPickerView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(\.dismiss) private var dismiss
     
     let excludedIds: Set<UUID>
     let onSelect: (ProxyConfiguration) -> Void
 
     private var standaloneConfigurations: [ProxyConfiguration] {
-        viewModel.configurations.filter { $0.subscriptionId == nil && !excludedIds.contains($0.id) }
+        configStore.configurations.filter { $0.subscriptionId == nil && !excludedIds.contains($0.id) }
     }
     
     private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
-        viewModel.subscriptions.compactMap { subscription in
-            let configurations = viewModel.configurations(for: subscription).filter { !excludedIds.contains($0.id) }
+        subscriptionStore.subscriptions.compactMap { subscription in
+            let configurations = configStore.configurations(for: subscription).filter { !excludedIds.contains($0.id) }
             return configurations.isEmpty ? nil : (subscription, configurations)
         }
     }
@@ -226,7 +227,7 @@ private struct ProxyPickerView: View {
                 }
             }
             .overlay {
-                if viewModel.configurations.isEmpty {
+                if configStore.configurations.isEmpty {
                     ContentUnavailableView("No Proxies", systemImage: "network")
                 }
             }

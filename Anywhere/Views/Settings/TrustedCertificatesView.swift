@@ -8,7 +8,7 @@
 import SwiftUI
 
 struct TrustedCertificatesView: View {
-    @StateObject private var store = CertificateStore.shared
+    @Environment(CertificateStore.self) private var store
 
     @State private var showAddAlert = false
     @State private var newFingerprint = ""

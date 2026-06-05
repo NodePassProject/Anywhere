@@ -9,7 +9,10 @@ import SwiftUI
 import NetworkExtension
 
 struct ProxyListView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
+    private let coordinator = ProxyRowCoordinator.shared
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
@@ -21,31 +24,27 @@ struct ProxyListView: View {
     @State private var renamingSubscription: Subscription?
     @State private var renameText = ""
 
-    private var standaloneConfigurations: [ProxyConfiguration] {
-        viewModel.configurations.filter { $0.subscriptionId == nil }
+    private var standaloneItems: [ProxyListItem] {
+        coordinator.models.filter { $0.subscriptionId == nil }
     }
 
-    private var subscribedGroups: [(Subscription, [ProxyConfiguration])] {
-        viewModel.subscriptions.compactMap { subscription in
-            let configurations = viewModel.configurations(for: subscription)
-            return configurations.isEmpty ? nil : (subscription, configurations)
-        }
+    private func items(for subscription: Subscription) -> [ProxyListItem] {
+        coordinator.models.filter { $0.subscriptionId == subscription.id }
     }
 
     var body: some View {
         List {
             Section {
-                ForEach(standaloneConfigurations) { configuration in
-                    configurationRow(configuration)
+                ForEach(standaloneItems) { item in
+                    proxyRow(item, editingDisabled: false)
                 }
             }
-            ForEach(viewModel.subscriptions) { subscription in
-                let configurations = viewModel.configurations(for: subscription)
+            ForEach(subscriptionStore.subscriptions) { subscription in
                 let editingDisabled = SubscriptionDomainHelper.shouldDisableProxyEditing(for: subscription.url)
                 Section {
                     if !collapsedSubscriptions.contains(subscription.id) {
-                        ForEach(configurations) { configuration in
-                            configurationRow(configuration, editingDisabled: editingDisabled)
+                        ForEach(items(for: subscription)) { item in
+                            proxyRow(item, editingDisabled: editingDisabled)
                         }
                     }
                 } header: {
@@ -54,13 +53,13 @@ struct ProxyListView: View {
             }
         }
         .overlay {
-            if viewModel.configurations.isEmpty {
+            if configStore.configurations.isEmpty {
                 ContentUnavailableView("No Proxies", systemImage: "network")
             }
         }
         .navigationTitle("Proxies")
         .toolbar {
-            if standaloneConfigurations.count > 1 || viewModel.subscriptions.count > 1 {
+            if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 {
                 ToolbarItem {
                     NavigationLink {
                         ReorderProxiesView()
@@ -71,10 +70,11 @@ struct ProxyListView: View {
             }
             ToolbarItem {
                 Button {
-                    let visibleConfigurations = standaloneConfigurations + subscribedGroups
-                        .filter { !collapsedSubscriptions.contains($0.0.id) }
-                        .flatMap(\.1)
-                    viewModel.testLatencies(for: visibleConfigurations)
+                    let visible = configStore.configurations.filter { configuration in
+                        guard let subId = configuration.subscriptionId else { return true }
+                        return !collapsedSubscriptions.contains(subId)
+                    }
+                    viewModel.testLatencies(for: visible)
                 } label: {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
                 }
@@ -94,12 +94,12 @@ struct ProxyListView: View {
         }
         .sheet(isPresented: $showingManualAddSheet) {
             ProxyEditorView { configuration in
-                viewModel.addConfiguration(configuration)
+                configStore.add(configuration); viewModel.selectIfNone(configuration)
             }
         }
         .sheet(item: $configurationToEdit) { configuration in
             ProxyEditorView(configuration: configuration) { updated in
-                viewModel.updateConfiguration(updated)
+                configStore.update(updated)
             }
         }
         .alert("Update Failed", isPresented: $showingSubscriptionError) {
@@ -111,13 +111,13 @@ struct ProxyListView: View {
             TextField("Name", text: $renameText)
             Button("OK") {
                 if let subscription = renamingSubscription, !renameText.isEmpty {
-                    viewModel.renameSubscription(subscription, to: renameText)
+                    subscriptionStore.rename(subscription, to: renameText)
                 }
             }
             Button("Cancel", role: .cancel) { }
         }
         .onAppear {
-            collapsedSubscriptions = Set(viewModel.subscriptions.filter(\.collapsed).map(\.id))
+            collapsedSubscriptions = Set(subscriptionStore.subscriptions.filter(\.collapsed).map(\.id))
         }
     }
 
@@ -135,7 +135,7 @@ struct ProxyListView: View {
                         collapsedSubscriptions.insert(id)
                     }
                 }
-                viewModel.toggleSubscriptionCollapsed(subscription)
+                subscriptionStore.toggleCollapsed(subscription)
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")
@@ -161,7 +161,7 @@ struct ProxyListView: View {
                 }
                 Menu {
                     Button {
-                        viewModel.testLatencies(for: viewModel.configurations(for: subscription))
+                        viewModel.testLatencies(for: configStore.configurations(for: subscription))
                     } label: {
                         Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
                     }
@@ -177,7 +177,7 @@ struct ProxyListView: View {
                         Label("Update", systemImage: "arrow.clockwise")
                     }
                     Button(role: .destructive) {
-                        viewModel.deleteSubscription(subscription)
+                        subscriptionStore.delete(subscription)
                     } label: {
                         Label("Delete", systemImage: "trash")
                     }
@@ -194,7 +194,7 @@ struct ProxyListView: View {
         updatingSubscription = subscription
         Task {
             do {
-                try await viewModel.updateSubscription(subscription)
+                try await subscriptionStore.refresh(subscription)
             } catch {
                 subscriptionErrorMessage = error.localizedDescription
                 showingSubscriptionError = true
@@ -203,132 +203,94 @@ struct ProxyListView: View {
         }
     }
 
-    // MARK: - Config Row
-    
-    @ViewBuilder
-    private func configurationRow(_ configuration: ProxyConfiguration, editingDisabled: Bool = false) -> some View {
-        let latency = viewModel.latencyResults[configuration.id]
+    // MARK: - Rows
 
-        Button {
-            viewModel.selectedConfiguration = configuration
-        } label: {
+    private func config(_ id: UUID) -> ProxyConfiguration? {
+        configStore.configurations.first { $0.id == id }
+    }
+
+    @ViewBuilder
+    private func proxyRow(_ item: ProxyListItem, editingDisabled: Bool) -> some View {
+        ProxyRowView(
+            item: item,
+            editingDisabled: editingDisabled,
+            onSelect: { if let configuration = config(item.id) { viewModel.selectedConfiguration = configuration } },
+            onTestLatency: { if let configuration = config(item.id) { viewModel.testLatency(for: configuration) } },
+            onCopyLink: { if let configuration = config(item.id) { UIPasteboard.general.string = configuration.toURL() } },
+            onEdit: { configurationToEdit = config(item.id) },
+            onDelete: { if let configuration = config(item.id) { configStore.delete(configuration) } }
+        )
+    }
+}
+
+// MARK: - Proxy Row
+
+private struct ProxyRowView: View {
+    let item: ProxyListItem
+    let editingDisabled: Bool
+    let onSelect: () -> Void
+    let onTestLatency: () -> Void
+    let onCopyLink: () -> Void
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
             HStack {
                 VStack(alignment: .leading) {
                     HStack {
-                        Text(configuration.name)
+                        Text(item.name)
                             .font(.body.weight(.medium))
-                        if viewModel.selectedConfiguration?.id == configuration.id {
+                        if item.isSelected {
                             Image(systemName: "checkmark")
                                 .font(.caption.bold())
                                 .foregroundStyle(.tint)
                         }
                     }
                     HStack(spacing: 4) {
-                        Text(configuration.outboundProtocol.name)
-                        if configuration.outboundProtocol == .vless {
-                            Text("·")
-                            Text(configuration.transportLayer.tag.uppercased())
-                        }
-                        let security = configuration.securityLayer.tag.uppercased()
-                        if security != "NONE" {
-                            Text("·")
-                            Text(security)
-                        }
-                        if case .vless(_, _, let flow?, _, _, _, _) = configuration.outbound, flow.uppercased().contains("VISION") {
-                            Text("·")
-                            Text("Vision")
+                        ForEach(Array(item.tags.enumerated()), id: \.offset) { index, tag in
+                            if index > 0 { Text("·") }
+                            Text(tag)
                         }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
-                
+
                 Spacer()
-                
-                latencyView(latency)
-                    .onTapGesture {
-                        viewModel.testLatency(for: configuration)
-                    }
+
+                LatencyLabel(latency: item.latency)
+                    .onTapGesture(perform: onTestLatency)
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .contextMenu {
-            Button {
-                viewModel.testLatency(for: configuration)
-            } label: {
+            Button(action: onTestLatency) {
                 Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
             }
-            
             if !editingDisabled {
-                Button {
-                    UIPasteboard.general.string = configuration.toURL()
-                } label: {
+                Button(action: onCopyLink) {
                     Label("Copy Link", systemImage: "doc.on.doc")
                 }
-                
-                Button {
-                    configurationToEdit = configuration
-                } label: {
+                Button(action: onEdit) {
                     Label("Edit", systemImage: "pencil")
                 }
-                
-                Button(role: .destructive) {
-                    viewModel.deleteConfiguration(configuration)
-                } label: {
+                Button(role: .destructive, action: onDelete) {
                     Label("Delete", systemImage: "trash")
                 }
             }
         }
         .swipeActions(edge: .trailing) {
             if !editingDisabled {
-                Button(role: .destructive) {
-                    viewModel.deleteConfiguration(configuration)
-                } label: {
+                Button(role: .destructive, action: onDelete) {
                     Label("Delete", systemImage: "trash")
                 }
-                
-                Button {
-                    configurationToEdit = configuration
-                } label: {
+                Button(action: onEdit) {
                     Label("Edit", systemImage: "pencil")
                 }
                 .tint(.orange)
             }
         }
-    }
-
-    @ViewBuilder
-    private func latencyView(_ latency: LatencyResult?) -> some View {
-        switch latency {
-        case .testing:
-            ProgressView()
-                .controlSize(.small)
-                .frame(width: 50, alignment: .trailing)
-        case .success(let ms):
-            Text("\(ms) ms")
-                .font(.caption)
-                .monospacedDigit()
-                .foregroundStyle(latencyColor(ms))
-                .frame(minWidth: 50, alignment: .trailing)
-        case .failed:
-            Text("timeout")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 50, alignment: .trailing)
-        case .insecure:
-            Text("insecure")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 50, alignment: .trailing)
-        case nil:
-            EmptyView()
-        }
-    }
-
-    private func latencyColor(_ ms: Int) -> Color {
-        if ms < 300 { return .green }
-        if ms < 500 { return .yellow }
-        return .red
     }
 }

@@ -9,7 +9,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct MITMSettingsView: View {
-    @StateObject private var store = MITMRuleSetStore.shared
+    @Environment(MITMRuleSetStore.self) private var store
 
     private static let importAllowedContentTypes: [UTType] = [UTType(filenameExtension: "amrs") ?? .data]
 
@@ -24,6 +24,7 @@ struct MITMSettingsView: View {
     @State private var subscribeError: String?
 
     var body: some View {
+        @Bindable var store = store
         Form {
             Section {
                 Toggle(isOn: $store.enabled) {

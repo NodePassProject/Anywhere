@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum LatencyResult: Sendable {
+enum LatencyResult: Sendable, Hashable {
     case testing
     case success(Int)  // milliseconds
     case failed

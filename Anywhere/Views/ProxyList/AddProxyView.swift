@@ -38,7 +38,9 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
 }
 
 struct AddProxyView: View {
-    @ObservedObject private var viewModel = VPNViewModel.shared
+    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(\.dismiss) var dismiss
     @Binding var showingManualAddSheet: Bool
     var deepLinkURL: String?
@@ -282,7 +284,7 @@ struct AddProxyView: View {
             }
             do {
                 let configuration = try ProxyConfiguration.parse(url: trimmedURL, naiveProtocol: naiveProtocol)
-                viewModel.addConfiguration(configuration)
+                configStore.add(configuration); viewModel.selectIfNone(configuration)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription
@@ -314,7 +316,7 @@ struct AddProxyView: View {
                     total: result.total,
                     expire: result.expire
                 )
-                viewModel.addSubscription(configurations: result.configurations, subscription: subscription)
+                subscriptionStore.add(subscription, configurations: result.configurations)
                 dismiss()
             } catch {
                 errorMessage = error.localizedDescription

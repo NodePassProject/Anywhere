@@ -18,7 +18,7 @@ class TVChainEditorViewController: UITableViewController {
 
     private var selectedProxies: [ProxyConfiguration] {
         selectedProxyIds.compactMap { id in
-            viewModel.configurations.first(where: { $0.id == id })
+            ConfigurationStore.shared.configurations.first(where: { $0.id == id })
         }
     }
 
@@ -281,7 +281,7 @@ class TVChainEditorViewController: UITableViewController {
 
     private func presentProxyPicker() {
         let picker = TVProxyPickerViewController(
-            configurations: viewModel.configurations,
+            configurations: ConfigurationStore.shared.configurations,
             excludedIds: Set(selectedProxyIds)
         ) { [weak self] selected in
             self?.selectedProxyIds.append(selected.id)

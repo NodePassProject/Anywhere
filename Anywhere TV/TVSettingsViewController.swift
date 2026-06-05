@@ -6,12 +6,10 @@
 //
 
 import UIKit
-import Combine
 
 class TVSettingsViewController: UIViewController {
 
     private let viewModel = VPNViewModel.shared
-    private var cancellable: AnyCancellable?
 
     // Left side
     private let iconView = UIImageView()

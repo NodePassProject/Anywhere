@@ -7,20 +7,21 @@
 
 import Foundation
 import NetworkExtension
-import Combine
+import Observation
 
 /// Isolated model for VPN traffic statistics.
 ///
 /// Publishes `bytesIn`/`bytesOut` every second while connected.
 @MainActor
-class ConnectionStatsModel: ObservableObject {
+@Observable
+class ConnectionStatsModel {
     static let shared = ConnectionStatsModel()
 
-    @Published private(set) var bytesIn: Int64 = 0
-    @Published private(set) var bytesOut: Int64 = 0
+    private(set) var bytesIn: Int64 = 0
+    private(set) var bytesOut: Int64 = 0
 
-    private var statsTask: Task<Void, Never>?
-    private weak var session: NETunnelProviderSession?
+    @ObservationIgnored private var statsTask: Task<Void, Never>?
+    @ObservationIgnored private weak var session: NETunnelProviderSession?
 
     func startPolling(session: NETunnelProviderSession) {
         self.session = session

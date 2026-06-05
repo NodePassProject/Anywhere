@@ -6,14 +6,15 @@
 //
 
 import Foundation
-import Combine
+import Observation
 import SwiftUI
 
 @MainActor
-class SubscriptionStore: ObservableObject {
+@Observable
+class SubscriptionStore {
     static let shared = SubscriptionStore()
 
-    @Published private(set) var subscriptions: [Subscription] = []
+    private(set) var subscriptions: [Subscription] = []
 
     private init() {
         subscriptions = Self.load()
@@ -63,5 +64,106 @@ class SubscriptionStore: ObservableObject {
                 print("Failed to save subscriptions: \(error)")
             }
         }
+    }
+}
+
+extension SubscriptionStore {
+    /// The subscription that owns a configuration, if any.
+    func subscription(for configuration: ProxyConfiguration) -> Subscription? {
+        guard let subId = configuration.subscriptionId else { return nil }
+        return subscriptions.first { $0.id == subId }
+    }
+
+    /// One picker section per non-empty subscription. Reads `ConfigurationStore.shared`.
+    var pickerSections: [PickerSection] {
+        let configStore = ConfigurationStore.shared
+        return subscriptions.compactMap { subscription in
+            let configs = configStore.configurations(for: subscription)
+            guard !configs.isEmpty else { return nil }
+            return PickerSection(
+                id: subscription.id,
+                header: subscription.name,
+                items: configs.map { PickerItem(id: $0.id, name: $0.name) }
+            )
+        }
+    }
+
+    func toggleCollapsed(_ subscription: Subscription) {
+        var updated = subscription
+        updated.collapsed.toggle()
+        update(updated)
+    }
+
+    func rename(_ subscription: Subscription, to newName: String) {
+        var updated = subscription
+        updated.name = newName
+        updated.isNameCustomized = true
+        update(updated)
+    }
+
+    /// Adds a subscription and its configurations atomically, tagging each config with the
+    /// subscription's id. (Selection is handled by the caller / `revalidateSelection`.)
+    func add(_ subscription: Subscription, configurations newConfigurations: [ProxyConfiguration]) {
+        // Persist subscription first so an interrupted import never leaves orphan proxies.
+        add(subscription)
+        let tagged = newConfigurations.map { configuration in
+            ProxyConfiguration(
+                id: configuration.id, name: configuration.name,
+                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
+                subscriptionId: subscription.id,
+                outbound: configuration.outbound
+            )
+        }
+        ConfigurationStore.shared.replaceConfigurations(for: subscription.id, with: tagged)
+    }
+
+    /// Re-fetches a subscription and replaces its configurations, matching new configs to
+    /// old ones by name to preserve IDs (and routing-rule assignments). Was
+    /// `VPNViewModel.updateSubscription`; selection fix-up is handled by `revalidateSelection`.
+    func refresh(_ subscription: Subscription) async throws {
+        let result = try await SubscriptionFetcher.fetch(url: subscription.url)
+
+        // Match new configurations against old ones by name to preserve IDs.
+        // When multiple configs share a name, they match positionally within that group.
+        let oldConfigurations = ConfigurationStore.shared.configurations(for: subscription)
+        var oldByName: [String: [ProxyConfiguration]] = [:]
+        for old in oldConfigurations {
+            oldByName[old.name, default: []].append(old)
+        }
+        var oldNameCursor: [String: Int] = [:]
+
+        var newConfigurations: [ProxyConfiguration] = []
+        for configuration in result.configurations {
+            let name = configuration.name
+            let cursor = oldNameCursor[name, default: 0]
+            let id: UUID
+            if let group = oldByName[name], cursor < group.count {
+                id = group[cursor].id
+                oldNameCursor[name] = cursor + 1
+            } else {
+                id = configuration.id
+            }
+            newConfigurations.append(ProxyConfiguration(
+                id: id, name: configuration.name,
+                serverAddress: configuration.serverAddress, serverPort: configuration.serverPort,
+                subscriptionId: subscription.id,
+                outbound: configuration.outbound
+            ))
+        }
+
+        // Atomically replace old configurations with new ones (single observation notification)
+        ConfigurationStore.shared.replaceConfigurations(for: subscription.id, with: newConfigurations)
+
+        // Update subscription metadata
+        var updated = subscription
+        updated.lastUpdate = Date()
+        updated.upload = result.upload ?? subscription.upload
+        updated.download = result.download ?? subscription.download
+        updated.total = result.total ?? subscription.total
+        updated.expire = result.expire ?? subscription.expire
+        if let name = result.name, !updated.isNameCustomized {
+            updated.name = name
+        }
+        update(updated)
     }
 }

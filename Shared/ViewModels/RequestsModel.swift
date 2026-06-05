@@ -7,13 +7,11 @@
 
 import Foundation
 import NetworkExtension
-import Combine
+import Observation
 
-/// Polls the network extension for the recent per-connection routing
-/// decision log. Mirrors ``LogsModel``: fetches once per second while
-/// polling is active.
 @MainActor
-class RequestsModel: ObservableObject {
+@Observable
+class RequestsModel {
     static let shared = RequestsModel()
 
     struct Entry: Identifiable, Equatable {
@@ -26,9 +24,9 @@ class RequestsModel: ObservableObject {
         let configurationName: String?
     }
 
-    @Published private(set) var requests: [Entry] = []
+    private(set) var requests: [Entry] = []
 
-    private var pollingTask: Task<Void, Never>?
+    @ObservationIgnored private var pollingTask: Task<Void, Never>?
 
     func startPolling() {
         guard pollingTask == nil else { return }

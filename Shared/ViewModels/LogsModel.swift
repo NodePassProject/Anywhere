@@ -7,13 +7,11 @@
 
 import Foundation
 import NetworkExtension
-import Combine
+import Observation
 
-/// Polls the network extension for recent error log entries.
-///
-/// Fetches logs every second while polling is active.
 @MainActor
-class LogsModel: ObservableObject {
+@Observable
+class LogsModel {
     static let shared = LogsModel()
 
     enum LogLevel: String {
@@ -29,9 +27,9 @@ class LogsModel: ObservableObject {
         let message: String
     }
 
-    @Published private(set) var logs: [LogEntry] = []
+    private(set) var logs: [LogEntry] = []
 
-    private var pollingTask: Task<Void, Never>?
+    @ObservationIgnored private var pollingTask: Task<Void, Never>?
 
     func startPolling() {
         guard pollingTask == nil else { return }
