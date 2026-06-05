@@ -218,7 +218,7 @@ struct HomeView: View {
     @ViewBuilder
     private var trafficStats: some View {
         cardContent {
-            TrafficStatsContent()
+            ConnectionStatsContent()
         }
     }
 
@@ -325,51 +325,5 @@ struct HomeView: View {
                         .fill(.white.opacity(0.2))
                 )
         }
-    }
-}
-
-// MARK: - Traffic Stats (isolated observation)
-
-/// Observes ``ConnectionStatsModel`` independently so that the
-/// 1-second stats poll only invalidates this sub-tree, not all of HomeView.
-private struct TrafficStatsContent: View {
-    @Environment(ConnectionStatsModel.self) private var stats
-
-    var body: some View {
-        HStack {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.up")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .accessibilityLabel("Upload")
-                Text(Self.formatBytes(stats.bytesOut))
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.white)
-                    .contentTransition(.numericText())
-            }
-            Spacer()
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .accessibilityLabel("Download")
-                Text(Self.formatBytes(stats.bytesIn))
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.white)
-                    .contentTransition(.numericText())
-            }
-        }
-        .animation(.default, value: stats.bytesIn)
-        .animation(.default, value: stats.bytesOut)
-    }
-
-    private static let byteFormatter: ByteCountFormatter = {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .binary
-        return formatter
-    }()
-
-    private static func formatBytes(_ bytes: Int64) -> String {
-        byteFormatter.string(fromByteCount: bytes)
     }
 }

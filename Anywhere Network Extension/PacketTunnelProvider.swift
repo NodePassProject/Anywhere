@@ -269,7 +269,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case .fetchStats:
             let response = StatsResponse(
                 bytesIn: tunnelStack.totalBytesIn,
-                bytesOut: tunnelStack.totalBytesOut
+                bytesOut: tunnelStack.totalBytesOut,
+                tcpConnections: tunnelStack.activeTCPConnections,
+                udpConnections: tunnelStack.activeUDPConnections,
+                memoryBytes: Self.memoryFootprint()
             )
             completionHandler?(try? JSONEncoder().encode(response))
 
@@ -281,6 +284,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let response = RequestsResponse(requests: tunnelStack.requestLog.snapshot())
             completionHandler?(try? JSONEncoder().encode(response))
         }
+    }
+
+    /// Current memory footprint of the network-extension process, in bytes.
+    ///
+    /// Reports `phys_footprint` from `TASK_VM_INFO` — the same accounting the
+    /// kernel uses for the extension's jetsam limit (NE processes get a far
+    /// tighter budget than the host app), so it's the figure worth surfacing.
+    /// Returns 0 if the Mach call fails. Cheap enough to read on each 1 Hz poll.
+    private static func memoryFootprint() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
+        )
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), intPtr, &count)
+            }
+        }
+        return kr == KERN_SUCCESS ? info.phys_footprint : 0
     }
 
     override func sleep(completionHandler: @escaping () -> Void) {

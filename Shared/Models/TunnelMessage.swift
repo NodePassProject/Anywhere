@@ -41,8 +41,39 @@ enum TunnelMessage: Codable, Sendable {
 // MARK: - Responses
 
 struct StatsResponse: Codable, Sendable {
+    /// Cumulative bytes received since the tunnel started.
     var bytesIn: Int64
+    /// Cumulative bytes sent since the tunnel started.
     var bytesOut: Int64
+    /// Live active TCP connections (lwIP `tcp_active_pcbs`).
+    var tcpConnections: Int
+    /// Live active UDP flows.
+    var udpConnections: Int
+    /// Network-extension process memory footprint, in bytes (`phys_footprint`).
+    var memoryBytes: UInt64
+
+    init(bytesIn: Int64, bytesOut: Int64,
+         tcpConnections: Int = 0, udpConnections: Int = 0, memoryBytes: UInt64 = 0) {
+        self.bytesIn = bytesIn
+        self.bytesOut = bytesOut
+        self.tcpConnections = tcpConnections
+        self.udpConnections = udpConnections
+        self.memoryBytes = memoryBytes
+    }
+
+    // Tolerant decoder: the three metrics below were added after `bytesIn`/
+    // `bytesOut`. An app update applied while the tunnel is connected can leave
+    // a newer app talking to the still-running older extension for a moment;
+    // defaulting the missing keys keeps stats flowing until the next restart
+    // instead of failing the whole decode.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bytesIn = try c.decode(Int64.self, forKey: .bytesIn)
+        bytesOut = try c.decode(Int64.self, forKey: .bytesOut)
+        tcpConnections = try c.decodeIfPresent(Int.self, forKey: .tcpConnections) ?? 0
+        udpConnections = try c.decodeIfPresent(Int.self, forKey: .udpConnections) ?? 0
+        memoryBytes = try c.decodeIfPresent(UInt64.self, forKey: .memoryBytes) ?? 0
+    }
 }
 
 struct LogsResponse: Codable, Sendable {
