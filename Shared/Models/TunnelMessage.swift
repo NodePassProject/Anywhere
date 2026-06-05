@@ -40,39 +40,50 @@ enum TunnelMessage: Codable, Sendable {
 
 // MARK: - Responses
 
+/// One second of traffic telemetry. The extension owns the rolling 60-sample
+/// window and ships the whole buffer in each ``StatsResponse`` so the app can
+/// render the time-series view without having to stitch successive polls.
+struct StatsSample: Codable, Identifiable, Hashable, Sendable {
+    /// Monotonic sequence number, restarted on each tunnel session; also the
+    /// natural chart x-position.
+    let id: UInt64
+    /// Bytes received during this second (throughput, not a running total).
+    let bytesIn: Int64
+    /// Bytes sent during this second.
+    let bytesOut: Int64
+    /// Active TCP connections at sample time.
+    let tcpConnectionCount: Int
+    /// Active UDP flows at sample time.
+    let udpConnectionCount: Int
+    /// Extension memory footprint at sample time, in bytes.
+    let memoryBytes: UInt64
+}
+
 struct StatsResponse: Codable, Sendable {
     /// Cumulative bytes received since the tunnel started.
     var bytesIn: Int64
     /// Cumulative bytes sent since the tunnel started.
     var bytesOut: Int64
-    /// Live active TCP connections (lwIP `tcp_active_pcbs`).
-    var tcpConnections: Int
-    /// Live active UDP flows.
-    var udpConnections: Int
-    /// Network-extension process memory footprint, in bytes (`phys_footprint`).
-    var memoryBytes: UInt64
+    /// Rolling per-second window. The extension drops the oldest entry once
+    /// the buffer is full; current TCP/UDP/memory gauges are
+    /// `samples.last`'s fields.
+    var samples: [StatsSample]
 
-    init(bytesIn: Int64, bytesOut: Int64,
-         tcpConnections: Int = 0, udpConnections: Int = 0, memoryBytes: UInt64 = 0) {
+    init(bytesIn: Int64, bytesOut: Int64, samples: [StatsSample] = []) {
         self.bytesIn = bytesIn
         self.bytesOut = bytesOut
-        self.tcpConnections = tcpConnections
-        self.udpConnections = udpConnections
-        self.memoryBytes = memoryBytes
+        self.samples = samples
     }
 
-    // Tolerant decoder: the three metrics below were added after `bytesIn`/
-    // `bytesOut`. An app update applied while the tunnel is connected can leave
-    // a newer app talking to the still-running older extension for a moment;
-    // defaulting the missing keys keeps stats flowing until the next restart
-    // instead of failing the whole decode.
+    // Tolerant decoder: lets a newer app survive briefly talking to an older
+    // extension across an app update, and vice versa, without failing the
+    // whole decode. Missing keys default to empty/zero — the next restart
+    // populates real data.
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         bytesIn = try c.decode(Int64.self, forKey: .bytesIn)
         bytesOut = try c.decode(Int64.self, forKey: .bytesOut)
-        tcpConnections = try c.decodeIfPresent(Int.self, forKey: .tcpConnections) ?? 0
-        udpConnections = try c.decodeIfPresent(Int.self, forKey: .udpConnections) ?? 0
-        memoryBytes = try c.decodeIfPresent(UInt64.self, forKey: .memoryBytes) ?? 0
+        samples = try c.decodeIfPresent([StatsSample].self, forKey: .samples) ?? []
     }
 }
 

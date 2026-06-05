@@ -5,28 +5,20 @@
 //  Created by NodePassProject on 6/5/26.
 //
 
+import Foundation
 import SwiftUI
 import Charts
-import Foundation
 
-// MARK: - Connection Stats (isolated observation)
-
-/// Observes ``ConnectionStatsModel`` independently so that the
-/// 1-second stats poll only invalidates this sub-tree, not all of HomeView.
-///
-/// Tapping cycles through views over the last-60-second window:
-/// running totals → speed → connections (TCP/UDP) → memory → back to totals.
-/// Charts are driven by ``ConnectionStatsModel/samples``.
 struct ConnectionStatsContent: View {
     @Environment(ConnectionStatsModel.self) private var stats
     @State private var mode: Mode = .totals
-
+    
     /// The displayed metric, advanced one step per tap (wraps at the end).
     private enum Mode: Int, CaseIterable {
         case totals, speed, connections, memory
         var next: Mode { Mode(rawValue: rawValue + 1) ?? .totals }
     }
-
+    
     var body: some View {
         ZStack {
             switch mode {
@@ -37,14 +29,7 @@ struct ConnectionStatsContent: View {
             case .connections:
                 connectionsView
             case .memory:
-                metricView(
-                    title: "Memory", systemImage: "memorychip",
-                    value: Self.formatBytes(Int64(stats.memoryBytes)),
-                    color: .yellow,
-                    yLabel: { Self.formatBytes(Int64($0)) }
-                ) {
-                    Double($0.memoryBytes)
-                }
+                memoryView
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -54,9 +39,9 @@ struct ConnectionStatsContent: View {
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Switches the displayed metric")
     }
-
+    
     // MARK: Totals (running cumulative bytes)
-
+    
     private var totalsView: some View {
         HStack {
             HStack(spacing: 6) {
@@ -84,9 +69,9 @@ struct ConnectionStatsContent: View {
         .animation(.default, value: stats.bytesIn)
         .animation(.default, value: stats.bytesOut)
     }
-
-    // MARK: Speed (per-second throughput, both directions)
-
+    
+    // MARK: Speed
+    
     private var speedView: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -94,31 +79,43 @@ struct ConnectionStatsContent: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.7))
                 Spacer()
-                speedReadout(systemImage: "arrow.up", color: .orange,
-                             bytes: stats.samples.last?.bytesOut ?? 0)
-                speedReadout(systemImage: "arrow.down", color: .cyan,
-                             bytes: stats.samples.last?.bytesIn ?? 0)
+                speedReadout(
+                    systemImage: "arrow.up",
+                    color: .orange,
+                    bytes: stats.samples.last?.bytesOut ?? 0
+                )
+                .animation(.default, value: stats.samples.last?.bytesOut)
+                speedReadout(
+                    systemImage: "arrow.down",
+                    color: .cyan,
+                    bytes: stats.samples.last?.bytesIn ?? 0
+                )
+                .animation(.default, value: stats.samples.last?.bytesIn)
             }
             Chart(stats.samples) { sample in
-                LineMark(x: .value("Time", Int(sample.id)),
-                         y: .value("Bps", Double(sample.bytesOut)),
-                         series: .value("Series", "Upload"))
-                    .foregroundStyle(.orange)
-                    .interpolationMethod(.monotone)
-                LineMark(x: .value("Time", Int(sample.id)),
-                         y: .value("Bps", Double(sample.bytesIn)),
-                         series: .value("Series", "Download"))
-                    .foregroundStyle(.cyan)
-                    .interpolationMethod(.monotone)
+                LineMark(
+                    x: .value("Time", Int(sample.id)),
+                    y: .value("Speed", Double(sample.bytesOut)),
+                    series: .value("Series", "Upload")
+                )
+                .foregroundStyle(.orange)
+                LineMark(
+                    x: .value("Time", Int(sample.id)),
+                    y: .value("Speed", Double(sample.bytesIn)),
+                    series: .value("Series", "Download")
+                )
+                .foregroundStyle(.cyan)
             }
             .chartXAxis(.hidden)
             .chartLegend(.hidden)
-            .chartYAxis { yAxis { Self.formatBytes(Int64($0)) } }
+            .chartXScale(domain: xDomain)
+            .chartYAxis { yAxis { Self.formatBytes(Int64($0)) + String(localized: "/s") } }
             .chartYScale(domain: .automatic(includesZero: true))
             .frame(minHeight: 50)
+            .animation(.default, value: stats.samples)
         }
     }
-
+    
     private func speedReadout(systemImage: String, color: Color, bytes: Int64) -> some View {
         HStack(spacing: 4) {
             Image(systemName: systemImage)
@@ -130,9 +127,9 @@ struct ConnectionStatsContent: View {
                 .contentTransition(.numericText())
         }
     }
-
-    // MARK: Connections (TCP + UDP counts, one chart)
-
+    
+    // MARK: Connections
+    
     private var connectionsView: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
@@ -140,29 +137,37 @@ struct ConnectionStatsContent: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.7))
                 Spacer()
-                connectionReadout(label: "TCP", color: .green, count: stats.tcpConnections)
-                connectionReadout(label: "UDP", color: .purple, count: stats.udpConnections)
+                connectionReadout(label: "TCP", color: .green, count: stats.tcpConnectionCount)
+                    .animation(.default, value: stats.tcpConnectionCount)
+                connectionReadout(label: "UDP", color: .purple, count: stats.udpConnectionCount)
+                    .animation(.default, value: stats.udpConnectionCount)
             }
             Chart(stats.samples) { sample in
-                LineMark(x: .value("Time", Int(sample.id)),
-                         y: .value("Count", Double(sample.tcpConnections)),
-                         series: .value("Series", "TCP"))
-                    .foregroundStyle(.green)
-                    .interpolationMethod(.monotone)
-                LineMark(x: .value("Time", Int(sample.id)),
-                         y: .value("Count", Double(sample.udpConnections)),
-                         series: .value("Series", "UDP"))
-                    .foregroundStyle(.purple)
-                    .interpolationMethod(.monotone)
+                LineMark(
+                    x: .value("Time", Int(sample.id)),
+                    y: .value("Count", Double(sample.tcpConnectionCount)),
+                    series: .value("Series", "TCP")
+                )
+                .foregroundStyle(.green)
+                .interpolationMethod(.monotone)
+                LineMark(
+                    x: .value("Time", Int(sample.id)),
+                    y: .value("Count", Double(sample.udpConnectionCount)),
+                    series: .value("Series", "UDP")
+                )
+                .foregroundStyle(.purple)
+                .interpolationMethod(.monotone)
             }
             .chartXAxis(.hidden)
             .chartLegend(.hidden)
+            .chartXScale(domain: xDomain)
             .chartYAxis { yAxis { "\(Int($0.rounded()))" } }
             .chartYScale(domain: .automatic(includesZero: true))
             .frame(minHeight: 50)
+            .animation(.default, value: stats.samples)
         }
     }
-
+    
     private func connectionReadout(label: String, color: Color, count: Int) -> some View {
         HStack(spacing: 4) {
             Circle()
@@ -174,52 +179,56 @@ struct ConnectionStatsContent: View {
                 .contentTransition(.numericText())
         }
     }
+    
+    // MARK: Memory
 
-    // MARK: Single-metric chart (memory)
-
-    @ViewBuilder
-    private func metricView(
-        title: String,
-        systemImage: String,
-        value: String,
-        color: Color,
-        yLabel: @escaping (Double) -> String,
-        y: @escaping (TrafficSample) -> Double
-    ) -> some View {
+    private var memoryView: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Label(title, systemImage: systemImage)
+                Label("Memory", systemImage: "memorychip")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.7))
                 Spacer()
-                Text(value)
+                Text(Self.formatBytes(Int64(stats.memoryBytes)))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white)
                     .contentTransition(.numericText())
+                    .animation(.default, value: stats.memoryBytes)
             }
             Chart(stats.samples) { sample in
-                AreaMark(x: .value("Time", Int(sample.id)),
-                         y: .value("Value", y(sample)))
-                    .foregroundStyle(.linearGradient(
-                        colors: [color.opacity(0.35), color.opacity(0.03)],
-                        startPoint: .top, endPoint: .bottom))
-                    .interpolationMethod(.monotone)
-                LineMark(x: .value("Time", Int(sample.id)),
-                         y: .value("Value", y(sample)))
-                    .foregroundStyle(color)
-                    .interpolationMethod(.monotone)
+                AreaMark(
+                    x: .value("Time", Int(sample.id)),
+                    y: .value("Usage", Double(sample.memoryBytes))
+                )
+                .foregroundStyle(.linearGradient(
+                    colors: [Color.yellow.opacity(0.35), Color.yellow.opacity(0.03)],
+                    startPoint: .top, endPoint: .bottom))
+                .interpolationMethod(.monotone)
+                LineMark(
+                    x: .value("Time", Int(sample.id)),
+                    y: .value("Usage", Double(sample.memoryBytes))
+                )
+                .foregroundStyle(.yellow)
+                .interpolationMethod(.monotone)
             }
             .chartXAxis(.hidden)
-            .chartYAxis { yAxis(yLabel) }
+            .chartXScale(domain: xDomain)
+            .chartYAxis { yAxis { Self.formatBytes(Int64($0)) } }
             .chartYScale(domain: .automatic(includesZero: true))
             .frame(minHeight: 50)
+            .animation(.default, value: stats.samples)
         }
     }
-
+    
+    // MARK: Chart X axis
+    
+    private var xDomain: ClosedRange<Int> {
+        let latest = Int(stats.samples.last?.id ?? UInt64(ConnectionStatsModel.maxSamples))
+        return (latest - (ConnectionStatsModel.maxSamples - 1))...latest
+    }
+    
     // MARK: Chart Y axis
-
-    /// Leading Y axis shared by every chart: caption-sized, card-legible labels
-    /// formatted by `label`, over faint grid lines.
+    
     private func yAxis(_ label: @escaping (Double) -> String) -> some AxisContent {
         AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { value in
             AxisGridLine()
@@ -233,22 +242,22 @@ struct ConnectionStatsContent: View {
             .foregroundStyle(.white.opacity(0.55))
         }
     }
-
+    
     // MARK: Formatting
-
+    
     private static let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .binary
         formatter.allowsNonnumericFormatting = false
         return formatter
     }()
-
+    
     private static func formatBytes(_ bytes: Int64) -> String {
         byteFormatter.string(fromByteCount: bytes)
     }
-
+    
     private static func formatSpeed(_ bytesPerSecond: Int64) -> String {
-        byteFormatter.string(fromByteCount: bytesPerSecond) + "/s"
+        byteFormatter.string(fromByteCount: bytesPerSecond) + String(localized: "/s")
     }
 }
 

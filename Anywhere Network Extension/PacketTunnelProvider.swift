@@ -15,6 +15,7 @@ private let logger = AnywhereLogger(category: "PacketTunnel")
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     private let tunnelStack = TunnelStack()
+    private let statsRecorder = StatsRecorder()
     private let pathMonitorQueue = DispatchQueue(label: AWCore.Identifier.pathMonitorQueue)
     private var pathMonitor: NWPathMonitor?
     private var lastPathSnapshot: PathSnapshot?
@@ -144,7 +145,23 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.tunnelStack.start(packetFlow: self.packetFlow,
                                  configuration: configuration)
             self.startMonitoringPath()
-            
+            self.statsRecorder.start { [weak self] in
+                guard let self else {
+                    return StatsRecorder.RawValues(
+                        cumulativeBytesIn: 0, cumulativeBytesOut: 0,
+                        tcpConnectionCount: 0, udpConnectionCount: 0,
+                        memoryBytes: 0
+                    )
+                }
+                return StatsRecorder.RawValues(
+                    cumulativeBytesIn: self.tunnelStack.totalBytesIn,
+                    cumulativeBytesOut: self.tunnelStack.totalBytesOut,
+                    tcpConnectionCount: self.tunnelStack.activeTCPConnections,
+                    udpConnectionCount: self.tunnelStack.activeUDPConnections,
+                    memoryBytes: Self.memoryFootprint()
+                )
+            }
+
             completionHandler(nil)
         }
     }
@@ -241,6 +258,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 #endif
         
+        statsRecorder.stop()
         stopMonitoringPath()
         logTunnelStop(reason: reason)
         tunnelStack.stop()
@@ -267,13 +285,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
         case .fetchStats:
-            let response = StatsResponse(
-                bytesIn: tunnelStack.totalBytesIn,
-                bytesOut: tunnelStack.totalBytesOut,
-                tcpConnections: tunnelStack.activeTCPConnections,
-                udpConnections: tunnelStack.activeUDPConnections,
-                memoryBytes: Self.memoryFootprint()
-            )
+            let response = statsRecorder.snapshot()
             completionHandler?(try? JSONEncoder().encode(response))
 
         case .fetchLogs:
