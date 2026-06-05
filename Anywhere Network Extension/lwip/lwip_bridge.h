@@ -81,6 +81,13 @@ void lwip_bridge_abort_all_tcp(void);
  * than the blanket RST of lwip_bridge_abort_all_tcp. */
 void lwip_bridge_for_each_tcp(void (*fn)(void *arg));
 
+/* Count active TCP PCBs — connections in the `tcp_active_pcbs` list
+ * (established, connecting, and closing). LISTEN pcbs (`tcp_listen_pcbs`) and
+ * TIME_WAIT pcbs (`tcp_tw_pcbs`) are excluded, so the result tracks live
+ * app-facing connections. Must be called on lwipQueue, like the other
+ * `tcp_active_pcbs` walkers; surfaced as the live TCP connection-count stat. */
+int lwip_bridge_active_tcp_count(void);
+
 /* --- Packet input (from TUN) ---
  *
  * Bracket a kernel readPackets batch with `_batch_begin` / `_batch_end`.

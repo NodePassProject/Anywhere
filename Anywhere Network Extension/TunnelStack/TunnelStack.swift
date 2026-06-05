@@ -193,6 +193,25 @@ class TunnelStack {
     func addBytesOut(_ n: Int64) { countersLock.withLock { _totalBytesOut += n } }
     func resetByteCounters() { countersLock.withLock { _totalBytesIn = 0; _totalBytesOut = 0 } }
 
+    // MARK: - Live Connection Counts
+    //
+    // Point-in-time snapshots for the 1 Hz stats poll. Each hops onto the queue
+    // that owns the underlying state so the count is consistent with the data
+    // plane instead of racing it. Both are read from the IPC message handler,
+    // which runs on neither queue, so `.sync` can't deadlock.
+
+    /// Active TCP connections: lwIP's ``tcp_active_pcbs`` list (established,
+    /// connecting, and closing legs; LISTEN and TIME_WAIT excluded). Read on
+    /// ``lwipQueue`` — the only queue allowed to touch lwIP state.
+    var activeTCPConnections: Int {
+        lwipQueue.sync { Int(lwip_bridge_active_tcp_count()) }
+    }
+
+    /// Active UDP flows. Read on ``udpQueue``, which owns ``udpFlows``.
+    var activeUDPConnections: Int {
+        udpQueue.sync { udpFlows.count }
+    }
+
     // MARK: - Log Buffer
     //
     // Stores recent log messages for display in the main app's log viewer.

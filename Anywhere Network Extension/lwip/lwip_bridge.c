@@ -333,6 +333,17 @@ void lwip_bridge_for_each_tcp(void (*fn)(void *arg)) {
     }
 }
 
+int lwip_bridge_active_tcp_count(void) {
+    /* Walk `tcp_active_pcbs` only — the same list the close/iterate paths use.
+     * No callbacks fire and the list isn't mutated, so a plain count is safe
+     * as long as we're on lwipQueue (the data plane can't run concurrently). */
+    int count = 0;
+    for (struct tcp_pcb *pcb = tcp_active_pcbs; pcb != NULL; pcb = pcb->next) {
+        count++;
+    }
+    return count;
+}
+
 void lwip_bridge_shutdown(void) {
     lwip_bridge_abort_all_tcp();
 
