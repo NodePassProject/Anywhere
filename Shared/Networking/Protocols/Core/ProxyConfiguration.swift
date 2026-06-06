@@ -143,8 +143,7 @@ enum Outbound: Hashable {
     /// AnyTLS multiplexes streams over one TLS connection per pooled session,
     /// authenticating with SHA256(password) and obfuscating with a server-driven
     /// padding scheme. `idleCheckInterval` / `idleTimeout` (seconds) and
-    /// `minIdleSession` tune the warm-pool behaviour; mirrors sing-anytls's
-    /// `ClientConfig` knobs and clamps to the same minimums (≥30s/≥30s/≥0).
+    /// `minIdleSession` tune the warm-pool behaviour.
     case anytls(
         password: String,
         idleCheckInterval: Int,
@@ -282,13 +281,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     }
 
     /// Whether this configuration is VLESS-over-XHTTP negotiating HTTP/3.
-    ///
-    /// XHTTP selects HTTP/3 when TLS advertises exactly one ALPN of `h3`
-    /// (mirrors Xray-core's `decideHTTPVersion` and ``ProxyClient``'s
-    /// `decideXHTTPHTTPVersion`). Unlike XHTTP over HTTP/1.1 or HTTP/2 — which
-    /// ride a TCP stream — HTTP/3 runs over QUIC (UDP), so a chain hop below it
-    /// must provide a `.udp` relay, exactly like Hysteria and Nowhere. Reality
-    /// (always HTTP/2) and the plaintext path (HTTP/1.1) are never h3.
     var isXHTTPOverHTTP3: Bool {
         guard case .xhttp = transportLayer else { return false }
         guard case .tls(let tls) = securityLayer else { return false }

@@ -10,16 +10,6 @@ import Foundation
 private let logger = AnywhereLogger(category: "AnyTLSClient")
 
 /// Per-server AnyTLS session pool.
-///
-/// Mirrors `session.Client` from sing-anytls 0.0.11: every logical proxy
-/// request goes through `createStream`, which prefers a warm idle session
-/// and only dials a fresh TLS connection when the pool is empty. When a
-/// stream closes, its underlying session is returned to the idle pool;
-/// a periodic cleaner trims sessions that have been idle longer than
-/// `idleSessionTimeout`, while keeping at least `minIdleSession` warm.
-///
-/// One instance per `(serverAddress, serverPort, password)` triple, owned
-/// by `AnyTLSManager`.
 nonisolated final class AnyTLSClient {
 
     /// Closure that creates a fresh TLS-backed `ProxyConnection` for a new

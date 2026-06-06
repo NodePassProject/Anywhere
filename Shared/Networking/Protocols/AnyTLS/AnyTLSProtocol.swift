@@ -155,7 +155,7 @@ enum AnyTLSProtocol {
         return map
     }
 
-    // MARK: - IP parsing (mirrors TrojanProtocol's helpers)
+    // MARK: - IP parsing
 
     private static func parseIPv4(_ address: String) -> [UInt8]? {
         var addr = in_addr()

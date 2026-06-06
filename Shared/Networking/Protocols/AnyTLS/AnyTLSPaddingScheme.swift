@@ -17,13 +17,6 @@ import Security
 /// packet the session picks the entry for `pktCounter`, generates a concrete
 /// list of byte-counts, and slices the outbound stream accordingly. After
 /// `stop` packets the session stops applying padding.
-///
-/// We store the original blob plus the `stop` value and re-derive each per-
-/// packet schedule on demand. That mirrors the Go reference (`PaddingFactory.
-/// GenerateRecordPayloadSizes`) which redraws ranges on every call so each
-/// outgoing packet gets fresh randomness.
-///
-/// Cross-ref: `padding/padding.go` in sing-anytls 0.0.11.
 final class AnyTLSPaddingScheme {
 
     /// Sentinel for the literal `c` marker — `Session.writeConn` treats it as

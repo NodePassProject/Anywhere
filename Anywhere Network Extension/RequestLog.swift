@@ -7,18 +7,6 @@
 
 import Foundation
 
-/// Bounded ring buffer of recent per-connection routing decisions. One
-/// instance per ``TunnelStack``; the main app pulls a snapshot via the
-/// ``TunnelMessage/fetchRequests`` IPC and renders it in the Requests
-/// view under Advanced Settings.
-///
-/// Mirrors the in-process log buffer pattern (``TunnelStack``'s log
-/// entries): entries older than ``TunnelConstants/requestLogRetentionInterval``
-/// or beyond ``TunnelConstants/requestLogMaxEntries`` are pruned on
-/// each append and each fetch. Appends happen on ``lwipQueue`` (TCP
-/// accept, UDP recv) and on the connection's own callback thread (SNI
-/// override) — an ``NSLock`` keeps the per-append cost in the tens of
-/// nanoseconds without ordering constraints.
 final class RequestLog {
 
     typealias Entry = TunnelRequestEntry

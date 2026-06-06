@@ -11,7 +11,7 @@ import Foundation
 /// called since the last check.  If no activity is detected within the
 /// configured interval the `onTimeout` callback fires.
 ///
-/// **Design** (mirrors Xray-core `common/signal/timer.go`):
+/// **Design**
 /// - A boolean flag is set by ``update()`` (non-blocking, safe to call often).
 /// - A `DispatchSourceTimer` fires every *timeout* seconds and checks the flag.
 ///   If the flag is still clear → inactivity → callback.

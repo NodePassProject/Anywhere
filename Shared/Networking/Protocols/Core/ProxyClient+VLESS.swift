@@ -215,9 +215,7 @@ extension ProxyClient {
     ///
     /// VLESS Encryption is exempt: its AEAD records masquerade as TLS 1.3
     /// `application_data` (`0x17 0x03 0x03` framing), giving Vision the same
-    /// record structure it keys off without a real outer TLS layer. This
-    /// mirrors Xray-core, where the outer-TLS-1.3 check only runs for an actual
-    /// `tls.Conn`; the `encryption.CommonConn` branch needs no outer TLS.
+    /// record structure it keys off without a real outer TLS layer.
     fileprivate func validateOuterTLSForVision(_ connection: ProxyConnection) -> Error? {
         if hasVLESSEncryption {
             return nil

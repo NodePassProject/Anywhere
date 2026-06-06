@@ -34,9 +34,9 @@ struct OnboardingView: View {
         }
         .background(
             LinearGradient(
-                colors: [Color("GradientStart"), Color("GradientEnd")],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+                colors: [Color.disconnectedBackgroundStart, Color.disconnectedBackgroundEnd],
+                startPoint: .top,
+                endPoint: .bottom
             )
             .ignoresSafeArea()
         )

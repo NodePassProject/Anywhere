@@ -62,11 +62,9 @@ nonisolated class XHTTPConnection {
     var _isConnected = false
     let lock = UnfairLock()
 
-    // Packet-up batching state (mirrors Xray-core's pipe.New buffered upload pipe in
-    // splithttp/dialer.go). Each `send()` in packet-up mode appends to the queue and
-    // returns once the batched POST has been written; a single in-flight flush drains
-    // the queue into one POST per `scMinPostsIntervalMs`. This is essential for UDP,
-    // where each datagram would otherwise become its own HTTP POST request.
+    // Packet-up batching state. Each `send()` in packet-up mode appends to the queue
+    // and returns once the batched POST has been written; a single in-flight flush
+    // drains the queue into one POST per `scMinPostsIntervalMs`.
     var packetUpQueue: [(Data, (Error?) -> Void)] = []
     var packetUpFlushPending = false
     var packetUpLastFlushTime: UInt64 = 0

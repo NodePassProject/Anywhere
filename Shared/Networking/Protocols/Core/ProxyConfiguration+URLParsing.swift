@@ -358,7 +358,7 @@ extension ProxyConfiguration {
             serverPart = String(serverPart[..<slashIndex])
         }
 
-        // Whole userinfo is the password (mirrors Trojan).
+        // Whole userinfo is the password.
         let password = userInfo.removingPercentEncoding ?? userInfo
 
         let (host, port) = try parseHostPort(serverPart)

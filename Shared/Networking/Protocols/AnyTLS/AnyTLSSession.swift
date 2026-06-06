@@ -10,8 +10,7 @@ import Foundation
 private let logger = AnywhereLogger(category: "AnyTLSSession")
 
 /// Owns one TLS connection and multiplexes one or more `AnyTLSStream`s over
-/// it via the AnyTLS framing. Mirrors `session.Session` (client side) in
-/// sing-anytls 0.0.11.
+/// it via the AnyTLS framing.
 ///
 /// Lifecycle:
 /// 1. Constructed with a freshly-handshaken TLS `inner` connection.

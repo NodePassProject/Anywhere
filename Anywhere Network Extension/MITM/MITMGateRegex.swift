@@ -194,8 +194,7 @@ final class MITMGateRegex: @unchecked Sendable {
     /// Lowercases the authority (`host[:port]`) of a `scheme://authority/…`
     /// pattern, leaving the scheme and path/query untouched. Returns the pattern
     /// unchanged when it carries no `://` (a bare-authority or path-only pattern,
-    /// where the host can't be unambiguously located). Mirrors
-    /// ``MITMRewritePolicy``'s URL host-lowercasing so pattern and URL agree.
+    /// where the host can't be unambiguously located).
     private static func lowercasingHostRegion(_ pattern: String) -> String {
         guard let sep = pattern.range(of: "://") else { return pattern }
         let authStart = sep.upperBound

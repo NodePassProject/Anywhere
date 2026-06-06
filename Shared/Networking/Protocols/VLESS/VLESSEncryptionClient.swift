@@ -1264,10 +1264,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         // Hand back anything we over-read past the final AEAD record before the
         // peer switched to raw output. Those are the leading bytes of the inner
         // TLS stream (already de-masked by the inner XorConn in `random` mode),
-        // and `inner.receiveRaw` would not replay them. This mirrors Vision
-        // flushing `CommonConn`'s buffered `input`/`rawInput` at the moment it
-        // switches to direct copy (see `VisionReader.ReadMultiBuffer` in
-        // Xray-core's proxy.go).
+        // and `inner.receiveRaw` would not replay them.
         recvLock.lock()
         if !inboundBuffer.isEmpty {
             let leftover = inboundBuffer

@@ -114,8 +114,7 @@ nonisolated class HTTP3Session: PoolableSession {
     ///   reuses it since its stream/flow-control needs are comparable.
     /// - Parameter transport: Optional UDP-relay transport for chained
     ///   XHTTP-over-h3. When set, QUIC rides it instead of a kernel socket
-    ///   (mirrors ``HysteriaSession``); `host`/`port` then identify the server
-    ///   logically rather than naming a dial target.
+    ///   `host`/`port` then identify the server logically rather than naming a dial target.
     init(host: String, port: UInt16, serverName: String, tuning: QUICTuning = .naive,
          transport: QUICDatagramTransport? = nil) {
         self.quic = QUICConnection(host: host, port: port, serverName: serverName,

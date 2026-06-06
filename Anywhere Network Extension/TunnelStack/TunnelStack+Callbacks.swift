@@ -9,13 +9,6 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "TunnelStack")
 
-/// Tracks recent rejects per destination so a misbehaving app that
-/// retries a blocked host in a tight loop downgrades from RST-on-SYN
-/// to silent drop. RST every SYN burns CPU and packets on both sides
-/// for no benefit; a timeout drives the app's retry back-off faster.
-/// Mirrors sing-box's `RuleActionReject` flood guard (50 rejects in
-/// 30 s → drop). Accessed from the SYN filter callback which runs on
-/// `lwipQueue`, so no internal locking is needed.
 private final class RejectFloodTracker {
     private let threshold: Int
     private let window: CFAbsoluteTime

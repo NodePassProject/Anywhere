@@ -640,8 +640,7 @@ enum MITMBodyCodec {
     /// Wraps raw DEFLATE output in a single gzip member: the 10-byte
     /// fixed header (no optional fields, unknown OS/MTIME), the deflate
     /// body, then the 8-byte trailer — CRC32 of the *uncompressed* input
-    /// and ISIZE (input length mod 2^32), both little-endian. Mirrors
-    /// what ``gunzipOneMember`` parses back.
+    /// and ISIZE (input length mod 2^32), both little-endian.
     private static func gzipWrap(_ deflated: Data, original: Data) -> Data {
         var out = Data(capacity: 10 + deflated.count + 8)
         // ID1 ID2 CM FLG | MTIME(4)=0 | XFL=0 OS=0xFF(unknown)

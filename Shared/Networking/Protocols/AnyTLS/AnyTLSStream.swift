@@ -17,8 +17,6 @@ private let logger = AnywhereLogger(category: "AnyTLSStream")
 /// surfaced through the standard ``ProxyConnection`` receive API: if a
 /// callback is already waiting it fires immediately; otherwise the bytes
 /// queue until ``receiveRaw(completion:)`` is called.
-///
-/// Mirrors `session.Stream` in sing-anytls 0.0.11.
 nonisolated final class AnyTLSStream: ProxyConnection {
 
     let sid: UInt32
