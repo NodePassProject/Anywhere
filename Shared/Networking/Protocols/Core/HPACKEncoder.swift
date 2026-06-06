@@ -78,8 +78,18 @@ nonisolated class HPACKDecoder {
     }
 
     /// Decodes an HPACK header block, updating the persistent dynamic table.
-    func decodeHeaders(from data: Data) -> [(name: String, value: String)]? {
+    ///
+    /// Returns the decoded fields plus the set of (lowercased) field-names that
+    /// arrived in the §6.2.3 "Literal Header Field Never Indexed" representation.
+    /// RFC 7541 §7.1.3 requires an intermediary that re-encodes such a field to
+    /// re-emit it never-indexed, so the caller threads this set into
+    /// ``HPACKEncoder/encodeHeaderBlock(_:neverIndexed:)``. Tracked by name (not
+    /// per-occurrence) — a name marked never-indexed once protects every
+    /// occurrence on re-encode, which over-protects in the (pathological) mixed
+    /// case but never under-protects.
+    func decodeHeaders(from data: Data) -> (fields: [(name: String, value: String)], neverIndexed: Set<String>)? {
         var headers: [(name: String, value: String)] = []
+        var neverIndexed: Set<String> = []
         var offset = data.startIndex
 
         while offset < data.endIndex {
@@ -101,10 +111,15 @@ nonisolated class HPACKDecoder {
                 insertWithEviction(name: name, value: value)
 
             } else if byte & 0xF0 == 0x00 || byte & 0xF0 == 0x10 {
-                // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed
+                // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed. The
+                // 0001xxxx variant (high nibble 0x1) is "Never Indexed" — record
+                // the name so the re-encoder preserves the marker (RFC 7541
+                // §7.1.3); 0000xxxx is plain without-indexing.
+                let isNeverIndexed = (byte & 0xF0 == 0x10)
                 guard let (name, value) = HPACKEncoder.decodeLiteral(from: data, at: &offset, prefixBits: 4,
                                                                      dynamicTable: dynamicTable) else { return nil }
                 headers.append((name, value))
+                if isNeverIndexed { neverIndexed.insert(name.lowercased()) }
 
             } else if byte & 0xE0 == 0x20 {
                 // §6.3 Dynamic Table Size Update (001xxxxx)
@@ -121,7 +136,7 @@ nonisolated class HPACKDecoder {
             }
         }
 
-        return headers
+        return (headers, neverIndexed)
     }
 
     /// Size of a dynamic-table entry in octets (RFC 7541 §4.1).
@@ -216,12 +231,28 @@ enum HPACKEncoder {
     /// Used by ``MITMHTTP2Connection`` to re-emit HEADERS / CONTINUATION
     /// frames after rewriting — independent dynamic-table state on each
     /// MITM leg means we can't byte-forward HPACK fragments.
+    ///
+    /// ``neverIndexed`` carries the lowercased names that arrived in the §6.2.3
+    /// "Never Indexed" representation (from ``HPACKDecoder/decodeHeaders``). A
+    /// field whose name is in that set is re-emitted never-indexed (§6.2.3) so a
+    /// downstream intermediary can't promote it into a dynamic table — RFC 7541
+    /// §7.1.3 makes this a MUST for intermediaries. The never-indexed check runs
+    /// first so such a field never collapses to a §6.1 indexed byte even when its
+    /// (name, value) happens to full-match the static table.
     static func encodeHeaderBlock(
-        _ headers: [(name: String, value: String)]
+        _ headers: [(name: String, value: String)],
+        neverIndexed: Set<String> = []
     ) -> Data {
         var block = Data()
         for header in headers {
-            if let fullIndex = staticTableFullIndex(header.name, header.value) {
+            if !neverIndexed.isEmpty, neverIndexed.contains(header.name.lowercased()) {
+                // §6.2.3 Literal Header Field Never Indexed — preserve the marker.
+                if let nameIdx = staticTableNameIndex(header.name) {
+                    encodeLiteralNeverIndexed(nameIndex: nameIdx, value: header.value, into: &block)
+                } else {
+                    encodeLiteralNeverIndexed(name: header.name, value: header.value, into: &block)
+                }
+            } else if let fullIndex = staticTableFullIndex(header.name, header.value) {
                 // §6.1 Indexed Header Field — name and value both come from
                 // the static table, so a single index byte suffices.
                 encodeIndexed(fullIndex, into: &block)
@@ -397,6 +428,26 @@ enum HPACKEncoder {
     /// Encodes a literal header without indexing, using a literal name.
     private static func encodeLiteralWithoutIndexing(name: String, value: String, into data: inout Data) {
         data.append(0x00)  // 0000 0000 — literal name, no indexing
+        encodeString(name.lowercased(), into: &data)
+        encodeString(value, into: &data)
+    }
+
+    /// Encodes a §6.2.3 "Literal Header Field Never Indexed" with an indexed name
+    /// from the static table. Identical to the without-indexing form but with the
+    /// 0001 prefix, which instructs every decoder (including downstream
+    /// intermediaries) never to add the field to a dynamic table (RFC 7541 §7.1.3).
+    private static func encodeLiteralNeverIndexed(nameIndex: Int, value: String, into data: inout Data) {
+        var indexData = Data()
+        encodeInteger(nameIndex, prefixBits: 4, into: &indexData)
+        indexData[indexData.startIndex] &= 0x0F  // clear the prefix nibble
+        indexData[indexData.startIndex] |= 0x10  // 0001xxxx — never indexed
+        data.append(indexData)
+        encodeString(value, into: &data)
+    }
+
+    /// Encodes a §6.2.3 "Literal Header Field Never Indexed" with a literal name.
+    private static func encodeLiteralNeverIndexed(name: String, value: String, into data: inout Data) {
+        data.append(0x10)  // 0001 0000 — literal name, never indexed
         encodeString(name.lowercased(), into: &data)
         encodeString(value, into: &data)
     }

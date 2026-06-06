@@ -137,6 +137,31 @@ final class MITMHTTP2Connection {
     /// case the outbound leg emits the body inline.
     var onPacedResponse: ((_ streamID: UInt32, _ headerBlock: Data, _ body: Data, _ endStream: Bool) -> Bool)?
 
+    /// Request-direction mirror of ``onPacedResponse``. Hands a buffered-rewrite
+    /// REQUEST body that exceeds the upstream's current flow-control window to the
+    /// opposing (outbound) leg for paced delivery to the server. The outbound leg
+    /// receives the server's WINDOW_UPDATEs and owns the server-bound buffer, so
+    /// only it can pace the body without overflowing the upstream window into a
+    /// FLOW_CONTROL_ERROR. Unlike the response handoff, the request HEADERS are
+    /// emitted separately by the inbound leg (they must reach the server in
+    /// stream-ID order to open the stream / trigger the deferred dial), so only
+    /// the body is handed over. ``MITMSession`` wires this on the inbound leg to
+    /// the outbound leg. Inbound leg only; nil before the legs are paired (the
+    /// deferred dial means the first request is processed before the outbound leg
+    /// exists — that body is instead held in ``heldPacedRequests`` and transferred
+    /// by the session once it creates the outbound leg). Invoked synchronously on
+    /// the shared serial lwIP queue. Returns true when the outbound leg accepted
+    /// the body for paced delivery; false when it declined (its server-bound
+    /// buffer is over budget), in which case the inbound leg emits inline.
+    var onPacedRequest: ((_ streamID: UInt32, _ body: Data, _ endStream: Bool) -> Bool)?
+
+    /// Tells the opposing (outbound) leg to drop any paced request body it holds
+    /// for ``streamID`` — the client RST'd or the connection abandoned the stream,
+    /// so delivering the buffered request to the server is pointless and would
+    /// pin its buffer. ``MITMSession`` wires this on the inbound leg to the
+    /// outbound leg's ``dropPacedRequest(_:)``. Inbound leg only.
+    var onUpstreamRequestAborted: ((_ streamID: UInt32) -> Void)?
+
     /// The most recent value passed to ``onObservedPeerHeaderTableSize``,
     /// retained so it can be replayed to the opposing leg when that leg is
     /// created late — the deferred dial means the inbound leg may observe the
@@ -229,6 +254,11 @@ final class MITMHTTP2Connection {
         var headers: [(name: String, value: String)]
         let originatingRequest: MITMRequestLog.Record?
         var abandoned: Bool = false
+        /// Lowercased field-names that arrived §6.2.3 never-indexed on this
+        /// message's HEADERS, carried so the deferred re-encode (early-open
+        /// flush, abandon, decompression-fail passthrough) preserves the marker
+        /// (RFC 7541 §7.1.3), matching the immediate pass-through path.
+        var neverIndexed: Set<String> = []
         /// Set when this stream's opening HEADERS were already emitted to
         /// the destination at HEADERS time — the early-open path for inbound
         /// bodied requests (see ``processFreshHeaderBlock``). A request
@@ -290,14 +320,18 @@ final class MITMHTTP2Connection {
     /// after each ``process(_:)`` call.
     private var pendingClientBytes = Data()
 
-    /// Sender-bound flow-control credit (WINDOW_UPDATE frames) the MITM issues
-    /// to the **upstream** while buffering a response for a rewrite rule, so the
+    /// Server-bound bytes the MITM emits out-of-band from the leg's own
+    /// ``process(_:)`` return: flow-control credit (WINDOW_UPDATE frames) issued to
+    /// the **upstream** while buffering a response for a rewrite rule, so the
     /// server keeps sending instead of stalling at its initial window on a body
-    /// the client hasn't seen yet (see ``creditBufferedDataToSender``). The
-    /// outbound (response) leg's analogue of ``pendingClientBytes``: populated
-    /// on the outbound leg only and drained by the session's outbound pump via
-    /// ``drainPendingServerBytes()`` immediately after each ``process(_:)``,
-    /// written straight onto the outer TLS record toward the server.
+    /// the client hasn't seen yet (see ``creditBufferedDataToSender``), and the
+    /// HEADERS-following paced DATA of a buffered-rewrite REQUEST body the inbound
+    /// leg handed over for flow-control pacing (see ``queuePacedServerRequest``).
+    /// The request-direction analogue of ``pendingClientBytes``: populated on the
+    /// outbound leg only and drained via ``drainPendingServerBytes()`` — by the
+    /// session's outbound pump after each ``process(_:)`` and by the inbound pump
+    /// right after a request handoff — written straight onto the outer TLS record
+    /// toward the server.
     private var pendingServerBytes = Data()
 
     // MARK: Deferred-dial connection setup (inbound only)
@@ -417,6 +451,34 @@ final class MITMHTTP2Connection {
     /// emitted).
     private var pendingSynthBodies: [UInt32: PendingSynthBody] = [:]
 
+    /// Upstream mirror of ``PendingSynthBody``: a MITM-buffered REQUEST body
+    /// being paced toward the server, owned by the **outbound** leg (it observes
+    /// the server's WINDOW_UPDATEs). The request HEADERS are emitted separately by
+    /// the inbound leg, so there is no pre-establishment / GOAWAY bookkeeping here.
+    private struct PendingRequestBody {
+        /// Body bytes not yet emitted to the server.
+        var remaining: Data
+        /// This stream's remaining per-stream send window toward the server
+        /// (RFC 9113 §6.9.1). Signed: a server SETTINGS_INITIAL_WINDOW_SIZE
+        /// decrease (§6.9.2) can push it negative, which withholds emission until
+        /// a server WINDOW_UPDATE brings it positive.
+        var streamWindow: Int
+    }
+
+    /// Per-stream paced server-bound request bodies (see ``PendingRequestBody``).
+    /// Populated on the **outbound** leg only — it owns the server-bound buffer
+    /// (``pendingServerBytes``) and sees the server's WINDOW_UPDATEs that drain
+    /// it. A streamID is present only while it still owes the server bytes.
+    private var pendingRequestBodies: [UInt32: PendingRequestBody] = [:]
+
+    /// Buffered-rewrite REQUEST bodies the inbound leg produced before the
+    /// outbound leg existed (the deferred dial processes the first request(s)
+    /// pre-dial). Keyed by stream ID; their HEADERS are already emitted toward the
+    /// server. ``MITMSession`` drains this via ``takeHeldPacedRequests()`` right
+    /// after it creates the outbound leg and transfers each to
+    /// ``queuePacedServerRequest``. Inbound leg only.
+    private var heldPacedRequests: [UInt32: (body: Data, endStream: Bool)] = [:]
+
     /// True while a pre-establishment one-shot synth is mid-pacing — its body
     /// is buffered in ``pendingSynthBodies`` and the terminating GOAWAY is
     /// deferred. While set, connection-level WINDOW_UPDATEs are consumed for
@@ -482,6 +544,10 @@ final class MITMHTTP2Connection {
         // up to 4 MiB each against the extension's memory budget until ARC
         // releases the connection.
         pendingSynthBodies.removeAll()
+        // Upstream request-body pacing buffers (outbound leg) and the pre-dial
+        // held requests (inbound leg) hold up to 4 MiB each; drop them too.
+        pendingRequestBodies.removeAll()
+        heldPacedRequests.removeAll()
         oneShotSynthPacing = false
     }
 
@@ -620,12 +686,14 @@ final class MITMHTTP2Connection {
         return bytes
     }
 
-    /// Drains and returns any upstream-bound flow-control credit the outbound
-    /// leg issued for buffered response DATA (see ``creditBufferedDataToSender``
-    /// / ``pendingServerBytes``). The session's outbound pump writes these onto
-    /// the outer TLS record toward the server right after each ``process(_:)``.
-    /// The inbound leg never populates this — call sites guard with
-    /// ``direction == .outbound``.
+    /// Drains and returns the outbound leg's queued server-bound bytes (see
+    /// ``pendingServerBytes``): flow-control credit for buffered response DATA
+    /// (``creditBufferedDataToSender``) and the paced DATA of a handed-over
+    /// buffered-rewrite request body (``flushPendingRequest``). The session writes
+    /// these onto the outer TLS record toward the server — from the outbound pump
+    /// after each ``process(_:)``, and from the inbound pump right after a request
+    /// handoff so the paced body follows its HEADERS. The inbound leg never
+    /// populates this.
     func drainPendingServerBytes() -> Data {
         let bytes = pendingServerBytes
         pendingServerBytes.removeAll(keepingCapacity: false)
@@ -769,6 +837,12 @@ final class MITMHTTP2Connection {
                     // pacing starts from the right window (and adjusts open
                     // synth streams when it changes mid-connection).
                     applyClientInitialWindowSize(Int(value))
+                case 0x4 where direction == .outbound: // SETTINGS_INITIAL_WINDOW_SIZE
+                    // The server's per-stream receive-window initializer governs
+                    // request DATA the MITM paces upstream; observe it so a paced
+                    // buffered request body starts from the right window (and is
+                    // retroactively adjusted, RFC 9113 §6.9.2, when it changes).
+                    applyServerInitialWindowSize(Int(value))
                 case 0x5: // SETTINGS_MAX_FRAME_SIZE
                     // This setting tells the *peer* how large a frame it may
                     // send. We sit in the middle and parse every frame with a
@@ -868,6 +942,16 @@ final class MITMHTTP2Connection {
         for id in pendingSynthBodies.keys where id > lastStreamID {
             pendingSynthBodies.removeValue(forKey: id)
         }
+        // Same for paced/held request bodies above the last-stream-id: a server
+        // GOAWAY (outbound leg) won't process them, so they'll never drain; a
+        // client GOAWAY (inbound leg) abandons any pre-dial held request. Each
+        // map is leg-specific, so the other is a no-op.
+        for id in pendingRequestBodies.keys where id > lastStreamID {
+            pendingRequestBodies.removeValue(forKey: id)
+        }
+        for id in heldPacedRequests.keys where id > lastStreamID {
+            heldPacedRequests.removeValue(forKey: id)
+        }
         return serializeFrame(frame)
     }
 
@@ -901,6 +985,15 @@ final class MITMHTTP2Connection {
         streamingScripts.removeValue(forKey: frame.streamID)
         // Abort pacing of a synth body the client cancelled mid-stream.
         pendingSynthBodies.removeValue(forKey: frame.streamID)
+        // Abort upstream request-body pacing for the aborted stream. A server RST
+        // (outbound leg) drops this leg's own paced body; a client RST (inbound
+        // leg) drops any pre-dial held body and signals the outbound leg to drop
+        // the paced body it holds (delivering a cancelled request is pointless and
+        // pins its buffer). Each map is leg-specific, so the non-matching op is a
+        // no-op; ``onUpstreamRequestAborted`` is set on the inbound leg only.
+        pendingRequestBodies.removeValue(forKey: frame.streamID)
+        heldPacedRequests.removeValue(forKey: frame.streamID)
+        onUpstreamRequestAborted?(frame.streamID)
         _ = rewriter.requestLog.popHTTP2(streamID: frame.streamID)
         // Swallow RST_STREAMs for streams the upstream never saw, so we don't
         // reset an idle stream — a PROTOCOL_ERROR per RFC 9113 §5.4.1 that the
@@ -1129,7 +1222,7 @@ final class MITMHTTP2Connection {
         kind: PendingHeaders.Kind,
         into output: inout Data
     ) -> Bool {
-        guard let decoded = decoder.decodeHeaders(from: fragments) else {
+        guard let decodeResult = decoder.decodeHeaders(from: fragments) else {
             // HPACK decode failure desyncs this leg's dynamic table
             // irrecoverably — partial decode may have advanced the
             // dynamic-table state past the failing instruction, so
@@ -1147,6 +1240,10 @@ final class MITMHTTP2Connection {
             rxBuffer = MITMByteBuffer()
             return false
         }
+        let decoded = decodeResult.fields
+        // Names that arrived §6.2.3 never-indexed; preserved on re-encode so the
+        // marker survives to any downstream intermediary (RFC 7541 §7.1.3).
+        let neverIndexed = decodeResult.neverIndexed
 
         // Classify the HEADERS frame against the raw decoded block,
         // BEFORE user header rules run (those can't fake a fresh
@@ -1206,6 +1303,7 @@ final class MITMHTTP2Connection {
                     return self.processFreshHeaderBlock(
                         streamID: streamID,
                         decoded: decoded,
+                        neverIndexed: neverIndexed,
                         originalFlags: originalFlags,
                         kind: kind,
                         isTrailer: isTrailer,
@@ -1219,6 +1317,7 @@ final class MITMHTTP2Connection {
                     return self.processFreshHeaderBlock(
                         streamID: streamID,
                         decoded: decoded,
+                        neverIndexed: neverIndexed,
                         originalFlags: originalFlags,
                         kind: kind,
                         isTrailer: isTrailer,
@@ -1231,6 +1330,7 @@ final class MITMHTTP2Connection {
         return processFreshHeaderBlock(
             streamID: streamID,
             decoded: decoded,
+            neverIndexed: neverIndexed,
             originalFlags: originalFlags,
             kind: kind,
             isTrailer: isTrailer,
@@ -1262,7 +1362,7 @@ final class MITMHTTP2Connection {
         logHTTP2Request(streamID: deferred, headers: openingHeaders)
         output.append(emitHeaderBlock(
             streamID: deferred,
-            block: HPACKEncoder.encodeHeaderBlock(openingHeaders),
+            block: HPACKEncoder.encodeHeaderBlock(openingHeaders, neverIndexed: pending.neverIndexed),
             endStream: false,
             kind: .headers
         ))
@@ -1280,6 +1380,7 @@ final class MITMHTTP2Connection {
     private func processFreshHeaderBlock(
         streamID: UInt32,
         decoded: [(name: String, value: String)],
+        neverIndexed: Set<String>,
         originalFlags: UInt8,
         kind: PendingHeaders.Kind,
         isTrailer: Bool,
@@ -1369,6 +1470,21 @@ final class MITMHTTP2Connection {
             ? MITMHTTP2Rewriter.requestPath(in: rewritten).map { "https://\(rewriter.host)\($0)" }
             : responseURL
 
+        // A CONNECT request (plain tunneling, or RFC 8441 extended CONNECT for
+        // WebSocket-over-h2, which carries a ``:protocol`` pseudo-header) must
+        // never enter buffered- or streaming-script mode. Buffering would hold
+        // tunnel/WebSocket frames until an END_STREAM that only arrives when the
+        // tunnel closes, and the buffered flush's ``rebuildHeaders`` reconstructs
+        // only ``:method``/``:scheme``/``:authority``/``:path`` — it would drop
+        // ``:protocol`` and force-synthesize a ``:scheme``/``:path`` onto a plain
+        // CONNECT, corrupting it. Forcing pass-through re-encodes the decoded
+        // header list verbatim (``:protocol`` included) and relays the tunnel
+        // bytes frame-for-frame, which is the only correct handling. (``:method``
+        // is never altered by header rules, so reading it off ``decoded`` is
+        // stable.) Inbound only — ``:method`` is a request pseudo-header.
+        let isConnectRequest = direction == .inbound
+            && firstHeaderValue(decoded, name: ":method") == "CONNECT"
+
         // Streaming-script mode wins over buffered-script mode when
         // both apply. The trade-off: stream rules see DATA frames
         // one-at-a-time without HTTP-level decompression, so the body
@@ -1399,7 +1515,7 @@ final class MITMHTTP2Connection {
             logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): tracked-stream cap \(Self.maxTrackedStreams) reached; passing through without MITM")
         }
 
-        if case .headers = kind, !isTrailer, !isInterimResponse,
+        if case .headers = kind, !isTrailer, !isInterimResponse, !isConnectRequest,
            !endStreamOnHeaders, !trackedStreamCapReached,
            rewriter.hasStreamScriptRule(phase: phase, requestURL: gateURL) {
             if rewriter.hasBufferedBodyRule(phase: phase, requestURL: gateURL) {
@@ -1422,7 +1538,7 @@ final class MITMHTTP2Connection {
                 cursor: MITMScriptTransform.FrameCursor()
             )
 
-            let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten)
+            let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten, neverIndexed: neverIndexed)
             output.append(emitHeaderBlock(
                 streamID: streamID,
                 block: reencoded,
@@ -1442,7 +1558,8 @@ final class MITMHTTP2Connection {
         // also drives body buffering; for END_STREAM-on-HEADERS streams the
         // script runs inline against an empty body. Skipped for trailers and
         // interim responses for the same reasons as streaming-script above.
-        if case .headers = kind, !isTrailer, !isInterimResponse, !trackedStreamCapReached,
+        if case .headers = kind, !isTrailer, !isInterimResponse, !isConnectRequest,
+           !trackedStreamCapReached,
            rewriter.hasBufferedBodyRule(phase: phase, requestURL: gateURL),
            shouldBufferStream(headers: rewritten, endStream: endStreamOnHeaders) {
             if !endStreamOnHeaders {
@@ -1483,7 +1600,7 @@ final class MITMHTTP2Connection {
                 logHTTP2Request(streamID: streamID, headers: openingHeaders)
                 output.append(emitHeaderBlock(
                     streamID: streamID,
-                    block: HPACKEncoder.encodeHeaderBlock(openingHeaders),
+                    block: HPACKEncoder.encodeHeaderBlock(openingHeaders, neverIndexed: neverIndexed),
                     endStream: false,
                     kind: kind
                 ))
@@ -1492,6 +1609,7 @@ final class MITMHTTP2Connection {
                     codec: codec,
                     headers: openingHeaders,
                     originatingRequest: originatingRequest,
+                    neverIndexed: neverIndexed,
                     headersAlreadyEmitted: true
                 )
                 return false
@@ -1510,7 +1628,8 @@ final class MITMHTTP2Connection {
                 data: Data(),
                 codec: codec,
                 headers: rewritten,
-                originatingRequest: originatingRequest
+                originatingRequest: originatingRequest,
+                neverIndexed: neverIndexed
             )
 
             if endStreamOnHeaders {
@@ -1536,7 +1655,7 @@ final class MITMHTTP2Connection {
             logHTTP2Request(streamID: streamID, headers: rewritten)
         }
 
-        let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten)
+        let reencoded = HPACKEncoder.encodeHeaderBlock(rewritten, neverIndexed: neverIndexed)
 
         // Encoded block emission drops PADDED and PRIORITY but preserves
         // END_STREAM. END_HEADERS lands on the final emitted frame, which
@@ -1946,7 +2065,7 @@ final class MITMHTTP2Connection {
         if direction == .inbound {
             logHTTP2Request(streamID: streamID, headers: pending.headers)
         }
-        let reencoded = HPACKEncoder.encodeHeaderBlock(pending.headers)
+        let reencoded = HPACKEncoder.encodeHeaderBlock(pending.headers, neverIndexed: pending.neverIndexed)
         var out = emitHeaderBlock(
             streamID: streamID,
             block: reencoded,
@@ -1972,7 +2091,7 @@ final class MITMHTTP2Connection {
         if direction == .inbound {
             logHTTP2Request(streamID: streamID, headers: pending.headers)
         }
-        let reencoded = HPACKEncoder.encodeHeaderBlock(pending.headers)
+        let reencoded = HPACKEncoder.encodeHeaderBlock(pending.headers, neverIndexed: pending.neverIndexed)
         let body = pending.data
         let headersHaveEndStream = endStream && body.isEmpty
         var out = emitHeaderBlock(
@@ -2130,6 +2249,17 @@ final class MITMHTTP2Connection {
                 logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): Anywhere.respond ignored on an already-opened request stream; forwarding original body")
                 body = plaintext
             }
+            // Pace a stream-ending body that exceeds the upstream window instead
+            // of dumping it (this early-open path is inbound-only; its HEADERS are
+            // already on the wire upstream). Mirror of the response pacing and the
+            // deferred-path request pacing below. A body that fits the window, a
+            // trailer-bearing (endStream == false) flush, or an empty body falls
+            // through to the inline emit.
+            let serverPacingWindow = Swift.max(0, Swift.min(flowController.serverConnectionWindow, flowController.serverInitialStreamWindow))
+            if direction == .inbound, endStream, !body.isEmpty, body.count > serverPacingWindow {
+                output.append(paceUpstreamRequestBody(streamID: streamID, body: body, endStream: endStream))
+                return
+            }
             output.append(emitBufferedDataFrames(streamID: streamID, payload: body, endStream: endStream))
             return
         }
@@ -2186,7 +2316,7 @@ final class MITMHTTP2Connection {
             logHTTP2Request(streamID: streamID, headers: finalHeaders)
         }
 
-        let reencoded = HPACKEncoder.encodeHeaderBlock(finalHeaders)
+        let reencoded = HPACKEncoder.encodeHeaderBlock(finalHeaders, neverIndexed: pending.neverIndexed)
         // RFC 9110 §15.2: a response to HEAD never carries a body even
         // when the same resource fetched with GET would. A script that
         // wrote into ctx.body would otherwise have us emit DATA frames
@@ -2230,6 +2360,26 @@ final class MITMHTTP2Connection {
             // Accepted for paced delivery on the inbound leg. A `false` return
             // (inbound client-bound buffer over budget) falls through to the
             // inline emission below rather than pacing.
+            return
+        }
+        // Request-direction mirror: a MITM-buffered REQUEST body the client
+        // hasn't seen the server receive can far exceed the server's per-stream
+        // window (still at its initial value — the server got nothing on this
+        // stream while we buffered), and dumping it whole would overflow that
+        // window into a FLOW_CONTROL_ERROR + connection-wide GOAWAY. Emit the
+        // HEADERS (without END_STREAM; the paced body carries it) and hand the
+        // body to the outbound leg's server-window pacer (or hold it for the
+        // deferred dial). Same ``endStream`` gating as the response path so a
+        // trailer can't race ahead of a still-draining body.
+        let serverPacingWindow = Swift.max(0, Swift.min(flowController.serverConnectionWindow, flowController.serverInitialStreamWindow))
+        if direction == .inbound, endStream, !body.isEmpty, body.count > serverPacingWindow {
+            output.append(emitHeaderBlock(
+                streamID: streamID,
+                block: reencoded,
+                endStream: false,
+                kind: .headers
+            ))
+            output.append(paceUpstreamRequestBody(streamID: streamID, body: body, endStream: endStream))
             return
         }
         output.append(emitHeaderBlock(
@@ -2487,9 +2637,11 @@ final class MITMHTTP2Connection {
             let chunkEnd = entry.remaining.startIndex + available
             let chunk = entry.remaining.subdata(in: entry.remaining.startIndex..<chunkEnd)
             let didFinish = available == entry.remaining.count
-            // ``emitDataFrames`` only auto-debits the connection window on the
-            // outbound leg; this is the inbound (synth) leg, so account here.
-            pendingClientBytes.append(emitDataFrames(streamID: streamID, payload: chunk, endStream: didFinish))
+            // Cross-direction emit: this is the inbound leg producing client-bound
+            // DATA, so frame without auto-debit and debit the *client* connection
+            // window explicitly (``emitDataFrames`` on the inbound leg would debit
+            // the server window — wrong for this client-bound body).
+            pendingClientBytes.append(frameData(streamID: streamID, payload: chunk, endStream: didFinish))
             flowController.debitConnection(available)
             entry.streamWindow -= available
             // Post-establishment synth shares the connection window with real
@@ -2551,6 +2703,161 @@ final class MITMHTTP2Connection {
         }
     }
 
+    // MARK: - Upstream request-body pacing (mirror of the synth/response pacing)
+
+    /// Upstream mirror of ``maxPacedClientBufferBytes``: cap on bytes held in
+    /// ``pendingRequestBodies`` for server-bound pacing before a new paced request
+    /// is declined (the inbound leg then emits it inline, accepting the overflow
+    /// risk only past the cap, and only for a connection already flooding us).
+    private static let maxPacedServerBufferBytes: Int = 2 * MITMBodyCodec.maxBufferedBodyBytes
+
+    /// Routes a stream-ending buffered/rewritten REQUEST body (inbound leg)
+    /// through upstream flow-control pacing instead of dumping it past the
+    /// server's window. The caller has already emitted this stream's HEADERS
+    /// (without END_STREAM — the paced body carries it). Hands the body to the
+    /// outbound leg's server-window pacer when that leg exists; before the
+    /// deferred dial creates it, holds the body for the session to transfer
+    /// (``takeHeldPacedRequests``). Returns the bytes to emit inline on the
+    /// inbound leg's server-bound output NOW: empty when the body was paced or
+    /// held; the unpaced inline frames when pacing was declined because a buffer
+    /// is over budget — the outbound pacer's, or pre-dial the held one — the same
+    /// past-the-cap fallback the response path takes. Inbound leg only.
+    private func paceUpstreamRequestBody(streamID: UInt32, body: Data, endStream: Bool) -> Data {
+        if let onPacedRequest {
+            if onPacedRequest(streamID, body, endStream) {
+                return Data()  // accepted; the outbound leg paces it to the server
+            }
+            // Declined (server-bound pacing buffer over budget): emit inline.
+            return emitBufferedDataFrames(streamID: streamID, payload: body, endStream: endStream)
+        }
+        // Pre-dial: the outbound leg doesn't exist yet. Hold the body; the session
+        // transfers it (``takeHeldPacedRequests`` → ``queuePacedServerRequest``)
+        // the moment it creates the outbound leg. The HEADERS the caller emitted
+        // are buffered for the dial and flushed ahead of it. Enforce the same cap
+        // the outbound pacer does so the transfer can't be declined there and
+        // silently drop a body (hanging its stream): past the cap, emit inline now
+        // — the live decline's fallback. Only HEADERS count against the session's
+        // pre-dial buffer cap, so this is the held bodies' only bound.
+        let held = heldPacedRequests.values.reduce(0) { $0 + $1.body.count }
+        guard held + body.count <= Self.maxPacedServerBufferBytes else {
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): pre-dial held request buffer would reach \(held + body.count) B over cap \(Self.maxPacedServerBufferBytes) B; emitting request inline (unpaced)")
+            return emitBufferedDataFrames(streamID: streamID, payload: body, endStream: endStream)
+        }
+        heldPacedRequests[streamID] = (body: body, endStream: endStream)
+        return Data()
+    }
+
+    /// Upstream mirror of ``queuePacedClientResponse``. Accepts a buffered REQUEST
+    /// body handed over from the inbound leg (this stream's HEADERS are already on
+    /// the wire to the server) and paces it against the server's flow-control
+    /// windows, emitting to ``pendingServerBytes``. Declines (returns false) when
+    /// the server-bound pacing buffer is already at budget, so the inbound leg
+    /// emits inline instead. Outbound leg only.
+    @discardableResult
+    func queuePacedServerRequest(streamID: UInt32, body: Data, endStream: Bool) -> Bool {
+        let held = pendingRequestBodies.values.reduce(0) { $0 + $1.remaining.count }
+        guard held + body.count <= Self.maxPacedServerBufferBytes else {
+            logger.warning("[MITM] HTTP/2 \(rewriter.host) stream \(streamID): paced server buffer would reach \(held + body.count) B over cap \(Self.maxPacedServerBufferBytes) B; emitting request inline (unpaced)")
+            return false
+        }
+        guard !body.isEmpty else {
+            // No body to pace, but the HEADERS went out without END_STREAM, so the
+            // server still needs an END_STREAM marker to close the request stream.
+            if endStream {
+                pendingServerBytes.append(frameData(streamID: streamID, payload: Data(), endStream: true))
+            }
+            return true
+        }
+        pendingRequestBodies[streamID] = PendingRequestBody(
+            remaining: body,
+            streamWindow: flowController.serverInitialStreamWindow
+        )
+        flushPendingRequest(streamID: streamID)
+        return true
+    }
+
+    /// Upstream mirror of ``flushPendingSynth``: emits as much of stream
+    /// ``streamID``'s buffered request body as the server's connection and
+    /// per-stream windows currently allow, appending DATA to ``pendingServerBytes``
+    /// and doing the window accounting. END_STREAM lands on the last frame and the
+    /// entry is dropped when the body finishes; a flush that can emit nothing
+    /// (windows exhausted) leaves the entry for the next server WINDOW_UPDATE.
+    private func flushPendingRequest(streamID: UInt32) {
+        guard var entry = pendingRequestBodies[streamID] else { return }
+        let available = max(0, min(flowController.serverConnectionWindow, entry.streamWindow, entry.remaining.count))
+        if available > 0 {
+            let chunkEnd = entry.remaining.startIndex + available
+            let chunk = entry.remaining.subdata(in: entry.remaining.startIndex..<chunkEnd)
+            let didFinish = available == entry.remaining.count
+            // Cross-direction emit: outbound leg producing server-bound DATA, so
+            // frame without auto-debit and debit the *server* connection window
+            // here. Record the client-request debt so the server's eventual credit
+            // for this body is withheld from the upstream→client WINDOW_UPDATE relay
+            // (the client was already credited while the body was buffered — see
+            // ``creditBufferedDataToSender`` — mirroring the response addSynthDebt).
+            pendingServerBytes.append(frameData(streamID: streamID, payload: chunk, endStream: didFinish))
+            flowController.debitServerConnection(available)
+            flowController.addClientRequestDebt(available)
+            entry.streamWindow -= available
+            entry.remaining.removeFirst(available)
+            if didFinish {
+                pendingRequestBodies.removeValue(forKey: streamID)
+                return
+            }
+        }
+        pendingRequestBodies[streamID] = entry
+    }
+
+    /// Upstream mirror of ``flushAllPendingSynth``: drains every buffered request
+    /// body in stream-ID order until the shared server connection window is
+    /// exhausted, used when a server connection-level WINDOW_UPDATE grows it.
+    private func flushAllPendingRequests() {
+        guard !pendingRequestBodies.isEmpty else { return }
+        for streamID in pendingRequestBodies.keys.sorted() {
+            if flowController.serverConnectionWindow <= 0 { break }
+            if pendingRequestBodies[streamID] != nil {
+                flushPendingRequest(streamID: streamID)
+            }
+        }
+    }
+
+    /// Drops the paced request body for ``streamID`` — the client RST'd or the
+    /// connection abandoned the stream, so delivering the buffered request to the
+    /// server is pointless and would pin its buffer. Called cross-leg via
+    /// ``onUpstreamRequestAborted`` (from the inbound RST handler) and directly by
+    /// the outbound leg's own RST/GOAWAY cleanup. Outbound leg only.
+    func dropPacedRequest(_ streamID: UInt32) {
+        pendingRequestBodies.removeValue(forKey: streamID)
+    }
+
+    /// Returns and clears the request bodies held before the outbound leg existed
+    /// (deferred dial), in stream-ID order so the session transfers them to the
+    /// outbound pacer in the order their HEADERS were sent upstream. Inbound leg.
+    func takeHeldPacedRequests() -> [(streamID: UInt32, body: Data, endStream: Bool)] {
+        guard !heldPacedRequests.isEmpty else { return [] }
+        let ordered = heldPacedRequests.keys.sorted().map { sid -> (streamID: UInt32, body: Data, endStream: Bool) in
+            let held = heldPacedRequests[sid]!
+            return (streamID: sid, body: held.body, endStream: held.endStream)
+        }
+        heldPacedRequests.removeAll()
+        return ordered
+    }
+
+    /// Outbound mirror of ``applyClientInitialWindowSize``: records a new server
+    /// SETTINGS_INITIAL_WINDOW_SIZE and applies the RFC 9113 §6.9.2 retroactive
+    /// delta to every open paced request stream window, then flushes any the
+    /// change unblocked.
+    private func applyServerInitialWindowSize(_ newValue: Int) {
+        let delta = flowController.updateServerInitialStreamWindow(newValue)
+        guard delta != 0 else { return }
+        for id in pendingRequestBodies.keys {
+            pendingRequestBodies[id]?.streamWindow += delta
+        }
+        if delta > 0, !pendingRequestBodies.isEmpty {
+            flushAllPendingRequests()
+        }
+    }
+
     /// Parses a WINDOW_UPDATE (RFC 9113 §6.9), updates the client flow-control
     /// window we track for it, drives any synth pacing the new window unblocks
     /// (appending DATA to ``pendingClientBytes``), and returns the bytes to emit
@@ -2573,23 +2880,47 @@ final class MITMHTTP2Connection {
     /// verbatim (upstream's flow control is its own concern).
     private func handleWindowUpdate(_ frame: RawFrame) -> Data {
         if direction == .outbound {
-            // The outbound leg relays the server's WINDOW_UPDATEs to the client.
-            // A connection-level (stream 0) one credits the client's connection
-            // window; if the inbound leg credited the client directly for request
-            // DATA it buffered (``creditBufferedDataToSender``), withhold that
-            // here so the client isn't credited twice — the request-direction
-            // mirror of the inbound leg's synth-debt withholding below. A
-            // per-stream, malformed, or zero-increment frame forwards verbatim
-            // for the real peer to handle.
-            guard frame.streamID == 0,
-                  let increment = Self.windowUpdateIncrement(frame.payload),
-                  increment > 0 else {
-                return serializeFrame(frame)
+            let increment = Self.windowUpdateIncrement(frame.payload)
+            if frame.streamID == 0 {
+                // Connection-level (stream 0) server WINDOW_UPDATE. First credit
+                // the upstream send-window model and drain any paced request
+                // bodies the larger window now allows toward the server. Then
+                // relay it to the client: if the inbound leg credited the client
+                // directly for request DATA it buffered
+                // (``creditBufferedDataToSender``), withhold that here so the
+                // client isn't credited twice. A malformed/zero-increment frame
+                // forwards verbatim for the client to enforce §6.9.1.
+                if let increment, increment > 0 {
+                    flowController.creditServerConnection(increment)
+                    flushAllPendingRequests()
+                }
+                guard let increment, increment > 0 else {
+                    return serializeFrame(frame)
+                }
+                let forwarded = flowController.withholdClientRequestDebt(from: increment)
+                if forwarded == increment { return serializeFrame(frame) }
+                if forwarded == 0 { return Data() }  // fully withheld → drop (zero WU is a PROTOCOL_ERROR)
+                return windowUpdateFrame(streamID: 0, increment: forwarded)
             }
-            let forwarded = flowController.withholdClientRequestDebt(from: increment)
-            if forwarded == increment { return serializeFrame(frame) }
-            if forwarded == 0 { return Data() }  // fully withheld → drop (zero WU is a PROTOCOL_ERROR)
-            return windowUpdateFrame(streamID: 0, increment: forwarded)
+            // Per-stream server WINDOW_UPDATE. A paced request stream is MITM-owned
+            // upstream — the client never saw the server's per-stream window for it
+            // (the MITM credited the client directly while buffering), so this
+            // drives the request pacer and is never relayed to the client, which
+            // would double-credit it (mirrors the inbound synth-stream swallow). A
+            // real (pass-through) stream forwards verbatim — the client paced it.
+            if pendingRequestBodies[frame.streamID] != nil {
+                if let increment, increment > 0,
+                   let current = pendingRequestBodies[frame.streamID]?.streamWindow {
+                    // Clamp to 2^31-1 (§6.9.1) so a hostile/buggy WINDOW_UPDATE
+                    // can't model an impossible per-stream window. A legitimately
+                    // negative window (server lowered SETTINGS mid-stream) stays
+                    // negative and keeps gating emission.
+                    pendingRequestBodies[frame.streamID]?.streamWindow = min(MITMHTTP2FlowController.maxWindow, current + increment)
+                    flushPendingRequest(streamID: frame.streamID)
+                }
+                return Data()
+            }
+            return serializeFrame(frame)
         }
         let increment = Self.windowUpdateIncrement(frame.payload)
 
@@ -3080,26 +3411,31 @@ final class MITMHTTP2Connection {
         return emitDataFrames(streamID: streamID, payload: payload, endStream: endStream)
     }
 
-    /// Emits one or more DATA frames whose payloads each fit within
-    /// ``maxFramePayloadSize``. END_STREAM lands on the last frame only.
-    /// An empty input still emits a single empty DATA frame so any
-    /// END_STREAM signal survives. Writes frame headers directly into
-    /// ``output`` and appends payload slices in place, avoiding the
-    /// per-frame intermediate ``Data`` and ``subdata`` copy a
-    /// ``serializeFrame`` round-trip would incur — 256 throwaway
-    /// allocations for a 4 MiB body split into 256 frames.
+    /// Emits DATA frames for the common **same-direction** paths (pass-through
+    /// relay and ``emitBufferedDataFrames``), debiting the receiver's
+    /// connection-level flow-control window: the client's window for client-bound
+    /// response DATA (outbound leg), the server's window for server-bound request
+    /// DATA (inbound leg). This is the single chokepoint every such DATA byte
+    /// routes through, so each window stays in step with what its peer has
+    /// actually received. The cross-direction pacers (``flushPendingSynth`` emits
+    /// client-bound DATA from the inbound leg; ``flushPendingRequest`` emits
+    /// server-bound DATA from the outbound leg) instead call ``frameData`` and
+    /// debit the correct window explicitly, since their leg's direction is the
+    /// opposite of the data they emit.
     private func emitDataFrames(streamID: UInt32, payload: Data, endStream: Bool) -> Data {
-        // Debit the client's shared connection-level flow-control window for
-        // real server→client DATA the outbound leg forwards or rewrites — this
-        // is the single chokepoint every such DATA byte routes through, so the
-        // window stays in step with what the client has actually received. The
-        // synth (`Anywhere.respond`) path debits the window itself as it paces,
-        // and the inbound leg's other ``emitDataFrames`` calls produce
-        // upstream-bound *request* DATA that the client window must not see, so
-        // gate on direction.
-        if direction == .outbound {
-            flowController.debitConnection(payload.count)
+        switch direction {
+        case .outbound: flowController.debitConnection(payload.count)        // client-bound response DATA
+        case .inbound:  flowController.debitServerConnection(payload.count)  // server-bound request DATA
         }
+        return frameData(streamID: streamID, payload: payload, endStream: endStream)
+    }
+
+    /// Pure DATA framing — splits ``payload`` into ``maxFramePayloadSize``-bounded
+    /// frames (END_STREAM on the last only; an empty payload still yields one
+    /// empty DATA frame so the END_STREAM signal survives) with **no**
+    /// flow-control accounting. ``emitDataFrames`` wraps it for the common paths;
+    /// the pacers frame here and debit the correct window themselves.
+    private func frameData(streamID: UInt32, payload: Data, endStream: Bool) -> Data {
         if payload.isEmpty {
             var output = Data(capacity: 9)
             var flags: UInt8 = 0

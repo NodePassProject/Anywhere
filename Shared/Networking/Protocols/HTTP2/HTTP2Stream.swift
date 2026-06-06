@@ -186,10 +186,13 @@ nonisolated class HTTP2Stream: HTTPTunnel {
 
     /// Handles a HEADERS frame routed to this stream by the session.
     func handleHeaders(_ frame: HTTP2Frame) {
-        guard let session, let headers = session.hpackDecoder.decodeHeaders(from: frame.payload) else {
+        guard let session, let decoded = session.hpackDecoder.decodeHeaders(from: frame.payload) else {
             handleStreamError(HTTP2Error.protocolError("Failed to decode headers on stream \(streamID)"))
             return
         }
+        // This client stack consumes responses (no re-encode/forwarding), so the
+        // never-indexed marker is irrelevant here — take just the decoded fields.
+        let headers = decoded.fields
 
         guard let statusHeader = headers.first(where: { $0.name == ":status" }) else {
             handleStreamError(HTTP2Error.protocolError("Missing :status on stream \(streamID)"))

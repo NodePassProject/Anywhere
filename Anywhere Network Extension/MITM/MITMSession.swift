@@ -635,6 +635,22 @@ final class MITMSession {
                 // emits inline; harmless since teardown suppresses emission anyway.
                 inLeg?.queuePacedClientResponse(streamID: streamID, headerBlock: headerBlock, body: body, endStream: endStream) ?? false
             }
+            // Request-direction mirror: a buffered-rewrite REQUEST body that
+            // exceeds the upstream window is handed from the inbound leg to the
+            // outbound leg — which receives the server's WINDOW_UPDATEs and owns
+            // the server-bound buffer — for paced delivery, so it can't overflow
+            // the server's window into a FLOW_CONTROL_ERROR. Weak capture: same
+            // mutual-retain-cycle break; the call is synchronous on the shared
+            // lwipQueue from the inbound flush.
+            inLeg.onPacedRequest = { [weak outLeg] streamID, body, endStream in
+                outLeg?.queuePacedServerRequest(streamID: streamID, body: body, endStream: endStream) ?? false
+            }
+            // A client RST / abandon of a stream whose request body the outbound
+            // leg is pacing drops it, so a cancelled request isn't delivered and
+            // its buffer isn't pinned until teardown.
+            inLeg.onUpstreamRequestAborted = { [weak outLeg] streamID in
+                outLeg?.dropPacedRequest(streamID)
+            }
             // The inbound leg may have already decoded the client's SETTINGS
             // (the h2 preface arrives before the dial completes); replay the
             // observed header-table size to the just-created outbound decoder so
@@ -653,6 +669,24 @@ final class MITMSession {
             sendChunked(buffered, via: outer) { [weak self] sendError in
                 guard let self, let sendError else { return }
                 self.lwipQueue.async { self.cancel(error: sendError) }
+            }
+        }
+        // The deferred dial processed the first request(s) before the outbound leg
+        // existed, so any buffered-rewrite request body too large for the upstream
+        // window was held on the inbound leg (its HEADERS are part of ``buffered``
+        // just flushed above). Hand each to the outbound pacer now, in stream-ID
+        // order, and flush the first window's worth toward the server — enqueued
+        // after the HEADERS on the shared outer send serializer, so order holds.
+        if let outLeg = outboundH2, let inLeg = inboundH2 {
+            for held in inLeg.takeHeldPacedRequests() {
+                outLeg.queuePacedServerRequest(streamID: held.streamID, body: held.body, endStream: held.endStream)
+            }
+            let pacedInit = outLeg.drainPendingServerBytes()
+            if !pacedInit.isEmpty {
+                sendChunked(pacedInit, via: outer) { [weak self] sendError in
+                    guard let self, let sendError else { return }
+                    self.lwipQueue.async { self.cancel(error: sendError) }
+                }
             }
         }
         startOutboundPump(inner: inner, outer: outer)
@@ -820,11 +854,35 @@ final class MITMSession {
                             self.lwipQueue.async { self.cancel(error: sendError) }
                         }
                     }
+                    // Flush any paced request body the outbound leg queued during
+                    // this feed toward the server (a buffered-rewrite request body
+                    // too large for the upstream window — see
+                    // ``MITMHTTP2Connection.onPacedRequest``). Always run AFTER the
+                    // request HEADERS/DATA in ``transformed`` so the body follows
+                    // its HEADERS on the shared outer serializer; for an early-open
+                    // handoff (HEADERS already on the wire, ``transformed`` empty)
+                    // there is nothing to order against. nil/empty for HTTP/1 and
+                    // whenever no handoff occurred this pass. The remainder drains
+                    // later as the server's WINDOW_UPDATEs arrive on the outbound
+                    // pump.
+                    let flushPacedRequest: (TLSRecordConnection) -> Void = { [weak self] outer in
+                        guard let self else { return }
+                        let pacedReq = self.outboundH2?.drainPendingServerBytes() ?? Data()
+                        guard !pacedReq.isEmpty else { return }
+                        self.sendChunked(pacedReq, via: outer) { [weak self] sendError in
+                            guard let self, let sendError else { return }
+                            self.lwipQueue.async { self.cancel(error: sendError) }
+                        }
+                    }
                     guard !transformed.isEmpty else {
                         // Buffered fragments (CONTINUATION pending, partial
                         // preface, body buffered for rewrite, etc.) or a request
                         // fully answered on the inner leg (302 / reject /
-                        // Anywhere.respond). Loop back for more without dialing.
+                        // Anywhere.respond). Post-dial, still flush any paced
+                        // request body an early-open handoff queued. Loop back.
+                        if let outer = self.outerRecord {
+                            flushPacedRequest(outer)
+                        }
                         self.startInboundPump(inner: inner)
                         return
                     }
@@ -851,7 +909,8 @@ final class MITMSession {
                             self.cancel(error: nil)
                             return
                         }
-                        // Post-dial: forward upstream.
+                        // Post-dial: forward upstream, then the paced body (if any)
+                        // after the HEADERS/DATA it belongs behind.
                         self.sendChunked(transformed, via: outer) { [weak self] sendError in
                             guard let self else { return }
                             if let sendError {
@@ -860,6 +919,7 @@ final class MITMSession {
                             }
                             self.startInboundPump(inner: inner)
                         }
+                        flushPacedRequest(outer)
                     } else {
                         // Pre-dial: the first request that needs the upstream.
                         // Buffer it and kick off the deferred dial.
@@ -983,11 +1043,13 @@ final class MITMSession {
                 // bytes to the client, then re-arms the read.
                 let handle: (Data) -> Void = { [weak self] transformed in
                     guard let self, !self.torn else { return }
-                    // Drain any upstream-bound flow-control credit the outbound
-                    // leg issued for a buffered response body and send it to the
-                    // server, so the server keeps sending while the body is held
-                    // instead of stalling at its window (mirrors the inbound
-                    // leg's pendingClientBytes drain). HTTP/1 has no such credit.
+                    // Drain the outbound leg's queued server-bound bytes and send
+                    // them to the server: flow-control credit it issued for a
+                    // buffered response body (so the server keeps sending while the
+                    // body is held instead of stalling at its window), plus any
+                    // paced request-body DATA a server WINDOW_UPDATE just unblocked
+                    // (see ``MITMHTTP2Connection.queuePacedServerRequest``). Mirrors
+                    // the inbound leg's pendingClientBytes drain; HTTP/1 has neither.
                     let serverCredit = self.outbound.drainPendingServerBytes()
                     if !serverCredit.isEmpty {
                         self.sendChunked(serverCredit, via: outer) { [weak self] sendError in
