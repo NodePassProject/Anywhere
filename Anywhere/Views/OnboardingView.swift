@@ -213,19 +213,16 @@ struct OnboardingView: View {
     // MARK: - Actions
 
     private func finishOnboarding() {
-        // Trigger a network request to prompt the local network permission
-        // dialog on China devices.
-        triggerNetworkPermission()
-
-        // Apply AD block setting
+        if DeviceCensorship.isChinaDevice {
+            triggerNetworkPermission()
+        }
+        
         if adBlockEnabled {
             if let adBlock = RoutingRuleSetStore.shared.ruleSets.first(where: { $0.name == "ADBlock" }) {
                 RoutingRuleSetStore.shared.updateAssignment(adBlock, configurationId: "REJECT")
             }
         }
-
-        // Persist the country bypass; the store re-syncs routing and restarts the tunnel.
-        // (The AD-block assignment above re-syncs itself via `updateAssignment`.)
+        
         ruleSetStore.bypassCountryCode = bypassCountryCode
 
         AWCore.setOnboardingCompleted(true)
@@ -242,11 +239,9 @@ struct OnboardingView: View {
             UnicodeScalar(127397 + $0.value)
         }.map(Character.init))
     }
-
-    /// Fire-and-forget request to 1.1.1.1 to trigger the network permission
-    /// dialog on China-region devices.
+    
     private func triggerNetworkPermission() {
-        guard let url = URL(string: "http://1.1.1.1") else { return }
+        guard let url = URL(string: "https://argsment.com") else { return }
         URLSession.shared.dataTask(with: url) { _, _, _ in }.resume()
     }
 }

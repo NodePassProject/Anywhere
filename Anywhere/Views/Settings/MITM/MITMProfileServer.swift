@@ -8,27 +8,21 @@
 import Foundation
 import Network
 
-@MainActor
+private let logger = AnywhereLogger(category: "MITMProfileServer")
+
 final class MITMProfileServer {
     static let shared = MITMProfileServer()
 
     private var listener: NWListener?
     private var port: NWEndpoint.Port?
     private var payload: Data?
-
-    /// Auto-shutdown timer: even if the user dismisses the install prompt,
-    /// the server stops serving after this window.
+    
     private static let lifetime: TimeInterval = 120
 
     private var shutdownWork: DispatchWorkItem?
 
     private init() {}
-
-    /// Starts the server (idempotent across calls — restarts with the new
-    /// payload) and returns the URL to open in Safari.
-    ///
-    /// `NWListener` binds asynchronously when constructed with `.any`, so
-    /// we await the first `.ready` state before reading the resolved port.
+    
     func start(payload: Data) async throws -> URL {
         stop()
 
@@ -39,24 +33,24 @@ final class MITMProfileServer {
         self.payload = payload
 
         listener.newConnectionHandler = { [weak self] connection in
-            Task { @MainActor in
-                self?.handle(connection: connection)
+            Task {
+                await self?.handle(connection: connection)
             }
         }
 
-        let resumedFlag = AtomicBool()
+        var hasResumed: Bool = false
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             listener.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    if resumedFlag.setOnce() {
+                    if !hasResumed {
                         continuation.resume()
+                        hasResumed = true
                     }
                 case .failed(let error):
-                    if resumedFlag.setOnce() {
+                    if !hasResumed {
                         continuation.resume(throwing: error)
-                    } else {
-                        NSLog("[MITM-Profile] listener failed: \(error)")
+                        hasResumed = true
                     }
                 default:
                     break
@@ -105,25 +99,23 @@ final class MITMProfileServer {
 
     private func receiveRequest(on connection: NWConnection, accumulated: Data = Data()) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
-            Task { @MainActor in
+            Task {
                 guard let self else {
                     connection.cancel()
                     return
                 }
                 if let error {
-                    NSLog("[MITM-Profile] receive error: \(error)")
+                    logger.error("receive error: \(error)")
                     connection.cancel()
                     return
                 }
                 var buffer = accumulated
                 if let data { buffer.append(data) }
 
-                // Wait for end-of-headers (CRLFCRLF). We don't bother
-                // parsing the request method/path — there's only one
-                // resource and it's only reachable from this device.
+                // Wait for end-of-headers (CRLFCRLF).
                 if let range = buffer.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])) {
                     _ = range
-                    self.send(connection: connection)
+                    await self.send(connection: connection)
                     return
                 }
 
@@ -132,7 +124,7 @@ final class MITMProfileServer {
                     return
                 }
 
-                self.receiveRequest(on: connection, accumulated: buffer)
+                await self.receiveRequest(on: connection, accumulated: buffer)
             }
         }
     }
@@ -164,22 +156,5 @@ final class MITMProfileServer {
             case .bindFailed: return "Failed to start local profile server."
             }
         }
-    }
-}
-
-/// One-shot atomic flag used to coalesce duplicate state notifications
-/// from `NWListener.stateUpdateHandler` into a single continuation resume.
-private final class AtomicBool: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
-
-    /// Returns `true` exactly once — the first call flips the flag and
-    /// returns true; every subsequent call returns false.
-    func setOnce() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if value { return false }
-        value = true
-        return true
     }
 }

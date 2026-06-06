@@ -9,7 +9,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct MITMSettingsView: View {
-    @Environment(MITMRuleSetStore.self) private var store
+    @Environment(MITMCertificateController.self) private var certificateController
+    @Environment(MITMRuleSetStore.self) private var ruleSetStore
 
     private static let importAllowedContentTypes: [UTType] = [UTType(filenameExtension: "amrs") ?? .data]
 
@@ -24,10 +25,10 @@ struct MITMSettingsView: View {
     @State private var subscribeError: String?
 
     var body: some View {
-        @Bindable var store = store
+        @Bindable var ruleSetStore = ruleSetStore
         Form {
             Section {
-                Toggle(isOn: $store.enabled) {
+                Toggle(isOn: $ruleSetStore.enabled) {
                     TextWithColorfulIcon(title: "MITM", comment: nil, systemName: "key.horizontal.fill", foregroundColor: .white, backgroundColor: .indigo)
                 }
             }
@@ -36,13 +37,18 @@ struct MITMSettingsView: View {
                 NavigationLink {
                     MITMCertificateView()
                 } label: {
-                    TextWithColorfulIcon(title: "Root Certificate", comment: nil, systemName: "lock.rectangle.fill", foregroundColor: .white, backgroundColor: .green)
+                    HStack {
+                        TextWithColorfulIcon(title: "Root Certificate", comment: nil, systemName: "lock.rectangle.fill", foregroundColor: .white, backgroundColor: .green)
+                        Spacer()
+                        Image(systemName: certificateStatusBadgeIcon)
+                            .foregroundStyle(certificateStatusBadgeColor)
+                    }
                 }
             }
 
-            if !store.ruleSets.isEmpty {
+            if !ruleSetStore.ruleSets.isEmpty {
                 Section("Rule Sets") {
-                    ForEach(store.ruleSets) { ruleSet in
+                    ForEach(ruleSetStore.ruleSets) { ruleSet in
                         NavigationLink {
                             MITMRuleSetDetailView(ruleSet: ruleSet)
                         } label: {
@@ -50,10 +56,10 @@ struct MITMSettingsView: View {
                         }
                     }
                     .onDelete { offsets in
-                        store.removeRuleSets(atOffsets: offsets)
+                        ruleSetStore.removeRuleSets(atOffsets: offsets)
                     }
                     .onMove { source, destination in
-                        store.moveRuleSets(fromOffsets: source, toOffset: destination)
+                        ruleSetStore.moveRuleSets(fromOffsets: source, toOffset: destination)
                     }
                 }
             }
@@ -90,7 +96,7 @@ struct MITMSettingsView: View {
             Button("Add") {
                 let name = newRuleSetName.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !name.isEmpty else { return }
-                store.addRuleSet(MITMRuleSet(name: name))
+                ruleSetStore.addRuleSet(MITMRuleSet(name: name))
                 newRuleSetName = ""
             }
             Button("Cancel", role: .cancel) {
@@ -184,7 +190,7 @@ struct MITMSettingsView: View {
                 domainSuffixes: parsed.domainSuffixes,
                 rules: parsed.rules
             )
-            store.addRuleSet(ruleSet)
+            ruleSetStore.addRuleSet(ruleSet)
         } catch {
             importError = error.localizedDescription
         }
@@ -220,11 +226,21 @@ struct MITMSettingsView: View {
                     rules: parsed.rules,
                     subscriptionURL: url
                 )
-                store.addRuleSet(ruleSet)
+                ruleSetStore.addRuleSet(ruleSet)
             } catch {
                 subscribeError = error.localizedDescription
             }
         }
+    }
+    
+    private var certificateStatusBadgeIcon: String {
+        if !certificateController.hasCA { return "xmark.circle.fill" }
+        return certificateController.trusted ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+    }
+
+    private var certificateStatusBadgeColor: Color {
+        if !certificateController.hasCA { return .red }
+        return certificateController.trusted ? .green : .orange
     }
 
     private func summary(for ruleSet: MITMRuleSet) -> String {

@@ -45,10 +45,7 @@ struct MITMRuleEditorView: View {
             case .bodyReplace:   return String(localized: "Body Replace")
             }
         }
-
-        /// The Rewrite operation only makes sense in the request phase. The
-        /// editor hides the phase picker when this is true and pins phase to
-        /// httpRequest at save time.
+        
         var requestPhaseOnly: Bool {
             switch self {
             case .rewrite: return true
@@ -56,15 +53,13 @@ struct MITMRuleEditorView: View {
             }
         }
     }
-
-    /// Sub-mode of the unified "Rewrite" operation (matches the import
-    /// sub-mode ids `0`–`4`).
+    
     private enum RewriteMode: String, CaseIterable, Identifiable {
-        case transparent
-        case redirect302
-        case reject200Text
-        case reject200Gif
-        case reject200Data
+        case transparent     // ID 0
+        case redirect302     // ID 1
+        case reject200Text   // ID 2
+        case reject200Gif    // ID 3
+        case reject200Data   // ID 4
 
         var id: String { rawValue }
         var label: String {
@@ -362,9 +357,7 @@ struct MITMRuleEditorView: View {
             self.searchText = search
             self.replacement = replacement
         case .script, .streamScript, .bodyJSON:
-            // Scripts and native JSON-body edits are import-only; the
-            // detail view should never route one of these into this editor.
-            // Guard anyway so the exhaustiveness check passes.
+            // Scripts and native JSON-body edits are import-only.
             break
         }
     }

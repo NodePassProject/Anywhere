@@ -7,10 +7,6 @@
 
 import SwiftUI
 
-/// A single draft row in the suffix editor. The id is per-row so SwiftUI
-/// keeps focus and deletion stable while the user types — using the
-/// string itself as the id would collapse rows whenever two are momentarily
-/// equal (e.g. both empty).
 private struct MITMDomainSuffixDraft: Identifiable, Equatable {
     let id = UUID()
     var value: String
@@ -38,11 +34,7 @@ struct MITMRuleSetDetailView: View {
     @State private var updateError: String?
 
     private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
-
-    /// The live rule set from the store. The ``ruleSet`` passed in is a
-    /// snapshot that goes stale after a subscription refresh, so reads that
-    /// must reflect the latest content — the subscription URL, and whether
-    /// the set is read-only — go through the store by id.
+    
     private var currentRuleSet: MITMRuleSet? {
         guard let id = ruleSet?.id else { return ruleSet }
         return store.ruleSet(id: id) ?? ruleSet
@@ -116,11 +108,8 @@ struct MITMRuleSetDetailView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            // Subscribed sets are remote-managed and read-only.
                             guard !isSubscribed else { return }
-                            // Scripts and native JSON-body edits are
-                            // import-only; no in-app editor for them.
-                            // body-replace is editable, so it falls through.
+                            // Scripts and native JSON-body edits are import-only.
                             switch rule.operation {
                             case .script, .streamScript, .bodyJSON: return
                             default: break
@@ -251,9 +240,7 @@ struct MITMRuleSetDetailView: View {
         guard let ruleSet = currentRuleSet else { return }
         loadState(from: ruleSet)
     }
-
-    /// Populates the editor's local @State from a rule set. Used on appear
-    /// and again after a subscription refresh replaces the content.
+    
     private func loadState(from ruleSet: MITMRuleSet) {
         name = ruleSet.name
         enabled = ruleSet.enabled
@@ -262,8 +249,7 @@ struct MITMRuleSetDetailView: View {
     }
 }
 
-/// Centralized label generation so the rule list and editor agree.
-enum MITMRuleSummary {
+fileprivate enum MITMRuleSummary {
     static func title(for rule: MITMRule) -> String {
         return "\(rule.phase.description) \(rule.operation.description)"
     }

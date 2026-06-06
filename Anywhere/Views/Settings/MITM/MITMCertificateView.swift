@@ -59,7 +59,7 @@ struct MITMCertificateView: View {
 
     @Environment(MITMCertificateController.self) private var controller
 
-    @State private var exportingCer = false
+    @State private var exportingCertificate = false
     @State private var showRegenerateConfirm = false
     @State private var showDeleteConfirm = false
     @State private var errorMessage: String?
@@ -169,7 +169,7 @@ struct MITMCertificateView: View {
         } message: {
             Text(errorMessage ?? "")
         }
-        .sheet(isPresented: $exportingCer) {
+        .sheet(isPresented: $exportingCertificate) {
             if let url = certificateURL() {
                 ShareSheet(items: [url])
             }
@@ -220,14 +220,11 @@ struct MITMCertificateView: View {
             errorMessage = String(localized: "Failed to export certificate.")
             return
         }
-        exportingCer = true
+        exportingCertificate = true
     }
 
     /// Hosts the .mobileconfig over a one-shot HTTP server bound to
-    /// 127.0.0.1 and opens the URL — only Safari and the system profile
-    /// installer recognise the `application/x-apple-aspen-config` MIME
-    /// type, so a regular share-sheet hand-off won't trigger the install
-    /// flow.
+    /// 127.0.0.1 and opens the URL.
     private func installProfile() {
         guard let plist = controller.mobileConfigData() else {
             errorMessage = String(localized: "Failed to export profile.")

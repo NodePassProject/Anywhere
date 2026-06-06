@@ -8,35 +8,7 @@
 import Foundation
 import JavaScriptCore
 
-/// Import-only parser that turns the text representation of a
-/// ``MITMRuleSet`` into a value ``ImportMITMRuleSetView`` can install.
-/// There is no serializer; the text comes from a user paste or a
-/// downloaded URL and is treated as untrusted — wire-safety validation
-/// of header and URL bytes happens later, in ``MITMRewritePolicy`` (for
-/// static rules) and ``MITMScriptEngine`` (for script output).
-///
-/// The text is a flat sequence of lines, in any order:
-///
-///     name     = My Rule Set
-///     hostname = example.com, api.example.org
-///     0, 0, ^https://old\.example\.com/, 0, https://new.example.com/
-///     0, 1, ^/api/, X-Powered-By, Anywhere
-///
-/// - **Header lines** (`<key> = <value>`, case-insensitive key) supply
-///   set metadata: `name` and `hostname`.
-/// - **Rule lines** (`<phase>, <operation>, <field…>`) each describe one
-///   rewrite. Phase is `0` (request) / `1` (response); operation is `0`–`5`
-///   for native edits or `100` / `101` for scripts.
-/// - **Comments** start with `#` or `//`.
-///
-/// Parsing never fails: a line that is neither a recognized header nor a
-/// valid rule (unrecognized key, wrong field count, uncompilable pattern,
-/// non-JavaScript script base64) is dropped silently, so a partially-valid
-/// file still imports what it can.
-///
-/// The full import-format and scripting reference — every header key,
-/// operation, rewrite action, and the `Anywhere` script API — lives in
-/// `Documentations/MITM.md`.
+/// The full import-format and scripting reference lives in `Documentations/MITM.md`.
 enum MITMRuleSetParser {
     static func parse(_ text: String) -> MITMRuleSet {
         var name = ""

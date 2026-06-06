@@ -11,12 +11,7 @@ import Observation
 @Observable
 final class DeepLinkManager {
     var url: String?
-
-    // Supported deep link schemes:
-    // anywhere://add-proxy?link=<link>
-    // vless://<...>
-    // ss://<...>
-    // sudoku://<...>
+    
     func handle(url: URL) {
         switch url.scheme?.lowercased() {
         case "anywhere":
