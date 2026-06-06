@@ -16,7 +16,7 @@ final class StatsRecorder {
         let memoryBytes: UInt64
     }
 
-    private static let maxSamples = 70
+    private static let maxSamples = 130
     private static let trimBatch = 10
 
     private var samples: [StatsSample] = []

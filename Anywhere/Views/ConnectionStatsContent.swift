@@ -11,12 +11,10 @@ import Charts
 
 struct ConnectionStatsContent: View {
     @Environment(ConnectionStatsModel.self) private var stats
-    @State private var mode: Mode = .totals
+    var mode: Mode = .totals
     
-    /// The displayed metric, advanced one step per tap (wraps at the end).
-    private enum Mode: Int, CaseIterable {
+    enum Mode: Int, CaseIterable {
         case totals, speed, connections, memory
-        var next: Mode { Mode(rawValue: rawValue + 1) ?? .totals }
     }
     
     var body: some View {
@@ -33,41 +31,97 @@ struct ConnectionStatsContent: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(.easeInOut(duration: 0.25), value: mode)
         .contentShape(Rectangle())
-        .onTapGesture { mode = mode.next }
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Switches the displayed metric")
     }
     
-    // MARK: Totals (running cumulative bytes)
+    // MARK: Totals
     
-    private var totalsView: some View {
-        HStack {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.up")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .accessibilityLabel("Upload")
-                Text(Self.formatBytes(stats.bytesOut))
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.white)
-                    .contentTransition(.numericText())
-            }
-            Spacer()
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .accessibilityLabel("Download")
-                Text(Self.formatBytes(stats.bytesIn))
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(.white)
-                    .contentTransition(.numericText())
-            }
+    private struct CumulativeTotal: Identifiable {
+        let id: UInt64
+        let bytesIn: Double
+        let bytesOut: Double
+    }
+
+    private var cumulativeTotals: [CumulativeTotal] {
+        var runningIn = 0.0
+        var runningOut = 0.0
+        return stats.samples.map { sample in
+            runningIn += Double(sample.bytesIn)
+            runningOut += Double(sample.bytesOut)
+            return CumulativeTotal(id: sample.id, bytesIn: runningIn, bytesOut: runningOut)
         }
-        .animation(.default, value: stats.bytesIn)
-        .animation(.default, value: stats.bytesOut)
+    }
+
+    private var totalsView: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Label("Totals", systemImage: "arrow.up.arrow.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+                Spacer()
+                totalReadout(systemImage: "arrow.up", color: .orange, bytes: stats.bytesOut)
+                    .animation(.default, value: stats.bytesOut)
+                totalReadout(systemImage: "arrow.down", color: .cyan, bytes: stats.bytesIn)
+                    .animation(.default, value: stats.bytesIn)
+            }
+            Chart(cumulativeTotals) { point in
+                AreaMark(
+                    x: .value("Time", Int(point.id)),
+                    y: .value("Totals", point.bytesOut),
+                    series: .value("Series", "Upload"),
+                    stacking: .unstacked
+                )
+                .foregroundStyle(.linearGradient(
+                    colors: [Color.orange.opacity(0.35), Color.orange.opacity(0.03)],
+                    startPoint: .top, endPoint: .bottom))
+                .interpolationMethod(.monotone)
+                AreaMark(
+                    x: .value("Time", Int(point.id)),
+                    y: .value("Totals", point.bytesIn),
+                    series: .value("Series", "Download"),
+                    stacking: .unstacked
+                )
+                .foregroundStyle(.linearGradient(
+                    colors: [Color.cyan.opacity(0.35), Color.cyan.opacity(0.03)],
+                    startPoint: .top, endPoint: .bottom))
+                .interpolationMethod(.monotone)
+                LineMark(
+                    x: .value("Time", Int(point.id)),
+                    y: .value("Totals", point.bytesOut),
+                    series: .value("Series", "Upload")
+                )
+                .foregroundStyle(.orange)
+                .interpolationMethod(.monotone)
+                LineMark(
+                    x: .value("Time", Int(point.id)),
+                    y: .value("Totals", point.bytesIn),
+                    series: .value("Series", "Download")
+                )
+                .foregroundStyle(.cyan)
+                .interpolationMethod(.monotone)
+            }
+            .chartXAxis(.hidden)
+            .chartLegend(.hidden)
+            .chartXScale(domain: xDomain)
+            .chartYAxis { yAxis { Self.formatBytes(Int64($0)) } }
+            .chartYScale(domain: .automatic(includesZero: true))
+            .frame(minHeight: 50, maxHeight: 100)
+            .animation(.default, value: stats.samples)
+        }
+    }
+
+    private func totalReadout(systemImage: String, color: Color, bytes: Int64) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(color)
+            Text(Self.formatBytes(bytes))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.white)
+                .contentTransition(.numericText())
+        }
     }
     
     // MARK: Speed
@@ -111,7 +165,7 @@ struct ConnectionStatsContent: View {
             .chartXScale(domain: xDomain)
             .chartYAxis { yAxis { Self.formatBytes(Int64($0)) + String(localized: "/s") } }
             .chartYScale(domain: .automatic(includesZero: true))
-            .frame(minHeight: 50)
+            .frame(minHeight: 50, maxHeight: 100)
             .animation(.default, value: stats.samples)
         }
     }
@@ -163,7 +217,7 @@ struct ConnectionStatsContent: View {
             .chartXScale(domain: xDomain)
             .chartYAxis { yAxis { "\(Int($0.rounded()))" } }
             .chartYScale(domain: .automatic(includesZero: true))
-            .frame(minHeight: 50)
+            .frame(minHeight: 50, maxHeight: 100)
             .animation(.default, value: stats.samples)
         }
     }
@@ -215,7 +269,7 @@ struct ConnectionStatsContent: View {
             .chartXScale(domain: xDomain)
             .chartYAxis { yAxis { Self.formatBytes(Int64($0)) } }
             .chartYScale(domain: .automatic(includesZero: true))
-            .frame(minHeight: 50)
+            .frame(minHeight: 50, maxHeight: 100)
             .animation(.default, value: stats.samples)
         }
     }
@@ -262,8 +316,6 @@ struct ConnectionStatsContent: View {
 }
 
 #if DEBUG
-/// Dark, card-like backdrop that mirrors the connected-state Home card, so the
-/// white text and colored charts read correctly in the preview canvas.
 private struct ConnectionStatsPreviewStage<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
@@ -284,7 +336,6 @@ private struct ConnectionStatsPreviewStage<Content: View>: View {
     }
 }
 
-// Tap the card to cycle: totals → speed → connections → memory → totals.
 #Preview("Live data") {
     ConnectionStatsPreviewStage {
         ConnectionStatsContent()
