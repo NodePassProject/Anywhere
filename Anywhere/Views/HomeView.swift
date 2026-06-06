@@ -9,12 +9,13 @@ import SwiftUI
 import NetworkExtension
 
 struct HomeView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
 
-    @State private var proxyMode = AWCore.getProxyMode()
+    @Namespace private var namespace
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
@@ -52,51 +53,27 @@ struct HomeView: View {
 
             GeometryReader { geometry in
                 ScrollView {
-                    VStack(spacing: 0) {
-                        Spacer()
-                        
-                        VStack(spacing: 10) {
-                            powerButton
-                            statusText
-                        }
-                        .padding(.bottom, 50)
-                        
+                    LazyVStack(spacing: 16, pinnedViews: [.sectionHeaders]) {
                         if isConnected {
-                            trafficStats
-                                .padding(.bottom, 20)
-                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                            Section {
+                                statsGrid
+                            } header: {
+                                connectedHeader
+                            }
+                        } else {
+                            VStack(spacing: 80) {
+                                powerButton
+                                    .matchedGeometryEffect(id: "powerButton", in: namespace)
+                                configurationCard
+                                    .matchedGeometryEffect(id: "configurationCard", in: namespace)
+                            }
+                            .frame(minHeight: geometry.size.height)
                         }
-                        
-                        configurationCard
-                        
-                        Spacer()
-                        
-                        Rectangle()
-                            .fill(.clear)
-                            .frame(height: geometry.size.height / 8)
                     }
                     .padding(.horizontal, 24)
-                    .frame(minHeight: geometry.size.height)
-                    .animation(.easeInOut(duration: 0.4), value: isConnected)
+                    .animation(.bouncy(duration: 1), value: isConnected)
                 }
             }
-        }
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                Picker("Proxy Mode", selection: $proxyMode) {
-                    Text("Rule").tag(ProxyMode.rule)
-                    Text("Global").tag(ProxyMode.global)
-                }
-                .pickerStyle(.segmented)
-                .frame(minWidth: 120)
-            }
-        }
-        .onAppear {
-            proxyMode = AWCore.getProxyMode()
-        }
-        .onChange(of: proxyMode) {
-            AWCore.setProxyMode(proxyMode)
-            AWCore.notifyTunnelSettingsChanged()
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
@@ -115,6 +92,35 @@ struct HomeView: View {
             Button("OK") { viewModel.startError = nil }
         } message: {
             Text(viewModel.startError ?? "")
+        }
+    }
+
+    // MARK: - Connected Layout
+    
+    @ViewBuilder
+    private var connectedHeader: some View {
+        HStack {
+            powerButton
+                .matchedGeometryEffect(id: "powerButton", in: namespace)
+            configurationCard
+                .matchedGeometryEffect(id: "configurationCard", in: namespace)
+        }
+        .padding(.vertical, 8)
+    }
+    
+    private var statsColumns: [GridItem] {
+        let columnCount = horizontalSizeClass == .regular ? 2 : 1
+        return Array(repeating: GridItem(.flexible(), spacing: 16), count: columnCount)
+    }
+
+    @ViewBuilder
+    private var statsGrid: some View {
+        LazyVGrid(columns: statsColumns, spacing: 16) {
+            ForEach(ConnectionStatsContent.Mode.allCases, id: \.self) { mode in
+                cardContent {
+                    ConnectionStatsContent(mode: mode)
+                }
+            }
         }
     }
 
@@ -153,34 +159,16 @@ struct HomeView: View {
             }
         } label: {
             ZStack {
-                Circle()
-                    .fill(
-                        RadialGradient(
-                            colors: [isConnected ? .cyan.opacity(0.25) : .clear, .clear],
-                            center: .center,
-                            startRadius: 50,
-                            endRadius: 110
-                        )
-                    )
-                    .frame(width: 200, height: 200)
-                    .phaseAnimator([false, true]) { content, phase in
-                        content
-                            .scaleEffect(phase ? 1.15 : 0.95)
-                            .opacity(phase ? 0.5 : 1.0)
-                    } animation: { _ in
-                        .easeInOut(duration: 2)
-                    }
-
                 if #available(iOS 26.0, *) {
                     Circle()
                         .fill(.clear)
-                        .frame(width: 140, height: 140)
+                        .frame(width: isConnected ? 50 : 140)
                         .glassEffect(.clear, in: .circle)
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 } else {
                     Circle()
                         .fill(.white.opacity(0.2))
-                        .frame(width: 140, height: 140)
+                        .frame(width: isConnected ? 50 : 140)
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 }
 
@@ -190,7 +178,7 @@ struct HomeView: View {
                         .tint(isConnected ? .white : .accentColor)
                 } else {
                     Image(systemName: "power")
-                        .font(.system(size: 44, weight: .light))
+                        .font(.system(size: isConnected ? 24 : 40, weight: .light))
                         .foregroundStyle(isConnected ? .white : .accentColor)
                 }
             }
@@ -200,26 +188,6 @@ struct HomeView: View {
         .disabled(viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations) && configStore.hasConfigurations)
         .sensoryFeedback(.impact(weight: .medium), trigger: isConnected)
         .animation(.easeInOut(duration: 0.6), value: isConnected)
-    }
-    
-    // MARK: - Status Text
-    
-    @ViewBuilder
-    private var statusText: some View {
-        Text(viewModel.statusText)
-            .font(.system(size: 20, weight: .medium))
-            .foregroundStyle(isConnected ? .white : .secondary)
-            .contentTransition(.interpolate)
-            .animation(.easeInOut, value: viewModel.vpnStatus)
-    }
-
-    // MARK: - Traffic Stats
-
-    @ViewBuilder
-    private var trafficStats: some View {
-        cardContent {
-            ConnectionStatsContent()
-        }
     }
 
     // MARK: - Configuration Card

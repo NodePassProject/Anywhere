@@ -26,7 +26,7 @@ class ConnectionStatsModel {
     /// Rolling window owned by the extension; replaced wholesale on each poll.
     private(set) var samples: [StatsSample] = []
     
-    static let maxSamples = 70
+    static let maxSamples = 130
 
     @ObservationIgnored private var statsTask: Task<Void, Never>?
     @ObservationIgnored private weak var session: NETunnelProviderSession?
