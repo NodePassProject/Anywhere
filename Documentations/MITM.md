@@ -893,6 +893,12 @@ function process(ctx) {
   dropped on the wire.
 - **Interim 1xx responses.** `100 Continue`, `103 Early Hints`, etc. are not the
   final response; scripts run only on the final response.
+- **Protocol upgrades & tunnels.** A `101 Switching Protocols` response, or a
+  `2xx` to a `CONNECT`, turns the connection into an opaque tunnel: both
+  directions drop to verbatim passthrough and no rule or script sees the
+  tunneled bytes (e.g. WebSocket frames). HTTP/2 `CONNECT` — including the
+  RFC 8441 extended form for WebSocket-over-h2 — is likewise relayed
+  frame-for-frame.
 - **Pipelining order.** A request-phase `Anywhere.respond` on a pipelined
   connection is held until the in-flight response ahead of it finishes, so the
   client's request/response ordering is preserved.

@@ -93,6 +93,17 @@ final class MITMHTTP1Stream {
     /// falls back to the original destination). Request phase only; read by
     /// the session's deferred-dial pump after the first ``transform``.
     private(set) var resolvedUpstream: (host: String, port: UInt16?)?
+
+    /// Fired (once) when this stream commits to an opaque protocol switch — a
+    /// `101 Switching Protocols` or a `2xx` response to a `CONNECT` — after
+    /// which the connection is no longer HTTP and both directions must forward
+    /// bytes verbatim. The session uses it to flip the OPPOSITE leg to
+    /// passthrough too; without that, the other direction keeps trying to parse
+    /// the post-upgrade byte stream as HTTP heads and stalls the tunnel (e.g.
+    /// client→server WebSocket frames buffered in the head parser forever).
+    /// Response phase only in practice. Invoked synchronously on the lwIP queue
+    /// from ``consumeHead``.
+    var onProtocolUpgrade: (() -> Void)?
     /// Lazy JS runtime, shared across both directions of the same MITM
     /// session. Touched only when a script rule fires.
     private let scriptEngineProvider: MITMScriptEngine.Provider
@@ -312,6 +323,14 @@ final class MITMHTTP1Stream {
     /// Set when the owning session tears down. A resume that fires after this
     /// bails without touching a dead leg or firing a stale completion.
     private var torn = false
+
+    /// Set when ``forcePassthrough`` is called while a script hop is still
+    /// parked (so ``mode`` can't be spliced inline). The matching resume honors
+    /// it instead of restoring the normal next mode. Not reachable for a real
+    /// upgrade — the upgrade request carries no scripted body, so this leg is
+    /// back in ``awaitingHead`` by the time the peer's 101 / 200 lands — but it
+    /// keeps the force path from ever stomping a live parked completion.
+    private var forcePassthroughPending = false
     /// Cursor-style buffer so prefix consumption is O(1). Chunked
     /// bodies streaming many small chunks would otherwise pay
     /// `O(remaining)` per ``Data.removeFirst`` shift; see
@@ -396,6 +415,46 @@ final class MITMHTTP1Stream {
         torn = true
         parkedCompletion = nil
         pendingPreParkOutput = Data()
+    }
+
+    /// Forces this stream into permanent passthrough and returns whatever
+    /// unparsed bytes are buffered, so the caller can forward them to the peer.
+    /// Called by the session when the OPPOSITE direction commits to a protocol
+    /// switch (101) or CONNECT tunnel: the connection is no longer HTTP, so this
+    /// leg must stop parsing heads and forward verbatim — including any bytes it
+    /// had already stranded in ``rxBuffer``. Idempotent (returns empty once
+    /// already in passthrough). If a script hop is outstanding — not reachable
+    /// for a real upgrade, see ``forcePassthroughPending`` — the switch is
+    /// deferred to the resume and empty is returned now.
+    func forcePassthrough() -> Data {
+        guard parkedCompletion == nil else {
+            forcePassthroughPending = true
+            return Data()
+        }
+        if case .passthrough = mode { return Data() }
+        let buffered = rxBuffer.prefix(rxBuffer.count)
+        rxBuffer.removeAll(keepingCapacity: false)
+        headScanned = 0
+        mode = .passthrough
+        return buffered
+    }
+
+    /// If a ``forcePassthrough`` landed while this stream was parked on a script
+    /// hop, honor it as the hop resumes: discard the now-irrelevant scripted
+    /// output (the connection is becoming an opaque tunnel), flush whatever is
+    /// buffered, and pin the stream to passthrough. Returns true when it fired,
+    /// in which case the resume must do nothing further.
+    private func resumeIntoForcedPassthroughIfNeeded() -> Bool {
+        guard forcePassthroughPending else { return false }
+        forcePassthroughPending = false
+        var resumed = pendingPreParkOutput
+        pendingPreParkOutput = Data()
+        resumed.append(rxBuffer.prefix(rxBuffer.count))
+        rxBuffer.removeAll(keepingCapacity: false)
+        headScanned = 0
+        mode = .passthrough
+        finishDrivePass(resumed)
+        return true
     }
 
     /// Fail-closed handler for the should-never-happen case where
@@ -761,6 +820,15 @@ final class MITMHTTP1Stream {
             // bytes the script asked us to deliver.
             flushSynthAfterResponse(into: &output)
             mode = .passthrough
+            // 101 / CONNECT-2xx: the connection is now an opaque tunnel. Signal
+            // the session so it flips the request direction to passthrough too —
+            // otherwise client→server bytes (e.g. WebSocket frames) would sit in
+            // the request leg's head parser forever, deadlocking the tunnel. Only
+            // a true protocol switch fires this; a read-until-close response is
+            // still HTTP and leaves the request leg parsing normally.
+            if case .switchingProtocols = framing {
+                onProtocolUpgrade?()
+            }
             return true
         case .none, .contentLength, .chunked:
             break
@@ -864,10 +932,14 @@ final class MITMHTTP1Stream {
         let canRewrite = buffersBody && codec.supported && length <= MITMBodyCodec.maxBufferedBodyBytes
 
         if canRewrite {
+            // The head is withheld until the whole body is buffered, which
+            // stalls a client that sent Expect: 100-continue; answer it
+            // ourselves and drop the header before the head goes upstream.
+            let headers = handleExpectContinue(startLine: rewrittenStartLine, headers: rewrittenHeaders)
             mode = .rewritingLength(
                 pending: PendingHead(
                     startLine: rewrittenStartLine,
-                    headers: rewrittenHeaders,
+                    headers: headers,
                     codec: codec,
                     originatingRequest: originatingRequest
                 ),
@@ -921,10 +993,13 @@ final class MITMHTTP1Stream {
         let codec = MITMBodyCodec.plan(for: combinedHeaderValue(rewrittenHeaders, name: "content-encoding"))
         if buffersBody, codec.supported {
             warnIfBufferedScriptDeStreams(rewrittenHeaders)
+            // The head is withheld until the body finishes buffering, so answer
+            // Expect: 100-continue ourselves (see ``handleExpectContinue``).
+            let headers = handleExpectContinue(startLine: rewrittenStartLine, headers: rewrittenHeaders)
             mode = .rewritingChunked(
                 pending: PendingHead(
                     startLine: rewrittenStartLine,
-                    headers: rewrittenHeaders,
+                    headers: headers,
                     codec: codec,
                     originatingRequest: originatingRequest
                 ),
@@ -939,6 +1014,36 @@ final class MITMHTTP1Stream {
         output.append(serializeHead(startLine: rewrittenStartLine, headers: rewrittenHeaders))
         mode = .forwardingChunked(reader: ChunkedReader())
         return true
+    }
+
+    /// When a request body is buffered for rewrite, the head is withheld until
+    /// the whole body is in hand (see ``rewriteLength`` / ``rewriteChunked``).
+    /// An HTTP/1.1 client that sent ``Expect: 100-continue`` (RFC 9110 §10.1.1)
+    /// waits for an interim ``100 Continue`` before sending that body — but the
+    /// upstream can't send one, because it hasn't seen the head we're holding.
+    /// The upload would stall until the client's continue-timeout (or hang for a
+    /// strict client), so synthesize the ``100 Continue`` toward the client
+    /// ourselves (queued on ``pendingClientBytes``, which the session injects on
+    /// the inner leg), then strip ``Expect`` so the upstream — which receives
+    /// head+body together — doesn't emit a second, redundant 100.
+    ///
+    /// Request phase + HTTP/1.1 only: HTTP/1.0 clients don't understand
+    /// 100-continue and send the body immediately, so nothing stalls and no
+    /// synthetic 100 is owed. No-op (headers returned unchanged) when the
+    /// request carries no ``Expect: 100-continue``. The non-buffering forward
+    /// path never calls this — it emits the head immediately, so the real server
+    /// answers the expectation itself.
+    private func handleExpectContinue(startLine: String, headers: [Header]) -> [Header] {
+        guard phase == .httpRequest, startLine.hasSuffix(" HTTP/1.1") else { return headers }
+        let expectsContinue = headers.contains { entry in
+            entry.name.equalsIgnoringASCIICase("expect")
+                && entry.value
+                    .trimmingCharacters(in: CharacterSet.whitespaces)
+                    .equalsIgnoringASCIICase("100-continue")
+        }
+        guard expectsContinue else { return headers }
+        pendingClientBytes.append(serializeHead(startLine: "HTTP/1.1 100 Continue", headers: []))
+        return headers.filter { !$0.name.equalsIgnoringASCIICase("expect") }
     }
 
     // MARK: - Body forwarding (no rewrite)
@@ -1361,6 +1466,7 @@ final class MITMHTTP1Stream {
         postFrame: StreamingPostFrame
     ) {
         guard !torn else { return }
+        if resumeIntoForcedPassthroughIfNeeded() { return }
         var resumed = pendingPreParkOutput
         pendingPreParkOutput = Data()
         var streaming = streaming
@@ -1576,6 +1682,7 @@ final class MITMHTTP1Stream {
         resumeMode: Mode
     ) {
         guard !torn else { return }
+        if resumeIntoForcedPassthroughIfNeeded() { return }
         var resumed = pendingPreParkOutput
         pendingPreParkOutput = Data()
         switch outcome {
@@ -1615,6 +1722,7 @@ final class MITMHTTP1Stream {
         originatingMethod: String?
     ) {
         guard !torn else { return }
+        if resumeIntoForcedPassthroughIfNeeded() { return }
         var resumed = pendingPreParkOutput
         pendingPreParkOutput = Data()
         switch outcome {
@@ -1904,9 +2012,7 @@ final class MITMHTTP1Stream {
         // spec calls for treating the message as an error since two
         // distinct framing sources let an attacker smuggle a second
         // request through a downstream peer that picks the other
-        // value. The canonical proxy normalization (nginx, haproxy)
-        // is to drop Content-Length and frame strictly via the
-        // chunked encoding, which is what we emit on the wire.
+        // value.
         if hasTEChunked && !contentLengthValues.isEmpty {
             headers = headers.filter {
                 !$0.name.equalsIgnoringASCIICase("content-length")
@@ -2136,6 +2242,16 @@ final class MITMHTTP1Stream {
             // Status line: "HTTP/1.x SSS Reason"
             let parts = startLine.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
             if parts.count >= 2, let status = parseHTTPStatusCode(parts[1]) {
+                // RFC 9110 §9.3.6: a 2xx response to CONNECT turns the
+                // connection into an opaque tunnel — no body, and no further
+                // HTTP framing on either leg. Treat it like 101 so the head is
+                // forwarded untouched (no spurious `Connection: close`) and the
+                // session flips BOTH directions to passthrough. A non-2xx CONNECT
+                // response means the tunnel was refused and is framed normally.
+                if (200..<300).contains(status),
+                   originatingMethod?.uppercased() == "CONNECT" {
+                    return .switchingProtocols
+                }
                 if status == 101 { return .switchingProtocols }
                 if status == 204 || status == 304 { return .none }
                 if status >= 100 && status < 200 { return .none }

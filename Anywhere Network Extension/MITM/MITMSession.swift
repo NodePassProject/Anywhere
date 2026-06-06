@@ -358,6 +358,13 @@ final class MITMSession {
     /// ALPN. Requests fully answered by a 302 / reject rewrite (or
     /// `Anywhere.respond`) never trigger a dial. Must be called on `lwipQueue`.
     func start(sni: String) {
+        // When the HTTP/1 response leg sees a 101 / CONNECT-2xx the connection
+        // becomes an opaque tunnel; flip the request leg to passthrough too and
+        // flush whatever it had buffered upstream, so client→server tunnel bytes
+        // (e.g. WebSocket frames) aren't stranded in its head parser.
+        responseStream.onProtocolUpgrade = { [weak self] in
+            self?.handleResponseUpgrade()
+        }
         // Capture the SNI as the origin-capability cache key so the later
         // ``markHTTP1Only`` write uses the same key as the ``isHTTP1Only`` read
         // below (see ``handshakeSNI``).
@@ -1000,6 +1007,23 @@ final class MITMSession {
         let resolved = inbound.resolvedUpstream
         return (resolved?.host ?? dstHost) == dialedHost
             && (resolved?.port ?? dstPort) == dialedPort
+    }
+
+    /// Invoked (on the lwIP queue) when the HTTP/1 response leg detects a
+    /// protocol switch (101) or CONNECT tunnel. The response leg has already
+    /// entered passthrough; flip the request leg too and forward whatever it had
+    /// buffered to the upstream, so the now-opaque client→server byte stream
+    /// flows instead of piling up unparsed in the request leg's head parser
+    /// (the WebSocket / tunnel deadlock). HTTP/2 has its own CONNECT handling,
+    /// so this fires only on the HTTP/1 path.
+    private func handleResponseUpgrade() {
+        guard !torn else { return }
+        let buffered = requestStream.forcePassthrough()
+        guard !buffered.isEmpty, let outer = outerRecord else { return }
+        sendChunked(buffered, via: outer) { [weak self] sendError in
+            guard let self, let sendError else { return }
+            self.lwipQueue.async { self.cancel(error: sendError) }
+        }
     }
 
     /// Reads plaintext from the outer record (= what the real server sent)
