@@ -335,10 +335,19 @@ final class MITMHTTP2Connection {
     /// synth-responded) or is force-committed by a higher-numbered stream via
     /// ``commitDeferredFirstRequestIfNeeded``.
     private var deferredFirstStreamID: UInt32?
-    /// Whether a server connection preface (empty SETTINGS + a SETTINGS ACK for
-    /// the client's SETTINGS) has been emitted to the client. Only used for a
-    /// pre-establishment synth reply, where no upstream relays one.
+    /// Whether the server connection preface (a SETTINGS frame) has been emitted
+    /// to the client. Set either eagerly by ``ensureClientServerPrefaceSent`` (the
+    /// normal path — an empty SETTINGS, decoupled from the origin) or by a
+    /// pre-establishment synth reply (``serverConnectionPreface``, which also
+    /// bundles the client's SETTINGS ACK since no upstream relays one).
     private var serverPrefaceSentToClient = false
+    /// Count of client SETTINGS ACKs to swallow on the inbound leg rather than
+    /// forward upstream: one per server-preface SETTINGS the MITM injected itself
+    /// (``ensureClientServerPrefaceSent``). The upstream never sent those
+    /// SETTINGS, so relaying their ACK would be an unsolicited SETTINGS ACK
+    /// (RFC 9113 §6.5.3 PROTOCOL_ERROR). ACKs for relayed origin SETTINGS are not
+    /// counted and forward normally.
+    private var pendingClientSettingsAckSwallows = 0
     /// Set after a pre-establishment synth has emitted its GOAWAY: the
     /// connection is one-shot, so further client frames are swallowed and
     /// nothing is dialed.
@@ -523,6 +532,12 @@ final class MITMHTTP2Connection {
         if !input.isEmpty {
             rxBuffer.append(input)
         }
+
+        // Emit our own server SETTINGS preface to the client before anything the
+        // pump might produce client-bound (notably a buffered-body WINDOW_UPDATE
+        // from ``creditBufferedDataToSender``), so the client's first server frame
+        // is always SETTINGS regardless of when the upstream establishes.
+        ensureClientServerPrefaceSent()
 
         parkedCompletion = completion
         // NB: sequence these as two statements. As a single
@@ -723,6 +738,16 @@ final class MITMHTTP2Connection {
     /// error the receiver will catch; we parse whole entries and ignore any
     /// trailing remainder rather than re-deriving that error here.
     private func handleSettings(_ frame: RawFrame) -> Data {
+        // Swallow the client's SETTINGS ACK for the server preface the MITM
+        // injected itself (``ensureClientServerPrefaceSent``). The upstream never
+        // sent that SETTINGS, so relaying its ACK upstream would be an
+        // unsolicited SETTINGS ACK — RFC 9113 §6.5.3 PROTOCOL_ERROR. The client's
+        // ACKs for the relayed origin SETTINGS aren't counted and fall through.
+        if direction == .inbound, frame.streamID == 0, frame.flags & 0x1 != 0,
+           pendingClientSettingsAckSwallows > 0 {
+            pendingClientSettingsAckSwallows -= 1
+            return Data()
+        }
         var frame = frame
         if frame.streamID == 0, frame.flags & 0x1 == 0 {
             var payload = frame.payload
@@ -2642,6 +2667,46 @@ final class MITMHTTP2Connection {
     /// The server half of the h2 connection preface used for a
     /// pre-establishment synth reply (when no upstream relays one): an empty
     /// SETTINGS frame followed by a SETTINGS ACK for the client's SETTINGS.
+    /// The MITM's own server connection preface — a single empty SETTINGS frame —
+    /// decoupled from the origin. Unlike ``serverConnectionPreface`` it carries no
+    /// bundled SETTINGS ACK, so the client's own SETTINGS is still acknowledged by
+    /// the relayed origin ACK (the normal path) rather than locally; the only
+    /// change to the SETTINGS handshake is this one injected preface frame (and
+    /// swallowing its ACK).
+    private func serverSettingsPreface() -> Data {
+        var d = Data()
+        appendFrameHeader(typeCode: FrameTypeCode.settings, flags: 0, streamID: 0, payloadLength: 0, into: &d)
+        return d
+    }
+
+    /// Emits the MITM's own server SETTINGS preface to the client as the first
+    /// client-bound frame, **once**, on the inbound leg — decoupling it from the
+    /// origin's SETTINGS, which can only be relayed once the proxied upstream
+    /// establishes.
+    ///
+    /// Without this, the client's server preface is *only* the relayed origin
+    /// SETTINGS, so any inbound-leg client-bound frame emitted before the upstream
+    /// establishes — notably a buffered-body flow-control WINDOW_UPDATE from
+    /// ``creditBufferedDataToSender`` — reaches the client ahead of any SETTINGS
+    /// and is answered with a connection-killing PROTOCOL_ERROR GOAWAY (RFC 9113
+    /// §3.4), making the client retry every in-flight request. Called at the top
+    /// of ``process`` so it precedes anything the pump emits. An empty SETTINGS
+    /// changes no setting from its protocol default, so it can't perturb HPACK or
+    /// flow-control state — it only satisfies the "first server frame is SETTINGS"
+    /// rule.
+    ///
+    /// The client's SETTINGS ACK for this injected preface is swallowed by
+    /// ``handleSettings`` (tracked via ``pendingClientSettingsAckSwallows``) so it
+    /// never reaches the upstream, which never sent that SETTINGS. Idempotent;
+    /// inbound leg only — the outbound (response) leg's server preface is the
+    /// origin's relayed SETTINGS.
+    private func ensureClientServerPrefaceSent() {
+        guard direction == .inbound, !serverPrefaceSentToClient else { return }
+        pendingClientBytes.append(serverSettingsPreface())
+        serverPrefaceSentToClient = true
+        pendingClientSettingsAckSwallows += 1
+    }
+
     private func serverConnectionPreface() -> Data {
         var d = Data()
         appendFrameHeader(typeCode: FrameTypeCode.settings, flags: 0, streamID: 0, payloadLength: 0, into: &d)
