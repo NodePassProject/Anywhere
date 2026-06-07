@@ -709,8 +709,11 @@ class TCPConnection {
         } else {
             initialData = nil
         }
-
-        let client = ProxyClient(configuration: configuration)
+        
+        let client = ProxyClient(
+            configuration: configuration,
+            isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
+        )
         self.proxyClient = client
 
         client.connect(to: dstHost, port: dstPort, initialData: initialData) { [weak self] result in
@@ -875,7 +878,10 @@ class TCPConnection {
                         }
                     }
                 } else {
-                    let client = ProxyClient(configuration: self.configuration)
+                    let client = ProxyClient(
+                        configuration: self.configuration,
+                        isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(self.configuration.id) ?? false
+                    )
                     client.connect(to: host, port: port, initialData: nil) { [weak self] result in
                         guard let self else {
                             if case .success(let conn) = result { conn.cancel() }

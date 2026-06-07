@@ -62,9 +62,9 @@ extension ProxyClient {
     ) {
         switch command {
         case .tcp, .mux:
-            client.openTCP(destination: destination, completion: completion)
+            client.openTCP(destination: destination, isDefaultProxy: isDefaultProxy, completion: completion)
         case .udp:
-            client.openUDP(destination: destination, completion: completion)
+            client.openUDP(destination: destination, isDefaultProxy: isDefaultProxy, completion: completion)
         }
     }
 

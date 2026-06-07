@@ -121,7 +121,7 @@ nonisolated final class NowhereClient {
         self.poolKey = poolKey
     }
 
-    private func acquireSession(completion: @escaping (Result<NowhereSession, Error>) -> Void) {
+    private func acquireSession(isDefaultProxy: Bool, completion: @escaping (Result<NowhereSession, Error>) -> Void) {
         lock.lock()
         if let existing = session, !existing.poolIsClosed {
             lock.unlock()
@@ -154,14 +154,21 @@ nonisolated final class NowhereClient {
             guard let self, let newSession else { return }
             self.handleSessionClose(newSession)
         }
+        
+        var handshakeTimer = MetricTimer(.handshakeNoDial)
+        handshakeTimer.enabled = isDefaultProxy
+        handshakeTimer.start()
 
-        newSession.ensureReady { [weak newSession] error in
+        newSession.ensureReady { [weak newSession, handshakeTimer] error in
             guard let newSession else {
                 completion(.failure(NowhereError.connectionFailed("Session deallocated")))
                 return
             }
             if let error { completion(.failure(error)) }
-            else { completion(.success(newSession)) }
+            else {
+                handshakeTimer.stop()
+                completion(.success(newSession))
+            }
         }
     }
 
@@ -188,16 +195,16 @@ nonisolated final class NowhereClient {
         }
     }
 
-    func openTCP(destination: String, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        openTCP(destination: destination, retriesLeft: 1, completion: completion)
+    func openTCP(destination: String, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
+        openTCP(destination: destination, retriesLeft: 1, isDefaultProxy: isDefaultProxy, completion: completion)
     }
 
-    private func openTCP(destination: String, retriesLeft: Int, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        acquireSession { [weak self] result in
+    private func openTCP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
+        acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
             switch result {
             case .failure(let error):
                 if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                    self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, completion: completion)
+                    self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
                 } else {
                     completion(.failure(error))
                 }
@@ -207,7 +214,7 @@ nonisolated final class NowhereClient {
                     if let error {
                         conn.cancel()
                         if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                            self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, completion: completion)
+                            self.openTCP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
                         } else {
                             completion(.failure(error))
                         }
@@ -219,16 +226,16 @@ nonisolated final class NowhereClient {
         }
     }
 
-    func openUDP(destination: String, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        openUDP(destination: destination, retriesLeft: 1, completion: completion)
+    func openUDP(destination: String, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
+        openUDP(destination: destination, retriesLeft: 1, isDefaultProxy: isDefaultProxy, completion: completion)
     }
 
-    private func openUDP(destination: String, retriesLeft: Int, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        acquireSession { [weak self] result in
+    private func openUDP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
+        acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
             switch result {
             case .failure(let error):
                 if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                    self.openUDP(destination: destination, retriesLeft: retriesLeft - 1, completion: completion)
+                    self.openUDP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
                 } else {
                     completion(.failure(error))
                 }
@@ -238,7 +245,7 @@ nonisolated final class NowhereClient {
                     if let error {
                         conn.cancel()
                         if retriesLeft > 0, Self.isStaleSessionError(error), let self {
-                            self.openUDP(destination: destination, retriesLeft: retriesLeft - 1, completion: completion)
+                            self.openUDP(destination: destination, retriesLeft: retriesLeft - 1, isDefaultProxy: isDefaultProxy, completion: completion)
                         } else {
                             completion(.failure(error))
                         }
