@@ -66,6 +66,13 @@ nonisolated class ProxyClient {
     /// (e.g. SOCKS5 opening its UDP-ASSOCIATE relay socket). Empty otherwise.
     let parentChain: [ProxyConfiguration]
 
+    /// Whether this client dials the **default outbound** — the single signal the
+    /// live Dial/Handshake gauges key off (see ``handshakeTimed``). The caller on
+    /// the connection path decides it from the tunnel's `isDefaultConfiguration`;
+    /// chain hops, rule-routed proxies, and latency probes leave it `false` so
+    /// their timings stay out of the home stats.
+    let isDefaultProxy: Bool
+
     /// Creates a new proxy client with the given configuration.
     ///
     /// - Parameters:
@@ -74,16 +81,21 @@ nonisolated class ProxyClient {
     ///   - useResolvedAddressForDirectDial: Whether direct first-hop transports should
     ///     prefer `resolvedIP` over `serverAddress`. Intended for latency testing only.
     ///   - parentChain: Chain prefix leading to this link's server. Empty for non-chain-link clients.
+    ///   - isDefaultProxy: Whether this client dials the default outbound, gating
+    ///     the live Dial/Handshake stats. Defaults to `false`; only the connection
+    ///     path's top-level client (and the default-only mux carrier) sets it.
     init(
         configuration: ProxyConfiguration,
         tunnel: ProxyConnection? = nil,
         useResolvedAddressForDirectDial: Bool = false,
-        parentChain: [ProxyConfiguration] = []
+        parentChain: [ProxyConfiguration] = [],
+        isDefaultProxy: Bool = false
     ) {
         self.configuration = configuration
         self.tunnel = tunnel
         self.useResolvedAddressForDirectDial = useResolvedAddressForDirectDial
         self.parentChain = parentChain
+        self.isDefaultProxy = isDefaultProxy
     }
 
     /// Host used for direct first-hop transport dials when not already tunneled through
@@ -94,14 +106,27 @@ nonisolated class ProxyClient {
     }
 
     // MARK: - Public API
-    //
-    // `connect`/`connectUDP` wrap their completion with a handshake ``MetricTimer``
-    // (``MetricTimer/timing(_:_:)``), timing from the call site to tunnel-ready;
-    // ``ConnectionMetrics`` subtracts the latest dial to isolate the post-TCP
-    // handshake. Chain hops complete before the outermost client, so the final
-    // (outer) record reflects the whole multi-hop setup.
-
-    /// Connects to a destination through the proxy server using TCP.
+    
+    var isQUICTransport: Bool {
+        configuration.outboundProtocol == .hysteria
+            || configuration.outboundProtocol == .nowhere
+            || configuration.isXHTTPOverHTTP3
+    }
+    
+    private var poolsQUICSession: Bool {
+        configuration.outboundProtocol == .hysteria
+            || configuration.outboundProtocol == .nowhere
+    }
+    
+    private func handshakeTimed(
+        _ completion: @escaping (Result<ProxyConnection, Error>) -> Void
+    ) -> (Result<ProxyConnection, Error>) -> Void {
+        guard isDefaultProxy else { return completion }
+        if poolsQUICSession { return completion }
+        let metric: ConnectionMetrics.Metric = isQUICTransport ? .handshakeNoDial : .handshake
+        return MetricTimer.timing(metric, completion)
+    }
+    
     func connect(
         to destinationHost: String,
         port destinationPort: UInt16,
@@ -113,11 +138,10 @@ nonisolated class ProxyClient {
             destinationHost: destinationHost,
             destinationPort: destinationPort,
             initialData: initialData,
-            completion: MetricTimer.timing(.handshake, completion)
+            completion: handshakeTimed(completion)
         )
     }
-
-    /// Connects to a destination through the proxy server using UDP.
+    
     func connectUDP(
         to destinationHost: String,
         port destinationPort: UInt16,
@@ -128,25 +152,20 @@ nonisolated class ProxyClient {
             destinationHost: destinationHost,
             destinationPort: destinationPort,
             initialData: nil,
-            completion: MetricTimer.timing(.handshake, completion)
+            completion: handshakeTimed(completion)
         )
     }
-
-    /// Connects a mux control channel through the proxy server.
-    ///
-    /// Uses `command=.mux` with destination `v1.mux.cool:666` (matching Xray-core).
+    
     func connectMux(completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
         connectThroughChainIfNeeded(
             command: .mux,
             destinationHost: "v1.mux.cool",
             destinationPort: 666,
             initialData: nil,
-            completion: completion
+            completion: handshakeTimed(completion)
         )
     }
-
-    /// If the configuration has a chain, builds the chain tunnel first, then connects.
-    /// Otherwise, connects directly.
+    
     private func connectThroughChainIfNeeded(
         command: ProxyCommand,
         destinationHost: String,
@@ -165,16 +184,8 @@ nonisolated class ProxyClient {
             )
             return
         }
-
-        // QUIC-based transports ride the chain's UDP relay as a datagram
-        // transport, so they build (or adopt) the chain inside their own
-        // protocol-specific dispatch rather than the generic TCP chain below.
-        // Hysteria/Nowhere are QUIC end to end; VLESS-over-XHTTP negotiates QUIC
-        // only when it selects HTTP/3 (ALPN h3), which the XHTTP leg factory
-        // dispatches to `dialXHTTPHTTP3Session`.
-        if configuration.outboundProtocol == .hysteria
-            || configuration.outboundProtocol == .nowhere
-            || configuration.isXHTTPOverHTTP3 {
+        
+        if isQUICTransport {
             connectWithCommand(
                 command: command,
                 destinationHost: destinationHost,

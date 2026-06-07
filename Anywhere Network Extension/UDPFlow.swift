@@ -291,19 +291,13 @@ class UDPFlow {
         // which builds the chain tunnel before connecting to the exit proxy.
 
         if !hasChain {
-            // Mux: only for VLESS with the default configuration (mux is tied to
-            // the default proxy). Compare against the snapshot's configurationID
-            // rather than reading TunnelStack.configuration directly — that's
-            // lwipQueue-owned, and we're on flowQueue (udpQueue).
-            let isDefaultConfiguration = (TunnelStack.shared?.udpConfig().configurationID == configuration.id)
+            let isDefaultConfiguration = TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
             if configuration.outboundProtocol == .vless, isDefaultConfiguration, let muxManager = TunnelStack.shared?.muxManager {
                 proxyConnecting = true
                 connectViaMux(muxManager: muxManager)
                 return
             }
-
-            // Shadowsocks: register with the shared per-configuration UDP
-            // session (synchronous — session handles its own connect).
+            
             if configuration.outboundProtocol == .shadowsocks {
                 connectShadowsocksUDP()
                 return
@@ -388,7 +382,10 @@ class UDPFlow {
 
     /// ProxyClient path: handles chain building + all protocols (VLESS, Shadowsocks, etc.).
     private func connectViaProxyClient() {
-        let client = ProxyClient(configuration: configuration)
+        let client = ProxyClient(
+            configuration: configuration,
+            isDefaultProxy: TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
+        )
         self.proxyClient = client
 
         client.connectUDP(to: dstHost, port: dstPort) { [weak self] result in

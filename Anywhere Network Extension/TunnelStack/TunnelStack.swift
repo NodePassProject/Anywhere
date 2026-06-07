@@ -354,6 +354,15 @@ class TunnelStack {
     /// path calls it once at the top of each inbound datagram.
     func udpConfig() -> UDPConfig { udpConfigLock.withLock { _udpConfig } }
 
+    /// Single source of truth for "does this configuration dial the default
+    /// outbound?" Keyed off the published snapshot's `configurationID`, so it is
+    /// safe from any queue. The data plane uses it to keep default-proxy-only
+    /// behavior pinned to the default proxy — mux (built only here, for the
+    /// default) and the live Dial/Handshake stats (see ``ProxyClient/isDefaultProxy``).
+    func isDefaultConfiguration(_ id: UUID) -> Bool {
+        udpConfig().configurationID == id
+    }
+
     /// Republishes the UDP config snapshot from the current ``lwipQueue``-owned
     /// state. Must be called on ``lwipQueue`` (reads ``configuration`` etc.);
     /// the snapshot it builds is then safe to read from ``udpQueue``.

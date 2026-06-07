@@ -221,8 +221,8 @@ nonisolated class MuxClient {
 
         connecting = true
         connectCompletions.append(completion)
-
-        let client = ProxyClient(configuration: configuration)
+        
+        let client = ProxyClient(configuration: configuration, isDefaultProxy: true)
         self.proxyClient = client
 
         client.connectMux { [weak self] (result: Result<ProxyConnection, Error>) in
