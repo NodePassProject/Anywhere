@@ -28,6 +28,26 @@ class UDPFlow {
 
     var lastActivity: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
 
+    /// Set once the destination has sent at least one datagram back. Every
+    /// downlink path funnels through ``handleProxyData``, so that's the single
+    /// place it flips. Until then the flow is one-way/speculative and uses the
+    /// shorter ``TunnelConstants/udpIdleTimeoutUnreplied``; after, it's an
+    /// established bidirectional flow on the longer
+    /// ``TunnelConstants/udpIdleTimeoutStream``. Mirrors conntrack's
+    /// unreplied → replied (`IPS_SEEN_REPLY`) transition. Confined to
+    /// ``flowQueue`` like the rest of this flow's mutable state.
+    var hasSeenReply = false
+
+    /// Absolute time at which this flow goes idle given its current state: last
+    /// activity plus the unreplied (30s) or stream (120s) timeout. The cleanup
+    /// reaper drops a flow once `now` passes this, and global-cap eviction
+    /// picks the flow with the smallest deadline (least time left) — so
+    /// unreplied probes are shed before established flows.
+    var idleDeadline: CFAbsoluteTime {
+        lastActivity + (hasSeenReply ? TunnelConstants.udpIdleTimeoutStream
+                                     : TunnelConstants.udpIdleTimeoutUnreplied)
+    }
+
     // Direct bypass path
     private var directSocket: RawUDPSocket?
 
@@ -567,6 +587,9 @@ class UDPFlow {
         flowQueue.async { [weak self] in
             guard let self, !self.closed else { return }
             self.lastActivity = CFAbsoluteTimeGetCurrent()
+            // First reply promotes the flow from the 30s unreplied timeout to
+            // the 120s established one (see ``idleDeadline``).
+            self.hasSeenReply = true
 
             // Emit the UDP response back to the app, swapping the 5-tuple:
             // response source = original destination, dest = original source.

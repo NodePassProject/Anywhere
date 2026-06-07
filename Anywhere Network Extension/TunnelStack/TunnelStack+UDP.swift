@@ -32,74 +32,47 @@ extension TunnelStack {
 
     /// Admission control for a new UDP flow, run on ``udpQueue`` immediately
     /// before the flow is inserted into ``udpFlows``. Bounds the data plane's
-    /// memory footprint two ways so a misbehaving client can neither OOM the
-    /// extension nor crowd out other traffic. Each live flow pins a socket
-    /// (kernel buffers) plus a 64 KB in-process receive buffer, and the idle
-    /// reaper only collects after ``TunnelConstants/udpIdleTimeout``.
+    /// memory footprint so a misbehaving client can't OOM the extension. Each
+    /// live flow pins a socket (kernel buffers) plus a 64 KB in-process receive
+    /// buffer.
     ///
-    /// 1. **Per-destination ceiling** (``TunnelConstants/udpMaxFlowsPerTarget``).
-    ///    A client spraying hundreds of requests at one target — common with
-    ///    P2P remote-desktop tools on a lossy link — would otherwise fill the
-    ///    table with flows that all share a *recent* `lastActivity`, so the
-    ///    time-based global step below would evict *innocent* flows to other
-    ///    destinations first. Capping the slots any one destination host
-    ///    (`dstIP`) may hold makes the noisy target evict its own
-    ///    least-recently-active flow instead, leaving the rest of the table for
-    ///    everyone else.
-    ///
-    /// 2. **Global ceiling** (``TunnelConstants/udpMaxFlows``). A genuine high
-    ///    fan-out across many distinct destinations is bounded here; at the cap
-    ///    the least-recently-active flow overall is evicted (LRU sheds dead
-    ///    probes and stale lookups before flows an app is actively using).
+    /// When the table is at ``TunnelConstants/udpMaxFlows`` the flow with the
+    /// least time left before its own idle deadline is evicted to admit the new
+    /// one. Because an unreplied flow's deadline is only
+    /// ``TunnelConstants/udpIdleTimeoutUnreplied`` (30s) out versus
+    /// ``TunnelConstants/udpIdleTimeoutStream`` (120s) for an established one,
+    /// this preferentially sheds one-way NAT-traversal probes — the usual cause
+    /// of a flow storm — before any flow an app is actively using, so no
+    /// separate per-destination cap is needed.
     ///
     /// Eviction uses async ``UDPFlow/close`` (never `closeSync`): memory relief,
     /// unlike FD-pressure relief, needn't free the FD before returning, and
     /// async close avoids any cross-queue wait on a victim still inside
     /// `getaddrinfo`.
-    func evictUDPFlowsToAdmit(_ newKey: UDPFlowKey) {
-        // Eviction precedes every insert and frees at most one slot — exactly the
-        // one flow about to be added — so the table never exceeds the cap and a
-        // single pass suffices (no drain loop). Below the per-target cap, the
-        // lower of the two thresholds, neither ceiling can be breached, so the
-        // unloaded path is one comparison and no scan.
-        let perTargetCap = TunnelConstants.udpMaxFlowsPerTarget
+    func evictUDPFlowsToAdmit() {
+        // Eviction precedes every insert and frees at most one slot — exactly
+        // the one flow about to be added — so the table never exceeds the cap
+        // and a single pass suffices (no drain loop). Below the cap nothing is
+        // evicted, so the unloaded path is one comparison and no scan.
         let cap = TunnelConstants.udpMaxFlows
-        guard udpFlows.count >= perTargetCap else { return }
+        guard udpFlows.count >= cap else { return }
 
-        // One pass yields both candidate victims: the new flow's destination-host
-        // population and that host's least-recently-active member (per-target
-        // ceiling), plus the least-recently-active flow overall (global ceiling).
-        var siblingCount = 0
-        var siblingLRU: UDPFlow?
-        var siblingLRUTime = CFAbsoluteTime.greatestFiniteMagnitude
-        var globalLRU: UDPFlow?
-        var globalLRUTime = CFAbsoluteTime.greatestFiniteMagnitude
+        // Evict the flow with the least time left before it would idle out on
+        // its own — the smallest idle deadline. `now` is constant across the
+        // scan, so comparing deadlines directly ranks flows by time-left, and an
+        // unreplied probe's 30s deadline sorts ahead of an established flow's
+        // 120s one.
+        var victim: UDPFlow?
+        var victimDeadline = CFAbsoluteTime.greatestFiniteMagnitude
         for flow in udpFlows.values {
-            let activity = flow.lastActivity
-            if activity < globalLRUTime { globalLRUTime = activity; globalLRU = flow }
-            if flow.flowKey.dstIP == newKey.dstIP, flow.flowKey.isIPv6 == newKey.isIPv6 {
-                siblingCount += 1
-                if activity < siblingLRUTime { siblingLRUTime = activity; siblingLRU = flow }
-            }
+            let deadline = flow.idleDeadline
+            if deadline < victimDeadline { victimDeadline = deadline; victim = flow }
         }
 
-        // Per-destination ceiling: a single hammered target evicts its own oldest
-        // flow, so it can neither crowd out nor — via the global step — evict
-        // flows to other destinations. That already frees a slot, so a table at
-        // the global cap needs nothing further (hence the early return).
-        if siblingCount >= perTargetCap, let victim = siblingLRU {
-            let host = TunnelStack.ipAddrToString(newKey.dstIP, isIPv6: newKey.isIPv6)
-            logger.debug("[UDP] Per-target cap (\(perTargetCap)) hit for \(host); evicting LRU flow \(victim.flowKey)")
-            victim.close()
-            removeUDPFlow(victim)
-            return
-        }
-
-        // Global ceiling: genuine high fan-out across many distinct destinations.
-        if udpFlows.count >= cap, let victim = globalLRU {
+        if let victim {
             if !udpFlowCapWarned {
                 udpFlowCapWarned = true
-                logger.warning("[UDP] Flow table at capacity (\(cap)); evicting least-recently-active flow to bound memory")
+                logger.warning("[UDP] Flow table at capacity (\(cap)); evicting flow with least time left to bound memory")
             }
             victim.close()
             removeUDPFlow(victim)
@@ -315,7 +288,7 @@ extension TunnelStack {
             forceBypass: forceBypass,
             flowQueue: udpQueue
         )
-        evictUDPFlowsToAdmit(flowKey)
+        evictUDPFlowsToAdmit()
         udpFlows[flowKey] = flow
         flow.handleReceivedData(payload, payloadLength: payload.count)
     }
