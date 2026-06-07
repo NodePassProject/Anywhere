@@ -265,6 +265,13 @@ nonisolated class RawTCPSocket: RawTransport {
     private var remainingPort: UInt16 = 0
     private var pendingInitialData: Data?
 
+    /// Times this socket's dial for the live "Dial" stat. The timing and
+    /// recording live in ``MetricTimer``, keeping this socket free of metrics
+    /// code; it only ``MetricTimer/start()``s and ``MetricTimer/stop()``s the
+    /// timer. Direct/bypass dials set `dialTimer.enabled = false` before
+    /// connecting so only proxied first-hop dials are counted.
+    var dialTimer = MetricTimer(.dial)
+
     // MARK: Send pipeline
 
     /// Partial-send FIFO. Each entry is drained in order.
@@ -355,6 +362,9 @@ nonisolated class RawTCPSocket: RawTransport {
             // that forceCancel()'s teardown block can fire it if we get
             // pre-empted.
             connectCompletion = completion
+            // Start the dial timer here, after DNS, so the "Dial" stat measures
+            // the TCP connect across IP attempts and excludes resolution.
+            dialTimer.start()
             tryConnectNext()
         }
     }
@@ -634,6 +644,10 @@ nonisolated class RawTCPSocket: RawTransport {
         // Refuse to overwrite a concurrent .cancelled. Teardown will fire the
         // completion in that case.
         guard transitionFromSetup(to: .ready) else { return }
+
+        // Report the dial latency (TCP connect time). MetricTimer no-ops for
+        // direct/bypass dials and while a latency probe has recording suspended.
+        dialTimer.stop()
 
         // Enqueue initialData for the first outgoing bytes (TFO-equivalent).
         if let data = pendingInitialData, !data.isEmpty {

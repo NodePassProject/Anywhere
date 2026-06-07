@@ -9,7 +9,6 @@ import SwiftUI
 import NetworkExtension
 
 struct HomeView: View {
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
@@ -50,7 +49,7 @@ struct HomeView: View {
                     LazyVStack(spacing: 16, pinnedViews: [.sectionHeaders]) {
                         if isConnected {
                             Section {
-                                statsGrid
+                                ConnectionStatsView()
                             } header: {
                                 connectedHeader
                             }
@@ -100,22 +99,6 @@ struct HomeView: View {
                 .matchedGeometryEffect(id: "configurationCard", in: namespace)
         }
         .padding(.vertical, 8)
-    }
-    
-    private var statsColumns: [GridItem] {
-        let columnCount = horizontalSizeClass == .regular ? 2 : 1
-        return Array(repeating: GridItem(.flexible(), spacing: 16), count: columnCount)
-    }
-
-    @ViewBuilder
-    private var statsGrid: some View {
-        LazyVGrid(columns: statsColumns, spacing: 16) {
-            ForEach(ConnectionStatsContent.Mode.allCases, id: \.self) { mode in
-                cardContent {
-                    ConnectionStatsContent(mode: mode)
-                }
-            }
-        }
     }
 
     // MARK: - Background

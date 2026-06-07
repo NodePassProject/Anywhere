@@ -18,15 +18,15 @@ class ConnectionStatsModel {
     private(set) var bytesIn: Int64 = 0
     private(set) var bytesOut: Int64 = 0
 
-    /// Latest instantaneous gauges, derived from `samples.last` on every poll.
+    /// Latest instantaneous gauges, refreshed wholesale on every poll.
     private(set) var tcpConnectionCount: Int = 0
     private(set) var udpConnectionCount: Int = 0
     private(set) var memoryBytes: UInt64 = 0
 
-    /// Rolling window owned by the extension; replaced wholesale on each poll.
-    private(set) var samples: [StatsSample] = []
-    
-    static let maxSamples = 130
+    /// Most recent connection-establishment timings (milliseconds), or `nil`
+    /// until the first connection of the session has been measured.
+    private(set) var dialMs: Int?
+    private(set) var handshakeMs: Int?
 
     @ObservationIgnored private var statsTask: Task<Void, Never>?
     @ObservationIgnored private weak var session: NETunnelProviderSession?
@@ -55,7 +55,8 @@ class ConnectionStatsModel {
         tcpConnectionCount = 0
         udpConnectionCount = 0
         memoryBytes = 0
-        samples = []
+        dialMs = nil
+        handshakeMs = nil
     }
 
     private func pollStats() async {
@@ -76,40 +77,28 @@ class ConnectionStatsModel {
               let stats = try? JSONDecoder().decode(StatsResponse.self, from: response) else { return }
         self.bytesIn = stats.bytesIn
         self.bytesOut = stats.bytesOut
-        self.samples = stats.samples
-        if let last = stats.samples.last {
-            self.tcpConnectionCount = last.tcpConnectionCount
-            self.udpConnectionCount = last.udpConnectionCount
-            self.memoryBytes = last.memoryBytes
-        }
+        self.tcpConnectionCount = stats.tcpConnectionCount
+        self.udpConnectionCount = stats.udpConnectionCount
+        self.memoryBytes = stats.memoryBytes
+        self.dialMs = stats.dialMs
+        self.handshakeMs = stats.handshakeMs
     }
 }
 
 #if DEBUG
 extension ConnectionStatsModel {
-    /// A model pre-filled with a full 60-second synthetic window for SwiftUI
-    /// previews and tests. The `private(set)` properties are file-scoped, so the
-    /// seeder lives here alongside the model rather than in the view file.
+    /// A model pre-filled with representative values for SwiftUI previews. The
+    /// `private(set)` properties are file-scoped, so the seeder lives here
+    /// alongside the model rather than in the view file.
     static func previewSeeded() -> ConnectionStatsModel {
         let model = ConnectionStatsModel()
-        var samples: [StatsSample] = []
-        for i in 0..<maxSamples {
-            let t = Double(i)
-            samples.append(StatsSample(
-                id: UInt64(i + 1),
-                bytesIn: Int64(400_000 + 350_000 * (sin(t / 6) + 1)),
-                bytesOut: Int64(120_000 + 90_000 * (cos(t / 5) + 1)),
-                tcpConnectionCount: Int(max(0, 8 + 6 * sin(t / 8))),
-                udpConnectionCount: Int(max(0, 3 + 3 * cos(t / 7))),
-                memoryBytes: UInt64(max(0, 28_000_000 + 4_000_000 * sin(t / 10)))
-            ))
-        }
-        model.samples = samples
         model.bytesIn = 1_840_000_000
         model.bytesOut = 320_000_000
-        model.tcpConnectionCount = samples.last?.tcpConnectionCount ?? 0
-        model.udpConnectionCount = samples.last?.udpConnectionCount ?? 0
-        model.memoryBytes = samples.last?.memoryBytes ?? 0
+        model.tcpConnectionCount = 5
+        model.udpConnectionCount = 64
+        model.memoryBytes = 31_000_000
+        model.dialMs = 62
+        model.handshakeMs = 200
         return model
     }
 }

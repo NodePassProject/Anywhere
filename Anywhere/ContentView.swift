@@ -57,7 +57,7 @@ struct ContentView: View {
     private var tabView: some View {
         if #available(iOS 18.0, *) {
             TabView(selection: $selectedTab) {
-                Tab("Home", systemImage: "house", value: .home) {
+                Tab("Home", image: "anywhere", value: .home) {
                     NavigationStack {
                         HomeView()
                     }
@@ -88,7 +88,7 @@ struct ContentView: View {
                 NavigationStack {
                     HomeView()
                 }
-                .tabItem { Label("Home", systemImage: "house") }
+                .tabItem { Label("Home", image: "anywhere") }
                 .tag(AppTab.home)
 
                 NavigationStack {

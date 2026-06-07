@@ -40,50 +40,58 @@ enum TunnelMessage: Codable, Sendable {
 
 // MARK: - Responses
 
-/// One second of traffic telemetry. The extension owns the rolling 60-sample
-/// window and ships the whole buffer in each ``StatsResponse`` so the app can
-/// render the time-series view without having to stitch successive polls.
-struct StatsSample: Codable, Identifiable, Hashable, Sendable {
-    /// Monotonic sequence number, restarted on each tunnel session; also the
-    /// natural chart x-position.
-    let id: UInt64
-    /// Bytes received during this second (throughput, not a running total).
-    let bytesIn: Int64
-    /// Bytes sent during this second.
-    let bytesOut: Int64
-    /// Active TCP connections at sample time.
-    let tcpConnectionCount: Int
-    /// Active UDP flows at sample time.
-    let udpConnectionCount: Int
-    /// Extension memory footprint at sample time, in bytes.
-    let memoryBytes: UInt64
-}
-
+/// A point-in-time snapshot of tunnel telemetry. The extension keeps only the
+/// newest reading — no rolling history — and ships it on each ``fetchStats``
+/// poll; the app renders it straight into the live stats cards.
 struct StatsResponse: Codable, Sendable {
     /// Cumulative bytes received since the tunnel started.
     var bytesIn: Int64
     /// Cumulative bytes sent since the tunnel started.
     var bytesOut: Int64
-    /// Rolling per-second window. The extension drops the oldest entry once
-    /// the buffer is full; current TCP/UDP/memory gauges are
-    /// `samples.last`'s fields.
-    var samples: [StatsSample]
+    /// Active TCP connections right now.
+    var tcpConnectionCount: Int
+    /// Active UDP flows right now.
+    var udpConnectionCount: Int
+    /// Extension memory footprint right now, in bytes.
+    var memoryBytes: UInt64
+    /// Most recent first-hop TCP dial time, in milliseconds. `nil` until a
+    /// connection has been dialed this session.
+    var dialMs: Int?
+    /// Most recent proxy handshake time (TCP-connected → tunnel ready), in
+    /// milliseconds. `nil` until a tunnel has been established this session.
+    var handshakeMs: Int?
 
-    init(bytesIn: Int64, bytesOut: Int64, samples: [StatsSample] = []) {
+    init(
+        bytesIn: Int64,
+        bytesOut: Int64,
+        tcpConnectionCount: Int = 0,
+        udpConnectionCount: Int = 0,
+        memoryBytes: UInt64 = 0,
+        dialMs: Int? = nil,
+        handshakeMs: Int? = nil
+    ) {
         self.bytesIn = bytesIn
         self.bytesOut = bytesOut
-        self.samples = samples
+        self.tcpConnectionCount = tcpConnectionCount
+        self.udpConnectionCount = udpConnectionCount
+        self.memoryBytes = memoryBytes
+        self.dialMs = dialMs
+        self.handshakeMs = handshakeMs
     }
 
     // Tolerant decoder: lets a newer app survive briefly talking to an older
     // extension across an app update, and vice versa, without failing the
-    // whole decode. Missing keys default to empty/zero — the next restart
+    // whole decode. Missing keys default to zero/nil — the next restart
     // populates real data.
     init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         bytesIn = try c.decode(Int64.self, forKey: .bytesIn)
         bytesOut = try c.decode(Int64.self, forKey: .bytesOut)
-        samples = try c.decodeIfPresent([StatsSample].self, forKey: .samples) ?? []
+        tcpConnectionCount = try c.decodeIfPresent(Int.self, forKey: .tcpConnectionCount) ?? 0
+        udpConnectionCount = try c.decodeIfPresent(Int.self, forKey: .udpConnectionCount) ?? 0
+        memoryBytes = try c.decodeIfPresent(UInt64.self, forKey: .memoryBytes) ?? 0
+        dialMs = try c.decodeIfPresent(Int.self, forKey: .dialMs)
+        handshakeMs = try c.decodeIfPresent(Int.self, forKey: .handshakeMs)
     }
 }
 

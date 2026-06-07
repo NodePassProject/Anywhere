@@ -598,6 +598,8 @@ class TCPConnection {
         }
 
         let transport = RawTCPSocket()
+        // Direct/bypass — not a proxied connection, so exclude it from the Dial stat.
+        transport.dialTimer.enabled = false
         let connection = DirectProxyConnection(connection: transport)
         self.proxyConnection = connection
         transport.connect(host: dstHost, port: dstPort) { [weak self] error in
@@ -802,6 +804,8 @@ class TCPConnection {
                 guard !self.closed else { completion(.failure(SocketError.notConnected)); return }
                 if self.bypass {
                     let transport = RawTCPSocket()
+                    // Direct/bypass — not a proxied connection, exclude from Dial.
+                    transport.dialTimer.enabled = false
                     let connection = DirectProxyConnection(connection: transport)
                     transport.connect(host: host, port: port) { [weak self] error in
                         guard let self else {

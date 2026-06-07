@@ -37,6 +37,11 @@ nonisolated enum LatencyTester {
     /// receive is timed — capturing the actual network round-trip through the
     /// full proxy chain. DNS resolution is excluded via pre-warming.
     nonisolated static func test(_ configuration: ProxyConfiguration) async -> LatencyResult {
+        // A probe dials through the proxy, but may target a config other than the
+        // active tunnel — keep its timings out of the live Dial/Handshake gauges.
+        ConnectionMetrics.shared.suspendRecording()
+        defer { ConnectionMetrics.shared.resumeRecording() }
+
         let testConfiguration = resolvedConfiguration(configuration)
 
         do {
