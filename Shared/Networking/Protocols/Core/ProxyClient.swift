@@ -94,6 +94,12 @@ nonisolated class ProxyClient {
     }
 
     // MARK: - Public API
+    //
+    // `connect`/`connectUDP` wrap their completion with a handshake ``MetricTimer``
+    // (``MetricTimer/timing(_:_:)``), timing from the call site to tunnel-ready;
+    // ``ConnectionMetrics`` subtracts the latest dial to isolate the post-TCP
+    // handshake. Chain hops complete before the outermost client, so the final
+    // (outer) record reflects the whole multi-hop setup.
 
     /// Connects to a destination through the proxy server using TCP.
     func connect(
@@ -107,7 +113,7 @@ nonisolated class ProxyClient {
             destinationHost: destinationHost,
             destinationPort: destinationPort,
             initialData: initialData,
-            completion: completion
+            completion: MetricTimer.timing(.handshake, completion)
         )
     }
 
@@ -122,7 +128,7 @@ nonisolated class ProxyClient {
             destinationHost: destinationHost,
             destinationPort: destinationPort,
             initialData: nil,
-            completion: completion
+            completion: MetricTimer.timing(.handshake, completion)
         )
     }
 

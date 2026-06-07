@@ -16,68 +16,32 @@ final class StatsRecorder {
         let memoryBytes: UInt64
     }
 
-    private static let maxSamples = 130
-    private static let trimBatch = 10
-
-    private var samples: [StatsSample] = []
-    private var lastBytesIn: Int64 = 0
-    private var lastBytesOut: Int64 = 0
-    private var hasBaseline = false
-    private var sampleSeq: UInt64 = 0
-    private var task: Task<Void, Never>?
     private var source: (() -> RawValues)?
 
+    /// Begins serving snapshots from `source`. Called once at tunnel start.
     func start(source: @escaping () -> RawValues) {
-        guard task == nil else { return }
         self.source = source
-        task = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                guard let self, !Task.isCancelled else { break }
-                self.tick()
-            }
-        }
     }
 
+    /// Stops serving snapshots and clears the live connection timings so the
+    /// next session starts blank.
     func stop() {
-        task?.cancel()
-        task = nil
         source = nil
-        samples = []
-        lastBytesIn = 0
-        lastBytesOut = 0
-        hasBaseline = false
-        sampleSeq = 0
+        ConnectionMetrics.shared.reset()
     }
 
-    /// Builds a `StatsResponse` for the IPC reply.
+    /// Builds a `StatsResponse` for the IPC reply from the current live values.
     func snapshot() -> StatsResponse {
         let live = source?()
+        let timings = ConnectionMetrics.shared.snapshot()
         return StatsResponse(
-            bytesIn: live?.cumulativeBytesIn ?? lastBytesIn,
-            bytesOut: live?.cumulativeBytesOut ?? lastBytesOut,
-            samples: samples
+            bytesIn: live?.cumulativeBytesIn ?? 0,
+            bytesOut: live?.cumulativeBytesOut ?? 0,
+            tcpConnectionCount: live?.tcpConnectionCount ?? 0,
+            udpConnectionCount: live?.udpConnectionCount ?? 0,
+            memoryBytes: live?.memoryBytes ?? 0,
+            dialMs: timings.dialMs,
+            handshakeMs: timings.handshakeMs
         )
-    }
-
-    private func tick() {
-        guard let raw = source?() else { return }
-        let inDelta = hasBaseline ? max(0, raw.cumulativeBytesIn - lastBytesIn) : 0
-        let outDelta = hasBaseline ? max(0, raw.cumulativeBytesOut - lastBytesOut) : 0
-        lastBytesIn = raw.cumulativeBytesIn
-        lastBytesOut = raw.cumulativeBytesOut
-        hasBaseline = true
-        sampleSeq += 1
-        samples.append(StatsSample(
-            id: sampleSeq,
-            bytesIn: inDelta,
-            bytesOut: outDelta,
-            tcpConnectionCount: raw.tcpConnectionCount,
-            udpConnectionCount: raw.udpConnectionCount,
-            memoryBytes: raw.memoryBytes
-        ))
-        if samples.count > Self.maxSamples {
-            samples.removeFirst(Self.trimBatch)
-        }
     }
 }
