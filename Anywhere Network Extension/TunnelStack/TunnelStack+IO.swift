@@ -207,6 +207,10 @@ extension TunnelStack {
             }
         }
         lwip_bridge_input_batch_end()
+        // A fresh segment may have created a PCB (and thus a tcp_tmr timeout)
+        // while the tick was suspended on an idle stack — re-arm so it gets
+        // serviced. No-op when the tick is already running.
+        resumeLwipTickIfNeeded()
     }
 
     /// Parses and dispatches a UDP sub-batch. Must run on ``udpQueue``.
@@ -220,19 +224,50 @@ extension TunnelStack {
 
     // MARK: - Timers
 
-    /// Starts the lwIP periodic timeout timer (250ms interval).
+    /// Starts the lwIP periodic timeout timer (100ms interval, matching
+    /// ``TunnelConstants/lwipTimeoutIntervalMs`` / `TCP_TMR_INTERVAL`).
+    ///
+    /// The tick services lwIP's timeout list, then **suspends itself** whenever
+    /// the list is empty (no active or TIME_WAIT TCP PCB), so an idle tunnel
+    /// stops waking the CPU 10x/sec. ``feedLwip`` re-arms it when an inbound
+    /// segment arrives — the only thing that can create new lwIP work once every
+    /// PCB has drained (all UDP and every other cyclic timer are out of the
+    /// picture: UDP runs in Swift, and the rest are disabled in lwipopts.h).
     func startTimeoutTimer() {
         let timer = DispatchSource.makeTimerSource(queue: lwipQueue)
         timer.schedule(
             deadline: .now() + .milliseconds(TunnelConstants.lwipTimeoutIntervalMs),
-            repeating: .milliseconds(TunnelConstants.lwipTimeoutIntervalMs)
+            repeating: .milliseconds(TunnelConstants.lwipTimeoutIntervalMs),
+            leeway: .milliseconds(TunnelConstants.lwipTimeoutLeewayMs)
         )
         timer.setEventHandler { [weak self] in
             guard let self, self.running else { return }
-            lwip_bridge_check_timeouts()
+            if lwip_bridge_check_timeouts() != 0 {
+                self.suspendLwipTickIfNeeded()
+            }
         }
         timer.resume()
+        lwipTickSuspended = false
         timeoutTimer = timer
+    }
+
+    /// Suspends the lwIP tick after it has drained every pending timeout. Idempotent
+    /// (guarded by ``lwipTickSuspended``) so the suspend count can't run away.
+    /// Must run on ``lwipQueue``.
+    private func suspendLwipTickIfNeeded() {
+        guard let timeoutTimer, !lwipTickSuspended else { return }
+        lwipTickSuspended = true
+        timeoutTimer.suspend()
+    }
+
+    /// Re-arms the lwIP tick if it idled. Called from ``feedLwip`` — inbound TCP
+    /// is the only thing that can schedule new lwIP timeouts once the stack is
+    /// quiescent. A no-op while the tick is already running. Must run on
+    /// ``lwipQueue``.
+    func resumeLwipTickIfNeeded() {
+        guard let timeoutTimer, lwipTickSuspended else { return }
+        lwipTickSuspended = false
+        timeoutTimer.resume()
     }
 
     /// Starts the UDP flow cleanup timer (1-second interval). Each flow is
@@ -243,11 +278,12 @@ extension TunnelStack {
         let timer = DispatchSource.makeTimerSource(queue: udpQueue)
         timer.schedule(
             deadline: .now() + .seconds(TunnelConstants.udpCleanupIntervalSec),
-            repeating: .seconds(TunnelConstants.udpCleanupIntervalSec)
+            repeating: .seconds(TunnelConstants.udpCleanupIntervalSec),
+            leeway: .milliseconds(TunnelConstants.udpCleanupLeewayMs)
         )
         timer.setEventHandler { [weak self] in
             guard let self, self.running else { return }
-            let now = CFAbsoluteTimeGetCurrent()
+            let now = MonotonicClock.now
             var keysToRemove: [UDPFlowKey] = []
             for (key, flow) in self.udpFlows {
                 if now > flow.idleDeadline {

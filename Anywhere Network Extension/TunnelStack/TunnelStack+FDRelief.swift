@@ -67,8 +67,8 @@ extension TunnelStack {
     /// requester. Must be called on `udpQueue`. Returns `true` if any flow
     /// was evicted.
     fileprivate func evictDirectUDPFlowsForFDPressure(priority: FDReliefPriority) -> Bool {
-        let now = CFAbsoluteTimeGetCurrent()
-        let minIdle: CFAbsoluteTime
+        let now = MonotonicClock.now
+        let minIdle: TimeInterval
         let maxEvictions: Int
         switch priority {
         case .userVisible:

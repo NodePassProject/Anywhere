@@ -63,7 +63,7 @@ extension TunnelStack {
         // unreplied probe's 30s deadline sorts ahead of an established flow's
         // 120s one.
         var victim: UDPFlow?
-        var victimDeadline = CFAbsoluteTime.greatestFiniteMagnitude
+        var victimDeadline = TimeInterval.greatestFiniteMagnitude
         for flow in udpFlows.values {
             let deadline = flow.idleDeadline
             if deadline < victimDeadline { victimDeadline = deadline; victim = flow }

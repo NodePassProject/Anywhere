@@ -76,14 +76,14 @@ enum TunnelConstants {
     /// probe storm can't pin sockets and receive buffers for the full
     /// established window. The reaper and the global-cap eviction both treat
     /// these as the first to go (see ``UDPFlow/idleDeadline``).
-    static let udpIdleTimeoutUnreplied: CFAbsoluteTime = 30
+    static let udpIdleTimeoutUnreplied: TimeInterval = 30
     /// Idle timeout for UDP flows that have seen at least one reply — an
     /// established bidirectional flow. Matches Linux conntrack's
     /// `nf_conntrack_udp_timeout_stream` default (120s): long enough that a
     /// paused-but-live flow — a game session, a long-poll — isn't torn down
     /// prematurely, while still freeing a genuinely dead established flow far
     /// sooner than the old 300s window did.
-    static let udpIdleTimeoutStream: CFAbsoluteTime = 120
+    static let udpIdleTimeoutStream: TimeInterval = 120
     /// Hard ceiling on concurrent UDP flows in ``TunnelStack/udpFlows``.
     ///
     /// Each live flow pins a socket (kernel send/receive buffers) plus a 64 KB
@@ -130,8 +130,15 @@ enum TunnelConstants {
     /// source has to wake at least that often or RTO/persist/MSL granularity
     /// regresses to whichever is coarser.
     static let lwipTimeoutIntervalMs = 100
+    /// Leeway for the lwIP tick (milliseconds). At 10% of the interval it lets
+    /// libdispatch coalesce the wakeup with other timers; `tcp_tmr` is already
+    /// 100ms-coarse, so this slack is imperceptible to TCP timer granularity.
+    static let lwipTimeoutLeewayMs = 10
     /// UDP flow cleanup timer interval (seconds).
     static let udpCleanupIntervalSec = 1
+    /// Leeway for the UDP cleanup reaper (milliseconds). Idle-flow reaping
+    /// tolerates a quarter-second of slack, so the wakeup can coalesce freely.
+    static let udpCleanupLeewayMs = 250
     /// Retry delay when TCP overflow drain makes no progress (milliseconds).
     static let drainRetryDelayMs = 250
 
@@ -186,5 +193,4 @@ enum TunnelConstants {
             ? ["1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001"]
             : ["1.1.1.1", "1.0.0.1"]
     }
-
 }

@@ -275,6 +275,10 @@ extension TunnelStack {
         resetByteCounters()
 
         timeoutTimer?.cancel()
+        if lwipTickSuspended {
+            lwipTickSuspended = false
+            timeoutTimer?.resume()
+        }
         timeoutTimer = nil
         udpCleanupTimer?.cancel()
         udpCleanupTimer = nil

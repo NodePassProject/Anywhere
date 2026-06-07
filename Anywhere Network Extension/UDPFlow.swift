@@ -26,7 +26,7 @@ class UDPFlow {
     let srcIPBytes: Data  // original source (becomes dst in response)
     let dstIPBytes: Data  // original destination (becomes src in response)
 
-    var lastActivity: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
+    var lastActivity: TimeInterval = MonotonicClock.now
 
     /// Set once the destination has sent at least one datagram back. Every
     /// downlink path funnels through ``handleProxyData``, so that's the single
@@ -38,12 +38,12 @@ class UDPFlow {
     /// ``flowQueue`` like the rest of this flow's mutable state.
     var hasSeenReply = false
 
-    /// Absolute time at which this flow goes idle given its current state: last
-    /// activity plus the unreplied (30s) or stream (120s) timeout. The cleanup
-    /// reaper drops a flow once `now` passes this, and global-cap eviction
-    /// picks the flow with the smallest deadline (least time left) — so
-    /// unreplied probes are shed before established flows.
-    var idleDeadline: CFAbsoluteTime {
+    /// Monotonic timestamp (``MonotonicClock``) at which this flow goes idle
+    /// given its current state: last activity plus the unreplied (30s) or stream
+    /// (120s) timeout. The cleanup reaper drops a flow once `now` passes this,
+    /// and global-cap eviction picks the flow with the smallest deadline (least
+    /// time left) — so unreplied probes are shed before established flows.
+    var idleDeadline: TimeInterval {
         lastActivity + (hasSeenReply ? TunnelConstants.udpIdleTimeoutStream
                                      : TunnelConstants.udpIdleTimeoutUnreplied)
     }
@@ -180,7 +180,7 @@ class UDPFlow {
 
     func handleReceivedData(_ data: Data, payloadLength: Int) {
         guard !closed else { return }
-        lastActivity = CFAbsoluteTimeGetCurrent()
+        lastActivity = MonotonicClock.now
 
         // Buffer data while the outbound connection is being established.
         // directSocket is set before its socket connects; sending to an
@@ -586,7 +586,7 @@ class UDPFlow {
     private func handleProxyData(_ data: Data) {
         flowQueue.async { [weak self] in
             guard let self, !self.closed else { return }
-            self.lastActivity = CFAbsoluteTimeGetCurrent()
+            self.lastActivity = MonotonicClock.now
             // First reply promotes the flow from the 30s unreplied timeout to
             // the 120s established one (see ``idleDeadline``).
             self.hasSeenReply = true
