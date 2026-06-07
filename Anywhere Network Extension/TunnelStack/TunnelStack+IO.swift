@@ -235,9 +235,10 @@ extension TunnelStack {
         timeoutTimer = timer
     }
 
-    /// Starts the UDP flow cleanup timer (1-second interval, 300-second idle
-    /// timeout). Runs on ``udpQueue`` — it iterates and mutates ``udpFlows``,
-    /// which that queue owns.
+    /// Starts the UDP flow cleanup timer (1-second interval). Each flow is
+    /// reaped once `now` passes its ``UDPFlow/idleDeadline`` — 30s after the
+    /// last packet for an unreplied flow, 120s for an established one. Runs on
+    /// ``udpQueue`` — it iterates and mutates ``udpFlows``, which that queue owns.
     func startUDPCleanupTimer() {
         let timer = DispatchSource.makeTimerSource(queue: udpQueue)
         timer.schedule(
@@ -249,7 +250,7 @@ extension TunnelStack {
             let now = CFAbsoluteTimeGetCurrent()
             var keysToRemove: [UDPFlowKey] = []
             for (key, flow) in self.udpFlows {
-                if now - flow.lastActivity > TunnelConstants.udpIdleTimeout {
+                if now > flow.idleDeadline {
                     flow.close()
                     keysToRemove.append(key)
                 }

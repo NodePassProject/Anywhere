@@ -69,34 +69,40 @@ enum TunnelConstants {
 
     /// Maximum buffer size for queued UDP datagrams.
     static let udpMaxBufferSize = 256 * 1024
-    /// Idle timeout for UDP flows (seconds).
-    static let udpIdleTimeout: CFAbsoluteTime = 300
+    /// Idle timeout for UDP flows that have **not** yet seen a reply from the
+    /// destination — one-way/speculative flows (NAT-traversal probes, scans,
+    /// abandoned sends). Mirrors Linux conntrack's `nf_conntrack_udp_timeout`
+    /// (30s default): a flow that never gets a packet back is reaped fast so a
+    /// probe storm can't pin sockets and receive buffers for the full
+    /// established window. The reaper and the global-cap eviction both treat
+    /// these as the first to go (see ``UDPFlow/idleDeadline``).
+    static let udpIdleTimeoutUnreplied: CFAbsoluteTime = 30
+    /// Idle timeout for UDP flows that have seen at least one reply — an
+    /// established bidirectional flow. Matches Linux conntrack's
+    /// `nf_conntrack_udp_timeout_stream` default (120s): long enough that a
+    /// paused-but-live flow — a game session, a long-poll — isn't torn down
+    /// prematurely, while still freeing a genuinely dead established flow far
+    /// sooner than the old 300s window did.
+    static let udpIdleTimeoutStream: CFAbsoluteTime = 120
     /// Hard ceiling on concurrent UDP flows in ``TunnelStack/udpFlows``.
     ///
     /// Each live flow pins a socket (kernel send/receive buffers) plus a 64 KB
-    /// in-process receive buffer, and the idle reaper only collects flows after
-    /// ``udpIdleTimeout``. With no ceiling, an app spraying UDP NAT-traversal
-    /// probes on a lossy link (common with P2P remote-desktop tools) can pile
-    /// up flows faster than they idle out and push the Network Extension past
-    /// its hard memory limit, getting it jetsam-killed. When the table is full,
-    /// the least-recently-active flow is evicted to admit a new one (see
-    /// ``TunnelStack/evictUDPFlowsToAdmit(_:)``). 256 sits far above any
-    /// legitimate app's working set while bounding the data plane's footprint.
-    static let udpMaxFlows = 256
-    /// Maximum concurrent UDP flows to any single destination *host* (`dstIP`).
+    /// in-process receive buffer. Without a ceiling, an app spraying UDP
+    /// NAT-traversal probes on a lossy link (common with P2P remote-desktop
+    /// tools) could pile up flows faster than they idle out and push the
+    /// Network Extension past its hard memory limit, getting it jetsam-killed.
     ///
-    /// Time-based global eviction alone is scan-vulnerable: a client that
-    /// sprays hundreds of flows at one target (P2P remote-desktop NAT traversal
-    /// on a lossy link is the usual culprit) fills the table with flows that
-    /// all carry a *recent* `lastActivity`, so the global LRU would evict
-    /// *innocent* flows to other destinations first. Bounding the slots any one
-    /// destination may hold makes the noisy target evict its own oldest flow
-    /// instead, so a single heavy hitter can neither monopolize the table nor
-    /// crowd out unrelated traffic. Keyed by host (not `ip:port`) so it also
-    /// contains a port-spray across one peer. 32 is generous for legitimate
-    /// multi-stream use (a remote-desktop session rarely needs more than a
-    /// handful of flows to one peer) while firmly capping a storm.
-    static let udpMaxFlowsPerTarget = 32
+    /// Two mechanisms keep that storm bounded without a per-destination cap.
+    /// First, an unreplied probe idles out after only
+    /// ``udpIdleTimeoutUnreplied`` (30s), so one-way flows self-shed an order of
+    /// magnitude faster than established ones. Second, when the table is
+    /// nonetheless full, the flow with the least time left before its own idle
+    /// deadline is evicted to admit a new one (see
+    /// ``TunnelStack/evictUDPFlowsToAdmit()``) — which preferentially sheds
+    /// those same short-lived probes before any flow an app is actively using.
+    /// 256 sits far above any legitimate app's working set while bounding the
+    /// data plane's footprint.
+    static let udpMaxFlows = 256
 
     // MARK: - Log Buffer
 
