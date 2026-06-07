@@ -84,6 +84,23 @@ enum TunnelConstants {
     /// prematurely, while still freeing a genuinely dead established flow far
     /// sooner than the old 300s window did.
     static let udpIdleTimeoutStream: TimeInterval = 120
+    /// Number of downlink datagrams a flow must receive before it counts as an
+    /// established bidirectional **stream** (and earns the longer
+    /// ``udpIdleTimeoutStream``) rather than a one-shot request/response probe
+    /// (which keeps the shorter ``udpIdleTimeoutUnreplied``).
+    ///
+    /// A single reply is deliberately *not* enough. STUN binding (WebRTC/ICE
+    /// candidate gathering) and one-shot DNS-over-UDP each send one request and
+    /// get exactly one answer, then fall silent; promoting them to the 120s
+    /// stream timeout on that first reply is what let a STUN storm peg
+    /// ``udpMaxFlows`` — hundreds of abandoned candidates each pinning a socket
+    /// (and its kernel buffers) for two minutes. Requiring several replies keeps
+    /// those probes on the 30s reap, while any real media/game/VoIP stream (many
+    /// packets/sec each way) crosses this threshold in a fraction of a second
+    /// and promotes immediately. Note ``lastActivity`` already keeps an *active*
+    /// flow of either class alive regardless of which timeout applies; this only
+    /// governs how quickly a flow is reaped once it goes silent.
+    static let udpStreamMinReplies = 4
     /// Hard ceiling on concurrent UDP flows in ``TunnelStack/udpFlows``.
     ///
     /// Each live flow pins a socket (kernel send/receive buffers) plus a 64 KB
