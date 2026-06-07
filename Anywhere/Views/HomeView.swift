@@ -66,6 +66,7 @@ struct HomeView: View {
                     .padding(.horizontal, 24)
                     .animation(.bouncy(duration: 1), value: isConnected)
                 }
+                .scrollBounceBehavior(.basedOnSize, axes: .vertical)
             }
         }
         .sheet(isPresented: $showingAddSheet) {
