@@ -97,14 +97,15 @@ extension TunnelStack {
         // Read the config the cold path needs once, from the snapshot
         // ``lwipQueue`` publishes — never the stored properties directly, which
         // that queue owns and mutates at start/restart.
-        let cfg = udpConfig()
+        let udpConfig = udpConfig()
 
-        // The DNS and Blocked-mode QUIC checks run before the flow lookup; the
-        // Automatic-mode QUIC/MITM decision needs the routing result, so it
-        // runs after resolution further down. The address string and `Data`
-        // forms are computed lazily: an established flow (including an allowed
-        // UDP/443 one) takes the fast path below and allocates nothing beyond
-        // the payload copy made during parse.
+        // The DNS, Blocked-mode QUIC, and WebRTC/STUN checks run before the
+        // flow lookup; the Automatic-mode QUIC/MITM decision needs the routing
+        // result, so it runs after resolution further down. The address string
+        // and `Data` forms are computed lazily: an established flow (including
+        // an allowed UDP/443 one) takes the fast path below and allocates
+        // nothing beyond the payload copy made during parse — the STUN check
+        // reads only those payload bytes, so it allocates nothing either.
 
         // DNS interception: fake-IP responses for queries targeting our own
         // resolver (the tunnel peer address). Queries to any other resolver
@@ -134,7 +135,27 @@ extension TunnelStack {
         // to the post-resolution check below (it needs the routing decision);
         // Unblocked never drops. A QUIC-based proxy's own transport leaves the
         // extension on a kernel-excluded socket, so it never reaches here.
-        if datagram.dstPort == 443 && cfg.quicPolicy.blocksAllQUIC {
+        if datagram.dstPort == 443 && udpConfig.quicPolicy.blocksAllQUIC {
+            sendICMPPortUnreachable(
+                srcIP: datagram.srcIPData,
+                srcPort: datagram.srcPort,
+                dstIP: datagram.dstIPData,
+                dstPort: datagram.dstPort,
+                isIPv6: isIPv6,
+                udpPayloadLength: payload.count
+            )
+            return
+        }
+
+        // WebRTC handling: reject STUN datagrams so WebRTC/ICE candidate
+        // gathering fails fast and no peer connection forms. STUN rides
+        // arbitrary ICE-negotiated ports, so it's classified by payload (the
+        // RFC 5389 magic cookie) rather than by port, and dropped with an ICMP
+        // port-unreachable like the QUIC path above. Run before the flow lookup
+        // so a candidate never opens a flow — and, since a rejected datagram
+        // never creates one, every retransmit and any later connectivity-check
+        // or keepalive STUN to the same 5-tuple lands here and is dropped too.
+        if udpConfig.blockWebRTC && TunnelStack.isSTUNMessage(payload) {
             sendICMPPortUnreachable(
                 srcIP: datagram.srcIPData,
                 srcPort: datagram.srcPort,
@@ -159,7 +180,7 @@ extension TunnelStack {
         }
 
         // New flow — now the string / Data forms are worth materialising.
-        guard let defaultConfiguration = cfg.configuration else { return }
+        guard let defaultConfiguration = udpConfig.configuration else { return }
         let dstIPString = TunnelStack.ipAddrToString(datagram.dstIP, isIPv6: isIPv6)
         let srcHost = TunnelStack.ipAddrToString(datagram.srcIP, isIPv6: isIPv6)
         let srcIPData = datagram.srcIPData
@@ -256,9 +277,9 @@ extension TunnelStack {
         // trie here. When we do drop a bypassed flow it can only be MITM.
         let isProxied = routeTarget.configurationID != nil
         if datagram.dstPort == 443,
-           cfg.quicPolicy.blocksResolvedQUIC(
+           udpConfig.quicPolicy.blocksResolvedQUIC(
                isProxied: isProxied,
-               mitmListed: dstIsDomain && cfg.mitmEnabled && mitmPolicy.matches(dstHost)
+               mitmListed: dstIsDomain && udpConfig.mitmEnabled && mitmPolicy.matches(dstHost)
            ) {
             logger.debug("[UDP] QUIC blocked (automatic): \(dstHost):443 reason=\(isProxied ? "proxied" : "mitm")")
             sendICMPPortUnreachable(
@@ -296,6 +317,38 @@ extension TunnelStack {
         evictUDPFlowsToAdmit()
         udpFlows[flowKey] = flow
         flow.handleReceivedData(payload, payloadLength: payload.count)
+    }
+
+    /// Classifies a UDP payload as a STUN message (RFC 5389 §6) — the protocol
+    /// WebRTC/ICE uses for NAT traversal (binding requests for server-reflexive
+    /// candidates, STUN-framed TURN allocate/refresh for relay candidates, and
+    /// peer connectivity checks). Detection keys on the 32-bit magic cookie
+    /// `0x2112A442` at byte offset 4, gated by the two structural invariants
+    /// every STUN message shares: the top two bits of byte 0 are zero, and the
+    /// attribute length (bytes 2–3) is 4-byte aligned and exactly fills the
+    /// datagram. Those gates make a false positive on non-STUN UDP vanishingly
+    /// unlikely, so the classifier needs no port allow-list and runs on any
+    /// datagram. Classic STUN (RFC 3489, pre-cookie) is deliberately not
+    /// matched: WebRTC always sends the cookie, and matching cookieless traffic
+    /// would risk dropping unrelated UDP. Reads only bytes already in `payload`;
+    /// allocates nothing.
+    static func isSTUNMessage(_ payload: Data) -> Bool {
+        // The fixed STUN header is 20 bytes; nothing below it can be trusted.
+        guard payload.count >= 20 else { return false }
+        // A `Data` produced by slicing keeps its parent's indices, so address
+        // every byte relative to the slice's own start, not a literal 0.
+        let base = payload.startIndex
+        // Byte 0: the two most-significant bits of every STUN message are 0.
+        guard payload[base] & 0xC0 == 0 else { return false }
+        // Bytes 4–7: the magic cookie — the definitive STUN marker.
+        guard payload[base + 4] == 0x21, payload[base + 5] == 0x12,
+              payload[base + 6] == 0xA4, payload[base + 7] == 0x42 else { return false }
+        // Bytes 2–3: attribute length. Attributes are 4-byte aligned, so it is a
+        // multiple of 4, and for a UDP-framed message the header plus attributes
+        // fill the datagram exactly. Rejects the rare non-STUN payload that
+        // happens to carry the cookie bytes.
+        let messageLength = Int(payload[base + 2]) << 8 | Int(payload[base + 3])
+        return messageLength & 0x3 == 0 && messageLength + 20 == payload.count
     }
 
     // MARK: - Outbound UDP

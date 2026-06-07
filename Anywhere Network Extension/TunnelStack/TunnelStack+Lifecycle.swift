@@ -479,6 +479,18 @@ extension TunnelStack {
                 publishUDPConfig()
             }
 
+            // Block WebRTC drives only the per-datagram STUN check in
+            // handleInboundUDP (read off the UDP snapshot), so reload it in
+            // place like quicPolicy rather than restarting the stack (which
+            // would drop every connection). May be the only change, so it must
+            // run before the change-detection guard below.
+            let blockWebRTC = AWCore.getBlockWebRTC()
+            if blockWebRTC != self.blockWebRTC {
+                logger.info("[VPN] Block WebRTC changed: \(self.blockWebRTC) -> \(blockWebRTC)")
+                self.blockWebRTC = blockWebRTC
+                publishUDPConfig()
+            }
+
             // Reflection is a pure read-path setting: reflection happens
             // in the read callback off the published snapshot, with no effect on
             // tunnel network settings or any connection state. Reload it in place

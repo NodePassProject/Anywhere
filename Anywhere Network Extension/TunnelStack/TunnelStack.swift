@@ -150,6 +150,7 @@ class TunnelStack {
     var proxyMode: ProxyMode = .rule
     var hideVPNIcon: Bool = false
     var quicPolicy: QUICPolicy = .blocked
+    var blockWebRTC: Bool = true
     var advertiseIPv6ToApps: Bool = false
     var encryptedDNSEnabled: Bool = false
     var encryptedDNSProtocol: String = "doh"
@@ -339,13 +340,15 @@ class TunnelStack {
         /// configuration?" check needs no cross-queue read of ``configuration``.
         let configurationID: UUID?
         let quicPolicy: QUICPolicy
+        /// Whether STUN datagrams are rejected to block WebRTC (default on).
+        let blockWebRTC: Bool
         let advertiseIPv6ToApps: Bool
         let mitmEnabled: Bool
     }
     private let udpConfigLock = UnfairLock()
     private var _udpConfig = UDPConfig(configuration: nil, configurationID: nil,
-                                       quicPolicy: .blocked, advertiseIPv6ToApps: false,
-                                       mitmEnabled: false)
+                                       quicPolicy: .blocked, blockWebRTC: true,
+                                       advertiseIPv6ToApps: false, mitmEnabled: false)
 
     /// Reads the current UDP config snapshot. Callable from any queue; the UDP
     /// path calls it once at the top of each inbound datagram.
@@ -359,6 +362,7 @@ class TunnelStack {
             configuration: configuration,
             configurationID: configuration?.id,
             quicPolicy: quicPolicy,
+            blockWebRTC: blockWebRTC,
             advertiseIPv6ToApps: advertiseIPv6ToApps,
             mitmEnabled: mitmEnabled
         )
@@ -513,6 +517,7 @@ class TunnelStack {
         loadProxyModeSetting()
         loadHideVPNIconSetting()
         loadQUICPolicySetting()
+        loadBlockWebRTCSetting()
         loadReflectionSetting()
         loadMITMSetting()
 
@@ -578,6 +583,10 @@ class TunnelStack {
 
     private func loadQUICPolicySetting() {
         quicPolicy = AWCore.getQUICPolicy()
+    }
+
+    private func loadBlockWebRTCSetting() {
+        blockWebRTC = AWCore.getBlockWebRTC()
     }
 
     /// Reads the reflection toggle and address list from app group

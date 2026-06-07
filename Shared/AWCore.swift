@@ -60,6 +60,7 @@ final class AWCore {
         UserDefaultsKey.bypassCountryCode: "",
         UserDefaultsKey.trustedCertificateSHA256s: [],
         UserDefaultsKey.quicPolicy: QUICPolicy.blocked.rawValue,
+        UserDefaultsKey.blockWebRTC: true,
         UserDefaultsKey.encryptedDNSProtocol: "doh",
         UserDefaultsKey.encryptedDNSServer: "https://cloudflare-dns.com/dns-query",
         UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
@@ -71,6 +72,7 @@ final class AWCore {
         static let allowInsecure = "allowInsecure"
         static let alwaysOnEnabled = "alwaysOnEnabled"
         static let quicPolicy = "quicPolicy"
+        static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
         static let encryptedDNSEnabled = "encryptedDNSEnabled"
         static let encryptedDNSProtocol = "encryptedDNSProtocol"
@@ -254,6 +256,14 @@ final class AWCore {
 
     static func setQUICPolicy(_ value: QUICPolicy) {
         userDefaults.set(value.rawValue, forKey: UserDefaultsKey.quicPolicy)
+    }
+    
+    static func getBlockWebRTC() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.blockWebRTC)
+    }
+
+    static func setBlockWebRTC(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.blockWebRTC)
     }
     
     static func getAdvertiseIPv6ToApps() -> Bool {
