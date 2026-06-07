@@ -259,14 +259,14 @@ struct HomeView: View {
         if #available(iOS 26.0, *) {
             content()
                 .padding(16)
-                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .glassEffect(.clear.interactive(), in: .rect(cornerRadius: 16))
+                .contentShape(Capsule())
+                .glassEffect(.clear.interactive(), in: .capsule)
         } else {
             content()
                 .padding(16)
-                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .contentShape(Capsule())
                 .background(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    Capsule()
                         .fill(.white.opacity(0.2))
                 )
         }
