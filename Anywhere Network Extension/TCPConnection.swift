@@ -503,6 +503,39 @@ class TCPConnection {
         failureReporter.report(operation: operation, endpoint: endpointDescription, error: error)
     }
 
+    /// Terminal handler for a failed outbound dial.
+    ///
+    /// - Parameter bufferedClientData: client bytes the dial path moved out of
+    ///   ``pendingData`` before dialing (e.g. a handshake-carried ClientHello).
+    ///   They are restored ahead of any bytes that arrived while dialing so the
+    ///   whole unacknowledged run is covered when forcing the FIN.
+    private func handleConnectFailure(_ error: Error, bufferedClientData: Data?) {
+        reportFailure("Connect", error: error)
+        guard case SocketError.resolutionFailed = error else {
+            abort()
+            return
+        }
+        if let bufferedClientData, !bufferedClientData.isEmpty {
+            pendingData = bufferedClientData + pendingData
+        }
+        if bufferedBytesAreTLSHandshake() {
+            rejectWithTLSAlert()
+        } else {
+            rejectGracefully()
+        }
+    }
+
+    /// True when ``pendingData`` begins with a TLS handshake record — content
+    /// type 22 (`0x16`) followed by the SSL3/TLS major version 3 (`0x03`). Used
+    /// to decide whether a fatal TLS alert is the right "do not retry" signal
+    /// (client mid-handshake) or whether a bare FIN must do (plain HTTP, other
+    /// protocols). Iterates rather than subscripts so it is index-offset safe
+    /// on a sliced ``Data``.
+    private func bufferedBytesAreTLSHandshake() -> Bool {
+        var iterator = pendingData.makeIterator()
+        return iterator.next() == 0x16 && iterator.next() == 0x03
+    }
+
     // MARK: - Route Commit
 
     /// Kicks off the outbound connection using the currently committed
@@ -610,8 +643,7 @@ class TCPConnection {
                 guard !self.closed else { return }
 
                 if let error {
-                    self.reportFailure("Connect", error: error)
-                    self.abort()
+                    self.handleConnectFailure(error, bufferedClientData: initialData)
                     return
                 }
                 self.handshakeTimer?.cancel()
@@ -694,8 +726,7 @@ class TCPConnection {
                     self.tryArmReceive()
 
                 case .failure(let error):
-                    self.reportFailure("Connect", error: error)
-                    self.abort()
+                    self.handleConnectFailure(error, bufferedClientData: initialData)
                 }
             }
         }
