@@ -26,14 +26,8 @@ nonisolated enum SocketHelpers {
     static let kernelSocketBufferSize: Int32 = 4 * 1024 * 1024
 
     /// Kernel send/receive buffer size for *direct-bypass* per-peer UDP sockets
-    /// (``UDPFlow``'s direct path, taken when a flow skips the proxy). One
-    /// exists per peer 5-tuple, so an app doing UDP NAT-traversal on a lossy
-    /// link can open many at once; at the relay size (``kernelSocketBufferSize``)
-    /// those kernel buffers would blow the Network Extension's hard memory cap
-    /// and get it jetsam-killed. 512 KB still sustains ~40 Mbit/s per flow at
-    /// 100 ms RTT — ample for direct app traffic — while bounding the per-flow
-    /// footprint 8×.
-    static let directDatagramSocketBufferSize: Int32 = 512 * 1024
+    /// (``UDPFlow``'s direct path, taken when a flow skips the proxy).
+    static let directDatagramSocketBufferSize: Int32 = 128 * 1024
 
     /// Sets a boolean-like `Int32` socket option. Failure is ignored — a
     /// missing option should never sink the connection.

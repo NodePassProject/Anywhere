@@ -28,15 +28,15 @@ class UDPFlow {
 
     var lastActivity: TimeInterval = MonotonicClock.now
 
-    /// Set once the destination has sent at least one datagram back. Every
-    /// downlink path funnels through ``handleProxyData``, so that's the single
-    /// place it flips. Until then the flow is one-way/speculative and uses the
-    /// shorter ``TunnelConstants/udpIdleTimeoutUnreplied``; after, it's an
-    /// established bidirectional flow on the longer
-    /// ``TunnelConstants/udpIdleTimeoutStream``. Mirrors conntrack's
-    /// unreplied → replied (`IPS_SEEN_REPLY`) transition. Confined to
-    /// ``flowQueue`` like the rest of this flow's mutable state.
-    var hasSeenReply = false
+    /// Count of downlink datagrams the destination has sent back. Every downlink
+    /// path funnels through ``handleProxyData``, so that's the single place it
+    /// increments. While it is below ``TunnelConstants/udpStreamMinReplies`` the
+    /// flow is treated as one-way/speculative or a one-shot request/response
+    /// probe (STUN binding, a single DNS lookup) and uses the shorter
+    /// ``TunnelConstants/udpIdleTimeoutUnreplied``; once it reaches the threshold
+    /// it is an established bidirectional **stream** on the longer
+    /// ``TunnelConstants/udpIdleTimeoutStream``.
+    var replyCount = 0
 
     /// Monotonic timestamp (``MonotonicClock``) at which this flow goes idle
     /// given its current state: last activity plus the unreplied (30s) or stream
@@ -44,8 +44,9 @@ class UDPFlow {
     /// and global-cap eviction picks the flow with the smallest deadline (least
     /// time left) — so unreplied probes are shed before established flows.
     var idleDeadline: TimeInterval {
-        lastActivity + (hasSeenReply ? TunnelConstants.udpIdleTimeoutStream
-                                     : TunnelConstants.udpIdleTimeoutUnreplied)
+        lastActivity + (replyCount >= TunnelConstants.udpStreamMinReplies
+                        ? TunnelConstants.udpIdleTimeoutStream
+                        : TunnelConstants.udpIdleTimeoutUnreplied)
     }
 
     // Direct bypass path
@@ -600,9 +601,11 @@ class UDPFlow {
         flowQueue.async { [weak self] in
             guard let self, !self.closed else { return }
             self.lastActivity = MonotonicClock.now
-            // First reply promotes the flow from the 30s unreplied timeout to
-            // the 120s established one (see ``idleDeadline``).
-            self.hasSeenReply = true
+            // Count this reply. The flow promotes from the 30s unreplied timeout
+            // to the 120s established one only after ``udpStreamMinReplies``
+            // replies — a single answer (STUN binding, one-shot DNS) is a probe,
+            // not a stream (see ``replyCount`` / ``idleDeadline``).
+            self.replyCount += 1
             
             TunnelStack.shared?.addBytesIn(Int64(data.count), target: self.routeTarget)
 
