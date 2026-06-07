@@ -60,8 +60,6 @@ extension TunnelStack {
         lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
             guard let shared = TunnelStack.shared, let data, let release else { return }
             let byteCount = Int(len)
-            shared.addBytesIn(Int64(byteCount))
-
             let mutableData = UnsafeMutableRawPointer(mutating: data)
             let packet = Data(bytesNoCopy: mutableData, count: byteCount, deallocator: .none)
             let proto: NSNumber = isIPv6 != 0 ? TunnelStack.ipv6Proto : TunnelStack.ipv4Proto
@@ -101,7 +99,7 @@ extension TunnelStack {
             // (domain for fake-IP rejects, IP literal for IP-CIDR rejects),
             // matching what the user sees in the request log.
             func reject(host: String, reason: String) -> Int32 {
-                shared.requestLog.record(proto: "TCP", host: host, port: dstPort, action: .reject)
+                shared.requestLog.record(proto: "TCP", host: host, port: dstPort, routeTarget: .reject)
                 if rejectFloodTracker.shouldDrop(host: host) {
                     logger.debug("[TCP] SYN dropped (flood) by \(reason): \(host):\(dstPort)")
                     return Int32(LWIP_BRIDGE_SYN_DROP)
@@ -142,53 +140,61 @@ extension TunnelStack {
 
             var dstHost = dstIPString
             var connectionConfiguration = defaultConfiguration
-            var forceBypass = false
+            // Committed routing identity. Defaults to the active default outbound
+            // (no rule matched); overridden per branch below. Drives both the
+            // dial path (via ``TCPConnection``) and traffic accounting.
+            var routeTarget = shared.defaultRouteTarget
             // Enable TLS ClientHello sniffing only on real-IP connections.
             // Fake-IP connections already know the domain via the fake-IP pool;
             // sniffing would add latency for no benefit (and could miscategorize
             // if the SNI disagrees with the DNS-resolved name).
             var sniffSNI = false
 
-            // Tracks the action/configuration to surface in the request log.
-            // Set on each routing branch below; recorded once after the switch.
-            var requestAction: TunnelRequestAction = .default
-            var requestConfigName: String? = defaultConfiguration.name
+            // True until a routing rule matches — i.e. the connection falls
+            // through to the default outbound. Surfaced in the request log.
+            var viaDefault = true
 
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
             case .passthrough:
                 // Real IP — check IP CIDR rules. `.reject` was filtered at SYN.
                 if let action = shared.domainRouter.matchIP(dstIPString) {
+                    viaDefault = false
                     switch action {
                     case .direct:
-                        forceBypass = true
-                        requestAction = .direct
-                        requestConfigName = nil
+                        routeTarget = .direct
                     case .reject:
                         // Should be unreachable — handled by the SYN filter.
                         return nil
-                    case .proxy(_):
-                        requestAction = .proxy
+                    case .proxy(let id):
+                        routeTarget = .proxy(id)
                         if let configuration = shared.domainRouter.resolveConfiguration(action: action) {
                             connectionConfiguration = configuration
-                            requestConfigName = configuration.name
                         } else {
                             logger.warning("[TCP] Routing config not found for \(dstIPString)")
-                            requestConfigName = nil
                         }
                     }
                 }
                 sniffSNI = true
-            case .resolved(let domain, let configurationOverride, let bypass):
+            case .resolved(let domain, let target, let configuration):
                 dstHost = domain
-                if let configuration = configurationOverride {
-                    connectionConfiguration = configuration
-                    requestAction = .proxy
-                    requestConfigName = configuration.name
-                } else if bypass {
-                    requestAction = .direct
-                    requestConfigName = nil
+                // `target == nil` means no domain rule matched — keep the default
+                // route already assigned above.
+                switch target {
+                case .direct:
+                    routeTarget = .direct
+                    viaDefault = false
+                case .proxy(let id):
+                    routeTarget = .proxy(id)
+                    viaDefault = false
+                    if let configuration {
+                        connectionConfiguration = configuration
+                    }
+                case .reject:
+                    // `.reject` surfaces as `.drop`, handled below.
+                    return nil
+                case .none:
+                    break
                 }
-                forceBypass = bypass
             case .drop, .unreachable:
                 // Both were handled by the SYN filter; defensive return.
                 return nil
@@ -198,8 +204,8 @@ extension TunnelStack {
                 proto: "TCP",
                 host: dstHost,
                 port: dstPort,
-                action: requestAction,
-                configurationName: requestConfigName
+                routeTarget: routeTarget,
+                viaDefault: viaDefault
             )
 
             // Fake-IP MITM: domain is known at accept time, but we still
@@ -215,7 +221,7 @@ extension TunnelStack {
                 dstHost: dstHost,
                 dstPort: dstPort,
                 configuration: connectionConfiguration,
-                forceBypass: forceBypass,
+                routeTarget: routeTarget,
                 sniffSNI: sniffSNI,
                 lwipQueue: shared.lwipQueue
             )
@@ -259,10 +265,12 @@ extension TunnelStack {
     /// Result of resolving a fake IP to its domain and routing configuration.
     /// Shared by the TCP accept callback and the Swift UDP path (``handleInboundUDP``).
     enum FakeIPResolution {
-        /// IP is not a fake IP — use original IP as host, default config, no bypass.
+        /// IP is not a fake IP — use original IP as host and the default route.
         case passthrough
-        /// Resolved to a domain with optional config override and bypass flag.
-        case resolved(domain: String, configurationOverride: ProxyConfiguration?, forceBypass: Bool)
+        /// Resolved to a domain. `target` is the matched route, or `nil` when no
+        /// domain rule matched (caller uses the default). `configuration` is the
+        /// dialing config for a `.proxy` target.
+        case resolved(domain: String, target: RouteTarget?, configuration: ProxyConfiguration?)
         /// Connection should be dropped (rejected by rule). Carries the
         /// resolved domain so the request log can record the rejected host.
         case drop(domain: String)
@@ -283,19 +291,19 @@ extension TunnelStack {
         if let action = domainRouter.matchDomain(entry.domain) {
             switch action {
             case .direct:
-                return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: true)
+                return .resolved(domain: entry.domain, target: .direct, configuration: nil)
             case .reject:
                 logger.debug("[\(proto)] Domain rejected by routing rule: \(entry.domain) (\(ip):\(dstPort))")
                 return .drop(domain: entry.domain)
-            case .proxy(_):
+            case .proxy(let id):
                 let configuration = domainRouter.resolveConfiguration(action: action)
                 if configuration == nil {
                     logger.warning("[\(proto)] Routing config not found for \(entry.domain)")
                 }
-                return .resolved(domain: entry.domain, configurationOverride: configuration, forceBypass: false)
+                return .resolved(domain: entry.domain, target: .proxy(id), configuration: configuration)
             }
         }
 
-        return .resolved(domain: entry.domain, configurationOverride: nil, forceBypass: false)
+        return .resolved(domain: entry.domain, target: nil, configuration: nil)
     }
 }

@@ -1,6 +1,6 @@
 //
 //  StatsRecorder.swift
-//  Anywhere Network Extension
+//  Anywhere
 //
 //  Created by NodePassProject on 6/5/26.
 //
@@ -9,8 +9,7 @@ import Foundation
 
 final class StatsRecorder {
     struct RawValues {
-        let cumulativeBytesIn: Int64
-        let cumulativeBytesOut: Int64
+        let byteCounts: TrafficByteCounts
         let tcpConnectionCount: Int
         let udpConnectionCount: Int
         let memoryBytes: UInt64
@@ -33,10 +32,21 @@ final class StatsRecorder {
     /// Builds a `StatsResponse` for the IPC reply from the current live values.
     func snapshot() -> StatsResponse {
         let live = source?()
+        let counts = live?.byteCounts ?? TrafficByteCounts()
         let timings = ConnectionMetrics.shared.snapshot()
+        let routes: [RouteTrafficEntry] = counts.routes
+            .map { target, value in
+                RouteTrafficEntry(
+                    target: target,
+                    bytesIn: value.bytesIn,
+                    bytesOut: value.bytesOut
+                )
+            }
+            .sorted { $0.totalBytes > $1.totalBytes }
         return StatsResponse(
-            bytesIn: live?.cumulativeBytesIn ?? 0,
-            bytesOut: live?.cumulativeBytesOut ?? 0,
+            bytesIn: counts.totalBytesIn,
+            bytesOut: counts.totalBytesOut,
+            routes: routes,
             tcpConnectionCount: live?.tcpConnectionCount ?? 0,
             udpConnectionCount: live?.udpConnectionCount ?? 0,
             memoryBytes: live?.memoryBytes ?? 0,

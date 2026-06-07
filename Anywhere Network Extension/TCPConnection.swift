@@ -41,7 +41,18 @@ class TCPConnection {
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
     private var proxyConnecting = false
-    private var bypass: Bool
+
+    /// Committed routing identity for this connection — the single source of
+    /// truth for both traffic accounting and the dial path. Mutable: a
+    /// successful SNI sniff can re-match a domain rule and change the route.
+    private var routeTarget: RouteTarget
+
+    /// Dial straight out iff the committed route is ``RouteTarget/direct``.
+    private var bypass: Bool {
+        if case .direct = routeTarget { return true }
+        return false
+    }
+
     private var pendingData = Data()
     private var closed = false
 
@@ -153,7 +164,7 @@ class TCPConnection {
     // MARK: Lifecycle
 
     init(pcb: UnsafeMutableRawPointer, dstHost: String, dstPort: UInt16,
-         configuration: ProxyConfiguration, forceBypass: Bool = false,
+         configuration: ProxyConfiguration, routeTarget: RouteTarget,
          sniffSNI: Bool = false,
          lwipQueue: DispatchQueue) {
         self.pcb = pcb
@@ -161,7 +172,7 @@ class TCPConnection {
         self.dstPort = dstPort
         self.configuration = configuration
         self.lwipQueue = lwipQueue
-        self.bypass = forceBypass
+        self.routeTarget = routeTarget
         if sniffSNI {
             self.sniffer = TLSClientHelloSniffer()
         }
@@ -391,6 +402,13 @@ class TCPConnection {
     /// output callback.
     private func acknowledgeReceivedBytes(_ byteCount: Int) {
         guard byteCount > 0 else { return }
+        // Uplink payload from the local app that the proxy/direct leg has
+        // accepted, attributed to this connection's committed route. Every
+        // non-rejected uplink ack funnels through here (pump completions, the
+        // VLESS handshake-carried initial data, and the MITM client bytes), so
+        // it's the single per-target tally point for uplink. Rejects advance the
+        // window via ``lwip_bridge_tcp_recved`` directly and stay uncounted.
+        TunnelStack.shared?.addBytesOut(Int64(byteCount), target: routeTarget)
         var remaining = byteCount
         while remaining > 0 {
             let part = UInt16(min(remaining, Int(UInt16.max)))
@@ -596,26 +614,28 @@ class TCPConnection {
             return
         }
 
+        // A successful SNI re-match is always a routing-rule decision (never the
+        // default), so these are recorded with `viaDefault: false`.
         switch action {
         case .direct:
-            bypass = true
-            stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, action: .direct)
+            routeTarget = .direct
+            stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, routeTarget: .direct)
         case .reject:
-            stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, action: .reject)
+            routeTarget = .reject
+            stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, routeTarget: .reject)
             logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
             rejectWithTLSAlert()
-        case .proxy:
+        case .proxy(let id):
+            // Override any IP-derived route: an IP-CIDR hit on the tentative dst
+            // may have set a direct/other route at accept time, but the domain
+            // rule now wins.
+            routeTarget = .proxy(id)
             if let resolved = router.resolveConfiguration(action: action) {
-                // Override any IP-derived bypass: an IP-CIDR `.direct` hit on
-                // the tentative dst may have set ``bypass = true`` at accept
-                // time, but the domain rule now wins.
-                bypass = false
                 configuration = resolved
-                stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, action: .proxy, configurationName: resolved.name)
             } else {
                 logger.warning("[TCP] SNI routing configuration not found for \(sni)")
-                stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, action: .proxy, configurationName: nil)
             }
+            stack.requestLog.record(proto: "TCP", host: sni, port: dstPort, routeTarget: .proxy(id))
         }
     }
 
@@ -965,6 +985,7 @@ class TCPConnection {
     /// racing ahead of the chunk currently being drained.
     private func writeToLWIP(_ data: Data) {
         guard !closed, !data.isEmpty else { return }
+        TunnelStack.shared?.addBytesIn(Int64(data.count), target: routeTarget)
         pendingWrite.append(data)
         drainPendingWrite()
     }

@@ -148,14 +148,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.statsRecorder.start { [weak self] in
                 guard let self else {
                     return StatsRecorder.RawValues(
-                        cumulativeBytesIn: 0, cumulativeBytesOut: 0,
+                        byteCounts: TrafficByteCounts(),
                         tcpConnectionCount: 0, udpConnectionCount: 0,
                         memoryBytes: 0
                     )
                 }
                 return StatsRecorder.RawValues(
-                    cumulativeBytesIn: self.tunnelStack.totalBytesIn,
-                    cumulativeBytesOut: self.tunnelStack.totalBytesOut,
+                    byteCounts: self.tunnelStack.byteCounts,
                     tcpConnectionCount: self.tunnelStack.activeTCPConnections,
                     udpConnectionCount: self.tunnelStack.activeUDPConnections,
                     memoryBytes: Self.memoryFootprint()

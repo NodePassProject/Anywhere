@@ -38,7 +38,6 @@ extension TunnelStack {
 
         lwipQueue.async { [self] in
             running = true
-            resetByteCounters()
 
             configureRuntime(for: configuration)
             registerCallbacks()
@@ -264,16 +263,7 @@ extension TunnelStack {
     }
 
     /// Shuts down the lwIP stack and all active flows. Must be called on `lwipQueue`.
-    /// Does NOT change `running` — callers manage it:
-    /// - `stop()` sets `running = false` before calling (kills the packet read loop).
-    /// - `restartStack()` leaves `running = true` (existing read loop continues).
-    ///
-    /// Note: Does NOT reset FakeIPPool. Callers handle pool lifecycle:
-    /// - `stop()` calls `fakeIPPool.reset()` (full teardown, no reconnections expected).
-    /// - `restartStack()` preserves pool as-is (routing decisions are made at connection time).
     private func shutdownInternal() {
-        resetByteCounters()
-
         timeoutTimer?.cancel()
         if lwipTickSuspended {
             lwipTickSuspended = false

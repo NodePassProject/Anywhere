@@ -64,7 +64,8 @@ struct HomeView: View {
                         }
                     }
                     .padding(.horizontal, 24)
-                    .animation(.bouncy(duration: 1), value: isConnected)
+                    .animation(.bouncy, value: isConnected)
+                    .sensoryFeedback(.impact, trigger: isConnected)
                 }
                 .scrollBounceBehavior(.basedOnSize, axes: .vertical)
             }

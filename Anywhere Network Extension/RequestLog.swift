@@ -10,20 +10,19 @@ import Foundation
 final class RequestLog {
 
     typealias Entry = TunnelRequestEntry
-    typealias Action = TunnelRequestAction
 
     private let lock = NSLock()
     private var entries: [Entry] = []
 
-    /// Records one routing decision. Caller supplies the protocol,
-    /// resolved host (domain if known, else IP literal), port, action,
-    /// and optional configuration name.
+    /// Records one routing decision. Caller supplies the protocol, resolved host
+    /// (domain if known, else IP literal), port, the route the connection took,
+    /// and whether it fell through to the default outbound.
     func record(
         proto: String,
         host: String,
         port: UInt16,
-        action: Action,
-        configurationName: String? = nil
+        routeTarget: RouteTarget,
+        viaDefault: Bool = false
     ) {
         let now = CFAbsoluteTimeGetCurrent()
         let entry = Entry(
@@ -31,8 +30,8 @@ final class RequestLog {
             proto: proto,
             host: host,
             port: port,
-            action: action,
-            configurationName: configurationName
+            routeTarget: routeTarget,
+            viaDefault: viaDefault
         )
         lock.lock()
         entries.append(entry)

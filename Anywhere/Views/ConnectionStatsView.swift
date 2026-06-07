@@ -6,13 +6,20 @@
 //
 
 import SwiftUI
+import Charts
 
 struct ConnectionStatsView: View {
     @Environment(ConnectionStatsModel.self) private var stats
-    
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(ChainStore.self) private var chainStore
+
     private static let connectionCeiling: Double = 256
     private static let memoryCeiling: Double = 50 * 1024 * 1024
     
+    private func routeName(_ target: RouteTarget) -> String {
+        target.displayName(configStore: configStore, chainStore: chainStore)
+    }
+
     var body: some View {
         VStack(spacing: 16) {
             HStack(spacing: 16) {
@@ -22,6 +29,12 @@ struct ConnectionStatsView: View {
                 StatCard("Download", systemImage: "arrow.down") {
                     StatValue(Self.formatBytes(stats.bytesIn))
                 }
+            }
+            if stats.bytesOut > 0 || stats.bytesIn > 0 {
+                RouteBreakdownCard(
+                    routes: stats.routes,
+                    name: routeName
+                )
             }
             HStack(spacing: 16) {
                 StatCard("TCP", systemImage: "arrow.left.arrow.right", spacing: 15) {
@@ -58,7 +71,7 @@ struct ConnectionStatsView: View {
         return formatter
     }()
 
-    private static func formatBytes(_ bytes: Int64) -> String {
+    fileprivate static func formatBytes(_ bytes: Int64) -> String {
         byteFormatter.string(fromByteCount: bytes)
     }
 
@@ -134,6 +147,139 @@ private struct StatCardChrome: ViewModifier {
     }
 }
 
+// MARK: - Route Breakdown
+
+private struct RouteBreakdownCard: View {
+    let routes: [RouteTrafficEntry]
+    let name: (RouteTarget) -> String
+    
+    private static let proxyPalette: [Color] =
+        [.cyan, .orange, .purple, .pink, .yellow, .mint, .indigo, .teal]
+    private static let directColor: Color = .green
+    private static let otherColor: Color = .gray
+    
+    private static let maxRows = 4
+
+    private struct Slice: Identifiable {
+        let id: String
+        let label: String
+        let bytes: Int64
+        let color: Color
+    }
+    
+    private var slices: [Slice] {
+        let proxies: [RouteTrafficEntry] = routes
+            .filter { $0.totalBytes > 0 && $0.target.configurationID != nil }
+            .sorted { $0.totalBytes > $1.totalBytes }
+        let directBytes: Int64 = routes.first { $0.target == .direct }?.totalBytes ?? 0
+
+        // Reserve one row for Direct; the rest go to proxies, with an "Other"
+        // bucket taking a slot when they don't all fit.
+        let proxyBudget = Self.maxRows - 1
+        let overflow = proxies.count > proxyBudget
+        let shownCount = overflow ? proxyBudget - 1 : proxies.count
+        let shown: [RouteTrafficEntry] = Array(proxies.prefix(shownCount))
+
+        var rows: [Slice] = []
+        for index in shown.indices {
+            let proxy = shown[index]
+            rows.append(Slice(
+                id: proxy.id,
+                label: name(proxy.target),
+                bytes: proxy.totalBytes,
+                color: Self.proxyPalette[index % Self.proxyPalette.count]
+            ))
+        }
+        if overflow {
+            var otherBytes: Int64 = 0
+            for proxy in proxies.dropFirst(shownCount) { otherBytes += proxy.totalBytes }
+            rows.append(Slice(id: "__other__", label: String(localized: "Other"),
+                              bytes: otherBytes, color: Self.otherColor))
+        }
+        rows.append(Slice(id: "__direct__", label: name(.direct),
+                          bytes: directBytes, color: Self.directColor))
+        return rows.sorted { $0.bytes > $1.bytes }
+    }
+
+    private var total: Int64 { slices.reduce(0) { $0 + $1.bytes } }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Label("Traffic by Route", systemImage: "chart.pie")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.7))
+
+            HStack(spacing: 18) {
+                donut
+                    .frame(maxWidth: .infinity)
+                legend
+                    .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, minHeight: 80)
+        .modifier(StatCardChrome())
+    }
+
+    private var donut: some View {
+        Chart(slices) { slice in
+            SectorMark(
+                angle: .value("Usage", Double(slice.bytes)),
+                innerRadius: .ratio(0.62),
+                angularInset: 1.5
+            )
+            .cornerRadius(3)
+            .foregroundStyle(slice.color)
+        }
+        .chartLegend(.hidden)
+    }
+
+    private var legend: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(slices) { slice in
+                LegendRow(
+                    color: slice.color,
+                    label: slice.label,
+                    bytes: slice.bytes,
+                    fraction: total > 0 ? Double(slice.bytes) / Double(total) : 0
+                )
+            }
+        }
+    }
+}
+
+private struct LegendRow: View {
+    let color: Color
+    let label: String
+    let bytes: Int64
+    let fraction: Double
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(color)
+                .frame(width: 10, height: 10)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(verbatim: label)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(ConnectionStatsView.formatBytes(bytes))
+                    .font(.system(size: 15, design: .rounded))
+                    .foregroundStyle(.white)
+                    .contentTransition(.numericText())
+                    .animation(.default, value: bytes)
+            }
+            Spacer(minLength: 4)
+            Text(fraction, format: .percent.precision(.fractionLength(0)))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.6))
+                .monospacedDigit()
+        }
+    }
+}
+
 // MARK: - Gauge style
 
 struct AnywherePressureGaugeStyle: GaugeStyle {
@@ -168,7 +314,44 @@ struct AnywherePressureGaugeStyle: GaugeStyle {
         .ignoresSafeArea()
         ConnectionStatsView()
             .environment(ConnectionStatsModel.previewSeeded())
+            .environment(ConfigurationStore.shared)
+            .environment(ChainStore.shared)
             .padding(24)
+    }
+}
+
+#Preview("Route Breakdown") {
+    let us = UUID(), jp = UUID(), de = UUID(), fr = UUID(), sg = UUID()
+    let names: [UUID: String] = [
+        us: "US · Los Angeles", jp: "JP · Tokyo", de: "DE · Frankfurt",
+        fr: "FR · Paris", sg: "SG · Singapore",
+    ]
+    // Five proxies + direct → exercises the 4-row cap and the "Other" bucket.
+    return ZStack {
+        LinearGradient(
+            colors: [Color.connectedBackgroundStart, Color.connectedBackgroundEnd],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .ignoresSafeArea()
+        RouteBreakdownCard(
+            routes: [
+                RouteTrafficEntry(target: .proxy(us), bytesIn: 1_200_000_000, bytesOut: 180_000_000),
+                RouteTrafficEntry(target: .proxy(jp), bytesIn: 400_000_000, bytesOut: 100_000_000),
+                RouteTrafficEntry(target: .proxy(de), bytesIn: 120_000_000, bytesOut: 30_000_000),
+                RouteTrafficEntry(target: .proxy(fr), bytesIn: 90_000_000, bytesOut: 20_000_000),
+                RouteTrafficEntry(target: .proxy(sg), bytesIn: 60_000_000, bytesOut: 10_000_000),
+                RouteTrafficEntry(target: .direct, bytesIn: 240_000_000, bytesOut: 40_000_000),
+            ],
+            name: { target in
+                switch target {
+                case .direct: return "Direct"
+                case .reject: return "Reject"
+                case .proxy(let id): return names[id] ?? "Proxy"
+                }
+            }
+        )
+        .padding(24)
     }
 }
 #endif

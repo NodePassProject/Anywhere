@@ -9,12 +9,6 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "DomainRouter")
 
-enum RouteAction {
-    case direct
-    case reject
-    case proxy(UUID)
-}
-
 class DomainRouter {
 
     // MARK: - Tier model
@@ -285,23 +279,23 @@ class DomainRouter {
 
         var isEmpty: Bool { domainRuleCount == 0 && ipRuleCount == 0 }
 
-        mutating func insertSuffix(_ suffix: String, action: RouteAction) {
+        mutating func insertSuffix(_ suffix: String, action: RouteTarget) {
             suffixTrie.insert(suffix: suffix, payload: actionTable.intern(action))
             domainRuleCount += 1
         }
 
-        mutating func insertKeyword(_ pattern: String, action: RouteAction) {
+        mutating func insertKeyword(_ pattern: String, action: RouteTarget) {
             guard !pattern.isEmpty else { return }
             keywordAutomaton.insert(pattern, actionID: actionTable.intern(action))
             domainRuleCount += 1
         }
 
-        mutating func insertIPv4(network: UInt32, prefixLen: Int, action: RouteAction) {
+        mutating func insertIPv4(network: UInt32, prefixLen: Int, action: RouteTarget) {
             ipv4Trie.insert(network: network, prefixLen: prefixLen, actionID: actionTable.intern(action))
             ipRuleCount += 1
         }
 
-        mutating func insertIPv6(network: [UInt8], prefixLen: Int, action: RouteAction) {
+        mutating func insertIPv6(network: [UInt8], prefixLen: Int, action: RouteTarget) {
             ipv6Trie.insert(network: network, prefixLen: prefixLen, actionID: actionTable.intern(action))
             ipRuleCount += 1
         }
@@ -316,7 +310,7 @@ class DomainRouter {
 
         /// Domain Suffix wins over Domain Keyword: only fall back to the
         /// keyword automaton when the suffix trie does not match.
-        func lookupDomain(_ domain: UnsafeBufferPointer<UInt8>) -> RouteAction? {
+        func lookupDomain(_ domain: UnsafeBufferPointer<UInt8>) -> RouteTarget? {
             if let id = suffixTrie.lookup(domain) {
                 return actionTable.resolve(id)
             }
@@ -324,12 +318,12 @@ class DomainRouter {
             return kid == ActionTable.noneID ? nil : actionTable.resolve(kid)
         }
 
-        func lookupIPv4(_ ip: UInt32) -> RouteAction? {
+        func lookupIPv4(_ ip: UInt32) -> RouteTarget? {
             let id = ipv4Trie.lookup(ip)
             return id == ActionTable.noneID ? nil : actionTable.resolve(id)
         }
 
-        func lookupIPv6(hi: UInt64, lo: UInt64) -> RouteAction? {
+        func lookupIPv6(hi: UInt64, lo: UInt64) -> RouteTarget? {
             let id = ipv6Trie.lookup(hi: hi, lo: lo)
             return id == ActionTable.noneID ? nil : actionTable.resolve(id)
         }
@@ -429,7 +423,7 @@ class DomainRouter {
         for rule in entries {
             guard let actionStr = rule["action"] as? String else { continue }
 
-            let action: RouteAction
+            let action: RouteTarget
             if actionStr == "direct" {
                 action = .direct
             } else if actionStr == "reject" {
@@ -512,7 +506,7 @@ class DomainRouter {
     }
 
     /// Matches a domain by walking tiers in priority order. First hit wins.
-    func matchDomain(_ domain: String) -> RouteAction? {
+    func matchDomain(_ domain: String) -> RouteTarget? {
         guard !domain.isEmpty else { return nil }
         // Lowercase once (allocation-free when already lowercase ASCII) and
         // hand the contiguous UTF-8 bytes to every tier, so neither the
@@ -527,7 +521,7 @@ class DomainRouter {
     /// Walks tiers in priority order over already-lowercased UTF-8 bytes.
     /// Iterates by index so the per-tier `TierMatchers` value isn't copied
     /// (which would retain/release all its backing buffers) on each lookup.
-    private func matchDomainBytes(_ bytes: UnsafeBufferPointer<UInt8>) -> RouteAction? {
+    private func matchDomainBytes(_ bytes: UnsafeBufferPointer<UInt8>) -> RouteTarget? {
         for i in tiers.indices {
             if let action = tiers[i].lookupDomain(bytes) { return action }
         }
@@ -535,10 +529,10 @@ class DomainRouter {
     }
 
     /// Matches an IP address against per-tier CIDR tries in priority order.
-    func matchIP(_ ip: String) -> RouteAction? {
+    func matchIP(_ ip: String) -> RouteTarget? {
         guard !ip.isEmpty else { return nil }
 
-        return routingLock.withLock { () -> RouteAction? in
+        return routingLock.withLock { () -> RouteTarget? in
             if ip.contains(":") {
                 var addr = in6_addr()
                 guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
@@ -561,9 +555,9 @@ class DomainRouter {
         }
     }
 
-    /// Resolves a RouteAction to a ProxyConfiguration.
+    /// Resolves a RouteTarget to a ProxyConfiguration.
     /// Returns nil for .direct/.reject or when the configuration UUID is not found.
-    func resolveConfiguration(action: RouteAction) -> ProxyConfiguration? {
+    func resolveConfiguration(action: RouteTarget) -> ProxyConfiguration? {
         switch action {
         case .direct, .reject:
             return nil
@@ -643,11 +637,11 @@ class DomainRouter {
 
 // MARK: - Action interning
 //
-// Each matcher node used to carry an `Optional<RouteAction>` (~32 B due
+// Each matcher node used to carry an `Optional<RouteTarget>` (~32 B due
 // to the `UUID` payload in `.proxy`). For tiers with thousands of CIDR
 // nodes this dominates the per-node footprint. `ActionTable` interns
 // distinct actions into a small `Int16` ID so nodes only need to store
-// a 2-byte handle, and resolves IDs back to `RouteAction` at the tier
+// a 2-byte handle, and resolves IDs back to `RouteTarget` at the tier
 // boundary. `.direct`/`.reject` are reserved IDs so they cost no table
 // space; `.proxy(UUID)` entries dedupe by UUID. `noneID` is the "no
 // action at this node" sentinel.
@@ -664,7 +658,7 @@ fileprivate struct ActionTable {
     private var proxyUUIDs: [UUID] = []
     private var proxyIndex: [UUID: Int16] = [:]
 
-    mutating func intern(_ action: RouteAction) -> Int16 {
+    mutating func intern(_ action: RouteTarget) -> Int16 {
         switch action {
         case .direct: return Self.directID
         case .reject: return Self.rejectID
@@ -677,7 +671,7 @@ fileprivate struct ActionTable {
         }
     }
 
-    func resolve(_ id: Int16) -> RouteAction? {
+    func resolve(_ id: Int16) -> RouteTarget? {
         switch id {
         case Self.noneID: return nil
         case Self.directID: return .direct
@@ -705,7 +699,7 @@ fileprivate struct ActionTable {
 // arena per trie; children are 4-byte indices instead of 8-byte class
 // references, and there is no per-node Swift class header / refcount.
 // Each node carries an `Int16` action ID into the tier's `ActionTable`
-// rather than a fat `Optional<RouteAction>`. The result is 16 B/node
+// rather than a fat `Optional<RouteTarget>`. The result is 16 B/node
 // for IPv4 and 32 B/node for IPv6, vs. ~80 B before.
 //
 // The v4 and v6 tries are deliberately separate types: IPv4 edges only
