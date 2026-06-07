@@ -100,6 +100,7 @@
 				Models/MITMRule.swift,
 				Models/ProxyMode.swift,
 				Models/QUICPolicy.swift,
+				Models/RouteTarget.swift,
 				Models/RoutingRule.swift,
 				Models/TunnelMessage.swift,
 				Networking/ConnectionMetrics.swift,

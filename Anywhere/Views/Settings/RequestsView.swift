@@ -9,6 +9,8 @@ import SwiftUI
 
 struct RequestsView: View {
     @Environment(RequestsModel.self) private var requestsModel
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(ChainStore.self) private var chainStore
     @State private var selection = Set<UUID>()
     @State private var editMode: EditMode = .inactive
 
@@ -45,7 +47,7 @@ struct RequestsView: View {
         } else {
             List(requestsModel.requests.reversed(), selection: $selection) { entry in
                 HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: entry.action.iconName)
+                    Image(systemName: icon(for: entry))
                         .foregroundStyle(.blue)
                         .frame(width: 16)
                     VStack(alignment: .leading, spacing: 4) {
@@ -63,8 +65,8 @@ struct RequestsView: View {
                         HStack(spacing: 4) {
                             Text(entry.proto)
                             Text("·")
-                            Text(entry.action.label)
-                            if let name = entry.configurationName {
+                            Text(label(for: entry))
+                            if let name = routeName(for: entry) {
                                 Text("·")
                                 Text(name).lineLimit(1).truncationMode(.tail)
                             }
@@ -100,24 +102,27 @@ struct RequestsView: View {
             .joined(separator: "\n")
         UIPasteboard.general.string = text
     }
-}
 
-extension TunnelRequestAction {
-    var label: String {
-        switch self {
+    // MARK: - Row formatting
+
+    private func icon(for entry: RequestsModel.Entry) -> String {
+        switch entry.routeTarget {
+        case .direct: "arrow.right.circle.fill"
+        case .reject: "xmark.bin.circle.fill"
+        case .proxy: entry.viaDefault ? "info.circle.fill" : "arrow.trianglehead.turn.up.right.circle.fill"
+        }
+    }
+
+    private func label(for entry: RequestsModel.Entry) -> String {
+        switch entry.routeTarget {
         case .direct: String(localized: "DIRECT")
         case .reject: String(localized: "REJECT")
-        case .proxy: String(localized: "Proxy")
-        case .default: String(localized: "Default")
+        case .proxy: entry.viaDefault ? String(localized: "Default") : String(localized: "Proxy")
         }
     }
     
-    var iconName: String {
-        switch self {
-        case .direct: "arrow.right.circle.fill"
-        case .reject: "xmark.bin.circle.fill"
-        case .proxy: "arrow.trianglehead.turn.up.right.circle.fill"
-        case .default: "info.circle.fill"
-        }
+    private func routeName(for entry: RequestsModel.Entry) -> String? {
+        guard case .proxy = entry.routeTarget else { return nil }
+        return entry.routeTarget.displayName(configStore: configStore, chainStore: chainStore)
     }
 }

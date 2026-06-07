@@ -10,6 +10,33 @@ import NetworkExtension
 
 private let logger = AnywhereLogger(category: "TunnelStack")
 
+// MARK: - Traffic Accounting
+
+/// Per-route cumulative payload byte counts for one tunnel session, keyed by
+/// ``RouteTarget`` — direct and each proxy/chain get their own bucket. Reject
+/// carries no payload, so it never appears. The Upload/Download totals are the
+/// sum across every route, so the UI's headline cards and the per-route
+/// breakdown always reconcile.
+struct TrafficByteCounts {
+    struct ByteCounts: Sendable {
+        var bytesIn: Int64 = 0
+        var bytesOut: Int64 = 0
+    }
+
+    var routes: [RouteTarget: ByteCounts] = [:]
+
+    var totalBytesIn: Int64 { routes.values.reduce(0) { $0 + $1.bytesIn } }
+    var totalBytesOut: Int64 { routes.values.reduce(0) { $0 + $1.bytesOut } }
+
+    mutating func add(bytesIn n: Int64, target: RouteTarget) {
+        routes[target, default: ByteCounts()].bytesIn += n
+    }
+
+    mutating func add(bytesOut n: Int64, target: RouteTarget) {
+        routes[target, default: ByteCounts()].bytesOut += n
+    }
+}
+
 // MARK: - TunnelStack
 
 /// Main coordinator for the tunnel's data plane.
@@ -61,6 +88,13 @@ class TunnelStack {
 
     var packetFlow: NEPacketTunnelFlow?
     var configuration: ProxyConfiguration?
+
+    /// Identity of the default outbound (connections that match no routing rule)
+    /// for the active configuration. Derived from the app's persisted selection
+    /// so a selected chain resolves to its stable chain id rather than the
+    /// composite's throwaway id. Recomputed in ``configureRuntime`` on every
+    /// start/switch. Reset/overwritten before any connection is accepted.
+    var defaultRouteTarget: RouteTarget = .direct
 
     static let ipv4Proto = NSNumber(value: AF_INET)
     static let ipv6Proto = NSNumber(value: AF_INET6)
@@ -184,22 +218,33 @@ class TunnelStack {
     /// Used to gate DomainRouter bypass flags and detect settings changes.
     var bypassCountryCode: String = ""
 
-    /// Global traffic counters (bytes through the tunnel). Incremented from
-    /// ``lwipQueue`` (TCP/netif) and ``udpQueue`` (UDP responses) on the
-    /// downlink, the read callback on the uplink, and read from the NE message
-    /// handler — so every access goes through ``countersLock``. With two
-    /// data-plane queues now writing the downlink counter, an unlocked `+=`
-    /// could drop increments; the critical section is a single add, so the
-    /// per-packet cost stays in the tens of nanoseconds (the lock is all but
-    /// uncontended) while keeping the UI total exact.
+    /// Per-target traffic counters (payload bytes through the tunnel), split by
+    /// routing target (per individual proxy, plus direct) so the UI can render a
+    /// per-route breakdown and a pie chart. Tallied at the connection/flow
+    /// layer, where the routing target is known — ``TCPConnection`` (``writeToLWIP`` /
+    /// ``acknowledgeReceivedBytes``) and ``UDPFlow`` (``handleProxyData`` /
+    /// ``handleReceivedData``) — rather than at the netif, which sees only
+    /// target-agnostic IP packets. These are therefore payload bytes, not wire
+    /// bytes: TCP/IP headers, ACKs, retransmits, and locally-synthesized DNS
+    /// responses are excluded. Rejected connections carry no payload and are
+    /// intentionally not recorded.
+    ///
+    /// Incremented from ``lwipQueue`` (TCP) and ``udpQueue`` (UDP) and read from
+    /// the NE message handler — so every access goes through ``countersLock``.
+    /// With both data-plane queues writing, an unlocked `+=` could drop
+    /// increments; the critical section is a single add, so the per-chunk cost
+    /// stays in the tens of nanoseconds (the lock is all but uncontended) while
+    /// keeping the UI totals exact.
     private let countersLock = UnfairLock()
-    private var _totalBytesIn: Int64 = 0
-    private var _totalBytesOut: Int64 = 0
-    var totalBytesIn: Int64 { countersLock.withLock { _totalBytesIn } }
-    var totalBytesOut: Int64 { countersLock.withLock { _totalBytesOut } }
-    func addBytesIn(_ n: Int64) { countersLock.withLock { _totalBytesIn += n } }
-    func addBytesOut(_ n: Int64) { countersLock.withLock { _totalBytesOut += n } }
-    func resetByteCounters() { countersLock.withLock { _totalBytesIn = 0; _totalBytesOut = 0 } }
+    private var _byteCounts = TrafficByteCounts()
+    func addBytesIn(_ n: Int64, target: RouteTarget) {
+        countersLock.withLock { _byteCounts.add(bytesIn: n, target: target) }
+    }
+    func addBytesOut(_ n: Int64, target: RouteTarget) {
+        countersLock.withLock { _byteCounts.add(bytesOut: n, target: target) }
+    }
+    /// Snapshot of all per-target counters, read once per stats poll.
+    var byteCounts: TrafficByteCounts { countersLock.withLock { _byteCounts } }
 
     // MARK: - Live Connection Counts
     //
@@ -454,6 +499,14 @@ class TunnelStack {
     // MARK: - Runtime Configuration
 
     func configureRuntime(for configuration: ProxyConfiguration) {
+        // Default-route identity: prefer the app's persisted selection (a chain
+        // keeps its stable chain id; a plain config keeps its config id), falling
+        // back to the dialing config's id. Never derived from a composited
+        // chain's throwaway id, so the app can always resolve the name.
+        defaultRouteTarget = AWCore.getSelectedChainId().map(RouteTarget.proxy)
+            ?? AWCore.getSelectedConfigurationId().map(RouteTarget.proxy)
+            ?? .proxy(configuration.id)
+
         loadIPv6Settings()
         loadBypassCountry()
         loadEncryptedDNSSetting()

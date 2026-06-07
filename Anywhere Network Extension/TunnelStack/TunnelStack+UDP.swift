@@ -167,23 +167,24 @@ extension TunnelStack {
 
         var dstHost = dstIPString
         var flowConfiguration = defaultConfiguration
-        var forceBypass = false
+        // Committed routing identity (defaults to the active default outbound).
+        // Drives the dial path and the QUIC automatic-mode check below.
+        var routeTarget = defaultRouteTarget
         var dstIsDomain = false
 
-        var requestAction: TunnelRequestAction = .default
-        var requestConfigName: String? = defaultConfiguration.name
+        // True until a routing rule matches — i.e. the default outbound is used.
+        var viaDefault = true
 
         switch resolveFakeIP(dstIPString, dstPort: datagram.dstPort, proto: "UDP") {
         case .passthrough:
             // Real IP — check IP CIDR rules
             if let action = domainRouter.matchIP(dstIPString) {
+                viaDefault = false
                 switch action {
                 case .direct:
-                    forceBypass = true
-                    requestAction = .direct
-                    requestConfigName = nil
+                    routeTarget = .direct
                 case .reject:
-                    requestLog.record(proto: "UDP", host: dstIPString, port: datagram.dstPort, action: .reject)
+                    requestLog.record(proto: "UDP", host: dstIPString, port: datagram.dstPort, routeTarget: .reject)
                     logger.debug("[UDP] IP rejected by routing rule: \(dstIPString):\(datagram.dstPort)")
                     sendICMPPortUnreachable(
                         srcIP: srcIPData,
@@ -194,31 +195,34 @@ extension TunnelStack {
                         udpPayloadLength: payload.count
                     )
                     return
-                case .proxy(_):
-                    requestAction = .proxy
+                case .proxy(let id):
+                    routeTarget = .proxy(id)
                     if let configuration = domainRouter.resolveConfiguration(action: action) {
                         flowConfiguration = configuration
-                        requestConfigName = configuration.name
                     } else {
                         logger.warning("[UDP] Routing config not found for \(dstIPString)")
-                        requestConfigName = nil
                     }
                 }
             }
-        case .resolved(let domain, let configurationOverride, let bypass):
+        case .resolved(let domain, let target, let configuration):
             dstHost = domain
             dstIsDomain = true
-            if let configuration = configurationOverride {
-                flowConfiguration = configuration
-                requestAction = .proxy
-                requestConfigName = configuration.name
-            } else if bypass {
-                requestAction = .direct
-                requestConfigName = nil
+            // `target == nil` → no domain rule matched; keep the default route.
+            switch target {
+            case .direct:
+                routeTarget = .direct
+                viaDefault = false
+            case .proxy(let id):
+                routeTarget = .proxy(id)
+                viaDefault = false
+                if let configuration {
+                    flowConfiguration = configuration
+                }
+            case .reject, .none:
+                break
             }
-            forceBypass = bypass
         case .drop(let domain):
-            requestLog.record(proto: "UDP", host: domain, port: datagram.dstPort, action: .reject)
+            requestLog.record(proto: "UDP", host: domain, port: datagram.dstPort, routeTarget: .reject)
             sendICMPPortUnreachable(
                 srcIP: srcIPData,
                 srcPort: datagram.srcPort,
@@ -250,12 +254,13 @@ extension TunnelStack {
         // flows are already dropped) carrying a real resolved domain. Blocked
         // decided before routing; Unblocked never drops; neither touches the
         // trie here. When we do drop a bypassed flow it can only be MITM.
+        let isProxied = routeTarget.configurationID != nil
         if datagram.dstPort == 443,
            cfg.quicPolicy.blocksResolvedQUIC(
-               isProxied: !forceBypass,
+               isProxied: isProxied,
                mitmListed: dstIsDomain && cfg.mitmEnabled && mitmPolicy.matches(dstHost)
            ) {
-            logger.debug("[UDP] QUIC blocked (automatic): \(dstHost):443 reason=\(forceBypass ? "mitm" : "proxied")")
+            logger.debug("[UDP] QUIC blocked (automatic): \(dstHost):443 reason=\(isProxied ? "proxied" : "mitm")")
             sendICMPPortUnreachable(
                 srcIP: srcIPData,
                 srcPort: datagram.srcPort,
@@ -271,8 +276,8 @@ extension TunnelStack {
             proto: "UDP",
             host: dstHost,
             port: datagram.dstPort,
-            action: requestAction,
-            configurationName: requestConfigName
+            routeTarget: routeTarget,
+            viaDefault: viaDefault
         )
 
         let flow = UDPFlow(
@@ -285,7 +290,7 @@ extension TunnelStack {
             dstIPData: dstIPData,
             isIPv6: isIPv6,
             configuration: flowConfiguration,
-            forceBypass: forceBypass,
+            routeTarget: routeTarget,
             flowQueue: udpQueue
         )
         evictUDPFlowsToAdmit()
@@ -311,12 +316,6 @@ extension TunnelStack {
             logger.debug("[UDP] Dropped outbound datagram: build failed (len=\(payload.count), v6=\(isIPv6))")
             return
         }
-        // Tally downlink bytes here: the former lwIP udp_sendto path was counted
-        // in the netif output callback, but enqueueOutbound bypasses it. (ICMP
-        // unreachables call enqueueOutbound directly and stay uncounted, as they
-        // were before.) ``addBytesIn`` is lock-guarded, so this is safe from
-        // udpQueue concurrently with the TCP netif tally on lwipQueue.
-        addBytesIn(Int64(packet.count))
         enqueueOutbound(packet, isIPv6: isIPv6)
     }
 }

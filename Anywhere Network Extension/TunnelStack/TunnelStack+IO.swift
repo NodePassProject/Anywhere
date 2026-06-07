@@ -131,33 +131,31 @@ extension TunnelStack {
 
             // Partition on the read-callback thread — only a cheap version/proto
             // header peek per packet (``UDPPacket/ipProtocol``); the heavier
-            // ``parse`` runs on udpQueue. Tally uplink bytes once for the whole
-            // batch regardless of how it splits.
+            // ``parse`` runs on udpQueue. Uplink bytes are tallied per-target
+            // downstream (``TCPConnection.acknowledgeReceivedBytes`` /
+            // ``UDPFlow.handleReceivedData``), where the routing target is known —
+            // not here, where the batch is still target-agnostic IP packets.
             //
             // Reflected packets (destination matches a configured reflection
             // address) are bounced straight back into the TUN here, before the
             // partition — they never reach lwIP, the UDP path, routing, or the
             // proxy. The snapshot is read once per batch (off ``reflector()``);
             // when the feature is off it's ``isActive == false`` and the whole
-            // branch is skipped. Reflected bytes are local, so they're excluded
-            // from the uplink tally.
+            // branch is skipped.
             let reflector = self.reflector()
             var udpBatch: [Data] = []
             var lwipBatch: [Data] = []
-            var uploadBytes: Int64 = 0
             for packet in packets {
                 if reflector.isActive, let reflected = reflector.reflect(packet) {
                     self.enqueueOutbound(reflected.data, isIPv6: reflected.isIPv6)
                     continue
                 }
-                uploadBytes += Int64(packet.count)
                 if let info = UDPPacket.ipProtocol(of: packet), info.proto == UDPPacket.ipProtocolUDP {
                     udpBatch.append(packet)
                 } else {
                     lwipBatch.append(packet)
                 }
             }
-            self.addBytesOut(uploadBytes)
 
             switch (lwipBatch.isEmpty, udpBatch.isEmpty) {
             case (true, true):

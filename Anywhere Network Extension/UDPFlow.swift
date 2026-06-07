@@ -65,7 +65,18 @@ class UDPFlow {
     private var muxSession: MuxSession?
 
     private var proxyConnecting = false
-    private var forceBypass = false
+
+    /// Committed routing identity for this flow — the single source of truth for
+    /// traffic accounting and the dial path. Fixed at creation (UDP has no SNI
+    /// re-routing).
+    private let routeTarget: RouteTarget
+
+    /// Dial straight out iff the committed route is ``RouteTarget/direct``.
+    private var bypass: Bool {
+        if case .direct = routeTarget { return true }
+        return false
+    }
+
     private var pendingData: [Data] = []  // always raw payloads (framing deferred to send time)
     private var pendingBufferSize = 0      // current total size of pendingData
     private var didWarnPendingOverflow = false
@@ -83,7 +94,7 @@ class UDPFlow {
          srcIPData: Data, dstIPData: Data,
          isIPv6: Bool,
          configuration: ProxyConfiguration,
-         forceBypass: Bool = false,
+         routeTarget: RouteTarget,
          flowQueue: DispatchQueue) {
         self.flowKey = flowKey
         self.srcHost = srcHost
@@ -94,7 +105,7 @@ class UDPFlow {
         self.dstIPBytes = dstIPData
         self.isIPv6 = isIPv6
         self.configuration = configuration
-        self.forceBypass = forceBypass
+        self.routeTarget = routeTarget
         self.flowQueue = flowQueue
     }
 
@@ -181,6 +192,8 @@ class UDPFlow {
     func handleReceivedData(_ data: Data, payloadLength: Int) {
         guard !closed else { return }
         lastActivity = MonotonicClock.now
+        
+        TunnelStack.shared?.addBytesOut(Int64(payloadLength), target: routeTarget)
 
         // Buffer data while the outbound connection is being established.
         // directSocket is set before its socket connects; sending to an
@@ -261,7 +274,7 @@ class UDPFlow {
     private func connectProxy() {
         guard !proxyConnecting && proxyConnection == nil && muxSession == nil && directSocket == nil && ssUDPSession == nil && !closed else { return }
 
-        if forceBypass {
+        if bypass {
             connectDirectUDP()
             return
         }
@@ -590,6 +603,8 @@ class UDPFlow {
             // First reply promotes the flow from the 30s unreplied timeout to
             // the 120s established one (see ``idleDeadline``).
             self.hasSeenReply = true
+            
+            TunnelStack.shared?.addBytesIn(Int64(data.count), target: self.routeTarget)
 
             // Emit the UDP response back to the app, swapping the 5-tuple:
             // response source = original destination, dest = original source.

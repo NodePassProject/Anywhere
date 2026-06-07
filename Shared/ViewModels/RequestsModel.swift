@@ -20,8 +20,8 @@ class RequestsModel {
         let proto: String
         let host: String
         let port: UInt16
-        let action: TunnelRequestAction
-        let configurationName: String?
+        let routeTarget: RouteTarget
+        let viaDefault: Bool
     }
 
     private(set) var requests: [Entry] = []
@@ -78,8 +78,8 @@ class RequestsModel {
                 proto: entry.proto,
                 host: entry.host,
                 port: entry.port,
-                action: entry.action,
-                configurationName: entry.configurationName
+                routeTarget: entry.routeTarget,
+                viaDefault: entry.viaDefault
             )
         }
     }

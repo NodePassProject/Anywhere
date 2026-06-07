@@ -272,7 +272,7 @@ extension TunnelStack {
             dstIPData: dstIPData,     // reply source → the Anywhere resolver address
             isIPv6: isIPv6,
             configuration: configuration,
-            forceBypass: false,       // proxy it, mirroring the public-resolver path
+            routeTarget: defaultRouteTarget,   // proxied via the default outbound
             flowQueue: udpQueue
         )
         evictUDPFlowsToAdmit()
