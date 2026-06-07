@@ -111,8 +111,13 @@ int  lwip_bridge_tcp_snd_queuelen(void *pcb);
 /* UDP is handled in Swift (UDPPacket / TunnelStack+UDP), so lwIP is built
  * TCP-only (LWIP_UDP=0) and exposes no UDP bridge entry points. */
 
-/* --- Timer --- */
-void lwip_bridge_check_timeouts(void);
+/* --- Timer ---
+ *
+ * Services lwIP's timeout list (TCP retransmit, persist, TIME_WAIT, etc.).
+ * Returns nonzero once nothing remains pending, so the caller can suspend the
+ * periodic tick until fresh input re-arms it; zero while timeouts are still due.
+ * Must be called on lwipQueue. */
+int lwip_bridge_check_timeouts(void);
 
 /* --- IP address utility --- */
 

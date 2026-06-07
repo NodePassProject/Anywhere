@@ -172,6 +172,14 @@ class TunnelStack {
     /// lwIP periodic timeout timer
     var timeoutTimer: DispatchSourceTimer?
 
+    /// True while ``timeoutTimer`` is suspended because lwIP reported no pending
+    /// timeouts (idle tunnel). The tick re-arms from the inbound-TCP path
+    /// (``feedLwip``). Confined to ``lwipQueue`` — set only in the tick handler,
+    /// ``feedLwip``, and ``shutdownInternal``, all of which run there — so it
+    /// faithfully tracks the source's suspend count, keeping suspend/resume
+    /// balanced (releasing a suspended `DispatchSource` traps).
+    var lwipTickSuspended = false
+
     /// Active bypass country code (empty = disabled).
     /// Used to gate DomainRouter bypass flags and detect settings changes.
     var bypassCountryCode: String = ""

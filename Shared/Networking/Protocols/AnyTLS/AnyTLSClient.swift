@@ -197,7 +197,8 @@ nonisolated final class AnyTLSClient {
         let timer = DispatchSource.makeTimerSource(queue: timerQueue)
         timer.schedule(
             deadline: .now() + idleSessionCheckInterval,
-            repeating: idleSessionCheckInterval
+            repeating: idleSessionCheckInterval,
+            leeway: .milliseconds(Int(idleSessionCheckInterval * 100))
         )
         timer.setEventHandler { [weak self] in
             self?.runIdleCleanup()

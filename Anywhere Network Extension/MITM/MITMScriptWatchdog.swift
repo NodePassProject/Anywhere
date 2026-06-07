@@ -82,7 +82,8 @@ enum MITMScriptWatchdog {
         let timer = DispatchSource.makeTimerSource(queue: monitorQueue)
         timer.schedule(
             deadline: .now() + .seconds(checkIntervalSeconds),
-            repeating: .seconds(checkIntervalSeconds)
+            repeating: .seconds(checkIntervalSeconds),
+            leeway: .seconds(1)
         )
         timer.setEventHandler { checkInFlightSpan() }
         timer.resume()

@@ -476,8 +476,13 @@ int lwip_bridge_tcp_snd_queuelen(void *pcb) {
  *  Timer
  * ======================================================================== */
 
-void lwip_bridge_check_timeouts(void) {
+int lwip_bridge_check_timeouts(void) {
     sys_check_timeouts();
+    /* With every cyclic timer but tcp_tmr disabled at build time (see
+     * lwipopts.h), an empty timeout list means no TCP PCB is active or in
+     * TIME_WAIT — nothing to tick for. Report that so the caller can suspend the
+     * tick until fresh input revives it. */
+    return sys_timeouts_sleeptime() == SYS_TIMEOUTS_SLEEPTIME_INFINITE;
 }
 
 /* ========================================================================
