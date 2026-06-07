@@ -11,6 +11,7 @@ struct AdvancedSettingsView: View {
     @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
     @State private var hideVPNIcon = AWCore.getHideVPNIcon()
     @State private var quicPolicy = AWCore.getQUICPolicy()
+    @State private var blockWebRTC = AWCore.getBlockWebRTC()
     @State private var remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
     
     @State private var showHideVPNIconAlert = false
@@ -59,6 +60,14 @@ struct AdvancedSettingsView: View {
                         Text(policy.title).tag(policy)
                     }
                 }
+                Toggle("Block WebRTC", isOn: Binding(
+                    get: { blockWebRTC },
+                    set: { newValue in
+                        blockWebRTC = newValue
+                        AWCore.setBlockWebRTC(newValue)
+                        AWCore.notifyTunnelSettingsChanged()
+                    }
+                ))
                 NavigationLink("IPv6") {
                     IPv6SettingsView()
                 }
