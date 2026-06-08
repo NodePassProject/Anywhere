@@ -30,6 +30,9 @@ struct QUICSessionTicket {
 enum QUICSessionTicketCache {
     private static let lock = UnfairLock()
     private static var cache: [String: QUICSessionTicket] = [:]
+    /// Upper bound on cached tickets, keeping the cache scoped to recently
+    /// contacted servers. Entries are small (a few hundred bytes to low KB).
+    private static let maxEntries = 64
 
     private static func key(serverName: String, alpn: [String]) -> String {
         "\(serverName)\u{0}\(alpn.joined(separator: ","))"
@@ -47,6 +50,15 @@ enum QUICSessionTicketCache {
         let k = key(serverName: serverName, alpn: alpn)
         lock.lock(); defer { lock.unlock() }
         cache[k] = ticket
+        guard cache.count > maxEntries else { return }
+        // Over budget: drop expired tickets first, then — if still over — the
+        // oldest by issue time. Release on demand rather than growing forever.
+        let now = CFAbsoluteTimeGetCurrent()
+        cache = cache.filter { now - $0.value.createdAt < Double($0.value.lifetime) }
+        while cache.count > maxEntries,
+              let oldest = cache.min(by: { $0.value.createdAt < $1.value.createdAt })?.key {
+            cache.removeValue(forKey: oldest)
+        }
     }
 
     /// Drops any cached ticket for (serverName, alpn) so the next handshake

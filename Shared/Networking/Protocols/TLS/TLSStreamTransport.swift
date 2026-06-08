@@ -92,6 +92,9 @@ nonisolated class TLSStreamTransport {
                 self.isReady = true
                 completion(nil)
             case .failure(let error):
+                // Release the client's socket on demand. TLSClient also self-cleans
+                // on failure, but cancel here keeps teardown explicit at the boundary.
+                self.tlsClient?.cancel()
                 self.tlsClient = nil
                 completion(error)
             }

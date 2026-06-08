@@ -106,6 +106,7 @@ nonisolated class TLSClient {
         port: UInt16,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
+        let completion = releasingConnectionOnFailure(completion)
         ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
 
         guard let privateKey = ephemeralPrivateKey else {
@@ -154,6 +155,7 @@ nonisolated class TLSClient {
         overTunnel tunnel: ProxyConnection,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
+        let completion = releasingConnectionOnFailure(completion)
         ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
         self.connection = TunneledTransport(tunnel: tunnel)
         performTLSHandshake(completion: completion)
@@ -164,6 +166,28 @@ nonisolated class TLSClient {
         clearHandshakeState()
         connection?.forceCancel()
         connection = nil
+    }
+
+    /// Wraps a handshake completion so that any failure result tears down the
+    /// in-flight `connection` immediately — release on demand, not via `deinit`.
+    ///
+    /// On success the socket has already been handed off to the
+    /// `TLSRecordConnection` and `connection` is nil, so this fires only on the
+    /// failure paths. Without it, a failed handshake leaves the connected
+    /// `RawTCPSocket` alive with its fd open and read/write sources armed until
+    /// the owner happens to call `cancel()` — and several owners don't, leaking
+    /// the fd (and risking an un-cancelled dispatch-source release).
+    private func releasingConnectionOnFailure(
+        _ completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
+    ) -> (Result<TLSRecordConnection, Error>) -> Void {
+        return { [weak self] result in
+            if case .failure = result {
+                self?.connection?.forceCancel()
+                self?.connection = nil
+                self?.clearHandshakeState()
+            }
+            completion(result)
+        }
     }
 
     // MARK: - Handshake

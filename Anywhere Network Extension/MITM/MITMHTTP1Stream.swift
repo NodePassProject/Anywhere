@@ -414,6 +414,12 @@ final class MITMHTTP1Stream {
         torn = true
         parkedCompletion = nil
         pendingPreParkOutput = Data()
+        // Drop any in-flight streaming-script state (a FrameCursor JSValue plus a
+        // buffered chunk, carried inside `.streamingChunked`) and the parse
+        // buffer now, rather than pinning them until the session releases this
+        // stream. The torn guards in the feed paths make `.passthrough` inert.
+        mode = .passthrough
+        rxBuffer = MITMByteBuffer()
     }
 
     /// Forces this stream into permanent passthrough and returns whatever
