@@ -15,6 +15,8 @@ struct HomeView: View {
     @Environment(SubscriptionStore.self) private var subscriptionStore
 
     @Namespace private var namespace
+    
+    @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
@@ -47,7 +49,7 @@ struct HomeView: View {
             GeometryReader { geometry in
                 ScrollView {
                     LazyVStack(spacing: 16, pinnedViews: [.sectionHeaders]) {
-                        if isConnected {
+                        if isConnected && experimentalEnabled {
                             Section {
                                 ConnectionStatsView()
                             } header: {
@@ -69,6 +71,9 @@ struct HomeView: View {
                 }
                 .scrollBounceBehavior(.basedOnSize, axes: .vertical)
             }
+        }
+        .onAppear {
+            experimentalEnabled = AWCore.getExperimentalEnabled()
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
@@ -141,13 +146,13 @@ struct HomeView: View {
                 if #available(iOS 26.0, *) {
                     Circle()
                         .fill(.clear)
-                        .frame(width: isConnected ? 50 : 140)
+                        .frame(width: (isConnected && experimentalEnabled) ? 50 : 140)
                         .glassEffect(.clear, in: .circle)
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 } else {
                     Circle()
                         .fill(.white.opacity(0.2))
-                        .frame(width: isConnected ? 50 : 140)
+                        .frame(width: (isConnected && experimentalEnabled) ? 50 : 140)
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 }
 
@@ -157,7 +162,7 @@ struct HomeView: View {
                         .tint(isConnected ? .white : .accentColor)
                 } else {
                     Image(systemName: "power")
-                        .font(.system(size: isConnected ? 24 : 40, weight: .light))
+                        .font(.system(size: (isConnected && experimentalEnabled) ? 24 : 40, weight: .light))
                         .foregroundStyle(isConnected ? .white : .accentColor)
                 }
             }
