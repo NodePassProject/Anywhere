@@ -224,6 +224,7 @@ struct HomeView: View {
                     Text(configuration.name)
                         .font(.body.weight(.medium))
                         .foregroundStyle(isConnected ? .white : .primary)
+                        .lineLimit(1)
                     Spacer()
                     Image(systemName: "chevron.up.chevron.down")
                         .font(.caption.weight(.semibold))
