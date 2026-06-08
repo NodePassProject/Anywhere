@@ -485,6 +485,28 @@ nonisolated final class BlockingProxyStream {
             return data
         }
     }
+    
+    func readSomeAsync(max: Int, completion: @escaping (Data?, Error?) -> Void) {
+        guard max > 0 else { completion(Data(), nil); return }
+        let buffered: Data? = readLock.withLock { pending.isEmpty ? nil : pending.read(max: max) }
+        if let buffered { completion(buffered, nil); return }
+        if isClosed { completion(nil, SudokuNativeError.closed); return }
+        connection.receiveRaw { [weak self] data, error in
+            guard let self else { completion(nil, SudokuNativeError.closed); return }
+            if let error { completion(nil, error); return }
+            guard let data, !data.isEmpty else {
+                self.markClosed()
+                completion(nil, SudokuNativeError.closed)
+                return
+            }
+            if data.count > max {
+                self.readLock.withLock { self.pending.append(data, from: max) }
+                completion(data.prefixData(max), nil)
+            } else {
+                completion(data, nil)
+            }
+        }
+    }
 
     func readExact(_ count: Int) throws -> Data {
         guard count > 0 else { return Data() }
@@ -943,6 +965,8 @@ nonisolated final class SudokuHTTPMaskTransport {
     private var closePath = ""
     private let earlyRequestPayload: Data?
     private(set) var earlyResponsePayload = Data()
+    private var pendingReceive: ((Data?, Error?) -> Void)?
+    private var pendingMax = 0
 
     init(config: SudokuNativeConfig, factory: SudokuConnectionFactory, mode: SudokuHTTPMaskMode, earlyRequestPayload: Data? = nil) throws {
         self.config = config
@@ -976,6 +1000,27 @@ nonisolated final class SudokuHTTPMaskTransport {
         if rxQueue.isEmpty { rxQueue.removeAll(keepingCapacity: false) }
         condition.signal()
         return out
+    }
+    
+    func receiveAsync(max: Int, completion: @escaping (Data?, Error?) -> Void) {
+        var deliver: (() -> Void)?
+        condition.lock()
+        if !rxQueue.isEmpty {
+            let out = rxQueue.read(max: max)
+            if rxQueue.isEmpty { rxQueue.removeAll(keepingCapacity: false) }
+            condition.signal()
+            deliver = { completion(out, nil) }
+        } else if closed {
+            let err: Error = fatal ? SudokuNativeError.connectionFailed("HTTPMask closed") : SudokuNativeError.closed
+            deliver = { completion(nil, err) }
+        } else if pendingReceive != nil {
+            deliver = { completion(nil, SudokuNativeError.protocolError("concurrent httpMask receive")) }
+        } else {
+            pendingMax = max
+            pendingReceive = completion
+        }
+        condition.unlock()
+        deliver?()
     }
 
     func close() {
@@ -1077,11 +1122,18 @@ nonisolated final class SudokuHTTPMaskTransport {
     }
 
     private func markClosed(fatal: Bool) {
+        var deliver: (() -> Void)?
         condition.lock()
         self.fatal = self.fatal || fatal
         closed = true
+        if let pending = pendingReceive {
+            pendingReceive = nil
+            let err: Error = self.fatal ? SudokuNativeError.connectionFailed("HTTPMask closed") : SudokuNativeError.closed
+            deliver = { pending(nil, err) }
+        }
         condition.broadcast()
         condition.unlock()
+        deliver?()
     }
 
     private func pullLoop() {
@@ -1125,6 +1177,19 @@ nonisolated final class SudokuHTTPMaskTransport {
 
     private func enqueueRX(_ data: Data) {
         condition.lock()
+        if !closed, let pending = pendingReceive {
+            pendingReceive = nil
+            let out: Data
+            if data.count <= pendingMax {
+                out = data
+            } else {
+                out = data.prefixData(pendingMax)
+                rxQueue.append(data, from: pendingMax)
+            }
+            condition.unlock()
+            pending(out, nil)
+            return
+        }
         let queueLimit = max(sudokuHTTPMaskMaxQueueBytes, data.count)
         while rxQueue.count + data.count > queueLimit && !closed {
             condition.wait()
@@ -1236,6 +1301,64 @@ nonisolated final class SudokuObfsTransport {
         var out = Data(capacity: count)
         while out.count < count { out.append(try receive(max: count - out.count)) }
         return out
+    }
+    
+    func receiveAsync(max: Int, completion: @escaping (Data?, Error?) -> Void) {
+        guard max > 0 else { completion(Data(), nil); return }
+        let pending: Data
+        do {
+            pending = try readLock.withLock { try drainDecoderPending(max: max) }
+        } catch {
+            completion(nil, error)
+            return
+        }
+        if !pending.isEmpty { completion(pending, nil); return }
+        let wireMax = sudokuObfsWireReadSize(decodedRemaining: max, pureDownlink: pureDownlink, maxRaw: sudokuObfsReadChunkSize)
+        receiveWireAsync(max: wireMax) { [weak self] wireData, error in
+            guard let self else { completion(nil, SudokuNativeError.closed); return }
+            if let error { completion(nil, error); return }
+            guard let wireData else { completion(nil, SudokuNativeError.closed); return }
+            let out: Data
+            do {
+                out = try self.readLock.withLock {
+                    try self.tables.withDownlink { table -> Data in
+                        if self.pureDownlink {
+                            return try self.pureDecoder.decode(wireData, table: table, limit: max)
+                        }
+                        return try self.packedDecoder.decode(wireData, table: table, limit: max)
+                    }
+                }
+            } catch {
+                completion(nil, error)
+                return
+            }
+            if out.isEmpty {
+                self.receiveAsync(max: max, completion: completion)
+            } else {
+                completion(out, nil)
+            }
+        }
+    }
+
+    func readExactAsync(_ count: Int, completion: @escaping (Data?, Error?) -> Void) {
+        guard count > 0 else { completion(Data(), nil); return }
+        var out = Data(capacity: count)
+        func step() {
+            receiveAsync(max: count - out.count) { data, error in
+                if let error { completion(nil, error); return }
+                guard let data, !data.isEmpty else { completion(nil, SudokuNativeError.closed); return }
+                out.append(data)
+                if out.count >= count { completion(out, nil) } else { step() }
+            }
+        }
+        step()
+    }
+
+    private func receiveWireAsync(max: Int, completion: @escaping (Data?, Error?) -> Void) {
+        switch wire {
+        case .stream(let stream): stream.readSomeAsync(max: max, completion: completion)
+        case .httpMask(let mask): mask.receiveAsync(max: max, completion: completion)
+        }
     }
 
     func close() {
@@ -1357,28 +1480,14 @@ nonisolated final class SudokuRecordStream {
                 } catch SudokuNativeError.closed {
                     throw SudokuNativeError.protocolError("truncated record length")
                 }
-                let bodyLen = Int(UInt16(lenData[0]) << 8 | UInt16(lenData[1]))
-                guard bodyLen >= 12 && bodyLen <= 65535 else { throw SudokuNativeError.protocolError("bad record length") }
+                let bodyLen = try Self.parseRecordLength(lenData)
                 let body: Data
                 do {
                     body = try transport.readExact(bodyLen)
                 } catch SudokuNativeError.closed {
                     throw SudokuNativeError.protocolError("truncated record body")
                 }
-                let epoch = body.uint32BE(at: 0)
-                let seq = body.uint64BE(at: 4)
-                if recvInitialized {
-                    if epoch < recvEpoch { throw SudokuNativeError.protocolError("replayed record epoch") }
-                    if epoch == recvEpoch && seq != recvSeq { throw SudokuNativeError.protocolError("out of order record") }
-                    if epoch > recvEpoch && epoch - recvEpoch > 8 { throw SudokuNativeError.protocolError("record epoch jump") }
-                }
-                let header = body.prefixData(12)
-                let ciphertext = body.rangeData(offset: 12, count: bodyLen - 12)
-                let key = SudokuNativeCrypto.recordEpochKey(base: baseRecv, method: method, epoch: epoch)
-                let plain = try SudokuNativeCrypto.open(method: method, key: key, nonce: header, ciphertext: ciphertext, aad: header)
-                recvEpoch = epoch
-                recvSeq = seq + 1
-                recvInitialized = true
+                let plain = try decryptRecord(body: body, bodyLen: bodyLen)
                 if plain.isEmpty { continue }
                 if plain.count > max {
                     readBuffer.append(plain, from: max)
@@ -1394,6 +1503,88 @@ nonisolated final class SudokuRecordStream {
         var out = Data(capacity: count)
         while out.count < count { out.append(try receive(max: count - out.count)) }
         return out
+    }
+    
+    func receiveAsync(max: Int, completion: @escaping (Data?, Error?) -> Void) {
+        guard max > 0 else { completion(Data(), nil); return }
+        let buffered: Data? = readLock.withLock { readBuffer.isEmpty ? nil : readBuffer.read(max: max) }
+        if let buffered { completion(buffered, nil); return }
+        if readLock.withLock({ method == .none }) {
+            transport.receiveAsync(max: max, completion: completion)
+            return
+        }
+        transport.readExactAsync(2) { [weak self] lenData, error in
+            guard let self else { completion(nil, SudokuNativeError.closed); return }
+            if let error { completion(nil, Self.mapTruncation(error, what: "record length")); return }
+            guard let lenData else { completion(nil, SudokuNativeError.protocolError("truncated record length")); return }
+            let bodyLen: Int
+            do { bodyLen = try Self.parseRecordLength(lenData) } catch { completion(nil, error); return }
+            self.transport.readExactAsync(bodyLen) { body, error in
+                if let error { completion(nil, Self.mapTruncation(error, what: "record body")); return }
+                guard let body else { completion(nil, SudokuNativeError.protocolError("truncated record body")); return }
+                let result: Result<Data?, Error> = self.readLock.withLock {
+                    do {
+                        let plain = try self.decryptRecord(body: body, bodyLen: bodyLen)
+                        if plain.isEmpty { return .success(nil) }
+                        if plain.count > max {
+                            self.readBuffer.append(plain, from: max)
+                            return .success(plain.prefixData(max))
+                        }
+                        return .success(plain)
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+                switch result {
+                case .failure(let e): completion(nil, e)
+                case .success(.some(let out)): completion(out, nil)
+                case .success(.none): self.receiveAsync(max: max, completion: completion)
+                }
+            }
+        }
+    }
+
+    func readExactAsync(_ count: Int, completion: @escaping (Data?, Error?) -> Void) {
+        guard count > 0 else { completion(Data(), nil); return }
+        var out = Data(capacity: count)
+        func step() {
+            receiveAsync(max: count - out.count) { data, error in
+                if let error { completion(nil, error); return }
+                guard let data, !data.isEmpty else { completion(nil, SudokuNativeError.closed); return }
+                out.append(data)
+                if out.count >= count { completion(out, nil) } else { step() }
+            }
+        }
+        step()
+    }
+    
+    private static func parseRecordLength(_ lenData: Data) throws -> Int {
+        let bodyLen = Int(UInt16(lenData[0]) << 8 | UInt16(lenData[1]))
+        guard bodyLen >= 12 && bodyLen <= 65535 else { throw SudokuNativeError.protocolError("bad record length") }
+        return bodyLen
+    }
+    
+    private func decryptRecord(body: Data, bodyLen: Int) throws -> Data {
+        let epoch = body.uint32BE(at: 0)
+        let seq = body.uint64BE(at: 4)
+        if recvInitialized {
+            if epoch < recvEpoch { throw SudokuNativeError.protocolError("replayed record epoch") }
+            if epoch == recvEpoch && seq != recvSeq { throw SudokuNativeError.protocolError("out of order record") }
+            if epoch > recvEpoch && epoch - recvEpoch > 8 { throw SudokuNativeError.protocolError("record epoch jump") }
+        }
+        let header = body.prefixData(12)
+        let ciphertext = body.rangeData(offset: 12, count: bodyLen - 12)
+        let key = SudokuNativeCrypto.recordEpochKey(base: baseRecv, method: method, epoch: epoch)
+        let plain = try SudokuNativeCrypto.open(method: method, key: key, nonce: header, ciphertext: ciphertext, aad: header)
+        recvEpoch = epoch
+        recvSeq = seq + 1
+        recvInitialized = true
+        return plain
+    }
+
+    private static func mapTruncation(_ error: Error, what: String) -> Error {
+        if case SudokuNativeError.closed = error { return SudokuNativeError.protocolError("truncated \(what)") }
+        return error
     }
 
     func close() { transport.close() }
@@ -1824,6 +2015,8 @@ nonisolated final class SudokuMuxStream {
     private let condition = NSCondition()
     private var queue = SudokuDataQueue()
     private var closed = false
+    private var pendingReceive: ((Data?, Error?) -> Void)?
+    private var pendingMax = 0
 
     init(client: SudokuMuxClient, id: UInt32) { self.client = client; self.id = id }
 
@@ -1840,45 +2033,75 @@ nonisolated final class SudokuMuxStream {
             offset += count
         }
     }
-
-    func receive(max: Int) throws -> Data {
-        condition.lock(); defer { condition.unlock() }
-        while queue.isEmpty && !closed { condition.wait() }
-        if queue.isEmpty && closed { throw SudokuNativeError.closed }
-        let out = queue.read(max: max)
-        condition.signal()
-        return out
+    
+    func receiveAsync(max: Int, completion: @escaping (Data?, Error?) -> Void) {
+        var deliver: (() -> Void)?
+        condition.lock()
+        if !queue.isEmpty {
+            let out = queue.read(max: max)
+            condition.signal()               // release a backpressured enqueue
+            deliver = { completion(out, nil) }
+        } else if closed {
+            deliver = { completion(nil, nil) }
+        } else if pendingReceive != nil {
+            deliver = { completion(nil, SudokuNativeError.protocolError("concurrent mux receive")) }
+        } else {
+            pendingMax = max
+            pendingReceive = completion
+        }
+        condition.unlock()
+        deliver?()
     }
 
     func enqueue(_ data: Data) -> Bool {
         condition.lock()
-        defer { condition.unlock() }
+        if closed { condition.unlock(); return false }
+        if let pending = pendingReceive {
+            pendingReceive = nil
+            let out: Data
+            if data.count <= pendingMax {
+                out = data
+            } else {
+                out = data.prefixData(pendingMax)
+                queue.append(data, from: pendingMax)
+            }
+            condition.unlock()
+            pending(out, nil)
+            return true
+        }
         let queueLimit = max(sudokuMuxMaxQueueBytes, data.count)
         while queue.count + data.count > queueLimit && !closed {
             condition.wait()
         }
-        guard !closed else { return false }
+        guard !closed else { condition.unlock(); return false }
         queue.append(data)
         condition.signal()
+        condition.unlock()
         return true
     }
 
     func close() { client?.close(stream: self) }
     func markClosed(discardQueuedData: Bool = false) {
+        var deliver: (() -> Void)?
         condition.lock()
         closed = true
         if discardQueuedData {
             queue.removeAll(keepingCapacity: false)
         }
+        if let pending = pendingReceive {
+            pendingReceive = nil
+            deliver = { pending(nil, nil) }
+        }
         condition.broadcast()
         condition.unlock()
+        deliver?()
     }
 }
 
 nonisolated final class SudokuTCPProxyConnection: ProxyConnection {
     private let stream: SudokuRecordStream
-    private let readQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.tcp.read", qos: .userInitiated)
-    private let writeQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.tcp.write", qos: .userInitiated)
+    private let callbackQueue = DispatchQueue(label: AWCore.Identifier.sudokuTCPReadQueue, qos: .userInitiated)
+    private let writeQueue = DispatchQueue(label: AWCore.Identifier.sudokuTCPWriteQueue, qos: .userInitiated)
     private var closed = false
 
     init(stream: SudokuRecordStream) { self.stream = stream; super.init() }
@@ -1903,11 +2126,17 @@ nonisolated final class SudokuTCPProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        readQueue.async {
-            do {
-                if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
-                completion(try self.stream.receive(max: sudokuTCPReceiveChunkSize), nil)
-            } catch SudokuNativeError.closed { completion(nil, nil) } catch { completion(nil, error) }
+        if lock.withLock({ closed }) { completion(nil, nil); return }
+        stream.receiveAsync(max: sudokuTCPReceiveChunkSize) { [weak self] data, error in
+            guard let self else { completion(nil, nil); return }
+            self.callbackQueue.async {
+                if let error {
+                    if case SudokuNativeError.closed = error { completion(nil, nil) }
+                    else { completion(nil, error) }
+                } else {
+                    completion(data, nil)
+                }
+            }
         }
     }
 
@@ -1917,8 +2146,8 @@ nonisolated final class SudokuTCPProxyConnection: ProxyConnection {
 nonisolated final class SudokuMuxTCPProxyConnection: ProxyConnection {
     private let client: SudokuMuxClient
     private let stream: SudokuMuxStream
-    private let readQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.mux.read", qos: .userInitiated)
-    private let writeQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.mux.write", qos: .userInitiated)
+    private let callbackQueue = DispatchQueue(label: AWCore.Identifier.sudokuMuxReadQueue, qos: .userInitiated)
+    private let writeQueue = DispatchQueue(label: AWCore.Identifier.sudokuMuxWriteQueue, qos: .userInitiated)
     private let closesClientOnClose: Bool
     private var onClose: (() -> Void)?
     private var closed = false
@@ -1960,16 +2189,19 @@ nonisolated final class SudokuMuxTCPProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        readQueue.async {
-            do {
-                if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
-                completion(try self.stream.receive(max: sudokuTCPReceiveChunkSize), nil)
-            } catch SudokuNativeError.closed {
-                self.closeResources(closeStream: false)
-                completion(nil, nil)
-            } catch {
-                self.closeResources(closeStream: false)
-                completion(nil, error)
+        if lock.withLock({ closed }) { completion(nil, nil); return }
+        stream.receiveAsync(max: sudokuTCPReceiveChunkSize) { [weak self] data, error in
+            guard let self else { completion(nil, nil); return }
+            self.callbackQueue.async {
+                if let error {
+                    self.closeResources(closeStream: false)
+                    completion(nil, error)
+                } else if let data, !data.isEmpty {
+                    completion(data, nil)
+                } else {
+                    self.closeResources(closeStream: false)
+                    completion(nil, nil)
+                }
             }
         }
     }
@@ -1996,8 +2228,8 @@ nonisolated final class SudokuUDPProxyConnection: ProxyConnection {
     private let stream: SudokuRecordStream
     private let destinationHost: String
     private let destinationPort: UInt16
-    private let readQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.udp.read", qos: .userInitiated)
-    private let writeQueue = DispatchQueue(label: "com.argsment.Anywhere.sudoku.udp.write", qos: .userInitiated)
+    private let callbackQueue = DispatchQueue(label: AWCore.Identifier.sudokuUDPReadQueue, qos: .userInitiated)
+    private let writeQueue = DispatchQueue(label: AWCore.Identifier.sudokuUDPWriteQueue, qos: .userInitiated)
     private var closed = false
 
     init(stream: SudokuRecordStream, destinationHost: String, destinationPort: UInt16) {
@@ -2034,17 +2266,33 @@ nonisolated final class SudokuUDPProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        readQueue.async {
-            do {
-                if self.lock.withLock({ self.closed }) { throw SudokuNativeError.closed }
-                let hdr = try self.stream.readExact(4)
-                let addrLen = Int(UInt16(hdr[0]) << 8 | UInt16(hdr[1]))
-                let payloadLen = Int(UInt16(hdr[2]) << 8 | UInt16(hdr[3]))
-                guard addrLen > 0 && addrLen <= 64 * 1024 else { throw SudokuNativeError.protocolError("bad UoT address length") }
-                guard payloadLen <= 64 * 1024 else { throw SudokuNativeError.protocolError("bad UoT payload length") }
-                _ = try self.stream.readExact(addrLen)
-                completion(try self.stream.readExact(payloadLen), nil)
-            } catch SudokuNativeError.closed { completion(nil, nil) } catch { completion(nil, error) }
+        if lock.withLock({ closed }) { completion(nil, nil); return }
+        stream.readExactAsync(4) { [weak self] hdr, error in
+            guard let self else { completion(nil, nil); return }
+            if let error { self.deliverUDP(nil, error, to: completion); return }
+            guard let hdr else { self.deliverUDP(nil, SudokuNativeError.closed, to: completion); return }
+            let addrLen = Int(UInt16(hdr[0]) << 8 | UInt16(hdr[1]))
+            let payloadLen = Int(UInt16(hdr[2]) << 8 | UInt16(hdr[3]))
+            guard addrLen > 0 && addrLen <= 64 * 1024 else { self.deliverUDP(nil, SudokuNativeError.protocolError("bad UoT address length"), to: completion); return }
+            guard payloadLen <= 64 * 1024 else { self.deliverUDP(nil, SudokuNativeError.protocolError("bad UoT payload length"), to: completion); return }
+            self.stream.readExactAsync(addrLen) { _, error in
+                if let error { self.deliverUDP(nil, error, to: completion); return }
+                self.stream.readExactAsync(payloadLen) { payload, error in
+                    if let error { self.deliverUDP(nil, error, to: completion); return }
+                    self.deliverUDP(payload, nil, to: completion)
+                }
+            }
+        }
+    }
+
+    private func deliverUDP(_ data: Data?, _ error: Error?, to completion: @escaping (Data?, Error?) -> Void) {
+        callbackQueue.async {
+            if let error {
+                if case SudokuNativeError.closed = error { completion(nil, nil) }
+                else { completion(nil, error) }
+            } else {
+                completion(data, nil)
+            }
         }
     }
 
