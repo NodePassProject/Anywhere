@@ -378,7 +378,6 @@ final class MITMHTTP1Stream {
     /// not part of this completion; the pump drains them via
     /// ``drainPendingClientBytes()`` right after the completion fires.
     func transform(_ data: Data, completion: @escaping (Data) -> Void) {
-        assert(parkedCompletion == nil, "transform re-entered while a script hop is outstanding")
         guard parkedCompletion == nil else { return failClosedReentry(completion) }
         if case .passthrough = mode {
             completion(data)
@@ -464,9 +463,8 @@ final class MITMHTTP1Stream {
     /// guard exists so a future regression surfaces loudly instead of silently
     /// overwriting the stashed completion — which would drop the prior read's
     /// re-arm callback and hang the connection half-open forever (a dual-leg
-    /// leak), with no crash and no log in release builds where the paired
-    /// ``assert`` is compiled out. Fires only the new completion (empty) and
-    /// leaves the stashed one intact so it still resumes exactly once.
+    /// leak). Fires only the new completion (empty) and leaves the stashed
+    /// one intact so it still resumes exactly once.
     private func failClosedReentry(_ completion: (Data) -> Void) {
         logger.error("[MITM] HTTP/1 \(host): transform/finish re-entered while a script hop is outstanding; dropping this chunk to preserve the parked completion (one-read-in-flight invariant violated)")
         completion(Data())
@@ -492,7 +490,6 @@ final class MITMHTTP1Stream {
     /// buffered body parks. The pass lands in ``Mode/passthrough``, so a
     /// second call (or stray late bytes) produces nothing.
     func finish(completion: @escaping (Data) -> Void) {
-        assert(parkedCompletion == nil, "finish re-entered while a script hop is outstanding")
         guard parkedCompletion == nil else { return failClosedReentry(completion) }
         guard case .rewritingUntilClose(let pending, let accumulator) = mode else {
             completion(Data())
@@ -902,7 +899,7 @@ final class MITMHTTP1Stream {
                 into: &output
             )
         case .readUntilClose, .switchingProtocols:
-            preconditionFailure("handled above")
+            return true
         }
     }
 

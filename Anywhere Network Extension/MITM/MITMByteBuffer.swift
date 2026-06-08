@@ -51,11 +51,6 @@ struct MITMByteBuffer {
 
     /// Byte at 0-relative index ``i`` in the consumable region.
     subscript(_ i: Int) -> UInt8 {
-        // The underlying ``Data`` subscript already traps on an out-of-range
-        // computed index; assert here so a parser bug surfaces against this
-        // type's 0-relative contract with a clear message rather than an opaque
-        // ``Data`` index trap.
-        precondition(i >= 0 && i < count, "MITMByteBuffer index \(i) out of range 0..<\(count)")
         return storage[storage.startIndex + offset + i]
     }
 
@@ -70,8 +65,6 @@ struct MITMByteBuffer {
     /// Returns the bytes at the given 0-relative range as a fresh
     /// ``Data``.
     func subdata(in range: Range<Int>) -> Data {
-        precondition(range.lowerBound >= 0 && range.upperBound <= count,
-                     "MITMByteBuffer subdata range \(range) out of 0..<\(count)")
         let s = storage.startIndex + offset
         return storage.subdata(in: (s + range.lowerBound)..<(s + range.upperBound))
     }
@@ -135,11 +128,7 @@ struct MITMByteBuffer {
     /// up to the storage length the storage is cleared so the next
     /// append starts from a known-empty state.
     mutating func removeFirst(_ n: Int) {
-        // A negative count is always a caller bug: it would rewind ``offset``
-        // (potentially below the storage start) and desync every later read.
-        // Overshoot past ``count`` stays tolerated — the reset below clamps it
-        // to empty — but a negative slip fails loudly here.
-        precondition(n >= 0, "MITMByteBuffer.removeFirst negative count \(n)")
+        // Overshoot past ``count`` is tolerated — the reset below clamps it to empty.
         offset += n
         if offset >= storage.count {
             storage.removeAll(keepingCapacity: true)

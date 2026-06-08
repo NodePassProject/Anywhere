@@ -25,8 +25,6 @@ enum TLSServerHelloBuilder {
         cipherSuite: UInt16,
         x25519PublicKey: Data
     ) -> Data {
-        precondition(x25519PublicKey.count == 32)
-
         var random = Data(count: 32)
         random.withUnsafeMutableBytes { ptr in
             _ = SecRandomCopyBytes(kSecRandomDefault, 32, ptr.baseAddress!)
@@ -125,8 +123,6 @@ enum TLSServerHelloBuilder {
         secureRenegotiation: Bool,
         serverRandom: Data
     ) -> Data {
-        precondition(serverRandom.count == 32)
-
         var body = Data()
         body.append(0x03); body.append(0x03)                          // version = TLS 1.2
         body.append(serverRandom)

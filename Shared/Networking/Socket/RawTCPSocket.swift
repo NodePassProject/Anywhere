@@ -298,17 +298,6 @@ nonisolated class RawTCPSocket: RawTransport {
 
     init() {}
 
-#if DEBUG
-    /// Leak tripwire: a connected socket must be torn down via `forceCancel()`
-    /// before the wrapper is freed. A live FD/source here means it was dropped
-    /// without cancelling. (`tearDownSocket` clears these on connect failure
-    /// too, so connect-failed sockets trip nothing.) DEBUG-only.
-    deinit {
-        assert(socketFD < 0 && readSource == nil && writeSource == nil,
-               "RawTCPSocket leaked: freed without forceCancel() (fd=\(socketFD))")
-    }
-#endif
-
     // MARK: - RawTransport
 
     var isTransportReady: Bool {

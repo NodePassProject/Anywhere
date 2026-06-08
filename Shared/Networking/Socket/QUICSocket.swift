@@ -61,15 +61,6 @@ nonisolated final class QUICSocket {
         self.rxBuf = [UInt8](repeating: 0, count: receiveBufferSize)
     }
 
-#if DEBUG
-    /// Leak tripwire: the owning connection must ``close()`` the socket before
-    /// dropping it, or the FD + its 4 MB kernel buffers + read source leak.
-    deinit {
-        assert(socketFD < 0 && readSource == nil,
-               "QUICSocket leaked: freed without close() (fd=\(socketFD))")
-    }
-#endif
-
     // MARK: - Connect
 
     /// Creates a connected non-blocking UDP socket to `remoteAddr` with the

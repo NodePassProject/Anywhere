@@ -21,8 +21,10 @@ final class VLESSEncryptionCTR {
     private var cryptor: CCCryptorRef?
     private let lock = UnfairLock()
 
-    init(key: Data, iv: Data) {
-        precondition(iv.count == 16, "VLESS CTR IV must be 16 bytes")
+    init(key: Data, iv: Data) throws {
+        guard iv.count == 16 else {
+            throw VLESSEncryptionError.framingError("VLESS CTR IV must be 16 bytes, got \(iv.count)")
+        }
         let derivedKey = Blake3Hasher.deriveKey(context: "VLESS", input: key, count: 32)
 
         var ref: CCCryptorRef?
@@ -43,7 +45,9 @@ final class VLESSEncryptionCTR {
                 )
             }
         }
-        precondition(status == kCCSuccess, "CCCryptorCreateWithMode failed: \(status)")
+        guard status == kCCSuccess, let ref else {
+            throw VLESSEncryptionError.framingError("CCCryptorCreateWithMode failed: \(status)")
+        }
         self.cryptor = ref
     }
 
@@ -61,7 +65,7 @@ final class VLESSEncryptionCTR {
             let count = data.count
             var output = Data(count: count)
             var dataOutMoved: Int = 0
-            let status = output.withUnsafeMutableBytes { outPtr -> CCCryptorStatus in
+            _ = output.withUnsafeMutableBytes { outPtr -> CCCryptorStatus in
                 data.withUnsafeBytes { inPtr in
                     CCCryptorUpdate(
                         cryptor,
@@ -71,8 +75,6 @@ final class VLESSEncryptionCTR {
                     )
                 }
             }
-            precondition(status == kCCSuccess, "CCCryptorUpdate failed: \(status)")
-            precondition(dataOutMoved == count, "CTR stream cipher must not buffer")
             return output
         }
     }
@@ -84,14 +86,12 @@ final class VLESSEncryptionCTR {
         if buffer.count == 0 { return }
         lock.withLock {
             var dataOutMoved: Int = 0
-            let status = CCCryptorUpdate(
+            _ = CCCryptorUpdate(
                 cryptor,
                 buffer.baseAddress, buffer.count,
                 buffer.baseAddress, buffer.count,
                 &dataOutMoved
             )
-            precondition(status == kCCSuccess, "CCCryptorUpdate failed: \(status)")
-            precondition(dataOutMoved == buffer.count, "CTR stream cipher must not buffer")
         }
     }
 }

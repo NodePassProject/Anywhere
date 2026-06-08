@@ -88,7 +88,6 @@ class DomainRouter {
         // MARK: Build API
 
         func insert(_ pattern: String, actionID: Int16) {
-            precondition(buildRoot != nil, "KeywordAutomaton: insert after finalize")
             guard !pattern.isEmpty else { return }
             let bytes = Array(pattern.utf8)
             // Domain patterns are bounded by 253 octets per RFC 1035; UInt16

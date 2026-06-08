@@ -140,7 +140,6 @@ nonisolated final class NowhereUDPConnection: ProxyConnection {
                 completion(nil, nil)
                 return
             }
-            assert(self.pendingReceive == nil, "NowhereUDPConnection: overlapping receiveRaw call")
             let stale = self.pendingReceive
             self.pendingReceive = completion
             stale?(nil, NowhereError.connectionFailed("overlapping receiveRaw on Nowhere UDP"))

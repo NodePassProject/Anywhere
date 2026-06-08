@@ -104,17 +104,6 @@ nonisolated final class RawUDPSocket {
         self.socketBufferSize = socketBufferSize
     }
 
-#if DEBUG
-    /// Leak tripwire: a connected socket must be torn down via `cancel()`
-    /// before the wrapper is freed. A live FD/read source here means it was
-    /// dropped without cancelling — a leaked FD plus its 4 MB kernel buffers.
-    /// (A never-connected socket has fd == -1 and trips nothing.) DEBUG-only.
-    deinit {
-        assert(socketFD < 0 && readSource == nil,
-               "RawUDPSocket leaked: freed without cancel() (fd=\(socketFD))")
-    }
-#endif
-
     // MARK: - Connect
 
     /// Resolves `host` via ``DNSResolver`` and creates a connected

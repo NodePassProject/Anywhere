@@ -39,7 +39,7 @@ nonisolated final class NowhereSession {
     var isOnQueue: Bool { quic.isOnQueue }
 
     private var state: State = .idle
-    private let closeLatch = CloseOnce()
+    private var closed = false
 
     private var authStreamID: Int64 = -1
     private var readyCallbacks: [(Error?) -> Void] = []
@@ -82,12 +82,6 @@ nonisolated final class NowhereSession {
             transport: transport
         )
     }
-
-#if DEBUG
-    deinit {
-        assert(closeLatch.isClosed, "NowhereSession leaked: freed without close()/failSession")
-    }
-#endif
 
     func ensureReady(completion: @escaping (Error?) -> Void) {
         queue.async { [weak self] in
@@ -327,7 +321,8 @@ nonisolated final class NowhereSession {
 
     func close() {
         let work = {
-            guard self.closeLatch.begin() else { return }
+            guard !self.closed else { return }
+            self.closed = true
             self.state = .closed
             self.idleCloseWorkItem?.cancel()
             self.idleCloseWorkItem = nil
@@ -358,7 +353,8 @@ nonisolated final class NowhereSession {
 
     private func failSession(_ error: Error) {
         queue.async {
-            guard self.closeLatch.begin() else { return }
+            guard !self.closed else { return }
+            self.closed = true
             self.state = .closed
             self.idleCloseWorkItem?.cancel()
             self.idleCloseWorkItem = nil

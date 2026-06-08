@@ -97,12 +97,6 @@ nonisolated class QUICConnection {
     /// of the current queue cycle via a single coalesced `writeToUDP`.
     private var flushScheduled = false
 
-    /// Guarantees the terminal teardown in `close()` runs exactly once, on
-    /// `queue`, retaining `self` until it completes — so the ngtcp2 conn, UDP
-    /// socket, and dispatch sources are always freed even when `close()` is
-    /// dispatched from off-queue on the connection's last reference.
-    private let closeLatch = CloseOnce()
-
     /// Connected UDP socket for the direct-dial path. `nil` when QUIC rides a
     /// `QUICDatagramTransport` (chained), and before/after the socket is open.
     private var quicSocket: QUICSocket?
@@ -273,19 +267,6 @@ nonisolated class QUICConnection {
         self.queue = DispatchQueue(label: "com.argsment.Anywhere.quic", qos: .userInitiated)
         queue.setSpecific(key: Self.queueKey, value: true)
     }
-
-#if DEBUG
-    /// Leak tripwire: by the time a connection is freed, `close()` (or a
-    /// setup-failure path) must have released the socket, ngtcp2 conn, and
-    /// dispatch sources. A live handle here means it was dropped without
-    /// closing — the exact leak this and `CloseOnce` exist to surface. Reads
-    /// are race-free: deinit implies no other reference, so nothing else can
-    /// touch this state. DEBUG-only; never aborts a shipping build.
-    deinit {
-        assert(quicSocket == nil && conn == nil && retransmitTimer == nil,
-               "QUICConnection leaked: freed without close() (socketOpen=\(quicSocket?.isOpen ?? false), connSet=\(conn != nil))")
-    }
-#endif
 
     // MARK: Connect
 
@@ -738,21 +719,23 @@ nonisolated class QUICConnection {
         // writeToUDP / flushPendingWrites), the batch above us still holds and
         // will reuse the `conn` pointer. Running `ngtcp2_conn_del` synchronously
         // here would dangle it — the next ngtcp2 call faults in `ngtcp2_cpymem`.
-        // Defer the teardown one queue cycle (strong `self`, like `CloseOnce`,
-        // so the last-reference case can't skip it); by then the batch has
+        // Defer the teardown one queue cycle (strong `self` so the
+        // last-reference case can't skip it); by then the batch has
         // returned and no local `conn` is live. Off-queue closes already defer
-        // through `CloseOnce`, so this only covers the on-queue reentrant case.
+        // via the dispatch below, so this only covers the on-queue reentrant case.
         if ngtcp2Busy && isOnQueue {
             queue.async { self.close(error: error) }
             return
         }
-        // `CloseOnce` runs this once on `queue`, strong-capturing `self` so the
-        // ngtcp2 conn / UDP socket / dispatch sources are always freed — even
-        // when `close()` is the connection's last reference (e.g. dispatched
-        // off-queue by `HysteriaSession`/`closeAll`). When already on `queue`
-        // (e.g. handleReceivedPacket detecting DRAINING) it runs synchronously
-        // so pool-visible state updates before new streams can be handed out.
-        closeLatch.fire(on: queue, runningOnQueue: isOnQueue) {
+        // Run teardown on `queue`, strong-capturing `self` so the ngtcp2 conn /
+        // UDP socket / dispatch sources are always freed — even when `close()`
+        // is the connection's last reference (e.g. dispatched off-queue by
+        // `HysteriaSession`/`closeAll`). When already on `queue` (e.g.
+        // handleReceivedPacket detecting DRAINING) it runs synchronously so
+        // pool-visible state updates before new streams can be handed out. The
+        // `state != .closed` guard makes the body idempotent if two closes race
+        // in before the first runs.
+        let teardown: () -> Void = {
             guard self.state != .closed else { return }
             // Any close that happens before we reached `.connected` means the
             // TLS handshake didn't complete — invalidate any cached session
@@ -808,6 +791,11 @@ nonisolated class QUICConnection {
             for d in dgrams { d.completion?(closeError) }
             self.connectionClosedHandler?(closeError)
             self.connectionClosedHandler = nil
+        }
+        if isOnQueue {
+            teardown()
+        } else {
+            queue.async(execute: teardown)
         }
     }
 

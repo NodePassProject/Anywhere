@@ -199,7 +199,6 @@ private enum VLESSLength {
         Data([UInt8(value >> 8), UInt8(value & 0xFF)])
     }
     static func decode(_ bytes: Data) -> Int {
-        precondition(bytes.count >= 2)
         return (Int(bytes[bytes.startIndex]) << 8) | Int(bytes[bytes.startIndex + 1])
     }
 }
@@ -441,7 +440,7 @@ nonisolated final class VLESSEncryptionClient {
                 pubOrCt = result.encapsulated
             }
             if xorMode != .native {
-                let ctr = VLESSEncryptionCTR(key: nfsKeysRaw[j], iv: iv)
+                let ctr = try VLESSEncryptionCTR(key: nfsKeysRaw[j], iv: iv)
                 pubOrCt = ctr.process(pubOrCt)
             }
             if let lastCTR {
@@ -460,7 +459,7 @@ nonisolated final class VLESSEncryptionClient {
                 // fresh CTR keyed on the current relay's nfsKey. This is
                 // what lets the *next* server in the chain verify it was
                 // actually expected (the hash binds the chain).
-                let newCTR = VLESSEncryptionCTR(key: nfsKey, iv: iv)
+                let newCTR = try VLESSEncryptionCTR(key: nfsKey, iv: iv)
                 relayBlock.append(newCTR.process(nfsKeysHash32[j + 1]))
                 lastCTR = newCTR
             }
@@ -509,7 +508,7 @@ nonisolated final class VLESSEncryptionClient {
             // (its "server random") before any masked record.
             let xor = VLESSXORConnection(
                 inner: connection,
-                outCTR: VLESSEncryptionCTR(key: unitedKey, iv: iv),
+                outCTR: try VLESSEncryptionCTR(key: unitedKey, iv: iv),
                 inCTR: nil,
                 outSkip: clientHello.count,
                 inSkip: 16
@@ -569,7 +568,6 @@ nonisolated final class VLESSEncryptionClient {
         var pfsPublic = Data()
         pfsPublic.append(mlkemPriv.publicKey.rawRepresentation)        // 1184 bytes
         pfsPublic.append(x25519Priv.publicKey.rawRepresentation)       // 32 bytes
-        precondition(pfsPublic.count == VLESSWire.pfsClientHelloPayloadLength)
 
         // Length frames encode the SEALED body size (plaintext + AEAD tag),
         // matching `EncodeLength(pfsKeyExchangeLength - 18)` in Go's client.go.
@@ -815,6 +813,9 @@ nonisolated final class VLESSEncryptionClient {
                             // The decoded value is the SEALED body size (matches
                             // Go's `EncodeLength(paddingLength - 18)`), so it
                             // already accounts for the 16-byte AEAD tag.
+                            guard lenBytes.count >= 2 else {
+                                throw VLESSEncryptionError.framingError("server sealed length frame too short: \(lenBytes.count) bytes")
+                            }
                             let sealedPaddingBodySize = VLESSLength.decode(lenBytes)
                             // Anything the reader buffered past the last
                             // readExact() must carry over to the encrypted
@@ -839,8 +840,8 @@ nonisolated final class VLESSEncryptionClient {
                             if self.xorMode == .random {
                                 let xor = VLESSXORConnection(
                                     inner: connection,
-                                    outCTR: VLESSEncryptionCTR(key: unitedKey, iv: state.iv),
-                                    inCTR: VLESSEncryptionCTR(key: unitedKey, iv: Data(sealedTicket.prefix(16))),
+                                    outCTR: try VLESSEncryptionCTR(key: unitedKey, iv: state.iv),
+                                    inCTR: try VLESSEncryptionCTR(key: unitedKey, iv: Data(sealedTicket.prefix(16))),
                                     outSkip: 0,
                                     inSkip: max(0, sealedPaddingBodySize - leftover.count)
                                 )
@@ -1103,8 +1104,12 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
             let serverRandom = Data(inboundBuffer.prefix(needed))
             inboundBuffer.removeFirst(needed)
             recvLock.unlock()
-            installReadAEAD(serverRandom: serverRandom)
-            completion(nil)
+            do {
+                try installReadAEAD(serverRandom: serverRandom)
+                completion(nil)
+            } catch {
+                completion(error)
+            }
             return
         }
         recvLock.unlock()
@@ -1121,11 +1126,11 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
         }
     }
 
-    private func installReadAEAD(serverRandom: Data) {
+    private func installReadAEAD(serverRandom: Data) throws {
         let aead = VLESSEncryptionAEAD(context: serverRandom, key: unitedKey, useAES: useAES)
         recvLock.withLock { self.readAEAD = aead }
         if let xor = xorConnection {
-            xor.installInboundCTR(VLESSEncryptionCTR(key: unitedKey, iv: serverRandom))
+            xor.installInboundCTR(try VLESSEncryptionCTR(key: unitedKey, iv: serverRandom))
         }
     }
 

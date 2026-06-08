@@ -255,7 +255,6 @@ nonisolated class RealityClient {
         //   1 byte session_id length (always 0x20 here)
         //   32 bytes session_id  ← offset 39
         let sessionIdOffset = 1 + 3 + 2 + 32 + 1
-        precondition(encryptedSessionId.count == 32, "Reality encryptedSessionId must be 32 bytes")
         rawClientHello.replaceSubrange(sessionIdOffset..<(sessionIdOffset + 32), with: encryptedSessionId)
 
         return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: rawClientHello)

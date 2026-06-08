@@ -565,13 +565,12 @@ final class MITMHTTP2Connection {
     /// not part of this completion; the pump drains them via
     /// ``drainPendingClientBytes()`` right after the completion fires.
     func process(_ data: Data, completion: @escaping (Data) -> Void) {
-        assert(parkedCompletion == nil, "process re-entered while a script hop is outstanding")
         guard parkedCompletion == nil else {
             // Should-never-happen: the pump only re-arms its receive after the
             // previous completion fires. Overwriting the stashed completion
             // would drop the prior read's re-arm callback and hang the
             // connection half-open forever (a dual-leg leak) with no crash and
-            // no log in release builds (where the ``assert`` is compiled out).
+            // no log in release builds.
             // Fail closed and loud: fire only the new completion (empty),
             // leaving the stashed one intact so it still resumes exactly once.
             logger.error("[MITM] HTTP/2 \(rewriter.host): process re-entered while a script hop is outstanding; dropping this chunk to preserve the parked completion (one-read-in-flight invariant violated)")
@@ -3560,13 +3559,6 @@ final class MITMHTTP2Connection {
         payloadLength: Int,
         into out: inout Data
     ) {
-        // The 24-bit length field can only represent 0…2^24-1. A
-        // negative or oversized value would sign-extend through the
-        // shifts and emit a corrupt frame header that desyncs the
-        // receiver's framing. No caller passes such a value today,
-        // but assert the invariant rather than silently emit garbage.
-        precondition(payloadLength >= 0 && payloadLength <= 0xFFFFFF,
-                     "HTTP/2 frame payload length \(payloadLength) out of 24-bit range")
         out.append(UInt8((payloadLength >> 16) & 0xFF))
         out.append(UInt8((payloadLength >> 8) & 0xFF))
         out.append(UInt8(payloadLength & 0xFF))

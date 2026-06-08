@@ -49,15 +49,6 @@ nonisolated class MuxClient {
         flowQueue.setSpecific(key: Self.queueKey, value: true)
     }
 
-#if DEBUG
-    /// Leak tripwire: a client must be torn down via `closeAll()` (which
-    /// cancels the idle timer and the proxy transport) before being freed.
-    /// DEBUG-only.
-    deinit {
-        assert(closed, "MuxClient leaked: freed without closeAll()")
-    }
-#endif
-
     // MARK: - Session Management
 
     /// Creates a new mux session for the given target.

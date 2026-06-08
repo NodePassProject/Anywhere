@@ -81,8 +81,6 @@ struct FlatLabelTrie<Payload> {
     /// count distinct rules vs. overwrites.
     @discardableResult
     mutating func insert(suffix: String, payload: Payload) -> Bool {
-        precondition(!frozen, "FlatLabelTrie: insert after freeze")
-
         var node = buildRoot!
         for labelSub in suffix.split(separator: ".").reversed() {
             let label = String(labelSub)

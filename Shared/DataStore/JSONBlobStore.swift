@@ -47,7 +47,7 @@ final class JSONBlobStore: @unchecked Sendable {
         case mitm
     }
 
-    private let container: ModelContainer
+    private let container: ModelContainer?
     private let queue = DispatchQueue(label: "com.argsment.Anywhere.jsonblobstore")
 
     private init() {
@@ -58,11 +58,12 @@ final class JSONBlobStore: @unchecked Sendable {
             container = try ModelContainer(for: JSONBlob.self, configurations: config)
         } catch {
             logger.error("Failed to open JSONBlob store: \(error)")
-            fatalError("Failed to open JSONBlob store: \(error)")
+            container = nil
         }
         // Migration is host-only. The Network Extension is a read-only
         // consumer and must not delete legacy data the host hasn't migrated.
-        if Bundle.main.bundleIdentifier == AWCore.Identifier.bundle {
+        // Skipped when the store couldn't be opened (container == nil).
+        if container != nil, Bundle.main.bundleIdentifier == AWCore.Identifier.bundle {
             migrateLegacyDataIfNeeded(containerURL: containerURL)
         }
     }
@@ -71,6 +72,7 @@ final class JSONBlobStore: @unchecked Sendable {
 
     func load(_ key: Key) -> Data? {
         queue.sync {
+            guard let container else { return nil }
             let context = ModelContext(container)
             let raw = key.rawValue
             let predicate = #Predicate<JSONBlob> { $0.key == raw }
@@ -82,6 +84,7 @@ final class JSONBlobStore: @unchecked Sendable {
 
     func save(_ key: Key, data: Data) {
         queue.sync {
+            guard let container else { return }
             let context = ModelContext(container)
             let raw = key.rawValue
             let predicate = #Predicate<JSONBlob> { $0.key == raw }

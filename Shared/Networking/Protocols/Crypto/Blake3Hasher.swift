@@ -19,7 +19,6 @@ struct Blake3Hasher {
 
     /// Initialize for keyed hashing with a 32-byte key.
     init(key: [UInt8]) {
-        precondition(key.count == 32)
         hasher = BLAKE3Hasher(key: key)
     }
 

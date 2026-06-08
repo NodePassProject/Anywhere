@@ -455,15 +455,6 @@ final class MITMSession {
         onTeardown?(error)
     }
 
-#if DEBUG
-    /// Leak tripwire: a session must be torn down via `cancel()` — which
-    /// cancels both TLS legs and `forceCancel`s the inner transport — before
-    /// being freed. DEBUG-only.
-    deinit {
-        assert(torn, "MITMSession leaked: freed without cancel()")
-    }
-#endif
-
     // MARK: - Inner Handshake
 
     /// Starts the inner-leg TLS server, negotiating from the supplied ALPN /

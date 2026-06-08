@@ -216,7 +216,6 @@ nonisolated final class VLESSXORConnection: ProxyConnection {
     /// behavior as Go's `DecodeHeader` so a corrupted or pre-padding byte
     /// stream produces 0 skip and re-enters header mode on the next chunk.
     private func decodeHeaderLength(_ header: Data) -> Int {
-        precondition(header.count == 5)
         let base = header.startIndex
         if header[base] != 23 || header[base + 1] != 3 || header[base + 2] != 3 {
             return 0

@@ -375,10 +375,8 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
             // previous overwrite-and-forget behavior silently leaked the
             // earlier completion (capturing `UDPFlow.startReceiving`'s
             // loop, which would then hang on a result that never came).
-            // Mirrors `DirectUDPProxyConnection.receiveRaw`. The assert
-            // catches it in debug; in release we surface a defined error
-            // to the stale completion so the caller learns.
-            assert(self.pendingReceive == nil, "HysteriaUDPConnection: overlapping receiveRaw call")
+            // Mirrors `DirectUDPProxyConnection.receiveRaw`: we surface a
+            // defined error to the stale completion so the caller learns.
             let stale = self.pendingReceive
             self.pendingReceive = completion
             stale?(nil, HysteriaError.connectionFailed("overlapping receiveRaw on Hysteria UDP"))
