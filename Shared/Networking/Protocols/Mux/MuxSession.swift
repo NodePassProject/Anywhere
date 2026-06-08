@@ -106,6 +106,8 @@ nonisolated class MuxSession {
         }
 
         closeHandler?(nil)
+        dataHandler = nil
+        closeHandler = nil
     }
 
     // MARK: - Called by MuxClient (demux)
@@ -122,5 +124,7 @@ nonisolated class MuxSession {
         guard !closed else { return }
         closed = true
         closeHandler?(error)
+        dataHandler = nil
+        closeHandler = nil
     }
 }

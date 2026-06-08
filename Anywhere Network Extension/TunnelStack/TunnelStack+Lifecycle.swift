@@ -134,6 +134,7 @@ extension TunnelStack {
             NowhereClient.closeAll()
             AnyTLSManager.shared.closeAll()
             HTTP3SessionPool.shared.closeAll()
+            HTTP2SessionPool.shared.closeAll()
 
             // The Vision mux, SS UDP sessions, and per-flow UDP state are
             // udpQueue-owned, so release them there. The sync hop is
@@ -244,6 +245,7 @@ extension TunnelStack {
         NowhereClient.closeAll()
         AnyTLSManager.shared.closeAll()
         HTTP3SessionPool.shared.closeAll()
+        HTTP2SessionPool.shared.closeAll()
 
         // The Vision mux, SS UDP sessions, and per-flow UDP state are
         // udpQueue-owned. Tear them down and rebuild the mux on that queue:
@@ -288,7 +290,9 @@ extension TunnelStack {
 
         HysteriaClient.closeAll()
         NowhereClient.closeAll()
+        AnyTLSManager.shared.closeAll()
         HTTP3SessionPool.shared.closeAll()
+        HTTP2SessionPool.shared.closeAll()
 
         // mux / SS sessions / flows are udpQueue-owned — close them there and
         // wait, so they're fully released before lwip_bridge_shutdown tears down

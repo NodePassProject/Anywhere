@@ -791,6 +791,12 @@ nonisolated class QUICConnection {
             for d in dgrams { d.completion?(closeError) }
             self.connectionClosedHandler?(closeError)
             self.connectionClosedHandler = nil
+            // Release the remaining session callbacks on demand. They capture
+            // their owners weakly today, but dropping them here keeps teardown
+            // explicit and stops a future strong capture from outliving close().
+            self.streamDataHandler = nil
+            self.streamTerminationHandler = nil
+            self.datagramHandler = nil
         }
         if isOnQueue {
             teardown()

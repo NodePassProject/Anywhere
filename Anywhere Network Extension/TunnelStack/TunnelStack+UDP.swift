@@ -19,9 +19,10 @@ extension TunnelStack {
     /// during a network-path change the old transports error out just as resumed
     /// traffic recreates a flow for the same 5-tuple. A blind
     /// `removeValue(forKey:)` from a stale callback would then evict that *newer*
-    /// flow and strand it — freed without `close()`, tripping the DEBUG leak
-    /// tripwire in ``UDPFlow``'s `deinit`. Identity-guarding makes every removal
-    /// self-only and idempotent.
+    /// flow from the registry without anyone calling ``UDPFlow/close`` on it,
+    /// orphaning its socket, receive buffer, and proxy connection — their
+    /// on-demand release only runs from `close()`. Identity-guarding makes every
+    /// removal self-only and idempotent.
     ///
     /// Must be called on ``udpQueue``.
     func removeUDPFlow(_ flow: UDPFlow) {
