@@ -43,7 +43,7 @@ nonisolated class HTTP11Connection: HTTPTunnel {
     private var connected = false
     /// Serial queue protecting all mutable state.
     /// `.userInitiated`: data-plane queue, same priority as the rest of the chain.
-    private let queue = DispatchQueue(label: "com.argsment.Anywhere.http11", qos: .userInitiated)
+    private let queue = DispatchQueue(label: AWCore.Identifier.http11Queue, qos: .userInitiated)
 
     /// HTTP/1.1 parses only a status line, so no response headers are exposed.
     let responseHeaders: [(name: String, value: String)] = []

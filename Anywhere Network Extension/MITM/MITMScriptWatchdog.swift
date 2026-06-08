@@ -7,6 +7,21 @@
 
 import Foundation
 
+/// Shared low-priority queue hosting every MITM hard-cap supervisor — the
+/// synchronous-script-span sampler (``MITMScriptWatchdog``) and the one-shot
+/// abandon checks for body-replace (``MITMBodyReplace``) and URL-gate
+/// (``MITMGateRegex``) regex runaways.
+///
+/// One queue, not three: each supervisor must run *off* the worker queue it
+/// watches — so it is never itself wedged behind the very runaway it exists to
+/// catch — but the supervisors don't watch *each other*. Their handlers are a
+/// cheap timestamp / non-blocking semaphore poll (then, at most, a
+/// process-killing ``fatalError``), so they coexist on one serial `.utility`
+/// queue without contending.
+enum MITMWatchdogMonitor {
+    static let queue = DispatchQueue(label: AWCore.Identifier.mitmMonitorQueue, qos: .utility)
+}
+
 /// Crash-on-runaway watchdog for **synchronous** JavaScript execution spans.
 ///
 /// A user `process(ctx)` runs synchronously on ``MITMScriptTransform/scriptQueue``
@@ -58,14 +73,6 @@ enum MITMScriptWatchdog {
     /// always-on tick cheap.
     private static let checkIntervalSeconds = 5
 
-    /// Independent queue carrying the sampling timer, so the check is never
-    /// itself stuck behind the wedged span it exists to catch (the wedge is on
-    /// scriptQueue; this is a different queue).
-    private static let monitorQueue = DispatchQueue(
-        label: "com.anywhere.mitm.script-monitor",
-        qos: .utility
-    )
-
     private static let lock = UnfairLock()
     /// Start time of the span currently executing, or nil between spans.
     private static var spanStart: DispatchTime?
@@ -79,7 +86,7 @@ enum MITMScriptWatchdog {
     /// the process's life (a cheap no-op tick while idle). A Swift `static let`
     /// is initialized exactly once, thread-safely, on first access.
     private static let sampler: DispatchSourceTimer = {
-        let timer = DispatchSource.makeTimerSource(queue: monitorQueue)
+        let timer = DispatchSource.makeTimerSource(queue: MITMWatchdogMonitor.queue)
         timer.schedule(
             deadline: .now() + .seconds(checkIntervalSeconds),
             repeating: .seconds(checkIntervalSeconds),

@@ -107,17 +107,9 @@ final class MITMGateRegex: @unchecked Sendable {
     /// threads, so runaways pin at most ~core-count cores even before
     /// quarantine bounds their number.
     private static let matchQueue = DispatchQueue(
-        label: "com.anywhere.mitm.gate-match",
+        label: AWCore.Identifier.mitmGateMatchQueue,
         qos: .userInitiated,
         attributes: .concurrent
-    )
-
-    /// Low-priority queue that fires the per-abandoned-match hard-cap check
-    /// (see ``scheduleHardCapCheck``). Separate from ``matchQueue`` so the
-    /// check can never itself be stuck behind the runaway it exists to catch.
-    private static let monitorQueue = DispatchQueue(
-        label: "com.anywhere.mitm.gate-monitor",
-        qos: .utility
     )
 
     /// Wall-clock budget for one match. A real URL-gate match is microseconds,
@@ -307,7 +299,7 @@ final class MITMGateRegex: @unchecked Sendable {
     /// poll succeed and the check a no-op. Only ever armed on the rare timeout
     /// path, so the always-completing fast path schedules nothing.
     private static func scheduleHardCapCheck(_ done: DispatchSemaphore, pattern: String) {
-        monitorQueue.asyncAfter(deadline: .now() + .seconds(hardCapSeconds)) {
+        MITMWatchdogMonitor.queue.asyncAfter(deadline: .now() + .seconds(hardCapSeconds)) {
             // `.now()` poll: success ⇒ the worker signaled at some point within
             // the cap ⇒ nothing pinned, no-op. timedOut ⇒ still running after
             // the full hard cap ⇒ permanently stuck, crash to recover.

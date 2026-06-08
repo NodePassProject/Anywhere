@@ -1149,6 +1149,14 @@ extension GRPCConnection {
             lock.unlock()
             return
         }
+        // Fires on the global pool rather than a dedicated per-connection queue:
+        // GRPCConnection serializes its own state with ``lock`` (it has no state
+        // queue), and the handler (``sendKeepalivePing``) re-checks that state
+        // under the lock before emitting. The PING leaves via ``transportSend`` —
+        // the same entry point every data frame already uses from arbitrary
+        // threads — so the timer adds no concurrency the transport layer doesn't
+        // already serialize. A once-per-``idleTimeout`` ping doesn't warrant its
+        // own queue.
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
         timer.schedule(deadline: .now() + .seconds(interval), repeating: .seconds(interval))
         timer.setEventHandler { [weak self] in

@@ -33,7 +33,7 @@ nonisolated final class AnyTLSClient {
     private var sessionCounter: UInt64 = 0
     private var closed: Bool = false
 
-    private let timerQueue = DispatchQueue(label: "AnyTLSClient.idleCleanup")
+    private let timerQueue = DispatchQueue(label: AWCore.Identifier.anyTLSIdleQueue)
     private var idleTimer: DispatchSourceTimer?
 
     init(

@@ -57,7 +57,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
     /// Serial queue protecting all mutable state (session + streams).
     /// `.userInitiated`: data-plane queue, same priority as the rest of the chain.
-    let queue = DispatchQueue(label: "com.argsment.Anywhere.http2session", qos: .userInitiated)
+    let queue = DispatchQueue(label: AWCore.Identifier.http2SessionQueue, qos: .userInitiated)
 
     // Stream management
     private var streams: [UInt32: HTTP2Stream] = [:]

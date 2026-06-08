@@ -101,17 +101,10 @@ enum MITMBodyReplace {
     /// bodies. A runaway that never drains is reclaimed by the
     /// ``hardCapSeconds`` crash backstop (see ``scheduleHardCapCheck``).
     private static let watchdogQueue = DispatchQueue(
-        label: "com.anywhere.mitm.body-replace.watchdog",
+        label: AWCore.Identifier.mitmBodyWatchdogQueue,
         qos: .userInitiated
     )
 
-    /// Low-priority queue carrying the hard-cap crash check, separate from
-    /// ``watchdogQueue`` so the check can never be stuck behind the very
-    /// runaway it exists to catch (the runaway pins ``watchdogQueue``).
-    private static let monitorQueue = DispatchQueue(
-        label: "com.anywhere.mitm.body-replace.monitor",
-        qos: .utility
-    )
     private static let inFlightLock = NSLock()
     private static var substitutionInFlight = false
 
@@ -169,7 +162,7 @@ enum MITMBodyReplace {
     /// the poll succeed and the check a no-op. Only armed on the rare timeout
     /// path, so the always-completing fast path schedules nothing.
     private static func scheduleHardCapCheck(_ done: DispatchSemaphore, byteCount: Int) {
-        monitorQueue.asyncAfter(deadline: .now() + .seconds(hardCapSeconds)) {
+        MITMWatchdogMonitor.queue.asyncAfter(deadline: .now() + .seconds(hardCapSeconds)) {
             // `.now()` poll: success ⇒ the worker signaled within the cap ⇒
             // nothing pinned, no-op. Failure ⇒ still running after the full hard
             // cap ⇒ permanently stuck, crash to recover.

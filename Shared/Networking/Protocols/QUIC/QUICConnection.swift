@@ -264,7 +264,7 @@ nonisolated class QUICConnection {
         self.datagramsEnabled = datagramsEnabled
         self.tuning = tuning
         self.transport = transport
-        self.queue = DispatchQueue(label: "com.argsment.Anywhere.quic", qos: .userInitiated)
+        self.queue = DispatchQueue(label: AWCore.Identifier.quicQueue, qos: .userInitiated)
         queue.setSpecific(key: Self.queueKey, value: true)
     }
 

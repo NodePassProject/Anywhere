@@ -57,7 +57,7 @@ nonisolated final class AnyTLSSession {
     var seq: UInt64 = 0
 
     /// Dispatch queue for the synDone watchdog timer.
-    private let timerQueue = DispatchQueue(label: "AnyTLSSession.timer")
+    private let timerQueue = DispatchQueue(label: AWCore.Identifier.anyTLSSessionTimerQueue)
     private var synDoneTimer: DispatchSourceTimer?
 
     /// Buffer for partial inbound frames (TLS records don't align with

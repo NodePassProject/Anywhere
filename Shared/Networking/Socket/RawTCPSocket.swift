@@ -235,7 +235,7 @@ nonisolated class RawTCPSocket: RawTransport {
     /// All DispatchSources are bound to this queue, so their event handlers
     /// run here and are naturally serialized against each other and against
     /// async operations dispatched from outside.
-    private let ioQueue = DispatchQueue(label: "com.argsment.Anywhere.RawTCPSocket",
+    private let ioQueue = DispatchQueue(label: AWCore.Identifier.rawTCPSocketQueue,
                                         qos: .userInitiated)
 
     // MARK: Socket & DispatchSources

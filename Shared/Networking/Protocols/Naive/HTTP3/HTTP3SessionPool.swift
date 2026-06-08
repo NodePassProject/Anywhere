@@ -34,7 +34,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
 
     /// Periodic cleanup timer.
     private var cleanupTimer: DispatchSourceTimer?
-    private let cleanupQueue = DispatchQueue(label: "com.argsment.Anywhere.http3pool.cleanup")
+    private let cleanupQueue = DispatchQueue(label: AWCore.Identifier.http3PoolCleanupQueue)
 
     private override init() {
         super.init()

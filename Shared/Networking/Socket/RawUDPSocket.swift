@@ -56,7 +56,7 @@ nonisolated final class RawUDPSocket {
     // MARK: Concurrency
 
     /// Serial queue for all socket I/O and state transitions.
-    private let ioQueue = DispatchQueue(label: "com.argsment.Anywhere.RawUDPSocket",
+    private let ioQueue = DispatchQueue(label: AWCore.Identifier.rawUDPSocketQueue,
                                         qos: .userInitiated)
 
     // MARK: Socket

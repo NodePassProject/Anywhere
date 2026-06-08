@@ -34,6 +34,59 @@ final class AWCore {
         static let udpQueue = "\(bundle).udp"
         /// Dispatch queue label for writes back to the TUN interface.
         static let outputQueue = "\(bundle).output"
+
+        // MARK: Proxy socket & protocol queue labels
+        //
+        // Centralized so every queue the extension spins up shares one
+        // reverse-DNS prefix (``bundle``) and one kebab-case convention — they
+        // then group cleanly in Instruments, `sample`, and crash-log thread
+        // listings instead of scattering across `com.anywhere.*`, bare
+        // `AnyTLS*`, and CamelCase variants. The *rationale* for each queue
+        // lives at its declaration site; this is only the label catalog. The
+        // per-socket and per-session queues deliberately share one label across
+        // every live instance: they're one logical role, so tooling aggregates
+        // them under it rather than exploding into a label per connection.
+
+        /// Per-socket I/O queue label for ``RawTCPSocket``.
+        static let rawTCPSocketQueue = "\(bundle).raw-tcp-socket"
+        /// Per-socket I/O queue label for ``RawUDPSocket``.
+        static let rawUDPSocketQueue = "\(bundle).raw-udp-socket"
+        /// Per-connection queue label for the ngtcp2 QUIC event loop.
+        static let quicQueue = "\(bundle).quic"
+        /// Per-connection queue label for the HTTP/1.1 CONNECT relay.
+        static let http11Queue = "\(bundle).http11"
+        /// Per-session queue label for an HTTP/2 multiplexed session.
+        static let http2SessionQueue = "\(bundle).http2-session"
+        /// Pool-wide idle-session reaper queue label for the Naive HTTP/3 pool.
+        static let http3PoolCleanupQueue = "\(bundle).http3-pool-cleanup"
+        /// Pool-wide idle-session reaper queue label for an AnyTLS client.
+        static let anyTLSIdleQueue = "\(bundle).anytls-idle-cleanup"
+        /// Per-session stream-handshake-timeout queue label for AnyTLS.
+        static let anyTLSSessionTimerQueue = "\(bundle).anytls-session-timer"
+
+        // Sudoku per-stream read/write queues (dotted `transport.role` hierarchy).
+        static let sudokuTCPReadQueue = "\(bundle).sudoku.tcp.read"
+        static let sudokuTCPWriteQueue = "\(bundle).sudoku.tcp.write"
+        static let sudokuMuxReadQueue = "\(bundle).sudoku.mux.read"
+        static let sudokuMuxWriteQueue = "\(bundle).sudoku.mux.write"
+        static let sudokuUDPReadQueue = "\(bundle).sudoku.udp.read"
+        static let sudokuUDPWriteQueue = "\(bundle).sudoku.udp.write"
+
+        // MARK: MITM supervisor queue labels
+        //
+        // ``mitmScriptQueue`` (above) runs the JS. The labels below belong to
+        // the runaway-supervision machinery: two worker queues kept apart by
+        // QoS/topology, plus one shared ``mitmMonitorQueue`` that hosts every
+        // hard-cap check (see ``MITMWatchdogMonitor``). A supervisor must run
+        // off the worker queue it watches, but the supervisors don't watch each
+        // other, so a single monitor queue suffices for all three.
+
+        /// Shared low-priority supervisor queue for all MITM hard-cap checks.
+        static let mitmMonitorQueue = "\(bundle).mitm-monitor"
+        /// Worker queue label carrying the (possibly runaway) body-replace regex.
+        static let mitmBodyWatchdogQueue = "\(bundle).mitm-body-watchdog"
+        /// Concurrent worker queue label for bounded URL-gate regex matching.
+        static let mitmGateMatchQueue = "\(bundle).mitm-gate-match"
     }
 
     /// App Group `UserDefaults` shared between the app and Network Extension.
