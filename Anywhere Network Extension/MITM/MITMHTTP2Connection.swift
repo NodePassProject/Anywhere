@@ -548,6 +548,13 @@ final class MITMHTTP2Connection {
         // held requests (inbound leg) hold up to 4 MiB each; drop them too.
         pendingRequestBodies.removeAll()
         heldPacedRequests.removeAll()
+        // Per-stream buffered bodies (up to 4 MiB each, ≤ maxTrackedStreams)
+        // and streaming-script cursors (each a JSValue) would otherwise stay
+        // pinned from teardown until ARC releases the connection. Drop them now
+        // so a torn-down connection doesn't hold that high-water mark against
+        // the extension's memory budget.
+        pendingMessages.removeAll()
+        streamingScripts.removeAll()
         oneShotSynthPacing = false
     }
 

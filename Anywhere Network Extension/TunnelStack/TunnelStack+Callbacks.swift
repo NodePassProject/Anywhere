@@ -13,6 +13,7 @@ private final class RejectFloodTracker {
     private let threshold: Int
     private let window: CFAbsoluteTime
     private var timestamps: [String: [CFAbsoluteTime]] = [:]
+    private var lastSweep: CFAbsoluteTime = 0
 
     init(threshold: Int = 50, window: CFAbsoluteTime = 30) {
         self.threshold = threshold
@@ -24,6 +25,14 @@ private final class RejectFloodTracker {
     func shouldDrop(host: String) -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
         let cutoff = now - window
+        // Reap fully-stale hosts on demand (at most once per window) so the key
+        // set stays bounded by "distinct hosts rejected in the last `window`
+        // seconds" instead of growing for the process lifetime — a reject /
+        // ad-block rule set can otherwise match thousands of unique domains.
+        if now - lastSweep > window {
+            timestamps = timestamps.filter { _, ts in ts.contains { $0 >= cutoff } }
+            lastSweep = now
+        }
         var times = timestamps[host, default: []]
         times.removeAll { $0 < cutoff }
         times.append(now)
