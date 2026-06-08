@@ -9,10 +9,13 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct RuleSetListView: View {
+    @Environment(\.editMode) private var editMode
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
+
+    private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
 
     private static let importAllowedContentTypes: [UTType] = [UTType(filenameExtension: "arrs") ?? .data]
 
@@ -48,11 +51,16 @@ struct RuleSetListView: View {
                         }
                     }
                     .onDelete { offsets in
-                        let customRuleSets = RoutingRuleSetStore.shared.customRuleSets
-                        for offset in offsets {
-                            RoutingRuleSetStore.shared.removeCustomRuleSet(customRuleSets[offset].id)
+                        customRuleSets.remove(atOffsets: offsets)
+                        if isEditing != true {
+                            save()
                         }
-                        self.customRuleSets = RoutingRuleSetStore.shared.customRuleSets
+                    }
+                    .onMove { source, destination in
+                        customRuleSets.move(fromOffsets: source, toOffset: destination)
+                        if isEditing != true {
+                            save()
+                        }
                     }
                 }
             }
@@ -60,7 +68,12 @@ struct RuleSetListView: View {
         .listRowSpacing(8)
         .navigationTitle("Routing Rules")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            if isEditing == true || !customRuleSets.isEmpty {
+                ToolbarItem {
+                    EditButton()
+                }
+            }
+            ToolbarItem {
                 Menu("More", systemImage: "ellipsis") {
                     Button {
                         showAddSheet = true
@@ -89,12 +102,16 @@ struct RuleSetListView: View {
             }
         }
         .onChange(of: builtInServiceRuleSets) { oldValue, newValue in
-            // Each `updateAssignment` re-syncs routing itself.
             for currentRuleSet in newValue {
                 let previousRuleSet = oldValue.first(where: { $0.id == currentRuleSet.id })
                 if currentRuleSet.assignedConfigurationId != previousRuleSet?.assignedConfigurationId {
                     RoutingRuleSetStore.shared.updateAssignment(currentRuleSet, configurationId: currentRuleSet.assignedConfigurationId)
                 }
+            }
+        }
+        .onChange(of: isEditing) { _, newValue in
+            if newValue == false {
+                save()
             }
         }
         .onAppear {
@@ -148,6 +165,20 @@ struct RuleSetListView: View {
         }
     }
     
+    private func save() {
+        let store = RoutingRuleSetStore.shared
+        let localIds = customRuleSets.map(\.id)
+        guard localIds != store.customRuleSets.map(\.id) else { return }
+        
+        let surviving = Set(localIds)
+        for removed in store.customRuleSets where !surviving.contains(removed.id) {
+            store.removeCustomRuleSet(removed.id)
+        }
+        if store.customRuleSets.map(\.id) != localIds {
+            store.reorderCustomRuleSets(customRuleSets)
+        }
+    }
+
     @ViewBuilder
     private func ruleSetRow(for ruleSet: CustomRoutingRuleSet) -> some View {
         HStack {

@@ -211,6 +211,16 @@ class RoutingRuleSetStore {
         rebuildRuleSets()
     }
 
+    /// Persists a user-driven reordering of the custom rule sets. The order determines both
+    /// display position and, within the User routing tier, match priority. The caller passes
+    /// the already-reordered set, which must contain the same members as the current list.
+    func reorderCustomRuleSets(_ ordered: [CustomRoutingRuleSet]) {
+        guard Set(ordered.map(\.id)) == Set(customRuleSets.map(\.id)) else { return }
+        customRuleSets = ordered
+        saveCustomRuleSets()
+        rebuildRuleSets()
+    }
+
     /// Fetches the subscription URL, parses the response as an `.arrs` rule set, and
     /// replaces the rules of the existing custom set. The user-given `name` is
     /// preserved across refreshes so renames stick.
@@ -235,27 +245,6 @@ class RoutingRuleSetStore {
         customRuleSets[index].rules = parsed.rules
         saveCustomRuleSets()
         rebuildRuleSets()
-    }
-
-    func addRule(to customRuleSetId: UUID, rule: RoutingRule) {
-        guard let index = customRuleSets.firstIndex(where: { $0.id == customRuleSetId }) else { return }
-        customRuleSets[index].rules.append(rule)
-        saveCustomRuleSets()
-    }
-
-    func addRules(to customRuleSetId: UUID, rules: [RoutingRule]) {
-        guard !rules.isEmpty,
-              let index = customRuleSets.firstIndex(where: { $0.id == customRuleSetId }) else { return }
-        customRuleSets[index].rules.append(contentsOf: rules)
-        saveCustomRuleSets()
-    }
-
-    func removeRules(from customRuleSetId: UUID, at indices: [Int]) {
-        guard let index = customRuleSets.firstIndex(where: { $0.id == customRuleSetId }) else { return }
-        for i in indices.sorted().reversed() {
-            customRuleSets[index].rules.remove(at: i)
-        }
-        saveCustomRuleSets()
     }
 
     func customRuleSet(for id: UUID) -> CustomRoutingRuleSet? {

@@ -9,10 +9,13 @@ import SwiftUI
 
 struct CustomRuleSetDetailView: View {
     let customRuleSetId: UUID
+    @Environment(\.editMode) private var editMode
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
+
+    @State private var rules: [RoutingRule] = []
 
     @State private var showAddRuleSheet = false
     @State private var showRenameAlert = false
@@ -21,6 +24,8 @@ struct CustomRuleSetDetailView: View {
     @State private var isUpdating = false
     @State private var updateError: String?
 
+    private var isEditing: Bool? { editMode?.wrappedValue.isEditing }
+
     private var customRuleSet: CustomRoutingRuleSet? {
         ruleSetStore.customRuleSet(for: customRuleSetId)
     }
@@ -28,6 +33,8 @@ struct CustomRuleSetDetailView: View {
     private var ruleSet: RoutingRuleSet? {
         ruleSetStore.ruleSets.first { $0.id == customRuleSetId.uuidString }
     }
+
+    private var isSubscribed: Bool { customRuleSet?.subscriptionURL != nil }
 
     var body: some View {
         List {
@@ -41,27 +48,42 @@ struct CustomRuleSetDetailView: View {
                 subscriptionSection(url: subscriptionURL)
             }
 
-            if let customRuleSet, !customRuleSet.rules.isEmpty {
+            if !rules.isEmpty {
                 Section("Rules") {
-                    ForEach(Array(customRuleSet.rules.enumerated()), id: \.offset) { _, rule in
+                    ForEach(Array(rules.enumerated()), id: \.offset) { _, rule in
                         ruleRow(rule)
                     }
-                    .onDelete { offsets in
-                        guard customRuleSet.subscriptionURL == nil else { return }
-                        ruleSetStore.removeRules(from: customRuleSetId, at: Array(offsets))
-                    }
+                    .onDelete(perform: isSubscribed ? nil : { offsets in
+                        rules.remove(atOffsets: offsets)
+                        if isEditing != true {
+                            save()
+                        }
+                    })
+                    .onMove(perform: isSubscribed ? nil : { source, destination in
+                        rules.move(fromOffsets: source, toOffset: destination)
+                        if isEditing != true {
+                            save()
+                        }
+                    })
                 }
             }
         }
         .navigationTitle(customRuleSet?.name ?? String(localized: "Rule Set"))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            if !isSubscribed {
+                ToolbarItem {
+                    EditButton()
+                }
+            }
+            ToolbarItem {
                 Menu("More", systemImage: "ellipsis") {
-                    Button {
-                        showAddRuleSheet = true
-                    } label: {
-                        Label("Add Rule", systemImage: "plus")
+                    if !isSubscribed {
+                        Button {
+                            showAddRuleSheet = true
+                        } label: {
+                            Label("Add Rule", systemImage: "plus")
+                        }
                     }
                     Button {
                         renameText = customRuleSet?.name ?? ""
@@ -73,7 +95,12 @@ struct CustomRuleSetDetailView: View {
             }
         }
         .sheet(isPresented: $showAddRuleSheet) {
-            AddRoutingRuleView(customRuleSetId: customRuleSetId)
+            AddRoutingRuleView { rule in
+                rules.append(rule)
+                if isEditing != true {
+                    save()
+                }
+            }
         }
         .alert("Rename Rule Set", isPresented: $showRenameAlert) {
             TextField("Name", text: $renameText)
@@ -92,6 +119,22 @@ struct CustomRuleSetDetailView: View {
         } message: {
             Text(updateError ?? "")
         }
+        .onAppear { loadInitial() }
+        .onChange(of: isEditing) { _, newValue in
+            if newValue == false {
+                save()
+            }
+        }
+    }
+
+    private func loadInitial() {
+        guard let customRuleSet else { return }
+        rules = customRuleSet.rules
+    }
+    
+    private func save() {
+        guard rules != customRuleSet?.rules else { return }
+        ruleSetStore.updateCustomRuleSet(customRuleSetId, rules: rules)
     }
 
     @ViewBuilder
@@ -124,6 +167,7 @@ struct CustomRuleSetDetailView: View {
             defer { isUpdating = false }
             do {
                 try await ruleSetStore.refreshCustomRuleSet(customRuleSetId)
+                loadInitial()
             } catch {
                 updateError = error.localizedDescription
             }
@@ -202,8 +246,7 @@ struct CustomRuleSetDetailView: View {
 // MARK: - Add Rule Sheet
 
 private struct AddRoutingRuleView: View {
-    let customRuleSetId: UUID
-    @Environment(RoutingRuleSetStore.self) private var ruleSetStore
+    let onAdd: (RoutingRule) -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var routingRuleValue = ""
@@ -235,7 +278,7 @@ private struct AddRoutingRuleView: View {
                     ConfirmButton("Add") {
                         let value = routingRuleValue.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !value.isEmpty else { return }
-                        ruleSetStore.addRule(to: customRuleSetId, rule: RoutingRule(type: routingRuleType, value: normalizeValue(value, type: routingRuleType)))
+                        onAdd(RoutingRule(type: routingRuleType, value: normalizeValue(value, type: routingRuleType)))
                         dismiss()
                     }
                     .disabled(routingRuleValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -253,7 +296,7 @@ private struct AddRoutingRuleView: View {
         case .ipCIDR6: return "2001:db8::/32"
         }
     }
-    
+
     func normalizeValue(_ value: String, type: RoutingRuleType) -> String {
         switch type {
         case .ipCIDR:
