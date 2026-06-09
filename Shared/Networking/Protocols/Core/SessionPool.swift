@@ -76,3 +76,7 @@ nonisolated class SessionPool<S: PoolableSession> {
         }
     }
 }
+
+extension SessionPool: TransportPool {
+    func reclaim() { closeAll() }
+}
