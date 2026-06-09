@@ -47,8 +47,10 @@ extension TunnelStack {
             var protocols: [NSNumber] = []
             var releases: [PendingRelease] = []
 
+            var queueDepth = 0
             outputBufferLock.withLock {
                 let pending = outputPackets.count
+                queueDepth = pending
                 if pending == 0 {
                     outputDrainInFlight = false
                     return
@@ -73,6 +75,7 @@ extension TunnelStack {
                 }
             }
 
+            PerformanceMonitor.gauge(.outputQueueDepth, queueDepth, highWater: TunnelConstants.tunnelMaxPacketsPerWrite)
             if packets.isEmpty { return }
             packetFlow?.writePackets(packets, withProtocols: protocols)
 

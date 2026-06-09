@@ -173,7 +173,9 @@ nonisolated final class QUICSocket {
         guard socketFD >= 0 else { return }
         while true {
             let n = rxBuf.withUnsafeMutableBufferPointer { buf -> Int in
-                Darwin.recv(socketFD, buf.baseAddress, buf.count, 0)
+                PerformanceMonitor.measure(.socketReceiveQUIC) {
+                    Darwin.recv(socketFD, buf.baseAddress, buf.count, 0)
+                }
             }
             if n < 0 {
                 let err = errno
@@ -207,7 +209,9 @@ nonisolated final class QUICSocket {
     func send(_ bytes: UnsafePointer<UInt8>, length: Int) {
         guard socketFD >= 0, length > 0 else { return }
         while true {
-            let n = Darwin.send(socketFD, bytes, length, 0)
+            let n = PerformanceMonitor.measure(.socketSendQUIC) {
+                Darwin.send(socketFD, bytes, length, 0)
+            }
             if n >= 0 { return }
             if errno == EINTR { continue }
             // Non-EAGAIN errors are silently dropped; ngtcp2's loss recovery

@@ -510,10 +510,12 @@ class DomainRouter {
         // Lowercase once (allocation-free when already lowercase ASCII) and
         // hand the contiguous UTF-8 bytes to every tier, so neither the
         // suffix trie nor the keyword automaton re-splits or re-allocates
-        // per tier.
-        var lowered = Self.asciiLowercasedIfNeeded(domain)
-        return routingLock.withLock {
-            lowered.withUTF8 { matchDomainBytes($0) }
+        // per tier. Timed outside routingLock so the monitor lock stays a leaf.
+        return PerformanceMonitor.measure(.routingDomain) {
+            var lowered = Self.asciiLowercasedIfNeeded(domain)
+            return routingLock.withLock {
+                lowered.withUTF8 { matchDomainBytes($0) }
+            }
         }
     }
 
@@ -531,25 +533,28 @@ class DomainRouter {
     func matchIP(_ ip: String) -> RouteTarget? {
         guard !ip.isEmpty else { return nil }
 
-        return routingLock.withLock { () -> RouteTarget? in
-            if ip.contains(":") {
-                var addr = in6_addr()
-                guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
-                // Pack the 16 address bytes into a 128-bit pair once, then reuse
-                // it across every tier rather than re-packing per tier.
-                let (hi, lo) = withUnsafeBytes(of: &addr) { raw -> (UInt64, UInt64) in
-                    CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
+        // Timed outside routingLock so the monitor lock stays a leaf.
+        return PerformanceMonitor.measure(.routingIP) {
+            routingLock.withLock { () -> RouteTarget? in
+                if ip.contains(":") {
+                    var addr = in6_addr()
+                    guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
+                    // Pack the 16 address bytes into a 128-bit pair once, then reuse
+                    // it across every tier rather than re-packing per tier.
+                    let (hi, lo) = withUnsafeBytes(of: &addr) { raw -> (UInt64, UInt64) in
+                        CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
+                    }
+                    for i in tiers.indices {
+                        if let action = tiers[i].lookupIPv6(hi: hi, lo: lo) { return action }
+                    }
+                    return nil
+                } else {
+                    guard let ip32 = Self.parseIPv4(ip) else { return nil }
+                    for i in tiers.indices {
+                        if let action = tiers[i].lookupIPv4(ip32) { return action }
+                    }
+                    return nil
                 }
-                for i in tiers.indices {
-                    if let action = tiers[i].lookupIPv6(hi: hi, lo: lo) { return action }
-                }
-                return nil
-            } else {
-                guard let ip32 = Self.parseIPv4(ip) else { return nil }
-                for i in tiers.indices {
-                    if let action = tiers[i].lookupIPv4(ip32) { return action }
-                }
-                return nil
             }
         }
     }

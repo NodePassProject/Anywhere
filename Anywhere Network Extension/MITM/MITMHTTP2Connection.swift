@@ -625,6 +625,8 @@ final class MITMHTTP2Connection {
     /// parks the connection. Returns true when parked (a resume continues the
     /// pump); false when the buffer drained with no hop outstanding.
     private func pump(into output: inout Data) -> Bool {
+        let span = PerformanceMonitor.span(.mitmRewrite)
+        defer { span.stop() }
         while let frame = parseFrame(from: &rxBuffer) {
             if handleFrame(frame, into: &output) {
                 return true

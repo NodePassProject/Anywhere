@@ -691,7 +691,9 @@ nonisolated class RawTCPSocket: RawTransport {
             let fd = socketFD
             let sent: Int = head.data.withUnsafeBytes { raw -> Int in
                 guard let base = raw.baseAddress else { return -1 }
-                return Darwin.send(fd, base.advanced(by: head.offset), remaining, 0)
+                return PerformanceMonitor.measure(.socketSendTCP) {
+                    Darwin.send(fd, base.advanced(by: head.offset), remaining, 0)
+                }
             }
 
             if sent > 0 {
@@ -780,7 +782,9 @@ nonisolated class RawTCPSocket: RawTransport {
             recvScratch = scratch
         }
         let fd = socketFD
-        let n = Darwin.recv(fd, scratch, Self.recvScratchSize, 0)
+        let n = PerformanceMonitor.measure(.socketReceiveTCP) {
+            Darwin.recv(fd, scratch, Self.recvScratchSize, 0)
+        }
         if n > 0 {
             // Copy exactly `n` bytes into the returned Data. The scratch is
             // reused on the next recv, so the returned Data must own its

@@ -121,10 +121,17 @@ nonisolated class ProxyClient {
     private func handshakeTimed(
         _ completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) -> (Result<ProxyConnection, Error>) -> Void {
-        guard isDefaultProxy else { return completion }
-        if poolsQUICSession { return completion }
+        // Bracket the full proxy setup as a perf span for every dial (not only
+        // the default proxy), stopping on success — matches MetricTimer.timing.
+        let span = PerformanceMonitor.span(.proxyHandshake)
+        let timed: (Result<ProxyConnection, Error>) -> Void = { result in
+            if case .success = result { span.stop() }
+            completion(result)
+        }
+        guard isDefaultProxy else { return timed }
+        if poolsQUICSession { return timed }
         let metric: ConnectionMetrics.Metric = isQUICTransport ? .handshakeNoDial : .handshake
-        return MetricTimer.timing(metric, completion)
+        return MetricTimer.timing(metric, timed)
     }
     
     func connect(

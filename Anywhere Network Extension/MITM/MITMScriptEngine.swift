@@ -381,7 +381,7 @@ final class MITMScriptEngine {
     private func runUserScript<T>(_ label: String, _ body: () -> T) -> T {
         MITMScriptWatchdog.begin(label)
         defer { MITMScriptWatchdog.end() }
-        return body()
+        return PerformanceMonitor.measure(.mitmScript, body)
     }
 
     // NB: there is intentionally no synchronous `apply(_:source:sourceKey:)`.

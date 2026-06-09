@@ -107,6 +107,7 @@
 				Networking/DNSResolver.swift,
 				Networking/LatencyTester.swift,
 				Networking/MetricTimer.swift,
+				Networking/PerformanceMonitor.swift,
 				Networking/ngtcp2/ngtcp2_acktr.c,
 				Networking/ngtcp2/ngtcp2_addr.c,
 				Networking/ngtcp2/ngtcp2_balloc.c,

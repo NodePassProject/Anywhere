@@ -246,7 +246,9 @@ nonisolated final class RawUDPSocket {
         guard socketFD >= 0 else { return }
         while true {
             let n = rxBuffer.withUnsafeMutableBufferPointer { buf -> Int in
-                Darwin.recv(socketFD, buf.baseAddress, buf.count, 0)
+                PerformanceMonitor.measure(.socketReceiveUDP) {
+                    Darwin.recv(socketFD, buf.baseAddress, buf.count, 0)
+                }
             }
             if n < 0 {
                 let err = errno
@@ -286,6 +288,7 @@ nonisolated final class RawUDPSocket {
                 // install can't grow unbounded.
                 if pendingDatagrams.count >= Self.maxPendingDatagrams {
                     pendingDatagrams.removeFirst()
+                    PerformanceMonitor.event(.udpBufferOverflow)
                     if !didWarnPendingOverflow {
                         didWarnPendingOverflow = true
                         logger.warning("[UDP] Pre-handler buffer overflowed (cap \(Self.maxPendingDatagrams)); dropping oldest until startReceiving arms")
@@ -321,7 +324,9 @@ nonisolated final class RawUDPSocket {
         }
         let sent = data.withUnsafeBytes { buf -> Int in
             guard let base = buf.baseAddress else { return -1 }
-            return Darwin.send(socketFD, base, data.count, 0)
+            return PerformanceMonitor.measure(.socketSendUDP) {
+                Darwin.send(socketFD, base, data.count, 0)
+            }
         }
         if sent < 0 {
             let err = errno

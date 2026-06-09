@@ -180,11 +180,16 @@ nonisolated class TLSClient {
     private func releasingConnectionOnFailure(
         _ completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) -> (Result<TLSRecordConnection, Error>) -> Void {
+        // Brackets the TLS handshake — both connect paths funnel through here at
+        // dial time. Stop on success only (network-bound; matches the proxy span).
+        let span = PerformanceMonitor.span(.tlsHandshake)
         return { [weak self] result in
             if case .failure = result {
                 self?.connection?.forceCancel()
                 self?.connection = nil
                 self?.clearHandshakeState()
+            } else {
+                span.stop()
             }
             completion(result)
         }

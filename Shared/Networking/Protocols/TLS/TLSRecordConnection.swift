@@ -593,19 +593,23 @@ nonisolated class TLSRecordConnection {
 
     /// Encrypts a single record, dispatching to the appropriate version-specific method.
     private func encryptSingleRecord(plaintext: Data, contentType: UInt8) throws -> Data {
-        if tlsVersion >= 0x0304 {
-            return try encryptTLS13Record(plaintext: plaintext, contentType: contentType)
-        } else {
-            return try encryptTLS12Record(plaintext: plaintext, contentType: contentType)
+        try PerformanceMonitor.measure(.tlsEncrypt) {
+            if tlsVersion >= 0x0304 {
+                return try encryptTLS13Record(plaintext: plaintext, contentType: contentType)
+            } else {
+                return try encryptTLS12Record(plaintext: plaintext, contentType: contentType)
+            }
         }
     }
 
     /// Decrypts a single record, dispatching to the appropriate version-specific method.
     private func decryptTLSRecord(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
-        if tlsVersion >= 0x0304 {
-            return try decryptTLS13Record(ciphertext: ciphertext, header: header, seqNum: seqNum)
-        } else {
-            return try decryptTLS12Record(ciphertext: ciphertext, header: header, seqNum: seqNum)
+        try PerformanceMonitor.measure(.tlsDecrypt) {
+            if tlsVersion >= 0x0304 {
+                return try decryptTLS13Record(ciphertext: ciphertext, header: header, seqNum: seqNum)
+            } else {
+                return try decryptTLS12Record(ciphertext: ciphertext, header: header, seqNum: seqNum)
+            }
         }
     }
 

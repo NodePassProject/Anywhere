@@ -277,6 +277,7 @@ extension TunnelStack {
         )
         evictUDPFlowsToAdmit()
         udpFlows[flowKey] = flow
+        PerformanceMonitor.gauge(.udpFlowCount, udpFlows.count, highWater: TunnelConstants.udpMaxFlows)
         logger.debug("[DNS] Forwarding qtype \(qtype) for \(domain) → \(upstream):\(dstPort) via \(configuration.name)")
         flow.handleReceivedData(payload, payloadLength: payload.count)
         return true
