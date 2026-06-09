@@ -42,14 +42,12 @@ struct ChainListView: View {
         }
         .navigationTitle("Chains")
         .toolbar {
-            ToolbarItem {
+            ToolbarItemGroup {
                 Button {
                     viewModel.testAllChainLatencies(chains: chainStore.chains, configurations: configStore.configurations)
                 } label: {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
                 }
-            }
-            ToolbarItem {
                 Button {
                     if configStore.configurations.count < 2 {
                         showingNotEnoughProxiesAlert = true

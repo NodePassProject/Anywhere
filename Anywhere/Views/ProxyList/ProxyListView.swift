@@ -60,15 +60,31 @@ struct ProxyListView: View {
         .navigationTitle("Proxies")
         .toolbar {
             if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 {
-                ToolbarItem {
-                    NavigationLink {
-                        ReorderProxiesView()
-                    } label: {
-                        Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
+                if #available(iOS 27.0, *) {
+                    ToolbarItemGroup {
+                        NavigationLink {
+                            ReorderProxiesView()
+                        } label: {
+                            Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
+                        }
+                    }
+                    .visibilityPriority(.low)
+                } else {
+                    ToolbarItemGroup {
+                        NavigationLink {
+                            ReorderProxiesView()
+                        } label: {
+                            Label("Reorder Proxies", systemImage: "arrow.up.arrow.down")
+                        }
                     }
                 }
             }
-            ToolbarItem {
+            
+            if #available(iOS 26.0, *) {
+                ToolbarSpacer()
+            }
+            
+            ToolbarItemGroup {
                 Button {
                     let visible = configStore.configurations.filter { configuration in
                         guard let subId = configuration.subscriptionId else { return true }
@@ -78,8 +94,6 @@ struct ProxyListView: View {
                 } label: {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
                 }
-            }
-            ToolbarItem {
                 Button {
                     showingAddSheet = true
                 } label: {
