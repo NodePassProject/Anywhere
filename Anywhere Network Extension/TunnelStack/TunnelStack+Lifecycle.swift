@@ -130,24 +130,8 @@ extension TunnelStack {
             guard running else { return }
             logger.info("[VPN] Path offline/sleep: releasing upstream transports; will rebuild when it returns")
 
-            HysteriaClient.closeAll()
-            NowhereClient.closeAll()
-            AnyTLSManager.shared.closeAll()
-            HTTP3SessionPool.shared.closeAll()
-            HTTP2SessionPool.shared.closeAll()
-
-            // The Vision mux, SS UDP sessions, and per-flow UDP state are
-            // udpQueue-owned, so release them there. The sync hop is
-            // deadlock-free: udpQueue work never sync-waits back on lwipQueue.
-            udpQueue.sync {
-                muxManager?.closeAll()
-                muxManager = nil
-                purgeShadowsocksUDPSessions()
-                for (_, flow) in udpFlows {
-                    flow.close()
-                }
-                udpFlows.removeAll()
-            }
+            TransportReclaim.reclaimAll()
+            reclaimInstanceTransports(rebuildMux: false)
         }
     }
 
@@ -241,21 +225,35 @@ extension TunnelStack {
             Unmanaged<TCPConnection>.fromOpaque(arg).takeUnretainedValue().close()
         }
 
-        HysteriaClient.closeAll()
-        NowhereClient.closeAll()
-        AnyTLSManager.shared.closeAll()
-        HTTP3SessionPool.shared.closeAll()
-        HTTP2SessionPool.shared.closeAll()
+        TransportReclaim.reclaimAll()
+        reclaimInstanceTransports(rebuildMux: true)
+    }
 
-        // The Vision mux, SS UDP sessions, and per-flow UDP state are
-        // udpQueue-owned. Tear them down and rebuild the mux on that queue:
-        // serialized against flow processing, so a flow handled after this finds
-        // the mux ready, while one caught mid-churn is torn down with the rest
-        // (wake / path-change resets connections regardless).
-        let useMux = Self.shouldUseVisionMux(configuration)
+    /// Reclaims the udpQueue-owned per-tunnel transports — the Vision mux, the
+    /// Shadowsocks UDP sessions, and every per-flow UDP proxy connection — that
+    /// the process-wide ``TransportReclaim`` pools don't cover because they
+    /// belong to this running tunnel rather than the process. Must be called on
+    /// `lwipQueue`; hops onto `udpQueue` (which owns all three) and waits. The
+    /// sync hop is deadlock-free: no udpQueue work ever sync-waits back on
+    /// lwipQueue.
+    ///
+    /// - Parameter rebuildMux: when `true` (network recovery), the Vision mux is
+    ///   rebuilt for the current configuration after teardown, so a flow handled
+    ///   right after finds it ready; when `false` (suspend / stop — there's no
+    ///   path to dial over, or the stack is going away), the mux is left `nil`.
+    private func reclaimInstanceTransports(rebuildMux: Bool) {
+        // Build the replacement mux on lwipQueue (where `configuration` is
+        // owned), then publish it inside the udpQueue hop alongside the teardown.
+        let rebuiltMux: MuxManager?
+        if rebuildMux, let configuration, Self.shouldUseVisionMux(configuration) {
+            rebuiltMux = MuxManager(configuration: configuration, flowQueue: udpQueue)
+        } else {
+            rebuiltMux = nil
+        }
+
         udpQueue.sync {
             muxManager?.closeAll()
-            muxManager = useMux ? MuxManager(configuration: configuration, flowQueue: udpQueue) : nil
+            muxManager = rebuiltMux
             purgeShadowsocksUDPSessions()
             for (_, flow) in udpFlows {
                 flow.close()
@@ -288,25 +286,8 @@ extension TunnelStack {
             outputDrainInFlight = false
         }
 
-        HysteriaClient.closeAll()
-        NowhereClient.closeAll()
-        AnyTLSManager.shared.closeAll()
-        HTTP3SessionPool.shared.closeAll()
-        HTTP2SessionPool.shared.closeAll()
-
-        // mux / SS sessions / flows are udpQueue-owned — close them there and
-        // wait, so they're fully released before lwip_bridge_shutdown tears down
-        // the stack. The sync hop is deadlock-free: no udpQueue work ever
-        // sync-waits back on lwipQueue.
-        udpQueue.sync {
-            muxManager?.closeAll()
-            muxManager = nil
-            purgeShadowsocksUDPSessions()
-            for (_, flow) in udpFlows {
-                flow.close()
-            }
-            udpFlows.removeAll()
-        }
+        TransportReclaim.reclaimAll()
+        reclaimInstanceTransports(rebuildMux: false)
 
         isTearingDown = true
         lwip_bridge_shutdown()

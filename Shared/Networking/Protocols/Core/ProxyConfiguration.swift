@@ -8,7 +8,7 @@
 import Foundation
 
 /// Outbound protocol type.
-enum OutboundProtocol: String, Codable {
+enum OutboundProtocol: String, Codable, CaseIterable {
     case vless
     case hysteria
     case nowhere

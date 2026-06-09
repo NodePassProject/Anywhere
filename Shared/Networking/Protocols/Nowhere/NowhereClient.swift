@@ -296,3 +296,10 @@ nonisolated final class NowhereClient {
         }
     }
 }
+
+extension NowhereClient {
+    static let pool: TransportPool = Pool()
+    private final class Pool: TransportPool {
+        func reclaim() { NowhereClient.closeAll() }
+    }
+}

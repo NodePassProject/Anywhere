@@ -199,6 +199,23 @@ private enum SudokuSharedMuxPool {
         }
         return evicted
     }
+    
+    static func reclaim() {
+        let victims = lock.withLock { () -> [SudokuSharedMuxClient] in
+            let all = Array(clients.values)
+            clients.removeAll()
+            accessOrder.removeAll()
+            return all
+        }
+        for client in victims { client.close() }
+    }
+}
+
+enum SudokuTransportPool {
+    static let pool: TransportPool = Reclaimer()
+    private final class Reclaimer: TransportPool {
+        func reclaim() { SudokuSharedMuxPool.reclaim() }
+    }
 }
 
 private final class SudokuSharedMuxClient {

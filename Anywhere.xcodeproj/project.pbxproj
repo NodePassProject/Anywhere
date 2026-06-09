@@ -184,6 +184,7 @@
 				Networking/Protocols/Core/ProxyUserAgent.swift,
 				Networking/Protocols/Core/SessionPool.swift,
 				Networking/Protocols/Core/TransportClosures.swift,
+				Networking/Protocols/Core/TransportReclaim.swift,
 				Networking/Protocols/Core/TunneledTransport.swift,
 				Networking/Protocols/Core/UDPFraming.swift,
 				Networking/Protocols/Crypto/Blake3Hasher.swift,
