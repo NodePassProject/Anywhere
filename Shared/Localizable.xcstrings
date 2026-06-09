@@ -8815,6 +8815,7 @@
       }
     },
     "Not recommended." : {
+      "extractionState" : "stale",
       "localizations" : {
         "ar" : {
           "stringUnit" : {

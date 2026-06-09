@@ -21,7 +21,7 @@ struct AppIconView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 32, height: 32)
-                .cornerRadius(7)
+                .clipShape(.rect(cornerRadius: 7))
                 .overlay(
                     RoundedRectangle(cornerRadius: 7)
                         .strokeBorder(
@@ -61,7 +61,7 @@ struct AppIconView: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: 32, height: 32)
-                .cornerRadius(7)
+                .clipShape(.rect(cornerRadius: 7))
         }
     }
 }

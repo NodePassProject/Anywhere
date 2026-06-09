@@ -8,41 +8,35 @@
 import SwiftUI
 
 struct EncryptedDNSSettingsView: View {
-    @State private var enabled = AWCore.getEncryptedDNSEnabled()
-    @State private var `protocol` = AWCore.getEncryptedDNSProtocol()
-    @State private var server = AWCore.getEncryptedDNSServer()
-    
     @State private var showEnableAlert = false
+    @State private var serverBuffer = ""
 
     var body: some View {
+        @Bindable var settings = AppSettings.shared
         Form {
             Section {
                 Toggle("Encrypted DNS", isOn: Binding(
-                    get: { enabled },
+                    get: { settings.encryptedDNSEnabled },
                     set: { newValue in
                         if newValue {
                             showEnableAlert = true
                         } else {
-                            enabled = false
-                            AWCore.setEncryptedDNSEnabled(false)
-                            AWCore.notifyTunnelSettingsChanged()
+                            settings.encryptedDNSEnabled = false
                         }
                     }
                 ))
-            } footer: {
-                Text("Not recommended.")
             }
 
-            if enabled {
+            if settings.encryptedDNSEnabled {
                 Section {
-                    Picker("Protocol", selection: $protocol) {
+                    Picker("Protocol", selection: $settings.encryptedDNSProtocol) {
                         Text("DNS over HTTPS").tag("doh")
                         Text("DNS over TLS").tag("dot")
                     }
                 }
 
                 Section {
-                    TextField("DNS Server", text: $server)
+                    TextField("DNS Server", text: $serverBuffer)
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
@@ -53,21 +47,11 @@ struct EncryptedDNSSettingsView: View {
             }
         }
         .navigationTitle("Encrypted DNS")
-        .onAppear {
-            enabled = AWCore.getEncryptedDNSEnabled()
-            `protocol` = AWCore.getEncryptedDNSProtocol()
-            server = AWCore.getEncryptedDNSServer()
-        }
+        .onAppear { serverBuffer = settings.encryptedDNSServer }
         .onDisappear { commitServer() }
-        .onChange(of: `protocol`) { _, newValue in
-            AWCore.setEncryptedDNSProtocol(newValue)
-            AWCore.notifyTunnelSettingsChanged()
-        }
         .alert("Encrypted DNS", isPresented: $showEnableAlert) {
             Button("Enable Anyway", role: .destructive) {
-                enabled = true
-                AWCore.setEncryptedDNSEnabled(true)
-                AWCore.notifyTunnelSettingsChanged()
+                settings.encryptedDNSEnabled = true
             }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -76,7 +60,6 @@ struct EncryptedDNSSettingsView: View {
     }
 
     private func commitServer() {
-        AWCore.setEncryptedDNSServer(server.trimmingCharacters(in: .whitespacesAndNewlines))
-        AWCore.notifyTunnelSettingsChanged()
+        AppSettings.shared.encryptedDNSServer = serverBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

@@ -50,7 +50,7 @@ struct CustomRuleSetDetailView: View {
 
             if !rules.isEmpty {
                 Section("Rules") {
-                    ForEach(Array(rules.enumerated()), id: \.offset) { _, rule in
+                    ForEach(rules) { rule in
                         ruleRow(rule)
                     }
                     .onDelete(perform: isSubscribed ? nil : { offsets in

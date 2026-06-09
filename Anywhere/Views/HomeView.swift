@@ -9,14 +9,13 @@ import SwiftUI
 import NetworkExtension
 
 struct HomeView: View {
+    @Environment(AppSettings.self) private var settings
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(ChainStore.self) private var chainStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
 
     @Namespace private var namespace
-    
-    @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
@@ -27,23 +26,11 @@ struct HomeView: View {
 
     private var isTransitioning: Bool { viewModel.vpnStatus.isTransitioning }
 
-    private var selectedPickerId: Binding<UUID?> {
-        Binding(
-            get: { viewModel.selectedChainId ?? viewModel.selectedConfiguration?.id },
-            set: { newId in
-                guard let id = newId else { return }
-                if let chain = chainStore.chains.first(where: { $0.id == id }) {
-                    viewModel.selectChain(chain, configurations: configStore.configurations)
-                } else if let configuration = configStore.configurations.first(where: { $0.id == id }) {
-                    viewModel.selectedConfiguration = configuration
-                }
-            }
-        )
-    }
+    private var experimentalEnabled: Bool { settings.experimentalEnabled }
 
     var body: some View {
         ZStack {
-            background
+            BackgroundGradient(isConnected: isConnected)
                 .ignoresSafeArea()
 
             GeometryReader { geometry in
@@ -53,7 +40,13 @@ struct HomeView: View {
                             Section {
                                 ConnectionStatsView()
                             } header: {
-                                connectedHeader
+                                HStack {
+                                    powerButton
+                                        .matchedGeometryEffect(id: "powerButton", in: namespace)
+                                    configurationCard
+                                        .matchedGeometryEffect(id: "configurationCard", in: namespace)
+                                }
+                                .padding(.vertical, 8)
                             }
                         } else {
                             VStack(spacing: 80) {
@@ -71,9 +64,6 @@ struct HomeView: View {
                 }
                 .scrollBounceBehavior(.basedOnSize, axes: .vertical)
             }
-        }
-        .onAppear {
-            experimentalEnabled = AWCore.getExperimentalEnabled()
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
@@ -95,23 +85,35 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - Connected Layout
-    
-    @ViewBuilder
-    private var connectedHeader: some View {
-        HStack {
-            powerButton
-                .matchedGeometryEffect(id: "powerButton", in: namespace)
-            configurationCard
-                .matchedGeometryEffect(id: "configurationCard", in: namespace)
+    private var powerButton: some View {
+        PowerButton(
+            isConnected: isConnected,
+            isTransitioning: isTransitioning,
+            isCompact: isConnected && experimentalEnabled,
+            isDisabled: viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations)
+                && configStore.hasConfigurations
+        ) {
+            if configStore.hasConfigurations {
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
+                    viewModel.toggleVPN()
+                }
+            } else {
+                showingAddSheet = true
+            }
         }
-        .padding(.vertical, 8)
     }
 
-    // MARK: - Background
+    private var configurationCard: some View {
+        ConfigurationCard(isConnected: isConnected, showingAddSheet: $showingAddSheet)
+    }
+}
 
-    @ViewBuilder
-    private var background: some View {
+// MARK: - Background
+
+private struct BackgroundGradient: View {
+    let isConnected: Bool
+
+    var body: some View {
         if isConnected {
             LinearGradient(
                 colors: [Color.connectedBackgroundStart, Color.connectedBackgroundEnd],
@@ -128,31 +130,30 @@ struct HomeView: View {
             .transition(.blurReplace)
         }
     }
+}
 
-    // MARK: - Power Button
+// MARK: - Power Button
 
-    @ViewBuilder
-    private var powerButton: some View {
-        Button {
-            if configStore.hasConfigurations {
-                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) {
-                    viewModel.toggleVPN()
-                }
-            } else {
-                showingAddSheet = true
-            }
-        } label: {
+private struct PowerButton: View {
+    let isConnected: Bool
+    let isTransitioning: Bool
+    let isCompact: Bool
+    let isDisabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
             ZStack {
                 if #available(iOS 26.0, *) {
                     Circle()
                         .fill(.clear)
-                        .frame(width: (isConnected && experimentalEnabled) ? 50 : 140)
+                        .frame(width: isCompact ? 50 : 140)
                         .glassEffect(.clear, in: .circle)
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 } else {
                     Circle()
                         .fill(.white.opacity(0.2))
-                        .frame(width: (isConnected && experimentalEnabled) ? 50 : 140)
+                        .frame(width: isCompact ? 50 : 140)
                         .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
                 }
 
@@ -162,43 +163,56 @@ struct HomeView: View {
                         .tint(isConnected ? .white : .accentColor)
                 } else {
                     Image(systemName: "power")
-                        .font(.system(size: (isConnected && experimentalEnabled) ? 24 : 40, weight: .light))
+                        .font(.system(size: isCompact ? 24 : 40, weight: .light))
                         .foregroundStyle(isConnected ? .white : .accentColor)
                 }
             }
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.isButtonDisabled(hasConfigurations: configStore.hasConfigurations) && configStore.hasConfigurations)
+        .disabled(isDisabled)
         .sensoryFeedback(.impact(weight: .medium), trigger: isConnected)
         .animation(.easeInOut(duration: 0.6), value: isConnected)
     }
+}
 
-    // MARK: - Configuration Card
+// MARK: - Configuration Card
 
-    @ViewBuilder
-    private var configurationCard: some View {
+private struct ConfigurationCard: View {
+    @Environment(VPNViewModel.self) private var viewModel
+    @Environment(ConfigurationStore.self) private var configStore
+    @Environment(ChainStore.self) private var chainStore
+    @Environment(SubscriptionStore.self) private var subscriptionStore
+
+    let isConnected: Bool
+    @Binding var showingAddSheet: Bool
+
+    var body: some View {
         if let configuration = viewModel.selectedConfiguration {
-            selectedConfigurationCard(configuration)
+            selectedCard(configuration)
         } else {
-            emptyStateCard
+            emptyCard
+        }
+    }
+    
+    private func select(id: UUID) {
+        if let chain = chainStore.chains.first(where: { $0.id == id }) {
+            viewModel.selectChain(chain, configurations: configStore.configurations)
+        } else if let configuration = configStore.configurations.first(where: { $0.id == id }) {
+            viewModel.selectedConfiguration = configuration
         }
     }
 
     @ViewBuilder
-    private func selectedConfigurationCard(_ configuration: ProxyConfiguration) -> some View {
+    private func selectedCard(_ configuration: ProxyConfiguration) -> some View {
         Menu {
             ForEach(configStore.standalonePickerItems) { item in
-                Button(item.name) {
-                    selectedPickerId.wrappedValue = item.id
-                }
+                Button(item.name) { select(id: item.id) }
             }
             if !chainStore.pickerItems.isEmpty {
                 Section {
                     ForEach(chainStore.pickerItems) { item in
-                        Button(item.name) {
-                            selectedPickerId.wrappedValue = item.id
-                        }
+                        Button(item.name) { select(id: item.id) }
                     }
                 } header: {
                     Text("Chains")
@@ -207,9 +221,7 @@ struct HomeView: View {
             ForEach(subscriptionStore.pickerSections) { section in
                 Section {
                     ForEach(section.items) { item in
-                        Button(item.name) {
-                            selectedPickerId.wrappedValue = item.id
-                        }
+                        Button(item.name) { select(id: item.id) }
                     }
                 } header: {
                     Text(section.header ?? "")
@@ -221,7 +233,7 @@ struct HomeView: View {
                 Label("Add", systemImage: "plus")
             }
         } label: {
-            cardContent {
+            CardCapsule {
                 HStack {
                     Image("anywhere")
                         .foregroundStyle(isConnected ? .white.opacity(0.7) : .secondary)
@@ -240,12 +252,11 @@ struct HomeView: View {
         .buttonStyle(.plain)
     }
 
-    @ViewBuilder
-    private var emptyStateCard: some View {
+    private var emptyCard: some View {
         Button {
             showingAddSheet = true
         } label: {
-            cardContent {
+            CardCapsule {
                 HStack(spacing: 12) {
                     Image(systemName: "plus.circle.fill")
                         .font(.title2)
@@ -261,16 +272,23 @@ struct HomeView: View {
         }
         .buttonStyle(.plain)
     }
+}
 
-    @ViewBuilder
-    private func cardContent<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+private struct CardCapsule<Content: View>: View {
+    private let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
         if #available(iOS 26.0, *) {
-            content()
+            content
                 .padding(16)
                 .contentShape(Capsule())
                 .glassEffect(.clear.interactive(), in: .capsule)
         } else {
-            content()
+            content
                 .padding(16)
                 .contentShape(Capsule())
                 .background(

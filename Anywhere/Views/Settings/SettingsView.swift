@@ -7,50 +7,31 @@
 
 import SwiftUI
 
-/// Settings that affect the Network Extension are stored in App Group UserDefaults
-/// and propagated via Darwin notifications:
-///
-/// - "tunnelSettingsChanged": triggers TunnelStack restart. Posted when ipv6, encrypted DNS, or bypass changes.
-///   TunnelStack re-reads all settings from UserDefaults during restart.
-///   IPv6 and encrypted DNS changes also trigger tunnel settings re-apply.
-///
-/// - "routingChanged": triggers DomainRouter rule reload only (no restart).
-///   Posted by RuleSetListView when routing rule assignments change.
-///
-/// - "alwaysOnEnabled": triggers VPN reconnect (if connected) so on-demand rules update immediately.
 struct SettingsView: View {
+    @Environment(AppSettings.self) private var settings
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     
-    @State private var experimentalEnabled = AWCore.getExperimentalEnabled()
-
-    @State private var alwaysOnEnabled = AWCore.getAlwaysOnEnabled()
-    
-    @State private var proxyMode = AWCore.getProxyMode()
     @State private var adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
 
-    @State private var allowInsecure = AWCore.getAllowInsecure()
     @State private var showInsecureAlert = false
 
     var body: some View {
+        @Bindable var settings = settings
         @Bindable var ruleSetStore = ruleSetStore
         Form {
             Section("VPN") {
-                Toggle(isOn: $alwaysOnEnabled) {
-                    TextWithColorfulIcon(title: "Always On", comment: nil, systemName: "bolt.circle.fill", foregroundColor: .white, backgroundColor: .green)
+                Toggle(isOn: $settings.alwaysOnEnabled) {
+                    TextWithColorfulIcon(title: "Always On", comment: nil, systemName: "poweron", foregroundColor: .white, backgroundColor: .green)
                 }
                 .disabled(viewModel.pendingReconnect)
             }
 
             Section("Routing") {
-                Toggle(isOn: Binding(get: {
-                    proxyMode == .global
-                }, set: { newValue in
-                    if newValue { proxyMode = .global } else { proxyMode = .rule }
-                })) {
+                Toggle(isOn: $settings.isGlobalMode) {
                     TextWithColorfulIcon(title: "Global Mode", comment: nil, systemName: "arrow.merge", foregroundColor: .white, backgroundColor: .orange)
                 }
-                if proxyMode != .global {
+                if !settings.isGlobalMode {
                     Toggle(isOn: $adBlockEnabled) {
                         TextWithColorfulIcon(title: "AD Blocking", comment: nil, systemName: "shield.checkered", foregroundColor: .white, backgroundColor: .red)
                     }
@@ -72,14 +53,12 @@ struct SettingsView: View {
 
             Section("Security") {
                 Toggle(isOn: Binding(
-                    get: { allowInsecure },
+                    get: { settings.allowInsecure },
                     set: { newValue in
                         if newValue {
                             showInsecureAlert = true
                         } else {
-                            allowInsecure = false
-                            AWCore.setAllowInsecure(false)
-                            AWCore.notifyCertificatePolicyChanged()
+                            settings.allowInsecure = false
                         }
                     }
                 )) {
@@ -93,7 +72,7 @@ struct SettingsView: View {
                 }
             }
 
-            if experimentalEnabled {
+            if settings.experimentalEnabled {
                 Section("Utilities") {
                     NavigationLink {
                         MITMSettingsView()
@@ -138,39 +117,21 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
-        .onChange(of: alwaysOnEnabled) { _, newValue in
-            AWCore.setAlwaysOnEnabled(newValue)
-            viewModel.reconnectVPN()
-        }
-        .onChange(of: proxyMode) { _, newValue in
-            AWCore.setProxyMode(newValue)
-            AWCore.notifyTunnelSettingsChanged()
-        }
         .onChange(of: adBlockEnabled) { _, newValue in
-            // `updateAssignment` re-syncs routing itself.
             if let adBlockRuleSet = RoutingRuleSetStore.shared.adBlockRuleSet {
                 RoutingRuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
             }
         }
         .alert("Allow Insecure", isPresented: $showInsecureAlert) {
             Button("Allow Anyway", role: .destructive) {
-                allowInsecure = true
-                AWCore.setAllowInsecure(true)
-                AWCore.notifyCertificatePolicyChanged()
+                settings.allowInsecure = true
             }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
         }
         .onAppear {
-            experimentalEnabled = AWCore.getExperimentalEnabled()
-
-            alwaysOnEnabled = AWCore.getAlwaysOnEnabled()
-            
-            proxyMode = AWCore.getProxyMode()
             adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
-
-            allowInsecure = AWCore.getAllowInsecure()
         }
     }
 

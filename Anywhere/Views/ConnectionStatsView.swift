@@ -149,25 +149,25 @@ private struct StatCardChrome: ViewModifier {
 
 // MARK: - Route Breakdown
 
+private struct RouteSlice: Identifiable {
+    let id: String
+    let label: String
+    let bytes: Int64
+    let color: Color
+}
+
 private struct RouteBreakdownCard: View {
     let routes: [RouteTrafficEntry]
     let name: (RouteTarget) -> String
-    
+
     private static let proxyPalette: [Color] =
         [.cyan, .orange, .purple, .pink, .yellow, .mint, .indigo, .teal]
     private static let directColor: Color = .green
     private static let otherColor: Color = .gray
-    
-    private static let maxRows = 4
 
-    private struct Slice: Identifiable {
-        let id: String
-        let label: String
-        let bytes: Int64
-        let color: Color
-    }
+    private static let maxRows = 4
     
-    private var slices: [Slice] {
+    private func makeSlices() -> [RouteSlice] {
         let proxies: [RouteTrafficEntry] = routes
             .filter { $0.totalBytes > 0 && $0.target.configurationID != nil }
             .sorted { $0.totalBytes > $1.totalBytes }
@@ -180,10 +180,10 @@ private struct RouteBreakdownCard: View {
         let shownCount = overflow ? proxyBudget - 1 : proxies.count
         let shown: [RouteTrafficEntry] = Array(proxies.prefix(shownCount))
 
-        var rows: [Slice] = []
+        var rows: [RouteSlice] = []
         for index in shown.indices {
             let proxy = shown[index]
-            rows.append(Slice(
+            rows.append(RouteSlice(
                 id: proxy.id,
                 label: name(proxy.target),
                 bytes: proxy.totalBytes,
@@ -193,26 +193,26 @@ private struct RouteBreakdownCard: View {
         if overflow {
             var otherBytes: Int64 = 0
             for proxy in proxies.dropFirst(shownCount) { otherBytes += proxy.totalBytes }
-            rows.append(Slice(id: "__other__", label: String(localized: "Other"),
-                              bytes: otherBytes, color: Self.otherColor))
+            rows.append(RouteSlice(id: "__other__", label: String(localized: "Other"),
+                                   bytes: otherBytes, color: Self.otherColor))
         }
-        rows.append(Slice(id: "__direct__", label: name(.direct),
-                          bytes: directBytes, color: Self.directColor))
+        rows.append(RouteSlice(id: "__direct__", label: name(.direct),
+                               bytes: directBytes, color: Self.directColor))
         return rows.sorted { $0.bytes > $1.bytes }
     }
 
-    private var total: Int64 { slices.reduce(0) { $0 + $1.bytes } }
-
     var body: some View {
-        VStack(spacing: 14) {
+        let slices = makeSlices()
+        let total = slices.reduce(0) { $0 + $1.bytes }
+        return VStack(spacing: 14) {
             Label("Traffic by Route", systemImage: "chart.pie")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.7))
 
             HStack(spacing: 18) {
-                donut
+                RouteDonut(slices: slices)
                     .frame(maxWidth: .infinity)
-                legend
+                RouteLegend(slices: slices, total: total)
                     .frame(maxWidth: .infinity)
             }
         }
@@ -220,8 +220,12 @@ private struct RouteBreakdownCard: View {
         .frame(maxWidth: .infinity, minHeight: 80)
         .modifier(StatCardChrome())
     }
+}
 
-    private var donut: some View {
+private struct RouteDonut: View {
+    let slices: [RouteSlice]
+
+    var body: some View {
         Chart(slices) { slice in
             SectorMark(
                 angle: .value("Usage", Double(slice.bytes)),
@@ -233,8 +237,13 @@ private struct RouteBreakdownCard: View {
         }
         .chartLegend(.hidden)
     }
+}
 
-    private var legend: some View {
+private struct RouteLegend: View {
+    let slices: [RouteSlice]
+    let total: Int64
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             ForEach(slices) { slice in
                 LegendRow(
