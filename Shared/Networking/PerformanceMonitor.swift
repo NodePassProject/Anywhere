@@ -347,7 +347,9 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
     /// Prints the current report immediately (in addition to the periodic one).
     static func report() {
         #if DEBUG
-        shared.emitReport(reason: "on-demand")
+        // A peek at the current window; does not reset, so it won't disturb the
+        // periodic windowing.
+        shared.emitReport(reason: "on-demand", resetAfter: false)
         #endif
     }
 
@@ -459,7 +461,10 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
                        repeating: Self.reportInterval,
                        leeway: .seconds(1))
         timer.setEventHandler { [weak self] in
-            self?.emitReport(reason: "periodic")
+            // Each periodic line reflects only the window since the last one:
+            // snapshot-and-reset atomically so successive reports show recent
+            // behaviour instead of a diluted lifetime average.
+            self?.emitReport(reason: "window", resetAfter: true)
         }
         reportTimer = timer
         timer.resume()
@@ -468,15 +473,16 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
     private func stopReporting() {
         reportTimer?.cancel()
         reportTimer = nil
-        emitReport(reason: "final")
-        lock.lock()
-        resetLocked()
-        lock.unlock()
+        // Final window since the last periodic report; the reset clears state
+        // for the next session.
+        emitReport(reason: "final", resetAfter: true)
     }
 
-    /// Snapshots all state under the lock, releases it, then formats and logs —
-    /// so string-building and `os_log` never run under the hot-path lock.
-    private func emitReport(reason: String) {
+    /// Snapshots all state under the lock — optionally resetting it in the same
+    /// critical section, so no records are lost across a window boundary — then
+    /// releases the lock and formats/logs. String-building and `os_log` never
+    /// run under the hot-path lock.
+    private func emitReport(reason: String, resetAfter: Bool) {
         let enabled = Self.enabledCategories
         guard !enabled.isEmpty else { return }
 
@@ -485,6 +491,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
         let buckets = spanBuckets
         let gauges = gaugeStats
         let events = eventCounts
+        if resetAfter { resetLocked() }
         lock.unlock()
 
         var lines: [String] = []
@@ -494,8 +501,8 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
             guard s.count > 0 else { continue }
             let base = component.rawValue * Self.bucketCount
             let avg = s.sumNanos / s.count
-            let p50 = Self.percentileNanos(buckets, base: base, count: s.count, p: 0.50)
-            let p99 = Self.percentileNanos(buckets, base: base, count: s.count, p: 0.99)
+            let p50 = Self.percentileNanos(buckets, base: base, count: s.count, max: s.maxNanos, p: 0.50)
+            let p99 = Self.percentileNanos(buckets, base: base, count: s.count, max: s.maxNanos, p: 0.99)
             lines.append("  \(Self.pad(component.displayName)) n=\(s.count) avg=\(Self.humanNanos(avg)) p50=\(Self.humanNanos(p50)) p99=\(Self.humanNanos(p99)) max=\(Self.humanNanos(s.maxNanos))")
         }
 
@@ -565,19 +572,26 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
         return min(bucketCount - 1, bits)
     }
 
-    /// Approximate percentile from the log2 histogram: the upper bound of the
-    /// bucket in which the p-th sample falls.
-    private static func percentileNanos(_ buckets: [UInt32], base: Int, count: UInt64, p: Double) -> UInt64 {
+    /// Approximate percentile from the log2 histogram: the arithmetic midpoint
+    /// of the bucket in which the p-th sample falls (the bucket spans
+    /// `[2^(i-1), 2^i)` ns), clamped to the observed `max` so a coarse top
+    /// bucket can never read higher than the largest real sample (a percentile
+    /// is by definition ≤ max). The buckets are 2× wide, so treat p50/p99 as a
+    /// band, not an exact figure — `avg` and `max` are exact.
+    private static func percentileNanos(_ buckets: [UInt32], base: Int, count: UInt64, max maxNanos: UInt64, p: Double) -> UInt64 {
         guard count > 0 else { return 0 }
         let target = UInt64((Double(count) * p).rounded(.up))
         var cumulative: UInt64 = 0
         for i in 0..<bucketCount {
             cumulative &+= UInt64(buckets[base + i])
             if cumulative >= target {
-                return i == 0 ? 0 : (UInt64(1) << UInt64(i))
+                guard i > 0 else { return 0 }
+                let lower = UInt64(1) << UInt64(i - 1)
+                let upper = UInt64(1) << UInt64(i)
+                return Swift.min((lower + upper) / 2, maxNanos)
             }
         }
-        return UInt64(1) << UInt64(bucketCount - 1)
+        return maxNanos
     }
 
     private static func humanNanos(_ ns: UInt64) -> String {
