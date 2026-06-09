@@ -19,6 +19,7 @@ struct AnywhereApp: App {
                     .onOpenURL { url in
                         deepLinkManager.handle(url: url)
                     }
+                    .environment(AppSettings.shared)
                     .environment(VPNViewModel.shared)
                     .environment(ConfigurationStore.shared)
                     .environment(SubscriptionStore.shared)

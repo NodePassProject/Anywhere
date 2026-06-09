@@ -10,47 +10,21 @@ import SwiftUI
 struct TunnelSettingsView: View {
     @Environment(VPNViewModel.self) private var viewModel
 
-    @State private var includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()
-    @State private var includeLocalNetworks = AWCore.getTunnelIncludeLocalNetworks()
-    @State private var includeAPNs = AWCore.getTunnelIncludeAPNs()
-    @State private var includeCellularServices = AWCore.getTunnelIncludeCellularServices()
-
     var body: some View {
+        @Bindable var settings = AppSettings.shared
         Form {
             Section {
-                Toggle("Include All Networks", isOn: $includeAllNetworks)
+                Toggle("Include All Networks", isOn: $settings.includeAllNetworks)
             }
 
             Section {
-                Toggle("Include Local Networks", isOn: $includeLocalNetworks)
-                Toggle("Include APNs", isOn: $includeAPNs)
-                Toggle("Include Cellular Services", isOn: $includeCellularServices)
+                Toggle("Include Local Networks", isOn: $settings.includeLocalNetworks)
+                Toggle("Include APNs", isOn: $settings.includeAPNs)
+                Toggle("Include Cellular Services", isOn: $settings.includeCellularServices)
             }
-            .disabled(!includeAllNetworks)
+            .disabled(!settings.includeAllNetworks)
         }
         .navigationTitle("Tunnel")
         .disabled(viewModel.pendingReconnect)
-        .onAppear {
-            includeAllNetworks = AWCore.getTunnelIncludeAllNetworks()
-            includeLocalNetworks = AWCore.getTunnelIncludeLocalNetworks()
-            includeAPNs = AWCore.getTunnelIncludeAPNs()
-            includeCellularServices = AWCore.getTunnelIncludeCellularServices()
-        }
-        .onChange(of: includeAllNetworks) { _, newValue in
-            AWCore.setTunnelIncludeAllNetworks(newValue)
-            viewModel.reconnectVPN()
-        }
-        .onChange(of: includeLocalNetworks) { _, newValue in
-            AWCore.setTunnelIncludeLocalNetworks(newValue)
-            viewModel.reconnectVPN()
-        }
-        .onChange(of: includeAPNs) { _, newValue in
-            AWCore.setTunnelIncludeAPNs(newValue)
-            viewModel.reconnectVPN()
-        }
-        .onChange(of: includeCellularServices) { _, newValue in
-            AWCore.setTunnelIncludeCellularServices(newValue)
-            viewModel.reconnectVPN()
-        }
     }
 }

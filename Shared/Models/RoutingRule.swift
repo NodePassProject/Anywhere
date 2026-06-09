@@ -14,7 +14,16 @@ enum RoutingRuleType: Int, Codable {
     case domainKeyword = 3  // Domain substring match
 }
 
-struct RoutingRule: Codable, Equatable {
+struct RoutingRule: Codable, Equatable, Identifiable {
+    let id = UUID()
     let type: RoutingRuleType
-    let value: String   // domain suffix or CIDR notation
+    let value: String
+
+    private enum CodingKeys: String, CodingKey {
+        case type, value
+    }
+
+    static func == (lhs: RoutingRule, rhs: RoutingRule) -> Bool {
+        lhs.type == rhs.type && lhs.value == rhs.value
+    }
 }

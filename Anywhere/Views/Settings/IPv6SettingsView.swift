@@ -8,21 +8,13 @@
 import SwiftUI
 
 struct IPv6SettingsView: View {
-    @State private var advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
-
     var body: some View {
+        @Bindable var settings = AppSettings.shared
         Form {
             Section {
-                Toggle("Advertise IPv6 to Apps", isOn: $advertiseIPv6ToApps)
+                Toggle("Advertise IPv6 to Apps", isOn: $settings.advertiseIPv6ToApps)
             }
         }
         .navigationTitle("IPv6")
-        .onAppear {
-            advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
-        }
-        .onChange(of: advertiseIPv6ToApps) { _, newValue in
-            AWCore.setAdvertiseIPv6ToApps(newValue)
-            AWCore.notifyTunnelSettingsChanged()
-        }
     }
 }

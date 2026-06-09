@@ -15,62 +15,16 @@ struct TextWithColorfulIcon: View {
     let backgroundColor: Color
 
     var body: some View {
-        if #available(iOS 26.0, *) {
-            HStack {
-                Image(systemName: systemName)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 19, height: 19)
-                    .foregroundColor(foregroundColor)
-                    .padding(5)
-                    .background(backgroundColor.gradient)
-                    .cornerRadius(7)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        .white.opacity(0.6),
-                                        .white.opacity(0.3),
-                                        .clear,
-                                        .clear
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 0.5
-                            )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        .clear,
-                                        .clear,
-                                        .white.opacity(0.1),
-                                        .white.opacity(0.3)
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 0.5
-                            )
-                    )
-                Text(String(localized: title, comment: comment))
-            }
-        } else {
-            HStack {
-                Image(systemName: systemName)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 19, height: 19)
-                    .foregroundColor(foregroundColor)
-                    .padding(5)
-                    .background(backgroundColor.gradient)
-                    .cornerRadius(7)
-                Text(String(localized: title, comment: comment))
-            }
+        HStack {
+            Image(systemName: systemName)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 19, height: 19)
+                .foregroundStyle(foregroundColor)
+                .padding(5)
+                .background(backgroundColor)
+                .clipShape(.rect(cornerRadius: 7))
+            Text(String(localized: title, comment: comment))
         }
     }
 }
@@ -83,66 +37,18 @@ struct TextWithColorfulIconAndCustomImage: View {
     let backgroundColor: Color
 
     var body: some View {
-        if #available(iOS 26.0, *) {
-            HStack {
-                Image(imageName)
-                    .interpolation(.high)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 19, height: 19)
-                    .foregroundColor(foregroundColor)
-                    .padding(5)
-                    .background(backgroundColor.gradient)
-                    .cornerRadius(7)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        .white.opacity(0.6),
-                                        .white.opacity(0.3),
-                                        .clear,
-                                        .clear
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 0.5
-                            )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 7)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        .clear,
-                                        .clear,
-                                        .white.opacity(0.1),
-                                        .white.opacity(0.3)
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 0.5
-                            )
-                    )
-                Text(String(localized: title, comment: comment))
-            }
-        } else {
-            HStack {
-                Image(imageName)
-                    .interpolation(.high)
-                    .renderingMode(.template)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 19, height: 19)
-                    .foregroundColor(foregroundColor)
-                    .padding(5)
-                    .background(backgroundColor.gradient)
-                    .cornerRadius(7)
-                Text(String(localized: title, comment: comment))
-            }
+        HStack {
+            Image(imageName)
+                .interpolation(.high)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 19, height: 19)
+                .foregroundStyle(foregroundColor)
+                .padding(5)
+                .background(backgroundColor)
+                .clipShape(.rect(cornerRadius: 7))
+            Text(String(localized: title, comment: comment))
         }
     }
 }
