@@ -86,3 +86,8 @@ nonisolated final class AnyTLSManager {
         }
     }
 }
+
+extension AnyTLSManager: TransportPool {
+    /// ``TransportPool`` conformance — forwards to ``closeAll()``.
+    func reclaim() { closeAll() }
+}

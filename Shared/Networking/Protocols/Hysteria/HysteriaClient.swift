@@ -347,3 +347,10 @@ nonisolated final class HysteriaClient {
         }
     }
 }
+
+extension HysteriaClient {
+    static let pool: TransportPool = Pool()
+    private final class Pool: TransportPool {
+        func reclaim() { HysteriaClient.closeAll() }
+    }
+}
