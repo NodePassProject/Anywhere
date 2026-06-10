@@ -583,20 +583,49 @@ and `[index]` / `["key"]` brackets). Recursive methods take a bare key name.
 
 ### `Anywhere.store`
 
-Per-rule-set persistent key/value state, scoped by rule-set id.
+Per-rule-set key/value state, scoped by rule-set id.
 
-- `get(key) → Uint8Array | undefined`
-- `getString(key) → string | undefined`
-- `set(key, value)` — value is bytes. **Throws** when the write would exceed the
-  scope's 1 MiB cap or the 16 MiB process-wide store cap (catch it and shed
-  entries with `delete`).
-- `delete(key)`
-- `keys() → [string]`
+- `get(key[, onDisk]) → Uint8Array | undefined`
+- `getString(key[, onDisk]) → string | undefined`
+- `set(key, value[, onDisk])` — value is bytes. **Throws** when the write would
+  exceed the scope's 1 MiB cap or the 16 MiB process-wide store cap (catch it and
+  shed entries with `delete`); the on-disk backing also throws on a failed write.
+- `delete(key[, onDisk])`
+- `keys([onDisk]) → [string]`
 
-State is **in-memory only** (no disk persistence) and **shared across every
-connection to the same rule set** — and across the rule set's `script` and
-`stream-script` rules. It survives a rule-set edit and is cleared when the rule
-set is removed or the extension restarts. Scripts must tolerate a missing key.
+Every method is **shared across every connection to the same rule set** — and
+across the rule set's `script` and `stream-script` rules — and survives a
+rule-set edit. State is cleared when the rule set is **removed** (a disabled set
+keeps its data).
+
+The optional **`onDisk`** flag (default `false`) selects the backing:
+
+- **`onDisk: false`** — in-memory. Fast, but **cleared when the extension
+  restarts** (the tunnel stopping, a device reboot, an NE relaunch). Use it for
+  per-session caches.
+- **`onDisk: true`** — persisted to a file in the App Group container, so it
+  **survives extension restarts**. Use it for tokens, cookies, or check-in state
+  that must outlive a single tunnel session.
+
+The two backings are **separate keyspaces** with **independent caps**: an
+in-memory `count` and an on-disk `count` are different entries, and `keys()` only
+lists the backing you ask for. Scripts must tolerate a missing key in either.
+
+```js
+// Persist a refreshed token across tunnel restarts; fall back to a fetch.
+async function process(ctx) {
+  let token = Anywhere.store.getString("token", true);
+  if (!token) {
+    const r = await Anywhere.http.get("https://api.example.com/token");
+    if (r.status === 200) {
+      token = Anywhere.codec.utf8.decode(r.body).trim();
+      try { Anywhere.store.set("token", token, true); }
+      catch (e) { Anywhere.log.warning("store full: " + e); }
+    }
+  }
+  if (token) ctx.headers.push(["Authorization", "Bearer " + token]);
+}
+```
 
 ### `Anywhere.log`
 
@@ -703,8 +732,10 @@ If you need composed behavior, consolidate the logic into a single
 | Limit                              | Value        | Effect on exceed |
 | ---------------------------------- | ------------ | ---------------- |
 | Buffered body (`script`)           | 4 MiB        | Content-Length → passthrough; chunked → truncated |
-| Per-scope `Anywhere.store`         | 1 MiB        | `set` throws `capacity exceeded` |
-| Total `Anywhere.store` (all scopes)| 16 MiB       | `set` throws `capacity exceeded` |
+| Per-scope `Anywhere.store` (memory)| 1 MiB        | `set` throws `capacity exceeded` |
+| Total `Anywhere.store` (memory)    | 16 MiB       | `set` throws `capacity exceeded` |
+| Per-scope `Anywhere.store` (onDisk)| 1 MiB        | `set` throws `capacity exceeded` |
+| Total `Anywhere.store` (onDisk)    | 16 MiB       | `set` throws `capacity exceeded` |
 | `Anywhere.crypto.randomBytes`      | 64 KiB       | throws |
 | Synthesized response body          | 4 MiB        | truncated |
 | `Anywhere.http` timeout            | 10 s default / 30 s max | Promise rejects |
