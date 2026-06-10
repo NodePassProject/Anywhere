@@ -17,32 +17,21 @@ class UDPFlow {
     let dstPort: UInt16
     let isIPv6: Bool
     let configuration: ProxyConfiguration
-    /// The stack's ``TunnelStack/udpQueue``. This flow's mutable state is
-    /// confined to it; every async I/O callback hops back here before touching
-    /// that state, so the flow needs no internal locking.
+    /// All mutable state is confined to this queue, so the flow needs no locking.
     let flowQueue: DispatchQueue
 
     // Raw IP bytes for building the response packet (swapped src/dst).
-    let srcIPBytes: Data  // original source (becomes dst in response)
-    let dstIPBytes: Data  // original destination (becomes src in response)
+    let srcIPBytes: Data
+    let dstIPBytes: Data
 
     var lastActivity: TimeInterval = MonotonicClock.now
 
-    /// Count of downlink datagrams the destination has sent back. Every downlink
-    /// path funnels through ``handleProxyData``, so that's the single place it
-    /// increments. While it is below ``TunnelConstants/udpStreamMinReplies`` the
-    /// flow is treated as one-way/speculative or a one-shot request/response
-    /// probe (STUN binding, a single DNS lookup) and uses the shorter
-    /// ``TunnelConstants/udpIdleTimeoutUnreplied``; once it reaches the threshold
-    /// it is an established bidirectional **stream** on the longer
-    /// ``TunnelConstants/udpIdleTimeoutStream``.
+    /// Downlink datagrams received; at udpStreamMinReplies the flow graduates
+    /// from the short unreplied timeout to the longer stream timeout.
     var replyCount = 0
 
-    /// Monotonic timestamp (``MonotonicClock``) at which this flow goes idle
-    /// given its current state: last activity plus the unreplied (30s) or stream
-    /// (120s) timeout. The cleanup reaper drops a flow once `now` passes this,
-    /// and global-cap eviction picks the flow with the smallest deadline (least
-    /// time left) — so unreplied probes are shed before established flows.
+    /// Monotonic expiry instant; eviction picks the smallest deadline, so
+    /// unreplied probes are shed before established streams.
     var idleDeadline: TimeInterval {
         lastActivity + (replyCount >= TunnelConstants.udpStreamMinReplies
                         ? TunnelConstants.udpIdleTimeoutStream
@@ -56,9 +45,7 @@ class UDPFlow {
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
 
-    // Shadowsocks shared UDP session + our registration token into it.
-    // The session is owned by TunnelStack and shared across every flow for
-    // this configuration; we only hold a borrowed reference until close().
+    // Shared SS UDP session owned by TunnelStack; borrowed only.
     private weak var ssUDPSession: ShadowsocksUDPSession?
     private var ssUDPSessionToken: ShadowsocksUDPSession.Token?
 
@@ -67,25 +54,19 @@ class UDPFlow {
 
     private var proxyConnecting = false
 
-    /// Committed routing identity for this flow — the single source of truth for
-    /// traffic accounting and the dial path. Fixed at creation (UDP has no SNI
-    /// re-routing).
+    /// Routing identity for accounting and dialing; fixed at creation (UDP has no SNI re-routing).
     private let routeTarget: RouteTarget
 
-    /// Dial straight out iff the committed route is ``RouteTarget/direct``.
     private var bypass: Bool {
         if case .direct = routeTarget { return true }
         return false
     }
 
-    private var pendingData: [Data] = []  // always raw payloads (framing deferred to send time)
-    private var pendingBufferSize = 0      // current total size of pendingData
+    private var pendingData: [Data] = []  // always raw payloads (framing applied at send time)
+    private var pendingBufferSize = 0
     private var didWarnPendingOverflow = false
     private var closed = false
 
-    /// One-shot reporter that logs this flow's terminal failure at most once.
-    /// All terminal-error paths funnel through it, so a dead flow emits exactly
-    /// one error line however many of them trip.
     private let failureReporter = ConnectionFailureReporter(prefix: "[UDP]", logger: logger)
 
 
@@ -123,15 +104,7 @@ class UDPFlow {
         )
     }
 
-    /// Routes a send-side error from the proxy connection: terminal errors
-    /// (connection gone for good — peer rejected, session closed, outer QUIC
-    /// torn down) close the flow so the consumer doesn't keep funneling
-    /// packets into a black hole until the receive side independently
-    /// discovers the break. Transient errors (per-packet MTU collapses,
-    /// queue overflows, fragmentation refusals) just log; UDP is lossy and
-    /// the flow stays alive.
-    ///
-    /// Must be called on `flowQueue`.
+    /// Terminal send errors close the flow; transient ones just log (UDP is lossy). Call on flowQueue.
     private func handleProxySendError(_ error: Error, connection: ProxyConnection) {
         if Self.isTerminalProxySendError(error, connection: connection) {
             reportFailure("Send", error: error)
@@ -142,22 +115,13 @@ class UDPFlow {
         }
     }
 
-    /// Classifies a proxy-connection send error. Terminal = the connection
-    /// is gone for good (matches the receive-side teardown path the inner
-    /// connection's error handler will eventually trip too). Transient =
-    /// this datagram didn't fit / didn't make it, but the connection is
-    /// still usable.
+    /// Terminal = the connection is gone for good; transient = the connection is still usable.
     private static func isTerminalProxySendError(_ error: Error, connection: ProxyConnection) -> Bool {
         if let hErr = error as? HysteriaError {
             switch hErr {
             case .streamClosed, .authRejected, .udpNotSupported,
                  .destinationTooLargeForDatagram:
-                // `destinationTooLargeForDatagram` is permanent for the
-                // flow's destination — the address (and therefore the
-                // header size) never shrinks. Closing the flow here
-                // surfaces the failure as one log line; otherwise the
-                // send-side classifier would log "transient" on every
-                // packet until the receive side independently failed.
+                // destinationTooLargeForDatagram is permanent for this destination.
                 return true
             case .notReady, .connectionFailed, .tunnelFailed:
                 return false
@@ -180,11 +144,7 @@ class UDPFlow {
                 return false
             }
         }
-        // Unknown error types: fall back to the connection's own liveness
-        // signal. `isConnected` is cheap on the protocols we care about
-        // (HysteriaUDPConnection is a direct read of state on its session
-        // queue; the others read in-memory flags). When the connection
-        // says it's gone, treat the send error as terminal.
+        // Unknown error types: fall back to the connection's own liveness signal.
         return !connection.isConnected
     }
 
@@ -196,9 +156,7 @@ class UDPFlow {
         
         TunnelStack.shared?.addBytesOut(Int64(payloadLength), target: routeTarget)
 
-        // Buffer data while the outbound connection is being established.
-        // directSocket is set before its socket connects; sending to an
-        // unconnected UDP socket silently drops the datagram.
+        // Buffer while connecting: sends on an unconnected UDP socket are silently dropped.
         if proxyConnecting {
             bufferPayload(data: data, payloadLength: payloadLength)
             return
@@ -206,7 +164,6 @@ class UDPFlow {
 
         let payload = data.prefix(payloadLength)
 
-        // Direct bypass path
         if let socket = directSocket {
             socket.send(data: payload) { [weak self] error in
                 if let error {
@@ -216,7 +173,6 @@ class UDPFlow {
             return
         }
 
-        // Shadowsocks shared UDP session
         if let session = ssUDPSession, let token = ssUDPSessionToken {
             session.send(token: token, dstHost: dstHost, dstPort: dstPort, payload: payload) { [weak self] error in
                 if let error {
@@ -226,7 +182,6 @@ class UDPFlow {
             return
         }
 
-        // Mux path: send raw payload (mux framing handled by MuxSession)
         if let session = muxSession {
             session.send(data: payload) { [weak self] error in
                 if let error {
@@ -236,11 +191,7 @@ class UDPFlow {
             return
         }
 
-        // Non-mux path: hand the raw payload to the proxy connection. Each
-        // protocol's UDP connection class applies its own per-packet wire
-        // framing (VLESSUDPConnection adds the 2-byte length prefix,
-        // ShadowsocksUDPConnection encrypts, HysteriaUDPConnection emits a
-        // QUIC DATAGRAM, …).
+        // Raw payload; each protocol's UDP connection applies its own per-packet wire framing.
         if let connection = proxyConnection {
             connection.send(data: payload) { [weak self] error in
                 guard let self, let error else { return }
@@ -252,13 +203,12 @@ class UDPFlow {
             return
         }
 
-        // No connection yet — buffer and start connecting
         bufferPayload(data: data, payloadLength: payloadLength)
         connectProxy()
     }
 
     private func bufferPayload(data: Data, payloadLength: Int) {
-        // Drop datagram if buffer limit would be exceeded (DiscardOverflow)
+        // Bound the buffer against a stalled connect; dropping is fine since UDP is lossy.
         if pendingBufferSize + payloadLength > TunnelConstants.udpMaxBufferSize {
             PerformanceMonitor.event(.udpBufferOverflow)
             if !didWarnPendingOverflow {
@@ -284,14 +234,7 @@ class UDPFlow {
 
         let hasChain = configuration.chain != nil && !configuration.chain!.isEmpty
 
-        // ── Direct fast paths (no chain only) ──────────────────────────────
-        //
-        // Protocol-specific helpers (MuxManager, ShadowsocksUDPSession) manage
-        // their own connections and bypass ProxyClient. They must only be
-        // used when the configuration has no chain. When a chain IS
-        // configured, we fall through to the ProxyClient path at the bottom,
-        // which builds the chain tunnel before connecting to the exit proxy.
-
+        // Fast paths bypass ProxyClient, so they must only run when no chain is configured.
         if !hasChain {
             let isDefaultConfiguration = TunnelStack.shared?.isDefaultConfiguration(configuration.id) ?? false
             if configuration.outboundProtocol == .vless, isDefaultConfiguration, let muxManager = TunnelStack.shared?.muxManager {
@@ -306,22 +249,16 @@ class UDPFlow {
             }
         }
 
-        // ── General path: ProxyClient (chain-aware) ────────────────────────
-        //
-        // ProxyClient.connectUDP() calls connectThroughChainIfNeeded(), which
-        // builds the chain tunnel when needed. This is the ONLY path used when
-        // a chain is configured, ensuring intermediate proxies are never skipped.
+        // ProxyClient builds the chain tunnel when needed — the only valid path with a chain.
         proxyConnecting = true
         connectViaProxyClient()
     }
 
     // MARK: - Connection Strategies
 
-    /// Mux path: dispatch through MuxManager (no chain — mux handles its own connections).
     private func connectViaMux(muxManager: MuxManager) {
-        // Cone NAT: GlobalID = blake3("udp:srcHost:srcPort") matching Xray-core's
-        // net.Destination.String() format. Non-zero GlobalID enables server-side
-        // session persistence (Full Cone NAT). Nil = no GlobalID (Symmetric NAT).
+        // Stable per-source globalID lets the server pin one upstream session
+        // (Full Cone NAT); nil keeps sessions per-datagram (Symmetric NAT).
         let globalID = configuration.xudpEnabled ? XUDP.generateGlobalID(sourceAddress: "udp:\(srcHost):\(srcPort)") : nil
         muxManager.dispatch(network: .udp, host: dstHost, port: dstPort, globalID: globalID) { [weak self] result in
             guard let self else { return }
@@ -332,9 +269,7 @@ class UDPFlow {
 
                 switch result {
                 case .success(let session):
-                    // Set up handlers BEFORE checking closed state to prevent
-                    // a race where close fires between the check and handler
-                    // registration, which would leak the flow.
+                    // Install handlers before the closed check; close firing between them would leak the flow.
                     session.dataHandler = { [weak self] data in
                         self?.handleProxyData(data)
                     }
@@ -349,8 +284,7 @@ class UDPFlow {
                         }
                     }
 
-                    // Guard against race: closeAll() may have already closed the
-                    // session (via receive-loop error) before this handler ran.
+                    // closeAll() may have already closed the session before this ran.
                     guard !session.closed else {
                         self.close()
                         TunnelStack.shared?.removeUDPFlow(self)
@@ -359,7 +293,6 @@ class UDPFlow {
 
                     self.muxSession = session
 
-                    // Send buffered raw payloads
                     let buffered = self.pendingData
                     self.pendingData.removeAll()
                     self.pendingBufferSize = 0
@@ -382,7 +315,6 @@ class UDPFlow {
         }
     }
 
-    /// ProxyClient path: handles chain building + all protocols (VLESS, Shadowsocks, etc.).
     private func connectViaProxyClient() {
         let client = ProxyClient(
             configuration: configuration,
@@ -401,9 +333,7 @@ class UDPFlow {
                 case .success(let proxyConnection):
                     self.proxyConnection = proxyConnection
 
-                    // Drain buffered payloads. `send` preserves packet
-                    // boundaries — each protocol's UDP connection applies its
-                    // own wire framing.
+                    // Drain buffered payloads; `send` preserves packet boundaries.
                     for payload in self.pendingData {
                         proxyConnection.send(data: payload) { [weak self] error in
                             guard let self, let error else { return }
@@ -416,7 +346,6 @@ class UDPFlow {
                     self.pendingData.removeAll()
                     self.pendingBufferSize = 0
 
-                    // Start receiving proxy responses
                     self.startProxyReceiving(proxyConnection: proxyConnection)
 
                 case .failure(let error):
@@ -450,14 +379,9 @@ class UDPFlow {
             return
         }
 
-        // Register against the shared session. The shared session handles
-        // connect + pending-send buffering internally; no `proxyConnecting`
-        // dance needed here.
-        //
-        // Seed response-address hints with whatever's already in the DNS
-        // cache. Fresh resolutions aren't forced here because the cache
-        // lookup is synchronous and flowQueue is performance-critical; the
-        // async prewarm below handles cache misses.
+        // The shared session buffers sends until its socket connects, so no `proxyConnecting`
+        // dance is needed. Hints use the synchronous DNS cache only (flowQueue is
+        // performance-critical); the async prewarm below handles misses.
         let cachedHints = DNSResolver.shared.cachedIPs(for: dstHost) ?? []
 
         let token = session.register(
@@ -480,8 +404,7 @@ class UDPFlow {
         self.ssUDPSession = session
         self.ssUDPSessionToken = token
 
-        // Drain anything buffered while we were deciding how to connect.
-        // The session itself buffers again if its socket isn't ready yet.
+        // Drain what buffered meanwhile; the session re-buffers if its socket isn't ready yet.
         let host = dstHost
         let port = dstPort
         for payload in pendingData {
@@ -494,11 +417,8 @@ class UDPFlow {
         pendingData.removeAll()
         pendingBufferSize = 0
 
-        // If the destination is a domain that's not yet in the DNS cache,
-        // kick off an async resolve so subsequent replies can route by
-        // exact IP match instead of relying on the port-only fallback
-        // (which misroutes when multiple flows share a destination port —
-        // e.g. concurrent QUIC connections on 443).
+        // Async-resolve uncached domains so replies route by exact IP; the port-only
+        // fallback misroutes flows sharing a destination port (e.g. QUIC on 443).
         if cachedHints.isEmpty, Self.isDomainName(host) {
             let weakSession = session
             let localQueue = flowQueue
@@ -512,9 +432,7 @@ class UDPFlow {
         }
     }
 
-    /// True when `host` looks like a domain name (not an IPv4/IPv6 literal).
-    /// Used to decide whether an async DNS resolve is worth attempting for
-    /// response-address hinting.
+    /// True when `host` is not an IPv4/IPv6 literal.
     private static func isDomainName(_ host: String) -> Bool {
         let bare: String
         if host.hasPrefix("[") && host.hasSuffix("]") {
@@ -531,12 +449,10 @@ class UDPFlow {
 
     private func connectDirectUDP() {
         guard directSocket == nil && !closed else { return }
-        proxyConnecting = true  // reuse flag to prevent re-entry
+        proxyConnecting = true  // reuse the flag so datagrams buffer until the socket connects
 
-        // Direct bypass is one socket per peer 5-tuple; size its kernel buffers
-        // modestly so a NAT-traversal storm of these can't blow the extension's
-        // memory cap. The 4 MB default is reserved for the proxy-relay
-        // transports. See ``SocketHelpers/directDatagramSocketBufferSize``.
+        // One socket per peer 5-tuple; modest kernel buffers keep a NAT-traversal
+        // storm under the extension's memory cap.
         let socket = RawUDPSocket(socketBufferSize: SocketHelpers.directDatagramSocketBufferSize)
         self.directSocket = socket
         socket.connect(host: dstHost, port: dstPort, completionQueue: flowQueue) { [weak self] error in
@@ -553,7 +469,6 @@ class UDPFlow {
                     return
                 }
 
-                // Send buffered payloads
                 for payload in self.pendingData {
                     socket.send(data: payload) { [weak self] error in
                         if let error {
@@ -564,8 +479,7 @@ class UDPFlow {
                 self.pendingData.removeAll()
                 self.pendingBufferSize = 0
 
-                // Start receiving responses. Non-EAGAIN recv errors close the
-                // flow so we don't sit on a dead socket.
+                // Non-EAGAIN recv errors close the flow so we don't sit on a dead socket.
                 socket.startReceiving(handler: { [weak self] data in
                     self?.handleProxyData(data)
                 }, errorHandler: { [weak self] error in
@@ -600,16 +514,11 @@ class UDPFlow {
         flowQueue.async { [weak self] in
             guard let self, !self.closed else { return }
             self.lastActivity = MonotonicClock.now
-            // Count this reply. The flow promotes from the 30s unreplied timeout
-            // to the 120s established one only after ``udpStreamMinReplies``
-            // replies — a single answer (STUN binding, one-shot DNS) is a probe,
-            // not a stream (see ``replyCount`` / ``idleDeadline``).
             self.replyCount += 1
             
             TunnelStack.shared?.addBytesIn(Int64(data.count), target: self.routeTarget)
 
-            // Emit the UDP response back to the app, swapping the 5-tuple:
-            // response source = original destination, dest = original source.
+            // Swap the 5-tuple: response source = original destination, and vice versa.
             TunnelStack.shared?.writeOutboundUDP(
                 srcIP: self.dstIPBytes, srcPort: self.dstPort,
                 dstIP: self.srcIPBytes, dstPort: self.srcPort,
@@ -618,15 +527,9 @@ class UDPFlow {
         }
     }
 
-    /// True if this flow currently owns a direct-bypass POSIX UDP FD that
-    /// can be cleanly released. Direct flows are the only flows eligible
-    /// for FD-pressure eviction — proxied flows either hold TCP FDs (kept
-    /// under the TCP-first relief policy) or share mux/SS sockets where
-    /// closing the flow doesn't free a per-flow FD.
-    ///
-    /// Mid-connect flows (`proxyConnecting == true`) are excluded: their
-    /// `RawUDPSocket.ioQueue` may be blocked inside `getaddrinfo`, which
-    /// would stall the relief path's synchronous `cancelSync` cross-hop.
+    /// True when this flow owns a per-flow UDP FD eligible for FD-pressure eviction.
+    /// Mid-connect flows are excluded: their ioQueue may be blocked in getaddrinfo,
+    /// which would stall the relief path's synchronous cancelSync.
     var holdsDirectFD: Bool { directSocket != nil && !proxyConnecting }
 
     // MARK: - Close
@@ -637,10 +540,8 @@ class UDPFlow {
         releaseProxy(syncSocket: false)
     }
 
-    /// Synchronous variant of ``close`` used by the FD-pressure relief
-    /// path: closes the underlying direct UDP socket before returning so
-    /// the FD is actually freed (not just `async`-scheduled for close) by
-    /// the time the caller retries `socket(2)`.
+    /// Synchronous close for the FD-pressure relief path: the direct socket's FD
+    /// is freed before returning, so the caller can retry `socket(2)`.
     func closeSync() {
         guard !closed else { return }
         closed = true
@@ -668,8 +569,7 @@ class UDPFlow {
         } else {
             socket?.cancel()
         }
-        // The SS session is owned by TunnelStack and shared across every flow
-        // for this configuration; unregister but never cancel the session.
+        // The SS session is shared and owned by TunnelStack; unregister, never cancel.
         if let ssSession, let ssToken {
             ssSession.unregister(token: ssToken)
         }

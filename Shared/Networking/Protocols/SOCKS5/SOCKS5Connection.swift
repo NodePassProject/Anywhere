@@ -27,10 +27,6 @@ private enum SOCKS5 {
 // MARK: - SOCKS5Buffer
 
 /// Shared read buffer for the SOCKS5 handshake.
-///
-/// Reads data from the underlying transport in large chunks and serves exact byte counts
-/// from its internal buffer. Any bytes remaining after the handshake belong to the
-/// tunneled data stream and are preserved via ``remaining``.
 nonisolated class SOCKS5Buffer {
     private var data = Data()
     private let transport: any RawTransport
@@ -39,7 +35,6 @@ nonisolated class SOCKS5Buffer {
         self.transport = transport
     }
 
-    /// Reads exactly `count` bytes from the buffer, fetching from the transport as needed.
     func readExact(count: Int, completion: @escaping (Data?, Error?) -> Void) {
         if data.count >= count {
             let result = data.subdata(in: data.startIndex..<data.startIndex + count)
@@ -62,8 +57,7 @@ nonisolated class SOCKS5Buffer {
         }
     }
 
-    /// Returns any data remaining in the buffer after the handshake.
-    /// This data belongs to the tunneled stream and must not be discarded.
+    /// Data remaining in the buffer after the handshake; belongs to the tunneled stream and must not be discarded.
     var remaining: Data? {
         data.isEmpty ? nil : data
     }
@@ -71,11 +65,8 @@ nonisolated class SOCKS5Buffer {
 
 // MARK: - SOCKS5Transport
 
-/// Transport wrapper that prepends buffered data from the SOCKS5 handshake.
-///
-/// After the SOCKS5 handshake, excess bytes in the ``SOCKS5Buffer`` may belong to the
-/// tunneled stream (e.g. the first bytes of a TLS ServerHello). This wrapper delivers
-/// that data on the first `receive` call before falling through to the underlying transport.
+/// Replays handshake-leftover bytes (e.g. the start of a TLS ServerHello) on the
+/// first `receive` before falling through to the underlying transport.
 nonisolated class SOCKS5Transport: RawTransport {
     private var initialData: Data?
     private let inner: any RawTransport
@@ -111,32 +102,15 @@ nonisolated class SOCKS5Transport: RawTransport {
 
 // MARK: - SOCKS5Handshake
 
-/// Performs the SOCKS5 client handshake (greeting, optional auth, CONNECT or UDP ASSOCIATE)
-/// over a raw transport.
-///
-/// Uses a ``SOCKS5Buffer`` to read data in large chunks and serve exact byte counts.
-/// After the handshake, any excess data in the buffer belongs to the tunneled stream
-/// and must be preserved via ``SOCKS5Buffer/remaining``.
-///
-/// Matches Xray-core's `ClientHandshake` behavior.
+/// SOCKS5 client handshake (greeting, optional auth, CONNECT or UDP ASSOCIATE);
+/// matches Xray-core's `ClientHandshake` behavior.
 enum SOCKS5Handshake {
 
-    /// Result of a UDP ASSOCIATE handshake containing the relay endpoint.
     struct UDPRelayInfo {
         let host: String
         let port: UInt16
     }
 
-    /// Performs the SOCKS5 TCP CONNECT handshake.
-    ///
-    /// - Parameters:
-    ///   - buffer: The shared read buffer (wraps the transport).
-    ///   - transport: The transport used for writes.
-    ///   - destinationHost: The target hostname or IP to connect to.
-    ///   - destinationPort: The target port to connect to.
-    ///   - username: Optional username for password authentication.
-    ///   - password: Optional password for password authentication.
-    ///   - completion: Called with `nil` on success or an error on failure.
     static func perform(
         buffer: SOCKS5Buffer,
         transport: any RawTransport,
@@ -168,10 +142,7 @@ enum SOCKS5Handshake {
         }
     }
 
-    /// Performs the SOCKS5 UDP ASSOCIATE handshake.
-    ///
-    /// Per RFC 1928, the client sends all-zero address/port in the UDP ASSOCIATE request.
-    /// The server responds with the relay address and port where UDP packets should be sent.
+    /// UDP ASSOCIATE: per RFC 1928 the client sends 0.0.0.0:0 and the server replies with the relay endpoint.
     static func performUDPAssociate(
         buffer: SOCKS5Buffer,
         transport: any RawTransport,
@@ -185,7 +156,6 @@ enum SOCKS5Handshake {
                 completion(.failure(error))
                 return
             }
-            // RFC 1928: client sends 0.0.0.0:0 for UDP ASSOCIATE
             sendCommand(
                 buffer: buffer,
                 transport: transport,
@@ -195,9 +165,8 @@ enum SOCKS5Handshake {
             ) { result in
                 switch result {
                 case .success(let info):
-                    // Always use the server's public address for the relay host.
-                    // Servers typically return their local/private IP (e.g. 172.x.x.x)
-                    // which is unreachable from the client. The relay port is still valid.
+                    // Servers often return an unreachable private IP for the relay
+                    // host; use the server's public address (the port is still valid).
                     completion(.success(UDPRelayInfo(host: serverAddress, port: info.port)))
                 case .failure(let error):
                     completion(.failure(error))
@@ -208,7 +177,6 @@ enum SOCKS5Handshake {
 
     // MARK: - Authentication
 
-    /// Performs the version negotiation and optional authentication phase.
     private static func performAuth(
         buffer: SOCKS5Buffer,
         transport: any RawTransport,
@@ -252,7 +220,6 @@ enum SOCKS5Handshake {
 
     // MARK: - Authentication (RFC 1929)
 
-    /// Sends username/password and reads the auth response.
     private static func sendAuth(
         buffer: SOCKS5Buffer,
         transport: any RawTransport,
@@ -288,7 +255,6 @@ enum SOCKS5Handshake {
 
     // MARK: - Command (CONNECT / UDP ASSOCIATE)
 
-    /// Sends a SOCKS5 command and reads the response, returning the bound address/port.
     private static func sendCommand(
         buffer: SOCKS5Buffer,
         transport: any RawTransport,
@@ -428,8 +394,7 @@ enum SOCKS5Handshake {
 
 // MARK: - TLSRecordTransport
 
-/// Adapts a ``TLSRecordConnection`` to the ``RawTransport`` interface so that the SOCKS5
-/// handshake can run over a TLS-encrypted channel.
+/// Adapts a ``TLSRecordConnection`` to ``RawTransport`` so the SOCKS5 handshake can run over TLS.
 nonisolated class TLSRecordTransport: RawTransport {
     private let tlsConnection: TLSRecordConnection
 
@@ -468,10 +433,8 @@ nonisolated class TLSRecordTransport: RawTransport {
 
 // MARK: - SOCKS5UDPProxyConnection
 
-/// SOCKS5 UDP ASSOCIATE relay. The `relay` connection is pre-connected to
-/// the relay address (kernel UDP or chain-built); outgoing packets get the
-/// SOCKS5 UDP header prepended, incoming have it stripped. The TCP control
-/// connection is retained because closing it ends the SOCKS5 UDP session.
+/// SOCKS5 UDP ASSOCIATE relay: prepends/strips the SOCKS5 UDP header per datagram.
+/// The TCP control connection is retained because closing it ends the UDP session.
 nonisolated class SOCKS5UDPProxyConnection: ProxyConnection {
     private let tcpTransport: any RawTransport
     private let tlsClient: TLSClient?
@@ -541,9 +504,8 @@ nonisolated class SOCKS5UDPProxyConnection: ProxyConnection {
             if let payload = self.stripUDPHeader(data) {
                 completion(payload, nil)
             } else {
-                // Async re-issue: `relay.receive` can deliver inline from an
-                // inbox-buffered datagram, so direct recursion would grow the
-                // stack under a malformed burst.
+                // Re-issue async: `relay.receive` can deliver inline, so direct
+                // recursion would grow the stack under a malformed burst.
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     self?.receiveRaw(completion: completion)
                 }
@@ -558,7 +520,6 @@ nonisolated class SOCKS5UDPProxyConnection: ProxyConnection {
         tcpTransport.forceCancel()
     }
 
-    /// Strips the SOCKS5 UDP header from a received packet, returning the payload.
     private func stripUDPHeader(_ data: Data) -> Data? {
         guard data.count >= 4 else { return nil }
         guard data[2] == 0x00 else { return nil } // reject fragments

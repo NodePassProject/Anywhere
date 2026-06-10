@@ -9,10 +9,8 @@ import Foundation
 
 // MARK: - GRPCConnection
 
-/// gRPC transport over HTTP/2.
-///
-/// Opens a single bidirectional streaming RPC to `/<serviceName>/Tun` (or `/TunMulti`) and
-/// tunnels raw bytes as `Hunk` protobuf messages framed with gRPC's 5-byte length prefix.
+/// gRPC transport over HTTP/2: a single bidirectional RPC to `/<serviceName>/Tun` (or
+/// `/TunMulti`) carrying raw bytes as length-prefixed `Hunk` protobuf messages.
 nonisolated class GRPCConnection {
 
     // MARK: Transport closures
@@ -31,21 +29,17 @@ nonisolated class GRPCConnection {
     private let lock = UnfairLock()
     private var _isConnected = false
 
-    /// Stream ID used for the bidirectional gRPC call. Clients must use odd IDs per
-    /// RFC 7540 §5.1.1; the first client-initiated stream is always 1.
+    /// First client-initiated stream ID (odd per RFC 7540 §5.1.1).
     private static let streamId: UInt32 = 1
 
     /// Raw HTTP/2 byte buffer (accumulates transport reads until a full frame is parseable).
     private var h2ReadBuffer = Data()
-    /// gRPC message reassembly buffer (accumulates HTTP/2 DATA payloads until a full
-    /// length-prefixed gRPC frame is available for decoding).
+    /// Reassembles HTTP/2 DATA payloads into length-prefixed gRPC frames.
     private var grpcFrameBuffer = Data()
-    /// Decoded app-layer bytes ready for the caller (one receive call may pull multiple
-    /// messages off the wire; the remainder stays buffered).
+    /// Decoded app-layer bytes awaiting delivery to the caller.
     private var decodedBuffer = Data()
 
-    /// Counts consecutive synchronous frame parses to trampoline every Nth call,
-    /// preventing stack overflow on rapid back-to-back parse completions.
+    /// Consecutive synchronous frame parses; trampolined every 16th to avoid stack overflow.
     private var h2ReadDepth: Int = 0
 
     /// Whether the gRPC response HEADERS (status 200) have been validated.
@@ -58,8 +52,7 @@ nonisolated class GRPCConnection {
     private var h2PeerStreamSendWindow: Int = 65535
     private var h2PeerInitialWindowSize: Int = 65535
 
-    /// Our local window sizes — both advertised to the peer at setup and used to decide
-    /// when to emit WINDOW_UPDATE frames.
+    /// Local window size, advertised at setup and used as the WINDOW_UPDATE threshold.
     private var h2LocalWindowSize: Int = 4_194_304 // 4 MB
 
     /// Maximum HTTP/2 frame payload size (SETTINGS_MAX_FRAME_SIZE default, updated by peer).
@@ -89,8 +82,6 @@ nonisolated class GRPCConnection {
 
     // MARK: - Initializers
 
-    /// Designated initializer. Takes a pre-built ``TransportClosures`` and the resolved
-    /// `:authority` value.
     init(transport: TransportClosures, configuration: GRPCConfiguration, authority: String) {
         self.configuration = configuration
         self.authority = authority
@@ -104,29 +95,22 @@ nonisolated class GRPCConnection {
         }
     }
 
-    /// Creates a gRPC connection over a plain ``RawTCPSocket``.
     convenience init(transport: RawTCPSocket, configuration: GRPCConfiguration, authority: String) {
         self.init(transport: TransportClosures(rawTCP: transport), configuration: configuration, authority: authority)
     }
 
-    /// Creates a gRPC connection over a ``TLSRecordConnection``.
     convenience init(tlsConnection: TLSRecordConnection, configuration: GRPCConfiguration, authority: String) {
         self.init(transport: TransportClosures(tls: tlsConnection), configuration: configuration, authority: authority)
     }
 
-    /// Creates a gRPC connection over a proxy tunnel (for proxy chaining).
     convenience init(tunnel: ProxyConnection, configuration: GRPCConfiguration, authority: String) {
         self.init(transport: TransportClosures(tunnel: tunnel), configuration: configuration, authority: authority)
     }
 
     // MARK: - Setup
 
-    /// Performs the HTTP/2 connection preface + SETTINGS exchange and opens the bidirectional
-    /// gRPC stream.
-    ///
-    /// HEADERS is sent eagerly without waiting for the server's SETTINGS. The `:status 200`
-    /// response may arrive during setup or later — some CDNs defer the response HEADERS
-    /// until they see the first client DATA frame, so both orderings are accepted.
+    /// Sends the HTTP/2 preface + SETTINGS and opens the gRPC stream without waiting for
+    /// the server's SETTINGS; some CDNs defer response HEADERS until the first DATA frame.
     func performSetup(completion: @escaping (Error?) -> Void) {
         var initData = Data()
 
@@ -154,8 +138,7 @@ nonisolated class GRPCConnection {
         wuPayload[3] = UInt8(connWindowInc & 0xFF)
         initData.append(buildH2Frame(type: Self.h2FrameWindowUpdate, flags: 0, streamId: 0, payload: wuPayload))
 
-        // HEADERS for the bidirectional gRPC stream. END_STREAM is intentionally not set —
-        // the client keeps sending DATA frames for the lifetime of the tunnel.
+        // HEADERS for the gRPC stream; END_STREAM deliberately unset — the tunnel keeps sending DATA.
         let headerBlock = encodeGRPCRequestHeaders()
         initData.append(buildH2Frame(
             type: Self.h2FrameHeaders,
@@ -173,11 +156,8 @@ nonisolated class GRPCConnection {
         }
     }
 
-    /// Reads frames until the server's SETTINGS is received and ACKed.
-    ///
-    /// Also handles WINDOW_UPDATE and PING frames during setup, and absorbs an early
-    /// response HEADERS if one arrives before SETTINGS. Setup completes as soon as the
-    /// server's SETTINGS is seen; the response body may arrive later.
+    /// Reads frames until the server's SETTINGS is received and ACKed, handling
+    /// WINDOW_UPDATE/PING and absorbing an early response HEADERS along the way.
     private func processInitialServerFrames(completion: @escaping (Error?) -> Void) {
         readH2Frame { [weak self] result in
             guard let self else {
@@ -208,8 +188,7 @@ nonisolated class GRPCConnection {
                             completion(GRPCError.setupFailed("gRPC response rejected: \(rejection)"))
                             return
                         }
-                        // Trailers-only response (END_STREAM on the first HEADERS) with
-                        // `:status 200` — HTTP succeeded but the gRPC call itself failed.
+                        // Trailers-only response: HTTP 200 but the gRPC call itself failed.
                         if frame.flags & Self.h2FlagEndStream != 0 {
                             if let grpcError = Self.parseGRPCTrailer(frame.payload) {
                                 self.lock.lock()
@@ -265,16 +244,11 @@ nonisolated class GRPCConnection {
         sendH2Data(data: framed, offset: 0, completion: completion)
     }
 
-    /// Fire-and-forget send.
     func send(data: Data) {
         send(data: data) { _ in }
     }
 
-    /// Reads the next application payload, decoding gRPC / protobuf framing as needed.
-    ///
-    /// Returns `nil` on stream EOF. One call to `receive` may trigger multiple HTTP/2
-    /// frame reads behind the scenes, and may return less than one gRPC message worth of
-    /// bytes when decoded data has been pre-buffered from a previous read.
+    /// Delivers the next decoded payload, or `nil` on EOF; buffered leftovers are returned first.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         lock.lock()
         if !decodedBuffer.isEmpty {
@@ -313,9 +287,7 @@ nonisolated class GRPCConnection {
     }
 
     deinit {
-        // Reclaim the keepalive timer if the connection was dropped without
-        // cancel(). `DispatchSource.cancel()` is thread-safe; a still-live
-        // transport (if any) is surfaced by the leaf socket's own tripwire.
+        // Reclaim the keepalive timer if dropped without cancel().
         keepaliveTimer?.cancel()
     }
 }
@@ -327,7 +299,6 @@ extension GRPCConnection {
     /// HTTP/2 connection preface (RFC 7540 §3.5).
     static let h2Preface = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
 
-    /// HTTP/2 frame header size.
     static let h2FrameHeaderSize = 9
 
     static let h2FrameData: UInt8 = 0x00
@@ -367,8 +338,7 @@ extension GRPCConnection {
         return frame
     }
 
-    /// Attempts to parse one complete frame from `h2ReadBuffer`. Returns nil if the
-    /// buffer doesn't yet contain a full frame. Caller must hold `lock`.
+    /// Parses one complete frame from `h2ReadBuffer`, or nil if incomplete. Caller must hold `lock`.
     private func parseH2FrameLocked() -> (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)? {
         guard h2ReadBuffer.count >= Self.h2FrameHeaderSize else { return nil }
 
@@ -476,8 +446,7 @@ extension GRPCConnection {
         }
     }
 
-    /// Updates our send-side view of the peer's flow-control windows. Wakes any sends
-    /// that were blocked waiting for the window to re-open.
+    /// Applies a WINDOW_UPDATE to the send windows and wakes blocked sends.
     fileprivate func handleWindowUpdate(frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)) {
         lock.lock()
         if frame.payload.count >= 4 {
@@ -500,10 +469,8 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
-    /// Encodes the HEADERS block for the outgoing gRPC request.
-    ///
-    /// Uses HPACK static-table indexing where possible and literal-with-incremental-indexing
-    /// for the remaining fields. Strings are emitted without Huffman compression.
+    /// HPACK-encodes the request HEADERS block; static-table indexing where possible,
+    /// strings emitted without Huffman compression.
     fileprivate func encodeGRPCRequestHeaders() -> Data {
         var block = Data()
 
@@ -534,8 +501,7 @@ extension GRPCConnection {
         block.append(contentsOf: ctBytes)
         block.append(contentsOf: Self.hpackEncodeString("application/grpc"))
 
-        // `te: trailers` is required by the gRPC protocol spec; servers reject requests
-        // that omit it.
+        // `te: trailers` is required by the gRPC spec; servers reject requests without it.
         block.append(0x40)
         block.append(contentsOf: Self.hpackEncodeString("te"))
         block.append(contentsOf: Self.hpackEncodeString("trailers"))
@@ -590,11 +556,7 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
-    /// Returns `nil` if the HEADERS block's `:status` is `200`, or a short error string
-    /// describing the response otherwise.
-    ///
-    /// Handles both Huffman and non-Huffman literal values and skips leading HPACK
-    /// dynamic-table-size updates (which servers may emit after a SETTINGS change).
+    /// Returns `nil` if the HEADERS block's `:status` is `200`, or a short error string otherwise.
     fileprivate func checkH2ResponseStatus(_ headerBlock: Data) -> String? {
         guard !headerBlock.isEmpty else { return "empty header block" }
 
@@ -659,8 +621,7 @@ extension GRPCConnection {
         return status == "200" ? nil : "status \(status)"
     }
 
-    /// Decodes a Huffman-encoded ASCII digit-only value (used for HTTP status codes).
-    /// RFC 7541 Appendix B: '0'..'2' are 5-bit codes, '3'..'9' are 6-bit codes.
+    /// Decodes a Huffman-encoded digit-only value (RFC 7541 App. B: '0'..'2' are 5-bit, '3'..'9' 6-bit).
     private static func huffmanDecodeDigits(_ data: Data) -> String {
         var result = ""
         var bits: UInt32 = 0
@@ -694,8 +655,7 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
-    /// Encodes a `Hunk` protobuf message with `bytes data = 1`.
-    /// Wire format: `0x0A <varint length> <bytes>`.
+    /// Encodes a `Hunk` protobuf (`bytes data = 1`): `0x0A <varint length> <bytes>`.
     fileprivate static func encodeHunk(_ data: Data) -> Data {
         var out = Data(capacity: 1 + 10 + data.count)
         out.append(0x0A) // (field 1 << 3) | wire type 2 (length-delimited)
@@ -704,8 +664,7 @@ extension GRPCConnection {
         return out
     }
 
-    /// Wraps a serialized protobuf message in the 5-byte gRPC length prefix:
-    /// `[compressed=0][big-endian uint32 length][message]`.
+    /// Wraps a protobuf message in the 5-byte gRPC prefix: `[compressed=0][u32be length][message]`.
     fileprivate static func wrapGRPCMessage(_ message: Data) -> Data {
         var out = Data(capacity: 5 + message.count)
         out.append(0x00) // No compression.
@@ -718,7 +677,6 @@ extension GRPCConnection {
         return out
     }
 
-    /// Protobuf varint encoder.
     private static func varintEncode(_ value: UInt64) -> Data {
         var out = Data()
         var v = value
@@ -748,12 +706,8 @@ extension GRPCConnection {
         return nil
     }
 
-    /// Decodes a `Hunk` or `MultiHunk` protobuf message into concatenated raw bytes.
-    ///
-    /// Both messages define `data` as field 1 (wire type 2). `Hunk` has one `bytes` field,
-    /// `MultiHunk` has `repeated bytes` — on the wire these look identical for a single-element
-    /// MultiHunk. Any field 1 occurrence is appended; everything else (unknown fields) is
-    /// skipped per proto3 forward-compat conventions.
+    /// Decodes a `Hunk` or `MultiHunk` into concatenated raw bytes: both carry `data` as
+    /// field 1 (wire type 2), so every field-1 occurrence is appended; unknown fields are skipped.
     fileprivate static func decodeHunkPayload(_ message: Data) throws -> Data {
         var out = Data()
         var offset = 0
@@ -806,9 +760,8 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
-    /// Sends `data` as one or more HTTP/2 DATA frames on the gRPC stream, batching as many
-    /// frames as the peer's current flow-control window allows into a single transport
-    /// write. If the window fills, the remainder waits for a WINDOW_UPDATE before resuming.
+    /// Sends `data` as DATA frames, batching as much as the flow-control window allows
+    /// into one transport write; the remainder waits for a WINDOW_UPDATE.
     fileprivate func sendH2Data(data: Data, offset: Int, completion: @escaping (Error?) -> Void) {
         guard offset < data.count else {
             completion(nil)
@@ -876,9 +829,7 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
-    /// Pulls H2 frames until at least one application payload is ready, then invokes
-    /// `completion`. Stream/connection management frames (SETTINGS, WINDOW_UPDATE, PING,
-    /// GOAWAY, RST_STREAM, trailer HEADERS) are handled inline.
+    /// Pulls H2 frames until an application payload is ready; management frames are handled inline.
     fileprivate func readAndDecode(completion: @escaping (Data?, Error?) -> Void) {
         readH2Frame { [weak self] result in
             guard let self else {
@@ -904,9 +855,7 @@ extension GRPCConnection {
                             return
                         }
                         if endOfStream {
-                            // Trailer HEADERS end the stream. A non-zero grpc-status means
-                            // the gRPC call itself failed and we surface it as an error
-                            // rather than a silent EOF.
+                            // Trailer HEADERS end the stream; non-zero grpc-status surfaces as an error, not silent EOF.
                             let grpcError = Self.parseGRPCTrailer(frame.payload)
                             self.lock.lock()
                             self.h2StreamClosed = true
@@ -979,8 +928,8 @@ extension GRPCConnection {
         }
     }
 
-    /// Validates the first HEADERS frame on our stream. Returns `true` if decode should
-    /// continue, `false` if an error was already delivered to `completion`.
+    /// Validates the first HEADERS on our stream; returns `false` if an error was already
+    /// delivered to `completion`.
     private func markResponseReceivedIfNeeded(_ payload: Data, completion: @escaping (Data?, Error?) -> Void) -> Bool {
         lock.lock()
         if h2ResponseReceived {
@@ -1002,9 +951,7 @@ extension GRPCConnection {
         return true
     }
 
-    /// Appends an incoming DATA frame's payload to the gRPC reassembly buffer, extracts
-    /// all complete gRPC messages, decodes their Hunk payloads, and surfaces the resulting
-    /// bytes to the caller. Emits a WINDOW_UPDATE when half the local window has been consumed.
+    /// Buffers a DATA payload, decodes all complete gRPC messages, and delivers the bytes.
     private func handleDataFrame(
         frame: (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data),
         isOurStream: Bool,
@@ -1012,8 +959,7 @@ extension GRPCConnection {
     ) {
         let endOfStream = (frame.flags & Self.h2FlagEndStream) != 0
 
-        // Always ack received bytes with WINDOW_UPDATEs — even for unexpected streams
-        // — so the connection window stays open.
+        // Ack bytes even on unexpected streams so the connection window stays open.
         emitWindowUpdatesIfNeeded(receivedBytes: frame.payload.count, onOurStream: isOurStream)
 
         guard isOurStream else {
@@ -1036,7 +982,6 @@ extension GRPCConnection {
             }
         }
 
-        // Extract as many complete gRPC messages as the buffer allows.
         while grpcFrameBuffer.count >= 5 {
             let compressed = grpcFrameBuffer[grpcFrameBuffer.startIndex]
             let length = (UInt32(grpcFrameBuffer[grpcFrameBuffer.startIndex + 1]) << 24)
@@ -1086,7 +1031,6 @@ extension GRPCConnection {
             if streamClosed {
                 completion(nil, nil)
             } else {
-                // No complete message yet; keep reading.
                 readAndDecode(completion: completion)
             }
             return
@@ -1095,8 +1039,7 @@ extension GRPCConnection {
         completion(decoded, nil)
     }
 
-    /// Emits connection- and stream-level WINDOW_UPDATE frames once at least half of the
-    /// local window has been consumed, to batch flow-control updates.
+    /// Emits WINDOW_UPDATEs once half the local window is consumed, batching flow-control updates.
     private func emitWindowUpdatesIfNeeded(receivedBytes: Int, onOurStream: Bool) {
         guard receivedBytes > 0 else { return }
 
@@ -1138,8 +1081,7 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
-    /// Starts a periodic PING timer when `idleTimeout` is non-zero, keeping the tunnel
-    /// alive while the proxied app is idle.
+    /// Starts a periodic keepalive PING timer when `idleTimeout` is non-zero.
     fileprivate func startKeepaliveIfNeeded() {
         let interval = configuration.idleTimeout
         guard interval > 0 else { return }
@@ -1149,14 +1091,7 @@ extension GRPCConnection {
             lock.unlock()
             return
         }
-        // Fires on the global pool rather than a dedicated per-connection queue:
-        // GRPCConnection serializes its own state with ``lock`` (it has no state
-        // queue), and the handler (``sendKeepalivePing``) re-checks that state
-        // under the lock before emitting. The PING leaves via ``transportSend`` —
-        // the same entry point every data frame already uses from arbitrary
-        // threads — so the timer adds no concurrency the transport layer doesn't
-        // already serialize. A once-per-``idleTimeout`` ping doesn't warrant its
-        // own queue.
+        // Handler state is lock-guarded and transportSend is thread-safe, so the global queue suffices.
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
         timer.schedule(deadline: .now() + .seconds(interval), repeating: .seconds(interval))
         timer.setEventHandler { [weak self] in
@@ -1206,8 +1141,7 @@ extension GRPCConnection {
         }
     }
 
-    /// Parses the HTTP/2 GOAWAY payload (RFC 7540 §6.8): 4-byte last-stream-id, 4-byte
-    /// error code, optional additional debug data. Returns a short human description.
+    /// Describes a GOAWAY payload (RFC 7540 §6.8).
     fileprivate static func describeGoawayPayload(_ payload: Data) -> String {
         guard payload.count >= 8 else { return "truncated GOAWAY payload" }
         let base = payload.startIndex
@@ -1229,7 +1163,7 @@ extension GRPCConnection {
         return "\(name), lastStreamId=\(lastStreamId & 0x7FFFFFFF)\(debug)"
     }
 
-    /// Parses an RST_STREAM payload (RFC 7540 §6.4): 4-byte error code.
+    /// Describes an RST_STREAM payload's error code (RFC 7540 §6.4).
     fileprivate static func describeRstStreamPayload(_ payload: Data) -> String {
         guard payload.count >= 4 else { return "truncated RST_STREAM payload" }
         let base = payload.startIndex
@@ -1246,9 +1180,7 @@ extension GRPCConnection {
 
 extension GRPCConnection {
 
-    /// Parses a trailer HEADERS block looking for `grpc-status` (and optionally `grpc-message`).
-    /// Returns a `GRPCError.callFailed(...)` when the status is non-zero, or `nil` on OK (status 0
-    /// or grpc-status not present — treated as implicitly OK).
+    /// Returns `.callFailed` when the trailer's `grpc-status` is non-zero; `nil` on OK or absent.
     fileprivate static func parseGRPCTrailer(_ payload: Data) -> GRPCError? {
         let headers = decodeHPACKHeaders(payload)
         guard let statusStr = headers["grpc-status"], let status = Int(statusStr), status != 0 else {
@@ -1282,14 +1214,8 @@ extension GRPCConnection {
         }
     }
 
-    /// Minimal HPACK decoder used for server trailer HEADERS. Handles indexed / literal
-    /// representations with both Huffman and plain string encodings. Decodes enough of the
-    /// static table to resolve common trailer names; dynamic-table entries are decoded as
-    /// "literal with incremental indexing" but aren't stored (we don't maintain a dynamic
-    /// table because trailers rarely reference one).
-    ///
-    /// Returns a lowercase `name: value` dictionary with the *last* value wins semantics
-    /// (duplicate headers aren't expected in trailers).
+    /// Minimal HPACK decoder for trailer HEADERS; dynamic-table entries are parsed but not
+    /// stored. Names are lowercased, last value wins.
     fileprivate static func decodeHPACKHeaders(_ payload: Data) -> [String: String] {
         var headers: [String: String] = [:]
         var offset = payload.startIndex
@@ -1394,8 +1320,7 @@ extension GRPCConnection {
         return (str, lenConsumed + length)
     }
 
-    /// Static-table entry for the given 1-based index (RFC 7541 Appendix A).
-    /// Only the entries we expect to see in gRPC trailers / headers are returned.
+    /// Static-table entry (RFC 7541 App. A); only entries expected in gRPC headers are returned.
     private static func staticTableEntry(at index: Int) -> (name: String, value: String?)? {
         switch index {
         case 1:  return (":authority", nil)
@@ -1419,8 +1344,7 @@ extension GRPCConnection {
         }
     }
 
-    /// Decodes an HPACK Huffman-encoded byte string (RFC 7541 Appendix B).
-    /// Returns `nil` on malformed input. Uses a bit-level DFA-ish walk over the table.
+    /// Decodes an HPACK Huffman string (RFC 7541 App. B); `nil` on malformed input.
     private static func huffmanDecode(_ data: Data) -> String? {
         var result = [UInt8]()
         var code: UInt32 = 0
@@ -1430,8 +1354,7 @@ extension GRPCConnection {
             code = (code << 8) | UInt32(byte)
             bits += 8
             while bits >= 5 {
-                // Try code lengths from 5 up to the maximum 30, smallest first, as each
-                // HPACK Huffman symbol has a unique length and prefix.
+                // Try code lengths 5...30 smallest-first; each symbol has a unique length+prefix.
                 var matched = false
                 for length in 5...min(bits, 30) {
                     let candidate = (code >> (bits - length)) & ((1 << length) - 1)
@@ -1457,8 +1380,6 @@ extension GRPCConnection {
         return String(bytes: result, encoding: .utf8)
     }
 
-    /// Looks up an HPACK Huffman symbol by its bit pattern and code length.
-    /// Returns the symbol (byte value, or 256 for EOS) or `nil` if no match.
     private static func huffmanLookup(code: UInt32, length: Int) -> Int? {
         return huffmanTable[HuffmanKey(code: code, length: length)]
     }

@@ -9,13 +9,6 @@ import Foundation
 
 extension ProxyClient {
     /// Connects through a CONNECT tunnel using HTTP/1.1, HTTP/2, or HTTP/3.
-    ///
-    /// The scheme is determined by ``OutboundProtocol``:
-    /// - `.http11` → HTTP/1.1 CONNECT over TLS
-    /// - `.http2` → HTTP/2 CONNECT over TLS (NaiveProxy)
-    /// - `.quic`  → HTTP/3 CONNECT over QUIC (NaiveProxy)
-    ///
-    /// All schemes produce a ``NaiveProxyConnection`` wrapping the appropriate ``NaiveTunnel``.
     func connectWithNaive(
         destinationHost: String,
         destinationPort: UInt16,
@@ -44,10 +37,8 @@ extension ProxyClient {
         let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
         let destination = "\(bracketedHost):\(destinationPort)"
 
-        // Use serverAddress (hostname) instead of connectAddress (which may
-        // contain a fake IP from FakeIPPool when switching proxies while the
-        // VPN is active).  The Network Extension resolves hostnames via the
-        // real network interface, bypassing the tunnel.
+        // Use serverAddress, not connectAddress: the latter may hold a FakeIPPool
+        // IP under an active VPN, routing the dial through the tunnel.
         let proxyHost = configuration.serverAddress
 
         switch scheme {
@@ -89,13 +80,8 @@ extension ProxyClient {
         }
     }
 
-    /// Acquires an HTTP/3 stream and opens the CONNECT tunnel, retrying once
-    /// on a fresh session for failures that kill the underlying QUIC
-    /// connection — handshake timeout, DRAINING, IDLE_CLOSE, or peer
-    /// `STREAM_ID_BLOCKED`. Without this, a single bad handshake fails every
-    /// concurrent `acquireStream` caller queued on the same `readyCallbacks`
-    /// list; the pool evicts the dead session on `onClose`, so the retry
-    /// lands on a freshly-built one (or joins a newer connecting session).
+    /// Acquires an HTTP/3 stream and opens the CONNECT tunnel, retrying once on
+    /// session-level QUIC failures; the pool evicts the dead session on close.
     private func acquireHTTP3StreamWithRetry(
         proxyHost: String,
         naiveConfig: NaiveConfiguration,
@@ -135,23 +121,19 @@ extension ProxyClient {
         }
     }
 
-    /// Session-level failures that warrant one fresh-session retry.
-    /// Excludes stream-level protocol errors (407 auth, tunnel status, etc.)
-    /// which would fail the same way on any new session.
+    /// Session-level failures warrant a fresh-session retry; stream-level
+    /// protocol errors (407, tunnel status) would fail identically.
     private static func isRetryableHTTP3Error(_ error: Error) -> Bool {
         if error is QUICConnection.QUICError { return true }
         if case HTTP3Error.streamIdBlocked = error { return true }
         if case HTTP3Error.streamClosed = error { return true }
         if case let HTTP3Error.connectionFailed(msg) = error {
-            // `connectionFailed` covers both "Session closed" / "Session
-            // draining" (retry worthwhile) and malformed-frame protocol
-            // errors (retry pointless). Distinguish by the message we emit.
+            // connectionFailed mixes session and protocol errors; our session errors start with "Session ".
             return msg.hasPrefix("Session ")
         }
         return false
     }
 
-    /// Opens a ``NaiveTunnel`` and wraps it in a ``NaiveProxyConnection``.
     private func openTunnelAndWrap(
         _ tunnel: NaiveTunnel,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void

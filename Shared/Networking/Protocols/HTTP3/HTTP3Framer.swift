@@ -33,8 +33,7 @@ enum HTTP3SettingsID: UInt64 {
 
 // MARK: - Error Codes (RFC 9114 §8.1)
 
-/// Application error codes carried on QUIC CONNECTION_CLOSE / RESET_STREAM /
-/// STOP_SENDING frames for the HTTP/3 protocol layer.
+/// Application error codes carried on QUIC CONNECTION_CLOSE / RESET_STREAM / STOP_SENDING.
 enum HTTP3ErrorCode: UInt64 {
     case noError                = 0x0100
     case generalProtocolError   = 0x0101
@@ -63,9 +62,8 @@ enum HTTP3Error: Error, LocalizedError {
     case tunnelFailed(statusCode: String)
     case authenticationRequired
     case streamClosed
-    /// ngtcp2 returned STREAM_ID_BLOCKED — peer hasn't granted enough bidi
-    /// stream credit on this session. The pool marks the session blocked so
-    /// the caller can retry once on a fresh session.
+    /// ngtcp2 returned STREAM_ID_BLOCKED — the peer hasn't granted more bidi stream
+    /// credit; the pool marks the session blocked so the caller retries on a fresh one.
     case streamIdBlocked
 
     var errorDescription: String? {
@@ -86,7 +84,6 @@ enum HTTP3Framer {
 
     // MARK: - Variable-Length Integer (RFC 9000 §16)
 
-    /// Encodes a variable-length integer per QUIC encoding.
     static func encodeVarInt(_ value: UInt64) -> Data {
         var data = Data()
         if value <= 63 {
@@ -112,11 +109,8 @@ enum HTTP3Framer {
         return data
     }
 
-    /// Decodes a variable-length integer. Returns (value, bytesConsumed) or nil.
-    /// `offset` is **relative to `data.startIndex`**, so callers can pass a
-    /// zero-copy slice of another `Data` (e.g. `frame.payload`) without
-    /// rebasing. Indexing `data[0]` on a slice with a non-zero startIndex
-    /// traps; `base + offset` makes that safe.
+    /// Returns (value, bytesConsumed) or nil. `offset` is relative to `data.startIndex`
+    /// so callers can pass a zero-copy slice directly.
     static func decodeVarInt(from data: Data, offset: Int = 0) -> (UInt64, Int)? {
         guard offset < data.count else { return nil }
         let base = data.startIndex
@@ -151,7 +145,6 @@ enum HTTP3Framer {
 
     // MARK: - Frame Construction
 
-    /// Builds an HTTP/3 HEADERS frame from QPACK-encoded header block.
     static func headersFrame(headerBlock: Data) -> Data {
         var frame = Data()
         frame.append(contentsOf: encodeVarInt(HTTP3FrameType.headers.rawValue))
@@ -160,7 +153,6 @@ enum HTTP3Framer {
         return frame
     }
 
-    /// Builds an HTTP/3 DATA frame.
     static func dataFrame(payload: Data) -> Data {
         var frame = Data()
         frame.append(contentsOf: encodeVarInt(HTTP3FrameType.data.rawValue))
@@ -169,7 +161,6 @@ enum HTTP3Framer {
         return frame
     }
 
-    /// Builds an HTTP/3 SETTINGS frame with default client settings.
     static func clientSettingsFrame() -> Data {
         var payload = Data()
 
@@ -202,22 +193,13 @@ enum HTTP3Framer {
 
     // MARK: - Frame Parsing
 
-    /// Parsed HTTP/3 frame.
     struct Frame {
         let type: UInt64
         let payload: Data
     }
 
-    /// Attempts to parse one HTTP/3 frame from the buffer.
-    /// `offset` is relative to `data.startIndex`; the returned `consumed`
-    /// count is also relative, so callers advance their own offset by it.
-    ///
-    /// The returned `payload` is a **zero-copy slice** of `data` — it shares
-    /// underlying storage and has a non-zero `startIndex`. Downstream parsers
-    /// (`decodeVarInt`, `QPACKEncoder.decodeHeaders`, etc.) use
-    /// `data.startIndex`-relative indexing so they accept the slice directly.
-    /// Bulk DATA frames just forward the slice, avoiding an O(payload) copy
-    /// per frame on the hot receive path.
+    /// Returns (Frame, bytesConsumed) or nil. `payload` is a zero-copy slice with
+    /// non-zero startIndex; downstream parsers must index relative to startIndex.
     static func parseFrame(from data: Data, offset: Int = 0) -> (Frame, Int)? {
         var pos = offset
 

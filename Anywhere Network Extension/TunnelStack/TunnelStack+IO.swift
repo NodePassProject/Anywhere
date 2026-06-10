@@ -14,32 +14,16 @@ extension TunnelStack {
 
     // MARK: - Output Batching
     //
-    // Output ownership: two producers append IP packets to ``outputPackets``
-    // under ``outputBufferLock`` — lwIP callbacks on ``lwipQueue`` (TCP), and
-    // the Swift UDP/ICMP builders on ``udpQueue`` (via ``enqueueOutbound``).
-    // Whoever appends with no drain in flight kicks off one ``outputQueue.async``
-    // invocation of ``drainOutputLoop``. The loop pulls successive batches under
-    // the lock and calls ``packetFlow.writePackets`` back-to-back on
-    // ``outputQueue`` until the buffer is empty; it then clears
-    // ``outputDrainInFlight`` and returns. Subsequent appends restart the
-    // loop. Keeping the drain on ``outputQueue`` prevents it from
-    // serializing behind lwIP work (input processing, proxy-leg
-    // completions) on ``lwipQueue``. Per-packet pbuf/heap releases still fire on
-    // ``lwipQueue`` (UDP/ICMP packets carry a ``noopRelease``, so they're free).
+    // Two producers append under ``outputBufferLock`` (lwIP callbacks on
+    // ``lwipQueue``, Swift UDP/ICMP builders on ``udpQueue``); the appender
+    // that finds no drain in flight kicks one ``drainOutputLoop`` on
+    // ``outputQueue``. Per-packet pbuf/heap releases still fire on ``lwipQueue``.
 
-    /// Drains the output buffer on ``outputQueue`` by issuing back-to-back
-    /// ``packetFlow.writePackets`` calls, each capped at
-    /// ``TunnelConstants/tunnelMaxPacketsPerWrite`` (utun's empirical per-call
-    /// ceiling — exceeding it trips ENOSPC). Between calls, new packets
-    /// appended by lwIP show up under the lock on the next iteration.
-    ///
-    /// Caller contract: only invoked from the kick path in
-    /// ``TunnelStack+Callbacks`` (and ``sendICMPPortUnreachable``), which
-    /// flips ``outputDrainInFlight`` true under the lock first. The loop is
-    /// responsible for flipping it back to false when it observes an empty
-    /// buffer — that must happen under the lock, atomic with the empty
-    /// check, otherwise a concurrent appender could see "drain in flight"
-    /// while the loop has already decided to exit.
+    /// Drains the output buffer with back-to-back writePackets calls, each
+    /// capped at tunnelMaxPacketsPerWrite (utun's empirical per-call ceiling —
+    /// exceeding it trips ENOSPC). ``outputDrainInFlight`` flips back false
+    /// under the lock, atomic with the empty check, so a concurrent appender
+    /// can't see "drain in flight" after the loop has decided to exit.
     func drainOutputLoop() {
         let cap = TunnelConstants.tunnelMaxPacketsPerWrite
         while true {
@@ -79,9 +63,8 @@ extension TunnelStack {
             if packets.isEmpty { return }
             packetFlow?.writePackets(packets, withProtocols: protocols)
 
-            // Free the whole batch in one ``lwipQueue.async``. ``writePackets``
-            // copies into the kernel synchronously, so the underlying memory is
-            // no longer referenced by the time we get here.
+            // writePackets copies into the kernel synchronously, so the buffers
+            // are already unreferenced.
             if !releases.isEmpty {
                 lwipQueue.async {
                     for r in releases {
@@ -92,12 +75,8 @@ extension TunnelStack {
         }
     }
 
-    /// Appends a fully-formed IP packet built in Swift — a UDP response
-    /// (``writeOutboundUDP``) or an ICMP unreachable (``sendICMPPortUnreachable``) —
-    /// to the output buffer and kicks the drain if one isn't already running.
-    /// Unlike lwIP-originated packets, these have no pbuf/heap buffer to free,
-    /// so a ``noopRelease`` placeholder is appended to keep ``pendingReleases``
-    /// index-aligned with ``outputPackets`` (see ``drainOutputLoop``).
+    /// Appends a Swift-built IP packet to the output buffer and kicks the drain
+    /// if idle; ``noopRelease`` keeps ``pendingReleases`` index-aligned.
     func enqueueOutbound(_ packet: Data, isIPv6: Bool) {
         let proto: NSNumber = isIPv6 ? Self.ipv6Proto : Self.ipv4Proto
         let needsKick: Bool = outputBufferLock.withLock {
@@ -115,36 +94,17 @@ extension TunnelStack {
 
     // MARK: - Packet Reading
 
-    /// Continuously reads IP packets from the tunnel, splitting each batch
-    /// across the two data planes: UDP datagrams go to ``udpQueue``
-    /// (``UDPPacket`` → ``handleInboundUDP`` — lwIP is built TCP-only,
-    /// `LWIP_UDP 0`), while TCP/ICMP are fed into lwIP on ``lwipQueue`` via
-    /// ``lwip_bridge_input``. The two sub-batches process concurrently, so a
-    /// heavy TCP burst no longer queues UDP datagrams head-of-line (and vice
-    /// versa) the way the single shared queue did.
-    ///
-    /// Backpressure is preserved exactly: the next ``readPackets`` is issued
-    /// only after *both* sub-batches finish, so at most one batch is ever in
-    /// flight (utun's input buffer paces us). For the common homogeneous batch
-    /// the re-arm rides the single non-empty side; only a genuinely mixed batch
-    /// pays for a ``DispatchGroup``.
+    /// Continuously reads IP packets from the tunnel, splitting each batch:
+    /// UDP datagrams to ``udpQueue``, TCP/ICMP into lwIP on ``lwipQueue``.
+    /// Backpressure: the next read is issued only after *both* sub-batches
+    /// finish, so at most one batch is ever in flight (utun paces us).
     func startReadingPackets() {
         packetFlow?.readPackets { [weak self] packets, _ in
             guard let self, self.running else { return }
 
-            // Partition on the read-callback thread — only a cheap version/proto
-            // header peek per packet (``UDPPacket/ipProtocol``); the heavier
-            // ``parse`` runs on udpQueue. Uplink bytes are tallied per-target
-            // downstream (``TCPConnection.acknowledgeReceivedBytes`` /
-            // ``UDPFlow.handleReceivedData``), where the routing target is known —
-            // not here, where the batch is still target-agnostic IP packets.
-            //
-            // Reflected packets (destination matches a configured reflection
-            // address) are bounced straight back into the TUN here, before the
-            // partition — they never reach lwIP, the UDP path, routing, or the
-            // proxy. The snapshot is read once per batch (off ``reflector()``);
-            // when the feature is off it's ``isActive == false`` and the whole
-            // branch is skipped.
+            // Partition on the read-callback thread — a cheap header peek per
+            // packet. Reflected packets bounce straight back into the TUN here,
+            // never reaching lwIP, UDP, routing, or the proxy.
             let reflector = self.reflector()
             var udpBatch: [Data] = []
             var lwipBatch: [Data] = []
@@ -162,11 +122,7 @@ extension TunnelStack {
 
             switch (lwipBatch.isEmpty, udpBatch.isEmpty) {
             case (true, true):
-                // Nothing left to feed: an empty batch (readPackets shouldn't
-                // deliver one, but re-arm defensively so the loop can't stall),
-                // or a batch whose packets were all reflected.
-                // (Unparseable packets aren't here: they fall to lwipBatch,
-                // where lwIP drops them.)
+                // Empty or all-reflected batch — re-arm so the loop can't stall.
                 self.startReadingPackets()
             case (false, true):
                 self.lwipQueue.async {
@@ -184,8 +140,8 @@ extension TunnelStack {
                 self.lwipQueue.async { self.feedLwip(lwipBatch); group.leave() }
                 group.enter()
                 self.udpQueue.async { self.feedUDP(udpBatch); group.leave() }
-                // Re-arm off the data-plane queues so the next read doesn't wait
-                // behind either side's queue depth — only behind both finishing.
+                // Re-arm off the data-plane queues so the next read waits only
+                // on both finishing, not on either queue's depth.
                 group.notify(queue: DispatchQueue.global(qos: .userInitiated)) { [weak self] in
                     self?.startReadingPackets()
                 }
@@ -193,12 +149,8 @@ extension TunnelStack {
         }
     }
 
-    /// Feeds a TCP/ICMP sub-batch into lwIP. Must run on ``lwipQueue``.
-    ///
-    /// The batch bracket coalesces per-segment ACKs into one per PCB and, on
-    /// `_end`, walks every active TCP PCB. It's only opened here — for batches
-    /// that actually contain lwIP-bound packets — so a UDP-only read (e.g. heavy
-    /// QUIC) skips that walk entirely by never calling this method.
+    /// Feeds a TCP/ICMP sub-batch into lwIP. Must run on ``lwipQueue``. The
+    /// batch bracket coalesces per-segment ACKs and walks every active PCB on `_end`.
     private func feedLwip(_ packets: [Data]) {
         lwip_bridge_input_batch_begin()
         for packet in packets {
@@ -208,9 +160,7 @@ extension TunnelStack {
             }
         }
         lwip_bridge_input_batch_end()
-        // A fresh segment may have created a PCB (and thus a tcp_tmr timeout)
-        // while the tick was suspended on an idle stack — re-arm so it gets
-        // serviced. No-op when the tick is already running.
+        // A fresh segment may have queued a timeout while the tick was suspended — re-arm.
         resumeLwipTickIfNeeded()
     }
 
@@ -225,15 +175,9 @@ extension TunnelStack {
 
     // MARK: - Timers
 
-    /// Starts the lwIP periodic timeout timer (100ms interval, matching
-    /// ``TunnelConstants/lwipTimeoutIntervalMs`` / `TCP_TMR_INTERVAL`).
-    ///
-    /// The tick services lwIP's timeout list, then **suspends itself** whenever
-    /// the list is empty (no active or TIME_WAIT TCP PCB), so an idle tunnel
-    /// stops waking the CPU 10x/sec. ``feedLwip`` re-arms it when an inbound
-    /// segment arrives — the only thing that can create new lwIP work once every
-    /// PCB has drained (all UDP and every other cyclic timer are out of the
-    /// picture: UDP runs in Swift, and the rest are disabled in lwipopts.h).
+    /// Starts the lwIP timeout timer (100ms, matching `TCP_TMR_INTERVAL`).
+    /// The tick suspends itself whenever lwIP's timeout list is empty so an
+    /// idle tunnel stops waking the CPU 10x/sec; ``feedLwip`` re-arms it.
     func startTimeoutTimer() {
         let timer = DispatchSource.makeTimerSource(queue: lwipQueue)
         timer.schedule(
@@ -252,29 +196,22 @@ extension TunnelStack {
         timeoutTimer = timer
     }
 
-    /// Suspends the lwIP tick after it has drained every pending timeout. Idempotent
-    /// (guarded by ``lwipTickSuspended``) so the suspend count can't run away.
-    /// Must run on ``lwipQueue``.
+    /// Suspends the drained lwIP tick; idempotent. Must run on ``lwipQueue``.
     private func suspendLwipTickIfNeeded() {
         guard let timeoutTimer, !lwipTickSuspended else { return }
         lwipTickSuspended = true
         timeoutTimer.suspend()
     }
 
-    /// Re-arms the lwIP tick if it idled. Called from ``feedLwip`` — inbound TCP
-    /// is the only thing that can schedule new lwIP timeouts once the stack is
-    /// quiescent. A no-op while the tick is already running. Must run on
-    /// ``lwipQueue``.
+    /// Re-arms the lwIP tick if it idled. Must run on ``lwipQueue``.
     func resumeLwipTickIfNeeded() {
         guard let timeoutTimer, lwipTickSuspended else { return }
         lwipTickSuspended = false
         timeoutTimer.resume()
     }
 
-    /// Starts the UDP flow cleanup timer (1-second interval). Each flow is
-    /// reaped once `now` passes its ``UDPFlow/idleDeadline`` — 30s after the
-    /// last packet for an unreplied flow, 120s for an established one. Runs on
-    /// ``udpQueue`` — it iterates and mutates ``udpFlows``, which that queue owns.
+    /// Starts the 1s cleanup timer reaping UDP flows past their idle deadline.
+    /// Runs on ``udpQueue``, which owns ``udpFlows``.
     func startUDPCleanupTimer() {
         let timer = DispatchSource.makeTimerSource(queue: udpQueue)
         timer.schedule(
@@ -295,9 +232,7 @@ extension TunnelStack {
             for key in keysToRemove {
                 self.udpFlows.removeValue(forKey: key)
             }
-            // Re-arm the flow-cap warning once the table has drained back below
-            // the ceiling, so a later storm logs its own rising edge instead of
-            // staying silent behind the first one's latch.
+            // Re-arm the flow-cap warning so a later storm logs its own rising edge.
             if self.udpFlowCapWarned && self.udpFlows.count < TunnelConstants.udpMaxFlows {
                 self.udpFlowCapWarned = false
             }

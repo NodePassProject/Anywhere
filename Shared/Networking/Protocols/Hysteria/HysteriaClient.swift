@@ -7,14 +7,9 @@
 
 import Foundation
 
-/// Reconnectable wrapper around `HysteriaSession`. One active session per
-/// pool entry; dead sessions clear themselves via `onClose` and direct
-/// callers reconnect on the next acquire. Chained entries are removed on
-/// close since their transport is one-shot.
-///
-/// Use ``shared(for:)`` for direct dials, ``acquireChained(...)`` for
-/// pooled chained dials, ``chained(configuration:transport:)`` for a
-/// chain-link Hysteria handed a per-flow inbound tunnel.
+/// Reconnectable wrapper around `HysteriaSession`; dead sessions clear via
+/// `onClose` and callers reconnect on the next acquire. Chained entries are
+/// removed on close because their transport is one-shot.
 nonisolated final class HysteriaClient {
 
     private struct Key: Hashable {
@@ -67,9 +62,7 @@ nonisolated final class HysteriaClient {
     }
 
     /// Pooled chained dial. Shares one client per `(server, chainSignature)`.
-    /// On cache miss `builder` produces the chain's transport and the chain
-    /// hop ProxyClients that the new entry takes ownership of. Concurrent
-    /// misses coalesce to a single build.
+    /// Concurrent cache misses coalesce to a single build.
     static func acquireChained(
         configuration: HysteriaConfiguration,
         chainSignature: String,
@@ -91,7 +84,6 @@ nonisolated final class HysteriaClient {
             return
         }
         if pending[key] != nil {
-            // Build already in flight — queue this completion for the same result.
             pending[key]?.append(completion)
             registryLock.unlock()
             return
@@ -156,12 +148,9 @@ nonisolated final class HysteriaClient {
             return
         }
 
-        // Chained transport is one-shot; once consumed, drop the pool
-        // entry inline so subsequent `acquireChained` calls cache-miss
-        // and build a fresh chain. Without this, the entry lingers until
-        // `handleSessionClose` fires async, and acquires landing in that
-        // window all hand out this dead client. Lock order is instance →
-        // registry, matching `handleSessionClose`.
+        // Chained transport is one-shot; drop the pool entry inline so acquires
+        // racing `handleSessionClose` don't get this dead client.
+        // Lock order: instance → registry.
         if transport != nil && transportConsumed {
             if let key = poolKey {
                 Self.registryLock.lock()
@@ -202,11 +191,8 @@ nonisolated final class HysteriaClient {
         }
     }
 
-    /// Handles a session closing. Chained entries also drop chain holders
-    /// and unregister from the pool. The registry removal happens under the
-    /// per-instance lock so concurrent `acquireChained` never sees an entry
-    /// whose per-instance state has already been cleared. Lock order is
-    /// instance → registry; no other path takes them in the reverse order.
+    /// Clears the closed session and, for chained entries, cancels chain
+    /// holders and unregisters from the pool. Lock order: instance → registry.
     private func handleSessionClose(_ closedSession: HysteriaSession) {
         lock.lock()
         guard session === closedSession else {
@@ -235,11 +221,8 @@ nonisolated final class HysteriaClient {
     }
 
     private func openTCP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        // The idle-close timer can fire between `acquireSession` checking
-        // `poolIsClosed` and the stream actually opening, so a single retry
-        // with a fresh session covers the race window. Errors from both
-        // `ensureReady` (caught here) and `conn.open` (caught below) can
-        // surface the race.
+        // The idle-close timer can fire between `poolIsClosed` check and
+        // stream open; one retry with a fresh session covers that window.
         acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
             switch result {
             case .failure(let error):
@@ -271,7 +254,6 @@ nonisolated final class HysteriaClient {
     }
 
     private func openUDP(destination: String, retriesLeft: Int, isDefaultProxy: Bool, completion: @escaping (Result<ProxyConnection, Error>) -> Void) {
-        // See `openTCP(retriesLeft:)` for the race rationale.
         acquireSession(isDefaultProxy: isDefaultProxy) { [weak self] result in
             switch result {
             case .failure(let error):
@@ -298,9 +280,8 @@ nonisolated final class HysteriaClient {
         }
     }
 
-    /// True for failures that indicate the cached session went away between
-    /// the `poolIsClosed` check and the stream-open. `udpNotSupported` is
-    /// excluded because it's a permanent server-side property.
+    /// True for failures meaning the cached session went away mid-acquire;
+    /// `udpNotSupported` is excluded as a permanent server-side property.
     private static func isStaleSessionError(_ error: Error) -> Bool {
         guard let hErr = error as? HysteriaError else { return false }
         switch hErr {
@@ -309,9 +290,8 @@ nonisolated final class HysteriaClient {
         }
     }
 
-    /// Synchronously drops the cached session (used by `closeAll` on device
-    /// wake). Chained entries also drop chain holders and unregister. See
-    /// `handleSessionClose` for the lock-order rationale.
+    /// Synchronously drops the cached session. For chained entries also
+    /// cancels chain holders and unregisters from the pool.
     private func invalidateSession() {
         lock.lock()
         let current = session
@@ -334,10 +314,8 @@ nonisolated final class HysteriaClient {
         }
     }
 
-    /// Invalidates every pooled session. Used on device wake to drop
-    /// QUIC connections whose underlying UDP socket the kernel tore down
-    /// during sleep — otherwise the first post-wake request reuses the
-    /// dead session and stalls until ngtcp2's idle timeout fires.
+    /// Invalidates every pooled session — the kernel tears down UDP sockets
+    /// during sleep, and a reused dead session stalls until ngtcp2's idle timeout.
     static func closeAll() {
         registryLock.lock()
         let clients = Array(registry.values)

@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Reality configuration for VLESS connections
 struct RealityConfiguration {
     let serverName: String          // SNI (target website to impersonate)
     let publicKey: Data             // Server's X25519 public key (32 bytes)
@@ -21,7 +20,6 @@ struct RealityConfiguration {
         self.fingerprint = fingerprint
     }
 
-    /// Parse Reality parameters from VLESS URL query parameters
     static func parse(from params: [String: String]) throws -> RealityConfiguration? {
         guard params["security"] == "reality" else { return nil }
 
@@ -113,15 +111,9 @@ enum TLSFingerprint: String, Codable, CaseIterable {
 
     case random = "random"
 
-    /// Internal, non-camouflage fingerprint for REAL handshakes (e.g. the MITM
-    /// outer leg). Emits a minimal, standards-correct TLS 1.3/1.2 ClientHello
-    /// that advertises only capabilities we actually implement — no GREASE,
-    /// ALPS, certificate compression, ECH, padding, or extension shuffle. A
-    /// browser fingerprint advertises ALPS, which commits the client to send a
-    /// ``ClientEncryptedExtensions`` message we don't implement; strict origins
-    /// (Google's GFE) then abort with `unexpected_message`. Deliberately
-    /// excluded from ``allCases`` so it never appears in proxy pickers or gets
-    /// chosen by ``random``.
+    /// Minimal ClientHello for real (non-camouflage) handshakes, e.g. the MITM outer leg.
+    /// Browser fingerprints advertise ALPS, which needs a ClientEncryptedExtensions we don't
+    /// send — strict origins (e.g. Google's GFE) abort with `unexpected_message`.
     case nonBrowser = "non_browser"
 
     var displayName: String {
@@ -140,21 +132,15 @@ enum TLSFingerprint: String, Codable, CaseIterable {
         }
     }
 
-    /// User-selectable fingerprints. ``nonBrowser`` is intentionally omitted —
-    /// it's an internal real-handshake fingerprint, not a camouflage option, so
-    /// it must not surface in proxy pickers or be reachable via ``random``.
-    /// (Manually maintained: add new camouflage fingerprints here too.)
+    /// User-selectable camouflage fingerprints; `nonBrowser` is intentionally excluded.
     static var allCases: [TLSFingerprint] {
         [.chrome133, .firefox148, .safari26, .ios14, .edge85,
          .chrome120, .firefox120, .safari16, .edge106, .random]
     }
 
-    /// All concrete (non-random) fingerprints for random selection.
-    /// Excludes TLS 1.2-only fingerprints since they can't complete a standard TLS handshake.
     static let concreteFingerprints: [TLSFingerprint] = allCases.filter { $0 != .random }
 }
 
-/// Reality protocol errors
 enum RealityError: Error, LocalizedError {
     case missingParameter(String)
     case invalidPublicKey

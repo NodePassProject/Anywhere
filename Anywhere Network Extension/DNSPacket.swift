@@ -9,8 +9,7 @@ import Foundation
 
 enum DNSPacket {
 
-    /// Parse a DNS query to extract the queried domain name and QTYPE.
-    /// Returns (domain, qtype) or nil on failure.
+    /// Extracts the queried domain name and QTYPE, or nil on failure.
     static func parseQuery(_ data: UnsafeBufferPointer<UInt8>) -> (domain: String, qtype: UInt16)? {
         // DNS header is 12 bytes
         guard data.count >= 12 else { return nil }
@@ -51,10 +50,8 @@ enum DNSPacket {
         return (domain, qtype)
     }
 
-    /// Generate a minimal DNS response for a query.
-    /// For QTYPE=A (1):    if fakeIP is non-nil, returns A record (RDLENGTH=4, TTL=1).
-    /// For QTYPE=AAAA (28): if fakeIP is non-nil, returns AAAA record (RDLENGTH=16, TTL=1).
-    /// If fakeIP is nil or QTYPE is neither A nor AAAA: returns NODATA (ANCOUNT=0).
+    /// Generates a minimal DNS response: an A/AAAA record when fakeIP is non-nil
+    /// and QTYPE matches, otherwise NODATA (ANCOUNT=0).
     static func generateResponse(query queryData: UnsafeBufferPointer<UInt8>,
                                  fakeIP: [UInt8]?, qtype: UInt16) -> Data? {
         guard queryData.count >= 12 else { return nil }
@@ -74,7 +71,6 @@ enum DNSPacket {
 
         let questionEnd = offset
 
-        // Determine RDATA length from QTYPE
         var rdLength: UInt16 = 0
         var ansType: UInt16 = 0
         if fakeIP != nil {
@@ -88,7 +84,7 @@ enum DNSPacket {
         }
 
         if rdLength > 0, let ipBytes = fakeIP {
-            // Answer response — build directly into Data (no intermediate [UInt8])
+            // Answer response
             let answerRecLen = 12 + Int(rdLength)
             let responseLen = questionEnd + answerRecLen
 
@@ -114,10 +110,8 @@ enum DNSPacket {
                 p[ans + 2] = UInt8(ansType >> 8)               // TYPE
                 p[ans + 3] = UInt8(ansType & 0xFF)
                 p[ans + 4] = 0x00; p[ans + 5] = 0x01          // CLASS = IN
-                // TTL = 300 seconds. Routing decisions are made at connection
-                // time (not from the DNS response), so caching fake IPs longer
-                // doesn't impede rule changes — those take effect on the next
-                // connect regardless of cache age.
+                // TTL = 300 s; routing is decided at connect time, so longer fake-IP
+                // caching doesn't impede rule changes.
                 p[ans + 6] = 0x00; p[ans + 7] = 0x00
                 p[ans + 8] = 0x01; p[ans + 9] = 0x2C
                 p[ans + 10] = UInt8(rdLength >> 8)             // RDLENGTH
@@ -128,7 +122,7 @@ enum DNSPacket {
             }
             return response
         } else {
-            // NODATA response (ANCOUNT=0) — build directly into Data
+            // NODATA response (ANCOUNT=0)
             var response = Data(count: questionEnd)
             response.withUnsafeMutableBytes { ptr in
                 guard let p = ptr.bindMemory(to: UInt8.self).baseAddress,

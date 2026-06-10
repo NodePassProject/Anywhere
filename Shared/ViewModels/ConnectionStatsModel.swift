@@ -14,15 +14,12 @@ import Observation
 class ConnectionStatsModel {
     static let shared = ConnectionStatsModel()
 
-    /// Cumulative byte totals for the session (shown on the home / TV screens).
-    /// Each equals the sum across ``routes``.
+    /// Cumulative session byte totals; each equals the sum across `routes`.
     private(set) var bytesIn: Int64 = 0
     private(set) var bytesOut: Int64 = 0
 
-    /// Per-route payload split — one entry per route (direct + each proxy/chain)
-    /// that carried traffic, sorted by total bytes, descending. Drives the
-    /// route-breakdown pie chart. Rejected traffic carries no payload and never
-    /// appears.
+    /// Per-route payload split, sorted by total bytes descending; rejected
+    /// traffic carries no payload and never appears.
     private(set) var routes: [RouteTrafficEntry] = []
 
     /// Latest instantaneous gauges, refreshed wholesale on every poll.
@@ -30,8 +27,7 @@ class ConnectionStatsModel {
     private(set) var udpConnectionCount: Int = 0
     private(set) var memoryBytes: UInt64 = 0
 
-    /// Most recent connection-establishment timings (milliseconds), or `nil`
-    /// until the first connection of the session has been measured.
+    /// Most recent connection-establishment timings (ms); nil until first measured.
     private(set) var dialMs: Int?
     private(set) var handshakeMs: Int?
 
@@ -96,9 +92,7 @@ class ConnectionStatsModel {
 
 #if DEBUG
 extension ConnectionStatsModel {
-    /// A model pre-filled with representative values for SwiftUI previews. The
-    /// `private(set)` properties are file-scoped, so the seeder lives here
-    /// alongside the model rather than in the view file.
+    /// Preview-seeded model; lives here because the `private(set)` setters are file-scoped.
     static func previewSeeded() -> ConnectionStatsModel {
         let model = ConnectionStatsModel()
         model.routes = [

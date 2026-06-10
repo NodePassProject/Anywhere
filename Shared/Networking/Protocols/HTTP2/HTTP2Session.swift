@@ -9,14 +9,8 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "HTTP2Session")
 
-/// Multiplexed HTTP/2 session that hosts multiple concurrent CONNECT tunnels.
-///
-/// Manages the TLS transport, connection preface, SETTINGS exchange,
-/// connection-level flow control, and a persistent read loop that
-/// demultiplexes incoming frames to individual ``HTTP2Stream`` instances.
-///
-/// One TCP/TLS connection carries many independent CONNECT streams, each with
-/// its own flow-control window.
+/// Multiplexed HTTP/2 session hosting many concurrent CONNECT tunnels on one TLS
+/// connection, with a read loop demultiplexing frames to individual streams.
 nonisolated class HTTP2Session: PoolableSession {
 
     // MARK: - State
@@ -41,22 +35,19 @@ nonisolated class HTTP2Session: PoolableSession {
     let sni: String
 
     private let transport: TLSStreamTransport
-    /// Supplies the per-CONNECT request headers (proxy auth, User-Agent,
-    /// padding, …). Injected so the session stays protocol-neutral; invoked
-    /// once per stream so randomized values (e.g. padding) differ per request.
+    /// Supplies per-CONNECT request headers; invoked once per stream so randomized
+    /// values (auth, padding) differ per request.
     private let connectHeaders: () -> [(name: String, value: String)]
 
     private(set) var state: State = .idle
 
-    // Pool-visible snapshot protected by `_poolLock`.
-    // HTTP2SessionPool reads these off-queue; the session updates them on `queue`.
+    // Pool-visible snapshot guarded by `_poolLock`: the pool reads off-queue, the session writes on `queue`.
     private let _poolLock = UnfairLock()
     private var _poolState: State = .idle
     private var _poolStreamCount: Int = 0
     private var _poolMaxConcurrent: UInt32 = 100
 
-    /// Serial queue protecting all mutable state (session + streams).
-    /// `.userInitiated`: data-plane queue, same priority as the rest of the chain.
+    /// Serial queue guarding all mutable session + stream state; `.userInitiated` to match the data-plane chain.
     let queue = DispatchQueue(label: AWCore.Identifier.http2SessionQueue, qos: .userInitiated)
 
     // Stream management
@@ -64,8 +55,7 @@ nonisolated class HTTP2Session: PoolableSession {
     private var nextStreamID: UInt32 = 1
     private var maxConcurrentStreams: UInt32 = 100
 
-    /// Connection-scoped HPACK decoder (RFC 7541 §2.2).
-    /// The dynamic table is shared across all streams on this session.
+    /// Connection-scoped HPACK decoder; the dynamic table is shared across all streams (RFC 7541 §2.2).
     let hpackDecoder = HPACKDecoder()
 
     // Connection-level flow control
@@ -104,7 +94,6 @@ nonisolated class HTTP2Session: PoolableSession {
 
     // MARK: - Capacity
 
-    /// Number of active streams on this session.
     var activeStreamCount: Int { streams.count }
 
     /// Whether the session can accept another stream (on-queue only).
@@ -122,13 +111,8 @@ nonisolated class HTTP2Session: PoolableSession {
         _poolLock.withLock { _poolState == .goingAway }
     }
 
-    /// Thread-safe: atomically checks capacity and reserves a stream slot.
-    /// Returns `true` if a slot was reserved; caller must follow up with
-    /// `createStream` on `queue`.
-    ///
-    /// Accepts sessions that are still setting up (`.idle`, `.connecting`,
-    /// `.prefaceSent`) so that burst requests coalesce behind a single
-    /// TLS/H2 handshake instead of each spawning its own session.
+    /// Atomically checks capacity and reserves a stream slot; accepts in-progress sessions
+    /// so burst requests coalesce behind one handshake. Caller must follow up with `createStream` on `queue`.
     func tryReserveStream() -> Bool {
         _poolLock.withLock {
             switch _poolState {
@@ -143,7 +127,7 @@ nonisolated class HTTP2Session: PoolableSession {
         }
     }
 
-    /// Syncs the pool-visible snapshot with current state. Must be called on `queue`.
+    /// Syncs the pool-visible snapshot; must be called on `queue`.
     private func updatePoolSnapshot() {
         _poolLock.withLock {
             _poolState = state
@@ -154,8 +138,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
     // MARK: - Session Setup
 
-    /// Ensures the session is connected and SETTINGS-exchanged.
-    /// Must be called on `queue`.
+    /// Ensures the session is connected and SETTINGS-exchanged; must be called on `queue`.
     func ensureReady(completion: @escaping (Error?) -> Void) {
         switch state {
         case .ready:
@@ -189,8 +172,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
     // MARK: - Stream Lifecycle
 
-    /// Creates and registers a new stream for a CONNECT tunnel.
-    /// Must be called on `queue`.
+    /// Creates and registers a new CONNECT stream; must be called on `queue`.
     func createStream(destination: String) -> HTTP2Stream {
         let streamID = nextStreamID
         nextStreamID += 2  // Client streams are odd-numbered
@@ -204,8 +186,7 @@ nonisolated class HTTP2Session: PoolableSession {
         return stream
     }
 
-    /// Removes a stream from the active map.
-    /// Must be called on `queue`.
+    /// Removes a stream from the active map; must be called on `queue`.
     func removeStream(_ stream: HTTP2Stream) {
         streams.removeValue(forKey: stream.streamID)
         updatePoolSnapshot()
@@ -218,7 +199,6 @@ nonisolated class HTTP2Session: PoolableSession {
     private func sendConnectionPreface() {
         var data = Data()
 
-        // Connection preface
         data.append(Self.connectionPreface)
 
         // SETTINGS chosen to match a common browser profile (probe resistance)
@@ -257,8 +237,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
     // MARK: - Read Loop
 
-    /// Persistent read loop. Processes all frames and dispatches to streams.
-    /// Runs from `prefaceSent` until `closed`.
+    /// Persistent read loop; runs from `prefaceSent` until `closed`.
     private func startReadLoop() {
         processAvailableFrames()
 
@@ -274,7 +253,6 @@ nonisolated class HTTP2Session: PoolableSession {
         }
     }
 
-    /// Parses and routes all complete frames in the receive buffer.
     private func processAvailableFrames() {
         while let frame = HTTP2Framer.deserialize(from: &receiveBuffer) {
             routeFrame(frame)
@@ -285,7 +263,6 @@ nonisolated class HTTP2Session: PoolableSession {
         }
     }
 
-    /// Routes a single frame to the appropriate handler.
     private func routeFrame(_ frame: HTTP2Frame) {
         switch frame.type {
         case .settings:
@@ -356,12 +333,10 @@ nonisolated class HTTP2Session: PoolableSession {
         updatePoolSnapshot()
         if let parsed = HTTP2Framer.parseGoaway(payload: frame.payload) {
             logger.warning("[HTTP2Session] GOAWAY: lastStreamID=\(parsed.lastStreamID), errorCode=\(parsed.errorCode)")
-            // Streams with ID > lastStreamID are rejected by the server
             for (id, stream) in streams where id > parsed.lastStreamID {
                 stream.handleSessionError(HTTP2Error.goaway)
             }
         }
-        // If we were still setting up, fail any waiting callbacks
         if previousState == .prefaceSent || previousState == .connecting {
             completeReadyCallbacks(HTTP2Error.goaway)
         }
@@ -381,9 +356,8 @@ nonisolated class HTTP2Session: PoolableSession {
         stream.handleData(frame.payload, endStream: endStream)
     }
 
-    /// Acknowledges consumed receive data at the connection level.
-    /// Called by streams when data is actually delivered to the consumer.
-    /// Must be called on `queue`.
+    /// Acknowledges connection-level receive bytes actually delivered to the consumer;
+    /// must be called on `queue`.
     func acknowledgeReceivedData(count: Int) {
         connectionRecvConsumed += count
         if connectionRecvConsumed >= connectionRecvWindowSize / 2 {
@@ -522,7 +496,6 @@ nonisolated class HTTP2Session: PoolableSession {
         }
     }
 
-    /// Closes the session and all streams.
     func close() {
         queue.async { [self] in
             guard state != .closed else { return }

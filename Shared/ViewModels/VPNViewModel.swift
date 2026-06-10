@@ -13,7 +13,6 @@ import Observation
 
 private let logger = AnywhereLogger(category: "VPNViewModel")
 
-/// ViewModel managing VPN connection state and operations
 @MainActor
 @Observable
 class VPNViewModel {
@@ -30,7 +29,6 @@ class VPNViewModel {
                 // Tell NE to re-filter routing rules against the new default.
                 AWCore.notifyRoutingChanged()
             }
-            // If VPN is connected, push new configuration to the tunnel
             if vpnStatus == .connected, let selectedConfiguration {
                 sendConfigurationToTunnel(selectedConfiguration)
             }
@@ -46,14 +44,10 @@ class VPNViewModel {
     @ObservationIgnored private var vpnManager: NETunnelProviderManager?
     @ObservationIgnored private var statusObserver: AnyCancellable?
     private(set) var pendingReconnect = false
-    /// Read by `selectedConfiguration.didSet` to skip the default behavior that clears
-    /// `selectedChainId`. Set only via `withoutSelectionPersistence` so the flag always
-    /// resets, even if the assignment inside the block throws.
+    /// Set only via `withoutSelectionPersistence` so the flag always resets.
     @ObservationIgnored private var _suppressSelectionPersistence = false
 
-    /// Assign to `selectedConfiguration` without triggering the chain-clearing branch
-    /// of its didSet. Used when restoring a chain selection or re-resolving an already
-    /// selected chain, where the chain ID has already been persisted.
+    /// Assigns to `selectedConfiguration` without triggering the chain-clearing branch of its didSet.
     private func withoutSelectionPersistence(_ block: () -> Void) {
         _suppressSelectionPersistence = true
         defer { _suppressSelectionPersistence = false }
@@ -66,13 +60,8 @@ class VPNViewModel {
     }
 
     // MARK: - Selection
-    //
-    // This view model owns only the *active* selection and VPN connection — the proxy /
-    // subscription / chain data lives in the stores (read by views via `@Environment`).
-    // A view that owns those stores feeds their data into the calls below.
 
     /// Restores the persisted selection (chain takes priority) against the current data.
-    /// Called by ``revalidateSelection(configurations:chains:)`` when no selection is active.
     private func restoreSelection(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
         guard selectedConfiguration == nil, selectedChainId == nil else { return }
         if let savedChainId = AWCore.getSelectedChainId(),
@@ -89,9 +78,7 @@ class VPNViewModel {
     }
 
     /// Re-validates the active selection against current data: restores the persisted
-    /// selection when none is active yet (launch), re-resolves a selected chain (or falls back
-    /// if it/its proxies were deleted), or refreshes/falls-back the selected proxy. The stores
-    /// drive this from their `coordinate()` whenever configurations or chains change.
+    /// selection at launch, re-resolves a selected chain, or refreshes/falls back the selected proxy.
     func revalidateSelection(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
         if selectedConfiguration == nil, selectedChainId == nil {
             restoreSelection(configurations: configurations, chains: chains)
@@ -121,7 +108,6 @@ class VPNViewModel {
         }
     }
 
-    /// Selects `configuration` only if nothing is currently selected (used after adding one).
     func selectIfNone(_ configuration: ProxyConfiguration) {
         if selectedConfiguration == nil { selectedConfiguration = configuration }
     }
@@ -162,16 +148,12 @@ class VPNViewModel {
         }
     }
 
-    /// The connect/disconnect button is disabled while no manager is ready, there are no
-    /// configurations (passed in by the view that owns ``ConfigurationStore``), or a
-    /// transition is in flight.
     func isButtonDisabled(hasConfigurations: Bool) -> Bool {
         !isManagerReady || !hasConfigurations || vpnStatus.isTransitioning
     }
 
     // MARK: - Chain Selection
 
-    /// Selects a chain as the active configuration, resolving it against `configurations`.
     func selectChain(_ chain: ProxyChain, configurations: [ProxyConfiguration]) {
         guard let resolved = chain.resolveComposite(from: configurations) else { return }
         selectedChainId = chain.id
@@ -183,20 +165,9 @@ class VPNViewModel {
     }
 
     // MARK: - Latency Testing
-    //
-    // Latency tests run in one of two modes depending on the tunnel state:
-    //   - VPN connected:  Forward the test to the network extension via IPC.
-    //                     The extension dials the proxy directly (independent
-    //                     of the active tunnel) and replies with the RTT.
-    //                     Going through the NE here means the test reuses the
-    //                     in-tunnel ``DNSResolver`` and avoids dialing
-    //                     interception fake-IPs from the main app.
-    //   - VPN off:        Dial the proxy from the main-app process directly
-    //                     via the shared ``LatencyTester``.
 
     @ObservationIgnored private var latencyTask: Task<Void, Never>?
 
-    /// Cap on simultaneous in-flight test requests.
     private static let maxConcurrentLatencyTests = 4
 
     func testLatency(for configuration: ProxyConfiguration) {
@@ -264,12 +235,10 @@ class VPNViewModel {
 
     // MARK: - Latency Test Execution
 
-    /// Active provider session used for IPC, or nil when no tunnel manager is loaded.
     private var providerSession: NETunnelProviderSession? {
         vpnManager?.connection as? NETunnelProviderSession
     }
 
-    /// Runs a single latency test using the chosen transport.
     nonisolated private static func runSingleLatencyTest(
         for configuration: ProxyConfiguration,
         viaIPC: Bool,
@@ -281,8 +250,7 @@ class VPNViewModel {
         return await LatencyTester.test(configuration)
     }
 
-    /// Runs latency tests for a batch, capped at ``maxConcurrentLatencyTests``
-    /// in-flight requests. Reports each result via `onResult` as it arrives.
+    /// Runs a batch of tests with at most `maxConcurrentLatencyTests` in flight, reporting each result as it arrives.
     nonisolated private static func runLatencyTests(
         _ configurations: [ProxyConfiguration],
         viaIPC: Bool,
@@ -312,12 +280,8 @@ class VPNViewModel {
         }
     }
 
-    /// Sends one `testLatency` IPC message and awaits the extension's reply.
-    /// The extension resolves the proxy server address itself via NE-process
-    /// `getaddrinfo` (scoped outside the tunnel). Resolving in the main app
-    /// while the tunnel is up would route through `NEDNSSettings` and yield a
-    /// fake IP from lwIP's interception, which the test would then dial and
-    /// time out on.
+    /// Sends one `testLatency` IPC message and awaits the extension's reply. The extension
+    /// resolves the address itself — main-app DNS while the tunnel is up yields lwIP fake IPs.
     nonisolated private static func sendLatencyTestMessage(
         for configuration: ProxyConfiguration,
         session: NETunnelProviderSession
@@ -337,8 +301,7 @@ class VPNViewModel {
         }
     }
 
-    /// Returns `configuration` with `resolvedIP` set, preferring an existing
-    /// value, then `fallback`, then a ``DNSResolver`` lookup.
+    /// Returns `configuration` with `resolvedIP` set, preferring an existing value, then `fallback`, then a DNS lookup.
     nonisolated static func withResolvedIP(
         _ configuration: ProxyConfiguration,
         fallback: String? = nil
@@ -368,7 +331,6 @@ class VPNViewModel {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] connection in
                 guard let self else { return }
-                // Only react to our VPN manager's connection
                 guard connection === self.vpnManager?.connection else { return }
                 self.vpnStatus = connection.status
                 let stats = ConnectionStatsModel.shared
@@ -428,15 +390,11 @@ class VPNViewModel {
               let configuration = selectedConfiguration else { return }
 
         Task {
-            // Routing config is kept current by the stores — every change runs
-            // coordinate()/scheduleSync() — so the extension reads up-to-date rules at start.
-
-            // Pre-resolve the main proxy address off main actor
+            // Pre-resolve the main proxy address off main actor.
             let resolvedIP = await Task.detached {
                 VPNViewModel.resolveServerAddress(configuration.serverAddress)
             }.value
 
-            // Configure the VPN (back on main actor)
             let tunnelProtocol = NETunnelProviderProtocol()
             tunnelProtocol.providerBundleIdentifier = "com.argsment.Anywhere.Network-Extension"
             tunnelProtocol.serverAddress = "Anywhere"
@@ -477,9 +435,7 @@ class VPNViewModel {
 
                     let resolved = Self.withResolvedIP(configuration, fallback: resolvedIP)
 
-                    // Persist configuration to App Group so the Network Extension
-                    // can read it when started from Settings or Always On (On Demand),
-                    // where options is nil.
+                    // Persist to App Group so the NE can read it when started from Settings or On Demand, where options is nil.
                     if let configData = try? JSONEncoder().encode(resolved) {
                         AWCore.setLastConfigurationData(configData)
                     }
@@ -526,7 +482,6 @@ class VPNViewModel {
 
     // MARK: - Configuration Switching
 
-    /// Sends the new configuration to the running tunnel extension via app message.
     private func sendConfigurationToTunnel(_ configuration: ProxyConfiguration) {
         guard let session = vpnManager?.connection as? NETunnelProviderSession else { return }
 
@@ -550,10 +505,8 @@ class VPNViewModel {
 
     // MARK: - DNS Resolution
 
-    /// Resolves a server address to an IP string. Returns the input unchanged if
-    /// it's already an IP literal. Delegates to ``DNSResolver`` so every proxy
-    /// hostname resolution shares the same cache (and stale-fast wake-recovery
-    /// path) as the transport layers.
+    /// Resolves a server address to an IP string (IP literals pass through) via the
+    /// shared `DNSResolver`, so proxy lookups share the transport layers' cache.
     nonisolated static func resolveServerAddress(_ address: String) -> String? {
         DNSResolver.shared.resolveHost(address)
     }
@@ -561,10 +514,6 @@ class VPNViewModel {
 }
 
 extension NEVPNStatus {
-    /// True while the VPN is moving between `.connected` and `.disconnected` —
-    /// `.connecting`, `.disconnecting`, or `.reasserting`. Callers use this to
-    /// gate UI affordances (disable the power button, show the spinner) during
-    /// states the user shouldn't be allowed to re-enter.
     var isTransitioning: Bool {
         self == .connecting || self == .disconnecting || self == .reasserting
     }

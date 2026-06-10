@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// TLS version constants matching TLS protocol version numbers.
 enum TLSVersion: UInt16, Codable {
     case tls10 = 0x0301
     case tls11 = 0x0302
@@ -18,10 +17,10 @@ enum TLSVersion: UInt16, Codable {
 /// Standard TLS transport configuration for VLESS connections.
 struct TLSConfiguration {
     let serverName: String              // SNI (defaults to server address)
-    let alpn: [String]?                 // ALPN protocols (e.g. ["h2", "http/1.1"])
-    let fingerprint: TLSFingerprint     // Browser fingerprint to mimic
-    let minVersion: TLSVersion?         // Minimum TLS version (nil = no constraint)
-    let maxVersion: TLSVersion?         // Maximum TLS version (nil = no constraint)
+    let alpn: [String]?                 // e.g. ["h2", "http/1.1"]
+    let fingerprint: TLSFingerprint
+    let minVersion: TLSVersion?         // nil = no constraint
+    let maxVersion: TLSVersion?         // nil = no constraint
 
     init(serverName: String, alpn: [String]? = nil, fingerprint: TLSFingerprint = .chrome133,
          minVersion: TLSVersion? = nil, maxVersion: TLSVersion? = nil) {
@@ -33,10 +32,7 @@ struct TLSConfiguration {
     }
 
     /// Parse TLS parameters from VLESS URL query parameters.
-    ///
-    /// Expected parameters: `security=tls&sni=example.com&alpn=h2,http/1.1&fp=chrome_133`
-    ///
-    /// Optional version constraints: `&minVersion=1.2&maxVersion=1.3`
+    /// Expected: `security=tls&sni=example.com&alpn=h2,http/1.1&fp=chrome_133[&minVersion=1.2&maxVersion=1.3]`
     static func parse(from params: [String: String], serverAddress: String) throws -> TLSConfiguration? {
         guard params["security"] == "tls" else { return nil }
 
@@ -62,7 +58,6 @@ struct TLSConfiguration {
         )
     }
 
-    /// Parses a version string like "1.0", "1.1", "1.2", "1.3" into a TLSVersion.
     private static func parseTLSVersion(_ string: String?) -> TLSVersion? {
         switch string {
         case "1.0": return .tls10
@@ -107,17 +102,13 @@ extension TLSConfiguration: Equatable, Hashable {
     }
 }
 
-/// TLS transport errors
 enum TLSError: Error, LocalizedError {
     case handshakeFailed(String)
     case certificateValidationFailed(String)
     case connectionFailed(String)
     case unsupportedTLSVersion
-    /// A fatal TLS alert received from the peer during the handshake.
-    /// `description` is the RFC 8446 §6 alert code — e.g. 120 is
-    /// `no_application_protocol` (the peer rejected every offered ALPN).
-    /// Carried structurally rather than folded into ``handshakeFailed`` so
-    /// callers can react to a specific alert without parsing a message string.
+    /// Fatal alert from the peer during the handshake; `description` is the RFC 8446 §6
+    /// alert code (e.g. 120 = no_application_protocol).
     case alert(level: UInt8, description: UInt8)
 
     var errorDescription: String? {

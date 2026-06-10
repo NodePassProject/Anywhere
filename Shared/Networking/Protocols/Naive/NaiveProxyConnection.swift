@@ -11,14 +11,7 @@ private let logger = AnywhereLogger(category: "NaiveProxy")
 
 // MARK: - NaiveTunnel Protocol
 
-/// Abstraction over the underlying HTTP connection used for a CONNECT tunnel,
-/// layering NaiveProxy's padding negotiation (``negotiatedPaddingType``) on top.
-///
-/// HTTP/1.1 and HTTP/2 are provided by the generic ``HTTPTunnel`` implementations
-/// (``HTTP11Connection``, ``HTTP2Stream``) wrapped in a ``NaiveTunnelAdapter``;
-/// HTTP/3 is NaiveProxy-specific glue (``HTTP3Stream``) that conforms directly.
-/// ``NaiveProxyConnection`` uses this protocol to relay data regardless of the
-/// HTTP version.
+/// Abstraction over the HTTP CONNECT tunnel (HTTP/1.1, HTTP/2, or HTTP/3) beneath NaiveProxy padding.
 protocol NaiveTunnel: AnyObject {
     var isConnected: Bool { get }
     var negotiatedPaddingType: NaivePaddingNegotiator.PaddingType { get }
@@ -30,15 +23,8 @@ protocol NaiveTunnel: AnyObject {
 
 // MARK: - NaiveProxyConnection
 
-/// ProxyConnection subclass that wraps a ``NaiveTunnel`` with NaiveProxy padding framing.
-///
-/// Supports HTTP/1.1, HTTP/2, and HTTP/3 tunnels through the ``NaiveTunnel`` protocol.
-/// Applies NaivePaddingFramer on the first 8 reads and writes when the server negotiates
-/// variant-1 padding. After 8 frames, data passes through unframed.
-///
-/// For the "server" direction (client→server), payloads < 100 bytes get biased padding
-/// `[255-len, 255]` and medium payloads (400–1024 bytes) are split into 200–300 byte chunks.
-/// The "client" direction (server→client) uses uniform random padding `[0, 255]`.
+/// ProxyConnection that wraps a NaiveTunnel with NaiveProxy padding framing,
+/// applied to the first 8 reads/writes when the server negotiates variant 1.
 nonisolated class NaiveProxyConnection: ProxyConnection {
     private let tunnel: NaiveTunnel
     private var paddingFramer = NaivePaddingFramer()
@@ -60,21 +46,16 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         if paddingFramer.isWritePaddingActive && paddingType == .variant1 {
-            // Fragment medium payloads (400–1024 bytes) into 200–300 byte chunks
             if data.count >= 400 && data.count <= 1024 {
                 sendFragmented(data: data, offset: 0, completion: completion)
                 return
             }
-            // Padding frame has 2-byte payload length (max 65535).
-            // Truncate to fit, matching the reference NaivePaddingFramer::Write()
-            // which caps payload_consumed_len to the output buffer capacity.
+            // Truncate to the 2-byte length cap, matching the reference NaivePaddingFramer::Write().
             let payload = data.count > Self.maxPaddingPayload
                 ? Data(data.prefix(Self.maxPaddingPayload)) : data
             let paddingSize = Self.generateSendPaddingSize(payloadSize: payload.count)
             let framed = paddingFramer.write(payload: payload, paddingSize: paddingSize)
             if payload.count < data.count {
-                // Send framed portion, then remainder unframed (padding frames exhausted
-                // after this since we're already near/at frame 8).
                 tunnel.sendData(framed) { [weak self] error in
                     if let error { completion(error); return }
                     let rest = Data(data[payload.count...])
@@ -92,14 +73,12 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
         sendRaw(data: data) { _ in }
     }
 
-    /// Fragments medium payloads into 200–300 byte chunks, each padded separately.
     private func sendFragmented(data: Data, offset: Int, completion: @escaping (Error?) -> Void) {
         guard offset < data.count else {
             completion(nil)
             return
         }
 
-        // Stop fragmenting if we've exhausted padding frames
         guard paddingFramer.isWritePaddingActive else {
             let remaining = Data(data[offset...])
             tunnel.sendData(remaining, completion: completion)
@@ -163,10 +142,7 @@ nonisolated class NaiveProxyConnection: ProxyConnection {
 
     // MARK: - Padding Size Generation
 
-    /// Generates padding size for the send (client→server) direction.
-    ///
-    /// Small payloads (< 100 bytes) get biased padding `[255-len, 255]` to obscure size.
-    /// All other payloads get uniform random padding `[0, 255]`.
+    /// Small payloads (< 100 bytes) get biased padding `[255-len, 255]` to obscure their size.
     private static func generateSendPaddingSize(payloadSize: Int) -> Int {
         if payloadSize < 100 {
             return Int.random(in: (255 - payloadSize)...255)

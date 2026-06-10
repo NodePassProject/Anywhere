@@ -55,11 +55,11 @@ struct MITMRuleEditorView: View {
     }
     
     private enum RewriteMode: String, CaseIterable, Identifiable {
-        case transparent     // ID 0
-        case redirect302     // ID 1
-        case reject200Text   // ID 2
-        case reject200Gif    // ID 3
-        case reject200Data   // ID 4
+        case transparent
+        case redirect302
+        case reject200Text
+        case reject200Gif
+        case reject200Data
 
         var id: String { rawValue }
         var label: String {

@@ -9,22 +9,7 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "AnyTLSSession")
 
-/// Owns one TLS connection and multiplexes one or more `AnyTLSStream`s over
-/// it via the AnyTLS framing.
-///
-/// Lifecycle:
-/// 1. Constructed with a freshly-handshaken TLS `inner` connection.
-/// 2. `start()` writes the post-TLS prologue (`SHA256(password) +
-///    paddingLen + paddingZeros`), enqueues the buffered cmdSettings frame,
-///    and kicks off the recv loop.
-/// 3. `openStream()` allocates a new `sid`, sends `cmdSYN(sid)`, and flips
-///    `buffering = false` so the next `cmdPSH(sid, addr)` written by the
-///    caller flushes the cmdSettings buffer alongside it.
-/// 4. Inbound frames are demuxed by cmd: cmdPSH → stream, cmdSYNACK →
-///    cancel handshake watcher / surface error, cmdHeartRequest → reply,
-///    cmdUpdatePaddingScheme → atomically swap the padding factory.
-/// 5. `close()` is idempotent; pool-driven death uses ``onClose`` to let the
-///    `AnyTLSClient` evict this session from the pool.
+/// Owns one TLS connection and multiplexes logical streams over it via AnyTLS framing.
 nonisolated final class AnyTLSSession {
 
     private let inner: ProxyConnection
@@ -33,8 +18,7 @@ nonisolated final class AnyTLSSession {
 
     private let lock = UnfairLock()
 
-    /// Mutable so cmdUpdatePaddingScheme can swap it. All sessions for a
-    /// given `AnyTLSClient` share the same atomic ref through the client.
+    /// Mutable so cmdUpdatePaddingScheme can swap it.
     private var padding: AnyTLSPaddingScheme
 
     private var streams: [UInt32: AnyTLSStream] = [:]
@@ -44,30 +28,23 @@ nonisolated final class AnyTLSSession {
     private var pktCounter: UInt32 = 0
     private var sendPadding: Bool = true
 
-    /// Until the first `OpenStream` flushes the buffer, every `writeConn`
-    /// just appends to `outboundBuffer`. This lets cmdSettings+cmdSYN+
-    /// SocksAddr land in a single TLS record (matches sing-anytls's
-    /// `b.WriteTo(conn)` semantics).
+    /// While true, writes accumulate in `outboundBuffer` so cmdSettings+cmdSYN+SocksAddr
+    /// land in one TLS record (matches sing-anytls).
     private var buffering: Bool = true
     private var outboundBuffer: Data = Data()
 
-    /// Set by `AnyTLSClient` when it inserts/withdraws the session from
-    /// the idle pool.
     var idleSince: CFAbsoluteTime = .greatestFiniteMagnitude
     var seq: UInt64 = 0
 
-    /// Dispatch queue for the synDone watchdog timer.
     private let timerQueue = DispatchQueue(label: AWCore.Identifier.anyTLSSessionTimerQueue)
     private var synDoneTimer: DispatchSourceTimer?
 
-    /// Buffer for partial inbound frames (TLS records don't align with
-    /// AnyTLS frames).
+    /// Buffer for partial inbound frames (TLS records don't align with AnyTLS frames).
     private var recvBuffer = Data()
 
     private var closed: Bool = false
 
-    /// Invoked once when the session transitions to closed. The
-    /// `AnyTLSClient` uses it to drop the session from the pool.
+    /// Invoked once when the session transitions to closed.
     var onClose: (() -> Void)?
 
     init(inner: ProxyConnection, passwordHash: Data, padding: AnyTLSPaddingScheme) {
@@ -82,18 +59,7 @@ nonisolated final class AnyTLSSession {
     // MARK: - Start
 
     /// Sends the prologue + buffered cmdSettings, then starts the recv loop.
-    ///
-    /// The first padding scheme call (`generateRecordPayloadSizes(packet: 0)`)
-    /// determines `paddingLen` for the prologue (default scheme returns
-    /// `[30]`, so 30 zero bytes are emitted). The cmdSettings frame is
-    /// written through `writeConn`, which during `buffering=true` just
-    /// appends to `outboundBuffer` instead of touching the wire — so nothing
-    /// goes out until the first stream's payload flushes the buffer.
-    ///
-    /// Note: pktCounter is intentionally still 0 after this call. It only
-    /// increments on actual `writeConn` invocations that hit the wire (i.e.
-    /// after `buffering=false`), so the per-packet padding schedule lines up
-    /// with what the server expects.
+    /// pktCounter intentionally stays 0 here so the padding schedule aligns with the server.
     func start() {
         var prologue = Data()
         prologue.append(passwordHash)
@@ -134,10 +100,8 @@ nonisolated final class AnyTLSSession {
 
     // MARK: - Stream open / close
 
-    /// Opens a new logical stream. The caller should immediately write the
-    /// destination address (`AnyTLSProtocol.encodeAddrPort`) on the returned
-    /// stream — that write becomes the cmdPSH that flushes the buffered
-    /// cmdSettings + cmdSYN to the wire.
+    /// Opens a new logical stream; the caller's first write (the destination address)
+    /// becomes the cmdPSH that flushes the buffered cmdSettings + cmdSYN.
     func openStream() -> AnyTLSStream? {
         lock.lock()
         if closed {
@@ -151,8 +115,7 @@ nonisolated final class AnyTLSSession {
         let stream = AnyTLSStream(sid: sid, session: self, outerTLSVersion: outerTLSVersion)
         streams[sid] = stream
 
-        // Watchdog for v2 servers: if the SYNACK doesn't arrive within 3 s,
-        // the session is wedged; close it. Cleared on cmdSYNACK in recvLoop.
+        // v2 watchdog: close the session if no SYNACK within 3 s (cleared on cmdSYNACK).
         let armWatchdog = sid >= 2 && peerVersion >= 2
         if armWatchdog {
             armSynDoneTimerLocked()
@@ -164,18 +127,15 @@ nonisolated final class AnyTLSSession {
         logger.debug("[AnyTLSSession] openStream sid=\(sid) peerVersion=\(pv) watchdog=\(armWatchdog) buffered=\(bufferedBytes)B")
 
         let synFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdSYN, sid: sid, length: 0)
-        // cmdSYN is still part of the buffered batch until we flip the flag.
         writeConnLocked(synFrame, completion: { _ in })
 
-        // After the first SYN, subsequent payload writes (the SocksAddr
-        // cmdPSH from the caller) will flush the buffer.
         lock.lock()
         buffering = false
         lock.unlock()
         return stream
     }
 
-    /// Sent by `AnyTLSStream.cancel()`. Removes the stream and emits cmdFIN.
+    /// Removes the stream and emits cmdFIN.
     func streamClosed(sid: UInt32) {
         lock.lock()
         guard !closed, let stream = streams.removeValue(forKey: sid) else {
@@ -187,8 +147,7 @@ nonisolated final class AnyTLSSession {
         let finFrame = AnyTLSProtocol.encodeFrameHeader(cmd: AnyTLSProtocol.cmdFIN, sid: sid, length: 0)
         writeConnLocked(finFrame, completion: { _ in })
 
-        // Surface a clean EOF locally too so any waiting `receiveRaw`
-        // callback unblocks.
+        // Surface a clean EOF locally so any waiting receive callback unblocks.
         stream.deliverClose(error: nil)
     }
 
@@ -221,13 +180,8 @@ nonisolated final class AnyTLSSession {
         writeConnLocked(frame, completion: completion)
     }
 
-    /// Padding-aware writer. Replicates `Session.writeConn` from sing-anytls:
-    /// while `buffering`, accumulate into `outboundBuffer`; otherwise prepend
-    /// the buffer (if any), then for each packet within the `stop` window
-    /// derive a per-packet schedule from the current padding factory and
-    /// slice the outbound bytes into frame-aligned chunks, topping up with
-    /// `cmdWaste(0)` filler frames when the schedule asks for more bytes
-    /// than the payload provides.
+    /// Padding-aware writer (replicates sing-anytls's `Session.writeConn`): buffers while
+    /// `buffering`, otherwise slices output per the padding schedule, topping up with cmdWaste.
     private func writeConnLocked(_ bytes: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
         if closed {
@@ -340,8 +294,7 @@ nonisolated final class AnyTLSSession {
     private func handleInbound(_ data: Data) {
         lock.lock()
         recvBuffer.append(data)
-        // Snapshot frames to dispatch outside the lock to avoid reentrancy
-        // (frame handlers may call back into the session via writeControl).
+        // Dispatch outside the lock — frame handlers may reenter via writeControl.
         var dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = []
         while recvBuffer.count >= AnyTLSProtocol.headerSize {
             guard let header = AnyTLSProtocol.decodeFrameHeader(recvBuffer) else { break }
@@ -441,8 +394,7 @@ nonisolated final class AnyTLSSession {
         close(reason: error)
     }
 
-    /// Idempotent. `reason == nil` means clean close; non-nil propagates to
-    /// every live stream so callers see the underlying transport error.
+    /// Idempotent; a non-nil reason propagates to every live stream.
     func close(reason: Error? = nil) {
         lock.lock()
         guard !closed else { lock.unlock(); return }
@@ -463,9 +415,7 @@ nonisolated final class AnyTLSSession {
     }
 
     deinit {
-        // Reclaim the SYN-done watchdog if the session was dropped without
-        // close(). `DispatchSource.cancel()` is thread-safe; the inner
-        // transport leak (if any) is surfaced by the leaf socket's tripwire.
+        // Reclaim the SYN-done watchdog if the session was dropped without close().
         synDoneTimer?.cancel()
     }
 

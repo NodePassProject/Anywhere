@@ -7,10 +7,8 @@
 
 import Foundation
 
-/// Wraps a `Decodable` so a single element's failure doesn't fail the
-/// whole array. Used by every persistent store's `load()` so a corrupt
-/// or schema-changed entry preserves the rest of the user's data
-/// instead of wiping it.
+/// Wraps a `Decodable` so a single corrupt element doesn't fail the whole
+/// array and wipe the rest of the user's data.
 struct FailableDecodable<T: Decodable>: Decodable {
     let value: T?
     init(from decoder: Decoder) throws {
@@ -19,9 +17,7 @@ struct FailableDecodable<T: Decodable>: Decodable {
 }
 
 extension JSONDecoder {
-    /// Decodes `[T]` from `data`, silently dropping any element that
-    /// fails to decode. Returns nil only when the surrounding JSON
-    /// isn't an array of objects at all.
+    /// Decodes `[T]`, dropping elements that fail; nil only when the JSON isn't an array at all.
     func decodeSkippingInvalid<T: Decodable>(
         _ type: [T].Type,
         from data: Data
@@ -34,9 +30,7 @@ extension JSONDecoder {
 }
 
 extension KeyedDecodingContainer {
-    /// Decodes `[T]` for ``key``, silently dropping elements that fail
-    /// to decode. Throws only when the key is missing or its value
-    /// isn't an array.
+    /// Decodes `[T]` for `key`, dropping elements that fail; throws only when the key is missing or not an array.
     func decodeSkippingInvalid<T: Decodable>(
         _ type: [T].Type,
         forKey key: Key

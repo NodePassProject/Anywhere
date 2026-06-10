@@ -10,9 +10,8 @@ import SwiftData
 
 private let logger = AnywhereLogger(category: "JSONBlobStore")
 
-/// Single SwiftData model storing opaque JSON blobs by key. Domain types
-/// stay as plain `Codable` structs; SwiftData is only the byte-level
-/// container so we keep the existing JSON wire format and decoders.
+/// Opaque JSON blob keyed by name; SwiftData is only the byte-level container,
+/// preserving the existing JSON wire format and decoders.
 @Model
 final class JSONBlob {
     @Attribute(.unique) var key: String
@@ -26,16 +25,9 @@ final class JSONBlob {
     }
 }
 
-/// Process-wide singleton owning the SwiftData ``ModelContainer`` for the
-/// JSON blob store, located in the App Group container so the host app
-/// and the Network Extension share a single SQLite database.
-///
-/// All public operations are synchronous and serialised through an internal
-/// queue. Each call creates a fresh ``ModelContext`` so cross-process reads
-/// always observe the latest committed state via SQLite WAL.
-///
-/// The host app is the only writer. The Network Extension reads MITM data
-/// on demand and never mutates the store.
+/// Blob store in the App Group container, shared by the host app (sole writer) and the
+/// Network Extension (read-only). Calls are serialised through an internal queue, and each
+/// uses a fresh `ModelContext` so cross-process reads observe the latest committed state.
 final class JSONBlobStore: @unchecked Sendable {
     static let shared = JSONBlobStore()
 
@@ -60,9 +52,7 @@ final class JSONBlobStore: @unchecked Sendable {
             logger.error("Failed to open JSONBlob store: \(error)")
             container = nil
         }
-        // Migration is host-only. The Network Extension is a read-only
-        // consumer and must not delete legacy data the host hasn't migrated.
-        // Skipped when the store couldn't be opened (container == nil).
+        // Migration is host-only — the NE must not delete legacy data the host hasn't migrated.
         if container != nil, Bundle.main.bundleIdentifier == AWCore.Identifier.bundle {
             migrateLegacyDataIfNeeded(containerURL: containerURL)
         }
@@ -106,21 +96,11 @@ final class JSONBlobStore: @unchecked Sendable {
 
     // MARK: - Migration
 
-    /// Idempotent migration from the pre-SwiftData blobs:
-    /// - `configurations.json`, `subscriptions.json`, `chains.json` files in
-    ///   the App Group container (and from the per-app documents directory
-    ///   for very old installs, via ``AWCore/migrateToAppGroup(fileName:)``)
-    /// - `customRuleSets`, `mitmData` UserDefaults entries in the App Group
-    ///   suite
-    ///
-    /// For each blob, the legacy source is read first, written to SwiftData,
-    /// and verified by re-reading; only then is the source removed. If any
-    /// step fails the legacy source is left in place so the next launch can
-    /// retry. If SwiftData already has the blob, the legacy source is just
-    /// cleaned up.
+    /// Idempotent migration from pre-SwiftData JSON files and UserDefaults blobs. Each source
+    /// is written to SwiftData and verified by re-read before removal, so a failure leaves the
+    /// legacy source in place for retry on the next launch.
     private func migrateLegacyDataIfNeeded(containerURL: URL) {
-        // Pull JSON files in from the per-app documents directory if they
-        // were left there by very old builds.
+        // Very old builds left JSON files in the per-app documents directory.
         AWCore.migrateToAppGroup(fileName: "configurations.json")
         AWCore.migrateToAppGroup(fileName: "subscriptions.json")
         AWCore.migrateToAppGroup(fileName: "chains.json")

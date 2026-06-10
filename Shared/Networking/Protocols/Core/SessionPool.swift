@@ -9,50 +9,30 @@ import Foundation
 
 // MARK: - PoolableSession
 
-/// The minimum surface a ``SessionPool`` needs from its sessions: a way to
-/// check whether the session has closed out of band, and a way to tear it
-/// down on pool-wide close.
+/// Minimum surface a ``SessionPool`` needs to manage a session.
 protocol PoolableSession: AnyObject {
-    /// Whether the session is closed. Sessions with this set are evicted by
-    /// the pool.
+    /// Whether the session is closed; closed sessions are evicted by the pool.
     var poolIsClosed: Bool { get }
 
-    /// Tears down the session. Called by `closeAll()` on pool shutdown; may
-    /// also be invoked by pool eviction paths.
     func close()
 }
 
 // MARK: - SessionPool
 
-/// Generic base for pooled-session managers (HTTP/2, HTTP/3). Handles the
-/// scaffolding that's identical across pool implementations:
-///
-/// - a lock,
-/// - a `host:port:sni`-keyed bucket dictionary,
-/// - removal of a specific session from its bucket,
-/// - a default `closeAll()` that drains every pooled session.
-///
-/// Subclasses add protocol-specific state (GOAWAY draining, idle timeouts,
-/// soft/hard caps) and override `closeAll()` to include their auxiliary
-/// storage.
+/// Generic base for pooled-session managers keyed by `host:port:sni`.
 nonisolated class SessionPool<S: PoolableSession> {
 
-    /// Guards ``sessions`` and any subclass-owned auxiliary storage. Subclasses
-    /// must acquire this lock before touching ``sessions``.
+    /// Guards `sessions` and any subclass-owned auxiliary storage.
     let lock = UnfairLock()
 
-    /// Sessions keyed by ``makeKey(host:port:sni:)``.
     var sessions: [String: [S]] = [:]
 
     init() {}
 
-    /// Builds the bucket key shared by every subclass.
     static func makeKey(host: String, port: UInt16, sni: String) -> String {
         "\(host):\(port):\(sni)"
     }
 
-    /// Removes `session` from its bucket at `key`. Drops the bucket entirely
-    /// if it becomes empty. Thread-safe.
     func removeSession(_ session: S, key: String) {
         lock.lock()
         sessions[key]?.removeAll { $0 === session }
@@ -62,9 +42,7 @@ nonisolated class SessionPool<S: PoolableSession> {
         lock.unlock()
     }
 
-    /// Closes every pooled session and empties the bucket dictionary.
-    /// Subclasses should override to additionally close any protocol-specific
-    /// auxiliary collections (e.g. dedicated sessions for chained tunnels).
+    /// Closes every pooled session; subclasses override to also cover auxiliary storage they own.
     func closeAll() {
         lock.lock()
         let all = sessions.values.flatMap { $0 }

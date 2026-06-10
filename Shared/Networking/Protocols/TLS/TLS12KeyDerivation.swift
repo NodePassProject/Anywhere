@@ -18,15 +18,8 @@ struct TLS12Keys {
     let serverIV: Data
 }
 
-/// Running TLS 1.2 server-side handshake state, mirroring
-/// ``TLS13ServerHandshakeState``.
-///
-/// The TLS 1.2 transcript is the concatenation of every plaintext
-/// handshake message (no record framing). It is appended to as messages
-/// are sent and received, and hashed at two points: at the master_secret
-/// derivation (when EMS is in use, hashing through ClientKeyExchange) and
-/// at the Finished verify_data computation (hashing through the peer's
-/// Finished).
+/// Running TLS 1.2 server-side handshake state. The transcript is the concatenation of
+/// plaintext handshake messages (no record framing), hashed for EMS and Finished.
 struct TLS12ServerHandshakeState {
     var transcript: Data = Data()
     var masterSecret: Data?
@@ -34,28 +27,17 @@ struct TLS12ServerHandshakeState {
     var clientRandom: Data?
     var serverRandom: Data?
     var extendedMasterSecret: Bool = false
-    /// Set once the client's ChangeCipherSpec has been observed; subsequent
-    /// handshake records from the client are interpreted as encrypted.
+    /// Once the client's CCS is seen, subsequent client handshake records are encrypted.
     var receivedCCS: Bool = false
 }
 
-/// TLS 1.2 key derivation utilities.
-///
-/// Implements the TLS 1.2 PRF (RFC 5246 §5) and key schedule,
-/// matching the behavior of utls `prf.go` and `internal/tls12/tls12.go`.
+/// TLS 1.2 key derivation utilities (RFC 5246 §5).
 struct TLS12KeyDerivation {
 
     // MARK: - PRF (Pseudo-Random Function)
 
-    /// TLS 1.2 PRF: `PRF(secret, label, seed) = P_<hash>(secret, label || seed)`
-    ///
-    /// RFC 5246 §5: The PRF is defined using a single hash function (SHA-256 or SHA-384).
-    /// - Parameters:
-    ///   - secret: The secret key material.
-    ///   - label: An ASCII label string (e.g. "master secret").
-    ///   - seed: The seed data (typically concatenated randoms).
-    ///   - length: Number of output bytes.
-    ///   - useSHA384: Use SHA-384 instead of SHA-256 (for SHA384 cipher suites).
+    /// TLS 1.2 PRF: `PRF(secret, label, seed) = P_<hash>(secret, label || seed)` (RFC 5246 §5).
+    /// - Parameter useSHA384: Use SHA-384 instead of SHA-256 for SHA-384 cipher suites.
     static func prf(secret: Data, label: String, seed: Data, length: Int, useSHA384: Bool = false) -> Data {
         var labelAndSeed = Data(label.utf8)
         labelAndSeed.append(seed)
@@ -63,17 +45,10 @@ struct TLS12KeyDerivation {
     }
 
     /// P_hash iterative expansion (RFC 5246 §5).
-    ///
-    /// ```
-    /// A(0) = seed
-    /// A(i) = HMAC_hash(secret, A(i-1))
-    /// P_hash(secret, seed) = HMAC_hash(secret, A(1) || seed) ||
-    ///                        HMAC_hash(secret, A(2) || seed) || ...
-    /// ```
     private static func pHash(secret: Data, seed: Data, length: Int, useSHA384: Bool) -> Data {
         let key = SymmetricKey(data: secret)
         var result = Data(capacity: length + 64)
-        var a = seed  // A(0) = seed
+        var a = seed
 
         while result.count < length {
             if useSHA384 {
@@ -94,12 +69,7 @@ struct TLS12KeyDerivation {
 
     // MARK: - Master Secret
 
-    /// Derives the 48-byte master secret from the pre-master secret.
-    ///
-    /// `master_secret = PRF(pre_master_secret, "master secret",
-    ///                      ClientHello.random + ServerHello.random)[0..47]`
-    ///
-    /// Matches utls `prf.go:masterFromPreMasterSecret()`.
+    /// `master_secret = PRF(pre_master_secret, "master secret", client_random || server_random)[0..47]`.
     static func masterSecret(
         preMasterSecret: Data,
         clientRandom: Data,
@@ -113,15 +83,8 @@ struct TLS12KeyDerivation {
 
     // MARK: - Extended Master Secret (RFC 7627)
 
-    /// Derives the 48-byte master secret using the Extended Master Secret formula.
-    ///
-    /// `master_secret = PRF(pre_master_secret, "extended master secret",
-    ///                      Hash(handshake_messages))[0..47]`
-    ///
-    /// The seed is the hash of all handshake messages up to and including
-    /// ClientKeyExchange (NOT clientRandom + serverRandom).
-    ///
-    /// Matches utls `prf.go:extMasterFromPreMasterSecret()`.
+    /// RFC 7627 extended master secret: the PRF seed is the transcript hash through
+    /// ClientKeyExchange, not the randoms.
     static func extendedMasterSecret(
         preMasterSecret: Data,
         sessionHash: Data,
@@ -132,17 +95,7 @@ struct TLS12KeyDerivation {
 
     // MARK: - Key Expansion
 
-    /// Derives encryption keys from the master secret.
-    ///
-    /// `key_block = PRF(master_secret, "key expansion",
-    ///                  server_random + client_random)`
-    ///
-    /// The key block is partitioned into:
-    /// `client_write_MAC_key[macLen] + server_write_MAC_key[macLen] +
-    ///  client_write_key[keyLen]     + server_write_key[keyLen] +
-    ///  client_write_IV[ivLen]       + server_write_IV[ivLen]`
-    ///
-    /// Matches utls `prf.go:keysFromMasterSecret()`.
+    /// Key block layout: client_MAC || server_MAC || client_key || server_key || client_IV || server_IV.
     static func keysFromMasterSecret(
         masterSecret: Data,
         clientRandom: Data,
@@ -152,7 +105,7 @@ struct TLS12KeyDerivation {
         ivLen: Int,
         useSHA384: Bool = false
     ) -> TLS12Keys {
-        // Note: seed order is server_random + client_random (reversed from master secret)
+        // Seed order is server_random + client_random (reversed from master secret).
         var seed = serverRandom
         seed.append(clientRandom)
         let totalLen = 2 * macLen + 2 * keyLen + 2 * ivLen
@@ -175,16 +128,7 @@ struct TLS12KeyDerivation {
 
     // MARK: - Finished Verify Data
 
-    /// Computes the 12-byte `verify_data` for the Finished message.
-    ///
-    /// `verify_data = PRF(master_secret, finished_label,
-    ///                    Hash(handshake_messages))[0..11]`
-    ///
-    /// - Parameters:
-    ///   - masterSecret: The 48-byte master secret.
-    ///   - label: `"client finished"` or `"server finished"`.
-    ///   - handshakeHash: Hash of all handshake messages so far.
-    ///   - useSHA384: Use SHA-384 for the PRF.
+    /// `verify_data = PRF(master_secret, "client finished"/"server finished", Hash(handshake_messages))[0..11]`.
     static func computeFinishedVerifyData(
         masterSecret: Data,
         label: String,
@@ -196,7 +140,6 @@ struct TLS12KeyDerivation {
 
     // MARK: - Transcript Hash
 
-    /// Computes the transcript hash of all handshake messages.
     static func transcriptHash(_ messages: Data, useSHA384: Bool = false) -> Data {
         if useSHA384 {
             return Data(SHA384.hash(data: messages))
@@ -207,11 +150,7 @@ struct TLS12KeyDerivation {
 
     // MARK: - TLS 1.0/1.1 MAC
 
-    /// Computes the TLS record MAC for CBC cipher suites.
-    ///
-    /// `MAC = HMAC_hash(mac_key, seq_num(8) || type(1) || version(2) || length(2) || fragment)`
-    ///
-    /// Matches utls `cipher_suites.go:tls10MAC()`.
+    /// CBC record MAC: `HMAC_hash(mac_key, seq(8) || type(1) || version(2) || length(2) || fragment)`.
     static func tls10MAC(
         macKey: Data,
         seqNum: UInt64,
@@ -224,19 +163,14 @@ struct TLS12KeyDerivation {
         let key = SymmetricKey(data: macKey)
 
         var input = Data(capacity: 13 + payload.count)
-        // Sequence number (8 bytes, big-endian)
         for i in (0..<8).reversed() {
             input.append(UInt8((seqNum >> (i * 8)) & 0xFF))
         }
-        // Content type (1 byte)
         input.append(contentType)
-        // Protocol version (2 bytes)
         input.append(UInt8(protocolVersion >> 8))
         input.append(UInt8(protocolVersion & 0xFF))
-        // Payload length (2 bytes)
         input.append(UInt8((payload.count >> 8) & 0xFF))
         input.append(UInt8(payload.count & 0xFF))
-        // Payload
         input.append(payload)
 
         if useSHA384 {

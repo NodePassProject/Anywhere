@@ -7,68 +7,33 @@
 
 import Foundation
 
-/// Connection-scoped HPACK decoder that persists the dynamic table across
-/// all HEADERS frames on one HTTP/2 connection (RFC 7541 §2.2).
-///
-/// In HTTP/2 the HPACK compression context is shared per-connection, not
-/// per-stream.  The server may encode stream 3's `:status` as a dynamic
-/// table reference that was added while encoding stream 1's response.
-/// A stateless `decodeHeaders` call would fail to resolve that reference.
-///
-/// One instance should be created per ``HTTP2Session`` and used for every
-/// incoming HEADERS frame on that session.
-///
-/// The dynamic table is bounded per RFC 7541 §4: entry sizes are accounted
-/// per §4.1 (`name + value + 32` octets), and entries are evicted from the
-/// oldest end on insert (§4.4) and on a table-size reduction (§4.3 / §6.3)
-/// so the table never exceeds the limit the encoder was given. Without the
-/// bound the table grows for the connection's whole lifetime — a memory-
-/// exhaustion vector a peer can drive that is acute under the Network
-/// Extension's tight memory budget. Eviction never drops below the
-/// encoder's current table, so index references stay resolvable.
+/// Connection-scoped HPACK decoder: the dynamic table persists across all HEADERS
+/// frames on one HTTP/2 connection (RFC 7541 §2.2) and is bounded per §4 eviction
+/// so a peer cannot grow it unbounded.
 nonisolated class HPACKDecoder {
 
-    /// HTTP/2's default ``SETTINGS_HEADER_TABLE_SIZE`` (RFC 9113 §6.5.2),
-    /// the table limit in force until a peer's SETTINGS says otherwise.
+    /// Default SETTINGS_HEADER_TABLE_SIZE (RFC 9113 §6.5.2).
     private static let defaultMaxTableSize = 4096
 
-    /// Defensive ceiling on the table limit we'll honor from an observed
-    /// ``SETTINGS_HEADER_TABLE_SIZE``. The setting is a 32-bit value, so
-    /// honoring it unbounded would hand a hostile peer a multi-GiB
-    /// allocation primitive. 64 KiB is the largest value mainstream peers
-    /// (Chrome, Firefox) advertise, so clamping here bounds worst-case
-    /// memory without tearing down real connections. A peer that both
-    /// advertises a larger table *and* fills past this clamp eventually
-    /// references an evicted index, which fails the decode cleanly (the
-    /// caller trips parseError and the connection GOAWAYs) rather than
-    /// mis-resolving to a stale entry.
+    /// Clamp on the peer's SETTINGS_HEADER_TABLE_SIZE; 64 KiB covers mainstream
+    /// peers while denying a hostile peer a multi-GiB allocation primitive.
     private static let maxAllowedTableSize = 65536
 
     private var dynamicTable: [(name: String, value: String)] = []
 
-    /// Running dynamic-table size in octets (RFC 7541 §4.1):
-    /// Σ(name.utf8.count + value.utf8.count + 32).
+    /// Running dynamic-table size in octets (RFC 7541 §4.1).
     private var currentSize = 0
 
-    /// Upper bound the encoder was given via ``SETTINGS_HEADER_TABLE_SIZE``.
-    /// A §6.3 Dynamic Table Size Update above this is a decoding error
-    /// (§4.2).
+    /// Limit from SETTINGS_HEADER_TABLE_SIZE; a §6.3 update above it is a decoding error (§4.2).
     private var protocolMaxSize = HPACKDecoder.defaultMaxTableSize
 
-    /// Effective eviction cap. Equals ``protocolMaxSize`` unless the
-    /// encoder signals a smaller working size via a §6.3 update. We only
-    /// ever *raise* it from an observed SETTINGS and lower it from the
-    /// encoder's own §6.3 update, so it never drops below the encoder's
-    /// live table — guaranteeing we don't evict an entry it still
-    /// references.
+    /// Effective eviction cap: equals protocolMaxSize unless the encoder lowers it
+    /// via a §6.3 update, so it never drops below the encoder's live table.
     private var maxSize = HPACKDecoder.defaultMaxTableSize
 
-    /// Applies the peer's advertised ``SETTINGS_HEADER_TABLE_SIZE`` (the
-    /// limit imposed on the encoder this decoder mirrors), clamped to
-    /// ``maxAllowedTableSize``. Only raises the working cap: a reduction
-    /// reaches us in-band as the encoder's §6.3 update once it has
-    /// actually evicted, so we never get ahead of it and drop a live
-    /// entry. Must be called on the same serial queue as ``decodeHeaders``.
+    /// Applies the peer's SETTINGS_HEADER_TABLE_SIZE, clamped to maxAllowedTableSize.
+    /// Only raises the cap — reductions arrive in-band as the encoder's §6.3 update.
+    /// Call on the same serial queue as decodeHeaders.
     func setPeerHeaderTableSize(_ size: Int) {
         let clamped = max(0, min(size, HPACKDecoder.maxAllowedTableSize))
         protocolMaxSize = clamped
@@ -77,16 +42,9 @@ nonisolated class HPACKDecoder {
         }
     }
 
-    /// Decodes an HPACK header block, updating the persistent dynamic table.
-    ///
-    /// Returns the decoded fields plus the set of (lowercased) field-names that
-    /// arrived in the §6.2.3 "Literal Header Field Never Indexed" representation.
-    /// RFC 7541 §7.1.3 requires an intermediary that re-encodes such a field to
-    /// re-emit it never-indexed, so the caller threads this set into
-    /// ``HPACKEncoder/encodeHeaderBlock(_:neverIndexed:)``. Tracked by name (not
-    /// per-occurrence) — a name marked never-indexed once protects every
-    /// occurrence on re-encode, which over-protects in the (pathological) mixed
-    /// case but never under-protects.
+    /// Decodes an HPACK header block, updating the persistent dynamic table. Also
+    /// returns the lowercased names received §6.2.3 never-indexed, which an
+    /// intermediary must re-emit never-indexed (RFC 7541 §7.1.3).
     func decodeHeaders(from data: Data) -> (fields: [(name: String, value: String)], neverIndexed: Set<String>)? {
         var headers: [(name: String, value: String)] = []
         var neverIndexed: Set<String> = []
@@ -111,10 +69,8 @@ nonisolated class HPACKDecoder {
                 insertWithEviction(name: name, value: value)
 
             } else if byte & 0xF0 == 0x00 || byte & 0xF0 == 0x10 {
-                // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed. The
-                // 0001xxxx variant (high nibble 0x1) is "Never Indexed" — record
-                // the name so the re-encoder preserves the marker (RFC 7541
-                // §7.1.3); 0000xxxx is plain without-indexing.
+                // §6.2.2/§6.2.3 Literal without Indexing / Never Indexed (0000xxxx / 0001xxxx);
+                // record never-indexed names so the re-encoder preserves the marker (§7.1.3).
                 let isNeverIndexed = (byte & 0xF0 == 0x10)
                 guard let (name, value) = HPACKEncoder.decodeLiteral(from: data, at: &offset, prefixBits: 4,
                                                                      dynamicTable: dynamicTable) else { return nil }
@@ -144,10 +100,7 @@ nonisolated class HPACKDecoder {
         name.utf8.count + value.utf8.count + 32
     }
 
-    /// Inserts a freshly decoded entry at the head of the dynamic table,
-    /// first evicting from the oldest end so the table stays within
-    /// ``maxSize`` (RFC 7541 §4.4). An entry larger than ``maxSize`` is
-    /// not added and empties the table.
+    /// Inserts at the head after evicting from the oldest end to stay within maxSize (RFC 7541 §4.4).
     private func insertWithEviction(name: String, value: String) {
         let size = entrySize(name: name, value: value)
         // §4.4: evict until the new entry fits, or the table is empty.
@@ -156,16 +109,14 @@ nonisolated class HPACKDecoder {
             dynamicTable.removeLast()
         }
         guard size <= maxSize else {
-            // §4.4: an entry larger than the maximum size empties the
-            // table and is not itself inserted.
+            // §4.4: an over-sized entry empties the table and is not inserted.
             return
         }
         dynamicTable.insert((name, value), at: 0)
         currentSize += size
     }
 
-    /// Evicts from the oldest end until the table fits ``maxSize``
-    /// (RFC 7541 §4.3).
+    /// Evicts from the oldest end until the table fits maxSize (RFC 7541 §4.3).
     private func evictToFit() {
         while currentSize > maxSize, let last = dynamicTable.last {
             currentSize -= entrySize(name: last.name, value: last.value)
@@ -174,31 +125,19 @@ nonisolated class HPACKDecoder {
     }
 }
 
-/// Minimal HPACK encoder/decoder for the NaiveProxy CONNECT tunnel.
-///
-/// Static encoding helpers for CONNECT requests and stateless decoding
-/// for use cases that don't need a persistent dynamic table.
-/// For connection-scoped decoding, use ``HPACKDecoder`` instead.
+/// Minimal HPACK encoder and stateless decoder for the NaiveProxy CONNECT tunnel.
 enum HPACKEncoder {
 
     // MARK: - CONNECT Request Encoding
 
     /// Encodes an HTTP/2 CONNECT request header block.
-    ///
-    /// Produces HPACK-encoded headers:
-    /// - `:method = CONNECT` (literal with indexed name, static index 2)
-    /// - `:authority = <authority>` (literal with indexed name, static index 1)
-    /// - Extra headers (proxy-authorization, padding, etc.)
     static func encodeConnectRequest(
         authority: String,
         extraHeaders: [(name: String, value: String)]
     ) -> Data {
         var block = Data()
-        // :method = CONNECT — literal without indexing, name index 2 (:method)
         encodeLiteralWithoutIndexing(nameIndex: 2, value: "CONNECT", into: &block)
-        // :authority = host:port — literal without indexing, name index 1 (:authority)
         encodeLiteralWithoutIndexing(nameIndex: 1, value: authority, into: &block)
-        // Extra headers
         for header in extraHeaders {
             if let nameIdx = staticTableNameIndex(header.name) {
                 encodeLiteralWithoutIndexing(nameIndex: nameIdx, value: header.value, into: &block)
@@ -211,34 +150,10 @@ enum HPACKEncoder {
 
     // MARK: - Generic Header Block Encoding
 
-    /// Encodes an arbitrary header list into a single HPACK header block.
-    ///
-    /// Stateless across calls — nothing is added to a dynamic table, so
-    /// there is no per-connection encoder state to keep in sync. Each
-    /// field uses the smallest representation that needs no dynamic table:
-    ///
-    /// - Static-table *full* match (name **and** value) → "Indexed Header
-    ///   Field" (RFC 7541 §6.1): a single byte, e.g. `:status 200` → `0x88`,
-    ///   `:scheme https` → `0x87`, `:method GET` → `0x82`.
-    /// - Static-table *name* match → "Literal Header Field without Indexing"
-    ///   (§6.2.2) with an indexed name and a literal value.
-    /// - Otherwise → literal without indexing with a literal name.
-    ///
-    /// Because nothing is emitted with incremental indexing (§6.2.1), the
-    /// peer's dynamic table is never loaded and no value — sensitive or
-    /// otherwise — is ever indexed.
-    ///
-    /// Used by ``MITMHTTP2Connection`` to re-emit HEADERS / CONTINUATION
-    /// frames after rewriting — independent dynamic-table state on each
-    /// MITM leg means we can't byte-forward HPACK fragments.
-    ///
-    /// ``neverIndexed`` carries the lowercased names that arrived in the §6.2.3
-    /// "Never Indexed" representation (from ``HPACKDecoder/decodeHeaders``). A
-    /// field whose name is in that set is re-emitted never-indexed (§6.2.3) so a
-    /// downstream intermediary can't promote it into a dynamic table — RFC 7541
-    /// §7.1.3 makes this a MUST for intermediaries. The never-indexed check runs
-    /// first so such a field never collapses to a §6.1 indexed byte even when its
-    /// (name, value) happens to full-match the static table.
+    /// Statelessly encodes a header list using only static-table representations, so
+    /// no value ever enters the peer's dynamic table. Fields in `neverIndexed` are
+    /// re-emitted §6.2.3 never-indexed (RFC 7541 §7.1.3 MUST), and that check runs
+    /// first so they never collapse to a §6.1 indexed byte.
     static func encodeHeaderBlock(
         _ headers: [(name: String, value: String)],
         neverIndexed: Set<String> = []
@@ -253,8 +168,7 @@ enum HPACKEncoder {
                     encodeLiteralNeverIndexed(name: header.name, value: header.value, into: &block)
                 }
             } else if let fullIndex = staticTableFullIndex(header.name, header.value) {
-                // §6.1 Indexed Header Field — name and value both come from
-                // the static table, so a single index byte suffices.
+                // §6.1 Indexed Header Field — one index byte supplies both name and value.
                 encodeIndexed(fullIndex, into: &block)
             } else if let nameIdx = staticTableNameIndex(header.name) {
                 encodeLiteralWithoutIndexing(nameIndex: nameIdx, value: header.value, into: &block)
@@ -268,9 +182,7 @@ enum HPACKEncoder {
     // MARK: - Response Decoding
 
     /// Decodes an HPACK header block into name-value pairs.
-    ///
-    /// Handles indexed, literal with/without indexing, and dynamic table size updates.
-    /// Maintains a local dynamic table for the duration of the decode.
+    /// Maintains a local dynamic table for the duration of the decode only.
     static func decodeHeaders(from data: Data) -> [(name: String, value: String)]? {
         var headers: [(name: String, value: String)] = []
         var offset = data.startIndex
@@ -305,7 +217,7 @@ enum HPACKEncoder {
                 let _ = decodeInteger(from: data, at: &offset, prefixBits: 5)
                 // We don't need to enforce table size for our minimal client
             } else {
-                return nil  // Unknown representation
+                return nil
             }
         }
 
@@ -347,14 +259,8 @@ enum HPACKEncoder {
         var m = 0
         repeat {
             guard offset < data.endIndex else { return nil }
-            // RFC 7541 §5.1. Every integer this decoder consumes — table
-            // indices, string lengths (≤ frame size), dynamic-table sizes —
-            // fits well within 32 bits. A varint carrying more continuation
-            // bytes than that, or one whose running value would overflow `Int`,
-            // is malformed: reject it instead of letting `value += …` trap.
-            // Without this guard an ~11-byte HEADERS block of 0xFF bytes
-            // overflows and crashes the extension — a remote DoS that takes
-            // down every multiplexed stream on the connection.
+            // RFC 7541 §5.1: every legitimate integer here fits in 32 bits. Reject
+            // over-long or overflowing varints instead of letting `value +=` trap (remote DoS).
             guard m < 32 else { return nil }
             let b = data[offset]
             offset += 1
@@ -386,8 +292,7 @@ enum HPACKEncoder {
         guard offset < data.endIndex else { return nil }
         let huffman = data[offset] & 0x80 != 0
         guard let length = decodeInteger(from: data, at: &offset, prefixBits: 7) else { return nil }
-        // Compute the headroom by subtraction (both operands are valid indices)
-        // so `offset + length` can't overflow `Int` before the bounds check.
+        // Compute headroom by subtraction so `offset + length` can't overflow Int.
         guard length >= 0, length <= data.endIndex - offset else { return nil }
 
         let stringData = data[offset..<(offset + length)]
@@ -403,9 +308,8 @@ enum HPACKEncoder {
 
     // MARK: - Indexed Header Encoding
 
-    /// Encodes a §6.1 Indexed Header Field: a back-reference to a table
-    /// entry that supplies both name and value. Only ever called with
-    /// static indices (1–61), which fit the 7-bit prefix in a single byte.
+    /// Encodes a §6.1 Indexed Header Field; only called with static indices (1–61),
+    /// which fit the 7-bit prefix in a single byte.
     private static func encodeIndexed(_ index: Int, into data: inout Data) {
         var indexData = Data()
         encodeInteger(index, prefixBits: 7, into: &indexData)
@@ -417,10 +321,9 @@ enum HPACKEncoder {
 
     /// Encodes a literal header without indexing, using an indexed name from the static table.
     private static func encodeLiteralWithoutIndexing(nameIndex: Int, value: String, into data: inout Data) {
-        // 0000xxxx prefix + name index
         var indexData = Data()
         encodeInteger(nameIndex, prefixBits: 4, into: &indexData)
-        indexData[indexData.startIndex] &= 0x0F  // Ensure 0000 prefix
+        indexData[indexData.startIndex] &= 0x0F  // 0000xxxx prefix
         data.append(indexData)
         encodeString(value, into: &data)
     }
@@ -432,14 +335,12 @@ enum HPACKEncoder {
         encodeString(value, into: &data)
     }
 
-    /// Encodes a §6.2.3 "Literal Header Field Never Indexed" with an indexed name
-    /// from the static table. Identical to the without-indexing form but with the
-    /// 0001 prefix, which instructs every decoder (including downstream
-    /// intermediaries) never to add the field to a dynamic table (RFC 7541 §7.1.3).
+    /// Encodes a §6.2.3 "Literal Header Field Never Indexed" with an indexed name;
+    /// the 0001 prefix forbids every downstream decoder from indexing the field (RFC 7541 §7.1.3).
     private static func encodeLiteralNeverIndexed(nameIndex: Int, value: String, into data: inout Data) {
         var indexData = Data()
         encodeInteger(nameIndex, prefixBits: 4, into: &indexData)
-        indexData[indexData.startIndex] &= 0x0F  // clear the prefix nibble
+        indexData[indexData.startIndex] &= 0x0F
         indexData[indexData.startIndex] |= 0x10  // 0001xxxx — never indexed
         data.append(indexData)
         encodeString(value, into: &data)
@@ -504,10 +405,8 @@ enum HPACKEncoder {
         return nil
     }
 
-    /// Returns the static table index whose name **and** value both match
-    /// (name case-insensitive, value exact), or `nil`. Enables the §6.1
-    /// single-byte Indexed Header Field for fully-specified common entries
-    /// such as `:method GET`, `:scheme https`, and `:status 200`.
+    /// Returns the static table index matching name (case-insensitive) and value
+    /// (exact), or nil; enables the single-byte §6.1 form for common entries.
     private static func staticTableFullIndex(_ name: String, _ value: String) -> Int? {
         let lower = name.lowercased()
         for (i, entry) in staticTable.enumerated() {
@@ -622,17 +521,12 @@ enum HPACKHuffman {
         return nodes
     }()
 
-    /// Decodes Huffman-encoded bytes into raw bytes, returning nil on any
-    /// RFC 7541 §5.2 violation: a bit that leaves the code tree, an explicit
-    /// EOS symbol in the data, or trailing padding that isn't the all-ones EOS
-    /// prefix (or runs to 8+ bits). Strict decoding matters here because the
-    /// MITM re-emits the decoded value, so accepting malformed input would
-    /// "launder" a header a strict endpoint would have rejected.
+    /// Decodes Huffman bytes, rejecting any RFC 7541 §5.2 violation (off-tree bit,
+    /// explicit EOS, bad padding) so the MITM never re-emits "laundered" malformed input.
     static func decode(_ data: some Collection<UInt8>) -> [UInt8]? {
         var result: [UInt8] = []
         var nodeIdx = 0
-        // Bits consumed since the last completed symbol, and whether they were
-        // all 1-bits — used to validate the trailing padding after the loop.
+        // Bits since the last completed symbol, for validating the trailing padding.
         var bitsSinceSymbol = 0
         var paddingAllOnes = true
 
@@ -647,9 +541,7 @@ enum HPACKHuffman {
 
                 let sym = tree[nodeIdx].symbol
                 if sym >= 0 {
-                    // RFC 7541 §5.2: the EOS symbol (256) MUST NOT appear in the
-                    // encoded data; its presence is a decoding error, not a
-                    // clean end-of-string.
+                    // RFC 7541 §5.2: an explicit EOS symbol is a decoding error.
                     if sym == 256 { return nil }
                     result.append(UInt8(sym))
                     nodeIdx = 0
@@ -659,11 +551,8 @@ enum HPACKHuffman {
             }
         }
 
-        // RFC 7541 §5.2: any bits left after the last complete symbol must be
-        // padding — the most-significant bits of the all-ones EOS code, and
-        // strictly fewer than 8 bits. nodeIdx == 0 means we ended exactly on a
-        // symbol boundary (no padding); otherwise the partial trailing path
-        // must be all-ones and < 8 bits, else it's malformed or over-long pad.
+        // RFC 7541 §5.2: any trailing partial code must be all-ones EOS padding,
+        // strictly fewer than 8 bits; nodeIdx == 0 means no padding at all.
         if nodeIdx != 0 {
             guard paddingAllOnes, bitsSinceSymbol < 8 else { return nil }
         }

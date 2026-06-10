@@ -16,14 +16,9 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     private let session: HysteriaSession
     private let destination: String
 
-    /// Connection state. Confined to `session.queue` for reads and writes; the
-    /// getter is deliberately lock-free. The setter mirrors readiness into
-    /// `_isReady` under `readyLock` so `isConnected` can be answered from any
-    /// queue WITHOUT a synchronous hop onto `session.queue` — that hop would
-    /// otherwise help form a deadlock against the FD-pressure relief path,
-    /// which hops the other way (quic.queue→`udpQueue.sync`) when `QUICSocket`
-    /// creation hits `EMFILE`. Only `.ready` mirrors as connected; the
-    /// intermediate `.openingStream` / `.handshaking` states read as not-ready.
+    /// Confined to `session.queue`. The setter mirrors readiness into
+    /// `_isReady` so `isConnected` avoids a sync hop onto `session.queue`,
+    /// which would deadlock against the FD-pressure path hopping the other way.
     private var _state: State = .idle
     private var state: State {
         get { _state }
@@ -32,28 +27,16 @@ nonisolated final class HysteriaConnection: ProxyConnection {
             readyLock.withLock { _isReady = (newValue == .ready) }
         }
     }
-    /// Cross-queue-readable mirror of `state == .ready`. Written only by the
-    /// `state` setter (on `session.queue`); read lock-free by `isConnected`.
     private let readyLock = UnfairLock()
     private var _isReady = false
 
     private var streamID: Int64 = -1
 
-    /// True once we've observed FIN on the downlink (server half-closed its
-    /// write side). The uplink is independent and stays open — `state`
-    /// remains `.ready` so the caller can continue to `sendRaw` until it
-    /// decides to tear the stream down. Blocks further reads: new
-    /// `receiveRaw` calls return `(nil, nil)` once the buffer drains.
-    ///
-    /// Conflating this with `state = .closed` (prior bug) broke TCP
-    /// half-close — any lwIP uplink bytes still coalesced at the moment the
-    /// peer FIN'd would fail with `HysteriaError.streamClosed`, which is
-    /// what produced the `[TCP] Send failed: host: Hysteria stream closed`
-    /// line observed on gracefully-closing HTTPS connections.
+    /// FIN seen on the downlink. Kept separate from `.closed` to preserve
+    /// TCP half-close — the caller must still be able to send after the peer FINs.
     private var readClosed = false
 
-    /// Buffer holding raw stream bytes we haven't yet delivered to a
-    /// pending `receiveRaw` call, plus the unparsed response header.
+    /// Accumulates incoming bytes until the response header is parsed, then holds data not yet delivered to a pending `receiveRaw`.
     private var receiveBuffer = Data()
     private var responseParsed = false
     private var pendingReceive: ((Data?, Error?) -> Void)?
@@ -67,8 +50,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         super.init()
     }
 
-    /// Non-blocking: reads the lock-guarded readiness mirror rather than
-    /// hopping onto `session.queue` (see `state`). Callable from any queue.
+    /// Lock-guarded readiness mirror; callable from any queue.
     override var isConnected: Bool {
         readyLock.withLock { _isReady }
     }
@@ -116,16 +98,12 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     // MARK: - Stream data (from HysteriaSession.handleStreamData)
 
     func handleStreamData(_ data: Data, fin: Bool) {
-        // On session queue (== quic.queue), called synchronously from
-        // ngtcp2's read_pkt callback. `data` is a zero-copy view into
-        // ngtcp2's receive buffer — any path that escapes to another
-        // queue must detach it with Data(...) first; Data.append also
-        // copies into our own storage.
+        // On session.queue, synchronously inside ngtcp2's read_pkt. `data` is
+        // a zero-copy view into ngtcp2's buffer — detach with Data(...)
+        // before escaping to another queue (Data.append also copies).
 
-        // Fast path: handshake done, nothing buffered, receiver waiting.
-        // Deliver inline so the flow-control credit (extendStreamOffset)
-        // rides read_pkt's tail-flush instead of an extra queue hop, and
-        // we skip the intermediate append/extract through receiveBuffer.
+        // Fast path: handshake done, nothing buffered, receiver waiting —
+        // deliver inline so the flow-control credit rides read_pkt's tail-flush.
         if responseParsed, receiveBuffer.isEmpty, !data.isEmpty,
            let cb = pendingReceive {
             pendingReceive = nil
@@ -157,7 +135,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
 
     private func tryParseResponse() {
         guard let parsed = HysteriaProtocol.parseTCPResponse(from: receiveBuffer) else {
-            return // incomplete
+            return
         }
         responseParsed = true
         receiveBuffer.removeFirst(parsed.consumed)
@@ -176,13 +154,8 @@ nonisolated final class HysteriaConnection: ProxyConnection {
     }
 
     private func deliverBufferedOrEOF(eof: Bool) {
-        // Record the half-close up front so both branches below see it and
-        // the next receive can surface EOF. Previously this flag was only
-        // set inside the `if eof` block after the early return, which meant
-        // that when buffered data AND a pending receive AND FIN all arrived
-        // together the EOF signal was lost — the caller would deliver the
-        // buffer and then hang forever waiting for more data that would
-        // never come.
+        // Set before both branches: with buffered data + pending receive +
+        // FIN, setting it only in the eof branch would lose the EOF and hang the caller.
         if eof { readClosed = true }
 
         if let cb = pendingReceive, !receiveBuffer.isEmpty {
@@ -213,34 +186,20 @@ nonisolated final class HysteriaConnection: ProxyConnection {
         session.queue.async { [weak self] in self?.fail(error) }
     }
 
-    /// Called by ``HysteriaSession`` when the QUIC layer signals that this
-    /// stream is terminated — either the peer sent RESET_STREAM or the
-    /// stream's `stream_close` callback fired. `error == nil` means a fully
-    /// clean close with no app error code; a non-nil error wraps the app
-    /// code the peer (or the local endpoint) sent.
-    ///
-    /// Runs on `session.queue`. Idempotent — `stream_reset` and
-    /// `stream_close` can both fire for the same stream, and local
-    /// `cancel()` may have already transitioned `state` to `.closed`.
+    /// QUIC stream termination (RESET_STREAM or stream_close). Idempotent —
+    /// both callbacks can fire for the same stream. Runs on `session.queue`.
     func handleStreamTermination(error: Error?) {
         guard state != .closed else { return }
         if let error {
             fail(error)
             return
         }
-        // Clean termination before the TCP response landed (peer FIN'd the
-        // stream cleanly without sending a Hysteria TCP response): fail open
-        // so the caller doesn't sit on `openCompletion` forever. Without this
-        // a server that drops the stream as its rejection mechanism would
-        // leak the flow into `proxyConnecting` until the whole app exited —
-        // the only other open-completion path runs through `handleStreamData`
-        // and only fires when at least one data byte arrived first.
+        // FIN before the Hysteria TCP response — servers reject this way;
+        // fail so `openCompletion` isn't leaked forever.
         if state != .ready {
             fail(HysteriaError.connectionFailed("Stream closed before TCP response"))
             return
         }
-        // Post-`ready` clean close: peer FIN'd in good order. Flush any
-        // pending receive with EOF.
         readClosed = true
         state = .closed
         if let cb = pendingReceive {
@@ -294,9 +253,7 @@ nonisolated final class HysteriaConnection: ProxyConnection {
                 completion(nil, nil)
                 return
             }
-            // Downlink half-closed and nothing left buffered — report EOF so
-            // the caller can shut its read side without waiting on a packet
-            // that will never arrive.
+            // Downlink half-closed and nothing buffered — report EOF.
             if self.readClosed {
                 completion(nil, nil)
                 return

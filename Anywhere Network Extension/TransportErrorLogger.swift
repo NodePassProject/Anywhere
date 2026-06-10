@@ -7,25 +7,14 @@
 
 import Foundation
 
-/// Shared error-reporting helper for TCP/UDP connections.
-///
-/// Logging policy
-/// ==============
-/// - Connection failures (TCP connect/send/receive, UDP connect/receive) are
-///   terminal events. The user-facing connection (``TCPConnection`` /
-///   ``UDPFlow``) owns a ``ConnectionFailureReporter`` that logs them
-///   exactly once.
-/// - Non-terminal send failures (UDP datagram drops, control-frame sends on a
-///   still-alive transport) use ``logTransientSend`` and log at warning level.
-/// - Inner transport / session / handshake layers must not call
-///   ``AnywhereLogger.error`` directly. They propagate errors via
-///   `Result`/`Error`; the LWIP boundary logs once.
+/// Shared error-reporting helper for TCP/UDP connections: terminal failures log
+/// exactly once via ConnectionFailureReporter, transient sends log at warning,
+/// and inner transport layers propagate errors instead of logging.
 enum TransportErrorLogger {
 
     // MARK: - Formatting
 
-    /// Strips the `"<Operation>: "` prefix that `SocketError.errorDescription`
-    /// already bakes in, because the operation word is also in our log line.
+    /// Strips the operation prefix `SocketError.errorDescription` bakes in; the log line repeats it.
     static func conciseErrorDescription(_ error: Error) -> String {
         var message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         let redundantPrefixes = [
@@ -43,9 +32,7 @@ enum TransportErrorLogger {
         return message
     }
 
-    /// Classifies a ``SocketError``'s POSIX errno (if any) into a log demotion
-    /// bucket. Returns `nil` when the error doesn't carry an errno or its
-    /// errno isn't one we recognize as a peer-initiated close.
+    /// Classifies a `SocketError`'s errno as a peer-initiated close, or nil.
     private static func peerCloseClass(for error: Error) -> PeerCloseClass? {
         guard let errno = (error as? SocketError)?.posixErrno else { return nil }
         switch errno {
@@ -56,19 +43,15 @@ enum TransportErrorLogger {
     }
 
     private enum PeerCloseClass {
-        /// Secondary failure after the peer has already dropped — logging it
-        /// would double-report behind an earlier RST/EOF.
+        /// Secondary failure behind an earlier RST/EOF; logging would double-report.
         case cascade
-        /// Primary notification of a peer-initiated RST — expected
-        /// termination from the remote's side, not our failure.
+        /// Peer-initiated RST — expected termination, not our failure.
         case reset
     }
 
     // MARK: - lwIP Error Codes
 
-    /// Human-readable description for an lwIP `err_t` value delivered via the
-    /// `tcp_err` callback. Mirrors the definitions in
-    /// `lwip/src/include/lwip/err.h`.
+    /// Human-readable lwIP `err_t` description. Must mirror lwip/src/include/lwip/err.h.
     static func describeLwIPError(_ err: Int32) -> String {
         switch err {
         case 0:   return "ERR_OK"
@@ -94,19 +77,9 @@ enum TransportErrorLogger {
 
     // MARK: - Terminal Failure Logging
 
-    /// Logs a terminal connection failure with consistent shape and level.
-    /// Used by ``ConnectionFailureReporter``; not intended for direct use.
-    ///
-    /// Classification, in order:
-    /// 1. `HTTP2Error` is downgraded to `debug` — GOAWAY/stream-reset is normal
-    ///    churn in a long-lived h2 tunnel and doesn't indicate a user-visible
-    ///    problem.
-    /// 2. `SocketError` carrying `EPIPE` is demoted to `debug` — by definition
-    ///    a cascade behind an earlier receive error or RST. Logging it would
-    ///    double-report.
-    /// 3. `SocketError` carrying `ECONNRESET` is demoted to `info` — expected
-    ///    termination from the remote's side, not our failure.
-    /// 4. Otherwise the failure logs at `error`.
+    /// Logs a terminal connection failure. `HTTP2Error` demotes to debug
+    /// (GOAWAY/stream-reset is normal h2 churn), EPIPE cascades to debug,
+    /// ECONNRESET to info; everything else logs at error.
     fileprivate static func logTerminal(
         operation: String,
         endpoint: String,
@@ -138,10 +111,6 @@ enum TransportErrorLogger {
     // MARK: - Transient Failure Logging
 
     /// Logs a non-terminal send failure at warning level.
-    ///
-    /// Use this for UDP datagram sends that don't tear the flow down (UDP is
-    /// lossy by design) or for control-frame sends on a still-alive transport
-    /// where the failure is recoverable.
     static func logTransientSend(
         endpoint: String,
         error: Error,
@@ -155,16 +124,9 @@ enum TransportErrorLogger {
 
 // MARK: - ConnectionFailureReporter
 
-/// One-shot terminal-failure reporter owned by an LWIP-layer connection.
-///
-/// The first ``report(operation:endpoint:error:)`` call logs at error level
-/// (subject to ``TransportErrorLogger``'s peer-close demotion rules);
-/// subsequent calls no-op. Guarantees that exactly one error line is emitted
-/// for any given connection's death, regardless of how many failure paths
-/// fire during teardown.
-///
-/// Not thread-safe by itself. Intended to be owned by a connection that
-/// serializes access through its own queue (`lwipQueue`).
+/// One-shot terminal-failure reporter: the first report logs (subject to demotion
+/// rules), later calls no-op, so a connection's death emits exactly one line.
+/// Not thread-safe; the owning connection must serialize access on its own queue.
 final class ConnectionFailureReporter {
     private let prefix: String
     private let logger: AnywhereLogger
@@ -175,9 +137,8 @@ final class ConnectionFailureReporter {
         self.logger = logger
     }
 
-    /// Logs the terminal failure the first time it's called. Subsequent calls
-    /// are no-ops. `endpoint` is supplied at call time so callers can surface
-    /// the most current endpoint description (e.g. post-SNI hostname).
+    /// Logs the terminal failure on first call only. `endpoint` is an autoclosure so
+    /// callers surface the most current description (e.g. post-SNI hostname).
     func report(operation: String, endpoint: @autoclosure () -> String, error: Error) {
         guard !reported else { return }
         reported = true
@@ -190,10 +151,8 @@ final class ConnectionFailureReporter {
         )
     }
 
-    /// Marks the connection as reported without logging. Use when the
-    /// connection is ending for a non-error reason (graceful close, deliberate
-    /// reject, system pressure abort with its own warning) but we want to
-    /// suppress any spurious error log that might fire later in teardown.
+    /// Marks reported without logging, so a non-error close suppresses any
+    /// spurious error log later in teardown.
     func markReported() {
         reported = true
     }

@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Outbound protocol type.
 enum OutboundProtocol: String, Codable, CaseIterable {
     case vless
     case hysteria
@@ -24,20 +23,8 @@ enum OutboundProtocol: String, Codable, CaseIterable {
     /// Whether this protocol uses a CONNECT tunnel (HTTP/1.1, HTTP/2, or HTTP/3).
     var isNaive: Bool { self == .http11 || self == .http2 || self == .http3 }
 
-    /// Whether the protocol's handshake can carry the caller's first bytes
-    /// inline, letting the client ship the TLS ClientHello / MTProto nonce /
-    /// etc. in the same packet as the handshake.
-    ///
-    /// `false` for protocols whose handshake has no payload slot (Shadowsocks,
-    /// Naive's HTTP CONNECT, Hysteria's TCPRequest, SOCKS5's method negotiation).
-    /// ``TCPConnection`` checks this to decide whether to hand `pendingData`
-    /// to the handshake (true) or to leave it buffered and forward it via a
-    /// separate `send(...)` right after the tunnel is up (false).
-    ///
-    /// Getting this wrong for Hysteria silently swallowed the caller's first
-    /// bytes — `connectWithHysteria` drops any `initialData` argument — which
-    /// manifested as Telegram hanging at "Updating" because its 64-byte MTProto
-    /// obfuscation nonce never reached the server.
+    /// Whether the handshake has a payload slot for the caller's first bytes; when `false`
+    /// they must be sent separately after the tunnel is up or the opening payload is dropped.
     var handshakeCarriesInitialData: Bool {
         switch self {
         case .vless:
@@ -49,16 +36,13 @@ enum OutboundProtocol: String, Codable, CaseIterable {
         }
     }
 
-    /// Whether the protocol can multiplex several logical streams inside one
-    /// tunnel (Xray-compatible mux.cool, routed via ``MuxManager``). Only
-    /// VLESS carries a mux-capable framing on the wire; every other protocol
-    /// must reject a ``ProxyCommand/mux`` request at dispatch time.
+    /// Whether the protocol supports Xray-compatible mux.cool multiplexing (VLESS only).
     var supportsMux: Bool {
         self == .vless
     }
 
-    /// Transport this protocol needs from the chain hop below it to service
-    /// `downstreamCommand`. `nil` when the protocol can't carry the command.
+    /// Transport needed from the chain hop below to service `downstreamCommand`;
+    /// `nil` when the protocol can't carry the command.
     func upstreamCommand(for downstreamCommand: ProxyCommand) -> ProxyCommand? {
         switch self {
         case .vless, .trojan, .anytls:
@@ -66,9 +50,8 @@ enum OutboundProtocol: String, Codable, CaseIterable {
         case .shadowsocks:
             return downstreamCommand == .udp ? .udp : .tcp
         case .socks5:
-            // The UDP-ASSOCIATE relay socket is opened separately
-            // (see `openSOCKS5UDPRelay`); the link below only carries
-            // the TCP control channel.
+            // The UDP-ASSOCIATE relay is opened separately; the link below
+            // only carries the TCP control channel.
             return .tcp
         case .hysteria, .nowhere:
             return .udp
@@ -108,12 +91,8 @@ enum OutboundProtocol: String, Codable, CaseIterable {
 // MARK: - Outbound Protocol Configuration
 
 /// Type-safe outbound protocol with associated credentials and settings.
-/// Protocol-specific plumbing (VLESS transport/security/flow, Hysteria SNI,
-/// etc.) lives on each case's associated values — outbounds that don't need
-/// a given knob simply don't expose it.
 enum Outbound: Hashable {
-    /// VLESS is the only outbound with a user-selectable transport layer and
-    /// TLS/Reality security layer, plus flow/mux/xudp knobs.
+    /// The only outbound with a user-selectable transport and TLS/Reality security layer.
     case vless(
         uuid: UUID,
         encryption: String,
@@ -123,10 +102,8 @@ enum Outbound: Hashable {
         muxEnabled: Bool,
         xudpEnabled: Bool
     )
-    /// Hysteria2 runs over QUIC with its own internal TLS. The SNI is always
-    /// populated — callers default it to the server address when there is no
-    /// explicit override. `uploadMbps` / `downloadMbps` are clamped to their
-    /// ranges and only take effect when `congestionControl` is `.brutal`.
+    /// Hysteria2 over QUIC. SNI is always populated; the Mbps values are clamped
+    /// and only take effect with `.brutal` congestion control.
     case hysteria(
         password: String,
         congestionControl: HysteriaCongestionControl,
@@ -136,14 +113,10 @@ enum Outbound: Hashable {
     )
     /// Nowhere runs over QUIC with a shared-key auth frame.
     case nowhere(key: String)
-    /// Trojan runs as a thin SHA224(password)+CRLF+request header layered on
-    /// top of mandatory TLS. The TLS knobs (SNI/ALPN/fingerprint) live in the
-    /// associated `TLSConfiguration`; there is no plaintext variant.
+    /// Trojan: SHA224(password)+CRLF+request over mandatory TLS. No plaintext variant.
     case trojan(password: String, tls: TLSConfiguration)
-    /// AnyTLS multiplexes streams over one TLS connection per pooled session,
-    /// authenticating with SHA256(password) and obfuscating with a server-driven
-    /// padding scheme. `idleCheckInterval` / `idleTimeout` (seconds) and
-    /// `minIdleSession` tune the warm-pool behaviour.
+    /// AnyTLS: stream multiplexer over pooled TLS sessions, authenticated with SHA256(password);
+    /// `idleCheckInterval`/`idleTimeout` (seconds) and `minIdleSession` tune the warm pool.
     case anytls(
         password: String,
         idleCheckInterval: Int,
@@ -168,7 +141,6 @@ enum Outbound: Hashable {
 // MARK: - Transport Layer Configuration
 
 /// Type-safe transport layer (mutually exclusive).
-/// Replaces the flat `transport` string + optional transport configs.
 enum TransportLayer: Hashable {
     case tcp
     case ws(WebSocketConfiguration)
@@ -191,7 +163,6 @@ enum TransportLayer: Hashable {
 // MARK: - Security Layer Configuration
 
 /// Type-safe security layer (mutually exclusive).
-/// Replaces the flat `security` string + optional security configs.
 enum SecurityLayer: Hashable {
     case none
     case tls(TLSConfiguration)
@@ -215,28 +186,18 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let name: String
     let serverAddress: String
     let serverPort: UInt16
-    /// Pre-resolved IP address for `serverAddress`. When set, socket connections and tunnel
-    /// routing use this IP instead of the domain name to avoid DNS-over-tunnel routing loops.
-    /// Populated at connect time by the app; `nil` when `serverAddress` is already an IP.
+    /// Pre-resolved IP used instead of `serverAddress` to avoid DNS-over-tunnel routing loops;
+    /// populated at connect time, `nil` when the address is already an IP.
     let resolvedIP: String?
-    /// The subscription this configuration belongs to, if any.
     let subscriptionId: UUID?
-    /// Protocol-specific settings. All VLESS transport/security/flow/mux/xudp
-    /// knobs and Hysteria's optional SNI live on the `Outbound` enum's
-    /// associated values — read them via the computed accessors below.
     let outbound: Outbound
-    /// Ordered list of proxy configurations to chain through before reaching this proxy's server.
-    /// The first element is the outermost proxy (real TCP connection); the last tunnels to this proxy.
-    /// `nil` or empty means a direct connection to the server.
+    /// Proxies to chain through, outermost first; `nil` or empty means a direct connection.
     let chain: [ProxyConfiguration]?
 
     /// The pre-resolved IP if available, otherwise `serverAddress`.
-    /// Used by opt-in first-hop dials (for example latency testing) and logging.
     var connectAddress: String { resolvedIP ?? serverAddress }
 
-    /// Protocol discriminator derived from `outbound`. Use this for type
-    /// checks and to reach ``OutboundProtocol``'s behaviour (`isNaive`,
-    /// `supportsMux`, …); pattern-match on `outbound` for the payload.
+    /// Protocol discriminator. Use for type checks; pattern-match on `outbound` for payload.
     var outboundProtocol: OutboundProtocol {
         switch outbound {
         case .vless:        .vless
@@ -254,10 +215,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     }
 
     // MARK: - VLESS-specific computed accessors
-    //
-    // These derive from the `.vless` case's associated values and return
-    // harmless defaults for every other outbound. Callers that are ready
-    // for a type-safe switch can pattern-match on `outbound` directly.
 
     /// Transport layer. Always `.tcp` for non-VLESS outbounds.
     var transportLayer: TransportLayer {
@@ -288,11 +245,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         return alpn.count == 1 && alpn[0].caseInsensitiveCompare("h3") == .orderedSame
     }
 
-    /// Transport this configuration needs from the chain hop below it to
-    /// service `downstreamCommand`. A transport-aware superset of
-    /// ``OutboundProtocol/upstreamCommand(for:)``: XHTTP-over-HTTP/3 rides QUIC,
-    /// so it always needs a `.udp` relay regardless of the command it carries
-    /// onward; every other configuration defers to the protocol-level rule.
+    /// XHTTP-over-HTTP/3 always needs `.udp` (rides QUIC); otherwise defers to the protocol rule.
     func upstreamCommand(for downstreamCommand: ProxyCommand) -> ProxyCommand? {
         if isXHTTPOverHTTP3 { return .udp }
         return outboundProtocol.upstreamCommand(for: downstreamCommand)
@@ -318,7 +271,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         self.chain = chain
     }
 
-    /// Returns a copy with the given chain, preserving all other fields.
     func withChain(_ chain: [ProxyConfiguration]?) -> ProxyConfiguration {
         ProxyConfiguration(
             id: id, name: name, serverAddress: serverAddress, serverPort: serverPort,
@@ -327,8 +279,8 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         )
     }
 
-    /// Compares configuration content, ignoring `id`, `resolvedIP`, and `subscriptionId`.
-    /// Used to detect unchanged configs during subscription updates.
+    /// Compares content ignoring `id`, `resolvedIP`, and `subscriptionId`,
+    /// to detect unchanged configs during subscription updates.
     func contentEquals(_ other: ProxyConfiguration) -> Bool {
         name == other.name &&
         serverAddress == other.serverAddress &&
@@ -358,9 +310,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case chain
     }
 
-    /// Custom decoder. The on-disk JSON keeps transport/security/mux/xudp at
-    /// the top level; we fold those into the `.vless` case's associated values
-    /// and read every other outbound's settings from its own keys.
+    /// Folds the flat JSON transport/security/mux/xudp keys into `.vless` associated values.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
@@ -375,7 +325,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
         switch proto {
         case .vless:
-            // Transport layer
             let transportStr = try container.decodeIfPresent(String.self, forKey: .transport) ?? "tcp"
             let transport: TransportLayer
             switch transportStr {
@@ -390,7 +339,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             default:
                 transport = .tcp
             }
-            // Security layer
             let securityStr = try container.decodeIfPresent(String.self, forKey: .security) ?? "none"
             let security: SecurityLayer
             switch securityStr {
@@ -412,9 +360,8 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             )
 
         case .hysteria:
-            // Absent congestion-control / cap keys default to Brutal uplink
-            // with a server-driven downlink. SNI falls back to `serverAddress`
-            // so it is always populated.
+            // Absent keys default to Brutal with server-driven downlink; SNI falls
+            // back to serverAddress so it is always populated.
             let cc = try container.decodeIfPresent(HysteriaCongestionControl.self, forKey: .hysteriaCongestionControl) ?? .brutal
             let rawUp = try container.decodeIfPresent(Int.self, forKey: .hysteriaUploadMbps)
                 ?? HysteriaCongestionControl.uploadMbpsDefault
@@ -435,16 +382,14 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
 
         case .trojan:
             let password = try container.decodeIfPresent(String.self, forKey: .trojanPassword) ?? ""
-            // Trojan TLS is mandatory; fall back to an SNI=serverAddress default
-            // so partial configs still decode to a usable outbound.
+            // TLS is mandatory; fall back to SNI=serverAddress so partial configs decode cleanly.
             let tls = try container.decodeIfPresent(TLSConfiguration.self, forKey: .trojanTLS)
                 ?? TLSConfiguration(serverName: serverAddress)
             outbound = .trojan(password: password, tls: tls)
 
         case .anytls:
             let password = try container.decodeIfPresent(String.self, forKey: .anytlsPassword) ?? ""
-            // sing-anytls clamps to ≥30s/≥30s/≥0; we store the raw value and
-            // let `AnyTLSClient` clamp at use time so the JSON round-trips.
+            // Stored unclamped so the JSON round-trips exactly; AnyTLSClient clamps at use time.
             let ici = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleCheckInterval) ?? 30
             let it  = try container.decodeIfPresent(Int.self, forKey: .anytlsIdleTimeout) ?? 30
             let mis = try container.decodeIfPresent(Int.self, forKey: .anytlsMinIdleSession) ?? 0
@@ -490,7 +435,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
     }
 
-    /// Custom encoder that flattens the `Outbound` enum to the flat JSON schema.
+    /// Flattens `Outbound` to the flat JSON schema.
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
 
@@ -501,10 +446,6 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         try container.encodeIfPresent(resolvedIP, forKey: .resolvedIP)
         try container.encodeIfPresent(subscriptionId, forKey: .subscriptionId)
 
-        // Flatten outbound back to the legacy JSON schema. VLESS carries
-        // its own transport/security/mux/xudp associated values;
-        // Hysteria carries an optional SNI; every other outbound writes
-        // only its protocol-specific credential fields.
         try container.encode(outboundProtocol, forKey: .outboundProtocol)
         switch outbound {
         case .vless(let uuid, let encryption, let flow, let transport, let security, let muxEnabled, let xudpEnabled):

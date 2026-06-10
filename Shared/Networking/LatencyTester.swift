@@ -19,26 +19,17 @@ private enum LatencyTestError: Error, LocalizedError {
     }
 }
 
-/// Tests full proxy round-trip latency by establishing a proxy connection
-/// and sending an HTTP request through the proxy chain.
 nonisolated enum LatencyTester {
 
-    /// Per-test timeout.
     private static let timeout: Duration = .seconds(10)
 
-    /// Latency test endpoint
     private static let latencyHost = "captive.apple.com"
     private static let latencyPort: UInt16 = 80
 
-    /// Test a single configuration's proxy round-trip latency.
-    ///
-    /// Measures data transfer RTT: the HTTP request is sent untimed (triggering
-    /// the proxy-to-target connection and protocol handshake), then only the
-    /// receive is timed — capturing the actual network round-trip through the
-    /// full proxy chain. DNS resolution is excluded via pre-warming.
+    /// Only the receive is timed, so the result is the network RTT through the
+    /// full proxy chain; DNS is excluded via pre-warming.
     nonisolated static func test(_ configuration: ProxyConfiguration) async -> LatencyResult {
-        // A probe dials through the proxy, but may target a config other than the
-        // active tunnel — keep its timings out of the live Dial/Handshake gauges.
+        // Keep probe timings out of the live dial/handshake gauges.
         ConnectionMetrics.shared.suspendRecording()
         defer { ConnectionMetrics.shared.resumeRecording() }
 
@@ -74,16 +65,9 @@ nonisolated enum LatencyTester {
 
     // MARK: - Private
 
-    /// Resolves each proxy hop ahead of time so latency tests can dial the same
-    /// first-hop IPs the tunnel expects, without depending on in-tunnel DNS timing.
-    ///
-    /// Any `resolvedIP` arriving in `configuration` from the IPC sender (the main
-    /// app) is discarded: while the tunnel is up, main-app `getaddrinfo` is scoped
-    /// inside `NEDNSSettings` and returns a fake IP from lwIP's interception
-    /// pool. That IP would route via the NE's kernel-bypassed sockets out the
-    /// physical interface, where 198.18.0.0/15 has no route, and the test would
-    /// hit its 3-second timeout. Resolving here uses NE-process `getaddrinfo`,
-    /// which Apple scopes outside the tunnel and returns a real IP.
+    /// Re-resolves each hop with NE-process `getaddrinfo` and discards any
+    /// main-app `resolvedIP`: while the tunnel is up, main-app DNS returns lwIP
+    /// fake IPs (198.18.0.0/15) unroutable from the NE's kernel-bypassed sockets.
     private static func resolvedConfiguration(_ configuration: ProxyConfiguration) -> ProxyConfiguration {
         let resolvedChain = configuration.chain?.map(resolvedConfiguration)
         return ProxyConfiguration(
@@ -99,7 +83,6 @@ nonisolated enum LatencyTester {
     }
 
     private static func performTest(_ configuration: ProxyConfiguration) async throws -> Int {
-        // Pre-warm DNS cache so resolution is excluded from timing.
         // forceFresh: tests must measure against a fresh address, never a stale one.
         DNSResolver.shared.prewarm(configuration.serverAddress, forceFresh: true)
         if let chain = configuration.chain {
@@ -113,11 +96,9 @@ nonisolated enum LatencyTester {
 
         do {
             let ms = try await withTaskCancellationHandler {
-                // Phases 1 + 2: connect + warmup, priming the proxy-to-target
-                // connection so phase 4 measures only the network round-trip.
                 let proxyConnection = try await Self.establishWarmedConnection(client: client, resumer: resumer)
 
-                // Phase 3 (untimed): Send the timed HTTP request.
+                // Phase 3 (untimed): send the request.
                 let httpRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\nConnection: close\r\n\r\n".data(using: .utf8)!
 
                 try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
@@ -126,9 +107,7 @@ nonisolated enum LatencyTester {
                     }
                 }
 
-                // Phase 4 (timed): Wait for the response.
-                // Timer starts after send completes — measures the actual network
-                // round-trip: data traverses client → proxy chain → target → back.
+                // Phase 4 (timed): timer starts after the send completes.
                 let clock = ContinuousClock()
                 let start = clock.now
 
@@ -140,7 +119,6 @@ nonisolated enum LatencyTester {
 
                 let elapsed = clock.now - start
 
-                // Validate HTTP 200 response
                 let statusLine = responseData.flatMap { String(data: $0, encoding: .utf8) }?
                     .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
                 guard let statusLine, statusLine.contains("200") else {
@@ -149,11 +127,8 @@ nonisolated enum LatencyTester {
 
                 return Int(elapsed.components.seconds * 1000 + elapsed.components.attoseconds / 1_000_000_000_000_000)
             } onCancel: {
-                // Just unblock the pending awaitCallback so the body throws
-                // out. `awaitClientCancel(client)` in the catch block then
-                // tears the socket down and waits for the fd to actually
-                // close — calling `client.cancel()` here too would race with
-                // it (state nilled before the awaitable cancel can attach).
+                // Unblock the awaiting callback. Do NOT call client.cancel()
+                // here — it races with awaitClientCancel.
                 resumer.cancel()
             }
             await awaitClientCancel(client)
@@ -164,27 +139,21 @@ nonisolated enum LatencyTester {
         }
     }
 
-    /// Wraps `ProxyClient.cancel(completion:)` as `async`. The continuation
-    /// resumes once the underlying file descriptor is fully closed, so the
-    /// next test in the `testAll` task group doesn't reuse resources before
-    /// they've been released.
+    /// Waits until the underlying fd is fully closed before the next test runs.
     private static func awaitClientCancel(_ client: ProxyClient) async {
         await withCheckedContinuation { continuation in
             client.cancel { continuation.resume() }
         }
     }
 
-    /// Phases 1 + 2: TCP/TLS/outbound handshake plus a warmup HEAD round-trip
-    /// to prime the proxy-to-target connection.
+    /// Phases 1 + 2 (untimed): proxy handshake plus a warmup HEAD round-trip.
     private static func establishWarmedConnection(client: ProxyClient, resumer: PendingResumer) async throws -> ProxyConnection {
-        // Phase 1 (untimed): Establish proxy connection.
-        // TCP + TLS/Reality + VLESS/SS handshake.
+        // Phase 1 (untimed): TCP/TLS/outbound handshake.
         let proxyConnection: ProxyConnection = try await awaitCallback(resumer: resumer) { complete in
             client.connect(to: Self.latencyHost, port: Self.latencyPort) { complete($0) }
         }
 
-        // Phase 2 (untimed warmup): Send a first request to prime the
-        // proxy-to-target connection.
+        // Phase 2 (untimed): warmup request primes the proxy-to-target connection.
         let warmupRequest = "HEAD / HTTP/1.1\r\nHost: \(Self.latencyHost)\r\n\r\n".data(using: .utf8)!
 
         try await awaitCallback(resumer: resumer) { (complete: @escaping (Result<Void, Error>) -> Void) in
@@ -199,7 +168,6 @@ nonisolated enum LatencyTester {
             }
         }
 
-        // Validate warmup response
         let warmupStatus = warmupData.flatMap { String(data: $0, encoding: .utf8) }?
             .split(separator: "\r\n", maxSplits: 1).first.map(String.init)
         guard let warmupStatus, warmupStatus.contains("200") else {
@@ -209,9 +177,7 @@ nonisolated enum LatencyTester {
         return proxyConnection
     }
 
-    /// Hook that the task-cancellation handler invokes to fail whichever phase
-    /// is currently awaiting, in case `client.cancel()` doesn't propagate to
-    /// the underlying callback.
+    /// Cancellation hook that fails whichever phase is currently awaiting.
     private final class PendingResumer: @unchecked Sendable {
         private let lock = NSLock()
         private var hook: ((Error) -> Void)?
@@ -235,9 +201,8 @@ nonisolated enum LatencyTester {
         }
     }
 
-    /// One-shot continuation wrapper. Either the operation callback or the
-    /// cancellation hook resumes it; the second caller is a no-op. Without
-    /// this, a cancel during a hung send/receive leaks the continuation.
+    /// One-shot continuation wrapper; the second resume is a no-op, so a cancel
+    /// during a hung send/receive can't double-resume or leak the continuation.
     private final class OneShotResumer<T>: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<T, Error>?
@@ -256,9 +221,8 @@ nonisolated enum LatencyTester {
         }
     }
 
-    /// Bridges a callback-style operation to async/await with one-shot cancel
-    /// safety: the continuation resumes exactly once, either from the callback
-    /// or from the task's cancellation handler.
+    /// Bridges a callback to async/await; the continuation resumes exactly
+    /// once, from either the callback or the cancellation hook.
     private static func awaitCallback<T>(
         resumer pending: PendingResumer,
         operation: (@escaping (Result<T, Error>) -> Void) -> Void

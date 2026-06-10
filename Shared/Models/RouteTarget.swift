@@ -7,31 +7,15 @@
 
 import Foundation
 
-/// Stable identity of *where* a connection was routed.
-///
-/// This is the single source of truth for routing identity across the whole
-/// stack — the routing decision, per-connection accounting, traffic stats, and
-/// the request log all speak `RouteTarget`. Crucially, the proxy id is the
-/// app's **authoritative** id (a `ConfigurationStore` configuration id or a
-/// `ChainStore` chain id), assigned at routing-decision time and carried
-/// unchanged everywhere. It is never derived from the dialing
-/// ``ProxyConfiguration/id``, which gets regenerated when a chain is composited
-/// or a routing rule is parsed — so display-name resolution is total and stable.
-///
-/// Proxies and chains share the `.proxy` case: from a routing/identity point of
-/// view a chain is just another configured outbound node, and the app resolves
-/// the name from whichever store owns the id (see `RouteTarget.displayName`,
-/// which lives app-side since the extension ships ids only).
+/// Stable identity of where a connection was routed, shared by routing, accounting,
+/// stats, and the request log. The `.proxy` id is the app's authoritative configuration
+/// or chain id — never the dialing `ProxyConfiguration` id, which gets regenerated.
 enum RouteTarget: Hashable, Sendable {
-    /// Bypassed / direct — dialed straight out.
     case direct
-    /// Rejected — connection refused; carries no payload.
     case reject
-    /// Proxied through the node with this app id (a standalone/subscription
-    /// configuration, or a chain).
+    /// Proxied through the configuration or chain with this app id.
     case proxy(UUID)
 
-    /// The configuration/chain id to dial through, or `nil` for direct/reject.
     var configurationID: UUID? {
         if case .proxy(let id) = self { return id }
         return nil
@@ -41,10 +25,7 @@ enum RouteTarget: Hashable, Sendable {
 // MARK: - Codable (compact string form)
 
 extension RouteTarget: Codable {
-    // Encodes as a single compact string — "direct", "reject", or
-    // "proxy:<uuid>" — so it stays small over IPC and human-readable in JSON,
-    // rather than the verbose nested form Swift synthesizes for enums with
-    // associated values.
+    // Encoded as a single compact string — "direct", "reject", or "proxy:<uuid>".
     init(from decoder: any Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         switch raw {
@@ -67,8 +48,7 @@ extension RouteTarget: Codable {
         try container.encode(storageKey)
     }
 
-    /// Stable string form — used as the `Codable` representation and as a
-    /// dictionary / `Identifiable` key in the UI.
+    /// Stable string form; also the `Codable` representation.
     var storageKey: String {
         switch self {
         case .direct: return "direct"

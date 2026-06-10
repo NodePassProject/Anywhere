@@ -9,12 +9,7 @@ import Foundation
 
 extension ProxyClient {
     /// Connects through a Trojan server: TCP → TLS → Trojan header → payload.
-    ///
-    /// Trojan mandates TLS on the wire; the server inspects the SHA224 hash
-    /// of the password and falls back to its decoy HTTP site for anything
-    /// that doesn't match, so there is no plaintext or Reality variant. UDP
-    /// rides the same TLS stream via ``TrojanUDPConnection``'s per-packet
-    /// framing (mux is not supported).
+    /// Trojan requires TLS; on password (SHA224) mismatch the server silently serves its decoy site.
     func connectWithTrojan(
         command: ProxyCommand,
         destinationHost: String,
@@ -60,9 +55,8 @@ extension ProxyClient {
         }
     }
 
-    /// Wraps a TLS-backed connection with the Trojan TCP or UDP framing and
-    /// forwards any `initialData` (non-empty TCP only) through the wrapper so
-    /// the Trojan header and the caller's first bytes share one TLS record.
+    /// Wraps a TLS connection with Trojan framing; `initialData` is sent through
+    /// the wrapper so the Trojan header and first payload coalesce into one TLS record.
     private func wrapTrojan(
         over tlsConnection: ProxyConnection,
         password: String,

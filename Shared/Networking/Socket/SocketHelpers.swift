@@ -10,27 +10,19 @@ import Darwin
 
 // MARK: - SocketHelpers
 
-/// Low-level POSIX socket helpers shared by ``RawTCPSocket``, ``RawUDPSocket``,
-/// and ``QUICSocket``. These cover the bring-up steps every transport repeats
-/// (create + relief retry, non-blocking, buffer sizing); the protocol-specific
-/// option sets (TCP keepalive, QUIC ECN, …) stay in their own classes.
+/// Low-level POSIX socket bring-up helpers shared by the raw transports.
 nonisolated enum SocketHelpers {
 
-    /// Kernel send/receive buffer size for the proxy-relay datagram transports
-    /// (``QUICSocket`` and the ``RawUDPSocket`` dialing a SOCKS5/Shadowsocks
-    /// server). macOS defaults (~9 KB) cap a relay at that much in flight per
-    /// RTT regardless of the congestion window; 4 MB lifts the ceiling. One
-    /// exists per proxy connection, so — unlike direct bypass
-    /// (``directDatagramSocketBufferSize``) — the buffers don't fan out per
-    /// peer. TCP leaves the kernel autotuner alone.
+    /// Kernel buffer size for proxy-relay datagram sockets; the ~9 KB macOS
+    /// default caps in-flight data per RTT, and one socket exists per proxy
+    /// connection so 4 MB doesn't fan out per peer.
     static let kernelSocketBufferSize: Int32 = 4 * 1024 * 1024
 
-    /// Kernel send/receive buffer size for *direct-bypass* per-peer UDP sockets
-    /// (``UDPFlow``'s direct path, taken when a flow skips the proxy).
+    /// Kernel buffer size for direct-bypass per-peer UDP sockets, kept small
+    /// because these fan out per peer.
     static let directDatagramSocketBufferSize: Int32 = 128 * 1024
 
-    /// Sets a boolean-like `Int32` socket option. Failure is ignored — a
-    /// missing option should never sink the connection.
+    /// Sets an `Int32` socket option; failure is deliberately ignored.
     @inline(__always)
     static func setInt(_ fd: Int32, level: Int32, name: Int32, value: Int32) {
         var v = value
@@ -45,29 +37,21 @@ nonisolated enum SocketHelpers {
         return fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0
     }
 
-    /// Sets the kernel send/receive buffers to `size` bytes. Best-effort: a
-    /// kernel that clamps the request just keeps a smaller buffer, so the
-    /// result is not checked.
+    /// Sets the kernel send/receive buffers to `size` bytes. Best-effort.
     @inline(__always)
     static func setDatagramBuffers(_ fd: Int32, size: Int32) {
         setInt(fd, level: SOL_SOCKET, name: SO_SNDBUF, value: size)
         setInt(fd, level: SOL_SOCKET, name: SO_RCVBUF, value: size)
     }
 
-    /// Widens the kernel send/receive buffers to ``kernelSocketBufferSize`` for
-    /// the high-throughput relay transports. Best-effort.
+    /// Widens the kernel buffers for the high-throughput relay transports.
     @inline(__always)
     static func setHighThroughputBuffers(_ fd: Int32) {
         setDatagramBuffers(fd, size: kernelSocketBufferSize)
     }
 
-    /// Creates a socket, retrying once through ``FDPressureRelief`` when the
-    /// first attempt hits per-process / system FD exhaustion (`EMFILE` /
-    /// `ENFILE`). `priority` selects how aggressively relief evicts idle direct
-    /// flows to free an FD for this caller (see ``FDReliefPriority``).
-    ///
-    /// Returns the new descriptor, or `-1` with `errno` set from the final
-    /// attempt — callers map that to their own error type.
+    /// Creates a socket, retrying once after FD-pressure relief on
+    /// `EMFILE`/`ENFILE`. Returns the descriptor, or `-1` with `errno` set.
     @inline(__always)
     static func makeSocket(family: Int32, type: Int32, proto: Int32 = 0,
                            reliefPriority priority: FDReliefPriority) -> Int32 {
@@ -75,8 +59,7 @@ nonisolated enum SocketHelpers {
         if fd < 0 {
             let err = errno
             if FDPressureRelief.isFDExhaustion(err), FDPressureRelief.relieve(for: priority) {
-                // Relief evicted idle direct UDP flow(s); retry once. A failed
-                // retry falls through with the latest errno.
+                // Relief freed FDs; retry once.
                 fd = socket(family, type, proto)
             }
         }

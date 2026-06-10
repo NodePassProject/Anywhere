@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Parsed view of an inbound ClientHello.
 struct TLSClientHelloParsed {
     let serverName: String?
     let cipherSuites: [UInt16]
@@ -15,26 +14,18 @@ struct TLSClientHelloParsed {
     let supportedGroups: [UInt16]
     let signatureAlgorithms: [UInt16]
     let alpnProtocols: [String]
-    /// Map from named-group code to client-provided key_share blob (raw,
-    /// without group-id / length prefix). Limited to the groups we care
-    /// about — currently just X25519 (0x001D).
+    /// Client key_share entries by named group (raw exchange bytes, no group-id/length prefix).
     let keyShares: [UInt16: Data]
-    /// TLS legacy_version field from the ClientHello.
     let legacyVersion: UInt16
     let random: Data
     let legacySessionID: Data
     let compressionMethods: [UInt8]
-    /// Whether the client offered the extended_master_secret extension (RFC 7627).
-    /// Only meaningful for TLS 1.2 negotiations.
+    /// Whether the client offered extended_master_secret (RFC 7627). Only meaningful for TLS 1.2.
     let extendedMasterSecret: Bool
-    /// Whether the client signaled support for secure renegotiation (RFC 5746),
-    /// either by including the `renegotiation_info` extension or by listing
-    /// the TLS_EMPTY_RENEGOTIATION_INFO_SCSV (0x00FF) signalling cipher
-    /// suite. The server MUST NOT emit `renegotiation_info` in its
-    /// ServerHello unless one of these was present.
+    /// RFC 5746: client signals secure renegotiation via `renegotiation_info` extension or
+    /// TLS_EMPTY_RENEGOTIATION_INFO_SCSV (0x00FF). Server MUST NOT emit the extension otherwise.
     let secureRenegotiation: Bool
-    /// Raw ClientHello (4-byte handshake header + body) — used for the TLS 1.3
-    /// transcript hash.
+    /// Raw ClientHello (4-byte handshake header + body), needed for the TLS 1.3 transcript hash.
     let handshakeMessage: Data
 }
 
@@ -48,11 +39,7 @@ enum TLSClientHelloParserError: Error {
 
 enum TLSClientHelloParser {
 
-    /// Parses a single ClientHello record. The input must contain exactly
-    /// one TLS record carrying the ClientHello — additional records that
-    /// might trail (early data, etc.) are not tolerated for v1.
-    ///
-    /// - Parameter record: Raw bytes including the 5-byte record header.
+    /// Parses a single ClientHello record (including the 5-byte record header); trailing records are not tolerated.
     static func parse(_ record: Data) throws -> TLSClientHelloParsed {
         // Record header: type(1) version(2) length(2)
         guard record.count >= 5 else { throw TLSClientHelloParserError.truncated }
@@ -65,9 +52,7 @@ enum TLSClientHelloParser {
         return try parseHandshakeBody(body)
     }
 
-    /// Parses the handshake fragment without the outer 5-byte record
-    /// header. Useful when the ClientHello has been pre-stripped (e.g.
-    /// from buffered transcript bytes).
+    /// Parses a handshake fragment without the outer 5-byte record header.
     static func parseHandshakeBody(_ body: Data) throws -> TLSClientHelloParsed {
         var cur = Cursor(body)
         guard let msgType = cur.readU8() else { throw TLSClientHelloParserError.truncated }
@@ -112,10 +97,6 @@ enum TLSClientHelloParser {
 
         let parsedExtensions = try parseExtensions(extensions)
 
-        // RFC 5746 §3.6: a ClientHello signals secure renegotiation either
-        // by carrying the `renegotiation_info` extension or by listing the
-        // TLS_EMPTY_RENEGOTIATION_INFO_SCSV (0x00FF) cipher suite. The
-        // ServerHello MUST NOT emit the extension otherwise.
         let secureRenegotiation = parsedExtensions.renegotiationInfo
             || cipherSuites.contains(0x00FF)
 

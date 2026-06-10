@@ -38,7 +38,6 @@ enum TLSCipherSuite {
 
     // MARK: - Cipher Suite Properties
 
-    /// Whether this cipher suite uses ECDHE key exchange
     static func isECDHE(_ suite: UInt16) -> Bool {
         switch suite {
         case 0xC009, 0xC00A, 0xC013, 0xC014,
@@ -64,7 +63,6 @@ enum TLSCipherSuite {
         }
     }
 
-    /// Whether this cipher suite uses ChaCha20-Poly1305
     static func isChaCha20(_ suite: UInt16) -> Bool {
         switch suite {
         case 0x1303, 0xCCA8, 0xCCA9:
@@ -74,7 +72,6 @@ enum TLSCipherSuite {
         }
     }
 
-    /// Whether this cipher suite uses SHA-384 (vs SHA-256)
     static func usesSHA384(_ suite: UInt16) -> Bool {
         switch suite {
         case 0x1302,                                     // TLS 1.3 AES-256-GCM
@@ -87,7 +84,6 @@ enum TLSCipherSuite {
         }
     }
 
-    /// Encryption key length in bytes for TLS 1.2 cipher suites
     static func keyLength(_ suite: UInt16) -> Int {
         switch suite {
         // 32-byte key (AES-256 or ChaCha20)
@@ -111,7 +107,7 @@ enum TLSCipherSuite {
         return 16                                         // 16-byte IV (AES-CBC block size)
     }
 
-    /// MAC key length in bytes (0 for AEAD suites)
+    /// MAC key length in bytes; 0 for AEAD suites.
     static func macLength(_ suite: UInt16) -> Int {
         if isAEAD(suite) { return 0 }
         if usesSHA384(suite) { return 48 }                // HMAC-SHA384
@@ -142,36 +138,25 @@ struct TLSApplicationKeys {
     let serverIV: Data
 }
 
-/// Handshake-time TLS 1.3 state shared between ``TLSClient`` and
-/// ``RealityClient``.
-///
-/// All fields are populated incrementally during the handshake, then cleared
-/// (by reassigning a fresh value) once the application keys move into the
-/// long-lived ``TLSRecordConnection``.
+/// Client-side handshake-time TLS 1.3 state; populated incrementally, then reset once
+/// the application keys move into the long-lived record connection.
 struct TLS13HandshakeState {
-    /// Per-cipher-suite key derivation helper. Set when the ServerHello
-    /// cipher suite is parsed.
+    /// Set when the ServerHello cipher suite is parsed.
     var keyDerivation: TLS13KeyDerivation?
 
-    /// Handshake secret derived from `ECDHE × early_secret`. Held until the
-    /// application keys are derived from the full transcript.
+    /// Held until the application keys are derived from the full transcript.
     var handshakeSecret: Data?
 
-    /// Symmetric handshake-traffic keys (one direction each). Used to decrypt
-    /// the encrypted handshake messages
-    /// (`Certificate`/`CertificateVerify`/`Finished`).
+    /// Handshake-traffic keys; decrypt Certificate/CertificateVerify/Finished.
     var handshakeKeys: TLSHandshakeKeys?
 
-    /// Application-traffic keys, derived after the server `Finished` is
-    /// verified.
+    /// Derived after the server Finished is verified.
     var applicationKeys: TLSApplicationKeys?
 
-    /// Running hash of every handshake message processed so far. Updated as
-    /// each message is consumed.
+    /// Running handshake transcript, updated as each message is consumed.
     var handshakeTranscript: Data?
 
-    /// Per-record sequence number for handshake-traffic decryption. Increments
-    /// after every encrypted record from the server.
+    /// Per-record seq# for handshake-traffic decryption.
     var serverHandshakeSeqNum: UInt64 = 0
 }
 
@@ -183,12 +168,11 @@ struct TLS13KeyDerivation {
         self.cipherSuite = cipherSuite
     }
 
-    /// Get hash output length based on cipher suite
     var hashLength: Int {
         return cipherSuite == TLSCipherSuite.TLS_AES_256_GCM_SHA384 ? 48 : 32
     }
 
-    /// Get encryption key length based on cipher suite (RFC 8446 §B.4)
+    /// Encryption key length per RFC 8446 §B.4.
     var keyLength: Int {
         switch cipherSuite {
         case TLSCipherSuite.TLS_AES_256_GCM_SHA384,
@@ -219,7 +203,6 @@ struct TLS13KeyDerivation {
         var output = Data(capacity: length + hashLen)
         var t = Data()
         var counter: UInt8 = 1
-        // Pre-allocate input buffer with max capacity: hashLen + info.count + 1
         var input = Data(capacity: hashLen + info.count + 1)
 
         while output.count < length {
@@ -264,7 +247,6 @@ struct TLS13KeyDerivation {
 
     // MARK: - Public API
 
-    /// Compute transcript hash
     func transcriptHash(_ messages: Data) -> Data {
         if cipherSuite == TLSCipherSuite.TLS_AES_256_GCM_SHA384 {
             return Data(SHA384.hash(data: messages))
@@ -273,9 +255,8 @@ struct TLS13KeyDerivation {
         }
     }
 
-    /// Derive TLS 1.3 handshake keys from shared secret.
-    /// - Parameter psk: Pre-shared key for session resumption. When `nil`, uses
-    ///   an all-zero IKM (full handshake without resumption).
+    /// Derive handshake-traffic keys and return the handshake secret.
+    /// `psk` is for session resumption; `nil` means full handshake (all-zero IKM).
     func deriveHandshakeKeys(sharedSecret: Data, transcript: Data, psk: Data? = nil) -> (handshakeSecret: Data, keys: TLSHandshakeKeys) {
         let earlyIKM = psk ?? Data(repeating: 0, count: hashLength)
         let (_, earlyKey) = hkdfExtract(salt: Data(), ikm: earlyIKM)
@@ -337,7 +318,6 @@ struct TLS13KeyDerivation {
         }
     }
 
-    /// Compute Client Finished verify data (convenience wrapper).
     func computeFinishedVerifyData(clientTrafficSecret: Data, transcript: Data) -> Data {
         computeFinishedVerifyData(trafficSecret: clientTrafficSecret, transcript: transcript)
     }
@@ -345,16 +325,8 @@ struct TLS13KeyDerivation {
 
 // MARK: - Server-Side Helpers
 
-/// The TLS 1.3 server runs the same key schedule as the client — only the
-/// "which side encrypts with which key" assignment differs. The math
-/// helpers ``deriveHandshakeKeys`` and ``deriveApplicationKeys`` remain
-/// shared; the server simply picks ``serverKey``/``serverIV`` to encrypt
-/// and ``clientKey``/``clientIV`` to decrypt.
-///
-/// A separate type wraps the running TLS 1.3 server-side state so the
-/// orchestrator (``TLSServer``) can step through messages without
-/// reaching into the client-side ``TLS13HandshakeState`` struct (whose
-/// fields name "server" and "client" relative to the local role).
+/// Server-side TLS 1.3 handshake state; the server encrypts with serverKey and
+/// decrypts with clientKey.
 struct TLS13ServerHandshakeState {
     var keyDerivation: TLS13KeyDerivation?
     var handshakeSecret: Data?
@@ -362,17 +334,13 @@ struct TLS13ServerHandshakeState {
     var applicationKeys: TLSApplicationKeys?
     /// Running transcript: ClientHello || (HRR || ClientHello2) || ServerHello || ...
     var transcript: Data = Data()
-    /// Sequence number for handshake-keys decryption of inbound messages
-    /// (i.e. client-encrypted Finished). Increments per encrypted record.
+    /// Per-record seq# for decrypting inbound handshake records (client-encrypted).
     var clientHandshakeSeqNum: UInt64 = 0
-    /// Sequence number for handshake-keys encryption of outbound messages
-    /// (EE/Cert/CertVerify/Finished, possibly split across records).
+    /// Per-record seq# for encrypting outbound handshake records (EE/Cert/CertVerify/Finished).
     var serverHandshakeSeqNum: UInt64 = 0
 }
 
 extension TLS13KeyDerivation {
-    /// Convenience wrapper: returns finished verify_data for the server
-    /// direction. Same math as the client side.
     func computeServerFinishedVerifyData(serverTrafficSecret: Data, transcript: Data) -> Data {
         computeFinishedVerifyData(trafficSecret: serverTrafficSecret, transcript: transcript)
     }

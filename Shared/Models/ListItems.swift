@@ -8,9 +8,8 @@
 import Foundation
 import Observation
 
-/// Observable row model for a proxy. Like ``ChainListItem``, a stable instance mutated in
-/// place by ``ProxyRowCoordinator`` so a single-field change (e.g. `latency`) re-renders just
-/// the affected row in SwiftUI and via the cell's `configurationUpdateHandler` on UIKit.
+/// Observable row model for a proxy: a stable instance mutated in place so a
+/// single-field change re-renders just the affected row.
 @MainActor
 @Observable
 final class ProxyListItem: Identifiable {
@@ -24,7 +23,6 @@ final class ProxyListItem: Identifiable {
     var isSelected: Bool
     var latency: LatencyResult?
 
-    /// Display tags in order: protocol, transport, security, Vision.
     var tags: [String] {
         var result = [protocolName]
         if let transportTag { result.append(transportTag) }
@@ -46,8 +44,7 @@ final class ProxyListItem: Identifiable {
         self.latency = latency
     }
 
-    /// Re-derives display state from the (possibly changed) configuration, assigning only
-    /// changed fields so observation fires for exactly what moved.
+    /// Assigns only changed fields so observation fires for exactly what moved.
     func update(_ configuration: ProxyConfiguration, isSelected: Bool, latency: LatencyResult?) {
         let d = Self.derive(configuration)
         if name != configuration.name { name = configuration.name }
@@ -79,9 +76,8 @@ final class ProxyListItem: Identifiable {
     }
 }
 
-/// Observable row model: a stable instance whose properties are mutated in place by
-/// ``ChainRowCoordinator``, so SwiftUI (row body) and UIKit (`configurationUpdateHandler`)
-/// re-render just the affected row when a single field — e.g. `latency` — changes.
+/// Observable row model for a chain: a stable instance mutated in place so a
+/// single-field change re-renders just the affected row.
 @MainActor
 @Observable
 final class ChainListItem: Identifiable {
@@ -94,7 +90,6 @@ final class ChainListItem: Identifiable {
     var isSelected: Bool
     var latency: LatencyResult?
 
-    /// "N proxie(s) · entry → exit", as rendered on tvOS.
     var infoText: String {
         var text = String(localized: "\(proxyNames.count) proxie(s)")
         if let entryAddress, let exitAddress {
@@ -115,8 +110,7 @@ final class ChainListItem: Identifiable {
         self.latency = latency
     }
 
-    /// Re-derives display state from the (possibly changed) chain. Assigns only changed
-    /// fields so observation fires for exactly what moved.
+    /// Assigns only changed fields so observation fires for exactly what moved.
     func update(_ chain: ProxyChain, configurations: [ProxyConfiguration], isSelected: Bool, latency: LatencyResult?) {
         let d = Self.derive(chain, configurations)
         if name != chain.name { name = chain.name }

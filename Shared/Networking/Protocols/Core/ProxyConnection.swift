@@ -9,7 +9,6 @@ import Foundation
 
 // MARK: - ProxyConnectionProtocol
 
-/// Defines the interface for all proxy connection types.
 protocol ProxyConnectionProtocol: AnyObject {
     var isConnected: Bool { get }
 
@@ -22,24 +21,15 @@ protocol ProxyConnectionProtocol: AnyObject {
 
 // MARK: - ProxyConnection
 
-/// Abstract base class providing common proxy connection functionality.
-///
-/// Subclasses must override ``isConnected``, ``sendRaw(data:completion:)``,
-/// ``sendRaw(data:)``, ``receiveRaw(completion:)``, and ``cancel()``.
+/// Abstract base class for proxy connections.
 nonisolated class ProxyConnection: ProxyConnectionProtocol {
-    /// Generic per-connection lock. Used by several subclasses for
-    /// protocol-specific state (Vision traffic state, SS session keys, HTTP
-    /// upgrade framing, …); no base-class invariant depends on it.
+    /// Generic per-connection lock for subclass state; no base-class invariant depends on it.
     let lock = UnfairLock()
 
-    /// The negotiated TLS version of the outer transport, if applicable.
-    /// Returns `nil` for non-TLS transports (raw TCP).
-    /// Subclasses should override to report their actual TLS version.
+    /// The negotiated TLS version of the outer transport; `nil` for non-TLS transports.
     var outerTLSVersion: TLSVersion? { nil }
 
-    /// Whether each `send`/`receive` call preserves one UDP datagram
-    /// boundary. Subclasses that frame UDP traffic (UoT or native UDP)
-    /// override to `true`.
+    /// Whether each `send`/`receive` call preserves one UDP datagram boundary.
     var deliversDatagrams: Bool { false }
 
     // MARK: Traffic Statistics
@@ -71,12 +61,10 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
         sendRaw(data: data)
     }
 
-    /// Sends raw data over the underlying transport. Must be overridden by subclasses.
     func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         fatalError("Subclass must override sendRaw")
     }
 
-    /// Sends raw data over the underlying transport without tracking completion.
     func sendRaw(data: Data) {
         fatalError("Subclass must override sendRaw")
     }
@@ -94,23 +82,16 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
         }
     }
 
-    /// Receives raw data from the underlying transport. Must be overridden by subclasses.
     func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         fatalError("Subclass must override receiveRaw")
     }
 
-    /// Receives raw data without transport decryption (for Vision direct copy mode).
-    ///
-    /// The default implementation delegates to ``receiveRaw(completion:)``.
-    /// Subclasses can override for special handling.
+    /// Bypasses transport decryption; used for Vision direct copy mode.
     func receiveDirectRaw(completion: @escaping (Data?, Error?) -> Void) {
         receiveRaw(completion: completion)
     }
 
-    /// Sends raw data without transport encryption (for Vision direct copy mode).
-    ///
-    /// The default implementation delegates to ``sendRaw(data:completion:)``.
-    /// Subclasses can override for special handling.
+    /// Bypasses transport encryption; used for Vision direct copy mode.
     func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {
         sendRaw(data: data, completion: completion)
     }
@@ -121,18 +102,14 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
 
     // MARK: Receive Loop
 
-    /// Starts a continuous receive loop, delivering data through `handler`.
-    ///
-    /// - Parameters:
-    ///   - handler: Called with each chunk of received data.
-    ///   - errorHandler: Called when an error occurs or the connection closes (`nil` error = clean close).
+    /// Starts a continuous receive loop. `errorHandler` receives `nil` on a clean close.
     func startReceiving(handler: @escaping (Data) -> Void, errorHandler: @escaping (Error?) -> Void) {
         receiveLoop(handler: handler, errorHandler: errorHandler)
     }
 
     private func receiveLoop(handler: @escaping (Data) -> Void, errorHandler: @escaping (Error?) -> Void) {
         receive { [weak self] data, error in
-            // Surface EOF on dealloc so ``startReceiving``'s "errorHandler called on close" contract holds.
+            // Surface EOF on dealloc so the errorHandler-on-close contract holds.
             guard let self else {
                 errorHandler(nil)
                 return

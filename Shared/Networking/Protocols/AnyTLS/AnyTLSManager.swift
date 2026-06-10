@@ -9,18 +9,8 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "AnyTLSManager")
 
-/// Process-wide registry of `AnyTLSClient`s keyed by `(host, port, password)`.
-///
-/// Each `AnyTLSClient` owns one TLS-session pool, so different proxy
-/// configurations that share the same `(host, port, password)` triple end up
-/// reusing the same warm pool — matching how `HysteriaClient.shared(for:)`
-/// dedupes its QUIC sessions.
-///
-/// The `dialOut` closure is captured per-key on first creation; subsequent
-/// `client(for:dialOut:)` calls with the same key reuse the existing client
-/// and ignore the new closure. This is fine because the inputs that
-/// influence the dial path (TLS knobs, chain) are part of the
-/// `ProxyConfiguration` already keyed in.
+/// Process-wide registry of `AnyTLSClient`s keyed by `(host, port, password)`;
+/// configs sharing the same triple reuse the same warm TLS-session pool.
 nonisolated final class AnyTLSManager {
 
     static let shared = AnyTLSManager()
@@ -36,10 +26,7 @@ nonisolated final class AnyTLSManager {
 
     private init() {}
 
-    /// Returns the per-server pool for `configuration`, creating it on first
-    /// use. The `dialOut` closure is captured into the new `AnyTLSClient`;
-    /// subsequent calls for the same key reuse the existing client and the
-    /// passed closure is dropped.
+    /// Returns the per-server pool, creating it on first use; on reuse the passed `dialOut` is dropped.
     func client(
         for configuration: ProxyConfiguration,
         dialOut: @escaping AnyTLSClient.DialOut
@@ -70,9 +57,8 @@ nonisolated final class AnyTLSManager {
         return client
     }
 
-    /// Closes every pooled session — invoked from `TunnelStack` lifecycle hooks
-    /// (device wake, network path change, tunnel stop) so we don't try to
-    /// reuse a TLS connection whose underlying socket the kernel tore down.
+    /// Closes every pooled session; called on wake/path change/stop because the
+    /// kernel may have torn down the underlying sockets.
     func closeAll() {
         lock.lock()
         let snapshot = Array(clients.values)
@@ -88,6 +74,5 @@ nonisolated final class AnyTLSManager {
 }
 
 extension AnyTLSManager: TransportPool {
-    /// ``TransportPool`` conformance — forwards to ``closeAll()``.
     func reclaim() { closeAll() }
 }

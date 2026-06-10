@@ -48,21 +48,12 @@ final class MITMLeafCertCache {
         self.leafPrivateKeySecKey = try Self.importSoftwareP256(key)
     }
 
-    /// Returns a leaf certificate for the given SNI, minting one if no
-    /// fresh entry is cached.
-    ///
-    /// Throws if the CA is missing or signing fails — caller should treat
-    /// it as a fatal handshake error.
+    /// Returns a cached leaf for the SNI, minting one if absent or near expiry; throws on CA/signing failure.
     func leaf(for hostname: String) throws -> Leaf {
         let normalized = hostname.lowercased()
         lock.lock()
         if let entry = entries[normalized],
            entry.leaf.expiry.timeIntervalSince(Date()) > Self.refreshThreshold {
-            // Touch the recency timestamp in place. Storing recency on the
-            // entry keeps the cache-hit path O(1) and defers the O(n) scan for
-            // an eviction victim to eviction time, which only runs on a cache
-            // miss past the cap. On a browser launch hitting hundreds of hosts
-            // the hit path is hot, so an O(n) update per hit would dominate it.
             entries[normalized]?.lastAccess = Date()
             let leaf = entry.leaf
             lock.unlock()
@@ -70,17 +61,8 @@ final class MITMLeafCertCache {
         }
         lock.unlock()
 
-        // Mint outside the lock so a slow CA signature (worst case a
-        // Secure-Enclave key) doesn't block lookups for *other* hosts. This is
-        // the sole caller path and runs on the shared serial lwIP queue
-        // (``MITMSession.start`` is documented "Must be called on lwipQueue"),
-        // so there is no concurrency to dedup. A prior NSCondition single-flight
-        // here was unreachable on a serial queue, and would have *deadlocked*
-        // the whole tunnel the day ``leaf(for:)`` was ever called from a second
-        // thread (a waiter blocking the very queue the leader needs to finish
-        // on). If a second caller is ever added, two racing mints for the same
-        // host each produce a valid leaf and the later store wins — harmless
-        // duplicate work, never a deadlock.
+        // Mint outside the lock; deliberately no single-flight — racing mints both produce
+        // valid leaves, while blocking a waiter on the serial lwIP queue would deadlock.
         let leaf = try mintLeaf(for: normalized)
 
         lock.lock()
@@ -91,12 +73,8 @@ final class MITMLeafCertCache {
         return leaf
     }
 
-    // NB: there is intentionally no `reset()`. CA rotation is not wired today,
-    // and a naive cache clear would race a leader minting outside the lock —
-    // its post-mint write would land a leaf signed by the *pre-rotation* CA. If
-    // CA rotation is added later, gate the post-mint cache write on a CA
-    // generation/fingerprint token so a mint started under the old CA can't
-    // repopulate the cache, then add the clear.
+    // Intentionally no reset(): a naive clear races the lock-free mint path and could
+    // repopulate with a pre-rotation leaf; CA rotation would need a generation token.
 
     // MARK: - Internals
 
@@ -131,10 +109,7 @@ final class MITMLeafCertCache {
     }
 
     private func evictIfNeededUnlocked() {
-        // Evict the LRU entry — the one whose ``lastAccess`` is
-        // smallest — until we're back at or below the cap. ``min(by:)``
-        // is O(n) but eviction runs only on cache miss past the cap,
-        // and we evict at most one entry per miss in the steady state.
+        // O(n) LRU eviction; only runs on a cache miss past the cap.
         while entries.count > Self.maxEntries {
             guard let oldest = entries.min(by: {
                 $0.value.lastAccess < $1.value.lastAccess
@@ -143,7 +118,7 @@ final class MITMLeafCertCache {
         }
     }
 
-    /// Imports the ephemeral leaf key into a Security.framework key reference.
+    /// Wraps the ephemeral P256 key as a Security.framework `SecKey`.
     private static func importSoftwareP256(_ key: P256.Signing.PrivateKey) throws -> SecKey {
         let attributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,

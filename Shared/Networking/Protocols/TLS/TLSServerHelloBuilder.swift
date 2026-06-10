@@ -11,15 +11,8 @@ enum TLSServerHelloBuilder {
 
     // MARK: - ServerHello
 
-    /// Builds a TLS 1.3 ServerHello.
-    ///
-    /// - Parameters:
-    ///   - legacySessionID: The 32-byte session ID echoed verbatim from the
-    ///     ClientHello (RFC 8446 §4.1.3).
-    ///   - cipherSuite: The cipher suite the server has chosen.
-    ///   - x25519PublicKey: 32-byte server X25519 public key for the
-    ///     `key_share` extension.
-    /// - Returns: A complete handshake-layer ServerHello (no record header).
+    /// Builds a TLS 1.3 ServerHello (handshake layer, no record header); the session ID is
+    /// echoed verbatim from the ClientHello per RFC 8446 §4.1.3.
     static func buildServerHello(
         legacySessionID: Data,
         cipherSuite: UInt16,
@@ -39,7 +32,6 @@ enum TLSServerHelloBuilder {
         body.append(UInt8(cipherSuite & 0xFF))
         body.append(0x00)                                             // legacy_compression_method = null
 
-        // Extensions
         var extensions = Data()
         extensions.append(buildSupportedVersionsServerExt())
         extensions.append(buildKeyShareServerExt(group: 0x001D, key: x25519PublicKey))
@@ -50,9 +42,8 @@ enum TLSServerHelloBuilder {
         return wrapHandshake(type: 0x02, body: body)
     }
 
-    /// Builds a HelloRetryRequest. Same wire shape as ServerHello but with
-    /// the well-known SHA-256("HelloRetryRequest") sentinel as Random and
-    /// a `key_share` extension naming only the requested group.
+    /// Builds a HelloRetryRequest: a ServerHello with the SHA-256("HelloRetryRequest") sentinel
+    /// as Random and a key_share naming only the requested group.
     static func buildHelloRetryRequest(
         legacySessionID: Data,
         cipherSuite: UInt16,
@@ -97,24 +88,8 @@ enum TLSServerHelloBuilder {
 
     // MARK: - TLS 1.2 ServerHello
 
-    /// Builds a TLS 1.2 ServerHello.
-    ///
-    /// Differs from the TLS 1.3 form in three ways: legacy_version is the
-    /// negotiated value (0x0303) rather than the supported_versions sentinel;
-    /// no `supported_versions` extension is emitted; and ALPN/EMS extensions
-    /// (which TLS 1.3 carries inside the encrypted EncryptedExtensions
-    /// message) appear directly in the ServerHello extension list.
-    ///
-    /// - Parameters:
-    ///   - legacySessionID: 32-byte session ID echoed verbatim from the
-    ///     ClientHello (RFC 5246 §7.4.1.3).
-    ///   - cipherSuite: The TLS 1.2 cipher suite the server chose.
-    ///   - alpn: The negotiated ALPN protocol, or nil to omit the extension.
-    ///   - extendedMasterSecret: Whether to advertise EMS (RFC 7627) — set
-    ///     when the client offered the extension.
-    ///   - serverRandom: 32-byte server-side random (returned by the caller
-    ///     so it can mix into the master_secret seed downstream).
-    /// - Returns: A complete handshake-layer ServerHello (no record header).
+    /// Builds a TLS 1.2 ServerHello: no supported_versions extension, and ALPN/EMS
+    /// (which TLS 1.3 carries in EncryptedExtensions) appear directly in the extension list.
     static func buildServerHello12(
         legacySessionID: Data,
         cipherSuite: UInt16,
@@ -132,9 +107,7 @@ enum TLSServerHelloBuilder {
         body.append(UInt8(cipherSuite & 0xFF))
         body.append(0x00)                                             // legacy_compression_method = null
 
-        // Extensions. RFC 5246 §7.4.1.4: an extension MUST NOT appear in
-        // the ServerHello unless it appeared in the ClientHello. Each
-        // extension is gated on the corresponding ClientHello signal.
+        // RFC 5246 §7.4.1.4: only echo extensions the client offered.
         var extensions = Data()
         if extendedMasterSecret {
             extensions.append(0x00); extensions.append(0x17)          // ext type = extended_master_secret
@@ -158,11 +131,8 @@ enum TLSServerHelloBuilder {
 
     // MARK: - TLS 1.2 Certificate
 
-    /// Builds a TLS 1.2 Certificate message (RFC 5246 §7.4.2).
-    ///
-    /// Wire shape differs from TLS 1.3: no `certificate_request_context`
-    /// length prefix and no per-entry extension list — just a length-
-    /// prefixed list of length-prefixed cert bodies.
+    /// Builds a TLS 1.2 Certificate message (RFC 5246 §7.4.2): unlike TLS 1.3, no request
+    /// context or per-entry extensions — just a length-prefixed list of cert bodies.
     static func buildCertificate12(leafCertDER: Data) -> Data {
         var body = Data()
 
@@ -185,11 +155,8 @@ enum TLSServerHelloBuilder {
 
     // MARK: - TLS 1.2 ServerKeyExchange
 
-    /// Builds the ECDHE ServerKeyExchange params blob (the bytes that get
-    /// signed and that prefix the SKE message).
-    ///
-    /// Format (RFC 8422 §5.4): curve_type(1) || named_curve(2) ||
-    /// pubkey_len(1) || pubkey(N).
+    /// ECDHE ServerKeyExchange params blob (RFC 8422 §5.4): curve_type(1) || named_curve(2) ||
+    /// pubkey_len(1) || pubkey(N) — the bytes that get signed and prefix the SKE message.
     static func serverECDHEParams(namedCurve: UInt16, publicKey: Data) -> Data {
         var params = Data()
         params.append(0x03)                                           // curve_type = named_curve
@@ -200,15 +167,8 @@ enum TLSServerHelloBuilder {
         return params
     }
 
-    /// Builds a TLS 1.2 ServerKeyExchange message for an ECDHE_ECDSA cipher
-    /// suite (RFC 5246 §7.4.3, RFC 8422 §5.4).
-    ///
-    /// - Parameters:
-    ///   - params: The pre-built params blob — also the prefix of the
-    ///     signed payload (caller computed `client_random || server_random
-    ///     || params` and signed that).
-    ///   - signatureAlgorithm: 0x0403 = ecdsa_secp256r1_sha256.
-    ///   - signature: DER-encoded ECDSA signature.
+    /// Builds a TLS 1.2 ECDHE_ECDSA ServerKeyExchange (RFC 8422 §5.4); the caller signed
+    /// client_random || server_random || params.
     static func buildServerKeyExchange(
         params: Data,
         signatureAlgorithm: UInt16,
@@ -226,23 +186,21 @@ enum TLSServerHelloBuilder {
 
     // MARK: - TLS 1.2 ServerHelloDone
 
-    /// Builds a TLS 1.2 ServerHelloDone message (RFC 5246 §7.4.5).
+    /// ServerHelloDone — RFC 5246 §7.4.5.
     static func buildServerHelloDone() -> Data {
         wrapHandshake(type: 0x0E, body: Data())
     }
 
     // MARK: - TLS 1.2 Finished
 
-    /// Builds a TLS 1.2 Finished message (RFC 5246 §7.4.9). Verify data is
-    /// always 12 bytes for TLS 1.2.
+    /// TLS 1.2 Finished (RFC 5246 §7.4.9); verify_data is always 12 bytes.
     static func buildFinished12(verifyData: Data) -> Data {
         wrapHandshake(type: 0x14, body: verifyData)
     }
 
     // MARK: - EncryptedExtensions
 
-    /// Builds an EncryptedExtensions handshake message advertising the
-    /// negotiated ALPN. Empty body if `alpn` is nil.
+    /// Builds an EncryptedExtensions message advertising the negotiated ALPN.
     static func buildEncryptedExtensions(alpn: String?) -> Data {
         var body = Data()
         var extensions = Data()
@@ -257,9 +215,7 @@ enum TLSServerHelloBuilder {
 
     // MARK: - Certificate
 
-    /// Builds a Certificate message for a single leaf certificate.
-    /// Per RFC 8446 §4.4.2: certificate_request_context length (0 here),
-    /// then a CertificateList ::= sequence of CertificateEntry.
+    /// Builds a single-leaf TLS 1.3 Certificate message (RFC 8446 §4.4.2).
     static func buildCertificate(leafCertDER: Data) -> Data {
         var body = Data()
         body.append(0x00)                                             // certificate_request_context length
@@ -286,13 +242,7 @@ enum TLSServerHelloBuilder {
 
     // MARK: - CertificateVerify
 
-    /// Builds a CertificateVerify carrying an ECDSA signature over the
-    /// transcript-hash context string (RFC 8446 §4.4.3).
-    ///
-    /// - Parameters:
-    ///   - signatureAlgorithm: 0x0403 = ecdsa_secp256r1_sha256.
-    ///   - signature: DER-encoded ECDSA signature (as returned by
-    ///     ``SecKeyCreateSignature``).
+    /// Builds a CertificateVerify carrying a DER-encoded ECDSA signature (RFC 8446 §4.4.3).
     static func buildCertificateVerify(signatureAlgorithm: UInt16, signature: Data) -> Data {
         var body = Data()
         body.append(UInt8((signatureAlgorithm >> 8) & 0xFF))
@@ -305,17 +255,13 @@ enum TLSServerHelloBuilder {
 
     // MARK: - Finished
 
-    /// Builds a Finished message carrying the verify_data MAC.
     static func buildFinished(verifyData: Data) -> Data {
         wrapHandshake(type: 0x14, body: verifyData)
     }
 
     // MARK: - CertificateVerify Signing Helpers
 
-    /// Builds the buffer that is signed for a server-side CertificateVerify.
-    /// Per RFC 8446 §4.4.3, the input is:
-    ///   octet 0x20 × 64 || "TLS 1.3, server CertificateVerify" ||
-    ///   0x00 || transcript_hash
+    /// Builds the server-side CertificateVerify signing input (RFC 8446 §4.4.3).
     static func certificateVerifyContext(transcriptHash: Data) -> Data {
         var ctx = Data(repeating: 0x20, count: 64)
         ctx.append(Data("TLS 1.3, server CertificateVerify".utf8))
@@ -326,9 +272,7 @@ enum TLSServerHelloBuilder {
 
     // MARK: - Alerts
 
-    /// Builds a TLS Alert payload (level + description), without the record
-    /// header. Caller wraps it in either a plain record (for
-    /// pre-handshake-keys alerts) or an encrypted record.
+    /// TLS Alert payload (level + description), without the record header.
     static func alert(level: UInt8, description: UInt8) -> Data {
         Data([level, description])
     }
@@ -376,7 +320,7 @@ enum TLSServerHelloBuilder {
         return ext
     }
 
-    /// Wraps a handshake body in the `[type:1][length:3][body]` framing.
+    /// Handshake framing: `[type:1][length:3][body]`.
     private static func wrapHandshake(type: UInt8, body: Data) -> Data {
         var out = Data()
         out.append(type)

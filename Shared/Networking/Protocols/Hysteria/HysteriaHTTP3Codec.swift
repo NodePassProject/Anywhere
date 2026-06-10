@@ -11,9 +11,7 @@ enum HysteriaHTTP3Codec {
 
     // MARK: - Static table (RFC 9204 Appendix A — subset we care about)
 
-    /// Full (name, value) entries for "Indexed Field Line" (pattern `1 T=1`).
-    /// Covers only rows that can plausibly appear on a /auth response — the
-    /// rest aren't relevant to Hysteria and would be dropped silently anyway.
+    /// "Indexed Field Line" entries — only rows that can plausibly appear on a /auth response.
     private static let entryByIndex: [Int: (name: String, value: String)] = [
         4:  ("content-length", "0"),
         24: (":status", "103"),
@@ -32,19 +30,14 @@ enum HysteriaHTTP3Codec {
         71: (":status", "500"),
     ]
 
-    /// Static-table names referenced via "Literal Field Line with Name Reference"
-    /// (pattern `01 N T=1`). The server may pick ANY index whose canonical
-    /// name matches the header it wants to send, then override the value — e.g.
-    /// `:status = "233"` for Hysteria `AuthOK` lands on one of indices 24-28
-    /// or 63-71, not a specific one.
+    /// Names for "Literal Field Line with Name Reference"; the server may
+    /// pick any index whose canonical name matches, then override the value.
     private static let nameByIndex: [Int: String] = {
         var m: [Int: String] = [
             0: ":authority",
             1: ":path",
             4: "content-length",
             6: "date",
-            // QPACK Appendix A also includes "hysteria-*" as literal names,
-            // not via the static table.
         ]
         for i in [24, 25, 26, 27, 28, 63, 64, 65, 66, 67, 68, 69, 70, 71] {
             m[i] = ":status"
@@ -54,18 +47,9 @@ enum HysteriaHTTP3Codec {
 
     // MARK: - Request encoding
 
-    /// Builds a complete HTTP/3 HEADERS frame carrying a POST /auth request.
-    ///
-    /// The wire layout is:
-    ///   varint(type=0x01) | varint(len) | headerBlock
-    ///
-    /// `headerBlock` is:
-    ///   0x00 0x00                                  (Required Insert Count + Delta Base, both 0)
-    ///   indexed(:method = POST)                    (static table index 20)
-    ///   indexed(:scheme = https)                   (static table index 23)
-    ///   literalWithNameRef(:authority, authority)  (static index 0)
-    ///   literalWithNameRef(:path, path)            (static index 1)
-    ///   literalFieldLine(name, value)              (one per extra header)
+    /// Builds an HTTP/3 HEADERS frame (varint type 0x01 | varint len | QPACK
+    /// block) carrying a POST /auth request. Static indexes: 20 = :method
+    /// POST, 23 = :scheme https, 0 = :authority, 1 = :path.
     static func encodeAuthRequestFrame(
         authority: String,
         path: String,
@@ -75,11 +59,8 @@ enum HysteriaHTTP3Codec {
         block.append(0x00) // Required Insert Count = 0
         block.append(0x00) // S = 0, Delta Base = 0
 
-        // :method = POST  — static table index 20
         block.append(contentsOf: indexedField(staticIndex: 20))
-        // :scheme = https — static table index 23
         block.append(contentsOf: indexedField(staticIndex: 23))
-        // :authority / :path — literal with static name ref
         block.append(contentsOf: literalWithNameRef(staticIndex: 0, value: authority))
         block.append(contentsOf: literalWithNameRef(staticIndex: 1, value: path))
 
@@ -87,7 +68,6 @@ enum HysteriaHTTP3Codec {
             block.append(contentsOf: literalFieldLine(name: h.name, value: h.value))
         }
 
-        // Wrap in an HTTP/3 HEADERS frame.
         var frame = Data()
         frame.append(contentsOf: encodeQUICVarInt(0x01)) // type = HEADERS
         frame.append(contentsOf: encodeQUICVarInt(UInt64(block.count)))
@@ -97,16 +77,14 @@ enum HysteriaHTTP3Codec {
 
     // MARK: - Response decoding
 
-    /// Decodes a QPACK-encoded header block into `(name, value)` pairs, or
-    /// returns nil if the block is malformed. Works correctly on both
-    /// zero-indexed and sliced `Data` inputs.
+    /// Decodes a QPACK header block into `(name, value)` pairs, or nil if
+    /// malformed. Slice-safe.
     static func decodeHeaderBlock(_ data: Data) -> [(name: String, value: String)]? {
         guard data.count >= 2 else { return nil }
         let base = data.startIndex
         var offset = 0
 
-        // Required Insert Count (8-bit prefix). We advertise dynamic table = 0,
-        // so a compliant peer MUST send 0.
+        // Required Insert Count must be 0 — we advertise dynamic table 0.
         guard let (ric, ricLen) = decodePrefixedInt(data, offset: offset, prefixBits: 8) else { return nil }
         guard ric == 0 else { return nil }
         offset += ricLen
@@ -145,9 +123,8 @@ enum HysteriaHTTP3Codec {
                 }
 
             } else if byte & 0x20 != 0 {
-                // 001 N H — Literal field line with literal name. The
-                // Hysteria server's HTTP/3 stack Huffman-encodes both name
-                // and value by default, so handle both forms.
+                // 001 N H — Literal field line with literal name. Hysteria
+                // Huffman-encodes by default, so handle both forms.
                 let isHuffmanName = (byte & 0x08) != 0
                 guard let (nameLen, nameLenBytes) = decodePrefixedInt(data, offset: offset, prefixBits: 3) else { return nil }
                 offset += nameLenBytes
@@ -169,8 +146,7 @@ enum HysteriaHTTP3Codec {
                 headers.append((name: decodedName.lowercased(), value: value))
 
             } else {
-                // Post-base patterns reference the dynamic table. We advertised 0,
-                // so this is a peer protocol error.
+                // Post-base patterns reference the dynamic table — peer protocol error.
                 return nil
             }
         }
@@ -180,16 +156,14 @@ enum HysteriaHTTP3Codec {
 
     // MARK: - Encoding helpers
 
-    /// Indexed field line pointing into the static table.
-    /// Pattern: `1 T=1 Index(6+)`.
+    /// Indexed field line into the static table: `1 T=1 Index(6+)`.
     private static func indexedField(staticIndex: Int) -> Data {
         var out = Data()
         appendPrefixedInt(&out, value: UInt64(staticIndex), prefixBits: 6, prefix: 0b1100_0000)
         return out
     }
 
-    /// Literal field line with static name reference.
-    /// Pattern: `01 N=0 T=1 NameIndex(4+)` then encoded value string.
+    /// Literal field line with static name reference: `01 N=0 T=1 NameIndex(4+)`, then value string.
     private static func literalWithNameRef(staticIndex: Int, value: String) -> Data {
         var out = Data()
         appendPrefixedInt(&out, value: UInt64(staticIndex), prefixBits: 4, prefix: 0b0101_0000)
@@ -197,8 +171,7 @@ enum HysteriaHTTP3Codec {
         return out
     }
 
-    /// Literal field line with literal name.
-    /// Pattern: `001 N=0 H=0 NameLen(3+)` name `ValueLen(7+)` value (Huffman=0).
+    /// Literal field line with literal name: `001 N=0 H=0 NameLen(3+)` name, then value.
     private static func literalFieldLine(name: String, value: String) -> Data {
         var out = Data()
         let nameBytes = Data(name.utf8)
@@ -229,8 +202,7 @@ enum HysteriaHTTP3Codec {
         out.append(UInt8(remaining))
     }
 
-    /// Appends a raw (non-Huffman) length-prefixed string.
-    /// Pattern: `H=0 Len(7+)` then UTF-8 bytes.
+    /// Appends a raw (non-Huffman) length-prefixed string: `H=0 Len(7+)` then UTF-8 bytes.
     private static func appendString(_ out: inout Data, _ value: String) {
         let bytes = Data(value.utf8)
         appendPrefixedInt(&out, value: UInt64(bytes.count), prefixBits: 7, prefix: 0x00)
@@ -239,8 +211,7 @@ enum HysteriaHTTP3Codec {
 
     // MARK: - Decoding helpers (slice-safe)
 
-    /// Decodes an N-bit prefixed integer. `offset` is relative to
-    /// `data.startIndex` so slices don't trap.
+    /// Decodes an N-bit prefixed integer; `offset` is relative to `data.startIndex` so slices don't trap.
     private static func decodePrefixedInt(
         _ data: Data,
         offset: Int,
@@ -271,9 +242,8 @@ enum HysteriaHTTP3Codec {
         return nil
     }
 
-    /// Decodes a length-prefixed string. Handles both raw UTF-8 and Huffman
-    /// (RFC 7541 Appendix B, shared between HPACK and QPACK), since the
-    /// Hysteria server Huffman-encodes responses by default.
+    /// Decodes a length-prefixed string, raw or Huffman (RFC 7541 Appendix B)
+    /// — the Hysteria server Huffman-encodes by default.
     private static func decodeString(_ data: Data, offset: Int) -> (value: String, bytesConsumed: Int)? {
         let base = data.startIndex
         guard offset < data.count else { return nil }
@@ -297,8 +267,7 @@ enum HysteriaHTTP3Codec {
 
     // MARK: - QUIC varint
 
-    /// Encodes a varint per RFC 9000 §16. Traps on overflow; 62-bit cap is
-    /// enforced by callers (header block lengths never approach it).
+    /// Encodes a varint per RFC 9000 §16; callers keep values within the 62-bit cap.
     private static func encodeQUICVarInt(_ value: UInt64) -> Data {
         if value < (1 << 6) {
             return Data([UInt8(value)])

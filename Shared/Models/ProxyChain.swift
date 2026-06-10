@@ -7,11 +7,8 @@
 
 import Foundation
 
-/// A named, ordered sequence of proxy configurations forming a chain.
-///
-/// When selected as the working configuration:
-/// - The **last** proxy in `proxyIds` is the exit proxy (talks to the target).
-/// - All preceding proxies form the intermediate chain (tunneled through in order).
+/// A named, ordered proxy chain: the last proxy is the exit (talks to the
+/// target), preceding proxies are tunneled through in order.
 struct ProxyChain: Identifiable, Codable, Hashable {
     let id: UUID
     var name: String
@@ -24,14 +21,13 @@ struct ProxyChain: Identifiable, Codable, Hashable {
         self.proxyIds = proxyIds
     }
 
-    /// Resolves this chain's ordered proxy IDs against the given pool. Missing IDs are skipped.
+    /// Resolves the ordered proxy IDs against the pool; missing IDs are skipped.
     func resolveProxies(from pool: [ProxyConfiguration]) -> [ProxyConfiguration] {
         proxyIds.compactMap { id in pool.first(where: { $0.id == id }) }
     }
 
-    /// Resolves the chain into a single composite ProxyConfiguration: the last proxy
-    /// becomes the exit, preceding proxies fill the `chain` field. Returns `nil` if
-    /// any proxy is missing or fewer than 2 proxies resolve.
+    /// Resolves into a single composite configuration (last = exit, rest fill `chain`);
+    /// nil if any proxy is missing or fewer than 2 resolve.
     func resolveComposite(from pool: [ProxyConfiguration]) -> ProxyConfiguration? {
         let configs = resolveProxies(from: pool)
         guard configs.count == proxyIds.count, configs.count >= 2 else { return nil }

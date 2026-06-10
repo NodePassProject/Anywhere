@@ -11,12 +11,8 @@ private let logger = AnywhereLogger(category: "Trojan")
 
 // MARK: - TrojanConnection
 
-/// Wraps a TLS-backed ProxyConnection with the Trojan TCP request header.
-///
-/// The header — `hex(sha224(password)) + CRLF + cmd + addr:port + CRLF` — is
-/// prepended to the first `sendRaw` payload and travels inside the same TLS
-/// record, matching Xray-core's `ConnWriter.Write`. The receive path is a
-/// pass-through because Trojan servers reply without any framing of their own.
+/// Prepends the Trojan TCP request header to the first outbound payload inside the same
+/// TLS record, matching Xray-core's `ConnWriter.Write`; server replies are unframed pass-through.
 nonisolated final class TrojanConnection: ProxyConnection {
     private let inner: ProxyConnection
     private var pendingHeader: Data?

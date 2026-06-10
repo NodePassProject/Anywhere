@@ -25,12 +25,7 @@ nonisolated final class VLESSConnection: ProxyConnection {
 
     // MARK: - Handshake
 
-    /// Writes the VLESS request header (and optional initial payload) to the
-    /// transport. Call once immediately after construction; subsequent sends
-    /// use the regular `send`/`sendRaw` API.
-    ///
-    /// For Vision flow callers pass `initialData = nil` — Vision sends its
-    /// first payload with its own padding machinery after this completes.
+    /// Writes the VLESS request header (and optional initial payload); call once after construction.
     func sendHandshake(
         requestHeader: Data,
         initialData: Data?,
@@ -73,15 +68,9 @@ nonisolated final class VLESSConnection: ProxyConnection {
         }
     }
 
-    /// Buffers incoming bytes until the 2-byte VLESS response header (plus
-    /// `addonsLength` bytes of addons) has been consumed, then delivers any
-    /// remainder to `completion`. Loops via `receiveRaw` if more bytes are
-    /// needed.
-    ///
-    /// If the first byte doesn't match `VLESSProtocol.version` we fall back
-    /// to passing the data through unmodified — some lax server
-    /// configurations skip the response header entirely, and refusing to
-    /// continue would break them needlessly.
+    /// Consumes the VLESS response header (version + addonsLength + addons), then
+    /// delivers the remainder. A non-matching first byte passes the buffered bytes
+    /// through as-is — some servers omit the response header entirely.
     private func processResponseHeader(data: Data, completion: @escaping (Data?, Error?) -> Void) {
         var output: Data?
         var shouldReceiveMore = false

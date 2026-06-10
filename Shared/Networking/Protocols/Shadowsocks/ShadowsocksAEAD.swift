@@ -11,11 +11,9 @@ import CommonCrypto
 
 // MARK: - Key Derivation
 
-/// Shadowsocks key derivation utilities.
 enum ShadowsocksKeyDerivation {
 
-    /// Derives a master key from a password using EVP_BytesToKey (MD5-based).
-    /// Matches `passwordToCipherKey()` in Xray-core config.go.
+    /// Derives a master key from a password via EVP_BytesToKey (MD5), matching Xray-core.
     static func deriveKey(password: String, keySize: Int) -> Data {
         guard keySize > 0 else { return Data() }
         let passwordData = Array(password.utf8)
@@ -39,8 +37,7 @@ enum ShadowsocksKeyDerivation {
         return Data(result.prefix(keySize))
     }
 
-    /// Derives a subkey from the master key and salt using HKDF-SHA1.
-    /// info = "ss-subkey", matching Xray-core's `hkdfSHA1()`.
+    /// Derives a per-salt subkey via HKDF-SHA1 with info "ss-subkey", matching Xray-core.
     static func deriveSubkey(masterKey: Data, salt: Data, keySize: Int) -> Data {
         let symmetricKey = SymmetricKey(data: masterKey)
         let info = "ss-subkey".data(using: .utf8)!
@@ -53,10 +50,9 @@ enum ShadowsocksKeyDerivation {
         return derivedKey.withUnsafeBytes { Data($0) }
     }
 
-    /// Decodes a base64-encoded PSK for Shadowsocks 2022.
-    /// The decoded key must be exactly keySize bytes.
+    /// Decodes a base64 PSK for Shadowsocks 2022; must be exactly keySize bytes.
     static func decodePSK(password: String, keySize: Int) -> Data? {
-        // Support colon-separated multi-PSK (use the last one for client)
+        // Colon-separated multi-PSK: the client uses the last one.
         let parts = password.split(separator: ":")
         guard let lastPart = parts.last,
               let psk = Data(base64Encoded: ShadowsocksKeyDerivation.padBase64(String(lastPart))) else {
@@ -68,8 +64,7 @@ enum ShadowsocksKeyDerivation {
         return psk
     }
 
-    /// Decodes ALL colon-separated base64-encoded PSKs for Shadowsocks 2022 multi-user mode.
-    /// Returns nil if any PSK fails to decode or has wrong size.
+    /// Decodes all colon-separated base64 PSKs; nil if any fails to decode or has the wrong size.
     static func decodePSKList(password: String, keySize: Int) -> [Data]? {
         let parts = password.split(separator: ":")
         var psks: [Data] = []
@@ -85,14 +80,10 @@ enum ShadowsocksKeyDerivation {
         return psks.isEmpty ? nil : psks
     }
 
-    /// Computes the first 16 bytes of BLAKE3 hash of the given data.
-    /// Used for identity header pskHash computation.
     static func blake3Hash16(_ data: Data) -> Data {
         Blake3Hasher.hash(data, count: 16)
     }
 
-    /// Derives an identity subkey using BLAKE3 DeriveKey mode.
-    /// context = "shadowsocks 2022 identity subkey", input = psk + salt.
     static func deriveIdentitySubkey(psk: Data, salt: Data, keySize: Int) -> Data {
         var input = Data(psk)
         input.append(salt)
@@ -100,9 +91,7 @@ enum ShadowsocksKeyDerivation {
                                      input: input, count: keySize)
     }
 
-    /// Derives a session key using BLAKE3 DeriveKey mode.
-    /// context = "shadowsocks 2022 session subkey", input = psk + salt.
-    /// Matching sing-shadowsocks SessionKey().
+    /// Matches sing-shadowsocks SessionKey().
     static func deriveSessionKey(psk: Data, salt: Data, keySize: Int) -> Data {
         var input = Data(psk)
         input.append(salt)
@@ -119,9 +108,7 @@ enum ShadowsocksKeyDerivation {
 
 // MARK: - Nonce Generator
 
-/// Generates incrementing AEAD nonces matching Xray-core's GenerateAEADNonceWithSize.
-/// Starts at all 0xFF, increments little-endian before each use.
-/// First returned nonce = all zeros.
+/// Incrementing little-endian AEAD nonce matching Xray-core: starts at all 0xFF, so the first returned nonce is all zeros.
 struct ShadowsocksNonce {
     private var bytes: [UInt8]
 
@@ -129,7 +116,6 @@ struct ShadowsocksNonce {
         bytes = [UInt8](repeating: 0xFF, count: size)
     }
 
-    /// Increments the nonce (little-endian) and returns the new value.
     mutating func next() -> Data {
         for i in 0..<bytes.count {
             bytes[i] &+= 1
@@ -141,7 +127,6 @@ struct ShadowsocksNonce {
 
 // MARK: - AEAD Seal/Open
 
-/// Low-level AEAD operations.
 enum ShadowsocksAEADCrypto {
 
     static func seal(cipher: ShadowsocksCipher, key: Data, nonce: Data, plaintext: Data) throws -> Data {
@@ -197,11 +182,8 @@ enum ShadowsocksAEADCrypto {
 
 // MARK: - ShadowsocksAEADWriter (Encrypt)
 
-/// Encrypts data into Shadowsocks AEAD chunk format.
-///
-/// Chunk format: `[Encrypted 2-byte length + 16-byte tag] [Encrypted payload + 16-byte tag]`
-/// Max payload per chunk: 0x3FFF (16383 bytes).
-/// The salt is prepended to the first output.
+/// Encrypts into Shadowsocks AEAD chunks — `[sealed 2-byte length][sealed payload]` —
+/// with the salt prepended to the first output.
 nonisolated class ShadowsocksAEADWriter {
     private let cipher: ShadowsocksCipher
     private let subkey: Data
@@ -222,18 +204,15 @@ nonisolated class ShadowsocksAEADWriter {
             return
         }
 
-        // Generate random salt
         var saltBytes = [UInt8](repeating: 0, count: cipher.saltSize)
         _ = SecRandomCopyBytes(kSecRandomDefault, saltBytes.count, &saltBytes)
         self.salt = Data(saltBytes)
 
-        // Derive subkey
         self.subkey = ShadowsocksKeyDerivation.deriveSubkey(
             masterKey: masterKey, salt: salt, keySize: cipher.keySize
         )
     }
 
-    /// Encrypts plaintext into AEAD chunks. Prepends salt on first call.
     func seal(plaintext: Data) throws -> Data {
         guard cipher != .none else {
             return plaintext
@@ -241,27 +220,23 @@ nonisolated class ShadowsocksAEADWriter {
 
         var output = Data()
 
-        // Prepend salt on first write
         if !saltWritten {
             output.append(salt)
             saltWritten = true
         }
 
-        // Split into chunks
         var offset = 0
         while offset < plaintext.count {
             let remaining = plaintext.count - offset
             let chunkSize = min(remaining, Self.maxPayloadSize)
             let chunk = plaintext[plaintext.startIndex.advanced(by: offset)..<plaintext.startIndex.advanced(by: offset + chunkSize)]
 
-            // Encrypt 2-byte length header
             let lengthBytes = Data([UInt8(chunkSize >> 8), UInt8(chunkSize & 0xFF)])
             let encryptedLength = try ShadowsocksAEADCrypto.seal(
                 cipher: cipher, key: subkey, nonce: nonce.next(), plaintext: lengthBytes
             )
             output.append(encryptedLength)
 
-            // Encrypt payload
             let encryptedPayload = try ShadowsocksAEADCrypto.seal(
                 cipher: cipher, key: subkey, nonce: nonce.next(), plaintext: chunk
             )
@@ -277,8 +252,6 @@ nonisolated class ShadowsocksAEADWriter {
 // MARK: - ShadowsocksAEADReader (Decrypt)
 
 /// Decrypts Shadowsocks AEAD chunk format.
-///
-/// State machine: `.waitingSalt` -> `.readingLength` -> `.readingPayload`
 nonisolated class ShadowsocksAEADReader {
     private let cipher: ShadowsocksCipher
     private let masterKey: Data
@@ -309,7 +282,6 @@ nonisolated class ShadowsocksAEADReader {
         }
     }
 
-    /// Feeds ciphertext and returns any available decrypted plaintext.
     func open(ciphertext: Data) throws -> Data {
         guard cipher != .none else { return ciphertext }
 
@@ -330,7 +302,6 @@ nonisolated class ShadowsocksAEADReader {
                 continue
 
             case .readingLength:
-                // Encrypted length = 2 bytes + tagSize
                 let needed = 2 + cipher.tagSize
                 guard remaining >= needed else { break }
 
@@ -348,7 +319,6 @@ nonisolated class ShadowsocksAEADReader {
                 continue
 
             case .readingPayload:
-                // Encrypted payload = payloadLength + tagSize
                 let needed = pendingPayloadLength + cipher.tagSize
                 guard remaining >= needed else { break }
 
@@ -367,7 +337,6 @@ nonisolated class ShadowsocksAEADReader {
             break
         }
 
-        // Compact buffer only when dead space exceeds threshold
         if bufferOffset > Self.compactThreshold {
             buffer.removeSubrange(0..<bufferOffset)
             bufferOffset = 0
@@ -389,7 +358,6 @@ enum ShadowsocksUDPCrypto {
     static func encrypt(cipher: ShadowsocksCipher, masterKey: Data, payload: Data) throws -> Data {
         guard cipher != .none else { return payload }
 
-        // Generate random salt
         var saltBytes = [UInt8](repeating: 0, count: cipher.saltSize)
         _ = SecRandomCopyBytes(kSecRandomDefault, saltBytes.count, &saltBytes)
         let salt = Data(saltBytes)
@@ -410,7 +378,6 @@ enum ShadowsocksUDPCrypto {
         return result
     }
 
-    /// Decrypts a UDP packet: extract salt, derive subkey, AEAD open.
     static func decrypt(cipher: ShadowsocksCipher, masterKey: Data, data: Data) throws -> Data {
         guard cipher != .none else { return data }
 

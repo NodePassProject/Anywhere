@@ -7,26 +7,18 @@
 
 import Foundation
 
-/// gRPC transport configuration.
 struct GRPCConfiguration: Codable, Equatable, Hashable {
-    /// Default gRPC service name used when `serviceName` is empty.
     static let defaultServiceName = "xray.transport.internet.grpc.encoding.GRPCService"
 
-    /// gRPC service name. Two interpretations:
-    /// - Plain name (e.g. `"example"`): standard stream names `Tun` / `TunMulti` are used.
-    ///   Path becomes `/<serviceName>/Tun` (or `/TunMulti`).
-    /// - Custom path (starts with `/`, e.g. `"/my/service/TunName"`): treated as the full
-    ///   path; the substring between the first and last `/` becomes the service name and
-    ///   the final segment is the stream name. Components are URL-path-escaped.
+    /// gRPC service name. A plain name maps to `/<name>/Tun` (or `/TunMulti`); a leading
+    /// `/` marks a full custom path whose final segment is the stream name.
     let serviceName: String
 
-    /// HTTP/2 `:authority` header value. When empty, derived from the TLS SNI /
-    /// Reality server name / server address at dial time.
+    /// HTTP/2 `:authority` value; when empty, derived from SNI / server address at dial time.
     let authority: String
 
-    /// When `true`, uses the `TunMulti` stream (`MultiHunk` messages) instead of `Tun`.
-    /// A single-element `MultiHunk` is wire-compatible with `Hunk`, so encoding always
-    /// emits one data element per message regardless of mode; decoding accepts both.
+    /// When `true`, uses the `TunMulti` stream. A single-element `MultiHunk` is
+    /// wire-compatible with `Hunk`, so encoding is identical in both modes.
     let multiMode: Bool
 
     /// Custom `User-Agent` header. When empty, falls back to the default Chrome UA.
@@ -65,14 +57,6 @@ struct GRPCConfiguration: Codable, Equatable, Hashable {
     }
 
     /// Parse gRPC parameters from VLESS URL query parameters.
-    ///
-    /// Recognised keys:
-    /// - `serviceName`: gRPC service name.
-    /// - `authority`: `:authority` override.
-    /// - `mode`: `"gun"` for single-Hunk `Tun`, `"multi"` for `TunMulti`. Default `"gun"`.
-    /// - `userAgent`: custom User-Agent.
-    /// - `idle_timeout`, `health_check_timeout`, `initial_windows_size` (integers).
-    /// - `permit_without_stream` (`"true"`/`"1"`).
     static func parse(from params: [String: String]) -> GRPCConfiguration? {
         let serviceName = params["serviceName"] ?? ""
         let authority = params["authority"] ?? ""
@@ -99,9 +83,7 @@ struct GRPCConfiguration: Codable, Equatable, Hashable {
 
     // MARK: - Path resolution
 
-    /// Returns the `:authority` value to advertise over HTTP/2.
-    ///
-    /// Priority: explicit `authority` config value → TLS SNI → Reality SNI → server address.
+    /// Returns the `:authority` to advertise: explicit config → TLS SNI → Reality SNI → server address.
     func resolvedAuthority(tlsServerName: String?, realityServerName: String?, serverAddress: String) -> String {
         if !authority.isEmpty { return authority }
         if let tlsServerName, !tlsServerName.isEmpty { return tlsServerName }
@@ -109,13 +91,8 @@ struct GRPCConfiguration: Codable, Equatable, Hashable {
         return serverAddress
     }
 
-    /// Returns the HTTP/2 `:path` value for this transport.
-    ///
-    /// - Plain `serviceName`: path = `/<url-escaped serviceName>/Tun` (or `/TunMulti`).
-    /// - `serviceName` starting with `/`: treated as a full custom path. The part between
-    ///   the first and last `/` becomes the service path (each segment URL-escaped); the
-    ///   part after the last `/` is the stream name. For multi mode, if the last segment
-    ///   contains `|` the first half is Tun and the second is TunMulti.
+    /// Returns the HTTP/2 `:path`: `/<escaped serviceName>/Tun[Multi]`, or the custom
+    /// path when `serviceName` starts with `/`. Components are URL-path-escaped.
     func resolvedPath() -> String {
         let name = serviceName.isEmpty ? Self.defaultServiceName : serviceName
         if !name.hasPrefix("/") {
@@ -136,8 +113,7 @@ struct GRPCConfiguration: Codable, Equatable, Hashable {
         let streamName: String
         let parts = endingPath.split(separator: "|", omittingEmptySubsequences: false).map { String($0) }
         if multiMode {
-            // A `|` in the last segment splits Tun (before) from TunMulti (after);
-            // without `|`, the single stream name is reused for both modes.
+            // `|` splits the Tun name (before) from the TunMulti name (after); without it one name serves both.
             streamName = parts.count >= 2 ? parts[1] : parts[0]
         } else {
             streamName = parts[0]
@@ -147,20 +123,17 @@ struct GRPCConfiguration: Codable, Equatable, Hashable {
         return "\(prefix)/\(urlPathEscape(streamName))"
     }
 
-    /// Percent-encodes a single URL path segment.
     private func urlPathEscape(_ value: String) -> String {
         return value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
     }
 }
 
-/// gRPC transport errors.
 enum GRPCError: Error, LocalizedError {
     case setupFailed(String)
     case connectionClosed
     case invalidResponse(String)
     case compressedMessageUnsupported
-    /// Server closed the stream with a non-OK gRPC status (trailer headers).
-    /// Example: `.callFailed(status: 12, name: "UNIMPLEMENTED", message: "unknown service …")`.
+    /// Server closed the stream with a non-OK gRPC status code in trailer headers.
     case callFailed(status: Int, name: String, message: String?)
 
     var errorDescription: String? {

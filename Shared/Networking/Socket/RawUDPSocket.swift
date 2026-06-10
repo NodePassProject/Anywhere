@@ -14,14 +14,9 @@ private let logger = AnywhereLogger(category: "RawUDPSocket")
 
 /// UDP transport over a connected non-blocking POSIX `SOCK_DGRAM`.
 ///
-/// DNS goes through ``DNSResolver``. Reads are driven by a
-/// `DispatchSourceRead` that loops `recv(2)` until `EAGAIN`, so one
-/// wake-up drains a burst of packets. Sends are non-blocking `send(2)`;
-/// `EAGAIN` drops the datagram (the upper layer retransmits).
-///
-/// All I/O runs on the internal `ioQueue`. The connect completion and
-/// receive handler fire on the caller's queue when supplied; `send`,
-/// `startReceiving`, and `cancel` are safe to call from any thread.
+/// All I/O runs on the internal `ioQueue`; `send`, `startReceiving`, and
+/// `cancel` are safe from any thread. Send-side `EAGAIN` drops the datagram
+/// (the upper layer retransmits).
 nonisolated final class RawUDPSocket {
 
     enum State {
@@ -32,9 +27,7 @@ nonisolated final class RawUDPSocket {
 
     // MARK: Constants
 
-    /// 65 KiB covers the largest possible UDP payload. Reused across
-    /// `recv(2)` calls so the loop only allocates for the per-packet
-    /// `Data` copy handed to the handler.
+    /// Covers the largest possible UDP payload.
     private static let receiveBufferSize = 65536
 
     // MARK: State
@@ -74,30 +67,18 @@ nonisolated final class RawUDPSocket {
     private var receiveHandlerQueue: DispatchQueue?
     private var rxBuffer = [UInt8](repeating: 0, count: RawUDPSocket.receiveBufferSize)
 
-    /// Datagrams that arrived after the socket was connected but before
-    /// the upper layer called `startReceiving`. Mostly empty for
-    /// UDP-connected sockets (server only sends after we send first), but
-    /// real when this socket is reused under chained QUIC: the QUIC client
-    /// initial races with the wrapper's lazy `startReceiving` install, so
-    /// without a tiny pre-handler buffer the server's response Initial can
-    /// land on `drainReads` while `receiveHandler == nil` and get dropped.
-    /// Bounded so a malformed peer that fires a burst before we arm the
-    /// handler can't OOM us; matches `DirectUDPProxyConnection`'s cap.
+    /// Datagrams received before `startReceiving` arms the handler — real under
+    /// chained QUIC, where the server's response races the lazy handler install.
+    /// Bounded so a pre-handler burst can't OOM us.
     private var pendingDatagrams: [Data] = []
     private static let maxPendingDatagrams = 1024
-    /// One-shot warn latch — when the pre-handler buffer fills before the
-    /// upper layer arms `startReceiving`, we lose the head-of-queue. Stays
-    /// silent in the common case (handler arms in tens of µs); only a
-    /// chained-dial that stalls before arming will trip this.
+    /// One-shot latch for the pre-handler overflow warning.
     private var didWarnPendingOverflow = false
 
     // MARK: - Lifecycle
 
-    /// Kernel `SO_SNDBUF`/`SO_RCVBUF` size applied on connect. The relay
-    /// transports (SOCKS5/Shadowsocks upstream) keep the high-throughput
-    /// default (``SocketHelpers/kernelSocketBufferSize``); direct-bypass flows
-    /// pass the smaller ``SocketHelpers/directDatagramSocketBufferSize`` so a
-    /// per-peer flow storm can't exhaust the extension's memory budget.
+    /// Kernel `SO_SNDBUF`/`SO_RCVBUF` applied on connect; direct-bypass flows
+    /// pass a smaller size so per-peer fan-out can't exhaust the memory budget.
     private let socketBufferSize: Int32
 
     init(socketBufferSize: Int32 = SocketHelpers.kernelSocketBufferSize) {
@@ -106,14 +87,8 @@ nonisolated final class RawUDPSocket {
 
     // MARK: - Connect
 
-    /// Resolves `host` via ``DNSResolver`` and creates a connected
-    /// non-blocking UDP socket to `port`.
-    ///
-    /// - Parameters:
-    ///   - host: Remote hostname or literal IP.
-    ///   - port: Remote UDP port.
-    ///   - completionQueue: Queue on which `completion` is invoked.
-    ///   - completion: `nil` on success, a ``SocketError`` on failure.
+    /// Resolves `host` and connects a non-blocking UDP socket; `completion`
+    /// fires on `completionQueue`.
     func connect(host: String, port: UInt16,
                  completionQueue: DispatchQueue,
                  completion: @escaping (Error?) -> Void) {
@@ -135,8 +110,6 @@ nonisolated final class RawUDPSocket {
                 return
             }
 
-            // Try each resolved IP in order, matching RawTCPSocket's behavior on
-            // mixed v4/v6 records.
             var lastError: SocketError?
             for ip in ips {
                 switch self.attemptConnect(ip: ip, port: port) {
@@ -155,8 +128,7 @@ nonisolated final class RawUDPSocket {
         }
     }
 
-    /// Builds a sockaddr from `ip`, creates the socket, applies options, and
-    /// calls `connect(2)`. Must run on `ioQueue`.
+    /// Creates, configures, and connects the socket. Must run on `ioQueue`.
     private func attemptConnect(ip: String, port: UInt16) -> Result<Void, SocketError> {
         guard let endpoint = IPEndpoint(ip: ip, port: port) else {
             return .failure(.connectionFailed("inet_pton failed for \(ip)"))
@@ -189,7 +161,6 @@ nonisolated final class RawUDPSocket {
         return .success(())
     }
 
-    /// Applies Darwin-specific UDP socket options.
     private func applyUDPSocketOptions(fd: Int32) {
         SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_NOSIGPIPE, value: 1)
         SocketHelpers.setDatagramBuffers(fd, size: socketBufferSize)
@@ -197,18 +168,10 @@ nonisolated final class RawUDPSocket {
 
     // MARK: - Receive
 
-    /// Installs a receive handler. Fires on `handlerQueue` (or `ioQueue` if
-    /// nil) once per datagram. Calling twice replaces the previous handler.
-    ///
-    /// `errorHandler`, when supplied, fires once on the same queue when the
-    /// recv loop encounters a non-transient `errno` (anything other than
-    /// EAGAIN/EWOULDBLOCK/EINTR). After the error handler fires, the read
-    /// source stops, so callers should treat this as a terminal event and
-    /// close the flow — otherwise the socket sits dead until the next send
-    /// surfaces ``SocketError/notConnected``.
-    ///
-    /// Drains any datagrams that arrived between `connect` and this call
-    /// so they reach the new handler instead of being silently dropped.
+    /// Installs the receive handler (fires on `handlerQueue`, or `ioQueue` if
+    /// nil) and drains datagrams buffered since connect. `errorHandler` fires
+    /// once on a non-transient recv errno; the read source then stops, so
+    /// callers should treat it as terminal and close the flow.
     func startReceiving(queue handlerQueue: DispatchQueue? = nil,
                         handler: @escaping (Data) -> Void,
                         errorHandler: ((Error) -> Void)? = nil) {
@@ -229,7 +192,7 @@ nonisolated final class RawUDPSocket {
         }
     }
 
-    /// Arms the read source. Runs on `ioQueue` via the connect path.
+    /// Arms the read source. Must run on `ioQueue`.
     private func armReadSource() {
         guard socketFD >= 0, readSource == nil else { return }
         let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: ioQueue)
@@ -253,9 +216,7 @@ nonisolated final class RawUDPSocket {
             if n < 0 {
                 let err = errno
                 if err == EAGAIN || err == EWOULDBLOCK || err == EINTR { return }
-                // Surface terminal recv failures so the flow can close; clear
-                // the read source so the dispatch event handler stops firing
-                // on the failed fd.
+                // Terminal recv failure: stop the read source and surface the error once.
                 let errorHandler = self.receiveErrorHandler
                 let handlerQueue = self.receiveHandlerQueue
                 self.receiveErrorHandler = nil
@@ -282,10 +243,7 @@ nonisolated final class RawUDPSocket {
                     handler(data)
                 }
             } else {
-                // Handler not yet installed (lazy `startReceiving` from
-                // the wrapper). Buffer the datagram so it reaches the
-                // handler when it eventually arms; cap so a burst before
-                // install can't grow unbounded.
+                // No handler yet; buffer (bounded) until startReceiving arms.
                 if pendingDatagrams.count >= Self.maxPendingDatagrams {
                     pendingDatagrams.removeFirst()
                     PerformanceMonitor.event(.udpBufferOverflow)
@@ -345,22 +303,16 @@ nonisolated final class RawUDPSocket {
     /// Safe to call from any thread; idempotent.
     func cancel() {
         guard latchCancelled() else { return }
-        // Strong `self`, not `[weak self]`: a socket cancelled as it deallocates
-        // must still tear down, or the FD + its 4 MB buffers + read source leak.
+        // Strong self: a socket cancelled as it deallocates must still tear
+        // down, or the fd and its buffers leak.
         ioQueue.async {
             self.performTeardownOnIOQueue()
         }
     }
 
-    /// Synchronous variant of ``cancel``. Closes the socket FD before
-    /// returning, so callers can rely on the FD being freed — used by the
-    /// FD-pressure relief path so an evicted flow's FD is actually back in
-    /// the table before the caller retries `socket(2)`.
-    ///
-    /// MUST NOT be called from this socket's `ioQueue` (would deadlock on
-    /// the `ioQueue.sync` below). The relief path reaches it on
-    /// `TunnelStack.udpQueue` (which owns the flow table), evicting a *distinct*
-    /// idle flow's socket — never the requester's own `ioQueue`.
+    /// Synchronous ``cancel`` — the fd is closed on return, as the FD-pressure
+    /// relief path requires. MUST NOT be called from this socket's `ioQueue`
+    /// (deadlocks on the `ioQueue.sync`).
     func cancelSync() {
         guard latchCancelled() else { return }
         ioQueue.sync { [weak self] in
@@ -368,9 +320,7 @@ nonisolated final class RawUDPSocket {
         }
     }
 
-    /// Atomically transitions the socket to `.cancelled`. Returns `true` if
-    /// the caller was the one that transitioned it (and therefore owns the
-    /// teardown), `false` if it was already cancelled.
+    /// Latches `.cancelled`; returns `true` if the caller owns teardown.
     private func latchCancelled() -> Bool {
         stateLock.withLock {
             if case .cancelled = _state { return false }

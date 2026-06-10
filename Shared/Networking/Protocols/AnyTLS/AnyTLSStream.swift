@@ -10,20 +10,12 @@ import Foundation
 private let logger = AnywhereLogger(category: "AnyTLSStream")
 
 /// One logical stream multiplexed inside an `AnyTLSSession`.
-///
-/// Outgoing bytes are wrapped in a `cmdPSH(sid, …)` frame and run through the
-/// session's padding-aware writer. Incoming bytes arrive from the session's
-/// recv loop via ``deliverData(_:)`` / ``deliverClose(error:)`` and are
-/// surfaced through the standard ``ProxyConnection`` receive API: if a
-/// callback is already waiting it fires immediately; otherwise the bytes
-/// queue until ``receiveRaw(completion:)`` is called.
 nonisolated final class AnyTLSStream: ProxyConnection {
 
     let sid: UInt32
     private weak var session: AnyTLSSession?
 
-    /// Snapshot of the session's TLS version, captured at construction so
-    /// `outerTLSVersion` keeps working after the session goes away.
+    /// Captured at construction so `outerTLSVersion` keeps working after the session goes away.
     private let cachedTLSVersion: TLSVersion?
 
     private let receiveLock = UnfairLock()
@@ -32,13 +24,10 @@ nonisolated final class AnyTLSStream: ProxyConnection {
     private var receiveError: Error?
     private var eof: Bool = false
 
-    /// Set true once `cancel()` has run so the session does not echo a FIN
-    /// back to itself when it tears the stream down.
+    /// Set by `cancel()` so the session does not echo a FIN back to itself.
     private(set) var locallyCancelled: Bool = false
 
-    /// Fires exactly once when the stream transitions to ended (caller
-    /// `cancel()`, inbound cmdFIN, or transport failure). `AnyTLSClient`
-    /// uses this to return the underlying session to the idle pool.
+    /// Fires exactly once when the stream ends; used to return the session to the idle pool.
     var onEnd: (() -> Void)?
 
     init(sid: UInt32, session: AnyTLSSession, outerTLSVersion: TLSVersion?) {
@@ -87,8 +76,7 @@ nonisolated final class AnyTLSStream: ProxyConnection {
             completion(nil, nil)
             return
         }
-        // Stash the callback; the session's recv loop will deliver bytes as
-        // they arrive, or signal EOF/error on close.
+        // Stash the callback; the recv loop delivers bytes or EOF/error later.
         pendingReceive = completion
         receiveLock.unlock()
     }
@@ -103,8 +91,7 @@ nonisolated final class AnyTLSStream: ProxyConnection {
         guard !already else { return }
         logger.debug("[AnyTLSStream] cancel sid=\(sid)")
         session?.streamClosed(sid: sid)
-        // Local close is also an end — fire the recycle hook so the
-        // session goes back to the idle pool.
+        // Local close is also an end — fire the recycle hook.
         fireOnEndOnce()
     }
 
@@ -123,8 +110,7 @@ nonisolated final class AnyTLSStream: ProxyConnection {
         }
     }
 
-    /// Delivers a clean EOF (`error == nil`) or transport-level failure
-    /// (`error != nil`). After this call the stream rejects further reads.
+    /// Delivers a clean EOF (`nil`) or transport failure; further reads are rejected.
     func deliverClose(error: Error?) {
         receiveLock.lock()
         if eof || receiveError != nil {

@@ -11,12 +11,8 @@ private let logger = AnywhereLogger(category: "XHTTP")
 
 // MARK: - XHTTP Channel Role
 
-/// Which half of an XHTTP session a connection drives.
-///
-/// `.combined` (default) runs both directions over one connection. For
-/// up/download detach the download leg is `.downloadOnly` (issues the GET, reads
-/// the body) and owns an `.uploadOnly` ``XHTTPConnection/uploadChannel`` (issues
-/// the POST(s)); the two are distinct connections sharing one session ID.
+/// Which half of an XHTTP session a connection drives; a detached session pairs
+/// a `.downloadOnly` leg (GET) with an `.uploadOnly` leg (POSTs) sharing one session ID.
 enum XHTTPChannelRole {
     case combined
     case downloadOnly
@@ -26,15 +22,13 @@ enum XHTTPChannelRole {
 // MARK: - XHTTPConnection
 
 /// XHTTP connection implementing packet-up, stream-up, and stream-one modes.
-///
-/// Uses the same closure-based transport abstraction as ``WebSocketConnection`` and ``HTTPUpgradeConnection``.
 nonisolated class XHTTPConnection {
 
     let configuration: XHTTPConfiguration
     let mode: XHTTPMode
     let sessionId: String
 
-    // Download / stream-one connection (closure-based, from ProxyClient)
+    // Download / stream-one connection
     let downloadSend: (Data, @escaping (Error?) -> Void) -> Void
     let downloadReceive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
     let downloadCancel: () -> Void
@@ -47,12 +41,9 @@ nonisolated class XHTTPConnection {
     var uploadReceive: ((@escaping (Data?, Bool, Error?) -> Void) -> Void)?
     var uploadCancel: (() -> Void)?
 
-    // Up/download detach. Set by the dialer before `performSetup`; `.combined`
-    // legs leave these at their defaults.
     /// Role of this connection in an up/download-detached session.
     var role: XHTTPChannelRole = .combined
-    /// Upload leg, owned by the download-leg coordinator when detached (else nil).
-    /// `send` is delegated here; `receive` always reads this (download) leg.
+    /// Upload leg owned by this download leg when detached; sends are delegated to it.
     var uploadChannel: XHTTPConnection?
 
     // State
@@ -62,9 +53,7 @@ nonisolated class XHTTPConnection {
     var _isConnected = false
     let lock = UnfairLock()
 
-    // Packet-up batching state. Each `send()` in packet-up mode appends to the queue
-    // and returns once the batched POST has been written; a single in-flight flush
-    // drains the queue into one POST per `scMinPostsIntervalMs`.
+    // Packet-up batching: sends queue here; a single in-flight flush drains one POST per `scMinPostsIntervalMs`.
     var packetUpQueue: [(Data, (Error?) -> Void)] = []
     var packetUpFlushPending = false
     var packetUpLastFlushTime: UInt64 = 0
@@ -77,13 +66,11 @@ nonisolated class XHTTPConnection {
     var h2ReadBuffer = Data()
     var h2DataBuffer = Data()
 
-    /// Maximum h2ReadBuffer size (2 MB). Protects against unbounded growth
+    /// Caps h2ReadBuffer to bound memory growth.
     static let maxH2ReadBufferSize = 2_097_152
-    /// Connection-level send window (RFC 7540 §6.9: stream 0).
-    /// Updated by WINDOW_UPDATE on stream 0 only.
+    /// Connection-level send window (RFC 7540 §6.9); updated by WINDOW_UPDATE on stream 0 only.
     var h2PeerConnectionWindow: Int = 65535
-    /// Stream-level send window for the active upload stream (stream-up / stream-one).
-    /// Updated by SETTINGS INITIAL_WINDOW_SIZE and stream-level WINDOW_UPDATE.
+    /// Send window for the active upload stream; updated by SETTINGS INITIAL_WINDOW_SIZE and stream WINDOW_UPDATE.
     var h2PeerStreamSendWindow: Int = 65535
     var h2PeerInitialWindowSize: Int = 65535
     var h2LocalWindowSize: Int = 4_194_304  // Match h2StreamWindowSize (4MB)
@@ -91,12 +78,9 @@ nonisolated class XHTTPConnection {
     var h2ResponseReceived = false
     var h2StreamClosed = false
 
-    /// Continuations stored when sends are blocked by flow control (window == 0).
-    /// All are invoked by the WINDOW_UPDATE handler; each re-checks its own window.
+    /// Sends blocked on flow control; the WINDOW_UPDATE handler invokes all, each re-checks its window.
     var h2FlowResumptions: [() -> Void] = []
-    /// Per-stream send windows for packet-up streams that are blocked on flow control.
-    /// Keyed by stream ID; entries are created when a packet-up send blocks, updated by
-    /// stream-level WINDOW_UPDATE, and removed when the send resumes.
+    /// Send windows for packet-up streams blocked on flow control, keyed by stream ID.
     var h2PacketStreamWindows: [UInt32: Int] = [:]
 
     /// Bytes received but not yet acknowledged via WINDOW_UPDATE (connection level).
@@ -104,29 +88,24 @@ nonisolated class XHTTPConnection {
     /// Bytes received but not yet acknowledged via WINDOW_UPDATE (stream level, download stream).
     var h2StreamReceiveConsumed: Int = 0
 
-    /// Counts consecutive synchronous frame parses in readH2Frame to trampoline
-    /// only every Nth call, avoiding both stack overflow and per-frame dispatch overhead.
+    /// Consecutive synchronous parses in readH2Frame; trampolined every Nth call to avoid stack overflow.
     var h2ReadDepth: Int = 0
 
     // HTTP/2 multiplexing state (for stream-up / packet-up over H2)
     var h2UploadStreamId: UInt32 = 3      // Fixed upload stream for stream-up
     var h2NextPacketStreamId: UInt32 = 3   // Next stream ID for packet-up uploads
-    /// Stream id treated as the download (GET) stream when reading H2 frames.
-    /// 1 on a normal/download leg; set out of range on an `.uploadOnly` leg so
-    /// its POST responses are drained for flow control rather than delivered.
+    /// Download (GET) stream id when reading H2 frames; set out of range on an
+    /// `.uploadOnly` leg so its POST responses are drained, not delivered.
     var h2DownloadStreamId: UInt32 = 1
 
-    // HTTP/3 state. XHTTP-over-h3 multiplexes its modes onto QUIC streams via an
-    // HTTP3Session, rather than framing over a single byte stream like H2.
+    // HTTP/3 state (modes multiplexed onto QUIC streams via HTTP3Session)
     var h3Session: HTTP3Session?
-    /// Download stream: the GET response body (stream-up / packet-up) or the
-    /// single full-duplex request stream (stream-one).
+    /// Download stream: the GET response body, or the full-duplex stream in stream-one.
     var h3Download: HTTP3RequestStream?
     /// Persistent upload POST stream (stream-up only).
     var h3Upload: HTTP3RequestStream?
     var h3Closed = false
 
-    /// Whether this connection runs over HTTP/3 (set when built with an HTTP3Session).
     var useHTTP3: Bool { h3Session != nil }
 
     var isConnected: Bool {
@@ -139,20 +118,15 @@ nonisolated class XHTTPConnection {
 
     // MARK: - X-Padding (matching Xray-core xpadding.go)
 
-    /// Applies X-Padding to the raw HTTP request string based on configuration.
-    ///
-    /// Non-obfs mode (default): `Referer: https://{host}{path}?x_padding=XXX...`
-    /// Obfs mode: Places padding in header, query, cookie, or queryInHeader based on config.
+    /// Applies X-Padding to the raw HTTP request (Referer-based by default, obfs placements otherwise).
     func applyPadding(to request: inout String, forPath path: String) {
         let padding = configuration.generatePadding()
 
         if !configuration.xPaddingObfsMode {
-            // Default mode: padding as Referer URL query param
             request += "Referer: https://\(configuration.host)\(path)?\(configuration.xPaddingKey)=\(padding)\r\n"
             return
         }
 
-        // Obfs mode: place based on configured placement
         switch configuration.xPaddingPlacement {
         case .header:
             request += "\(configuration.xPaddingHeader): \(padding)\r\n"
@@ -161,7 +135,7 @@ nonisolated class XHTTPConnection {
         case .cookie:
             request += "Cookie: \(configuration.xPaddingKey)=\(padding)\r\n"
         case .query:
-            // Query padding is appended to the URL path in the request line — handled separately
+            // Appended to the URL in the request line.
             break
         default:
             break
@@ -230,7 +204,6 @@ nonisolated class XHTTPConnection {
         }
     }
 
-    /// Appends a segment to a URL path, ensuring proper "/" handling.
     func appendToPath(_ path: String, _ segment: String) -> String {
         if path.hasSuffix("/") {
             return path + segment
@@ -238,16 +211,14 @@ nonisolated class XHTTPConnection {
         return path + "/" + segment
     }
 
-    /// Builds the full request URL path with optional query string.
     func buildRequestLine(method: String, path: String, queryParts: [String]) -> String {
         var url = path
         var allQuery = queryParts.filter { !$0.isEmpty }
-        // Include config-level query string (from path after "?"), matching Xray-core GetNormalizedQuery
+        // Config-level query (path after "?"), matching Xray-core GetNormalizedQuery.
         let configQuery = configuration.normalizedQuery
         if !configQuery.isEmpty {
             allQuery.insert(configQuery, at: 0)
         }
-        // Add query-based padding if in obfs+query mode
         if configuration.xPaddingObfsMode && configuration.xPaddingPlacement == .query {
             let padding = configuration.generatePadding()
             allQuery.append("\(configuration.xPaddingKey)=\(padding)")
@@ -260,8 +231,7 @@ nonisolated class XHTTPConnection {
 
     // MARK: - Initializers
 
-    /// Designated initializer. Takes a pre-built download ``TransportClosures``
-    /// so the three convenience inits below are each one line.
+    /// Designated initializer taking a pre-built download `TransportClosures`.
     init(download: TransportClosures, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
         self.configuration = configuration
         self.mode = mode
@@ -274,24 +244,19 @@ nonisolated class XHTTPConnection {
         self._isConnected = true
     }
 
-    /// Creates an XHTTP connection over a plain ``RawTCPSocket`` (security=none).
     convenience init(transport: RawTCPSocket, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
         self.init(download: TransportClosures(rawTCP: transport), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
     }
 
-    /// Creates an XHTTP connection over a ``TLSRecordConnection`` (security=tls or reality).
     convenience init(tlsConnection: TLSRecordConnection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
         self.init(download: TransportClosures(tls: tlsConnection), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
     }
 
-    /// Creates an XHTTP connection over a proxy tunnel (for proxy chaining).
     convenience init(tunnel: ProxyConnection, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String, useHTTP2: Bool = false, uploadConnectionFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)? = nil) {
         self.init(download: TransportClosures(tunnel: tunnel), configuration: configuration, mode: mode, sessionId: sessionId, useHTTP2: useHTTP2, uploadConnectionFactory: uploadConnectionFactory)
     }
 
-    /// Creates an XHTTP connection over HTTP/3 (QUIC). Byte I/O is multiplexed
-    /// over the provided ``HTTP3Session`` rather than a single transport stream,
-    /// so the closure triple is the no-op ``TransportClosures/unused``.
+    /// Over HTTP/3, byte I/O is multiplexed by the session, so the download closures are the no-op `.unused`.
     convenience init(h3Session: HTTP3Session, configuration: XHTTPConfiguration, mode: XHTTPMode, sessionId: String) {
         self.init(download: .unused, configuration: configuration, mode: mode, sessionId: sessionId)
         self.h3Session = h3Session
@@ -299,16 +264,8 @@ nonisolated class XHTTPConnection {
 
     // MARK: - Setup
 
-    /// Performs the initial HTTP handshake (sends the initial request and reads the response headers).
-    ///
-    /// - For stream-one mode: sends a POST with `Transfer-Encoding: chunked` and reads the response headers.
-    /// - For stream-up mode: sends a GET for download stream, establishes upload connection,
-    ///   and sends a streaming POST with `Transfer-Encoding: chunked` (no sequence numbers).
-    /// - For packet-up mode: sends a GET request for the download stream, reads response headers,
-    ///   and establishes the upload connection via the factory.
+    /// Performs the initial HTTP handshake; detached sessions set up the download leg, then the upload leg.
     func performSetup(completion: @escaping (Error?) -> Void) {
-        // Detached coordinator: set up this (download) leg, then the upload leg.
-        // Both share `sessionId`; the VLESS layer above sees one connection.
         guard let uploadChannel else {
             performLegSetup(completion: completion)
             return
@@ -322,15 +279,10 @@ nonisolated class XHTTPConnection {
         }
     }
 
-    /// Sets up a single leg according to its role and HTTP version.
     private func performLegSetup(completion: @escaping (Error?) -> Void) {
         if useHTTP3 {
-            // HTTP/3: all modes multiplex onto QUIC streams via the HTTP3Session.
-            // performH3Setup is role-aware, so an up/download-detached session can
-            // run either leg over its own QUIC session (download-only / upload-only).
             performH3Setup(completion: completion)
         } else if useHTTP2 {
-            // HTTP/2 setup is role-aware (combined / download-only / upload-only).
             performH2Setup(completion: completion)
         } else {
             switch role {
@@ -352,7 +304,6 @@ nonisolated class XHTTPConnection {
 
     // MARK: - Send
 
-    /// Sends data through the XHTTP connection.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         // Detached: writes go to the upload leg; this (download) leg only reads.
         if let uploadChannel {
@@ -360,14 +311,10 @@ nonisolated class XHTTPConnection {
             return
         }
         if mode == .packetUp {
-            // Packet-up batches writes through an internal queue (see
-            // enqueuePacketUpSend). All other modes go directly to the wire.
             enqueuePacketUpSend(data: data, completion: completion)
             return
         }
         if useHTTP3 {
-            // stream-up writes request body to the dedicated upload POST stream;
-            // stream-one writes to its single full-duplex request stream.
             let stream = (mode == .streamUp) ? h3Upload : h3Download
             guard let stream else { completion(XHTTPError.connectionClosed); return }
             stream.sendBody(data, fin: false, completion: completion)
@@ -387,14 +334,12 @@ nonisolated class XHTTPConnection {
         }
     }
 
-    /// Sends data without tracking completion.
     func send(data: Data) {
         send(data: data) { _ in }
     }
 
     // MARK: - Receive
 
-    /// Receives data from the download stream.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         if useHTTP3 {
             receiveH3Data(completion: completion)
@@ -406,7 +351,6 @@ nonisolated class XHTTPConnection {
         }
 
         lock.lock()
-        // Try to get data from chunked decoder buffer first
         if let decoded = chunkedDecoder.nextChunk() {
             lock.unlock()
             completion(decoded, nil)
@@ -420,7 +364,6 @@ nonisolated class XHTTPConnection {
         }
         lock.unlock()
 
-        // Need more data from download connection
         downloadReceive { [weak self] data, _, error in
             guard let self else {
                 completion(nil, XHTTPError.connectionClosed)
@@ -448,7 +391,6 @@ nonisolated class XHTTPConnection {
                 completion(nil, nil)
             } else {
                 self.lock.unlock()
-                // Not enough data for a full chunk, keep reading
                 self.receive(completion: completion)
             }
         }
@@ -456,7 +398,6 @@ nonisolated class XHTTPConnection {
 
     // MARK: - Cancel
 
-    /// Cancels the connection and releases resources.
     func cancel() {
         lock.lock()
         _isConnected = false
@@ -484,11 +425,9 @@ nonisolated class XHTTPConnection {
 
         downloadCancel()
         uploadCancelFn?()
-        // Tear down the HTTP/3 streams and QUIC session (no-ops if not on the h3 path).
         h3Dl?.close()
         h3Up?.close()
         h3Sess?.close()
-        // Detached: tear down the upload leg too.
         uploadChannel?.cancel()
     }
 
@@ -513,8 +452,7 @@ nonisolated class XHTTPConnection {
         }
     }
 
-    /// Schedules a packet-up flush, respecting the `scMinPostsIntervalMs` interval
-    /// since the last flush start (matches Xray-core's `time.Sleep(... - elapsed)`).
+    /// Schedules a flush respecting `scMinPostsIntervalMs` since the last flush start (matches Xray-core).
     private func schedulePacketUpFlush() {
         lock.lock()
         let delayMs = configuration.scMinPostsIntervalMs
@@ -539,9 +477,7 @@ nonisolated class XHTTPConnection {
         }
     }
 
-    /// Drains the packet-up queue (up to `scMaxEachPostBytes`) into a single batched
-    /// POST. On completion, fires every queued completion and chains into the next
-    /// flush if more data has been enqueued in the meantime.
+    /// Drains the queue (up to `scMaxEachPostBytes`) into one POST, then chains into the next flush if needed.
     private func flushPacketUpBatch() {
         lock.lock()
 
@@ -567,9 +503,7 @@ nonisolated class XHTTPConnection {
         var batchedCompletions: [(Error?) -> Void] = []
         while !packetUpQueue.isEmpty {
             let (chunk, completion) = packetUpQueue[0]
-            // Allow the first chunk to exceed maxSize on its own (sendPacketUp will
-            // re-split it); otherwise stop before the limit so the next flush picks
-            // up where this one left off.
+            // The first chunk may exceed maxSize on its own (sendPacketUp re-splits it).
             if !batchedData.isEmpty && batchedData.count + chunk.count > maxSize {
                 break
             }

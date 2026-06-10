@@ -12,17 +12,13 @@ private let logger = AnywhereLogger(category: "AnyTLSClient")
 /// Per-server AnyTLS session pool.
 nonisolated final class AnyTLSClient {
 
-    /// Closure that creates a fresh TLS-backed `ProxyConnection` for a new
-    /// session. Provided by `ProxyClient+AnyTLS` so each AnyTLSClient stays
-    /// independent of the TLS plumbing — the closure already knows about
-    /// the proxy chain (`tunnel`) and the configured TLS knobs.
+    /// Creates a fresh TLS-backed `ProxyConnection` for a new session.
     typealias DialOut = (@escaping (Result<ProxyConnection, Error>) -> Void) -> Void
 
     private let dialOut: DialOut
     private let passwordHash: Data
 
-    /// Defaults clamped to ≥30s/≥30s/≥0 to match `session/client.go`'s
-    /// `NewClient` (it bumps anything ≤5s up to 30s).
+    /// Clamped to ≥30s/≥30s/≥0 to match sing-anytls's `NewClient`.
     let idleSessionCheckInterval: TimeInterval
     let idleSessionTimeout: TimeInterval
     let minIdleSession: Int
@@ -55,9 +51,8 @@ nonisolated final class AnyTLSClient {
         idleTimer?.cancel()
     }
 
-    /// Acquires a session (idle or freshly dialed) and opens a stream on it.
-    /// On success the caller gets an `AnyTLSStream` ready to receive its
-    /// destination address as the first cmdPSH.
+    /// Acquires a session (idle or freshly dialed) and opens a stream on it;
+    /// the stream expects a destination address as its first cmdPSH payload.
     func createStream(completion: @escaping (Result<AnyTLSStream, Error>) -> Void) {
         lock.lock()
         if closed {
@@ -117,8 +112,7 @@ nonisolated final class AnyTLSClient {
         }
     }
 
-    /// Returns every session (active and idle) to the pool's "closed" state.
-    /// Used by `AnyTLSManager.closeAll` and the per-config replace path.
+    /// Closes all sessions (active and idle) and shuts down the pool.
     func closeAll() {
         lock.lock()
         closed = true
@@ -141,9 +135,7 @@ nonisolated final class AnyTLSClient {
             completion(.failure(ProxyError.connectionFailed("Failed to open AnyTLS stream")))
             return
         }
-        // Per sing-anytls's `dieHook` (session/client.go line ~98): when
-        // this stream's pipe closes, return its underlying session to the
-        // idle pool so the next CreateStream can reuse the warm TLS conn.
+        // Per sing-anytls's `dieHook`: return the session to the idle pool when the stream closes.
         stream.onEnd = { [weak self, weak session] in
             guard let self, let session else { return }
             self.returnToPool(session: session)
@@ -151,7 +143,6 @@ nonisolated final class AnyTLSClient {
         completion(.success(stream))
     }
 
-    /// Called by `AnyTLSSession.onClose`. Evict this session from both pools.
     private func evict(session: AnyTLSSession) {
         lock.lock()
         let id = ObjectIdentifier(session)
@@ -160,8 +151,7 @@ nonisolated final class AnyTLSClient {
         lock.unlock()
     }
 
-    /// Returns the session to the idle pool. Called when a stream's lifetime
-    /// ends and no other streams remain (tracked by `SessionRecycler`).
+    /// Returns the session to the idle pool after its last stream closes.
     fileprivate func returnToPool(session: AnyTLSSession) {
         guard session.isAlive else {
             logger.debug("[AnyTLSClient] returnToPool seq=\(session.seq): session already dead, dropping")
@@ -183,8 +173,7 @@ nonisolated final class AnyTLSClient {
     }
 
     private func popIdleSessionLocked() -> AnyTLSSession? {
-        // Prefer the most recently-used session (last appended) so the LRU
-        // tail naturally migrates to the cleanup edge.
+        // Pop most-recently-used so the LRU tail naturally ages out via cleanup.
         while let candidate = idleSessions.popLast() {
             if candidate.isAlive { return candidate }
         }
@@ -215,8 +204,7 @@ nonisolated final class AnyTLSClient {
             lock.unlock()
             return
         }
-        // Walk oldest-first (head of array) — anything past cutoff is killed
-        // unless we're already below the minimum warm count.
+        // Walk oldest-first; anything past cutoff is killed unless below the minimum warm count.
         var survivors: [AnyTLSSession] = []
         var keptCount = 0
         for session in idleSessions {

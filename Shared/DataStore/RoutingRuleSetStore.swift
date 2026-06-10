@@ -91,7 +91,6 @@ class RoutingRuleSetStore {
         ruleSets.filter { $0.name != "ADBlock" }
     }
 
-    /// Bundled ruleset names: supported services + ADBlock.
     private static let builtIn: [String] = {
         serviceCatalog.supportedServices + ["ADBlock"]
     }()
@@ -102,7 +101,6 @@ class RoutingRuleSetStore {
         bypassCountryCode = AWCore.getBypassCountryCode()
         let assignments = AWCore.getRuleSetAssignments()
 
-        // Load custom rulesets
         if let data = JSONBlobStore.shared.load(.customRuleSets),
            let decoded = JSONDecoder().decodeSkippingInvalid([CustomRoutingRuleSet].self, from: data) {
             customRuleSets = decoded
@@ -118,9 +116,8 @@ class RoutingRuleSetStore {
             RoutingRuleSet(id: name, name: name, assignedConfigurationId: assignmentsDict[name])
         }
 
-        // Custom rule sets sit between Services and ADBlock here for stable display
-        // ordering. Runtime priority is enforced separately by DomainRouter, which
-        // queries tiers in: User > ADBlock > Built-in > Country Bypass.
+        // Custom sets sit between Services and ADBlock for display only;
+        // runtime match priority is enforced separately by DomainRouter.
         let insertionIndex = sets.firstIndex(where: { $0.id == "ADBlock" }) ?? sets.endIndex
         for (offset, custom) in customRuleSets.enumerated() {
             let id = custom.id.uuidString
@@ -157,8 +154,7 @@ class RoutingRuleSetStore {
         scheduleSync()
     }
 
-    /// Resets any rule set assignments that reference UUIDs (configuration or chain)
-    /// not in `availableIds`. Returns the names of affected rule sets, or empty.
+    /// Resets assignments referencing ids not in `availableIds`; returns the affected rule set names.
     func clearOrphanedAssignments(availableIds: Set<String>) -> [String] {
         var affected: [String] = []
         for (index, ruleSet) in ruleSets.enumerated() {
@@ -195,7 +191,6 @@ class RoutingRuleSetStore {
         customRuleSets.removeAll { $0.id == id }
         saveCustomRuleSets()
 
-        // Remove assignment for this custom ruleset
         var assignments = AWCore.getRuleSetAssignments()
         assignments.removeValue(forKey: id.uuidString)
         AWCore.setRuleSetAssignments(assignments)
@@ -211,9 +206,7 @@ class RoutingRuleSetStore {
         rebuildRuleSets()
     }
 
-    /// Persists a user-driven reordering of the custom rule sets. The order determines both
-    /// display position and, within the User routing tier, match priority. The caller passes
-    /// the already-reordered set, which must contain the same members as the current list.
+    /// Persists a user-driven reorder; order sets both display position and User-tier match priority.
     func reorderCustomRuleSets(_ ordered: [CustomRoutingRuleSet]) {
         guard Set(ordered.map(\.id)) == Set(customRuleSets.map(\.id)) else { return }
         customRuleSets = ordered
@@ -221,9 +214,7 @@ class RoutingRuleSetStore {
         rebuildRuleSets()
     }
 
-    /// Fetches the subscription URL, parses the response as an `.arrs` rule set, and
-    /// replaces the rules of the existing custom set. The user-given `name` is
-    /// preserved across refreshes so renames stick.
+    /// Fetches and parses the subscription `.arrs` file, replacing the set's rules; the user-given name is preserved.
     func refreshCustomRuleSet(_ id: UUID) async throws {
         guard let index = customRuleSets.firstIndex(where: { $0.id == id }),
               let url = customRuleSets[index].subscriptionURL else {
@@ -253,8 +244,7 @@ class RoutingRuleSetStore {
 
     // MARK: - Rules
 
-    /// Loads rules for a given built-in rule set name. Thread-safe – no instance state accessed.
-    /// All built-in rules are stored in the bundled Rules.db SQLite database.
+    /// Loads rules for a built-in rule set name. Thread-safe — no instance state accessed.
     static func loadRules(for name: String) -> [RoutingRule] {
         if name != "ADBlock" {
             return serviceCatalog.rules(for: name)
@@ -265,12 +255,11 @@ class RoutingRuleSetStore {
     // MARK: - App Group Sync
 
     func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain], serializeConfiguration: @escaping @Sendable (ProxyConfiguration) -> [String: Any]) async {
-        // Snapshot main-actor state
         let snapshot = ruleSets
         let customSnapshot = customRuleSets
 
-        // Pre-resolve each rule set's assigned target on the main actor — chain composites
-        // are constructed here so the detached worker only sees Sendable lookup data.
+        // Resolve targets (including chain composites) on the main actor so the
+        // detached worker only sees Sendable lookup data.
         var resolvedTargets: [String: ProxyConfiguration] = [:]
         for ruleSet in snapshot {
             guard let assignedId = ruleSet.assignedConfigurationId,
@@ -292,7 +281,6 @@ class RoutingRuleSetStore {
             for ruleSet in snapshot {
                 guard let assignedId = ruleSet.assignedConfigurationId else { continue }
 
-                // Load rules: custom rulesets use captured data, built-in use database
                 let domainRules: [RoutingRule]
                 if ruleSet.isCustom,
                    let customId = UUID(uuidString: ruleSet.id),
@@ -349,7 +337,6 @@ class RoutingRuleSetStore {
                 }
             }
 
-            // Fetch bypass country rules
             var bypassRules: [[String: Any]] = []
             let countryCode = AWCore.getBypassCountryCode()
             if !countryCode.isEmpty {
@@ -389,8 +376,7 @@ class RoutingRuleSetStore {
         scheduleSync()
     }
 
-    /// Schedules a routing re-sync to the Network Extension after a rule / assignment / bypass
-    /// change. Keeping it here means views never trigger routing syncs themselves.
+    /// Schedules a routing re-sync to the Network Extension after any rule/assignment/bypass change.
     private func scheduleSync() {
         Task { await syncToAppGroup() }
     }
@@ -399,21 +385,16 @@ class RoutingRuleSetStore {
 // MARK: - App Group Sync & Orphan Cleanup (convenience)
 
 extension RoutingRuleSetStore {
-    /// Builds routing config from the given data + current rule sets and writes it to the
-    /// App Group for the Network Extension. Uses the built-in ``serializeConfiguration``.
     func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain]) async {
         await syncToAppGroup(configurations: configurations, chains: chains, serializeConfiguration: Self.serializeConfiguration)
     }
 
-    /// Convenience that reads the current configurations and chains from their stores.
     func syncToAppGroup() async {
         await syncToAppGroup(configurations: ConfigurationStore.shared.configurations,
                              chains: ChainStore.shared.chains)
     }
 
-    /// Clears assignments whose target proxy/chain no longer exists and records the affected
-    /// names for the UI. Called from the stores' `coordinate()` when configurations or chains
-    /// change, which re-syncs routing afterwards.
+    /// Clears assignments whose target proxy/chain no longer exists and records the affected names for the UI.
     func clearOrphans(configurations: [ProxyConfiguration], chains: [ProxyChain]) {
         let availableIds = Set(configurations.map { $0.id.uuidString })
             .union(chains.map { $0.id.uuidString })
@@ -428,8 +409,7 @@ extension RoutingRuleSetStore {
 
     // MARK: - Configuration Serialization
 
-    /// Serializes a configuration into the `[String: Any]` shape the Network Extension's
-    /// routing layer expects. Moved here from `VPNViewModel` so routing stays self-contained.
+    /// Serializes a configuration into the `[String: Any]` shape the Network Extension's routing layer expects.
     nonisolated static func serializeConfiguration(_ configuration: ProxyConfiguration) -> [String: Any] {
         let vlessUUID: UUID
         let vlessEncryption: String
@@ -452,7 +432,6 @@ extension RoutingRuleSetStore {
             "outboundProtocol": configuration.outboundProtocol.rawValue,
         ]
 
-        // Add protocol-specific credential fields
         switch configuration.outbound {
         case .vless: break
         case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
@@ -511,7 +490,6 @@ extension RoutingRuleSetStore {
             configurationDict["http3Password"] = password
         }
 
-        // Add Reality configuration if present
         if case .reality(let reality) = configuration.securityLayer {
             configurationDict["realityServerName"] = reality.serverName
             configurationDict["realityPublicKey"] = reality.publicKey.base64EncodedString()
@@ -519,7 +497,6 @@ extension RoutingRuleSetStore {
             configurationDict["realityFingerprint"] = reality.fingerprint.rawValue
         }
 
-        // Add TLS configuration if present
         if case .tls(let tls) = configuration.securityLayer {
             configurationDict["tlsServerName"] = tls.serverName
             if let alpn = tls.alpn {
@@ -567,9 +544,7 @@ extension RoutingRuleSetStore {
                     configurationDict["xhttpHeaders"] = xhttp.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
                 }
                 configurationDict["xhttpNoGRPCHeader"] = xhttp.noGRPCHeader
-                // Up/download detach: carry the whole settings as one JSON value
-                // (lossless) rather than flattening each field. (Other advanced
-                // XHTTP fields are not serialized on this routing-rule path.)
+                // Carry downloadSettings as one JSON value (lossless) rather than flattening each field.
                 if let ds = xhttp.downloadSettings,
                    let data = try? JSONEncoder().encode(ds),
                    let json = String(data: data, encoding: .utf8) {
@@ -578,7 +553,6 @@ extension RoutingRuleSetStore {
             }
         }
 
-        // Add proxy chain if present
         if let chain = configuration.chain, !chain.isEmpty {
             configurationDict["chain"] = chain.map { Self.serializeConfiguration($0) }
         }

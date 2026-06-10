@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Supported Shadowsocks AEAD cipher methods.
 enum ShadowsocksCipher {
     case aes128gcm
     case aes256gcm
@@ -27,7 +26,7 @@ enum ShadowsocksCipher {
         }
     }
 
-    /// Salt size (also called IV size in Xray-core). Equals keySize for all ciphers.
+    /// Salt size (called IV size in Xray-core).
     var saltSize: Int { keySize }
 
     /// AEAD authentication tag size (16 for all AEAD ciphers).
@@ -46,7 +45,6 @@ enum ShadowsocksCipher {
         }
     }
 
-    /// Whether this is a Shadowsocks 2022 cipher.
     var isSS2022: Bool {
         switch self {
         case .blake3aes128gcm, .blake3aes256gcm, .blake3chacha20poly1305: return true

@@ -13,7 +13,7 @@ nonisolated class MuxClient {
     let configuration: ProxyConfiguration
     let flowQueue: DispatchQueue
 
-    /// Key for identifying the flowQueue (used by removeSession to detect current queue).
+    /// Marks flowQueue so callers can detect they're already on it.
     private static let queueKey = DispatchSpecificKey<Bool>()
 
     private var proxyClient: ProxyClient?
@@ -31,7 +31,6 @@ nonisolated class MuxClient {
     private var writeQueue: [(Data, (Error?) -> Void)] = []
     private var isWriting = false
 
-    // Receive loop + frame parser
     private var frameParser = MuxFrameParser()
 
     // 16s idle timer (matching Xray-core)
@@ -51,7 +50,6 @@ nonisolated class MuxClient {
 
     // MARK: - Session Management
 
-    /// Creates a new mux session for the given target.
     /// Lazily connects the underlying proxy connection on first use.
     func createSession(
         network: MuxNetwork,
@@ -87,7 +85,6 @@ nonisolated class MuxClient {
         )
         sessions[sessionID] = session
 
-        // Reset idle timer when a new session is added
         resetIdleTimer()
 
         let finishCreation = { [weak self] (error: Error?) in
@@ -105,7 +102,6 @@ nonisolated class MuxClient {
                 return
             }
 
-            // Send New frame with target address
             let metadata = MuxFrameMetadata(
                 sessionID: sessionID,
                 status: .new,
@@ -136,7 +132,6 @@ nonisolated class MuxClient {
         }
     }
 
-    /// Removes a session from the map (called by MuxSession on close).
     /// Safe to call from any thread — dispatches to flowQueue if needed.
     func removeSession(_ sessionID: UInt16) {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
@@ -155,12 +150,8 @@ nonisolated class MuxClient {
         }
     }
 
-    /// Closes all sessions and the underlying proxy connection.
-    ///
-    /// `error` is non-nil only when the mux connection died with a transport
-    /// failure (receive/write error on the shared mux pipe). Each owning flow
-    /// then sees the error in its `closeHandler` and reports its own death.
-    /// Pass `nil` for normal teardown (idle close, deliberate cancel).
+    /// `error` is non-nil when the mux connection died with a transport failure;
+    /// pass `nil` for normal teardown (idle close, deliberate cancel).
     func closeAll(error: Error? = nil) {
         guard !closed else { return }
         closed = true
@@ -204,7 +195,6 @@ nonisolated class MuxClient {
             return
         }
 
-        // If already connecting, queue this completion for when connection finishes
         if connecting {
             connectCompletions.append(completion)
             return
@@ -244,7 +234,6 @@ nonisolated class MuxClient {
 
     // MARK: - Write Serialization
 
-    /// Enqueues a frame for serialized writing.
     func writeFrame(_ data: Data, completion: @escaping (Error?) -> Void) {
         flowQueue.async { [weak self] in
             guard let self, !self.closed else {

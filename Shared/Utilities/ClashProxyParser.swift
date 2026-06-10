@@ -61,8 +61,7 @@ struct ClashProxyParser {
 
     // MARK: - Dispatch
 
-    /// Clash `type:` values we can map to a `ProxyConfiguration`. Every other
-    /// value is silently skipped because we have no matching outbound.
+    /// Clash `type:` values without a matching outbound are silently skipped.
     private static func parseProxy(_ node: Node) -> ProxyConfiguration? {
         guard let type = getString(node, key: "type") else { return nil }
         switch type {
@@ -111,8 +110,6 @@ struct ClashProxyParser {
         return result.isEmpty ? nil : result
     }
 
-    /// Pulls the `name`/`server`/`port` triple every Clash proxy requires.
-    /// Rejects nodes whose port is out of the 1...65535 range.
     private static func parseBasics(_ node: Node) -> (name: String, server: String, port: UInt16)? {
         guard
             let name = getString(node, key: "name"),
@@ -141,7 +138,6 @@ struct ClashProxyParser {
         let rawFlow = getString(node, key: "flow")
         let flow: String? = (rawFlow?.isEmpty == false) ? rawFlow : nil
 
-        // Security: reality > tls > none
         let tlsEnabled = getBool(node, key: "tls") ?? false
         let realityOpts = node["reality-opts"]
         let hasReality = realityOpts.type == .map
@@ -198,9 +194,7 @@ struct ClashProxyParser {
     
     // MARK: - Hysteria2
 
-    /// Parses a Clash `type: hysteria2` node. Our Hysteria client speaks
-    /// plain Hysteria v2 without Salamander obfuscation or multi-port hop,
-    /// so any node that requests those is skipped.
+    /// Our Hysteria client lacks Salamander obfuscation and multi-port hop, so nodes requesting them are skipped.
     private static func parseHysteria2Proxy(_ node: Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
 
@@ -234,12 +228,8 @@ struct ClashProxyParser {
 
     // MARK: - Trojan
 
-    /// Parses a Clash `type: trojan` node into a `.trojan(password:tls:)`
-    /// outbound. Reality, ECH, gRPC, the Trojan-Go SS layer, and any
-    /// transport other than bare TCP are out of scope and cause the node to
-    /// be skipped — silently downgrading a WS or Reality node to plain
-    /// Trojan would route traffic over a different wire format than the
-    /// server expects.
+    /// Nodes using Reality, ECH, gRPC, the Trojan-Go SS layer, or any non-TCP transport are
+    /// skipped — silently downgrading would speak a different wire format than the server expects.
     private static func parseTrojanProxy(_ node: Node) -> ProxyConfiguration? {
         guard
             let basics = parseBasics(node),
@@ -271,11 +261,7 @@ struct ClashProxyParser {
 
     // MARK: - AnyTLS
 
-    /// Parses a Clash `type: anytls` node. AnyTLS always runs over a mandatory
-    /// TLS layer, so we build a `.anytls` outbound around a `TLSConfiguration`
-    /// (`servername`/`sni`, `alpn`, `client-fingerprint`). The warm-pool knobs
-    /// map straight across; `AnyTLSClient` clamps them to its ≥30s/≥30s/≥0
-    /// minimums at use time, so we store the raw Clash values here.
+    /// Warm-pool knobs are stored raw; `AnyTLSClient` clamps them at use time.
     private static func parseAnyTLSProxy(_ node: Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
 
@@ -307,10 +293,8 @@ struct ClashProxyParser {
 
     // MARK: - Shadowsocks
 
-    /// Parses a Clash `type: ss` node. Anywhere only supports bare
-    /// Shadowsocks — any plugin (obfs, v2ray-plugin, shadow-tls, restls),
-    /// configured transport other than plain TCP, or TLS wrapper causes the
-    /// node to be skipped rather than silently downgraded.
+    /// Only bare Shadowsocks is supported — nodes with a plugin, non-TCP transport,
+    /// or TLS wrapper are skipped rather than silently downgraded.
     private static func parseShadowsocksProxy(_ node: Node) -> ProxyConfiguration? {
         guard
             let basics = parseBasics(node),
@@ -336,8 +320,7 @@ struct ClashProxyParser {
 
     private static func parseSOCKS5Proxy(_ node: Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
-        // Anywhere speaks SOCKS5 strictly in the clear — reject SOCKS5-over-TLS
-        // nodes rather than silently downgrading them.
+        // Reject SOCKS5-over-TLS rather than silently downgrading it.
         if getBool(node, key: "tls") == true { return nil }
         return ProxyConfiguration(
             name: basics.name,
@@ -409,25 +392,19 @@ struct ClashProxyParser {
 
     // MARK: - Shared option parsing
 
-    /// Reads the SNI used by VLESS/Trojan/Hysteria — Clash spells it
-    /// `servername` for VLESS and `sni` for Trojan/Hysteria, and we accept
-    /// either on any protocol so hand-edited configs round-trip cleanly.
+    /// Clash spells SNI `servername` for VLESS and `sni` for Trojan/Hysteria; accept either on any protocol.
     private static func parseSNI(_ node: Node, server: String) -> String {
         getString(node, key: "servername")
             ?? getString(node, key: "sni")
             ?? server
     }
 
-    /// Maps Clash `client-fingerprint` strings to the corresponding
-    /// `TLSFingerprint`, falling back to `.chrome133` when unset or unknown.
     private static func parseFingerprint(_ node: Node) -> TLSFingerprint {
         let raw = getString(node, key: "client-fingerprint")
         return TLSFingerprint(rawValue: mapFingerprint(raw)) ?? .chrome133
     }
 
-    /// Parses a Clash bandwidth string (e.g. `"30 Mbps"`, `"30"`) into an
-    /// integer Mbit/s value for Hysteria Brutal CC. Returns `def` when the
-    /// field is missing or unparseable.
+    /// Parses a Clash bandwidth string (e.g. `"30 Mbps"`, `"30"`) into Mbit/s, or `def` if unparseable.
     private static func parseBandwidthMbps(_ raw: String?, default def: Int) -> Int {
         guard let trimmed = raw?.trimmingCharacters(in: .whitespaces), !trimmed.isEmpty else {
             return def
@@ -436,8 +413,6 @@ struct ClashProxyParser {
         return Int(leading) ?? def
     }
 
-    /// Parses `ws-opts` from a Clash proxy node and returns the appropriate transport layer.
-    /// When `v2ray-http-upgrade` is set, returns `.httpUpgrade`; otherwise `.ws`.
     private static func parseWSTransportLayer(from node: Node, server: String) -> TransportLayer {
         var wsPath = "/"
         var wsHost = server
@@ -495,7 +470,6 @@ struct ClashProxyParser {
         )
     }
 
-    /// Maps Clash `client-fingerprint` strings to `TLSFingerprint` raw values.
     private static func mapFingerprint(_ fp: String?) -> String {
         switch fp?.lowercased() {
         case "chrome":  return TLSFingerprint.chrome133.rawValue

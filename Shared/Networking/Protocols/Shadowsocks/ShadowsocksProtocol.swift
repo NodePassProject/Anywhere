@@ -13,12 +13,8 @@ import Foundation
 /// - ATYP 0x01: IPv4 (4 bytes)
 /// - ATYP 0x03: Domain (1-byte length + string)
 /// - ATYP 0x04: IPv6 (16 bytes)
-///
-/// Cross-ref: Xray-core/proxy/shadowsocks/protocol.go
 enum ShadowsocksProtocol {
 
-    /// Builds a Shadowsocks address header for the given host and port.
-    /// Matches `WriteTCPRequest()` address encoding in Xray-core.
     static func buildAddressHeader(host: String, port: UInt16) -> Data {
         var data = Data()
 
@@ -29,14 +25,12 @@ enum ShadowsocksProtocol {
             data.append(0x04)
             data.append(contentsOf: ipv6)
         } else {
-            // Domain
             let domainBytes = Array(host.utf8)
             data.append(0x03)
             data.append(UInt8(domainBytes.count))
             data.append(contentsOf: domainBytes)
         }
 
-        // Port (big-endian)
         data.append(UInt8(port >> 8))
         data.append(UInt8(port & 0xFF))
 
@@ -44,15 +38,12 @@ enum ShadowsocksProtocol {
     }
 
     /// Encodes a UDP packet: address header + raw payload.
-    /// Matches `EncodeUDPPacket()` in Xray-core.
     static func encodeUDPPacket(host: String, port: UInt16, payload: Data) -> Data {
         var data = buildAddressHeader(host: host, port: port)
         data.append(payload)
         return data
     }
 
-    /// Decodes a UDP packet: parses address header, returns (host, port, payload).
-    /// Matches `DecodeUDPPacket()` in Xray-core.
     static func decodeUDPPacket(data: Data) -> (host: String, port: UInt16, payload: Data)? {
         guard !data.isEmpty else { return nil }
         var offset = data.startIndex

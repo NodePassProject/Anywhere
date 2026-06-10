@@ -25,50 +25,29 @@ extension MITMPhase: CustomStringConvertible {
     }
 }
 
-/// One declarative edit to a JSON message body — the native,
-/// rule-configured analog of the ``Anywhere.json`` script API. A single
-/// ``MITMOperation/bodyJSON`` rule carries exactly one of these; several
-/// ``bodyJSON`` rules matching the same message compose in rule order
-/// (unlike ``MITMOperation/script``, which is single-rule, last-wins).
-/// The body is parsed once, every matching edit applies in turn, and the
-/// result is re-serialized — and, exactly as in ``Anywhere.json``, a body
-/// that isn't JSON or an edit that doesn't resolve leaves the body
-/// untouched (total / fail-closed).
-///
-/// ``path`` is a JSONPath like `"$.data.items[0].id"` (leading `$`
-/// optional; dotted keys and `[index]` / `["key"]` brackets). ``key`` and
-/// ``field`` are bare names — for the recursive ops ``key`` matches at any
-/// depth. ``value`` / ``values`` are authored as JSON literals (`true`,
-/// `42`, `"text"`, `{"a":1}`); a string that isn't valid JSON is taken as
-/// a literal JSON string, so the common case `value = Anywhere` means the
-/// string `"Anywhere"`. The compile step (``MITMJSONPatch/compile``)
-/// pre-parses path and value once at rule-load time.
+/// One declarative edit to a JSON message body. Matching `bodyJSON` rules compose
+/// in rule order; a non-JSON body or an unresolved edit leaves the body untouched.
+/// `path` is a JSONPath; `value`/`values` are JSON literals (a non-JSON string is
+/// taken as a literal string, so `value = Anywhere` means `"Anywhere"`).
 enum MITMJSONOperation: Equatable {
-    /// Upsert: create the addressed member (or overwrite it if present);
-    /// for an array index, set in range or append when index == count.
+    /// Upsert: create or overwrite the addressed member; an array index appends when index == count.
     case add(path: String, value: String)
-    /// Modify-in-place: does nothing when the addressed member/index
-    /// doesn't already exist, so it can't introduce new fields.
+    /// Modify-in-place: a no-op when the addressed member doesn't already exist.
     case replace(path: String, value: String)
-    /// Remove the addressed member/element.
     case delete(path: String)
-    /// Overwrite every property named ``key`` at any depth (existing
-    /// occurrences only; never created where absent).
+    /// Overwrite every existing property named `key` at any depth; never creates.
     case replaceRecursive(key: String, value: String)
-    /// Remove every property named ``key`` at any depth.
+    /// Remove every property named `key` at any depth.
     case deleteRecursive(key: String)
-    /// At the array addressed by ``path``, drop every object element that
-    /// contains ``key``.
+    /// At the array at `path`, drop every object element that contains `key`.
     case removeWhereKeyExists(path: String, key: String)
-    /// At the array addressed by ``path``, drop every object element whose
-    /// ``field`` equals one of ``values`` (a JSON array literal, or a lone
-    /// scalar).
+    /// At the array at `path`, drop every object element whose `field` equals
+    /// one of `values` (a JSON array literal, or a lone scalar).
     case removeWhereFieldIn(path: String, field: String, values: String)
 }
 
 extension MITMJSONOperation: CustomStringConvertible {
-    /// Short action token, reused by the text import format and the rule
-    /// list subtitle.
+    /// Action token; must match the text import format.
     var action: String {
         switch self {
         case .add:                  return "add"
@@ -81,7 +60,6 @@ extension MITMJSONOperation: CustomStringConvertible {
         }
     }
 
-    /// `action target` for the rule list, e.g. `add $.user.vip`.
     var description: String {
         switch self {
         case .add(let path, _),
@@ -187,66 +165,29 @@ extension MITMJSONOperation: Codable {
     }
 }
 
-/// A single rewrite operation. The associated values carry only the
-/// fields that operation needs; the ``MITMRule/urlPattern`` that gates
-/// every rule lives one level up on ``MITMRule``, uniform across
-/// operations. See ``MITMRuleSetParser`` for the text import format and
-/// the per-operation field layout.
+/// A single rewrite operation; the gating `urlPattern` lives on `MITMRule`.
 enum MITMOperation: Equatable {
-    /// Request-phase only. The unified "Rewrite" operation (import op id
-    /// `0`): rewrites the request URL to a full replacement URL, redirects
-    /// with a synthesized `302`, or rejects with a synthesized `200`. The
-    /// specific behavior is carried by the ``MITMRewriteAction`` sub-mode.
-    /// When the sub-mode is ``MITMRewriteAction/transparent(url:)`` the outer
-    /// leg is dialed to the replacement host and `Host`/`:authority` is
-    /// rewritten to match; the other sub-modes synthesize the response on the
-    /// inner leg without an upstream dial. Gated, like every operation, by
-    /// ``MITMRule/urlPattern``.
+    /// Request-phase only: rewrites the request URL, redirects with a synthesized
+    /// `302`, or rejects with a synthesized `200`, per the `MITMRewriteAction` sub-mode.
     case rewrite(MITMRewriteAction)
     case headerAdd(name: String, value: String)
     case headerDelete(name: String)
-    /// Overwrites the value of every header named ``name``
-    /// (case-insensitive); absent headers are left untouched.
+    /// Overwrites every header named `name` (case-insensitive); absent headers are untouched.
     case headerReplace(name: String, value: String)
-    /// JavaScript transform. ``scriptBase64`` is the base64-encoded UTF-8
-    /// source defining `function process(ctx)`. See ``MITMScriptEngine``
-    /// for the runtime contract.
-    ///
-    /// Single-rule semantics, by design, not a limitation: at most one
-    /// ``.script`` fires per message; when several match, the last wins.
-    /// This is a deliberate performance choice (see ``MITMScriptTransform``)
-    /// — authors needing composed behaviour should consolidate into one
-    /// `process(ctx)`.
+    /// JavaScript transform; `scriptBase64` is base64 UTF-8 source defining
+    /// `function process(ctx)`. Single-rule by design: at most one `.script`
+    /// fires per message, last match wins.
     case script(scriptBase64: String)
-    /// Per-frame JavaScript transform for streaming bodies (gRPC, SSE,
-    /// chunked APIs): same storage shape as ``script`` but invoked once
-    /// per HTTP/2 DATA frame or HTTP/1 chunked chunk, without buffering,
-    /// decompression, or head-field mutation. See ``MITMScriptEngine``.
-    ///
-    /// HTTP/1 Content-Length bodies are skipped (the byte count is
-    /// already committed). When both a ``script`` and a ``streamScript``
-    /// match, ``streamScript`` wins; otherwise single-rule semantics
-    /// match ``script`` — at most one fires per stream, last match wins.
+    /// Per-frame script for streaming bodies: runs once per HTTP/2 DATA frame or
+    /// HTTP/1 chunk, without buffering or decompression. HTTP/1 Content-Length
+    /// bodies are skipped; beats a matching `script`, otherwise last match wins.
     case streamScript(scriptBase64: String)
-    /// Native regex find-and-replace over the decompressed text body
-    /// (import op id `4`). ``search`` is a regex and ``replacement`` the
-    /// literal swapped in for each match, applied to the body. Buffered like
-    /// ``bodyJSON`` (the body is accumulated, decompressed, edited, and
-    /// re-emitted with a fresh length) and, like it, **every** matching
-    /// ``bodyReplace`` rule fires in rule order so edits compose. Total /
-    /// fail-closed: a body that isn't valid UTF-8 — or a search that matches
-    /// nothing — leaves the body untouched. See ``MITMBodyReplace`` for the
-    /// runtime.
+    /// Regex find-and-replace over the buffered, decompressed text body; every
+    /// matching rule fires in rule order. Fail-closed: a non-UTF-8 body or a
+    /// search with no matches leaves the body untouched.
     case bodyReplace(search: String, replacement: String)
-    /// Native JSON body edit — the declarative analog of the
-    /// ``Anywhere.json`` script API, applied in compiled native code
-    /// rather than JavaScript. Buffered like ``script`` (the body is
-    /// accumulated, decompressed, edited, and re-emitted with a fresh
-    /// length), but, unlike ``script``, **every** matching ``bodyJSON``
-    /// rule fires in rule order so edits compose. When a ``script`` rule
-    /// also matches the same message, the JSON edits run first and the
-    /// script sees the already-edited body. See ``MITMJSONOperation`` for
-    /// the edit catalog and ``MITMJSONPatch`` for the runtime.
+    /// Native JSON body edit over the buffered, decompressed body; every matching
+    /// rule fires in rule order, and a matching `script` runs after the edits.
     case bodyJSON(MITMJSONOperation)
 }
 
@@ -365,9 +306,8 @@ extension MITMOperation: Codable {
 struct MITMRule: Codable, Equatable, Identifiable {
     var id = UUID()
     var phase: MITMPhase
-    /// `NSRegularExpression` over the **whole request URL**
-    /// (`https://host/path?query`) that gates the ``operation``. The set's
-    /// domain suffixes gate the host; this refines against the full URL.
+    /// `NSRegularExpression` over the whole request URL (`https://host/path?query`);
+    /// the set's domain suffixes gate the host first.
     var urlPattern: String
     var operation: MITMOperation
 
@@ -405,24 +345,10 @@ struct MITMRule: Codable, Equatable, Identifiable {
     }
 }
 
-/// The sub-mode of the unified "Rewrite" operation (``MITMOperation/rewrite``).
-/// Maps 1:1 to the numeric sub-mode in the import format (see
-/// ``MITMRuleSetParser``); ``MITMRespondBuilder`` produces the synthesized
-/// wire response for the non-transparent sub-modes.
-///
-/// - ``transparent(url:)`` (0): rewrite the request URL to ``url`` (a full
-///   URL). The outer leg is dialed to ``url``'s host and `Host`/`:authority`
-///   is rewritten to match (a no-op in effect when ``url`` keeps the original
-///   host); the client still sees the original SNI on the leaf certificate.
-/// - ``redirect302(url:)`` (1): no outer leg; synthesize a `302 Found`
-///   whose `Location` is ``url``.
-/// - ``reject200Text(content:)`` (2): no outer leg; synthesize a `200 OK`
-///   with a `text/plain` body (empty ``content`` → a default line).
-/// - ``reject200Gif`` (3): no outer leg; synthesize a `200 OK` carrying the
-///   canned 1×1 GIF.
-/// - ``reject200Data(base64:)`` (4): no outer leg; synthesize a `200 OK`
-///   with an `application/octet-stream` body decoded from ``base64`` (empty
-///   → a default payload).
+/// Sub-mode of the rewrite operation; cases map 1:1 to the import format's
+/// numeric ids (transparent 0, redirect302 1, reject200Text 2, reject200Gif 3,
+/// reject200Data 4). Only `transparent` dials upstream — it rewrites the URL
+/// and `Host`/`:authority`; the rest synthesize the response locally.
 enum MITMRewriteAction: Equatable {
     case transparent(url: String)
     case redirect302(url: String)
@@ -484,28 +410,19 @@ extension MITMRewriteAction: Codable {
     }
 }
 
-/// An ordered group of rewrite rules identified by a user-supplied name
-/// and applied to any host matching one of ``domainSuffixes``. Redirect /
-/// reject / host-rewrite behavior lives on individual ``rules`` via the
-/// ``MITMOperation/rewrite`` operation, not on the set.
-///
-/// When ``subscriptionURL`` is set, the suffixes and rules are sourced
-/// from a remote `.amrs` file and replaced on refresh; the set's ``id``
-/// (its ``MITMScriptStore`` scope key) and user-given ``name`` are
-/// preserved across refreshes so the scope and any rename stick.
+/// An ordered, named group of rewrite rules applied to any host matching one
+/// of `domainSuffixes`.
 struct MITMRuleSet: Codable, Equatable, Identifiable {
     static let maxRuleCount = 10000
 
     var id = UUID()
     var name: String
-    /// Per-set master switch. A disabled set is persisted and editable but
-    /// excluded from the compiled rewrite policy, so it matches no traffic
-    /// until re-enabled. Blobs predating this field decode as enabled.
+    /// Per-set master switch; a disabled set stays editable but matches no traffic.
     var enabled: Bool
     var domainSuffixes: [String]
     var rules: [MITMRule]
-    /// When set, the set's content is sourced from a remote `.amrs` file
-    /// and replaced on refresh.
+    /// When set, the suffixes and rules are sourced from a remote `.amrs` file
+    /// and replaced on refresh; `id` and `name` are preserved.
     var subscriptionURL: URL?
 
     init(
@@ -536,10 +453,8 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        // Persisted id keeps ``MITMScriptStore`` scope keys stable across
-        // snapshot reloads. Pre-id blobs decode with a fresh UUID; any
-        // script-store buckets written under that fresh id stay reachable
-        // for the rest of the process (and get persisted on the next save).
+        // Persisted id keeps MITMScriptStore scope keys stable across reloads;
+        // pre-id blobs decode with a fresh UUID.
         self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         let legacySuffix = try c.decodeIfPresent(String.self, forKey: .domainSuffix)
         if let suffixes = try c.decodeIfPresent([String].self, forKey: .domainSuffixes) {
@@ -577,9 +492,7 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
     }
 }
 
-/// Persisted shape for the MITM feature: master toggle plus the user's
-/// rule sets. Owned by the app side via ``MITMRuleSetStore`` and read by the
-/// network extension via ``TunnelStack/loadMITMSetting``.
+/// Persisted shape for the MITM feature: master toggle plus the user's rule sets.
 struct MITMSnapshot: Codable, Equatable {
     var enabled: Bool
     var ruleSets: [MITMRuleSet]
@@ -609,14 +522,9 @@ struct MITMSnapshot: Codable, Equatable {
         try c.encode(ruleSets, forKey: .ruleSets)
     }
 
-    /// Best-effort decode of the persisted blob. Returns ``empty`` when no
-    /// snapshot has been written yet or the blob fails to decode. Both sides
-    /// treat that as "MITM disabled" rather than crashing.
-    ///
-    /// If SwiftData has nothing yet, fall back to the legacy UserDefaults
-    /// key so the Network Extension keeps working during the upgrade window
-    /// before the host has migrated. The host removes that key once the
-    /// blob is in SwiftData, so the fallback turns into a no-op afterwards.
+    /// Best-effort decode; a missing or undecodable blob yields `empty` (MITM
+    /// disabled). Falls back to the legacy UserDefaults key so the extension
+    /// keeps working during the upgrade window before the host migrates.
     static func load() -> MITMSnapshot {
         if let data = JSONBlobStore.shared.load(.mitm),
            let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
@@ -631,8 +539,7 @@ struct MITMSnapshot: Codable, Equatable {
 
     private static let legacyMITMDefaultsKey = "mitmData"
 
-    /// Encodes and persists the snapshot, then fires the Darwin
-    /// notification the extension observes to trigger a reload.
+    /// Persists the snapshot and fires the Darwin notification the extension observes.
     func save() {
         guard let data = try? JSONEncoder().encode(self) else { return }
         JSONBlobStore.shared.save(.mitm, data: data)

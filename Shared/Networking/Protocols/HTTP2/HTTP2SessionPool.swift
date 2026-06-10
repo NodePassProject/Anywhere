@@ -9,45 +9,22 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "HTTP2Pool")
 
-/// Pools ``HTTP2Session`` instances for reuse across CONNECT tunnels.
-///
-/// Sessions are keyed by `host:port:sni`. When a new stream is requested the
-/// pool returns an existing session with available capacity, or creates a new
-/// one, letting many CONNECT tunnels share a single TCP/TLS connection.
-///
-/// When a session receives GOAWAY or the transport closes, the pool evicts it
-/// automatically via the session's `onClose` callback.
+/// Pools HTTP/2 sessions keyed by `host:port:sni` so many CONNECT tunnels share one
+/// TCP/TLS connection; sessions self-evict via `onClose` on GOAWAY or transport close.
 nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
 
     static let shared = HTTP2SessionPool()
 
-    /// Dedicated (non-pooled) sessions for chained connections, plus
-    /// post-GOAWAY sessions that need to stay alive while their existing
-    /// streams drain. Retained here so the session isn't deallocated while
-    /// streams are still in use.
+    /// Dedicated (non-pooled) sessions for chained connections, and
+    /// post-GOAWAY sessions retained until their in-flight streams drain.
     private var dedicatedSessions: [ObjectIdentifier: HTTP2Session] = [:]
 
     private override init() {}
 
     // MARK: - Acquire
 
-    /// Returns an ``HTTP2Stream`` on a pooled (or new) session.
-    ///
-    /// For direct connections (`tunnel == nil`), sessions are pooled by server
-    /// identity so multiple CONNECT tunnels share a single HTTP/2 connection.
-    /// For chained connections (`tunnel != nil`), a dedicated session is
-    /// created because the transport path is unique.
-    ///
-    /// - Parameters:
-    ///   - host: Proxy server address (IP or hostname).
-    ///   - port: Proxy server port.
-    ///   - sni: TLS SNI value.
-    ///   - tunnel: Optional outer proxy connection (for proxy chaining).
-    ///   - connectHeaders: Supplies the per-CONNECT request headers (proxy
-    ///     auth, User-Agent, padding, …); invoked once per stream so randomized
-    ///     values differ per request.
-    ///   - destination: The `host:port` target for the CONNECT tunnel.
-    ///   - completion: Called with the ready-to-use stream.
+    /// Returns a stream on a pooled (or new) session. Chained connections (`tunnel != nil`)
+    /// get a dedicated session because their transport path is unique.
     func acquireStream(
         host: String,
         port: UInt16,
@@ -57,7 +34,6 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
         destination: String,
         completion: @escaping (HTTP2Stream) -> Void
     ) {
-        // Chained connections cannot be pooled (each outer tunnel is unique).
         if tunnel != nil {
             let session = HTTP2Session(
                 host: host, port: port, sni: sni,
@@ -85,9 +61,7 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
         let session: HTTP2Session
 
         lock.lock()
-        // Move post-GOAWAY sessions out of the pool into dedicatedSessions so
-        // they stay alive until their existing streams drain, then evict any
-        // closed or going-away entries from the active bucket.
+        // Park GOAWAY sessions in dedicatedSessions to drain, then evict them from the active bucket.
         if let array = sessions[key] {
             for s in array where s.poolIsGoingAway {
                 dedicatedSessions[ObjectIdentifier(s)] = s
@@ -120,8 +94,7 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
 
     // MARK: - Eviction
 
-    /// Drops the bucket entry plus any draining-after-GOAWAY copy in
-    /// ``dedicatedSessions``.
+    /// Removes the session from both the pool bucket and ``dedicatedSessions``.
     override func removeSession(_ session: HTTP2Session, key: String) {
         super.removeSession(session, key: key)
         lock.lock()
@@ -130,7 +103,6 @@ nonisolated final class HTTP2SessionPool: SessionPool<HTTP2Session> {
         logger.debug("[HTTP2Pool] Evicted session for \(key)")
     }
 
-    /// Closes pooled and dedicated sessions on VPN tunnel teardown.
     override func closeAll() {
         lock.lock()
         let dedicated = Array(dedicatedSessions.values)

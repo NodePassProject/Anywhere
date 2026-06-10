@@ -11,9 +11,6 @@ import Foundation
 nonisolated class TLSProxyConnection: ProxyConnection {
     private let tlsConnection: TLSRecordConnection
 
-    /// Creates a new TLS-backed proxy connection.
-    ///
-    /// - Parameter tlsConnection: The underlying TLS record connection.
     init(tlsConnection: TLSRecordConnection) {
         self.tlsConnection = tlsConnection
     }

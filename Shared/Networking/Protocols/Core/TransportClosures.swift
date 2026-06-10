@@ -9,19 +9,8 @@ import Foundation
 
 // MARK: - TransportClosures
 
-/// Closure-based transport adapter used by ``WebSocketConnection``,
-/// ``HTTPUpgradeConnection``, and ``XHTTPConnection``.
-///
-/// These protocols ride on top of different underlying transports — a plain
-/// TCP socket, a TLS record connection, or a tunneled proxy chain — each of
-/// which exposes a slightly different `send`/`receive`/`cancel` API.
-/// Wrapping the transport in a fixed closure triple lets the higher-level
-/// protocol stay transport-agnostic without introducing a protocol witness
-/// table or forcing every transport to conform to a shared interface.
-///
-/// Construct with one of the `init(rawTCP:)` / `init(tls:)` / `init(tunnel:)`
-/// factories; the raw memberwise init remains available for call sites that
-/// need to synthesize closures (e.g. upload transports built at dial time).
+/// Closure triple adapting the differing send/receive/cancel APIs of plain TCP,
+/// TLS, and tunneled transports so protocol logic stays transport-agnostic.
 struct TransportClosures {
     let send: (Data, @escaping (Error?) -> Void) -> Void
     let receive: (@escaping (Data?, Bool, Error?) -> Void) -> Void
@@ -31,7 +20,6 @@ struct TransportClosures {
 // MARK: - Transport adapters
 
 extension TransportClosures {
-    /// Adapts a ``RawTCPSocket`` to the closure triple.
     init(rawTCP transport: RawTCPSocket) {
         self.init(
             send: { data, completion in
@@ -46,10 +34,7 @@ extension TransportClosures {
         )
     }
 
-    /// Adapts a ``TLSRecordConnection`` to the closure triple. The TLS
-    /// receive callback signature `(Data?, Error?)` is widened to include
-    /// the EOF bit; TLS surfaces EOF as `error == nil && data == nil`, which
-    /// the caller handles via its own framing layer.
+    /// Widens TLS's two-arg callback (EOF = nil data, nil error) to the three-way signal.
     init(tls tlsConnection: TLSRecordConnection) {
         self.init(
             send: { data, completion in
@@ -66,12 +51,7 @@ extension TransportClosures {
         )
     }
 
-    /// A no-op transport for connections whose byte I/O is handled out-of-band.
-    /// XHTTP-over-HTTP/3 multiplexes over a ``QUICConnection`` (via
-    /// ``HTTP3Session``) rather than a single byte stream, so its
-    /// ``XHTTPConnection`` carries this placeholder; the send/receive closures
-    /// are never invoked (the H3 code path branches before reaching them) and
-    /// cancellation is driven through the H3 session instead.
+    /// Placeholder for XHTTP-over-HTTP/3, which multiplexes over QUIC; these closures are never invoked.
     static var unused: TransportClosures {
         TransportClosures(
             send: { _, completion in completion(nil) },
@@ -80,10 +60,7 @@ extension TransportClosures {
         )
     }
 
-    /// Adapts a tunneled ``ProxyConnection`` (for proxy chaining) to the
-    /// closure triple. Empty / nil data on a non-error receive is translated
-    /// to EOF so the caller sees the same three-way signal as the direct
-    /// transports.
+    /// Translates empty/nil data on a non-error receive to EOF to match the three-way signal.
     init(tunnel: ProxyConnection) {
         self.init(
             send: { data, completion in

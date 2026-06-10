@@ -19,13 +19,10 @@ nonisolated class MuxSession {
     private var firstFrameSent: Bool
     private(set) var closed = false
 
-    /// Called by MuxClient when demuxed data arrives for this session.
     var dataHandler: ((Data) -> Void)?
 
-    /// Called by MuxClient when the session is closed. The error parameter
-    /// is non-nil when the underlying mux connection died with a transport
-    /// failure (so each owning flow can report its own death); nil when the
-    /// session ended cleanly (End frame, normal cancel).
+    /// Non-nil error means the underlying mux connection died with a transport
+    /// failure; nil means the session ended cleanly (End frame / normal cancel).
     var closeHandler: ((Error?) -> Void)?
 
     init(
@@ -45,7 +42,6 @@ nonisolated class MuxSession {
         self.client = client
     }
 
-    /// Sends data through the mux connection as a Keep frame with payload.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         guard !closed else {
             completion(ProxyError.connectionFailed("Mux session closed"))
@@ -80,7 +76,7 @@ nonisolated class MuxSession {
         let frame = MuxFrame.encode(metadata: metadata, payload: data)
         client.writeFrame(frame) { [weak self] error in
             if let error, isFirstFrame {
-                // Allow a retry if the first frame failed before the session was torn down.
+                // Allow retry: first frame never committed, so roll back.
                 self?.firstFrameSent = false
                 completion(error)
                 return
@@ -112,14 +108,11 @@ nonisolated class MuxSession {
 
     // MARK: - Called by MuxClient (demux)
 
-    /// Delivers demuxed data to this session.
     func deliverData(_ data: Data) {
         guard !closed else { return }
         dataHandler?(data)
     }
 
-    /// Delivers a close event to this session. `error` is non-nil only when
-    /// the underlying mux connection died with a transport failure.
     func deliverClose(error: Error? = nil) {
         guard !closed else { return }
         closed = true

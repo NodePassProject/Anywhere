@@ -1,5 +1,5 @@
 //
-//  XHTTPConfiguration.swift
+//  XHTTPConnection+H2Transport.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/30/26.
@@ -13,26 +13,17 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Setup
 
-    /// Performs HTTP/2 connection setup matching Go's http2.Transport behavior.
-    ///
-    /// Go's http2.Transport sends preface + SETTINGS + WINDOW_UPDATE immediately,
-    /// then sends HEADERS without waiting for the server's SETTINGS first.
-    /// We replicate this by sending preface + SETTINGS + WINDOW_UPDATE + HEADERS
-    /// all in one write, then processing server frames (SETTINGS, ACK, etc.)
-    /// while waiting for the response HEADERS (200 OK).
+    /// HTTP/2 setup matching Go's http2.Transport: preface + SETTINGS + WINDOW_UPDATE
+    /// + HEADERS in one write, without waiting for the server's SETTINGS first.
     func performH2Setup(completion: @escaping (Error?) -> Void) {
         var initData = h2ClientPreface()
 
-        // HEADERS go out immediately, before the server's SETTINGS arrive, to save
-        // a round trip; SETTINGS are handled afterward in processInitialServerFrames.
-        // That step deliberately does not wait for the 200 response HEADERS: some
-        // CDNs buffer the response until the backend produces body data, which only
-        // happens after the POST sent post-setup, so waiting would deadlock.
+        // Setup deliberately does not wait for the 200 response HEADERS: some CDNs
+        // buffer it until the backend sees POST body data, so waiting would deadlock.
         switch role {
         case .uploadOnly:
-            // Upload leg on its own connection: the POST is stream 1, and no stream
-            // here is the download stream — reads are a flow-control/response drain
-            // (see startH2UploadPump). packet-up opens a stream per batch later.
+            // Upload leg: the POST is stream 1; no stream here is the download
+            // stream, so reads are only a flow-control/response drain.
             h2UploadStreamId = 1
             h2DownloadStreamId = .max
             if mode == .streamUp {
@@ -85,10 +76,8 @@ extension XHTTPConnection {
         }
     }
 
-    /// Builds the H2 client preface + client SETTINGS (ENABLE_PUSH off, 4MB stream
-    /// window, 10MB max header list) + a 1GB connection-level WINDOW_UPDATE. Shared
-    /// by all roles so each leg of a detached session opens its H2 connection
-    /// identically.
+    /// Client preface + SETTINGS (ENABLE_PUSH off, 4MB stream window, 10MB max
+    /// header list) + a 1GB connection-level WINDOW_UPDATE.
     private func h2ClientPreface() -> Data {
         var initData = Data()
         initData.append(Self.h2Preface)
@@ -114,21 +103,16 @@ extension XHTTPConnection {
         return initData
     }
 
-    /// Background frame pump for an `.uploadOnly` H2 leg. Keeps connection-level
-    /// flow control current (WINDOW_UPDATE), ACKs SETTINGS/PING, and discards POST
-    /// responses so the server's writes never stall the upload. Runs until the
-    /// connection closes; `receiveH2Data` never delivers data here because
-    /// `h2DownloadStreamId == .max` matches no real stream.
+    /// Frame pump for an `.uploadOnly` leg: keeps flow control current, ACKs SETTINGS/PING,
+    /// and discards POST responses; never delivers data since `h2DownloadStreamId == .max`.
     func startH2UploadPump() {
         receiveH2Data { [weak self] _, _ in
             self?.markH2Closed()
         }
     }
 
-    /// Reads frames until the server's SETTINGS is received and ACKed.
-    /// Does NOT wait for the 200 OK response — that is handled later by receiveH2Data.
-    /// Any non-SETTINGS frames received here (WINDOW_UPDATE, PING, etc.) are processed
-    /// normally. If the response HEADERS arrives early, it is handled and we complete.
+    /// Reads frames until the server's SETTINGS is received and ACKed; does not
+    /// wait for the 200 OK, and early HEADERS complete the setup.
     private func processInitialServerFrames(completion: @escaping (Error?) -> Void) {
         readH2Frame { [weak self] result in
             guard let self else {
@@ -144,18 +128,15 @@ extension XHTTPConnection {
                 switch frame.type {
                 case Self.h2FrameSettings:
                     if frame.flags & Self.h2FlagAck == 0 {
-                        // Server's SETTINGS — parse and send ACK, then complete
                         self.parseH2Settings(frame.payload)
                         let ack = self.buildH2Frame(type: Self.h2FrameSettings, flags: Self.h2FlagAck, streamId: 0, payload: Data())
                         self.downloadSend(ack) { _ in }
                         completion(nil)
                     } else {
-                        // SETTINGS ACK for our settings — keep reading
                         self.processInitialServerFrames(completion: completion)
                     }
 
                 case Self.h2FrameHeaders:
-                    // Early response HEADERS — process and complete
                     let isDownload = frame.streamId == 0 || frame.streamId == self.h2DownloadStreamId
                     if isDownload {
                         if let rejection = self.checkH2ResponseStatus(frame.payload) {
@@ -213,8 +194,7 @@ extension XHTTPConnection {
         lock.unlock()
     }
 
-    /// Sends data as HTTP/2 DATA frame(s) on the given stream, respecting peer flow control.
-    /// Batches as many frames as the window allows into a single transport write.
+    /// Sends DATA frames respecting peer flow control, batched into a single transport write.
     func sendH2Data(data: Data, streamId: UInt32, offset: Int = 0, completion: @escaping (Error?) -> Void) {
         guard offset < data.count else {
             completion(nil)
@@ -238,7 +218,6 @@ extension XHTTPConnection {
             return
         }
 
-        // Batch multiple DATA frames into a single write
         var frames = Data()
         var currentOffset = offset
         var windowRemaining = window
@@ -274,11 +253,7 @@ extension XHTTPConnection {
         }
     }
 
-    /// Sends data as a packet-up POST: opens a new HTTP/2 stream with HEADERS + DATA + END_STREAM.
-    ///
-    /// Matches Xray-core's `scMinPostsIntervalMs` delay: the completion is deferred so that
-    /// rapid writes are batched into fewer, larger POSTs by the upstream coalescing buffer
-    /// (TCPConnection keeps `uploadFlushInFlight` true during the delay).
+    /// Sends a packet-up batch as a new HTTP/2 stream: HEADERS + DATA + END_STREAM.
     func sendH2PacketUp(data: Data, completion: @escaping (Error?) -> Void) {
         lock.lock()
         if h2StreamClosed {
@@ -295,7 +270,6 @@ extension XHTTPConnection {
         let streamWindow = h2PeerInitialWindowSize
         let connectionWindow = h2PeerConnectionWindow
 
-        // Build HEADERS for this upload POST (with session ID + seq metadata)
         let headerBlock = encodeH2UploadHeaders(seq: seq, contentLength: data.count)
         let headerFlags: UInt8 = data.isEmpty
             ? (Self.h2FlagEndHeaders | Self.h2FlagEndStream)
@@ -304,8 +278,7 @@ extension XHTTPConnection {
 
         guard !data.isEmpty else {
             lock.unlock()
-            // Rate limiting between POSTs is handled one layer up by
-            // flushPacketUpBatch; complete as soon as the HEADERS frame is on the wire.
+            // Rate limiting between POSTs is handled upstream by flushPacketUpBatch.
             downloadSend(outbound) { [weak self] error in
                 if let error {
                     self?.markH2Closed()
@@ -347,7 +320,6 @@ extension XHTTPConnection {
                 return
             }
             if nextOffset < data.count {
-                // Remaining data needs more window — continue via sendH2PacketUpData
                 self?.sendH2PacketUpData(data: data, streamId: streamId, offset: nextOffset, maxSize: maxSize, streamWindow: perStreamRemaining) { [weak self] error in
                     if let error {
                         self?.markH2Closed()
@@ -360,9 +332,8 @@ extension XHTTPConnection {
         }
     }
 
-    /// Sends DATA frames for a packet-up upload stream, with END_STREAM on the last frame.
-    /// Batches as many frames as the window allows into a single transport write.
-    /// `streamWindow` tracks the per-stream remaining window (not stored globally since packet-up streams are short-lived).
+    /// Sends packet-up DATA frames with END_STREAM on the last; `streamWindow` is the
+    /// per-stream remaining window (not stored globally — packet-up streams are short-lived).
     private func sendH2PacketUpData(data: Data, streamId: UInt32, offset: Int = 0, maxSize: Int, streamWindow: Int, completion: @escaping (Error?) -> Void) {
         guard offset < data.count else {
             completion(nil)
@@ -427,10 +398,8 @@ extension XHTTPConnection {
 
     // MARK: HTTP/2 Receive
 
-    /// Receives data from HTTP/2 DATA frames on the download stream (stream 1).
-    /// Frames for other streams (upload responses) are silently consumed.
+    /// Receives DATA from the download stream; frames for other streams are silently consumed.
     func receiveH2Data(completion: @escaping (Data?, Error?) -> Void) {
-        // Check buffered data first
         lock.lock()
         if !h2DataBuffer.isEmpty {
             let data = h2DataBuffer
@@ -446,7 +415,6 @@ extension XHTTPConnection {
         }
         lock.unlock()
 
-        // Read next frame
         readH2Frame { [weak self] result in
             guard let self else {
                 completion(nil, XHTTPError.connectionClosed)
@@ -462,12 +430,9 @@ extension XHTTPConnection {
 
                 switch frame.type {
                 case Self.h2FrameData:
-                    // Batch WINDOW_UPDATEs: accumulate consumed bytes and send
-                    // when >= 50% of window is consumed (matches Go http2 behavior).
-                    // Only send stream-level WINDOW_UPDATE for the download stream;
-                    // upload streams may already be closed, and sending WINDOW_UPDATE
-                    // for a closed stream triggers RST_STREAM (STREAM_CLOSED) from
-                    // the server, which would disrupt the connection.
+                    // Batch WINDOW_UPDATEs at >= 50% of window consumed (matches Go http2).
+                    // Stream-level updates only for the download stream — updating a
+                    // possibly-closed upload stream draws RST_STREAM (STREAM_CLOSED).
                     if !frame.payload.isEmpty {
                         self.lock.lock()
                         self.h2ConnectionReceiveConsumed += frame.payload.count
@@ -519,7 +484,6 @@ extension XHTTPConnection {
                             completion(frame.payload, nil)
                         }
                     } else {
-                        // Upload stream response data — ignore
                         self.receiveH2Data(completion: completion)
                     }
 
@@ -541,9 +505,7 @@ extension XHTTPConnection {
                             self.receiveH2Data(completion: completion)
                         }
                     } else {
-                        // Upload stream response — ignore regardless of status.
-                        // The POST data was already delivered; a non-200 reply
-                        // (e.g. 500 from CDN) should not tear down the download.
+                        // Ignore upload responses regardless of status; a non-200 must not tear down the download.
                         self.receiveH2Data(completion: completion)
                     }
 
@@ -594,9 +556,7 @@ extension XHTTPConnection {
                         self.lock.unlock()
                         completion(nil, nil)
                     } else {
-                        // Upload stream resets are expected after the server
-                        // finishes processing the POST. Silently ignore and
-                        // keep reading for download stream data.
+                        // Upload stream resets are expected after the POST completes; ignore.
                         self.receiveH2Data(completion: completion)
                     }
 

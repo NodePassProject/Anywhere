@@ -13,55 +13,36 @@ final class AWCore {
     enum Identifier {
         /// Bundle identifier prefix for the Anywhere app family.
         static let bundle = "com.argsment.Anywhere"
-        /// App Group suite shared between the app and Network Extension.
         static let appGroupSuite = "group.\(bundle)"
-        /// Error domain for `NSError` returned by the tunnel provider.
         static let errorDomain = bundle
-        /// Dispatch queue label for the VPN path monitor.
         static let pathMonitorQueue = "\(bundle).path-monitor"
-        /// Dispatch queue label for the serial lwIP queue.
+        /// Label for the serial lwIP queue.
         static let lwipQueue = "\(bundle).lwip"
-        /// Dispatch queue label for the serial MITM script-execution queue.
-        /// MITM JavaScript runs here, off the lwIP queue, so a slow or
-        /// pathological `process(ctx)` on one connection can no longer stall
-        /// packet processing for every other flow in the tunnel. Serial because
-        /// JSC's shared virtual machine serializes heap access across engines
-        /// anyway (see ``MITMScriptEngine``).
+        /// Serial MITM script queue; JS runs here off the lwIP queue so a slow
+        /// script can't stall packet processing.
         static let mitmScriptQueue = "\(bundle).mitm-script"
-        /// Dispatch queue label for the serial UDP data-plane queue. UDP no
-        /// longer traverses lwIP (`LWIP_UDP 0`), so its flow state and per-packet
-        /// processing run here instead of contending on ``lwipQueue``.
+        /// Serial UDP data-plane queue; UDP bypasses lwIP (`LWIP_UDP 0`).
         static let udpQueue = "\(bundle).udp"
         /// Dispatch queue label for writes back to the TUN interface.
         static let outputQueue = "\(bundle).output"
 
         // MARK: Proxy socket & protocol queue labels
         //
-        // Centralized so every queue the extension spins up shares one
-        // reverse-DNS prefix (``bundle``) and one kebab-case convention — they
-        // then group cleanly in Instruments, `sample`, and crash-log thread
-        // listings instead of scattering across `com.anywhere.*`, bare
-        // `AnyTLS*`, and CamelCase variants. The *rationale* for each queue
-        // lives at its declaration site; this is only the label catalog. The
-        // per-socket and per-session queues deliberately share one label across
-        // every live instance: they're one logical role, so tooling aggregates
-        // them under it rather than exploding into a label per connection.
+        // Centralized so labels share one prefix and group in Instruments.
+        // Per-socket/per-session queues deliberately share one label per role.
 
-        /// Per-socket I/O queue label for ``RawTCPSocket``.
         static let rawTCPSocketQueue = "\(bundle).raw-tcp-socket"
-        /// Per-socket I/O queue label for ``RawUDPSocket``.
         static let rawUDPSocketQueue = "\(bundle).raw-udp-socket"
         /// Per-connection queue label for the ngtcp2 QUIC event loop.
         static let quicQueue = "\(bundle).quic"
         /// Per-connection queue label for the HTTP/1.1 CONNECT relay.
         static let http11Queue = "\(bundle).http11"
-        /// Per-session queue label for an HTTP/2 multiplexed session.
         static let http2SessionQueue = "\(bundle).http2-session"
-        /// Pool-wide idle-session reaper queue label for the Naive HTTP/3 pool.
+        /// Idle-session reaper queue label for the Naive HTTP/3 pool.
         static let http3PoolCleanupQueue = "\(bundle).http3-pool-cleanup"
-        /// Pool-wide idle-session reaper queue label for an AnyTLS client.
+        /// Idle-session reaper queue label for an AnyTLS client.
         static let anyTLSIdleQueue = "\(bundle).anytls-idle-cleanup"
-        /// Per-session stream-handshake-timeout queue label for AnyTLS.
+        /// Stream-handshake-timeout queue label for AnyTLS.
         static let anyTLSSessionTimerQueue = "\(bundle).anytls-session-timer"
 
         // Sudoku per-stream read/write queues (dotted `transport.role` hierarchy).
@@ -74,12 +55,8 @@ final class AWCore {
 
         // MARK: MITM supervisor queue labels
         //
-        // ``mitmScriptQueue`` (above) runs the JS. The labels below belong to
-        // the runaway-supervision machinery: two worker queues kept apart by
-        // QoS/topology, plus one shared ``mitmMonitorQueue`` that hosts every
-        // hard-cap check (see ``MITMWatchdogMonitor``). A supervisor must run
-        // off the worker queue it watches, but the supervisors don't watch each
-        // other, so a single monitor queue suffices for all three.
+        // A supervisor must run off the worker queue it watches; one shared
+        // monitor queue hosts every hard-cap check.
 
         /// Shared low-priority supervisor queue for all MITM hard-cap checks.
         static let mitmMonitorQueue = "\(bundle).mitm-monitor"
@@ -89,24 +66,16 @@ final class AWCore {
         static let mitmGateMatchQueue = "\(bundle).mitm-gate-match"
     }
 
-    /// App Group `UserDefaults` shared between the app and Network Extension.
-    /// Prefer the typed `getX` / `setX` accessors below over direct access.
-    ///
-    /// Lazily initialized: the first access registers the values in
-    /// ``registeredDefaults``. `register(defaults:)` only affects keys that
-    /// have not been explicitly written, so user-set values always win.
-    /// Swift's `static let` semantics make this thread-safe and run-once.
+    /// App Group `UserDefaults` shared with the Network Extension. First access
+    /// registers ``registeredDefaults``; registered values never override user-set keys.
     private static let userDefaults: UserDefaults = {
         let defaults = UserDefaults(suiteName: Identifier.appGroupSuite)!
         defaults.register(defaults: registeredDefaults)
         return defaults
     }()
 
-    /// Defaults applied to App Group `UserDefaults` on first access.
-    /// The single source of truth for any setting whose unset value isn't
-    /// the type's natural zero (`false`/`""`/`nil`/empty collection). Bool
-    /// settings that default to `false` are omitted because `bool(forKey:)`
-    /// already returns `false` for unset keys.
+    /// Defaults for settings whose unset value isn't the type's natural zero;
+    /// bools defaulting to `false` are omitted.
     private static let registeredDefaults: [String: Any] = [
         UserDefaultsKey.identifier: UUID().uuidString,
         UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
@@ -151,8 +120,7 @@ final class AWCore {
         static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
     }
 
-    /// One-time migration of a JSON file from the per-app documents directory
-    /// into the App Group container shared with the Network Extension.
+    /// One-time migration of a JSON file from the app's documents directory into the App Group container.
     static func migrateToAppGroup(fileName: String) {
         let fileManager = FileManager.default
         let oldURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(fileName)
