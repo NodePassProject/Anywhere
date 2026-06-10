@@ -13,6 +13,36 @@ import Security
 
 private let logger = AnywhereLogger(category: "QUIC")
 
+// MARK: - QUICPortHopping
+
+/// Rotate the UDP destination port across `ports` every `interval`. Transport-level technique
+/// (Hysteria's "port hopping"): the server DNATs the whole range to one listening port, so the
+/// rotation is invisible to QUIC on both ends. See `HysteriaPortHopping` for the wire format.
+struct QUICPortHopping {
+    /// Inclusive port ranges to draw from; assumed non-empty.
+    let ports: [ClosedRange<UInt16>]
+    /// Seconds between hops.
+    let interval: TimeInterval
+
+    /// Count of distinct ports across all ranges.
+    var totalPortCount: Int {
+        ports.reduce(0) { $0 + (Int($1.upperBound) - Int($1.lowerBound) + 1) }
+    }
+
+    /// A uniformly random port across the union of ranges, or `nil` if empty.
+    func randomPort() -> UInt16? {
+        let total = totalPortCount
+        guard total > 0 else { return nil }
+        var index = Int.random(in: 0..<total)
+        for range in ports {
+            let count = Int(range.upperBound) - Int(range.lowerBound) + 1
+            if index < count { return UInt16(Int(range.lowerBound) + index) }
+            index -= count
+        }
+        return ports.first?.lowerBound
+    }
+}
+
 // MARK: - QUICConnection
 
 nonisolated class QUICConnection {
@@ -80,6 +110,12 @@ nonisolated class QUICConnection {
 
     /// Direct-dial UDP socket. `nil` when QUIC rides a `QUICDatagramTransport`.
     private var quicSocket: QUICSocket?
+
+    /// Port-hopping config; `nil` disables it. Honored only on the direct kernel-socket path —
+    /// a chained transport has no port to rotate.
+    private let portHopping: QUICPortHopping?
+    /// Rotates the socket's destination port every `portHopping.interval`. On `queue`.
+    private var hopTimer: DispatchSourceTimer?
 
     private var localAddr = sockaddr_storage()
     private var remoteAddr = sockaddr_storage()
@@ -172,6 +208,7 @@ nonisolated class QUICConnection {
 
     init(host: String, port: UInt16, serverName: String? = nil, alpn: [String] = ["h3"],
          datagramsEnabled: Bool = false, tuning: QUICTuning,
+         portHopping: QUICPortHopping? = nil,
          transport: QUICDatagramTransport? = nil) {
         self.host = host
         self.port = port
@@ -179,6 +216,9 @@ nonisolated class QUICConnection {
         self.alpn = alpn
         self.datagramsEnabled = datagramsEnabled
         self.tuning = tuning
+        // Port hopping needs a kernel socket whose destination we control; a chained transport
+        // has none, so drop it there rather than silently no-op deeper down.
+        self.portHopping = transport == nil ? portHopping : nil
         self.transport = transport
         self.queue = DispatchQueue(label: AWCore.Identifier.quicQueue, qos: .userInitiated)
         queue.setSpecific(key: Self.queueKey, value: true)
@@ -593,7 +633,11 @@ nonisolated class QUICConnection {
                 throw QUICError.connectionFailed("DNS lookup failed for \(host)")
             }
             let sock = QUICSocket(queue: queue, receiveBufferSize: Self.maxUDPPayload)
-            try sock.connect(remoteAddr: remoteAddr, localAddr: &localAddr, addrLen: addrLen)
+            // ngtcp2's path stays pinned to `remoteAddr` (the canonical host:port); only the
+            // socket's real destination rotates. The first dial already uses a hop port so the
+            // handshake itself rides the hopped range.
+            let initialPeer = initialHopAddr() ?? remoteAddr
+            try sock.connect(remoteAddr: initialPeer, localAddr: &localAddr, addrLen: addrLen)
             quicSocket = sock
             try initializeNgtcp2()
             state = .handshaking
@@ -603,6 +647,7 @@ nonisolated class QUICConnection {
                     self?.close(error: QUICError.connectionFailed("recv errno=\(err)"))
                 }
             )
+            startHopTimer()
             writeToUDP()    // send client initial
             rescheduleTimer()
         } catch {
@@ -672,8 +717,64 @@ nonisolated class QUICConnection {
     }
 
     private func closeSocket() {
+        hopTimer?.cancel()
+        hopTimer = nil
         quicSocket?.close()
         quicSocket = nil
+    }
+
+    // MARK: Port hopping
+
+    /// Initial socket destination when port hopping is enabled: `remoteAddr` with a random hop
+    /// port. `nil` when hopping is off or no port is available, so the caller dials `remoteAddr`.
+    private func initialHopAddr() -> sockaddr_storage? {
+        guard let port = portHopping?.randomPort() else { return nil }
+        return hopAddr(port: port)
+    }
+
+    /// Arms the repeating hop timer. No-op unless hopping is enabled and more than one port is
+    /// reachable — a single fixed port has nothing to rotate to.
+    private func startHopTimer() {
+        guard let portHopping, portHopping.totalPortCount > 1, quicSocket != nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.setEventHandler { [weak self] in self?.performHop() }
+        // Loose leeway: hop timing has no latency budget, and slack lets the scheduler coalesce
+        // the wakeup with QUIC's own timers.
+        timer.schedule(deadline: .now() + portHopping.interval,
+                       repeating: portHopping.interval,
+                       leeway: .milliseconds(250))
+        hopTimer = timer
+        timer.resume()
+    }
+
+    /// Re-points the socket at a fresh random port. ngtcp2 is untouched — it keeps sending to the
+    /// same fixed path, and the kernel redirects those bytes to the new peer.
+    private func performHop() {
+        guard state != .closed, let portHopping,
+              let sock = quicSocket, let port = portHopping.randomPort() else { return }
+        sock.reconnect(remoteAddr: hopAddr(port: port), addrLen: addrLen)
+        // Flush any pending frames onto the new port so the server's reverse-NAT mapping
+        // re-points immediately; an idle connection just falls back to the keep-alive PING.
+        writeToUDP()
+    }
+
+    /// Copies `remoteAddr`, overriding only the port. Preserves the resolved IP and family.
+    private func hopAddr(port: UInt16) -> sockaddr_storage {
+        var addr = remoteAddr
+        if addr.ss_family == sa_family_t(AF_INET) {
+            withUnsafeMutablePointer(to: &addr) { storage in
+                storage.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { sin in
+                    sin.pointee.sin_port = port.bigEndian
+                }
+            }
+        } else if addr.ss_family == sa_family_t(AF_INET6) {
+            withUnsafeMutablePointer(to: &addr) { storage in
+                storage.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
+                    sin6.pointee.sin6_port = port.bigEndian
+                }
+            }
+        }
+        return addr
     }
 
     private func populateRemoteAddr() {

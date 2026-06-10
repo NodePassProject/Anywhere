@@ -73,6 +73,8 @@ class TVProxyEditorViewController: UITableViewController {
     private var hysteriaCC: HysteriaCongestionControl = .brutal
     private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
     private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
+    private var hysteriaPortsSpec = ""
+    private var hysteriaHopIntervalText = String(HysteriaPortHopping.defaultIntervalSeconds)
     private var hysteriaSNI = ""
 
     // Nowhere fields
@@ -149,10 +151,12 @@ class TVProxyEditorViewController: UITableViewController {
         case vlessTLSSNI, vlessTLSALPN, vlessFingerprint
         case vlessRealitySNI, vlessRealityPublicKey, vlessRealityShortId
         case vlessXHTTPDownloadEnabled, vlessXHTTPDownloadAddress, vlessXHTTPDownloadPort
-        case vlessXHTTPDownloadSecurity, vlessXHTTPDownloadTLSSNI, vlessXHTTPDownloadTLSALPN, vlessXHTTPDownloadFingerprint
-        case vlessXHTTPDownloadRealitySNI, vlessXHTTPDownloadRealityPublicKey, vlessXHTTPDownloadRealityShortId
         case vlessXHTTPDownloadHost, vlessXHTTPDownloadPath
-        case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps, hysteriaSNI
+        case vlessXHTTPDownloadSecurity, vlessXHTTPDownloadTLSSNI, vlessXHTTPDownloadTLSALPN, vlessXHTTPDownloadFingerprint
+        case vlessXHTTPDownloadRealitySNI, vlessXHTTPDownloadRealityPublicKey,
+             vlessXHTTPDownloadRealityShortId
+        case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps,
+             hysteriaPorts, hysteriaHopInterval, hysteriaSNI
         case nowhereKey
         case trojanPassword, trojanSNI, trojanALPN, trojanFingerprint
         case anytlsPassword, anytlsSNI, anytlsALPN, anytlsFingerprint
@@ -211,6 +215,10 @@ class TVProxyEditorViewController: UITableViewController {
             if hysteriaCC == .brutal {
                 serverRows.append(.text(label: String(localized: "Upload Speed", comment: "Upload Speed for Hysteria protocol"), value: hysteriaUploadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaUploadMbps))
                 serverRows.append(.text(label: String(localized: "Download Speed", comment: "Download Speed for Hysteria protocol"), value: hysteriaDownloadMbpsText, placeholder: String(localized: "Mbps"), key: .hysteriaDownloadMbps))
+            }
+            serverRows.append(.text(label: String(localized: "Port Hopping", comment: "Port Hopping for Hysteria protocol"), value: hysteriaPortsSpec, placeholder: String("443,5000-6000"), key: .hysteriaPorts))
+            if !hysteriaPortsSpec.isEmpty {
+                serverRows.append(.text(label: String(localized: "Port Hopping Interval", comment: "Port Hopping Interval for Hysteria protocol"), value: hysteriaHopIntervalText, placeholder: String(localized: "Seconds"), key: .hysteriaHopInterval))
             }
         } else if isNowhere {
             serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
@@ -334,9 +342,10 @@ class TVProxyEditorViewController: UITableViewController {
                 .selection(label: String(localized: "Fingerprint"), value: anytlsFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .anytlsFingerprint),
             ]))
         } else if isHysteria {
-            sections.append((nil, [
+            var hysteriaRows: [RowType] = [
                 .text(label: String(localized: "SNI"), value: hysteriaSNI, placeholder: String(localized: "SNI"), key: .hysteriaSNI),
-            ]))
+            ]
+            sections.append((nil, hysteriaRows))
         }
 
         // XHTTP up/download detach
@@ -689,6 +698,8 @@ class TVProxyEditorViewController: UITableViewController {
             if let cc = HysteriaCongestionControl(rawValue: value) { hysteriaCC = cc }
         case .hysteriaUploadMbps: hysteriaUploadMbpsText = value
         case .hysteriaDownloadMbps: hysteriaDownloadMbpsText = value
+        case .hysteriaPorts: hysteriaPortsSpec = value
+        case .hysteriaHopInterval: hysteriaHopIntervalText = value
         case .hysteriaSNI: hysteriaSNI = value
         case .nowhereKey: nowhereKey = value
         case .trojanPassword: trojanPassword = value
@@ -804,11 +815,13 @@ class TVProxyEditorViewController: UITableViewController {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni, let portHopping):
             hysteriaPassword = password
             hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
+            hysteriaPortsSpec = portHopping?.portsSpec ?? ""
+            hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
             hysteriaSNI = sni
         case .nowhere(let key):
             nowhereKey = key
@@ -1037,12 +1050,17 @@ class TVProxyEditorViewController: UITableViewController {
         case .hysteria:
             let up = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
             let down = HysteriaCongestionControl.clampDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault)
+            let portHopping = HysteriaPortHopping.make(
+                spec: hysteriaPortsSpec,
+                intervalSeconds: Int(hysteriaHopIntervalText)
+            )
             let sni = hysteriaSNI.isEmpty ? bareAddress : hysteriaSNI
             outbound = .hysteria(
                 password: hysteriaPassword,
                 congestionControl: hysteriaCC,
                 uploadMbps: up,
                 downloadMbps: down,
+                portHopping: portHopping.
                 sni: sni
             )
         case .nowhere:

@@ -103,12 +103,14 @@ enum Outbound: Hashable {
         xudpEnabled: Bool
     )
     /// Hysteria2 over QUIC. SNI is always populated; the Mbps values are clamped
-    /// and only take effect with `.brutal` congestion control.
+    /// and only take effect with `.brutal` congestion control. `portHopping` is `nil`
+    /// for a fixed single port.
     case hysteria(
         password: String,
         congestionControl: HysteriaCongestionControl,
         uploadMbps: Int,
         downloadMbps: Int,
+        portHopping: HysteriaPortHopping?,
         sni: String
     )
     /// Nowhere runs over QUIC with a shared-key auth frame.
@@ -298,6 +300,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case security, tls, reality
         case muxEnabled, xudpEnabled
         case hysteriaPassword, hysteriaCongestionControl, hysteriaUploadMbps, hysteriaDownloadMbps, hysteriaSNI
+        case hysteriaPorts, hysteriaHopInterval
         case nowhereKey
         case trojanPassword, trojanTLS
         case anytlsPassword, anytlsIdleCheckInterval, anytlsIdleTimeout, anytlsMinIdleSession, anytlsTLS
@@ -367,11 +370,14 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
                 ?? HysteriaCongestionControl.uploadMbpsDefault
             let rawDown = try container.decodeIfPresent(Int.self, forKey: .hysteriaDownloadMbps) ?? 0
             let explicitSNI = try container.decodeIfPresent(String.self, forKey: .hysteriaSNI)
+            let portsSpec = try container.decodeIfPresent(String.self, forKey: .hysteriaPorts)
+            let hopInterval = try container.decodeIfPresent(Int.self, forKey: .hysteriaHopInterval)
             outbound = .hysteria(
                 password: try container.decodeIfPresent(String.self, forKey: .hysteriaPassword) ?? "",
                 congestionControl: cc,
                 uploadMbps: HysteriaCongestionControl.clampUploadMbps(rawUp),
                 downloadMbps: HysteriaCongestionControl.clampDownloadMbps(rawDown),
+                portHopping: HysteriaPortHopping.make(spec: portsSpec, intervalSeconds: hopInterval),
                 sni: (explicitSNI?.isEmpty == false ? explicitSNI! : serverAddress)
             )
 
@@ -472,13 +478,17 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
             try container.encode(muxEnabled, forKey: .muxEnabled)
             try container.encode(xudpEnabled, forKey: .xudpEnabled)
 
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let sni):
             try container.encode(id, forKey: .uuid)
             try container.encode("none", forKey: .encryption)
             try container.encode(password, forKey: .hysteriaPassword)
             try container.encode(congestionControl, forKey: .hysteriaCongestionControl)
             try container.encode(uploadMbps, forKey: .hysteriaUploadMbps)
             try container.encode(downloadMbps, forKey: .hysteriaDownloadMbps)
+            if let portHopping {
+                try container.encode(portHopping.portsSpec, forKey: .hysteriaPorts)
+                try container.encode(portHopping.intervalSeconds, forKey: .hysteriaHopInterval)
+            }
             try container.encode(sni, forKey: .hysteriaSNI)
         case .nowhere(let key):
             try container.encode(id, forKey: .uuid)

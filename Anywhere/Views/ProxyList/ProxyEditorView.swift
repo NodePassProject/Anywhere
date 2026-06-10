@@ -69,6 +69,8 @@ struct ProxyEditorView: View {
     @State private var hysteriaCC: HysteriaCongestionControl = .brutal
     @State private var hysteriaUploadMbpsText = String(HysteriaCongestionControl.uploadMbpsDefault)
     @State private var hysteriaDownloadMbpsText = String(HysteriaCongestionControl.downloadMbpsDefault)
+    @State private var hysteriaPortsSpec = ""
+    @State private var hysteriaHopIntervalText = String(HysteriaPortHopping.defaultIntervalSeconds)
     @State private var hysteriaSNI = ""
 
     // Nowhere fields
@@ -297,6 +299,15 @@ struct ProxyEditorView: View {
                 } label: {
                     TextWithColorfulIcon(title: "Password", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
                 }
+                if !hysteriaPortsSpec.isEmpty {
+                    LabeledContent {
+                        TextField("Seconds", text: $hysteriaHopIntervalText)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "Port Hopping Interval", comment: "Port Hopping Interval for Hysteria protocol", systemName: "timer", foregroundColor: .white, backgroundColor: .green)
+                    }
+                }
                 Picker(selection: $hysteriaCC) {
                     ForEach(HysteriaCongestionControl.allCases, id: \.self) { cc in
                         Text(cc.displayName).tag(cc)
@@ -319,6 +330,14 @@ struct ProxyEditorView: View {
                     } label: {
                         TextWithColorfulIcon(title: "Download Speed", comment: "Download Speed for Hysteria protocol", systemName: "arrow.down.circle.fill", foregroundColor: .white, backgroundColor: .blue)
                     }
+                }
+                LabeledContent {
+                    TextField(String("443,5000-6000"), text: $hysteriaPortsSpec)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Port Hopping", comment: "Port Hopping for Hysteria protocol", systemName: "arrowshape.bounce.forward.fill", foregroundColor: .white, backgroundColor: .cyan)
                 }
             } else if isNowhere {
                 LabeledContent {
@@ -974,11 +993,13 @@ struct ProxyEditorView: View {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let sni):
             hysteriaPassword = password
             hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
             hysteriaDownloadMbpsText = String(downloadMbps)
+            hysteriaPortsSpec = portHopping?.portsSpec ?? ""
+            hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
             hysteriaSNI = sni
         case .nowhere(let key):
             nowhereKey = key
@@ -1214,11 +1235,16 @@ struct ProxyEditorView: View {
             let up = HysteriaCongestionControl.clampUploadMbps(Int(hysteriaUploadMbpsText) ?? HysteriaCongestionControl.uploadMbpsDefault)
             let down = HysteriaCongestionControl.clampDownloadMbps(Int(hysteriaDownloadMbpsText) ?? HysteriaCongestionControl.downloadMbpsDefault)
             let sni = hysteriaSNI.isEmpty ? bareAddress : hysteriaSNI
+            let portHopping = HysteriaPortHopping.make(
+                spec: hysteriaPortsSpec,
+                intervalSeconds: Int(hysteriaHopIntervalText)
+            )
             outbound = .hysteria(
                 password: hysteriaPassword,
                 congestionControl: hysteriaCC,
                 uploadMbps: up,
                 downloadMbps: down,
+                portHopping: portHopping,
                 sni: sni
             )
         case .nowhere:

@@ -61,7 +61,8 @@ extension ProxyConfiguration {
             let rawDown = (configurationDict["hysteriaDownloadMbps"] as? Int) ?? 0
             let congestionControl = (configurationDict["hysteriaCongestionControl"] as? String)
                 .flatMap(HysteriaCongestionControl.init(rawValue:)) ?? .brutal
-            // Fall back to legacy tlsServerName, then serverAddress so SNI is always populated.
+            let portsSpec = configurationDict["hysteriaPorts"] as? String
+            let hopInterval = configurationDict["hysteriaHopInterval"] as? Int
             let explicitSNI = (configurationDict["hysteriaSNI"] as? String)
                 ?? (configurationDict["tlsServerName"] as? String)
             outbound = .hysteria(
@@ -69,6 +70,7 @@ extension ProxyConfiguration {
                 congestionControl: congestionControl,
                 uploadMbps: HysteriaCongestionControl.clampUploadMbps(rawUp),
                 downloadMbps: HysteriaCongestionControl.clampDownloadMbps(rawDown),
+                portHopping: HysteriaPortHopping.make(spec: portsSpec, intervalSeconds: hopInterval),
                 sni: (explicitSNI?.isEmpty == false) ? explicitSNI! : serverAddress
             )
         case .nowhere:

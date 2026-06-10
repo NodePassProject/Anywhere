@@ -117,6 +117,21 @@ nonisolated final class QUICSocket {
         socketFD = fd
     }
 
+    /// Re-points the connected socket at a new peer, keeping the same FD (and thus the same
+    /// local source port and armed read source). Used for Hysteria port hopping: only the
+    /// destination port rotates, so the server's post-DNAT 4-tuple — and ngtcp2's fixed path —
+    /// stay put. Best-effort; a failed re-connect leaves the prior peer in place and the next
+    /// hop retries. Must run on `queue`.
+    func reconnect(remoteAddr: sockaddr_storage, addrLen: Int) {
+        guard socketFD >= 0 else { return }
+        var remote = remoteAddr
+        _ = withUnsafePointer(to: &remote) { ptr -> Int32 in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.connect(socketFD, sa, socklen_t(addrLen))
+            }
+        }
+    }
+
     // MARK: - Receive
 
     /// Arms the read source. `onPacket` fires synchronously with a zero-copy view valid only

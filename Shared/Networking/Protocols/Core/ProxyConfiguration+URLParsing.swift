@@ -180,6 +180,12 @@ extension ProxyConfiguration {
         let uploadMbps = HysteriaCongestionControl.clampUploadMbps(rawUp ?? HysteriaCongestionControl.uploadMbpsDefault)
         let downloadMbps = HysteriaCongestionControl.clampDownloadMbps(rawDown ?? HysteriaCongestionControl.downloadMbpsDefault)
 
+        // Both `mport` (Hysteria links) and `ports` (Clash) name the hop range, by source.
+        let portsSpec = (params["mport"]?.isEmpty == false) ? params["mport"]
+            : ((params["ports"]?.isEmpty == false) ? params["ports"] : nil)
+        let hopInterval = (params["hop-interval"] ?? params["hopInterval"]).flatMap { Int($0) }
+        let portHopping = HysteriaPortHopping.make(spec: portsSpec, intervalSeconds: hopInterval)
+
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
             serverAddress: host,
@@ -189,6 +195,7 @@ extension ProxyConfiguration {
                 congestionControl: congestionControl,
                 uploadMbps: uploadMbps,
                 downloadMbps: downloadMbps,
+                portHopping: portHopping,
                 sni: sni
             )
         )

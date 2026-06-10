@@ -194,12 +194,27 @@ struct ClashProxyParser {
     
     // MARK: - Hysteria2
 
-    /// Our Hysteria client lacks Salamander obfuscation and multi-port hop, so nodes requesting them are skipped.
+    /// Our Hysteria client lacks Salamander obfuscation, so obfuscated nodes are skipped. The
+    /// `ports` (multi-port hop range) and `hop-interval` fields are imported as `portHopping`.
     private static func parseHysteria2Proxy(_ node: Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
 
         if let obfs = getString(node, key: "obfs"), !obfs.isEmpty { return nil }
-        if let ports = getString(node, key: "ports"), !ports.isEmpty { return nil }
+
+        let portHopping: HysteriaPortHopping?
+        if let ports = getString(node, key: "ports"), !ports.isEmpty {
+            // An unparseable range would silently collapse to one port and likely fail to
+            // connect, so skip the node entirely — matching how this parser drops nodes
+            // whose features it can't faithfully represent.
+            guard HysteriaPortHopping.parseRanges(ports) != nil else { return nil }
+            let interval = getInt(node, key: "hop-interval") ?? getInt(node, key: "hop_interval")
+            portHopping = HysteriaPortHopping(
+                portsSpec: ports,
+                intervalSeconds: interval ?? HysteriaPortHopping.defaultIntervalSeconds
+            )
+        } else {
+            portHopping = nil
+        }
 
         let password = getString(node, key: "password") ?? ""
         let rawSNI = getString(node, key: "sni") ?? getString(node, key: "servername")
@@ -221,6 +236,7 @@ struct ClashProxyParser {
                 congestionControl: congestionControl,
                 uploadMbps: uploadMbps,
                 downloadMbps: downloadMbps,
+                portHopping: portHopping,
                 sni: sni
             )
         )

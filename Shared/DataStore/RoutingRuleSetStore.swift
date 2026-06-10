@@ -434,11 +434,15 @@ extension RoutingRuleSetStore {
 
         switch configuration.outbound {
         case .vless: break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let sni):
             configurationDict["hysteriaPassword"] = password
             configurationDict["hysteriaCongestionControl"] = congestionControl.rawValue
             configurationDict["hysteriaUploadMbps"] = uploadMbps
             configurationDict["hysteriaDownloadMbps"] = downloadMbps
+            if let portHopping {
+                configurationDict["hysteriaPorts"] = portHopping.portsSpec
+                configurationDict["hysteriaHopInterval"] = portHopping.intervalSeconds
+            }
             configurationDict["hysteriaSNI"] = sni
         case .nowhere(let key):
             configurationDict["nowhereKey"] = key
