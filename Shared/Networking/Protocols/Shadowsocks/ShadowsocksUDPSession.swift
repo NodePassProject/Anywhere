@@ -14,50 +14,33 @@ private let logger = AnywhereLogger(category: "SS-UDP")
 
 // MARK: - ShadowsocksUDPSession
 
-/// Shared Shadowsocks UDP session over a single datagram socket.
-///
-/// Multiplexes every destination flow from one client configuration through
-/// one UDP socket, one SS 2022 sessionID, and one monotonic packetID.
-///
-/// Replies are demultiplexed by (socks address, port) from the reply's
-/// decrypted SS header. When the server resolved a domain to an IP the
-/// client did not pre-seed (the common case for domain destinations), the
-/// exact match fails and we fall back to a port-only match. For typical VPN
-/// traffic a single source port talks to a single destination, so the
-/// fallback is both rare and safe.
+/// Shared Shadowsocks UDP session: multiplexes every destination flow through one
+/// socket, sessionID, and packetID; replies demultiplex by (host, port) from the SS
+/// header, falling back to port-only match when the server replies from an unseeded IP.
 nonisolated final class ShadowsocksUDPSession {
 
     // MARK: - Mode
 
     enum Mode {
-        /// Legacy SS: per-packet salt + AEAD(address || payload). No session
-        /// state, so the sessionID / packetID counters are unused.
+        /// Legacy SS: per-packet salt + AEAD(address || payload); no session state.
         case legacy(cipher: ShadowsocksCipher, masterKey: Data)
-        /// SS 2022 AES variant: AES-ECB 16-byte packet header + per-session
-        /// AEAD body. Supports multi-PSK via identity headers.
+        /// SS 2022 AES variant: AES-ECB 16-byte packet header + per-session AEAD body; multi-PSK via identity headers.
         case ss2022AES(cipher: ShadowsocksCipher, pskList: [Data])
-        /// SS 2022 ChaCha variant: XChaCha20-Poly1305 with 24-byte random
-        /// nonce. Single PSK only (spec-enforced in sing-shadowsocks).
+        /// SS 2022 ChaCha variant: XChaCha20-Poly1305 with 24-byte random nonce; single PSK only.
         case ss2022ChaCha(psk: Data)
     }
 
     // MARK: - Registration
 
-    /// Handle returned by ``register`` — opaque token the owner stores and
-    /// passes back to ``send`` / ``unregister``.
+    /// Opaque registration handle.
     typealias Token = UInt64
 
     private final class Registration {
         let token: Token
         let port: UInt16
-        /// Response hosts considered a match for this flow. Seeded with the
-        /// destination host at registration, extended with any resolver
-        /// hints the owner provides, and opportunistically learned from the
-        /// reply address on the first port-only fallback delivery.
+        /// Reply hosts matching this flow: destination host, owner hints, and hosts learned via port-only fallback.
         var responseHosts: Set<String>
-        /// True once this flow has received a reply from a specific address
-        /// (added to `responseHosts`). Used by the port-only fallback to
-        /// prefer flows that haven't pinned a reply source yet.
+        /// True once a reply source is pinned; port-only fallback prefers unpinned flows.
         var hasLearnedSource: Bool
         let handler: (Data) -> Void
         let errorHandler: ((Error) -> Void)?
@@ -81,11 +64,11 @@ nonisolated final class ShadowsocksUDPSession {
     }
 
     private enum State {
-        case idle           // nothing started yet
-        case connecting     // socket connect in flight
-        case ready          // connected and receiving
+        case idle
+        case connecting
+        case ready
         case failed(Error)  // terminal — notified all flows, refuses new sends
-        case cancelled      // owner called cancel()
+        case cancelled
     }
 
     // MARK: - Immutable configuration
@@ -93,9 +76,7 @@ nonisolated final class ShadowsocksUDPSession {
     private let mode: Mode
     private let serverHost: String
     private let serverPort: UInt16
-    /// Queue used for all state mutations and callback delivery. The owner
-    /// (``TunnelStack``) supplies its `udpQueue`; the internal ``RawUDPSocket``
-    /// has its own I/O queue and hops callbacks back here.
+    /// Owner-supplied queue for all state mutations and callback delivery.
     private let delegateQueue: DispatchQueue
 
     // MARK: - Mutable state (all on `delegateQueue`)
@@ -117,20 +98,17 @@ nonisolated final class ShadowsocksUDPSession {
     }
     private var pendingSends: [PendingSend] = []
 
-    // SS 2022 session state. Sessionwide, not per-flow — that's the point.
+    // SS 2022 session state — sessionwide, not per-flow.
     private var sessionID: UInt64 = 0
     private var packetIDCounter: UInt64 = 0
-    /// Outbound AEAD key for the AES variant. Derived once from the
-    /// sessionID and the user PSK; reused for every outgoing packet.
+    /// Outbound AEAD key for the AES variant, derived once from sessionID + user PSK.
     private var outboundCipherKey: Data?
 
-    /// Most recently seen server sessionID + its derived inbound AEAD key.
-    /// Cached so we only run the BLAKE3 DeriveKey when the server rotates.
+    /// Last seen server sessionID + derived inbound key; re-derived only when the server rotates.
     private var remoteSessionID: UInt64 = 0
     private var remoteCipherKey: Data?
 
-    /// First-16-bytes BLAKE3 hash of each `pskList[i]` for i >= 1, used by
-    /// the SS 2022 AES multi-PSK identity-header construction.
+    /// First 16 BLAKE3 bytes of each `pskList[i]` for i >= 1, for multi-PSK identity headers.
     private let pskHashes: [Data]
 
     // MARK: - Init
@@ -180,8 +158,6 @@ nonisolated final class ShadowsocksUDPSession {
     // MARK: - Public API (call on `delegateQueue`)
 
     /// True while the session can still accept registrations and sends.
-    /// Owners should check this before reusing a cached session; once
-    /// `false`, drop the reference and build a new one.
     var isUsable: Bool {
         switch state {
         case .idle, .connecting, .ready: return true
@@ -189,15 +165,9 @@ nonisolated final class ShadowsocksUDPSession {
         }
     }
 
-    /// Registers interest in UDP replies whose SS address matches
-    /// `(dstHost, dstPort)` or any of `responseHostHints`.
-    ///
-    /// The SS server typically replies with the RESOLVED upstream IP in the
-    /// address header, not the domain we sent. For IP destinations the
-    /// match works directly. For domain destinations, pass any IPs already
-    /// known locally (e.g. from a fake-IP pool or DNS cache) as hints so
-    /// exact demultiplexing can still happen; otherwise we fall back to a
-    /// port-only match at receive time.
+    /// Registers interest in UDP replies matching `(dstHost, dstPort)` or any hint.
+    /// Servers typically reply with the resolved IP, so pass known IPs as hints for
+    /// exact demultiplexing; otherwise delivery falls back to port-only.
     func register(dstHost: String,
                   dstPort: UInt16,
                   responseHostHints: [String] = [],
@@ -209,10 +179,7 @@ nonisolated final class ShadowsocksUDPSession {
         var hosts: Set<String> = [dstHost]
         for hint in responseHostHints { hosts.insert(hint) }
 
-        // `dstHost` alone isn't enough to tell "the response address has
-        // been pinned to something the server picked" — that requires a
-        // reply. Any extra `responseHostHints` (e.g. pre-resolved IPs) let
-        // us pin ahead of the first reply.
+        // Pre-supplied hints count as a pinned source; `dstHost` alone does not.
         let pinned = hosts.count > 1
 
         let reg = Registration(token: token, port: dstPort,
@@ -232,10 +199,7 @@ nonisolated final class ShadowsocksUDPSession {
         return token
     }
 
-    /// Adds additional response-address hints for an existing registration.
-    /// Called after an async DNS resolve completes so subsequent replies
-    /// from the learned IPs route via exact match instead of port-only
-    /// fallback.
+    /// Adds response-address hints so replies from those IPs match exactly.
     func addResponseHints(token: Token, hints: [String]) {
         guard let reg = registrations[token] else { return }
         var inserted = false
@@ -248,7 +212,7 @@ nonisolated final class ShadowsocksUDPSession {
         }
     }
 
-    /// Removes a registration. Idempotent.
+    /// Removes a registration. Idempotent; no-ops if the token is unknown.
     func unregister(token: Token) {
         guard let reg = registrations.removeValue(forKey: token) else { return }
         for host in reg.responseHosts {
@@ -258,9 +222,7 @@ nonisolated final class ShadowsocksUDPSession {
         pendingSends.removeAll { $0.token == token }
     }
 
-    /// Encrypts and enqueues a UDP payload. If the session has not yet
-    /// completed its socket connect the payload is buffered and flushed
-    /// once the connection is ready (in the same order it was queued).
+    /// Encrypts and sends a UDP payload, buffering in order while the socket is still connecting.
     func send(token: Token,
               dstHost: String,
               dstPort: UInt16,
@@ -287,11 +249,8 @@ nonisolated final class ShadowsocksUDPSession {
         }
     }
 
-    /// Tears down the socket and drops all registrations. Notifies dependent
-    /// flows so they don't silently orphan when callers don't close them in
-    /// the same pass. Completions of in-flight sends may still fire on the
-    /// socket's I/O queue after this returns, so callers should guard their
-    /// closures against stale state.
+    /// Tears down the socket and errors out all registered flows; in-flight send
+    /// completions may still fire after this returns.
     func cancel() {
         if case .cancelled = state { return }
         state = .cancelled
@@ -320,7 +279,7 @@ nonisolated final class ShadowsocksUDPSession {
 
             self.state = .ready
 
-            // Install the recv handler on the same queue we mutate state on.
+            // Receive on delegateQueue so handlers run on the same queue as state mutations.
             self.socket.startReceiving(queue: self.delegateQueue, handler: { [weak self] data in
                 self?.handleReceivedDatagram(data)
             }, errorHandler: { [weak self] err in
@@ -373,35 +332,26 @@ nonisolated final class ShadowsocksUDPSession {
         do {
             decoded = try decryptPacket(data)
         } catch {
-            // Corrupt / stale datagrams happen on the open Internet; tearing
-            // the session down on a single bad packet would be fragile.
+            // Drop corrupt/stale datagrams; don't tear down the session on one bad packet.
             logger.debug("[SS-UDP] Decrypt error: \(error.localizedDescription)")
             return
         }
 
         let key = ResponseKey(host: decoded.host, port: decoded.port)
 
-        // Exact match on the reply's (host, port) — the common good case for
-        // IP destinations and for domain destinations that were pre-resolved
-        // via `addResponseHints`.
         if let tokens = tokensByResponse[key],
            let reg = firstRegistration(in: tokens) {
             reg.handler(decoded.payload)
             return
         }
 
-        // Fallback: port-only match. Multiple flows may share a port (two
-        // concurrent QUIC connections on 443, two DNS queries to different
-        // resolvers); prefer a flow that hasn't yet pinned a reply source,
-        // since a flow that already learned its source should've matched
-        // exactly above. Missing that, fall back to first-registered.
+        // Port-only fallback: multiple flows may share a port; prefer one that
+        // hasn't pinned a reply source (a pinned flow would have matched exactly).
         if let tokens = tokensByPort[decoded.port] {
             let target = firstRegistration(in: tokens, where: { !$0.hasLearnedSource })
                 ?? firstRegistration(in: tokens)
             if let target {
-                // Pin this reply address to the flow so subsequent replies
-                // from the same peer route exactly, and so other flows
-                // without a pin take the next port-only match.
+                // Pin this reply address so future packets from the same peer route exactly.
                 if !target.responseHosts.contains(decoded.host) {
                     target.responseHosts.insert(decoded.host)
                     tokensByResponse[key, default: []].append(target.token)
@@ -501,9 +451,7 @@ nonisolated final class ShadowsocksUDPSession {
         let sealedBody = try ShadowsocksAEADCrypto.seal(
             cipher: cipher, key: sessionKey, nonce: nonce, plaintext: body)
 
-        // Header is AES-ECB encrypted with pskList[0] — the iPSK for multi-PSK
-        // setups, or the user PSK when only one is configured (single-user
-        // case trivially has pskList[0] == pskList.last).
+        // Header is AES-ECB encrypted with pskList[0]: the iPSK, or the user PSK when single.
         let encryptedHeader = try ssAESECBEncryptBlock(key: pskList.first!, block: header)
 
         var packet = Data(capacity: encryptedHeader.count + identityData.count + sealedBody.count)
@@ -563,8 +511,7 @@ nonisolated final class ShadowsocksUDPSession {
         case .ss2022AES(let cipher, let pskList):
             guard data.count >= 16 + 16 else { throw ShadowsocksError.decryptionFailed }
 
-            // Header AES-ECB decrypt uses pskList[last] — the user's PSK, per
-            // sing-shadowsocks `m.udpBlockDecryptCipher`.
+            // Header AES-ECB decrypt uses the user PSK (pskList.last), per sing-shadowsocks.
             let header = try ssAESECBDecryptBlock(key: pskList.last!, block: Data(data.prefix(16)))
 
             var sidBE: UInt64 = 0
@@ -599,9 +546,8 @@ nonisolated final class ShadowsocksUDPSession {
             let ciphertext = Data(data.suffix(from: data.startIndex + 24))
             let body = try XChaCha20Poly1305.open(key: psk, nonce: nonce, ciphertext: ciphertext)
 
-            // Body layout: sessionID(8) + packetID(8) + [standard server body].
-            // We don't validate the server's sessionID/packetID sliding window
-            // — the AEAD tag + timestamp already gate acceptance.
+            // Body: sessionID(8) + packetID(8) + standard server body. No sliding-window
+            // validation — the AEAD tag + timestamp already gate acceptance.
             guard body.count >= 16 else { throw ShadowsocksError.decryptionFailed }
             let innerBody = Data(body.suffix(from: body.startIndex + 16))
             return try parseServerUDPBody(innerBody)

@@ -21,24 +21,7 @@ enum X509Builder {
 
     // MARK: - Public API
 
-    /// Builds a self-signed CA certificate. The CA private key signs its own
-    /// `tbsCertificate`; the public key embedded in the cert is the same
-    /// key's public half.
-    ///
-    /// - Parameters:
-    ///   - privateKey: ECDSA P-256 private key reference. May live in the
-    ///     Secure Enclave or in software — this method only needs
-    ///     ``SecKeyCreateSignature`` and ``SecKeyCopyPublicKey``, both of
-    ///     which work transparently against either.
-    ///   - subjectCN: Common Name for the CA subject (and issuer, since
-    ///     it's self-signed).
-    ///   - organization: Organization name written into the DN.
-    ///   - serial: 16-byte big-endian serial. Stripped of leading zero
-    ///     octets and forced positive before encoding; an all-zero value
-    ///     normalizes to 1 (RFC 5280 §4.1.2.2 forbids serial 0).
-    ///   - notBefore: Validity start.
-    ///   - notAfter: Validity end (typically +10 years).
-    /// - Returns: DER-encoded certificate.
+    /// Builds a self-signed CA certificate (ECDSA P-256); returns DER.
     static func buildCACertificate(
         privateKey: SecKey,
         subjectCN: String,
@@ -72,20 +55,8 @@ enum X509Builder {
         return encodeCertificate(tbs: tbs, signature: signature)
     }
 
-    /// Builds a leaf certificate signed by the CA private key.
-    ///
-    /// - Parameters:
-    ///   - leafPublicKey: ECDSA P-256 public key for the leaf.
-    ///   - caPrivateKey: ECDSA P-256 private key of the issuing CA.
-    ///   - caCertificateDER: DER-encoded CA certificate. Issuer DN and AKID
-    ///     are read directly from this blob so there's no chance of drift
-    ///     between what the CA presents and what the leaf claims.
-    ///   - hostname: SNI to embed into the SAN and Common Name.
-    ///   - serial: 16-byte big-endian serial, normalized to a positive
-    ///     integer before encoding (see ``buildCACertificate``).
-    ///   - notBefore: Validity start (typically now − 1h for clock skew).
-    ///   - notAfter: Validity end (typically now + 7d).
-    /// - Returns: DER-encoded leaf certificate.
+    /// Builds a leaf certificate signed by the CA key; issuer DN and AKID are
+    /// parsed from `caCertificateDER` for byte-exact agreement. Returns DER.
     static func buildLeafCertificate(
         leafPublicKey: P256.Signing.PublicKey,
         caPrivateKey: SecKey,
@@ -98,9 +69,7 @@ enum X509Builder {
         let leafSPKI = try buildECP256SPKI(publicKeyX963: leafPublicKey.x963Representation)
         let caComponents = try parseCAComponents(certDER: caCertificateDER)
 
-        // Strip IPv6 URI brackets for the CN so it matches the bracket-free
-        // address the SAN emits. Cosmetic — the CN is ignored when a SAN is
-        // present — but keeps the two consistent.
+        // Strip IPv6 URI brackets so the CN matches the bracket-free SAN address.
         let cnHostname: String
         if hostname.hasPrefix("["), hostname.hasSuffix("]"), hostname.count >= 2 {
             cnHostname = String(hostname.dropFirst().dropLast())
@@ -159,8 +128,7 @@ enum X509Builder {
         return ASN1.sequence(validity)
     }
 
-    /// RFC 5280 §4.1.2.5: UTCTime for years 1950..2049, GeneralizedTime
-    /// otherwise. UTCTime is two-digit year, GeneralizedTime is four.
+    /// RFC 5280 §4.1.2.5: UTCTime for years 1950–2049, GeneralizedTime otherwise.
     private static func encodeTime(_ date: Date) -> Data {
         let calendar = Calendar(identifier: .gregorian)
         var calCopy = calendar
@@ -200,9 +168,8 @@ enum X509Builder {
         return try buildECP256SPKI(publicKeyX963: raw)
     }
 
-    /// Builds an SPKI from the X9.63 (uncompressed) point representation.
-    /// CryptoKit returns X9.63 directly; ``SecKeyCopyExternalRepresentation``
-    /// also returns X9.63 for ECC keys.
+    /// Builds an SPKI from the X9.63 (uncompressed, 0x04-prefixed) point format
+    /// that both CryptoKit and `SecKeyCopyExternalRepresentation` emit for P-256.
     private static func buildECP256SPKI(publicKeyX963: Data) throws -> Data {
         guard publicKeyX963.count == 65, publicKeyX963.first == 0x04 else {
             throw X509BuilderError.invalidPublicKey
@@ -213,7 +180,6 @@ enum X509Builder {
         algorithm.append(ASN1OID.prime256v1)
         let algorithmSeq = ASN1.sequence(algorithm)
 
-        // SubjectPublicKey is a BIT STRING wrapping the uncompressed point.
         let subjectPublicKey = ASN1.bitString(unusedBits: 0, content: publicKeyX963)
 
         var spki = Data()
@@ -228,7 +194,6 @@ enum X509Builder {
         var inner = Data()
         for e in extensions { inner.append(e) }
         let seq = ASN1.sequence(inner)
-        // Wrapped in [3] EXPLICIT
         return ASN1.contextSpecific(tag: 3, constructed: true, content: seq)
     }
 
@@ -256,34 +221,15 @@ enum X509Builder {
         return encodeExtension(oid: ASN1OID.basicConstraints, critical: true, value: value)
     }
 
-    /// Bits per RFC 5280 §4.2.1.3:
-    ///   0 digitalSignature, 1 nonRepudiation, 2 keyEncipherment,
-    ///   3 dataEncipherment, 4 keyAgreement, 5 keyCertSign, 6 cRLSign,
-    ///   7 encipherOnly.
-    ///
-    /// Encoded as a BIT STRING whose bits are numbered MSB-first per
-    /// X.690 §8.6 (bit 0 = most-significant bit of the first content
-    /// octet). The leading "unused bits" byte of the BIT STRING tells
-    /// the decoder how many trailing bits in the final octet are
-    /// padding — DER requires that to be the minimum, computed from
-    /// the rightmost meaningful bit position.
-    ///
-    /// Rather than packing the byte and computing unused bits from
-    /// trailing-zero count (which couples encoding correctness to the
-    /// specific combination of named bits and breaks any time the
-    /// caller adds a sparse named bit), this version maps each named
-    /// bit to its fixed RFC position and derives ``unusedBits`` from
-    /// the highest set position.
+    /// RFC 5280 §4.2.1.3 bits (MSB-first): 0 digitalSignature, 5 keyCertSign,
+    /// 6 cRLSign; unusedBits = 7 − highest set position.
     private static func encodeKeyUsage(keyCertSign: Bool, cRLSign: Bool, digitalSignature: Bool) -> Data {
         var positions: [Int] = []
         if digitalSignature { positions.append(0) }
         if keyCertSign      { positions.append(5) }
         if cRLSign          { positions.append(6) }
         guard let highest = positions.max() else {
-            // Empty BIT STRING — RFC 5280 forbids this for KeyUsage
-            // (§4.2.1.3 requires at least one bit set), but
-            // defensively emit a well-formed empty BIT STRING rather
-            // than a malformed cert.
+            // No bits set: emit a well-formed empty BIT STRING rather than malformed DER.
             let bitString = ASN1.bitString(unusedBits: 0, content: Data())
             return encodeExtension(oid: ASN1OID.keyUsage, critical: true, value: bitString)
         }
@@ -291,34 +237,20 @@ enum X509Builder {
         for pos in positions {
             byte |= UInt8(0x80 >> pos)
         }
-        // DER §11.2: unused bits = the number of trailing padding bits
-        // in the last octet. For a single-octet BIT STRING with
-        // ``highest`` as the rightmost meaningful bit position
-        // (0…7, MSB-first), unused = 7 - highest.
         let unused = UInt8(7 - highest)
         let bitString = ASN1.bitString(unusedBits: unused, content: Data([byte]))
         return encodeExtension(oid: ASN1OID.keyUsage, critical: true, value: bitString)
     }
 
-    /// SAN: GeneralName. When ``hostname`` is an IPv4 or IPv6 literal,
-    /// emits an ``iPAddress`` GeneralName ([7] OCTET STRING — 4 or 16
-    /// raw bytes). Otherwise emits a ``dNSName`` ([2] IA5String).
-    /// RFC 5280 §4.2.1.6 requires IP-addressed servers to use
-    /// ``iPAddress`` SAN; using ``dNSName`` for an IP literal would
-    /// be rejected by strict validators (Safari, Chrome).
+    /// Emits an `iPAddress` GeneralName for IP literals (RFC 5280 §4.2.1.6 —
+    /// Safari and Chrome reject a `dNSName` holding an IP), `dNSName` otherwise.
     private static func encodeSubjectAltName(hostname: String) -> Data {
         let generalName: Data
         if let ipBytes = parseIPAddress(hostname) {
             generalName = ASN1.contextSpecific(tag: 7, constructed: false, content: ipBytes)
         } else {
-            // dNSName is [2] IA5String — ASCII only. A U-label hostname
-            // (`café.example.com`) written verbatim puts non-ASCII bytes inside
-            // an IA5String: malformed DER that fails SecTrust hostname matching,
-            // so interception silently breaks. Convert to the IDNA A-label
-            // (Punycode) first. A real ClientHello SNI is already an A-label
-            // (RFC 6066); this covers a U-label arriving via a configured
-            // destination host. Falls back to the original on the (unreachable
-            // for real hostnames) Punycode-overflow case — no worse than before.
+            // dNSName is IA5String (ASCII only); convert U-labels to IDNA A-labels
+            // or SecTrust hostname matching fails.
             let asciiHost = Self.idnaASCII(hostname) ?? hostname
             let nameBytes = Data(asciiHost.utf8)
             generalName = ASN1.contextSpecific(tag: 2, constructed: false, content: nameBytes)
@@ -327,13 +259,10 @@ enum X509Builder {
         return encodeExtension(oid: ASN1OID.subjectAltName, critical: false, value: value)
     }
 
-    /// Returns the 4-byte (IPv4) or 16-byte (IPv6) network-order
-    /// representation when ``s`` parses as an IP literal, or nil
-    /// otherwise. IPv6 zone identifiers ("fe80::1%en0") are not
-    /// permitted in certificates so are intentionally rejected.
+    /// Returns the 4- or 16-byte network-order address, or nil if `s` is not an
+    /// IP literal; zone identifiers (`%en0`) are invalid in certificates.
     private static func parseIPAddress(_ s: String) -> Data? {
-        // IPv6 literals in SNI are wrapped in [brackets]; strip
-        // them before attempting the network-form parse.
+        // SNI wraps IPv6 literals in [brackets].
         let trimmed: String
         if s.hasPrefix("["), s.hasSuffix("]") {
             trimmed = String(s.dropFirst().dropLast())
@@ -341,14 +270,9 @@ enum X509Builder {
             trimmed = s
         }
         if trimmed.contains("%") { return nil }
-        // ``IPv4Address`` / ``IPv6Address`` use lenient inet_aton/inet_pton
-        // parsing that accepts non-dotted-quad forms — e.g. IPv4Address("1234")
-        // → 0.0.4.210, "2130706433" → 127.0.0.1, "1.2.3" → 1.2.0.3. Those are
-        // valid DNS hostnames, and mis-encoding one as an ``iPAddress`` SAN
-        // makes the leaf fail SNI hostname matching (the SSL policy treats SNI
-        // as a DNS name and finds no matching dNSName). Gate IPv4 on a strict
-        // 4-octet dotted-quad, and only treat a colon-bearing literal as IPv6;
-        // anything else is encoded as a ``dNSName``.
+        // `IPv4Address` accepts inet_aton shorthands ("1.2.3") that are valid DNS
+        // hostnames; gate on a strict dotted-quad so such hosts aren't mis-encoded
+        // as `iPAddress` SANs.
         if Self.isDottedQuadIPv4(trimmed), let v4 = IPv4Address(trimmed) {
             return v4.rawValue
         }
@@ -358,9 +282,7 @@ enum X509Builder {
         return nil
     }
 
-    /// True only for a canonical IPv4 dotted-quad: exactly four runs of 1–3
-    /// ASCII decimal digits, each 0–255. Rejects the inet_aton shorthands
-    /// (`1234`, `1.2.3`, `0x7f000001`, octal) that ``IPv4Address`` accepts.
+    /// True only for a canonical dotted-quad; rejects inet_aton shorthands.
     private static func isDottedQuadIPv4(_ s: String) -> Bool {
         let parts = s.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 4 else { return false }
@@ -373,11 +295,7 @@ enum X509Builder {
         return true
     }
 
-    /// Converts ``hostname`` to its IDNA ASCII (A-label) form for use in an
-    /// IA5String dNSName: every dot-separated label containing a non-ASCII
-    /// character is Punycode-encoded and prefixed with `xn--`; an all-ASCII
-    /// hostname (or label) is returned unchanged. Returns nil only if a label's
-    /// Punycode encode overflows — unreachable for any real hostname.
+    /// Converts `hostname` to IDNA ASCII (A-label); nil only on Punycode delta overflow.
     private static func idnaASCII(_ hostname: String) -> String? {
         guard hostname.contains(where: { !$0.isASCII }) else { return hostname }
         var labels: [String] = []
@@ -392,9 +310,7 @@ enum X509Builder {
         return labels.joined(separator: ".")
     }
 
-    /// RFC 3492 Punycode encode of a single label (without the `xn--` prefix).
-    /// Returns nil on the bias/delta overflow guard — not reachable for a real
-    /// DNS label, but checked so a hostile input can't trap.
+    /// RFC 3492 Punycode encode of one label (no `xn--` prefix); nil on delta overflow.
     private static func punycodeEncode(_ input: String) -> String? {
         let base = 36, tmin = 1, tmax = 26, skew = 38, damp = 700
         let initialBias = 72, initialN = 128
@@ -462,7 +378,7 @@ enum X509Builder {
     }
 
     private static func encodeSubjectKeyIdentifier(spki: Data) throws -> Data {
-        // SKI is the SHA-1 of the SubjectPublicKey BIT STRING content (RFC 5280 §4.2.1.2 method (1)).
+        // SKI = SHA-1 of the BIT STRING content (RFC 5280 §4.2.1.2, method 1).
         let publicKeyContent = try extractSubjectPublicKey(spki: spki)
         let digest = sha1(publicKeyContent)
         let value = ASN1.octetString(Data(digest))
@@ -470,7 +386,7 @@ enum X509Builder {
     }
 
     private static func encodeAuthorityKeyIdentifier(keyIdentifier: Data) -> Data {
-        // AuthorityKeyIdentifier ::= SEQUENCE { keyIdentifier [0] OCTET STRING OPTIONAL, ... }
+        // AuthorityKeyIdentifier: keyIdentifier is [0] IMPLICIT OCTET STRING.
         let inner = ASN1.contextSpecific(tag: 0, constructed: false, content: keyIdentifier)
         let value = ASN1.sequence(inner)
         return encodeExtension(oid: ASN1OID.authorityKeyIdentifier, critical: false, value: value)
@@ -478,8 +394,7 @@ enum X509Builder {
 
     // MARK: - Algorithm Identifier
 
-    /// ECDSA-with-SHA256 — used both inside `tbsCertificate.signature` and
-    /// in the outer `signatureAlgorithm` field.
+    /// ECDSA-with-SHA256, used in both `tbsCertificate.signature` and the outer `signatureAlgorithm`.
     private static let algorithmECDSAWithSHA256: Data = {
         ASN1.sequence(ASN1OID.ecdsaWithSHA256)
     }()
@@ -499,26 +414,12 @@ enum X509Builder {
         let versionInner = ASN1.integer(2)
         let versionWrapped = ASN1.contextSpecific(tag: 0, constructed: true, content: versionInner)
         tbs.append(versionWrapped)
-
-        // serialNumber INTEGER
         tbs.append(ASN1.rawInteger(serial))
-
-        // signature AlgorithmIdentifier
         tbs.append(algorithmECDSAWithSHA256)
-
-        // issuer Name
         tbs.append(issuer)
-
-        // validity
         tbs.append(validity)
-
-        // subject Name
         tbs.append(subject)
-
-        // SubjectPublicKeyInfo
         tbs.append(spki)
-
-        // extensions [3] EXPLICIT
         tbs.append(extensions)
 
         return ASN1.sequence(tbs)
@@ -547,11 +448,6 @@ enum X509Builder {
     }
 
     // MARK: - CA Component Reuse
-    //
-    // To keep the leaf's "issuer" field byte-identical to the CA's "subject"
-    // field, we read the CA cert's DER directly rather than re-encoding from
-    // the parameters. Same for the AKID — the CA's SKI is what the AKID
-    // references.
 
     private struct CAComponents {
         let subjectDN: Data
@@ -567,7 +463,7 @@ enum X509Builder {
         try tbsParser.skipExplicitContextSpecific(tag: 0)           // version
         try tbsParser.skipNext()                                    // serialNumber
         try tbsParser.skipNext()                                    // signature algorithm
-        try tbsParser.skipNext()                                    // issuer (we don't need it here)
+        try tbsParser.skipNext()                                    // issuer
         try tbsParser.skipNext()                                    // validity
         let subjectDN = try tbsParser.readNextWithHeader(expectedTag: 0x30)
         try tbsParser.skipNext()                                    // SPKI
@@ -584,10 +480,8 @@ enum X509Builder {
             let ext = try seqParser.readSequence()
             var extParser = ASN1Parser(data: ext)
             let oid = try extParser.readNextWithHeader(expectedTag: 0x06)
-            // Drop the tag/length to compare contents only.
             let oidContent = try ASN1Parser.contentOf(oid)
-            // Optional `critical` BOOLEAN
-            if try extParser.peekTag() == 0x01 {
+            if try extParser.peekTag() == 0x01 {  // skip optional critical BOOLEAN
                 try extParser.skipNext()
             }
             let octets = try extParser.readNextWithHeader(expectedTag: 0x04)
@@ -620,18 +514,12 @@ enum X509Builder {
     // MARK: - Helpers
 
     private static func normalizeSerial(_ serial: Data) -> Data {
-        // RFC 5280: serial must be a positive integer. Strip any leading
-        // zeros, then ensure top bit is clear (otherwise INTEGER would be
-        // negative, requiring a 0x00 prefix — easier to just zero the top
-        // bit and re-add a 0x00 if needed below).
+        // RFC 5280 §4.1.2.2: serial must be a positive integer.
         var trimmed = serial
         while trimmed.count > 1 && trimmed.first == 0x00 {
             trimmed = trimmed.dropFirst()
         }
-        // The strip loop stops at one byte, so an all-zero (or empty) input
-        // collapses to a single 0x00 — which would encode as INTEGER 0, a serial
-        // RFC 5280 §4.1.2.2 forbids and strict validators reject. Treat a lone
-        // 0x00 (and the never-reached empty case) as "no serial" and substitute 1.
+        // All-zero collapses to 0x00; substitute 1 (RFC 5280 forbids serial 0).
         if trimmed.isEmpty || (trimmed.count == 1 && trimmed.first == 0x00) {
             trimmed = Data([0x01])
         }
@@ -688,8 +576,7 @@ private enum ASN1 {
         return emit(tag: 0x02, content: Data(bytes))
     }
 
-    /// Wraps a raw big-endian INTEGER content blob — caller is responsible
-    /// for sign-correctness.
+    /// Wraps a raw big-endian INTEGER content blob; caller ensures sign-correctness.
     static func rawInteger(_ content: Data) -> Data {
         emit(tag: 0x02, content: content)
     }
@@ -839,27 +726,16 @@ private struct ASN1Parser {
             return (Int(first), 1)
         }
         let count = Int(first & 0x7F)
-        // Long-form length: 0x80 alone means indefinite-length (not
-        // legal in DER, only BER). count > 4 would also exceed the
-        // size addressable by ``Int`` on 32-bit platforms, so cap at
-        // 4 bytes (16 MiB), which is well beyond any cert we
-        // legitimately handle.
+        // 0x80 alone is BER indefinite-length (invalid DER); cap length bytes at 4.
         guard count > 0, count <= 4, start + count < data.endIndex else {
             throw X509BuilderError.asn1ParseFailed("Length encoding invalid")
         }
-        // Accumulate in UInt64 to avoid signed-Int overflow when
-        // ``count == 4`` and the top byte is ≥ 0x80 (on 32-bit
-        // platforms ``Int`` is 32-bit, so ``length << 8`` overflows
-        // the sign bit before the final byte is read).
+        // Accumulate in UInt64 — a 4-byte length can overflow a 32-bit `Int`.
         var length: UInt64 = 0
         for i in 0..<count {
             length = (length << 8) | UInt64(data[start + 1 + i])
         }
-        // Bound the decoded length to the remaining buffer. Without
-        // this guard a huge length value flows into
-        // ``readNextWithHeader`` where ``1 + lengthBytes + length``
-        // can overflow ``Int`` and silently bypass the
-        // ``end <= data.endIndex`` check.
+        // Bound to remaining buffer; a huge length would overflow Int in readNextWithHeader.
         let remaining = data.endIndex - (start + 1 + count)
         guard length <= UInt64(Int.max), length <= UInt64(remaining) else {
             throw X509BuilderError.asn1ParseFailed(
@@ -869,13 +745,8 @@ private struct ASN1Parser {
         return (Int(length), 1 + count)
     }
 
-    /// Returns the content bytes of a tag-length-value blob (skips the
-    /// tag and length header).
+    /// Returns the content bytes of a TLV blob (strips the tag and length header).
     static func contentOf(_ tlv: Data) throws -> Data {
-        // Need at least a tag + a length octet: ``tlv[startIndex + 1]`` below
-        // would trap on a 1-byte input. Every current caller passes a full TLV
-        // from ``readNextWithHeader`` (≥ 2 bytes), so this is a defensive
-        // backstop, not a reachable path today.
         guard tlv.count >= 2 else {
             throw X509BuilderError.asn1ParseFailed("TLV too short")
         }

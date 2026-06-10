@@ -7,48 +7,23 @@
 
 import Foundation
 
-/// Native, declarative JSON body editing — the engine behind
-/// ``MITMOperation/bodyJSON`` (import operation id `5`). It is the
-/// rule-configured analog of the ``Anywhere.json`` script API: the same
-/// edit catalog and the same total / fail-closed contract, expressed as
-/// compiled native code instead of JavaScript so a body rewrite needs no
-/// `JSContext`.
-///
-/// The path-walking core (``parseJSONPath``, ``applyAtPath``,
-/// ``replaceKeyRecursive`` …) is the single source of truth for JSON edit
-/// semantics: ``MITMScriptEngine``'s `Anywhere.json` blocks delegate to it
-/// too, so the native operation and the scripted API can never drift.
-///
-/// **Bytes in, bytes out.** ``applyAll`` parses the body once, applies
-/// every compiled edit in order against one mutable document, and
-/// re-serializes once (compact, slashes unescaped — it's going on the
-/// wire). A body that isn't JSON, a path that doesn't resolve, a type
-/// mismatch, or a value that can't be re-serialized all yield the body
-/// **unchanged**; a rewrite rule routinely fires on a response whose shape
-/// it doesn't fully control, and a hard failure there would be worse than
-/// a no-op.
+/// Native, declarative JSON body editing; the path-walking core is shared with the
+/// scripted `Anywhere.json` API. Fail-closed: any miss yields the body unchanged.
 enum MITMJSONPatch {
 
     // MARK: - Path model
 
-    /// One step of a parsed JSONPath: an object member (``key``) or an
-    /// array element (``index``). No wildcards or `..` descent — recursive
-    /// matching is ``replaceRecursive`` / ``deleteRecursive``, which take a
-    /// bare key name rather than a path.
+    /// One step of a parsed JSONPath; no wildcards or `..` descent.
     enum PathSegment: Equatable {
         case key(String)
         case index(Int)
     }
 
-    /// What ``applyAtPath`` does to the addressed leaf.
     enum LeafMode { case add, replace, delete }
 
     // MARK: - Compiled operation
 
-    /// A ``MITMJSONOperation`` with its path pre-parsed to ``PathSegment``s
-    /// and its JSON value pre-parsed to a Foundation object, done once at
-    /// rule-load time so the per-message hot path neither re-parses the
-    /// path string nor re-decodes the value literal.
+    /// An operation with path and value pre-parsed at rule-load time.
     enum CompiledOp {
         case add(path: [PathSegment], value: Any)
         case replace(path: [PathSegment], value: Any)
@@ -61,12 +36,7 @@ enum MITMJSONPatch {
 
     // MARK: - Compilation
 
-    /// Compiles a model operation, pre-parsing its path and value. Returns
-    /// nil only when the path is malformed (the rule is then dropped with a
-    /// logged diagnostic by the caller); values never fail — an authored
-    /// string that isn't valid JSON is taken as a literal JSON string (see
-    /// ``parseValue``), so `value = Anywhere` compiles to the string
-    /// `"Anywhere"`.
+    /// Returns nil only for a malformed path; a non-JSON value compiles to a literal string.
     static func compile(_ operation: MITMJSONOperation) -> CompiledOp? {
         switch operation {
         case .add(let path, let value):
@@ -91,12 +61,7 @@ enum MITMJSONPatch {
         }
     }
 
-    /// Turns an authored value string into its Foundation JSON form. Tries
-    /// to parse it as a JSON fragment first (`true`, `42`, `"text"`,
-    /// `{"a":1}`, `[1,2]`, `null`); when that fails, the raw string is the
-    /// value verbatim, so the everyday `value = Anywhere` yields the string
-    /// `"Anywhere"` without the author having to quote it. Never returns
-    /// nil — an empty string yields the empty JSON string `""`.
+    /// Parses an authored value as JSON; a non-JSON string becomes a literal string. Never nil.
     static func parseValue(_ raw: String) -> Any {
         if let parsed = try? JSONSerialization.jsonObject(
             with: Data(raw.utf8),
@@ -107,10 +72,7 @@ enum MITMJSONPatch {
         return raw
     }
 
-    /// Normalizes the `values` argument of ``removeWhereFieldIn`` into a
-    /// Swift array: a JSON array becomes its elements, a lone JSON scalar
-    /// becomes a one-element array, and a string that isn't JSON becomes a
-    /// one-element array holding that literal string.
+    /// Normalizes to an array: JSON array → elements, scalar or non-JSON string → one element.
     static func parseValues(_ raw: String) -> [Any] {
         if let parsed = try? JSONSerialization.jsonObject(
             with: Data(raw.utf8),
@@ -124,25 +86,11 @@ enum MITMJSONPatch {
 
     // MARK: - Application
 
-    /// Applies every compiled edit, in order, to ``body``. Parses once,
-    /// mutates one shared document, serializes once. Returns the body
-    /// **unchanged** when the list is empty, the body isn't JSON, no op
-    /// actually changed the document, or the edited document can't be
-    /// re-serialized — matching ``Anywhere.json``'s total contract so a rule
-    /// that fires on an unexpected body shape degrades to a no-op rather than
-    /// corrupting the wire.
+    /// Applies every compiled edit in order; fail-closed on non-JSON, no-op edits, or re-serialization failure.
     static func applyAll(_ ops: [CompiledOp], to body: Data) -> Data {
         guard !ops.isEmpty else { return body }
         guard var root = parse(body) else { return body }
-        // Snapshot the parsed document so we can tell whether any op actually
-        // changed it. A rule that merely *matched* — its path didn't resolve,
-        // its predicate removed nothing, its replacement equalled what was
-        // already there — must leave the body byte-for-byte identical.
-        // Re-serializing an unchanged document would round-trip every number
-        // through ``JSONSerialization`` and could reshape 64-bit IDs /
-        // high-precision decimals *anywhere* in the body (see ``parse``), so a
-        // no-op rule would silently corrupt untouched data. Returning the
-        // original bytes when nothing changed avoids that entirely.
+        // Return original bytes when nothing changed: re-serializing could reshape 64-bit IDs / high-precision decimals.
         let before = snapshot(root)
         for op in ops {
             apply(op, to: &root)
@@ -152,9 +100,7 @@ enum MITMJSONPatch {
         return out
     }
 
-    /// Applies a single compiled edit to a parsed, mutable document. The
-    /// root is `inout` so an op can edit a container in place (the common
-    /// case) or swap the root wholesale (an empty-path add/replace).
+    /// Root is `inout` so empty-path add/replace can swap the root wholesale.
     private static func apply(_ op: CompiledOp, to root: inout Any) {
         switch op {
         case .add(let path, let value):
@@ -184,64 +130,25 @@ enum MITMJSONPatch {
 
     // MARK: - Parse / serialize
 
-    /// `JSON.parse` via Foundation, with mutable containers so the ops can
-    /// edit nodes in place and `.fragmentsAllowed` so a top-level scalar
-    /// body (`42`, `"x"`, `true`) still parses. Returns nil for empty or
-    /// malformed input.
-    ///
-    /// KNOWN LIMITATION: ``JSONSerialization`` decodes every JSON number into
-    /// an ``NSNumber``. Current Foundation backs large/precise literals with
-    /// ``NSDecimalNumber`` and round-trips integers past 2^53, full Int64/UInt64,
-    /// and high-precision decimals exactly — but this is not contractual and may
-    /// not hold on every OS version, so an edited document is still re-serialized
-    /// without a precision guarantee. ``applyAll`` returns the original bytes
-    /// untouched whenever no op actually changed the document (so a rule that
-    /// merely *matched* never reshapes numbers in parts of the body it never
-    /// edited); once an op *does* change the document the whole thing is
-    /// re-serialized and numbers elsewhere in it ride whatever fidelity the
-    /// running OS's ``JSONSerialization`` provides. Exact, guaranteed
-    /// round-tripping would need a number-lexeme-preserving JSON parser (a larger
-    /// change). Bodies that match no rule never reach here, so unmatched traffic
-    /// is unaffected.
+    /// Parses with mutable containers and `.fragmentsAllowed`; nil for empty/malformed input.
+    /// NSNumber round-tripping isn't contractual, so applyAll only re-serializes changed documents.
     static func parse(_ data: Data) -> Any? {
         guard !data.isEmpty else { return nil }
         return try? JSONSerialization.jsonObject(with: data, options: [.mutableContainers, .fragmentsAllowed])
     }
 
-    /// `JSON.stringify` via Foundation. Compact, slashes left unescaped to
-    /// match how servers actually emit URLs in JSON, and
-    /// `.fragmentsAllowed` to round-trip a scalar root. Returns nil when the
-    /// graph can't be represented as JSON, which the caller turns into a
-    /// body-unchanged pass-through.
-    ///
-    /// IMPORTANT: ``JSONSerialization/data(withJSONObject:options:)`` does not
-    /// merely *throw* on an invalid graph — for a non-finite ``NSNumber`` (NaN /
-    /// ±Infinity) or a non-string dictionary key it **raises an Objective-C
-    /// `NSException`**, which Swift's `try?` cannot catch, crashing the whole
-    /// Network Extension (every tunneled connection with it). A scripted
-    /// ``Anywhere.json`` value rides ``JSValue/toObject`` and can carry a
-    /// `NaN`/`Infinity` (`0/0`, `1/0`, `Number.MAX_VALUE*10`, …), so the graph
-    /// is validated up front and rejected to a body-unchanged pass-through,
-    /// honoring the total / never-throws contract.
+    /// Nil for an un-serializable graph. JSONSerialization raises an ObjC NSException (uncatchable
+    /// by `try?`) on non-finite NSNumbers or non-string keys, so `isJSONEncodable` guards first.
     static func serialize(_ object: Any) -> Data? {
         guard isJSONEncodable(object) else { return nil }
         return try? JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed, .withoutEscapingSlashes])
     }
 
-    /// Recursively verifies a Foundation object graph holds only values
-    /// ``JSONSerialization`` can encode *without raising*: every ``NSNumber``
-    /// must be finite (a non-finite one raises, not throws) and every
-    /// dictionary key must be a string. Errs toward `false` for any unexpected
-    /// type — the caller maps that to a safe body-unchanged pass-through, the
-    /// same outcome `try?` would give for a merely-throwing graph. Bounded by
-    /// ``maxRecursionDepth`` like the other tree walkers.
+    /// Verifies a graph can be serialized without raising: finite NSNumbers, string keys only.
     private static func isJSONEncodable(_ object: Any, depth: Int = 0) -> Bool {
         guard depth < maxRecursionDepth else { return false }
         switch object {
         case let number as NSNumber:
-            // A boolean is a CFBoolean-backed NSNumber whose doubleValue is
-            // 0/1 (finite), so it passes; a real number must be finite to
-            // serialize without raising.
             return number.doubleValue.isFinite
         case is NSString:
             return true
@@ -262,13 +169,8 @@ enum MITMJSONPatch {
 
     // MARK: - JSONPath
 
-    /// Splits a JSONPath into segments. Tolerant by design: a leading `$`
-    /// is optional, brackets accept a bare or quoted key or a numeric
-    /// index, and a path written without the `$.` prefix (`"data.items"`)
-    /// still parses. Returns nil only for genuinely malformed input — an
-    /// empty dotted segment (`"a..b"`, a trailing `"."`) or an empty `"[]"`
-    /// — so the caller can warn instead of silently addressing the wrong
-    /// node. An empty result (`"$"` or `""`) means "the document root".
+    /// Splits a JSONPath into segments; leading `$` optional, brackets take quoted/bare
+    /// keys or numeric indices. Nil for malformed input; empty result means the document root.
     static func parseJSONPath(_ raw: String) -> [PathSegment]? {
         var segments: [PathSegment] = []
         var chars = Substring(raw)
@@ -286,11 +188,7 @@ enum MITMJSONPatch {
             } else if c == "[" {
                 chars = chars.dropFirst()
                 var inner = ""
-                // A quoted bracket key may legitimately contain `]`. When the
-                // token opens with a quote, scan to the MATCHING closing quote
-                // (keeping the quotes in ``inner`` so the strip below removes
-                // them) before looking for `]` — otherwise `["a]b"]` truncates at
-                // the first `]` to the key `"a` plus trailing garbage.
+                // Scan past a quoted key first: it may contain `]` (`["a]b"]`).
                 if let quote = chars.first, quote == "\"" || quote == "'" {
                     inner.append(quote)
                     chars = chars.dropFirst()
@@ -313,13 +211,7 @@ enum MITMJSONPatch {
                    (token.first == "\"" && token.last == "\"") || (token.first == "'" && token.last == "'") {
                     segments.append(.key(String(token.dropFirst().dropLast())))
                 } else if !token.isEmpty, token.allSatisfy({ $0.isASCII && $0.isNumber }) {
-                    // A bare all-digits token is an array index. ``Int(_:)``
-                    // failing on an all-digits token means the literal overflows
-                    // ``Int`` — reject the path as malformed rather than silently
-                    // falling through to ``.key`` and addressing an object member
-                    // literally named "9999999999999999999999" (which then
-                    // resolves to nil — a silent mis-address the contract above
-                    // promises to warn on instead).
+                    // Int(_:) fails only on overflow — reject rather than fall through to .key.
                     guard let index = Int(token) else { return nil }
                     segments.append(.index(index))
                 } else if !token.isEmpty {
@@ -340,14 +232,7 @@ enum MITMJSONPatch {
         return segments
     }
 
-    /// Descends one segment. Object keys index a dictionary; numeric
-    /// segments index an array (bounds-checked). Indices are non-negative
-    /// only: a negative index (e.g. `[-1]`) is **not** "last element" — it
-    /// fails the bounds check and resolves to nil (a no-op), matching the
-    /// fail-closed contract rather than silently editing the wrong element.
-    /// Any other pairing — a key into an array, an index into an object, a
-    /// step off the end, a step into a scalar — returns nil, which unwinds the
-    /// whole walk to a no-op.
+    /// Descends one segment; nil on type mismatch or out-of-bounds. Negative indices fail closed, not "last element".
     private static func childNode(_ node: Any?, _ segment: PathSegment) -> Any? {
         guard let node else { return nil }
         switch segment {
@@ -359,8 +244,7 @@ enum MITMJSONPatch {
         }
     }
 
-    /// Resolves a full path to its node (or nil). Empty segments means the
-    /// root. Used by the `removeWhere…` ops to find the target array.
+    /// Resolves a full path to its node, or nil. Empty segments = document root.
     static func resolveNode(_ root: Any, segments: [PathSegment]) -> Any? {
         var node: Any? = root
         for segment in segments {
@@ -369,16 +253,8 @@ enum MITMJSONPatch {
         return node
     }
 
-    /// Applies add/replace/delete at the leaf of ``segments``. Walks to the
-    /// leaf's parent container, then acts per ``mode``. Returns the root —
-    /// usually the same object mutated in place, except an empty-path
-    /// add/replace which swaps the root for ``value``. Every miss (absent
-    /// parent, wrong container type, out-of-range index) is a no-op.
-    ///
-    /// Inserted values are deep-copied: the same ``value`` may be a
-    /// long-lived ``CompiledOp`` payload reused across every intercepted
-    /// message, so handing the document a private copy keeps a later edit
-    /// (or a later message) from mutating the shared compiled value.
+    /// Applies add/replace/delete at the path leaf; every miss is a no-op. Inserted values are
+    /// deep-copied — the shared CompiledOp payload must never be mutated through a document.
     static func applyAtPath(_ root: Any, segments: [PathSegment], mode: LeafMode, value: Any?) -> Any {
         if segments.isEmpty {
             switch mode {
@@ -422,28 +298,12 @@ enum MITMJSONPatch {
         return root
     }
 
-    /// Depth ceiling for the recursive whole-tree walkers below. Kept *above*
-    /// ``JSONSerialization``'s own parse-depth limit (empirically 512 for both
-    /// nested arrays and objects on Apple platforms) so every document the
-    /// parser accepts can be walked in full: a ceiling below it would let the
-    /// walkers bail mid-tree on a body the parser handled, and since
-    /// ``isJSONEncodable`` / ``documentsEqual`` walk the whole document, even a
-    /// shallow edit on a body that merely *contains* one too-deep sub-tree would
-    /// silently no-op — a fail-closed JSON-rewrite-evasion vector an upstream
-    /// could trigger by burying deep nesting in an otherwise-normal body. 600
-    /// clears the parse limit with margin while staying far within the Network
-    /// Extension's worker-thread stack (each frame is tiny — ~600 levels is
-    /// ≈120 KiB, safe even on a 512 KiB stack). A document deeper than the
-    /// parser's own limit never reaches these walkers (``parse`` rejects it
-    /// first); past this depth they stop descending — a graceful no-op on the
-    /// deep sub-tree, never a crash.
+    /// Depth ceiling for recursive walkers. Must exceed JSONSerialization's parse-depth limit
+    /// (empirically 512) or deep sub-trees silently no-op; 600 stays within NE stack bounds.
     private static let maxRecursionDepth = 600
 
-    /// Overwrites every ``key`` member at any depth with ``value``.
-    /// Children are visited before the key is set so the replacement is
-    /// never itself descended into; the key is only overwritten where it
-    /// already exists (recursive replace, not recursive insert). Each site
-    /// receives its own deep copy (see ``applyAtPath``).
+    /// Overwrites every existing `key` member at any depth (replace, not insert);
+    /// children are visited first so the replacement value is never descended into.
     static func replaceKeyRecursive(_ node: Any?, key: String, value: Any, depth: Int = 0) {
         guard depth < maxRecursionDepth else { return }
         if let dictionary = node as? NSMutableDictionary {
@@ -459,8 +319,7 @@ enum MITMJSONPatch {
         }
     }
 
-    /// Removes every ``key`` member at any depth, then recurses into what
-    /// remains.
+    /// Removes every `key` member at any depth.
     static func deleteKeyRecursive(_ node: Any?, key: String, depth: Int = 0) {
         guard depth < maxRecursionDepth else { return }
         if let dictionary = node as? NSMutableDictionary {
@@ -475,49 +334,24 @@ enum MITMJSONPatch {
 
     // MARK: - Helpers
 
-    /// True when ``value`` is a JSON boolean (`true`/`false`), which Foundation
-    /// backs with `CFBoolean` rather than a numeric `NSNumber`. JSON `true` and
-    /// `1` (and `false`/`0`) are distinct values, but `NSNumber(bool:)` `isEqual`
-    /// `NSNumber(1)` is `true` on Apple platforms — so the comparisons below must
-    /// reject a boolean-vs-number mismatch before deferring to `isEqual`.
+    /// True for a JSON boolean (CFBoolean-backed); NSNumber's `isEqual` equates `true`/`1`, which JSON does not.
     private static func isBooleanNumber(_ value: Any) -> Bool {
         return CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID()
     }
 
-    /// JSON-value equality for the `removeWhere…` predicates and the leaf level
-    /// of ``documentsEqual``. `isEqual` is exactly right for `NSString`/`NSNull`
-    /// and treats `1` and `1.0` as equal (what a numeric-literal rule expects),
-    /// but it also equates `true`/`false` with `1`/`0`, which JSON does not.
-    /// Reject a boolean-vs-number mismatch first, then defer to `isEqual`.
+    /// JSON-value equality: `isEqual` (equates `1`/`1.0`) with boolean-vs-number mismatches rejected first.
     static func valueEquals(_ lhs: Any, _ rhs: Any) -> Bool {
         if isBooleanNumber(lhs) != isBooleanNumber(rhs) { return false }
         return (lhs as AnyObject).isEqual(rhs)
     }
 
-    /// A structural snapshot of a parsed JSON document so a caller can tell
-    /// whether a later mutation actually changed anything — letting an unchanged
-    /// document be returned as its original bytes instead of re-serialized (which
-    /// would perturb 64-bit numbers). Used by ``applyAll`` and the scripted
-    /// `Anywhere.json` bridge in ``MITMScriptEngine``.
     static func snapshot(_ value: Any) -> Any {
         return deepCopy(value)
     }
 
-    /// Deep structural equality for two parsed JSON documents, used to decide
-    /// whether any op changed the document. Both sides are Foundation JSON
-    /// graphs (`NSDictionary` / `NSArray` / `NSNumber` / `NSString` / `NSNull`).
-    /// It recurses with ``valueEquals`` at the leaves rather than a blanket
-    /// `isEqual:` so a `true`↔`1` (or `false`↔`0`) edit is NOT misclassified as
-    /// a no-op and silently dropped. Comparing post-parse graphs is
-    /// apples-to-apples, so an untouched document always compares equal and its
-    /// original bytes are returned verbatim.
+    /// Structural equality via `valueEquals` at the leaves so a `true`↔`1` edit isn't misclassified as a no-op.
     static func documentsEqual(_ lhs: Any, _ rhs: Any, depth: Int = 0) -> Bool {
-        // Past the recursion ceiling, fail toward "changed" rather than a
-        // blanket ``isEqual:`` — which re-equates true↔1 / false↔0 and would
-        // silently drop a bool↔number edit nested this deep (the very
-        // misclassification this function exists to avoid). Treating an
-        // unverifiable-depth document as changed only costs a re-serialization
-        // of pathologically-deep JSON.
+        // Past the ceiling, report "changed" — safe in both directions.
         guard depth < maxRecursionDepth else { return false }
         switch (lhs, rhs) {
         case let (l as NSDictionary, r as NSDictionary):
@@ -534,17 +368,11 @@ enum MITMJSONPatch {
             }
             return true
         default:
-            // Leaves (or a container-vs-scalar / dict-vs-array type mismatch,
-            // which valueEquals correctly reports unequal).
             return valueEquals(lhs, rhs)
         }
     }
 
-    /// Recursively copies JSON containers so an inserted value shares no
-    /// mutable node with the document it came from. Scalars (`NSString` /
-    /// `NSNumber` / `NSNull`) are immutable and returned as-is; only
-    /// dictionaries and arrays are duplicated, into their mutable forms so
-    /// subsequent edits along the same path still work.
+    /// Deep copy sharing no mutable node with the source; copies stay mutable for later edits.
     private static func deepCopy(_ value: Any, depth: Int = 0) -> Any {
         guard depth < maxRecursionDepth else { return value }
         switch value {

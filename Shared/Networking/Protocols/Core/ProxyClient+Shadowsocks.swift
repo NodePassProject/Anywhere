@@ -9,15 +9,11 @@ import Foundation
 
 extension ProxyClient {
 
-    /// Whether this client is configured for Shadowsocks outbound.
     var isShadowsocks: Bool {
         configuration.outboundProtocol == .shadowsocks
     }
 
-    /// Shadowsocks protocol handshake on top of an established transport.
-    /// Shadowsocks owns its own wire encryption and address framing, so the
-    /// "handshake" is just wrapping the inner connection with the right
-    /// cipher/PSK; the result is delivered synchronously via `completion`.
+    /// No network round-trip — just wraps the transport with cipher/PSK, completing synchronously.
     func sendShadowsocksProtocolHandshake(
         over connection: ProxyConnection,
         command: ProxyCommand,
@@ -33,9 +29,8 @@ extension ProxyClient {
         ))
     }
 
-    /// Opens a real-UDP path to the SS server (via a UDP-shaped chain tunnel
-    /// or a kernel `SOCK_DGRAM`) and wraps with SS UDP encryption keyed for
-    /// the final destination.
+    /// Opens a real-UDP path to the SS server (chain-tunnel datagram or raw socket)
+    /// and wraps with SS UDP encryption keyed for the final destination.
     func connectShadowsocksRealUDP(
         destinationHost: String,
         destinationPort: UInt16,
@@ -55,8 +50,7 @@ extension ProxyClient {
         }
 
         if let tunnel = self.tunnel {
-            // Standard SS UDP only runs over real datagrams. A TCP tunnel here
-            // is a configuration error — fail rather than silently truncate.
+            // SS UDP needs real datagrams; a TCP tunnel here is a config error — fail rather than silently truncate.
             guard tunnel.deliversDatagrams else {
                 completion(.failure(ProxyError.protocolError(
                     "Shadowsocks UDP requires the chain link above it to deliver UDP datagrams."

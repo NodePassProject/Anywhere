@@ -14,15 +14,8 @@ private let logger = AnywhereLogger(category: "Reality")
 
 // MARK: - RealityClient
 
-/// Client for establishing authenticated Reality connections over TLS 1.3.
-///
-/// Performs a TLS 1.3 handshake with Reality-specific extensions:
-/// - Embeds authentication metadata in the ClientHello SessionId (AES-GCM encrypted).
-/// - Uses X25519 ECDH with the server's public key for mutual authentication.
-/// - Derives application-layer encryption keys from the TLS 1.3 handshake transcript.
-///
-/// After a successful handshake, returns a ``TLSRecordConnection`` that wraps
-/// the underlying ``RawTCPSocket`` with TLS record encryption/decryption.
+/// Reality client: embeds AES-GCM–encrypted auth metadata in the ClientHello SessionId,
+/// performs X25519 ECDH mutual authentication, and derives TLS 1.3 keys from the transcript.
 nonisolated class RealityClient {
     private let configuration: RealityConfiguration
     private var connection: (any RawTransport)?
@@ -33,16 +26,11 @@ nonisolated class RealityClient {
     private var storedClientHello: Data?
     private var mlkemPrivateKeyStorage: Any? // MLKEM768.PrivateKey when the SDK provides it.
 
-    /// TLS 1.3 session state (cleared after handshake by reassigning a
-    /// fresh ``TLS13HandshakeState``).
     private var tls13 = TLS13HandshakeState()
     private var serverCertVerified = false
 
     // MARK: Initialization
 
-    /// Creates a new Reality client with the given configuration.
-    ///
-    /// - Parameter configuration: The Reality server configuration (public key, shortId, SNI).
     init(configuration: RealityConfiguration) {
         self.configuration = configuration
     }
@@ -50,11 +38,6 @@ nonisolated class RealityClient {
     // MARK: - Public API
 
     /// Connects to a Reality server and performs the TLS handshake.
-    ///
-    /// - Parameters:
-    ///   - host: The server hostname or IP address.
-    ///   - port: The server port number.
-    ///   - completion: Called with the established ``TLSRecordConnection`` or an error.
     func connect(
         host: String,
         port: UInt16,
@@ -67,8 +50,7 @@ nonisolated class RealityClient {
             return
         }
 
-        // Build ClientHello before connecting so it can be sent via TCP Fast Open
-        // (included in the SYN packet, saving one round trip).
+        // Build the ClientHello first so TCP Fast Open can carry it in the SYN.
         let clientHello: Data
         do {
             clientHello = try buildRealityClientHello(privateKey: privateKey)
@@ -92,18 +74,11 @@ nonisolated class RealityClient {
                 return
             }
 
-            // ClientHello already sent via TFO, proceed directly to server response
             self.receiveServerResponse(completion: completion)
         }
     }
 
-    /// Connects over an existing proxy tunnel and performs the Reality handshake.
-    ///
-    /// Used for proxy chaining: the tunnel provides raw TCP I/O to the remote server.
-    ///
-    /// - Parameters:
-    ///   - tunnel: The proxy connection providing a TCP tunnel to the server.
-    ///   - completion: Called with the established ``TLSRecordConnection`` or an error.
+    /// Connects over an existing proxy tunnel (proxy chaining) and performs the Reality handshake.
     func connect(
         overTunnel tunnel: ProxyConnection,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
@@ -113,7 +88,6 @@ nonisolated class RealityClient {
         performRealityHandshake(completion: completion)
     }
 
-    /// Cancels the connection and releases all resources.
     func cancel() {
         clearHandshakeState()
         connection?.forceCancel()
@@ -122,8 +96,6 @@ nonisolated class RealityClient {
 
     // MARK: - Handshake
 
-    /// Performs the Reality TLS handshake: sends ClientHello, processes ServerHello,
-    /// derives encryption keys, and sends Client Finished.
     private func performRealityHandshake(
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
@@ -159,13 +131,8 @@ nonisolated class RealityClient {
 
     // MARK: - ClientHello
 
-    /// Builds a TLS ClientHello with Reality authentication metadata.
-    ///
-    /// Embeds version, timestamp, and shortId in the SessionId field,
-    /// encrypted with AES-GCM using a key derived from ECDH with the server.
-    ///
-    /// - Parameter privateKey: The ephemeral X25519 private key for this connection.
-    /// - Returns: A complete TLS record containing the ClientHello.
+    /// Builds a TLS ClientHello with the Reality SessionId (version + timestamp + shortId,
+    /// AES-GCM encrypted with a key derived from ECDH with the server).
     private func buildRealityClientHello(privateKey: Curve25519.KeyAgreement.PrivateKey) throws -> Data {
         var random = Data(count: 32)
         guard random.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
@@ -185,13 +152,12 @@ nonisolated class RealityClient {
         sessionId[6] = UInt8((timestamp >> 8) & 0xFF)
         sessionId[7] = UInt8(timestamp & 0xFF)
 
-        // Copy shortId into bytes 8-15, zero-padded to 8 bytes (matching Xray-core's fixed [8]byte)
+        // shortId in bytes 8-15, zero-padded to 8 bytes (matching Xray-core's fixed [8]byte)
         let shortIdLen = min(configuration.shortId.count, 8)
         for i in 0..<shortIdLen {
             sessionId[8 + i] = configuration.shortId[i]
         }
 
-        // ECDH with server's public key to derive auth key
         let serverPublicKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: configuration.publicKey)
         let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: serverPublicKey)
 
@@ -214,15 +180,8 @@ nonisolated class RealityClient {
         }
         #endif
 
-        // Build the ClientHello once with a zero-sessionId placeholder. The
-        // sessionId field is the only byte range that differs between the
-        // AAD and final forms (same fingerprint / random / public keys /
-        // ALPN / extensions), so ``buildFingerprintedParts`` would produce
-        // identical cipher suites, extensions, and padding either way. We
-        // hand the buffer to AES-GCM as AAD (matching Xray-core's protocol,
-        // which expects AAD = ClientHello with the zero placeholder) and
-        // then overwrite the placeholder bytes with the encrypted sessionId
-        // in place — saving an entire duplicate build pass.
+        // The zero-SessionId ClientHello is the AES-GCM AAD (Xray-core protocol);
+        // the field is patched in place below.
         let zeroSessionId = Data(count: 32)
         var rawClientHello = TLSClientHelloBuilder.buildRawClientHello(
             fingerprint: configuration.fingerprint,
@@ -233,9 +192,7 @@ nonisolated class RealityClient {
             mlkemEncapsulationKey: mlkemEncapsulationKey
         )
 
-        // Encrypt first 16 bytes of SessionId using AES-GCM. Output is
-        // ciphertext (16 B) + tag (16 B) = 32 B, exactly the size of the
-        // sessionId field.
+        // AES-GCM output is ciphertext (16 B) + tag (16 B) = 32 B, filling the SessionId field exactly.
         let nonce = random.suffix(12)
         let plaintext = sessionId.prefix(16)
 
@@ -246,14 +203,7 @@ nonisolated class RealityClient {
             aad: rawClientHello
         )
 
-        // Patch the encrypted sessionId into the raw ClientHello body at the
-        // fixed offset. Layout up to the sessionId field:
-        //   1 byte  handshake type (0x01)
-        //   3 bytes length
-        //   2 bytes legacy version (0x0303)
-        //   32 bytes random
-        //   1 byte session_id length (always 0x20 here)
-        //   32 bytes session_id  ← offset 39
+        // SessionId offset: type(1) + length(3) + legacy_version(2) + random(32) + sid_len(1) = 39.
         let sessionIdOffset = 1 + 3 + 2 + 32 + 1
         rawClientHello.replaceSubrange(sessionIdOffset..<(sessionIdOffset + 32), with: encryptedSessionId)
 
@@ -262,13 +212,8 @@ nonisolated class RealityClient {
 
     // MARK: - Server Response Processing
 
-    /// Receives and processes the server's TLS response.
-    ///
-    /// `RawTCPSocket.receive()` is built on `Darwin.recv()` which returns any
-    /// number of bytes from 1 up to the scratch size; through tunnels and
-    /// proxy chains a partial first chunk of <5 bytes (smaller than a TLS
-    /// record header) is plausible. Buffer until at least the record header
-    /// is available before dispatching on `contentType`.
+    /// Buffers the server's TLS response until a full 5-byte record header is available
+    /// (partial chunks are plausible through proxy chains).
     private func receiveServerResponse(
         buffer: Data = Data(),
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
@@ -311,14 +256,10 @@ nonisolated class RealityClient {
         }
     }
 
-    /// Continues receiving handshake messages until ServerHello is complete.
     private func continueReceivingHandshake(
         buffer: Data,
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
-        // Wait until we have a complete TLS record containing ServerHello.
-        // The server may split the response across multiple TCP segments,
-        // so we must check the record's declared length before parsing.
         if !bufferContainsCompleteServerHello(buffer) {
             guard let connection else {
                 completion(.failure(RealityError.connectionFailed("Connection cancelled")))
@@ -396,20 +337,14 @@ nonisolated class RealityClient {
 
     // MARK: - ServerHello Parsing
 
-    /// Returns `true` when the buffer contains at least one complete TLS Handshake
-    /// record whose payload starts with a ServerHello (type 0x02).
-    ///
-    /// Returns `false` when a record header indicates more bytes than are
-    /// currently buffered — the caller should read more data and retry.
+    /// True when the buffer holds a complete Handshake record starting with ServerHello (0x02).
     private func bufferContainsCompleteServerHello(_ buffer: Data) -> Bool {
         var offset = 0
         while offset + 5 <= buffer.count {
             let recordLen = Int(buffer[offset + 3]) << 8 | Int(buffer[offset + 4])
 
-            // Incomplete record — need more data from the network
             if offset + 5 + recordLen > buffer.count { return false }
 
-            // Complete Handshake record containing a ServerHello
             if buffer[offset] == 0x16 && offset + 5 < buffer.count && buffer[offset + 5] == 0x02 {
                 return true
             }
@@ -417,8 +352,7 @@ nonisolated class RealityClient {
             offset += 5 + recordLen
         }
 
-        // All records complete but no ServerHello found — let parseServerHello handle the error
-        return offset > 0
+        return offset > 0  // records complete but no ServerHello — let parseServerHello handle it
     }
 
     /// Extracts the ServerHello handshake message from the buffer (without TLS record header).
@@ -440,10 +374,7 @@ nonisolated class RealityClient {
         return Data()
     }
 
-    /// Parses the ServerHello to extract the server's key share, group, and cipher suite.
-    ///
-    /// - Parameter data: The raw TLS data containing the ServerHello record.
-    /// - Returns: A tuple of (keyShareData, group, cipherSuite) or `nil` if parsing fails.
+    /// Extracts the server's key share, group, and cipher suite from the ServerHello.
     private func parseServerHello(data: Data) -> (keyShare: Data, group: UInt16, cipherSuite: UInt16)? {
         var offset = 0
 
@@ -501,10 +432,8 @@ nonisolated class RealityClient {
                     }
                 }
 
-                // Advance to the next extension header. Anchor on extDataStart
-                // because the 0x0033 branch above may have consumed group+keyLen
-                // (4 bytes) without returning, leaving shOffset advanced past
-                // the start of extData.
+                // Anchor on extDataStart — the 0x0033 branch may have advanced
+                // shOffset past the start of extData without returning.
                 shOffset = extDataStart + extDataLen
             }
 
@@ -516,9 +445,8 @@ nonisolated class RealityClient {
 
     // MARK: - Encrypted Handshake Processing
 
-    /// Consumes remaining TLS handshake records (encrypted), looking for Server Finished.
-    ///
-    /// Once Server Finished is found, derives application keys and sends Client Finished.
+    /// Consumes encrypted TLS handshake records until Server Finished, then derives
+    /// application keys and sends Client Finished.
     private func consumeRemainingHandshake(
         buffer: Data,
         startOffset: Int = 0,
@@ -560,7 +488,6 @@ nonisolated class RealityClient {
                     )
                     tls13.serverHandshakeSeqNum += 1
 
-                    // Add decrypted handshake messages to transcript
                     var hsOffset = 0
                     while hsOffset + 4 <= decrypted.count {
                         let hsType = decrypted[hsOffset]
@@ -596,9 +523,8 @@ nonisolated class RealityClient {
 
             offset += 5 + recordLen
 
-            // After Server Finished, subsequent records (e.g. NewSessionTicket) are
-            // encrypted with application keys. Stop here and let TLSRecordConnection
-            // handle them so the sequence numbers stay in sync.
+            // Post-Finished records (e.g. NewSessionTicket) use application keys;
+            // stop here so TLSRecordConnection handles them with correct sequence numbers.
             if foundServerFinished { break }
         }
 
@@ -636,9 +562,6 @@ nonisolated class RealityClient {
                 realityConnection.connection = self.connection
                 self.connection = nil
 
-                // Feed remaining buffer data (post-Finished records like NewSessionTicket)
-                // to TLSRecordConnection so they are decrypted with application keys
-                // and sequence numbers stay in sync.
                 let remaining = buffer.subdata(in: processedOffset..<buffer.count)
                 if !remaining.isEmpty {
                     realityConnection.prependToReceiveBuffer(remaining)
@@ -648,7 +571,6 @@ nonisolated class RealityClient {
                 completion(.success(realityConnection))
             }
         } else {
-            // Need more handshake data
             guard let connection else {
                 completion(.failure(RealityError.connectionFailed("Connection cancelled")))
                 return
@@ -676,7 +598,6 @@ nonisolated class RealityClient {
 
     // MARK: - Client Finished
 
-    /// Sends the ChangeCipherSpec and encrypted Client Finished messages.
     private func sendClientFinished(completion: @escaping (Error?) -> Void) {
         guard let keys = tls13.handshakeKeys,
               let transcript = tls13.handshakeTranscript,
@@ -685,14 +606,12 @@ nonisolated class RealityClient {
             return
         }
 
-        // ChangeCipherSpec record
         var ccsRecord = Data([0x14, 0x03, 0x03, 0x00, 0x01, 0x01])
 
-        // Build and encrypt Client Finished
         let verifyData = kd.computeFinishedVerifyData(clientTrafficSecret: keys.clientTrafficSecret, transcript: transcript)
 
         var finishedMsg = Data()
-        finishedMsg.append(0x14) // Handshake type: Finished
+        finishedMsg.append(0x14) // Finished
         finishedMsg.append(0x00)
         finishedMsg.append(0x00)
         finishedMsg.append(UInt8(verifyData.count))
@@ -720,7 +639,6 @@ nonisolated class RealityClient {
 
     // MARK: - Verification
 
-    /// Verifies the server response contains a valid ServerHello.
     private func verifyServerResponse(data: Data) -> Bool {
         guard authKey != nil else { return false }
 
@@ -746,22 +664,16 @@ nonisolated class RealityClient {
 
     // MARK: - Certificate Verification
 
-    /// Verifies the Reality server's certificate using HMAC-SHA512.
-    ///
-    /// The Reality server signs its ed25519 certificate with `HMAC-SHA512(AuthKey, publicKey)`.
-    /// This matches Xray-core's `VerifyPeerCertificate` in `reality.go`.
+    /// Verifies the Reality server certificate: signature == HMAC-SHA512(AuthKey, ed25519PublicKey),
+    /// matching Xray-core's `VerifyPeerCertificate` in `reality.go`.
     private func verifyRealityCertificate(certBody: Data) -> Bool {
         guard let authKey else { return false }
 
-        // Extract first certificate DER from TLS Certificate message body
         guard let certDER = Self.extractFirstCertificate(from: certBody) else { return false }
-
-        // Extract ed25519 public key and signature from the certificate
         guard let (publicKey, signature) = Self.extractEd25519Components(from: certDER) else {
             return false
         }
 
-        // Verify: signature == HMAC-SHA512(AuthKey, publicKey)
         let hmac = HMAC<SHA512>.authenticationCode(for: publicKey, using: SymmetricKey(data: authKey))
         return Self.constantTimeEqual(Data(hmac), signature)
     }
@@ -772,17 +684,15 @@ nonisolated class RealityClient {
     private static func extractFirstCertificate(from certBody: Data) -> Data? {
         var offset = 0
 
-        // Request context length (0 for server certificate)
+        // request context (1 byte length + context bytes, always 0 for server cert)
         guard offset < certBody.count else { return nil }
         let contextLen = Int(certBody[offset])
         offset += 1 + contextLen
 
-        // Certificate list length (3 bytes)
         guard offset + 3 <= certBody.count else { return nil }
-        offset += 3
+        offset += 3  // certificate list length (3 bytes)
 
-        // First certificate data length (3 bytes)
-        guard offset + 3 <= certBody.count else { return nil }
+        guard offset + 3 <= certBody.count else { return nil }  // first cert data length
         let certLen = Int(certBody[offset]) << 16 | Int(certBody[offset + 1]) << 8 | Int(certBody[offset + 2])
         offset += 3
 
@@ -790,10 +700,8 @@ nonisolated class RealityClient {
         return certBody.subdata(in: offset..<(offset + certLen))
     }
 
-    /// Extracts ed25519 public key and signature from a DER X.509 certificate.
-    ///
-    /// Returns `nil` if the certificate does not use ed25519, indicating it's
-    /// a real website certificate rather than a Reality server certificate.
+    /// Extracts the ed25519 public key and signature from a DER X.509 certificate;
+    /// `nil` means a real website certificate rather than a Reality one.
     private static func extractEd25519Components(from certDER: Data) -> (publicKey: Data, signature: Data)? {
         var offset = 0
 
@@ -819,15 +727,12 @@ nonisolated class RealityClient {
         }
         guard let pubKey = publicKey else { return nil }
 
-        // Skip past TBSCertificate
         offset = tbsEnd
 
-        // signatureAlgorithm SEQUENCE (skip)
         guard let sigAlgLen = parseDERSequence(certDER, offset: &offset) else { return nil }
-        offset += sigAlgLen
+        offset += sigAlgLen  // skip signatureAlgorithm
 
-        // signatureValue BIT STRING
-        guard offset < certDER.count, certDER[offset] == 0x03 else { return nil }
+        guard offset < certDER.count, certDER[offset] == 0x03 else { return nil }  // signatureValue BIT STRING
         offset += 1
         guard let sigBitStringLen = parseDERLength(certDER, offset: &offset) else { return nil }
         guard sigBitStringLen >= 1, offset < certDER.count, certDER[offset] == 0x00 else { return nil }
@@ -843,7 +748,6 @@ nonisolated class RealityClient {
         return parseDERLength(data, offset: &offset)
     }
 
-    /// Parses a DER length encoding.
     private static func parseDERLength(_ data: Data, offset: inout Int) -> Int? {
         guard offset < data.count else { return nil }
         let first = data[offset]
@@ -866,10 +770,8 @@ nonisolated class RealityClient {
 
     // MARK: - CompressedCertificate (RFC 8879)
 
-    /// Decompresses a CompressedCertificate message body.
-    ///
-    /// RFC 8879 layout: algorithm (2) + uncompressed_length (3) + compressed_length (3) + data.
-    /// Supports zlib (0x0001) and brotli (0x0002) via the system Compression framework.
+    /// Decompresses a CompressedCertificate (RFC 8879):
+    /// algorithm(2) + uncompressed_length(3) + compressed_length(3) + data.
     private func decompressCertificate(_ body: Data) -> Data? {
         guard body.count >= 8 else { return nil }
 
@@ -911,7 +813,6 @@ nonisolated class RealityClient {
 
     // MARK: - Helpers
 
-    /// Constant-time comparison of two Data values to prevent timing side-channel attacks.
     private static func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
         guard a.count == b.count else { return false }
         var result: UInt8 = 0
@@ -921,7 +822,6 @@ nonisolated class RealityClient {
         return result == 0
     }
 
-    /// Frees handshake-only state to reduce memory after the connection is established.
     private func clearHandshakeState() {
         ephemeralPrivateKey = nil
         authKey = nil
@@ -931,7 +831,6 @@ nonisolated class RealityClient {
         serverCertVerified = false
     }
 
-    /// Decapsulates an ML-KEM-768 ciphertext using the stored private key.
     private func decapsulateMLKEM(ciphertext: Data) throws -> Data {
         #if compiler(>=6.2)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
@@ -945,14 +844,6 @@ nonisolated class RealityClient {
         throw RealityError.handshakeFailed("ML-KEM not supported on this platform")
     }
 
-    /// Derives a symmetric key from a shared secret using HKDF.
-    ///
-    /// - Parameters:
-    ///   - sharedSecret: The X25519 shared secret.
-    ///   - salt: The HKDF salt.
-    ///   - info: The HKDF info string.
-    ///   - outputLength: The desired output key length in bytes.
-    /// - Returns: The derived key data, or `nil` on failure.
     private func deriveKey(sharedSecret: SharedSecret, salt: Data, info: Data, outputLength: Int) -> Data? {
         let derivedKey = sharedSecret.hkdfDerivedSymmetricKey(
             using: SHA256.self,

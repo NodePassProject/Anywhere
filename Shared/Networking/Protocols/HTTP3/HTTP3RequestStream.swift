@@ -7,22 +7,11 @@
 
 import Foundation
 
-/// A general-purpose HTTP/3 request/response stream multiplexed over an
-/// ``HTTP3Session``.
+/// A general-purpose HTTP/3 request/response stream multiplexed over an ``HTTP3Session``.
 ///
-/// Unlike ``HTTP3Stream`` (specialised for Naive's CONNECT tunnels), this
-/// issues an arbitrary request — GET or POST with a caller-supplied QPACK
-/// header block — and exposes the response status plus a streamed response
-/// body. XHTTP-over-HTTP/3 builds its download (GET) and upload (POST) streams
-/// on top of it, mapping each "HTTP request" of a split-HTTP mode onto one
-/// bidirectional QUIC stream.
-///
-/// Received DATA is queued one chunk at a time and the QUIC stream window is
-/// extended only as the app drains it, so a slow reader exerts backpressure on
-/// the server rather than letting it flood memory.
-///
-/// Threading: every public method hops to the session queue (shared with the
-/// `QUICConnection`), so all mutable state is touched on a single serial queue.
+/// The QUIC stream window is extended only as the app drains received DATA, so a
+/// slow reader backpressures the server. Every public method hops to the session
+/// queue, so all mutable state is touched on one serial queue.
 nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
 
     // MARK: - State
@@ -38,26 +27,21 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
     private var headersReceived = false
     private(set) var responseStatus: Int?
 
-    /// Fired once when the response HEADERS frame is parsed (status known), or
-    /// with an error if the stream fails first. Callers that gate on the
-    /// response (e.g. the XHTTP download GET) set this; fire-and-forget upload
-    /// streams leave it nil.
+    /// Fired once with the response status when HEADERS arrive, or with an error
+    /// if the stream fails first; fire-and-forget callers leave it nil.
     private var onResponse: ((Result<Int, Error>) -> Void)?
 
     // MARK: - Receive buffering
 
-    // Each queued element carries its QUIC byte count (frame header + payload)
-    // so the flow-control window is extended as the chunk leaves the buffer,
-    // not in one up-front grant — a slow consumer then throttles the sender
-    // instead of letting received data pile up unbounded.
+    // Each element carries its QUIC byte count so the flow-control window is
+    // extended as chunks are consumed, not up-front.
     private var receiveQueue: [(chunk: Data, quicBytes: Int)] = []
     private var pendingReceive: ((Data?, Error?) -> Void)?
     private var endStreamReceived = false
     private var streamError: Error?
 
-    // Partial HTTP/3 frame buffer (frames may span multiple QUIC deliveries).
-    // Parsing advances `frameBufferOffset` in place; the buffer is compacted
-    // lazily to keep parse-per-frame amortized O(1).
+    // Frames may span QUIC deliveries; offset-based parsing with lazy compaction
+    // keeps cost amortized O(1).
     private var frameBuffer = Data()
     private var frameBufferOffset = 0
 
@@ -69,15 +53,9 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
 
     // MARK: - Request
 
-    /// Opens a bidirectional QUIC stream and writes the request HEADERS frame.
-    ///
-    /// - Parameters:
-    ///   - headerBlock: QPACK-encoded request header block (see ``QPACKEncoder``).
-    ///   - endStream: send FIN with the HEADERS frame (true for a body-less GET).
-    ///   - onResponse: optional callback fired when the response HEADERS arrive,
-    ///     carrying the parsed `:status`.
-    ///   - completion: fired once the request HEADERS frame is on the wire (or
-    ///     with an error if the stream could not be opened/written).
+    /// Opens a bidirectional QUIC stream and writes the request HEADERS frame;
+    /// `completion` fires once the HEADERS are written (or the stream fails),
+    /// `onResponse` when the response `:status` arrives.
     func sendRequest(headerBlock: Data,
                      endStream: Bool,
                      onResponse: ((Result<Int, Error>) -> Void)? = nil,
@@ -102,9 +80,7 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
                     return
                 }
                 self.quicStreamID = sid
-                // Set before the write hops queues so a fast response can't race
-                // ahead of the callback (response handling is serialised on this
-                // same queue, so registering + storing the callback first is safe).
+                // Register before the write so a fast response can't race ahead of the callback.
                 self.onResponse = onResponse
                 session.registerStream(self, streamID: sid)
                 self.state = .requestSent
@@ -120,8 +96,7 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
         }
     }
 
-    /// Sends a chunk of request body as an HTTP/3 DATA frame, optionally closing
-    /// the request stream (FIN) afterwards.
+    /// Sends a chunk of request body as an HTTP/3 DATA frame, optionally with FIN.
     func sendBody(_ data: Data, fin: Bool, completion: @escaping (Error?) -> Void) {
         guard let session else { completion(HTTP3Error.streamClosed); return }
         let block: () -> Void = { [self] in
@@ -168,14 +143,11 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
         if session.isOnQueue { block() } else { session.queue.async(execute: block) }
     }
 
-    /// Reads and discards the entire response, then lets the stream close
-    /// cleanly on EOF. Used for fire-and-forget upload requests (packet-up)
-    /// whose response is irrelevant — avoids RESET_STREAM after we've already
-    /// sent FIN, which some servers treat as the POST being aborted.
+    /// Reads and discards the entire response so the stream closes cleanly on EOF —
+    /// avoids RESET_STREAM after FIN, which some servers treat as aborting the POST.
     func drainResponse() {
         receive { [weak self] data, error in
             guard let self else { return }
-            // EOF (nil data) or error → the stream has closed itself; stop.
             guard data != nil, error == nil else { return }
             self.drainResponse()
         }
@@ -216,7 +188,7 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
             if let pending = pendingReceive, receiveQueue.isEmpty {
                 pendingReceive = nil
                 closeAndShutdown()
-                pending(nil, nil) // EOF
+                pending(nil, nil)
             } else if receiveQueue.isEmpty {
                 closeAndShutdown()
             }
@@ -230,14 +202,13 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
     // MARK: - Frame processing
 
     private func processFrameBuffer() {
-        // HEADERS/SETTINGS/trailers are consumed internally; only DATA reaches
-        // the app. Ack control-frame QUIC bytes as a batch per parse pass.
+        // Only DATA frames reach the app; control frames are acked in batch.
         var controlBytes = 0
         while frameBufferOffset < frameBuffer.count {
             guard let (frame, consumed) = HTTP3Framer.parseFrame(
                 from: frameBuffer, offset: frameBufferOffset
             ) else {
-                break // Incomplete frame, wait for more data.
+                break
             }
             frameBufferOffset += consumed
 

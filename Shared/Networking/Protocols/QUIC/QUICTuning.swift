@@ -7,37 +7,24 @@
 
 import Foundation
 
-/// Per-protocol tuning knobs for `QUICConnection`. Covers congestion
-/// control, flow-control windows, stream limits, and timeouts — everything
-/// that a higher-layer protocol may want to adjust without touching
-/// `QUICConnection` internals.
-///
-/// Use one of the static presets (e.g. `.naive`) unless you have a reason
-/// to diverge.
+/// Per-protocol tuning knobs for `QUICConnection`.
 struct QUICTuning {
 
     // MARK: Congestion control
 
-    /// Which congestion controller `QUICConnection` should run.
-    ///
-    /// The three ngtcp2-native algorithms are passed through unchanged.
-    /// `.brutal` keeps ngtcp2 initialized with CUBIC (for a valid fallback
-    /// state) and then replaces `conn->cc`'s callbacks with our Swift
-    /// Brutal implementation — no ngtcp2 source changes.
+    /// ngtcp2-native algorithms pass through unchanged; `.brutal` initializes ngtcp2
+    /// with CUBIC and then swaps `conn->cc`'s callbacks for the Swift Brutal implementation.
     enum CongestionControl {
         case reno
         case cubic
         case bbr
-        /// Hysteria Brutal CC with an initial target send rate (bytes/sec).
-        /// The rate is typically updated post-auth once the server's
-        /// Hysteria-CC-RX is known.
+        /// Hysteria Brutal CC with an initial target send rate (bytes/sec),
+        /// typically updated post-auth from the server's Hysteria-CC-RX.
         case brutal(initialBps: UInt64)
     }
 
     var cc: CongestionControl
 
-    /// Underlying ngtcp2 algo enum used to initialize `ngtcp2_conn`. For
-    /// `.brutal` we init with CUBIC and overlay Brutal callbacks after.
     var ngtcp2CCAlgo: ngtcp2_cc_algo {
         switch cc {
         case .reno:    return NGTCP2_CC_ALGO_RENO
@@ -77,19 +64,9 @@ struct QUICTuning {
 
 extension QUICTuning {
 
-    /// Tuning preset for the Naive (HTTP/3 CONNECT) transport. CUBIC is the
-    /// congestion controller the Naive server stack is tuned against; BBR is
-    /// a reasonable proxy-side alternative but is left off by default.
-    ///
-    /// Flow-control windows target 2× BDP for 125 Mbps × 256 ms links:
-    /// 64 MB stream / 128 MB connection. The initial per-stream window is
-    /// bumped to 16 MB so the first RTT after CONNECT can fill a high-BDP
-    /// pipe before the ngtcp2 auto-scaler ramps.
-    ///
-    /// The 10 s handshake timeout covers ~three PTO retransmissions
-    /// (1/2/4 s) before the pool's one-shot retry kicks in — tight enough to
-    /// recover from a stale PSK quickly, loose enough not to trip on
-    /// high-RTT / lossy mobile paths.
+    /// Naive (HTTP/3 CONNECT) preset: CUBIC matches the Naive server stack; windows target
+    /// 2× BDP for 125 Mbps × 256 ms links, with a 16 MB initial stream window so the first RTT
+    /// can fill a high-BDP pipe; 10 s handshake ≈ three PTOs before the pool's one-shot retry.
     static let naive = QUICTuning(
         cc: .cubic,
         maxStreamWindow: 64 * 1024 * 1024,
@@ -106,23 +83,10 @@ extension QUICTuning {
         disableActiveMigration: true
     )
 
-    /// Hysteria v2 runs over QUIC with a user-selectable congestion controller.
-    ///
-    /// `.brutal` paces uploads at a user-configured rate (replaced post-auth
-    /// with `min(server_rx, client_max_tx)`). Its flow-control windows are
-    /// deliberately small: each QUIC stream proxies a TCP connection with
-    /// `TCP_SND_BUF ≈ 696 KB`, so when the server's stream credit dwarfs that,
-    /// Brutal dumps several MB into our side in milliseconds and then sits
-    /// stalled behind `snd_buf=0` waiting for iOS client ACKs. Sizing the
-    /// stream window to roughly 2× `TCP_SND_BUF` keeps the server paced to what
-    /// the downstream TCP can actually absorb, eliminating the "burst-then-stall"
-    /// pattern without capping throughput (Brutal sends at a fixed rate with no
-    /// window-driven backoff). `max == initial` disables ngtcp2's receive-window
-    /// auto-tuner, so those values are also the effective ceiling.
-    ///
-    /// `.bbr` paces from ngtcp2's own bandwidth estimate, so it needs room to
-    /// grow: the windows start small but let the auto-tuner scale up to a
-    /// high-BDP ceiling (`max > initial`).
+    /// Brutal windows are deliberately small — ~2× the proxied stream's `TCP_SND_BUF` (≈696 KB)
+    /// prevents burst-then-stall without capping throughput — and `max == initial` disables
+    /// ngtcp2's window auto-tuner. BBR paces from its own estimate, so its windows may auto-scale
+    /// (`max > initial`).
     static func hysteria(congestionControl: HysteriaCongestionControl, uploadMbps: Int) -> QUICTuning {
         switch congestionControl {
         case .brutal:

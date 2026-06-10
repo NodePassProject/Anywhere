@@ -15,18 +15,12 @@ extension TunnelStack {
     // MARK: - Lifecycle
 
     /// Starts the lwIP stack and begins reading packets from the tunnel.
-    ///
-    /// - Parameters:
-    ///   - packetFlow: The tunnel's packet flow for reading/writing IP packets.
-    ///   - configuration: The proxy configuration.
     func start(packetFlow: NEPacketTunnelFlow, configuration: ProxyConfiguration) {
         TunnelStack.shared = self
         AnywhereLogger.logSink = { [weak self] message, level in
             let logLevel: TunnelStack.LogLevel
             switch level {
-            // `debug` is below `minimumSinkLevel`, so it never reaches the
-            // sink; map it defensively to the lowest user-visible bucket in
-            // case the floor is ever lowered.
+            // `debug` never reaches the sink; mapped defensively.
             case .debug, .info: logLevel = .info
             case .warning: logLevel = .warning
             case .error: logLevel = .error
@@ -75,10 +69,7 @@ extension TunnelStack {
         TunnelStack.shared = nil
     }
 
-    /// Switches to a new configuration, tearing down all active connections.
-    ///
-    /// Shuts down the lwIP stack and all VLESS connections, then restarts
-    /// with the new configuration using the existing packet flow.
+    /// Restarts the lwIP stack on the existing packet flow under the new configuration.
     func switchConfiguration(_ newConfiguration: ProxyConfiguration) {
         lwipQueue.async { [self] in
             logger.info("[VPN] Configuration switched; reconnecting active connections")
@@ -86,20 +77,8 @@ extension TunnelStack {
         }
     }
 
-    /// Invalidates outbound proxy state after the device wakes from sleep.
-    ///
-    /// The lwIP netif, listeners, timers, and routing state all survive
-    /// suspension intact — they live in our own memory, not the kernel's.
-    /// What the kernel does tear down is outbound sockets: the Vision mux's
-    /// long-lived TCP, per-flow UDP proxy connections, and the transport
-    /// sockets held by each ``TCPConnection``. Those are what this
-    /// method invalidates, leaving the rest of the stack running so idle
-    /// flows and the FakeIP pool are preserved.
-    ///
-    /// Each TCP leg is closed gracefully (see ``invalidateOutboundState``):
-    /// idle legs get a FIN, in-flight legs downgrade to a RST, and the proxy
-    /// socket behind each is torn down. The netif and listener PCBs stay up,
-    /// so new client activity is served without waiting on a netif rebuild.
+    /// Invalidates outbound proxy state after device wake: the kernel tears
+    /// down our outbound sockets across sleep, but in-process lwIP state survives.
     func handleWake() {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
@@ -108,25 +87,9 @@ extension TunnelStack {
         }
     }
 
-    /// Releases the dead upstream transports when the network goes away
-    /// (`.unsatisfied`) or the device sleeps — the "down edge" companion to
-    /// ``invalidateOutboundState``'s "up edge". The kernel has torn down, or is
-    /// about to tear down, their sockets, so the Vision mux's long-lived TCP,
-    /// the QUIC/Hysteria/HTTP3/AnyTLS sessions, the Shadowsocks UDP sessions, and
-    /// the per-flow UDP proxy connections are dead weight; freeing them promptly
-    /// stops us pinning sockets we can't use for the duration of the outage.
-    ///
-    /// Deliberately conservative: it does NOT re-resolve DNS or rebuild the mux
-    /// (there's no path to dial over) and does NOT force-close the app-facing TCP
-    /// legs. A leg riding a freed shared session (Hysteria/Nowhere/AnyTLS/HTTP3, or a
-    /// UDP-over-mux flow) sees a graceful downlink EOF — ``MuxManager/closeAll``
-    /// and friends deliver no error — and winds down on its own; a leg actively
-    /// writing when its session drops aborts on the failed send; per-connection
-    /// VLESS legs and direct (bypass) legs are simply left open. Whatever is still
-    /// open is closed gracefully and the transports rebuilt when the path returns
-    /// or the device wakes, via ``invalidateOutboundState``. Hops onto `lwipQueue`
-    /// internally, where all transport state (including ``muxManager``) is owned,
-    /// so it serialises against connection accepts and dials.
+    /// Releases upstream transports on sleep/path-down — the kernel tears down
+    /// their sockets, so holding them just pins FDs. No mux rebuild (no path to
+    /// dial over) and no force-close of app-facing TCP legs.
     func suspendOutbound() {
         lwipQueue.async { [self] in
             guard running else { return }
@@ -137,19 +100,9 @@ extension TunnelStack {
         }
     }
 
-    /// Recovers active connections after the network path changes (interface
-    /// switch, restored from unavailable, Wi-Fi roam, NAT rebind). Like device
-    /// wake, the lwIP netif, listeners, and timers all survive — only the
-    /// outbound sockets are stranded on network state that no longer exists —
-    /// so this runs the same lightweight ``invalidateOutboundState`` rather
-    /// than a full stack restart. Each app-facing TCP leg is closed gracefully
-    /// (FIN for idle legs, RST only for in-flight ones), so apps reconnect over
-    /// the new path without a blanket reset.
-    ///
-    /// Debounced by ``TunnelConstants/networkRecoveryDebounceInterval``: the
-    /// leading edge fires immediately, and a burst of updates within the window
-    /// (typical of a handoff) coalesces into a single trailing recovery. Only
-    /// the last deferred request runs.
+    /// Recovers connections after a network path change (only outbound sockets
+    /// are stranded — no full restart). Debounced: leading edge fires
+    /// immediately; a burst coalesces into one trailing recovery.
     func handleNetworkPathChange(summary: String) {
         lwipQueue.async { [self] in
             guard running, configuration != nil else { return }
@@ -175,8 +128,7 @@ extension TunnelStack {
         }
     }
 
-    /// Runs the outbound-state invalidation for a settled network path and
-    /// stamps the debounce clock. Must be called on `lwipQueue`.
+    /// Runs the recovery and stamps the debounce clock. Must be called on `lwipQueue`.
     private func performNetworkRecovery(summary: String) {
         pendingNetworkRecovery?.cancel()
         pendingNetworkRecovery = nil
@@ -186,42 +138,16 @@ extension TunnelStack {
         invalidateOutboundState(configuration: configuration)
     }
 
-    /// Re-resolves the cached DNS answers and invalidates all outbound
-    /// transport state — the Vision mux, QUIC/Hysteria/HTTP3/AnyTLS sessions,
-    /// Shadowsocks UDP sessions, per-flow UDP proxy connections, and every
-    /// active TCP leg — while leaving the lwIP netif, listeners, and timers
-    /// running. Must be called on `lwipQueue`.
-    ///
-    /// Shared by device-wake and network-path-change recovery: both face the
-    /// same problem (the kernel's outbound sockets are bound to network state
-    /// that no longer exists) and neither needs the local stack rebuilt.
-    /// Rather than RST every app-facing leg, each TCP connection is closed
-    /// gracefully via ``lwip_bridge_for_each_tcp`` + ``TCPConnection/close()``:
-    /// idle legs receive a FIN and reconnect transparently, while in-flight
-    /// legs downgrade to a RST that triggers idempotent retries. The netif and
-    /// listener PCBs stay up, so new client activity is served without waiting
-    /// on a netif rebuild.
+    /// Flushes cached DNS and invalidates all outbound transport state while
+    /// leaving the lwIP netif, listeners, and timers running. Must be called
+    /// on `lwipQueue`.
     private func invalidateOutboundState(configuration: ProxyConfiguration) {
-        // Cached DNS answers were resolved over the network path we're leaving
-        // and may not route on the new one (GeoDNS/CDN locality, split-horizon
-        // DNS, captive-portal answers). Drop every cached host so the next dial
-        // over the new path takes a fresh lookup: the first connection to each
-        // host pays one cold resolve, but it's guaranteed an answer that routes
-        // on the current network rather than a stale cross-network IP — the
-        // safer trade-off while reconnecting.
+        // Cached answers may not route on the new path; flush so the next dial re-resolves.
         DNSResolver.shared.flush()
 
-        // Gracefully close every app-facing TCP leg before tearing down the
-        // upstream transports below. close() flushes already-received downlink
-        // bytes, then tcp_close sends a FIN to idle legs — the client reconnects
-        // on its next request, seamlessly — and lets lwIP downgrade in-flight
-        // legs (unacknowledged rx data) to a RST, an unambiguous error that
-        // drives idempotent retries. Closing first sets `closed` on each
-        // connection synchronously (we're on lwipQueue), so the upstream
-        // teardown's error completions become no-ops and can't pre-empt a
-        // graceful FIN into a RST. No ERR_ABRT callbacks fire — tcp_close clears
-        // the PCB callbacks before closing — so `isTearingDown` is unnecessary
-        // here, unlike the abort path in shutdownInternal.
+        // Close app-facing TCP legs BEFORE tearing down upstreams: close() sets
+        // `closed` synchronously (on lwipQueue), so teardown error completions
+        // can't pre-empt a graceful FIN into a RST.
         lwip_bridge_for_each_tcp { arg in
             guard let arg else { return }
             Unmanaged<TCPConnection>.fromOpaque(arg).takeUnretainedValue().close()
@@ -231,21 +157,13 @@ extension TunnelStack {
         reclaimInstanceTransports(rebuildMux: true)
     }
 
-    /// Reclaims the udpQueue-owned per-tunnel transports — the Vision mux, the
-    /// Shadowsocks UDP sessions, and every per-flow UDP proxy connection — that
-    /// the process-wide ``TransportReclaim`` pools don't cover because they
-    /// belong to this running tunnel rather than the process. Must be called on
-    /// `lwipQueue`; hops onto `udpQueue` (which owns all three) and waits. The
-    /// sync hop is deadlock-free: no udpQueue work ever sync-waits back on
-    /// lwipQueue.
-    ///
-    /// - Parameter rebuildMux: when `true` (network recovery), the Vision mux is
-    ///   rebuilt for the current configuration after teardown, so a flow handled
-    ///   right after finds it ready; when `false` (suspend / stop — there's no
-    ///   path to dial over, or the stack is going away), the mux is left `nil`.
+    /// Reclaims the udpQueue-owned per-tunnel transports (Vision mux, SS UDP
+    /// sessions, per-flow UDP connections). Must be called on `lwipQueue`; the
+    /// sync hop onto `udpQueue` is deadlock-free — no udpQueue work sync-waits
+    /// back on lwipQueue. `rebuildMux` rebuilds the Vision mux after teardown
+    /// (network recovery) vs. leaving it `nil` (suspend/stop).
     private func reclaimInstanceTransports(rebuildMux: Bool) {
-        // Build the replacement mux on lwipQueue (where `configuration` is
-        // owned), then publish it inside the udpQueue hop alongside the teardown.
+        // Build the replacement mux on lwipQueue, which owns `configuration`.
         let rebuiltMux: MuxManager?
         if rebuildMux, let configuration, Self.shouldUseVisionMux(configuration) {
             rebuiltMux = MuxManager(configuration: configuration, flowQueue: udpQueue)
@@ -278,9 +196,8 @@ extension TunnelStack {
         outputBufferLock.withLock {
             outputPackets.removeAll(keepingCapacity: true)
             outputProtocols.removeAll(keepingCapacity: true)
-            // Data deallocator is .none, so the release fns are the only
-            // way to free the pbufs/buffers. Synchronous calls are safe:
-            // shutdownInternal runs inside ``lwipQueue.sync``.
+            // The release fns are the only owners (.none deallocator); calling
+            // them synchronously is safe — we're on `lwipQueue`.
             for r in pendingReleases {
                 r.fn(r.ctx)
             }
@@ -298,10 +215,7 @@ extension TunnelStack {
     }
 
     /// Tears down all connections and restarts the lwIP stack. Must be called on `lwipQueue`.
-    ///
-    /// Throttled to at most once per ``TunnelConstants/restartThrottleInterval``. When a restart is
-    /// requested within the cooldown window the request is deferred; only the last
-    /// deferred request executes (earlier ones are cancelled and replaced).
+    /// Throttled to once per restartThrottleInterval; only the last deferred request runs.
     private func restartStack(configuration: ProxyConfiguration) {
         let now = CFAbsoluteTimeGetCurrent()
         let elapsed = now - lastRestartTime
@@ -324,10 +238,9 @@ extension TunnelStack {
     }
 
     /// Performs the actual stack restart. Must be called on `lwipQueue`.
-    /// `running` stays `true` so the existing `readPackets` loop continues uninterrupted —
-    /// packets queued on lwipQueue during reinit are processed after `lwip_bridge_init()`.
-    /// FakeIPPool is preserved across restarts — since all DNS queries get fake IPs and
-    /// routing decisions are made at connection time, cached fake IPs remain valid.
+    /// `running` stays `true` so the existing read loop continues; the FakeIP
+    /// pool is preserved — routing is decided at connection time, so cached
+    /// fake IPs stay valid.
     private func restartStackNow(configuration: ProxyConfiguration) {
         deferredRestart?.cancel()
         deferredRestart = nil
@@ -341,52 +254,15 @@ extension TunnelStack {
         lwip_bridge_init()
         startTimeoutTimer()
         startUDPCleanupTimer()
-        // Note: startReadingPackets() is NOT called here — the existing read loop
-        // (started in start()) continues because `running` was never set to false.
         logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), mux=\(Self.shouldUseVisionMux(configuration)), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
     }
 
     // MARK: - Settings Observation
     //
-    // Three Darwin notifications are observed. Only "tunnelSettingsChanged"
-    // triggers a full stack restart; the other two reload in place to avoid
-    // tearing down active connections for edits that don't invalidate them.
-    //
-    // 1. "tunnelSettingsChanged" — posted by SettingsView when IPv6/Encrypted DNS/Country Bypass toggles change.
-    //    Triggers a full stack restart (shutdownInternal → restartStack),
-    //    which closes all TCP/UDP connections and re-reads settings.
-    //    FakeIPPool is preserved. IPv6 additionally re-applies tunnel
-    //    network settings (routes + DNS servers).
-    //
-    // 2. "routingChanged" — posted whenever routing rules or rule-set
-    //    assignments change. Does NOT restart the stack: routing decisions
-    //    are made at connection accept time, so already-established flows
-    //    remain valid under any rule edit. The DomainRouter rule tiers and
-    //    configuration map are rebuilt in place on lwipQueue so the reload
-    //    serializes against new accept callbacks. New connections pick up
-    //    the new rules immediately; existing connections keep running over
-    //    their already-chosen proxy (or DIRECT path) until they close
-    //    naturally. This means an assignment change from Proxy A to Proxy B
-    //    only affects future connections — active flows on Proxy A continue
-    //    until they end. We accept this drift because the alternative
-    //    (killing every connection on every rule edit) is the very
-    //    disruption this change exists to eliminate.
-    //
-    // 3. "mitmChanged" — posted by MITMSnapshot.save() when the MITM toggle or
-    //    rules change. Does NOT restart the stack: connections in flight keep
-    //    their TLS legs and lwIP state. The in-memory hostname matcher is
-    //    rebuilt in place on lwipQueue so it serializes against new accept
-    //    callbacks. Note that the policy is shared by reference with every
-    //    live MITMSession, so active sessions DO pick up the new rules on
-    //    their next request head (the rewriters re-query
-    //    ``MITMRewritePolicy.rules(for:phase:)`` per message), and the
-    //    MITMScriptStore buckets for rule sets the user just deleted are
-    //    purged immediately — any active scripts on those sets lose their
-    //    in-memory ``Anywhere.store`` state. We accept this drift over the
-    //    alternative (snapshotting the policy per session) because the
-    //    expected use case is short-lived connections plus deliberate edits
-    //    during script development, where seeing the new rules apply
-    //    promptly is the desired behaviour.
+    // Three Darwin notifications: "tunnelSettingsChanged" restarts the stack;
+    // "routingChanged" and "mitmChanged" reload in place — routing/MITM
+    // decisions bind when a connection opens, so already-open connections
+    // deliberately keep their old rules until they close.
 
     /// Registers Darwin notification observers for cross-process settings changes.
     private func startObservingSettings() {
@@ -437,9 +313,8 @@ extension TunnelStack {
         )
     }
 
-    /// Handles the "tunnelSettingsChanged" notification (ipv6/bypass/encrypted DNS toggles).
-    /// Compares current values against UserDefaults and restarts the stack if changed.
-    /// Stack restart closes all connections, clears FakeIPPool, and re-reads all settings.
+    /// Restarts the stack when a restart-requiring toggle changed; QUIC, Block
+    /// WebRTC, and Reflection changes instead reload in place.
     private func handleSettingsChanged() {
         lwipQueue.async { [self] in
             guard running, let configuration else { return }
@@ -452,25 +327,19 @@ extension TunnelStack {
             let encryptedDNSProtocol = AWCore.getEncryptedDNSProtocol()
             let encryptedDNSServer = AWCore.getEncryptedDNSServer()
 
-            // QUIC policy only drives the per-datagram UDP/443 decision, read
-            // on this queue in handleInboundUDP — reload it in place rather
-            // than restarting the stack (which would drop every connection).
+            // QUIC policy only drives the per-datagram UDP/443 decision —
+            // reload in place rather than dropping every connection.
             let quicPolicy = AWCore.getQUICPolicy()
             if quicPolicy != self.quicPolicy {
                 logger.info("[VPN] QUIC policy changed: \(self.quicPolicy.rawValue) -> \(quicPolicy.rawValue)")
                 self.quicPolicy = quicPolicy
-                // Propagate to the UDP snapshot — the per-datagram UDP/443
-                // decision in handleInboundUDP reads it from there. This may be
-                // the only change (the guard below returns without a restart),
-                // so republish here rather than relying on configureRuntime.
+                // May be the only change (the guard below returns without a
+                // restart), so republish the UDP snapshot here.
                 publishUDPConfig()
             }
 
-            // Block WebRTC drives only the per-datagram STUN check in
-            // handleInboundUDP (read off the UDP snapshot), so reload it in
-            // place like quicPolicy rather than restarting the stack (which
-            // would drop every connection). May be the only change, so it must
-            // run before the change-detection guard below.
+            // Block WebRTC only drives the per-datagram STUN check; reload in
+            // place, before the change-detection guard below.
             let blockWebRTC = AWCore.getBlockWebRTC()
             if blockWebRTC != self.blockWebRTC {
                 logger.info("[VPN] Block WebRTC changed: \(self.blockWebRTC) -> \(blockWebRTC)")
@@ -478,12 +347,8 @@ extension TunnelStack {
                 publishUDPConfig()
             }
 
-            // Reflection is a pure read-path setting: reflection happens
-            // in the read callback off the published snapshot, with no effect on
-            // tunnel network settings or any connection state. Reload it in place
-            // like quicPolicy rather than restarting the stack (which would drop
-            // every connection); this may also be the only change, so it must
-            // run before the change-detection guard below.
+            // Reflection is a pure read-path setting; reload in place, before
+            // the change-detection guard below.
             let reflectionEnabled = AWCore.getReflectionEnabled()
             let reflectionAddresses = AWCore.getReflectionAddresses()
             if reflectionEnabled != self.reflectionEnabled || reflectionAddresses != self.reflectionAddresses {
@@ -507,10 +372,8 @@ extension TunnelStack {
             
             logger.info("[VPN] Settings changed, reconnecting active connections")
 
-            // IPv6 connections toggle affects tunnel network settings (IPv6 routes + DNS servers).
-            // Encrypted DNS changes also affect tunnel settings (NEDNSOverHTTPSSettings / NEDNSOverTLSSettings).
-            // Hide VPN Icon toggles IPv4 route shape and IPv6 claim, also tunnel settings.
-            // Must re-apply via PacketTunnelProvider before restarting the stack.
+            // These toggles change tunnel network settings (routes/DNS);
+            // re-apply them before restarting the stack.
             if advertiseIPv6ToAppsChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged || hideVPNIconChanged {
                 onTunnelSettingsNeedReapply?()
             }
@@ -519,21 +382,8 @@ extension TunnelStack {
         }
     }
 
-    /// Handles the "routingChanged" notification (routing rules or rule-set assignments changed).
-    ///
-    /// Reloads DomainRouter rules and configurations in place — no stack
-    /// restart, no FakeIPPool rebuild, no connection teardown. In global
-    /// mode the router is unused, so the notification is a no-op. Routing
-    /// decisions are made at connection accept time, so active flows stay
-    /// valid under any rule edit and new flows pick up the new rules on their
-    /// next accept callback. The reload runs on lwipQueue but takes
-    /// DomainRouter's internal lock, so a concurrent UDP new-flow lookup on
-    /// udpQueue never observes a half-rebuilt table.
-    ///
-    /// Do NOT call onTunnelSettingsNeedReapply here — setTunnelNetworkSettings
-    /// should only be triggered by IPv6 changes (which affect tunnel routes
-    /// and DNS servers). Routing changes do not alter
-    /// NEPacketTunnelNetworkSettings.
+    /// Reloads the routing rules in place — no restart; routing binds at
+    /// connection accept, so active flows stay valid. No-op in global mode.
     private func handleRoutingChanged() {
         lwipQueue.async { [self] in
             guard running else { return }
@@ -543,25 +393,15 @@ extension TunnelStack {
         }
     }
 
-    /// Handles the "mitmChanged" notification (MITM toggle or rules changed).
-    ///
-    /// No stack restart is needed — we rebuild the matcher in place on
-    /// `lwipQueue` to serialize against connection accept callbacks. Each MITM
-    /// session snapshots its matching rules when the connection opens (see
-    /// ``MITMHTTP1Stream/init`` and the HTTP/2 rewriter), so a reload takes
-    /// effect on the **next new connection**: an already-open keep-alive /
-    /// HTTP/2 / SSE connection keeps the rule snapshot it started with until it
-    /// closes. Rule-set deletions also drop the corresponding
-    /// ``MITMScriptStore`` buckets. See the ``startObservingSettings`` comment
-    /// for the full picture.
+    /// Rebuilds the MITM matcher in place on `lwipQueue` — no restart; sessions
+    /// snapshot their rules at connection open, so only new connections see the change.
     fileprivate func handleMITMChanged() {
         lwipQueue.async { [self] in
             guard running else { return }
             logger.info("[VPN] MITM settings changed; reloading matcher")
             loadMITMSetting()
             // `mitmEnabled` gates the UDP/443 MITM decision via the snapshot;
-            // republish so udpQueue sees the new toggle (the matcher itself is
-            // shared by reference and already reloaded under its own lock).
+            // republish so udpQueue sees the new toggle.
             publishUDPConfig()
         }
     }

@@ -25,16 +25,8 @@ enum TLSStreamError: Error, LocalizedError {
 
 // MARK: - TLSStreamTransport
 
-/// A reusable TLS-over-TCP stream transport built on ``RawTCPSocket`` + ``TLSClient``.
-///
-/// Establishes a TLS 1.3 connection to a server with a configurable ALPN list
-/// (e.g. `["h2"]` for HTTP/2, `["http/1.1"]` for HTTP/1.1). After the handshake,
-/// all I/O flows through a ``TLSRecordConnection`` which handles TLS record
-/// encryption/decryption. Protocol-neutral: any layer needing a TLS byte stream
-/// (HTTP/1.1, HTTP/2, …) can build on it.
-///
-/// Supports both direct connections and connections tunneled through an existing
-/// ``ProxyConnection`` (for proxy chaining).
+/// TLS-over-TCP stream transport with configurable ALPN, supporting direct and
+/// proxy-tunneled connections.
 nonisolated class TLSStreamTransport {
 
     private let host: String
@@ -50,14 +42,7 @@ nonisolated class TLSStreamTransport {
 
     // MARK: Initialization
 
-    /// Creates a new TLS transport.
-    ///
-    /// - Parameters:
-    ///   - host: The proxy server hostname or IP address.
-    ///   - port: The proxy server port.
-    ///   - sni: TLS SNI override. Defaults to `host` if `nil`.
-    ///   - alpn: ALPN protocol list for TLS negotiation. Defaults to `["h2"]`.
-    ///   - tunnel: Optional proxy connection to tunnel through (for proxy chaining).
+    /// - Parameter sni: TLS SNI hostname; defaults to `host` when `nil`.
     init(host: String, port: UInt16, sni: String?, alpn: [String] = ["h2"], tunnel: ProxyConnection? = nil) {
         self.host = host
         self.port = port
@@ -68,13 +53,6 @@ nonisolated class TLSStreamTransport {
 
     // MARK: - Connect
 
-    /// Establishes a TLS connection to the proxy server.
-    ///
-    /// Uses ``RawTCPSocket`` for TCP (or tunnels through an existing ``ProxyConnection``)
-    /// and ``TLSClient`` for the TLS 1.3 handshake. On success, stores the
-    /// ``TLSRecordConnection`` for subsequent I/O.
-    ///
-    /// - Parameter completion: Called with `nil` on success or an error on failure.
     func connect(completion: @escaping (Error?) -> Void) {
         let configuration = TLSConfiguration(
             serverName: sni,
@@ -92,8 +70,7 @@ nonisolated class TLSStreamTransport {
                 self.isReady = true
                 completion(nil)
             case .failure(let error):
-                // Release the client's socket on demand. TLSClient also self-cleans
-                // on failure, but cancel here keeps teardown explicit at the boundary.
+                // TLSClient self-cleans on failure; explicit cancel keeps teardown ownership clear.
                 self.tlsClient?.cancel()
                 self.tlsClient = nil
                 completion(error)
@@ -109,14 +86,6 @@ nonisolated class TLSStreamTransport {
 
     // MARK: - Send
 
-    /// Sends data through the TLS connection.
-    ///
-    /// Data is encrypted into TLS Application Data records by the underlying
-    /// ``TLSRecordConnection``.
-    ///
-    /// - Parameters:
-    ///   - data: The plaintext data to send.
-    ///   - completion: Called with `nil` on success or an error on failure.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         guard let tlsConnection, isReady else {
             completion(TLSStreamError.notConnected)
@@ -127,10 +96,7 @@ nonisolated class TLSStreamTransport {
 
     // MARK: - Receive
 
-    /// Receives decrypted data from the TLS connection.
-    ///
-    /// - Parameter completion: Called with `(data, nil)` on success, `(nil, nil)` for EOF,
-    ///   or `(nil, error)` on failure.
+    /// Receives decrypted data; completion gets `(nil, nil)` on EOF.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         guard let tlsConnection, isReady else {
             completion(nil, TLSStreamError.notConnected)
@@ -141,7 +107,6 @@ nonisolated class TLSStreamTransport {
 
     // MARK: - Cancel
 
-    /// Closes the TLS connection and releases all resources.
     func cancel() {
         isReady = false
         tlsClient?.cancel()

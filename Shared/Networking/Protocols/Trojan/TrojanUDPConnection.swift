@@ -11,13 +11,8 @@ private let logger = AnywhereLogger(category: "Trojan-UDP")
 
 // MARK: - TrojanUDPConnection
 
-/// Wraps a TLS-backed ProxyConnection as a Trojan UDP-over-TCP session.
-///
-/// Each outgoing datagram is framed as `addr:port + length + CRLF + payload`
-/// on top of the Trojan UDP request header (sent once). The inbound side
-/// buffers stream bytes from TLS and emits one payload per `receiveRaw` call,
-/// silently dropping the per-packet header — the upper layer only sees raw
-/// UDP payloads addressed to the destination it originally requested.
+/// Wraps a TLS-backed ProxyConnection as a Trojan UDP-over-TCP session: each datagram
+/// is framed as `addr:port + length + CRLF + payload` after a one-shot UDP request header.
 nonisolated final class TrojanUDPConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let passwordKey: Data
@@ -25,8 +20,7 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
     private let dstPort: UInt16
 
     private var headerSent = false
-    /// Accumulates TLS stream bytes across receives; packets are decoded as
-    /// soon as enough bytes arrive and leftovers carry over to the next call.
+    /// Buffers TLS stream bytes across receives; leftovers carry over to the next call.
     private var receiveBuffer = Data()
 
     init(inner: ProxyConnection, password: String, destinationHost: String, destinationPort: UInt16) {
@@ -77,8 +71,6 @@ nonisolated final class TrojanUDPConnection: ProxyConnection {
         return out
     }
 
-    /// Tries to decode one complete packet from `receiveBuffer`. If the buffer
-    /// is short, reads more from `inner` and retries.
     private func deliverNextPacket(completion: @escaping (Data?, Error?) -> Void) {
         do {
             let parsed: (payload: Data, consumed: Int)? = try lock.withLock {

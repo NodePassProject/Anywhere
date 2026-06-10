@@ -10,18 +10,15 @@ import CommonCrypto
 
 /// AnyTLS wire-format constants and pure-data helpers.
 ///
-/// The AnyTLS protocol layers a small framing on top of a normal TLS connection
-/// so a single TLS session can multiplex several logical streams. The first
-/// bytes after the TLS handshake are
+/// After the TLS handshake the client sends:
 ///
 ///     [SHA256(password) (32 B)] [paddingLen (BE u16)] [paddingLen × 0x00]
 ///
-/// followed by a stream of length-prefixed control/data frames whose header is
+/// followed by length-prefixed frames:
 ///
 ///     [cmd (1 B)] [sid (BE u32)] [length (BE u16)] [length B payload]
 ///
-/// Cross-ref: github.com/anytls/sing-anytls@0.0.11 — `client.go`,
-/// `session/{frame,session,stream}.go`, `padding/padding.go`.
+/// Ref: github.com/anytls/sing-anytls@0.0.11
 enum AnyTLSProtocol {
 
     // MARK: - Frame commands
@@ -43,19 +40,17 @@ enum AnyTLSProtocol {
 
     // MARK: - Client identity
 
-    /// Mirrors `util.Verison` in sing-anytls — the literal sent in cmdSettings.
+    /// Mirrors `util.Verison` in sing-anytls — sent verbatim in cmdSettings.
     static let clientVersion: String = "sing-anytls/0.0.11"
 
     // MARK: - UoT
 
     /// UDP-over-TCP magic destination for v2 (sing's `uot.MagicAddress`).
-    /// The client opens a stream to this FQDN, then writes the UoT request
-    /// `[isConnect][SocksaddrSerializer(realDest)]` before sending datagrams.
     static let uotMagicAddress: String = "sp.v2.udp-over-tcp.arpa"
 
     // MARK: - Password
 
-    /// SHA256(password) — the 32 bytes the server uses to look up the user.
+    /// Returns SHA256(password) — the 32-byte token the server uses to identify the user.
     static func passwordHash(_ password: String) -> Data {
         let bytes = Array(password.utf8)
         var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
@@ -69,9 +64,7 @@ enum AnyTLSProtocol {
 
     // MARK: - Address (SocksaddrSerializer: 0x01 IPv4, 0x03 FQDN, 0x04 IPv6)
 
-    /// Encodes an address+port as the standard sing SocksaddrSerializer expects:
-    /// `atyp(1) + addr + port(BE u16)`. Used both for the per-stream destination
-    /// (written into the cmdPSH that follows cmdSYN) and inside the UoT request.
+    /// Encodes `atyp(1) + addr + port(BE u16)` per sing's SocksaddrSerializer format.
     static func encodeAddrPort(host: String, port: UInt16) -> Data {
         var data = Data()
         if let ipv4 = parseIPv4(host) {
@@ -106,8 +99,7 @@ enum AnyTLSProtocol {
         return data
     }
 
-    /// Parses a 7-byte header from `bytes` starting at `offset`. Returns
-    /// `nil` if the buffer is too short.
+    /// Parses a 7-byte header from `bytes` at `offset`; returns `nil` if the buffer is too short.
     static func decodeFrameHeader(_ bytes: Data, at offset: Int = 0) -> (cmd: UInt8, sid: UInt32, length: UInt16)? {
         guard bytes.count - offset >= headerSize else { return nil }
         let i = bytes.startIndex + offset
@@ -120,8 +112,6 @@ enum AnyTLSProtocol {
         return (cmd, sid, length)
     }
 
-    /// Builds a complete frame (header + payload). Use for control frames and
-    /// when assembling a cmdWaste filler within the padding algorithm.
     static func encodeFrame(cmd: UInt8, sid: UInt32, payload: Data) -> Data {
         let length = UInt16(min(payload.count, Int(UInt16.max)))
         var frame = encodeFrameHeader(cmd: cmd, sid: sid, length: length)
@@ -131,9 +121,7 @@ enum AnyTLSProtocol {
 
     // MARK: - StringMap (cmdSettings / cmdServerSettings payload)
 
-    /// Encodes `key=value` lines joined with `\n` (sing-anytls's StringMap
-    /// `ToBytes`). Sorted so the byte sequence is deterministic — useful
-    /// for tests; the server doesn't care about ordering.
+    /// Encodes `key=value\n...` per sing-anytls's StringMap; keys sorted for determinism.
     static func encodeStringMap(_ map: [String: String]) -> Data {
         let lines = map
             .sorted { $0.key < $1.key }
@@ -141,7 +129,7 @@ enum AnyTLSProtocol {
         return Data(lines.joined(separator: "\n").utf8)
     }
 
-    /// Decodes `key=value\nkey=value...` lines. Lines without `=` are skipped.
+    /// Decodes `key=value\n...`; lines without `=` are skipped.
     static func decodeStringMap(_ data: Data) -> [String: String] {
         guard let text = String(data: data, encoding: .utf8) else { return [:] }
         var map: [String: String] = [:]

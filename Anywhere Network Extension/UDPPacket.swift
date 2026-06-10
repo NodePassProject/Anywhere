@@ -7,23 +7,14 @@
 
 import Foundation
 
-/// Parses inbound IP+UDP datagrams arriving from the TUN interface and builds
-/// outbound ones, replacing lwIP's UDP path entirely.
-///
-/// UDP is connectionless, so all flow state (NAT, idle timeout, routing,
-/// fake-IP, proxy association) already lives in Swift (``UDPFlow`` /
-/// ``TunnelStack/udpFlows``). lwIP only ever contributed header parse-on-input
-/// and header-build-on-output — both done here instead, which lets the
-/// vendored lwIP build TCP-only (`LWIP_UDP 0`). The hand-built output path
-/// mirrors the ICMP packet builder in ``TunnelStack`` (`+ICMP`).
+/// Parses inbound IP+UDP datagrams from the TUN interface and builds outbound
+/// ones, replacing lwIP's UDP path entirely (the vendored lwIP builds with `LWIP_UDP 0`).
 enum UDPPacket {
 
     static let ipProtocolUDP: UInt8 = 17
 
-    /// A parsed inbound UDP datagram. `srcIP`/`dstIP` are the raw address bytes
-    /// held inline (zero-padded; IPv4 occupies the first 4) so the per-packet
-    /// flow lookup keys on them with no heap allocation. `payload` is a fresh
-    /// copy of the UDP data (the one copy the old `udp_recv_cb` made too).
+    /// A parsed inbound UDP datagram. Addresses are zero-padded inline bytes so
+    /// the per-packet flow lookup allocates nothing; `payload` is a fresh copy.
     struct Inbound {
         let isIPv6: Bool
         let srcIP: SIMD16<UInt8>
@@ -32,18 +23,14 @@ enum UDPPacket {
         let dstPort: UInt16
         let payload: Data
 
-        /// Address width in bytes (4 for IPv4, 16 for IPv6).
         var addrLen: Int { isIPv6 ? 16 : 4 }
-        /// Source/destination address as `Data`, sized to the family. Allocates
-        /// on access — only the cold paths (DNS, ICMP, new-flow creation) need
-        /// it; the per-packet fast path keys on the inline bytes directly.
+        /// Family-sized address as `Data`; allocates on access, so only cold paths use it.
         var srcIPData: Data { UDPPacket.ipData(srcIP, count: addrLen) }
         var dstIPData: Data { UDPPacket.ipData(dstIP, count: addrLen) }
     }
 
-    /// Reads the IP version + transport protocol from a packet's fixed header,
-    /// or returns nil for an unrecognised version / too-short buffer. Cheap
-    /// enough for the per-packet TCP-vs-UDP routing decision in the read loop.
+    /// Reads the IP version + transport protocol, or nil for an unrecognised
+    /// version or too-short buffer.
     static func ipProtocol(of packet: Data) -> (isIPv6: Bool, proto: UInt8)? {
         packet.withUnsafeBytes { raw -> (Bool, UInt8)? in
             guard let p = raw.bindMemory(to: UInt8.self).baseAddress else { return nil }
@@ -57,13 +44,9 @@ enum UDPPacket {
         }
     }
 
-    /// Parses a UDP datagram into its 5-tuple + payload.
-    ///
-    /// Returns nil (drop) for fragments, IPv6 extension headers, non-UDP, or
-    /// malformed/short packets. This matches lwIP's reassembly-off posture
-    /// (`IP_REASSEMBLY` / `LWIP_IPV6_REASS` both 0 in lwipopts.h), under which
-    /// such packets were already dropped — so there is no behavioural change,
-    /// only the drop now happens here instead of inside lwIP.
+    /// Parses a UDP datagram into its 5-tuple + payload. Returns nil (drop) for
+    /// fragments, IPv6 extension headers, non-UDP, or malformed packets — matching
+    /// lwIP's reassembly-off posture (`IP_REASSEMBLY` / `LWIP_IPV6_REASS` both 0).
     static func parse(_ packet: Data) -> Inbound? {
         packet.withUnsafeBytes { raw -> Inbound? in
             guard let p = raw.bindMemory(to: UInt8.self).baseAddress else { return nil }
@@ -75,18 +58,15 @@ enum UDPPacket {
                 guard len >= 20 else { return nil }
                 let ihl = Int(p[0] & 0x0F) * 4
                 guard ihl >= 20, len >= ihl + 8, p[9] == ipProtocolUDP else { return nil }
-                // Drop fragments (MF set or non-zero fragment offset): with
-                // IP_REASSEMBLY=0 lwIP never reassembled them, and delivering a
-                // single fragment as a whole datagram would be wrong.
+                // Drop fragments (MF set or non-zero offset); delivering a single
+                // fragment as a whole datagram would be wrong.
                 let fragWord = (UInt16(p[6]) << 8) | UInt16(p[7])
                 guard fragWord & 0x3FFF == 0 else { return nil }
                 return finish(p, len: len, headerLen: ihl, isIPv6: false,
                               srcOffset: 12, dstOffset: 16, addrLen: 4)
             case 6:
-                // Only bare UDP (next-header 17). Extension headers — including
-                // the IPv6 Fragment header (44) — are dropped: with
-                // LWIP_IPV6_REASS=0 lwIP wouldn't reassemble, and all real UDP
-                // traffic we carry (QUIC, DNS) uses no extension headers.
+                // Bare UDP only (next-header 17); extension headers, including the
+                // Fragment header (44), are dropped.
                 guard len >= 48, p[6] == ipProtocolUDP else { return nil }
                 return finish(p, len: len, headerLen: 40, isIPv6: true,
                               srcOffset: 8, dstOffset: 24, addrLen: 16)
@@ -103,9 +83,8 @@ enum UDPPacket {
         let srcPort = (UInt16(u[0]) << 8) | UInt16(u[1])
         let dstPort = (UInt16(u[2]) << 8) | UInt16(u[3])
         let udpLen = Int((UInt16(u[4]) << 8) | UInt16(u[5]))
-        // The UDP length field counts its own 8-byte header; a value below 8 is
-        // malformed (lwIP's udp_input dropped these). Clamp the upper bound to the
-        // bytes that actually arrived so a bogus length can't over-read the buffer.
+        // The UDP length field counts its own 8-byte header, so below 8 is malformed.
+        // Clamp to the bytes that arrived so a bogus length can't over-read.
         guard udpLen >= 8 else { return nil }
         let payloadLen = min(udpLen, len - headerLen) - 8
         return Inbound(
@@ -128,7 +107,6 @@ enum UDPPacket {
     }
 
     /// Loads up to 16 address bytes from `data` into zero-padded inline storage.
-    /// Used by cold paths (e.g. DNS forwarding) that hold the address as `Data`.
     static func loadIP(_ data: Data) -> SIMD16<UInt8> {
         var v = SIMD16<UInt8>()
         let n = min(data.count, 16)
@@ -144,12 +122,9 @@ enum UDPPacket {
         withUnsafeBytes(of: v) { Data(bytes: $0.baseAddress!, count: count) }
     }
 
-    /// Builds a complete IPv4/IPv6 UDP packet (header + checksum + payload)
-    /// ready for `NEPacketTunnelFlow.writePackets`. `srcIP`/`dstIP` are the
-    /// response packet's own source/destination as raw bytes matching
-    /// `isIPv6`. Returns nil for a mismatched address length or an
-    /// over-MTU-of-UDP payload (>65527 bytes — a single datagram can't exceed
-    /// it, and lwIP's IP_FRAG=0 build never fragmented either).
+    /// Builds a complete IPv4/IPv6 UDP packet (header + checksum + payload) ready for
+    /// writePackets. Returns nil for a mismatched address length or a payload over
+    /// 65527 bytes (a single datagram's limit; lwIP's IP_FRAG=0 build never fragmented either).
     static func build(srcIP: Data, srcPort: UInt16,
                       dstIP: Data, dstPort: UInt16,
                       isIPv6: Bool, payload: Data) -> Data? {
@@ -216,8 +191,7 @@ enum UDPPacket {
 
             writeUDP(p, udpStart: 40, srcPort: srcPort, dstPort: dstPort, udpLen: udpLen, payload: payload)
 
-            // UDP checksum is mandatory over IPv6. Pseudo-header per RFC 8200
-            // §8.1: src(16) + dst(16) + upper-layer length + next header.
+            // UDP checksum is mandatory over IPv6; pseudo-header per RFC 8200 §8.1.
             let psum = sum(p, 8, 40) + UInt32(udpLen) + UInt32(ipProtocolUDP) + sum(p, 40, total)
             var udpck = fold(psum)
             if udpck == 0 { udpck = 0xFFFF }
@@ -226,9 +200,8 @@ enum UDPPacket {
         return pkt
     }
 
-    /// Writes the 8-byte UDP header (checksum left zero) and payload at
-    /// `udpStart`. The checksum is patched in by the caller after the
-    /// pseudo-header sum is known.
+    /// Writes the 8-byte UDP header (checksum zero, patched by the caller) and
+    /// payload at `udpStart`.
     private static func writeUDP(_ p: UnsafeMutablePointer<UInt8>, udpStart: Int,
                                  srcPort: UInt16, dstPort: UInt16, udpLen: Int, payload: Data) {
         p[udpStart + 0] = UInt8(srcPort >> 8); p[udpStart + 1] = UInt8(srcPort & 0xFF)
@@ -240,9 +213,8 @@ enum UDPPacket {
         }
     }
 
-    /// Sums 16-bit big-endian words over `p[start..<end]` for the Internet
-    /// checksum (RFC 1071). A trailing odd byte is treated as the high byte of
-    /// a zero-padded word.
+    /// Sums big-endian 16-bit words for the Internet checksum (RFC 1071); a
+    /// trailing odd byte is the high byte of a zero-padded word.
     private static func sum(_ p: UnsafePointer<UInt8>, _ start: Int, _ end: Int) -> UInt32 {
         var acc: UInt32 = 0
         var i = start
@@ -251,8 +223,7 @@ enum UDPPacket {
         return acc
     }
 
-    /// Folds a 32-bit checksum accumulator into the one's-complement 16-bit
-    /// result.
+    /// Folds a 32-bit accumulator into the one's-complement 16-bit checksum.
     private static func fold(_ acc: UInt32) -> UInt16 {
         var s = acc
         while s > 0xFFFF { s = (s & 0xFFFF) + (s >> 16) }

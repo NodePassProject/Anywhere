@@ -10,14 +10,9 @@ import Foundation
 private let logger = AnywhereLogger(category: "AnyTLS")
 
 extension ProxyClient {
-    /// Connects through an AnyTLS server: TCP → TLS → AnyTLS handshake →
-    /// stream + destination address (or stream + UoT request for UDP).
-    ///
-    /// AnyTLS mandates TLS on the wire (the password SHA256 is the first
-    /// thing the server reads after the TLS handshake), so there's no
-    /// plaintext or Reality variant. UDP rides a stream opened to the
-    /// `sp.v2.udp-over-tcp.arpa` magic FQDN, with `[isConnect=1][addr]`
-    /// preceding the per-datagram `[length][payload]` framing.
+    /// Connects through an AnyTLS server: TCP → TLS → AnyTLS handshake → stream + destination.
+    /// AnyTLS mandates TLS (the password SHA256 is the first thing the server reads after the
+    /// handshake); UDP rides a UoT stream opened to the `sp.v2.udp-over-tcp.arpa` magic FQDN.
     func connectWithAnyTLS(
         command: ProxyCommand,
         destinationHost: String,
@@ -38,23 +33,15 @@ extension ProxyClient {
         }
         logger.debug("[AnyTLS] sni=\(tlsConfig.serverName) alpn=\(tlsConfig.alpn?.joined(separator: ",") ?? "<none>") fp=\(tlsConfig.fingerprint.rawValue)")
 
-        // Capture what the dial closure needs. We can't capture `self` long-
-        // term because the AnyTLSClient persists across ProxyClient
-        // instances; instead we snapshot the chain bits we need (tunnel,
-        // host/port for the direct dial).
+        // Don't capture self in the dial closure: AnyTLSClient persists across ProxyClient instances.
         let directHost = directDialHost
         let directPort = configuration.serverPort
         let tunnel = self.tunnel
 
         let dialOut: AnyTLSClient.DialOut = { dialCompletion in
             let tlsClient = TLSClient(configuration: tlsConfig)
-            // CRITICAL: keep `tlsClient` alive until its completion fires.
-            // TLSClient owns its `RawTCPSocket`; if it deallocates while the
-            // async TCP connect is in flight, the write-source fires with a
-            // [weak self] that is now nil, and `connectCompletion` is never
-            // invoked — the dial silently hangs forever. We anchor by
-            // referencing `tlsClient` inside the completion closure so the
-            // closure capture extends its lifetime until the result arrives.
+            // Anchor `tlsClient` until the async connect finishes; otherwise the socket's
+            // write-source fires after deallocation and the dial hangs silently.
             let handleTLSResult: (Result<TLSRecordConnection, Error>) -> Void = { result in
                 withExtendedLifetime(tlsClient) {
                     switch result {
@@ -92,9 +79,8 @@ extension ProxyClient {
                 logger.debug("[AnyTLS] stream opened sid=\(stream.sid) cmd=\(command)")
                 switch command {
                 case .tcp:
-                    // First cmdPSH on the stream is the destination address;
-                    // appending `initialData` lets the caller's first bytes
-                    // ride in the same TLS record (same trick Trojan uses).
+                    // The first cmdPSH carries the destination; coalescing
+                    // initialData into the same send avoids an extra TLS record.
                     var bootstrap = AnyTLSProtocol.encodeAddrPort(
                         host: destinationHost, port: destinationPort
                     )
@@ -113,8 +99,7 @@ extension ProxyClient {
                     }
 
                 case .udp:
-                    // Open a UoT stream: address points at the magic FQDN,
-                    // followed by `[isConnect=1][SocksaddrSerializer(realDest)]`.
+                    // UoT bootstrap: magic-FQDN address, then [isConnect=1][realDest].
                     var bootstrap = AnyTLSProtocol.encodeAddrPort(
                         host: AnyTLSProtocol.uotMagicAddress, port: 0
                     )

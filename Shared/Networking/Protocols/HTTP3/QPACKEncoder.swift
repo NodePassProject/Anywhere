@@ -19,29 +19,8 @@ private enum QPACKStaticIndex: Int {
 
 enum QPACKEncoder {
 
-    /// Encodes HTTP/3 CONNECT headers into a QPACK header block.
-    ///
-    /// For a classic CONNECT request, the pseudo-headers are:
-    /// - `:method` = CONNECT (static table index 15)
-    /// - `:authority` = host:port (literal with name reference)
-    ///
-    /// No `:scheme` or `:path` headers for classic CONNECT (RFC 9114 §4.4).
-    ///
-    /// For **extended CONNECT** (RFC 9220) — e.g. CONNECT-UDP (RFC 9298) or
-    /// WebTransport — the `protocolPseudo` parameter adds a `:protocol`
-    /// pseudo-header, and `:scheme` / `:path` become mandatory:
-    /// - `:method` = CONNECT
-    /// - `:protocol` = <value> (e.g. "connect-udp")
-    /// - `:scheme` = "https"
-    /// - `:path` = <path> (e.g. `/.well-known/masque/udp/<host>/<port>/`)
-    /// - `:authority` = <authority>
-    ///
-    /// - Parameters:
-    ///   - authority: The target `host:port`.
-    ///   - protocolPseudo: Optional `:protocol` value for extended CONNECT.
-    ///   - path: Request path; required when `protocolPseudo` is set.
-    ///   - extraHeaders: Additional headers (User-Agent, padding, auth, etc.).
-    /// - Returns: QPACK-encoded header block (with required prefix bytes).
+    /// Encodes CONNECT headers: classic CONNECT (RFC 9114 §4.4) sends only `:method` and
+    /// `:authority`; extended CONNECT (RFC 9220/9298) adds `:protocol`, `:scheme`, `:path`.
     static func encodeConnectHeaders(
         authority: String,
         protocolPseudo: String? = nil,
@@ -50,35 +29,29 @@ enum QPACKEncoder {
     ) -> Data {
         var block = Data()
 
-        // QPACK header block prefix: Required Insert Count (0) + Delta Base (0)
-        // Both are 0 since we don't use the dynamic table.
-        block.append(0x00) // Required Insert Count = 0
-        block.append(0x00) // S=0, Delta Base = 0
+        // Header block prefix: Required Insert Count 0, Delta Base 0 (no dynamic table).
+        block.append(0x00)
+        block.append(0x00)
 
-        // :method = CONNECT (indexed field line, static table)
-        // Prefix 1xxxxxxx, T=1 (static), index 15
         block.append(contentsOf: encodeIndexedFieldLine(QPACKStaticIndex.methodConnect.rawValue))
 
         if let protocolPseudo {
             // Extended CONNECT (RFC 9220 §3 / RFC 9298 §3): :protocol, :scheme,
-            // :path are all mandatory alongside :method and :authority.
+            // and :path are all mandatory alongside :method and :authority.
             block.append(contentsOf: encodeLiteralFieldLine(
                 name: ":protocol", value: protocolPseudo
             ))
-            // :scheme = https (static table index 23)
-            block.append(contentsOf: encodeIndexedFieldLine(23))
-            // :path (literal with name ref, static index 1)
+            block.append(contentsOf: encodeIndexedFieldLine(23))  // :scheme = https (index 23)
             block.append(contentsOf: encodeLiteralWithNameRef(
                 staticIndex: 1, value: path ?? "/"
             ))
         }
 
-        // :authority = <authority> (literal with name reference, static index 0)
+        // :authority (literal with name ref, static index 0)
         block.append(contentsOf: encodeLiteralWithNameRef(
             staticIndex: 0, value: authority
         ))
 
-        // Extra headers as literal field lines
         for header in extraHeaders {
             block.append(contentsOf: encodeLiteralFieldLine(
                 name: header.name, value: header.value
@@ -88,58 +61,46 @@ enum QPACKEncoder {
         return block
     }
 
-    /// Decodes QPACK-encoded headers from a response header block.
-    ///
-    /// Returns an array of (name, value) pairs, or nil if the block is malformed
-    /// or references the dynamic table. We advertise `QPACK_MAX_TABLE_CAPACITY=0`
-    /// in SETTINGS, so a compliant server must not emit dynamic references; treat
-    /// any such reference as a protocol violation rather than silently dropping
-    /// the field.
+    /// Decodes a QPACK header block; nil if malformed or it references the dynamic
+    /// table — a protocol violation since we advertise `QPACK_MAX_TABLE_CAPACITY=0`.
     static func decodeHeaders(from data: Data) -> [(name: String, value: String)]? {
         var headers: [(name: String, value: String)] = []
         guard data.count >= 2 else { return nil }
 
-        // All byte access through `base + offset` so this decoder works on
-        // zero-copy slices (non-zero `startIndex`) as well as rebased `Data`.
+        // All byte access via `base + offset` so zero-copy slices (non-zero startIndex) work.
         let base = data.startIndex
         var offset = 0
 
-        // QPACK header block prefix: Required Insert Count + Delta Base.
-        // With a disabled dynamic table, Required Insert Count MUST be 0.
+        // QPACK prefix: Required Insert Count MUST be 0 (dynamic table disabled).
         guard let (requiredInsertCount, ricLen) =
                 decodeVarIntPrefix(from: data, offset: offset, prefixBits: 8) else { return nil }
         offset += ricLen
         guard requiredInsertCount == 0 else { return nil }
 
         guard offset < data.count else { return nil }
-        // Delta Base uses 7-bit prefix after the sign bit
+        // Delta Base: 7-bit prefix after the sign bit; value unused (no dynamic table).
         guard let (_, dbLen) = decodeVarIntPrefix(from: data, offset: offset, prefixBits: 7) else {
             return nil
         }
         offset += dbLen
 
-        // Decode field lines
         while offset < data.count {
             let byte = data[base + offset]
 
             if byte & 0x80 != 0 {
-                // Indexed field line (1 T=static index).
-                // Dynamic table (T=0) is not supported.
+                // Indexed field line: 1 T index(6+). T=0 (dynamic) is not supported.
                 let isStatic = (byte & 0x40) != 0
                 guard isStatic else { return nil }
                 guard let (index, len) =
                         decodeVarIntPrefix(from: data, offset: offset, prefixBits: 6) else { return nil }
                 offset += len
-                // Our static table is a subset of RFC 9204 Appendix A; indices
-                // outside that subset belong to the canonical static table
-                // (e.g. "content-type") — skip rather than fail so unknown
-                // headers don't break origin-server interop.
+                // Indices outside our RFC 9204 Appendix A subset are skipped, not
+                // failed, so unknown headers don't break origin-server interop.
                 if let entry = staticTableEntry(Int(index)) {
                     headers.append(entry)
                 }
             } else if byte & 0x40 != 0 {
-                // Literal with name reference (01 N T=static name-index).
-                // Dynamic table name references (T=0) are not supported.
+                // Literal with name ref: 01 N T name-index(4+) value. T=0 (dynamic) not supported.
                 let isStatic = (byte & 0x10) != 0
                 guard isStatic else { return nil }
                 guard let (nameIdx, nameLen) =
@@ -151,7 +112,7 @@ enum QPACKEncoder {
                     headers.append((name: name, value: value))
                 }
             } else if byte & 0x20 != 0 {
-                // Literal field line with literal name: 001 N H NameLen(3+) Name Value
+                // Literal field line with literal name: 001 N H nameLen(3+) name value
                 let nameHuffman = (byte & 0x08) != 0
                 guard let (nameLen, nameLenBytes) =
                         decodeVarIntPrefix(from: data, offset: offset, prefixBits: 3) else { return nil }
@@ -175,9 +136,7 @@ enum QPACKEncoder {
                 offset += vLen
                 headers.append((name: name, value: value))
             } else {
-                // Remaining patterns are Indexed field line with post-base index
-                // (0001xxxx) and Literal with post-base name reference (0000xxxx),
-                // both of which reference the dynamic table.
+                // Post-base forms (0001xxxx / 0000xxxx) require the dynamic table — not supported.
                 return nil
             }
         }
@@ -186,34 +145,18 @@ enum QPACKEncoder {
     }
 
     /// Encodes HTTP/3 POST request headers into a QPACK header block.
-    ///
-    /// For a regular (non-CONNECT) request:
-    /// - `:method`    = POST   (static table index 20)
-    /// - `:scheme`    = https  (static table index 23)
-    /// - `:authority`          (literal with name ref, static index 0)
-    /// - `:path`               (literal with name ref, static index 1)
-    ///
-    /// - Parameters:
-    ///   - authority: The target host (e.g. "example.com").
-    ///   - path: The request path (e.g. "/auth").
-    ///   - extraHeaders: Additional headers.
-    /// - Returns: QPACK-encoded header block.
     static func encodePostHeaders(
         authority: String,
         path: String,
         extraHeaders: [(name: String, value: String)]
     ) -> Data {
         var block = Data()
-        block.append(0x00) // Required Insert Count = 0
-        block.append(0x00) // S=0, Delta Base = 0
+        block.append(0x00)
+        block.append(0x00)
 
-        // :method = POST (static table index 20)
-        block.append(contentsOf: encodeIndexedFieldLine(20))
-        // :scheme = https (static table index 23)
-        block.append(contentsOf: encodeIndexedFieldLine(23))
-        // :authority = <authority> (static index 0)
+        block.append(contentsOf: encodeIndexedFieldLine(20))  // :method POST
+        block.append(contentsOf: encodeIndexedFieldLine(23))  // :scheme https
         block.append(contentsOf: encodeLiteralWithNameRef(staticIndex: 0, value: authority))
-        // :path = <path> (static index 1)
         block.append(contentsOf: encodeLiteralWithNameRef(staticIndex: 1, value: path))
 
         for header in extraHeaders {
@@ -222,22 +165,7 @@ enum QPACKEncoder {
         return block
     }
 
-    /// Encodes HTTP/3 request headers for an arbitrary method into a QPACK
-    /// header block. Used by the XHTTP-over-HTTP/3 download (GET) and upload
-    /// (POST / configured uplink method) streams.
-    ///
-    /// - `:method`    = GET (static index 17) or POST (static index 20) via the
-    ///   static table; any other method as a literal `:method` field line.
-    /// - `:scheme`    = https  (static table index 23)
-    /// - `:authority`          (literal with name ref, static index 0)
-    /// - `:path`               (literal with name ref, static index 1)
-    ///
-    /// - Parameters:
-    ///   - method: HTTP method (e.g. "GET", "POST").
-    ///   - authority: The target host (e.g. "example.com").
-    ///   - path: The request path including any query string.
-    ///   - extraHeaders: Additional headers (user-agent, padding, content-type, …).
-    /// - Returns: QPACK-encoded header block.
+    /// Encodes HTTP/3 request headers for an arbitrary method into a QPACK header block.
     static func encodeRequestHeaders(
         method: String,
         authority: String,
@@ -245,8 +173,8 @@ enum QPACKEncoder {
         extraHeaders: [(name: String, value: String)]
     ) -> Data {
         var block = Data()
-        block.append(0x00) // Required Insert Count = 0
-        block.append(0x00) // S=0, Delta Base = 0
+        block.append(0x00)
+        block.append(0x00)
 
         switch method.uppercased() {
         case "GET":
@@ -256,11 +184,8 @@ enum QPACKEncoder {
         default:
             block.append(contentsOf: encodeLiteralFieldLine(name: ":method", value: method))
         }
-        // :scheme = https (static table index 23)
-        block.append(contentsOf: encodeIndexedFieldLine(23))
-        // :authority = <authority> (static index 0)
+        block.append(contentsOf: encodeIndexedFieldLine(23))  // :scheme https
         block.append(contentsOf: encodeLiteralWithNameRef(staticIndex: 0, value: authority))
-        // :path = <path> (static index 1)
         block.append(contentsOf: encodeLiteralWithNameRef(staticIndex: 1, value: path))
 
         for header in extraHeaders {
@@ -271,26 +196,24 @@ enum QPACKEncoder {
 
     // MARK: - Encoding Helpers
 
-    /// Indexed field line: 1 T(1) Index(6+)
+    /// Indexed field line: 1 T(1) index(6+). T=1 → prefix byte 0xC0.
     private static func encodeIndexedFieldLine(_ index: Int) -> Data {
-        // T=1 (static), so first byte = 11xxxxxx
         return encodeVarIntWithPrefix(UInt64(index), prefixBits: 6, prefix: 0xC0)
     }
 
-    /// Literal field line with name reference: 01 N(1) T(1) NameIndex(4+) Value(8+)
+    /// Literal field line with name reference: 01 N T nameIndex(4+) value.
+    /// N=0 T=1 (static) → prefix 0x50.
     private static func encodeLiteralWithNameRef(staticIndex: Int, value: String) -> Data {
         var data = Data()
-        // 01 N=0 T=1 (static) → 0101xxxx = 0x50 + index
         data.append(contentsOf: encodeVarIntWithPrefix(UInt64(staticIndex), prefixBits: 4, prefix: 0x50))
-        // Value: no Huffman (H=0), length + string
         data.append(contentsOf: encodeStringLiteral(value))
         return data
     }
 
-    /// Literal field line with literal name: 001 N(1) Name(3+) Value(8+)
+    /// Literal field line with literal name: 001 N H nameLen(3+) name value.
+    /// N=0 → prefix 0x20.
     private static func encodeLiteralFieldLine(name: String, value: String) -> Data {
         var data = Data()
-        // 001 N=0 → 0010xxxx = 0x20 + name length
         let nameBytes = Data(name.lowercased().utf8)
         data.append(contentsOf: encodeVarIntWithPrefix(UInt64(nameBytes.count), prefixBits: 3, prefix: 0x20))
         data.append(nameBytes)
@@ -298,17 +221,15 @@ enum QPACKEncoder {
         return data
     }
 
-    /// Encodes a string literal (H=0, no Huffman).
+    /// String literal: H=0 (no Huffman), 7-bit length prefix.
     private static func encodeStringLiteral(_ string: String) -> Data {
         let bytes = Data(string.utf8)
         var data = Data()
-        // H=0, 7-bit length prefix
         data.append(contentsOf: encodeVarIntWithPrefix(UInt64(bytes.count), prefixBits: 7, prefix: 0x00))
         data.append(bytes)
         return data
     }
 
-    /// Encodes a variable-length integer with a given prefix.
     private static func encodeVarIntWithPrefix(_ value: UInt64, prefixBits: Int, prefix: UInt8) -> Data {
         let maxPrefix = (1 << prefixBits) - 1
         var data = Data()
@@ -329,12 +250,8 @@ enum QPACKEncoder {
 
     // MARK: - Decoding Helpers
 
-    /// `offset` is **relative to `data.startIndex`**, so slices (e.g. the
-    /// `payload` view returned by `HTTP3Framer.parseFrame`) work without
-    /// rebasing. Indexing a slice as `data[0]` would trap.
-    /// QPACK integers are bounded by 2^62 − 1 (RFC 9204 §4.1.1). Any encoding
-    /// that exceeds this — or that would overflow `UInt64` while accumulating —
-    /// is malformed input, not a crash.
+    /// Decode offsets are relative to `data.startIndex` (slice-safe). QPACK integers
+    /// cap at 2^62 − 1 (RFC 9204 §4.1.1); overflow is malformed input, not a trap.
     private static let qpackIntMax: UInt64 = (1 << 62) - 1
 
     private static func decodeVarIntPrefix(from data: Data, offset: Int, prefixBits: Int) -> (UInt64, Int)? {
@@ -353,9 +270,7 @@ enum QPACKEncoder {
         while pos < data.count {
             let byte = data[base + pos]
             let add = UInt64(byte & 0x7F)
-            // Guard BEFORE shifting/adding: Swift's `+=` traps on overflow, so a
-            // crafted continuation byte (e.g. 0xFF…) would otherwise crash the
-            // process instead of being rejected as malformed.
+            // Check before shifting — Swift traps on overflow.
             if shift > 62 || (qpackIntMax >> shift) < add { return nil }
             let shifted = add << shift
             if qpackIntMax - shifted < value { return nil }
@@ -438,10 +353,8 @@ enum QPACKEncoder {
         case 32: return ("accept-ranges", "bytes")
         case 33: return ("access-control-allow-headers", "cache-control")
         case 34: return ("access-control-allow-headers", "content-type")
-        // Status 100/204/206/302/400/403/421/425/500 live at 63–71 in RFC 9204
-        // Appendix A (not contiguous with 24–28). A server may send any of them
-        // as an indexed field line, so they must resolve to the right code
-        // rather than be skipped (which would surface as a missing `:status`).
+        // Statuses 100–500 live non-contiguously at 63–71 in RFC 9204 Appendix A;
+        // they must resolve here or an indexed `:status` would go missing.
         case 63: return (":status", "100")
         case 64: return (":status", "204")
         case 65: return (":status", "206")

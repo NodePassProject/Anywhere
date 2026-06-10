@@ -20,13 +20,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var pathMonitor: NWPathMonitor?
     private var lastPathSnapshot: PathSnapshot?
 
-    /// Snapshot of the connection-relevant facts about a network path. The
-    /// `primaryInterface` (first available — the egress the OS prefers) is what
-    /// determines whether established outbound sockets are still valid: when it
-    /// changes, every leg is stranded on a dead source address. The
-    /// IPv4/IPv6/expensive/constrained flags are tracked only so the classifier
-    /// can tell an *additive* capability change (e.g. IPv6 arriving on the same
-    /// Wi-Fi) — which leaves connections valid — apart from a real egress move.
+    /// Connection-relevant snapshot of a network path. A primary-interface change
+    /// strands established sockets; the other flags only distinguish additive changes.
     private struct PathSnapshot {
         let status: Network.NWPath.Status
         let unsatisfiedReason: String?
@@ -37,10 +32,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let isExpensive: Bool
         let isConstrained: Bool
 
-        /// Identity of the egress interface: name + BSD index + type. A change
-        /// in any of these means the OS moved the default route onto a
-        /// different interface (Wi-Fi⇄cellular, reattach), invalidating every
-        /// socket bound to the old one.
+        /// Egress interface identity (name + BSD index + type); a change means the
+        /// default route moved, invalidating every socket bound to the old interface.
         struct PrimaryInterface: Equatable, CustomStringConvertible {
             let name: String
             let index: Int
@@ -86,27 +79,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     // MARK: - Tunnel Lifecycle
-    //
-    // Tunnel network settings (routes, DNS servers) are applied at start and can be
-    // re-applied live via reapplyTunnelSettings() when settings change.
-    //
-    // Currently re-applied when:
-    // - IPv6 connections toggle: adds/removes IPv6 routes and IPv6 DNS servers.
-    // - Encrypted DNS changes: switches between NEDNSSettings,
-    //   NEDNSOverHTTPSSettings, or NEDNSOverTLSSettings based on protocol
-    //   and custom server configuration.
-    //
-    // NOT re-applied when (stack restart is sufficient):
-    // - Encrypted DNS toggle without custom server: DDR blocking in TunnelStack
-    //   controls behavior at the DNS interception level; no tunnel settings
-    //   change needed.
-    // - Bypass country: only affects per-connection GeoIP checks in TunnelStack.
 
     override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
-        // When started from the app, the configuration arrives in `options`
-        // wrapped in a ``TunnelMessage`` envelope. When started from Settings
-        // or Always-On (On Demand), `options` is nil and we fall back to the
-        // last configuration persisted in the App Group.
+        // App starts pass the configuration in `options`; Settings/On-Demand starts
+        // pass nil, so fall back to the last persisted configuration.
         let configuration: ProxyConfiguration?
         if let messageData = options?[TunnelMessage.optionKey] as? Data,
            case .setConfiguration(let config) = try? JSONDecoder().decode(TunnelMessage.self, from: messageData) {
@@ -166,11 +142,6 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     // MARK: - Tunnel Settings
-    //
-    // Builds NEPacketTunnelNetworkSettings from current UserDefaults.
-    // Reads: encryptedDNSEnabled, encryptedDNSProtocol, encryptedDNSServer.
-    // When encrypted DNS is enabled with a custom server, uses NEDNSOverHTTPSSettings
-    // or NEDNSOverTLSSettings. Otherwise DDR auto-upgrade is controlled at the lwIP level.
 
     private func buildTunnelSettings() -> NEPacketTunnelNetworkSettings {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "10.8.0.1")
@@ -191,10 +162,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             settings.ipv6Settings = ipv6Settings
         }
 
-        // Plain DNS is intercepted by lwIP on UDP/53 regardless of destination IP,
-        // so we point it at the tunnel's own peer address. Using an in-tunnel
-        // address keeps queries reachable only through utun — they cannot leak
-        // even if a future bypass-route change would otherwise expose a public IP.
+        // Plain DNS is intercepted by lwIP on UDP/53; an in-tunnel server address
+        // keeps queries reachable only through utun, so they cannot leak.
         let plainDNSServers: [String]
         if advertiseIPv6ToApps {
             plainDNSServers = ["10.8.0.1", "fd00::1"]
@@ -202,9 +171,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             plainDNSServers = ["10.8.0.1"]
         }
 
-        // Fallback when the user's encrypted-DNS hostname fails to resolve at
-        // tunnel start. The OS opens a real TLS connection to these IPs, so
-        // they must speak DoT/DoH — internal tunnel addresses would not work.
+        // Fallback when the encrypted-DNS hostname fails to resolve; the OS dials
+        // these IPs directly, so they must speak DoT/DoH.
         let encryptedDNSFallbackServers = TunnelConstants.fallbackDNSServers(includeIPv6: advertiseIPv6ToApps)
 
         let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
@@ -236,9 +204,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         return settings
     }
 
-    /// Re-applies tunnel network settings with current UserDefaults values.
-    /// Called by TunnelStack via onTunnelSettingsNeedReapply when IPv6/encrypted DNS settings change.
-    /// Resets the virtual interface and flushes the OS DNS cache.
+    /// Re-applies tunnel settings from current UserDefaults; resets the virtual
+    /// interface and flushes the OS DNS cache.
     private func reapplyTunnelSettings() {
         let settings = buildTunnelSettings()
         setTunnelNetworkSettings(settings) { error in
@@ -297,12 +264,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    /// Current memory footprint of the network-extension process, in bytes.
-    ///
-    /// Reports `phys_footprint` from `TASK_VM_INFO` — the same accounting the
-    /// kernel uses for the extension's jetsam limit (NE processes get a far
-    /// tighter budget than the host app), so it's the figure worth surfacing.
-    /// Returns 0 if the Mach call fails. Cheap enough to read on each 1 Hz poll.
+    /// Memory footprint in bytes (`phys_footprint`, the figure jetsam uses for the
+    /// extension's tight budget); 0 if the Mach call fails.
     private static func memoryFootprint() -> UInt64 {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(
@@ -317,11 +280,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func sleep(completionHandler: @escaping () -> Void) {
-        // Down edge — the sleep counterpart of wake(). The kernel suspends us
-        // and tears down our outbound sockets, so release the upstream transports
-        // now rather than carrying dead sessions across the sleep. Best-effort: if
-        // we're suspended before it runs, wake() rebuilds everything anyway, so we
-        // don't block sleep on it.
+        // The kernel tears down outbound sockets across sleep, so release the
+        // upstream transports now; best-effort — wake() rebuilds everything anyway.
         tunnelStack.suspendOutbound()
         completionHandler()
     }
@@ -349,20 +309,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         lastPathSnapshot = nil
     }
 
-    /// What changed between two *satisfied* paths, and whether it strands
-    /// existing outbound sockets.
+    /// What changed between two satisfied paths and whether it strands existing outbound sockets.
     private enum SatisfiedChange {
         /// Nothing connection-relevant changed.
         case unchanged
-        /// The egress interface moved (Wi-Fi⇄cellular, reattach, index change).
-        /// Every outbound socket is bound to the old interface — recover.
+        /// The egress interface moved; every outbound socket is stranded — recover.
         case interfaceChanged(String)
-        /// Same interface, but IPv4 reachability dropped (e.g. dual-stack →
-        /// IPv6-only). IPv4 proxy legs can no longer send — recover.
+        /// Same interface but IPv4 reachability dropped; IPv4 proxy legs can no longer send — recover.
         case ipv4EgressLost
-        /// Same interface and IPv4 egress, only additive/orthogonal attributes
-        /// changed (IPv6 arriving/leaving, Low Data Mode, constrained). Existing
-        /// connections stay valid — do nothing.
+        /// Only additive/orthogonal attributes changed; existing connections stay valid.
         case capabilityOnly(String)
     }
 
@@ -371,8 +326,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let previous = lastPathSnapshot
         lastPathSnapshot = snapshot
 
-        // First update after start: record the baseline. Connections being set
-        // up are already dialing over this path — nothing to recover.
+        // First update after start: just record the baseline.
         guard let previous else {
             logger.info("[VPN] Network path ready: \(snapshot.summary)")
             return
@@ -385,10 +339,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 logger.info("[VPN] Network path restored: \(snapshot.summary); recovering connections")
                 tunnelStack.handleNetworkPathChange(summary: "network path restored")
             } else {
-                // Still satisfied — recover only when the egress actually moved.
-                // Additive changes (notably IPv6 arriving on the same Wi-Fi)
-                // leave established connections valid, so they must NOT tear the
-                // stack down.
+                // Recover only on a real egress move; additive changes (e.g. IPv6
+                // arriving on the same Wi-Fi) leave connections valid.
                 switch Self.classifySatisfiedChange(from: previous, to: snapshot) {
                 case .interfaceChanged(let detail):
                     logger.info("[VPN] Egress interface changed (\(detail)); recovering connections")
@@ -402,14 +354,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     break
                 }
             }
-            // We have a usable path again; clear any prior reasserting state.
             if reasserting {
                 reasserting = false
             }
 
         case .requiresConnection:
-            // Dedupe repeated callbacks in the same state so we don't re-log;
-            // there is no network to recover onto yet, so we only flag reasserting.
+            // Dedupe repeated callbacks in the same state; nothing to recover onto yet.
             guard previous.status != .requiresConnection else { return }
             let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
             logger.warning("[VPN] Network path waiting for attachment\(reasonSuffix); active connections may pause")
@@ -420,10 +370,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let reasonSuffix = snapshot.unsatisfiedReason.map { " (\($0))" } ?? ""
             logger.warning("[VPN] Network path unavailable\(reasonSuffix); releasing upstream transports")
             reasserting = true
-            // Down edge: free the dead upstream transports now instead of pinning
-            // sockets we can't use through the outage. Idle legs wind down
-            // gracefully; any survivors are closed and the transports rebuilt on
-            // the up edge (.satisfied / wake) via handleNetworkPathChange.
+            // Down edge: release dead upstream transports instead of pinning sockets
+            // through the outage; rebuilt on the up edge.
             tunnelStack.suspendOutbound()
 
         @unknown default:
@@ -431,12 +379,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    /// Classifies a satisfied→satisfied transition. The egress interface is the
-    /// decisive signal: an established outbound socket is pinned to the
-    /// interface/source address it was opened on, so it survives anything that
-    /// doesn't move the egress. We deliberately treat IPv6 (and other additive
-    /// capability) changes on an unchanged interface as no-ops — tearing
-    /// connections down for them is the wasted, disruptive work this avoids.
+    /// Classifies a satisfied→satisfied transition. Outbound sockets are pinned to
+    /// their egress interface, so additive changes on an unchanged interface are
+    /// deliberate no-ops.
     private static func classifySatisfiedChange(from prev: PathSnapshot, to cur: PathSnapshot) -> SatisfiedChange {
         if prev.primaryInterface != cur.primaryInterface {
             let from = prev.primaryInterface?.description ?? "none"
@@ -562,9 +507,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             unsatisfiedReason = nil
         }
 
-        // The first available interface is the egress the OS prefers for this
-        // path (availableInterfaces is ordered by preference). Its identity is
-        // what we diff to detect a genuine interface move.
+        // availableInterfaces is ordered by preference, so the first is the OS-preferred egress.
         let primaryInterface = path.availableInterfaces.first.map {
             PathSnapshot.PrimaryInterface(name: $0.name, index: $0.index, type: $0.type)
         }
@@ -583,10 +526,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     // MARK: - Encrypted DNS Hostname Resolution
 
-    /// Resolves a hostname to IP addresses via getaddrinfo.
-    /// Used to populate the `servers` parameter of NEDNSOverHTTPSSettings / NEDNSOverTLSSettings
-    /// so the system connects to the correct DoH/DoT server IPs (not hardcoded Cloudflare IPs).
-    /// Returns nil if the hostname is already an IP literal or resolution fails.
+    /// Resolves a hostname via getaddrinfo for the `servers` list of DoH/DoT
+    /// settings; returns nil for IP literals or on failure.
     private static func resolveEncryptedDNSHostname(_ hostname: String, includeIPv6: Bool) -> [String]? {
         // Skip resolution for IP literals — they can be used directly as servers
         var addr = in_addr()

@@ -14,20 +14,15 @@ import CommonCrypto
 ///                   + cmd(1) + ATYP(1) + address(var) + port(2 BE) + CRLF
 /// UDP packet format: ATYP(1) + address(var) + port(2 BE) + length(2 BE) + CRLF + payload
 /// Address encoding matches SOCKS5 / Shadowsocks: ATYP 0x01 IPv4, 0x03 domain, 0x04 IPv6.
-///
-/// Cross-ref: Xray-core/proxy/trojan/protocol.go
 enum TrojanProtocol {
 
-    /// Command byte values on the wire.
     static let commandTCP: UInt8 = 0x01
     static let commandUDP: UInt8 = 0x03
 
-    /// Max per-packet payload size accepted by upstream Trojan servers.
-    /// Matches Xray-core's `maxLength = 8192`.
+    /// Max per-packet UDP payload accepted by Trojan servers; matches Xray-core's `maxLength = 8192`.
     static let maxUDPPayloadLength: Int = 8192
 
-    /// SHA224(password) rendered as 56 lowercase-hex ASCII bytes — the exact
-    /// byte sequence Trojan servers compare against.
+    /// SHA224(password) as 56 lowercase-hex ASCII bytes — the exact byte sequence Trojan servers compare against.
     static func passwordKey(_ password: String) -> Data {
         let bytes = Array(password.utf8)
         var digest = [UInt8](repeating: 0, count: Int(CC_SHA224_DIGEST_LENGTH))
@@ -48,7 +43,6 @@ enum TrojanProtocol {
         return out
     }
 
-    /// Builds the Trojan TCP/UDP request header that precedes the first payload.
     static func buildRequestHeader(
         passwordKey: Data,
         command: UInt8,
@@ -64,7 +58,6 @@ enum TrojanProtocol {
         return data
     }
 
-    /// Encodes ATYP + address + 2-byte big-endian port.
     static func encodeAddressPort(host: String, port: UInt16) -> Data {
         var data = Data()
         if let ipv4 = parseIPv4(host) {
@@ -84,7 +77,6 @@ enum TrojanProtocol {
         return data
     }
 
-    /// Wraps a single UDP datagram: ATYP/addr/port + length + CRLF + payload.
     static func encodeUDPPacket(host: String, port: UInt16, payload: Data) -> Data {
         let addr = encodeAddressPort(host: host, port: port)
         var out = Data(capacity: addr.count + 4 + payload.count)
@@ -97,10 +89,8 @@ enum TrojanProtocol {
         return out
     }
 
-    /// Attempts to parse one UDP packet out of a buffered stream.
-    /// Returns the payload and the total consumed byte count, or `nil` when
-    /// the buffer is short. Throws on malformed framing so the caller can
-    /// tear down the connection rather than desynchronize the stream.
+    /// Parses one UDP packet from a buffered stream; nil when the buffer is short,
+    /// throws on malformed framing so the caller tears down rather than desynchronize.
     static func tryDecodeUDPPacket(buffer: Data) throws -> (payload: Data, consumed: Int)? {
         guard !buffer.isEmpty else { return nil }
         var offset = buffer.startIndex
@@ -128,7 +118,6 @@ enum TrojanProtocol {
         let length = (Int(buffer[offset]) << 8) | Int(buffer[offset + 1])
         offset += 2
 
-        // CRLF
         offset += 2
 
         guard length <= maxUDPPayloadLength else {

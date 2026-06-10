@@ -7,22 +7,11 @@
 
 import Foundation
 
-/// Builds the synthesized inner-leg response for the non-transparent
-/// "Rewrite" sub-modes (302 redirect / 200 reject). Returns a
-/// ``MITMScriptEngine/SynthesizedResponse`` — the same shape produced by
-/// `Anywhere.respond` — so the HTTP/1 and HTTP/2 rewriters can reuse their
-/// existing `queueSynthesizedResponse` serializers. Those serializers add the
-/// status line and a body-matching `Content-Length`, so this only supplies the
-/// status, the one distinguishing header, and the body.
-///
-/// 302 / reject sub-modes are gated per-rule by `urlPattern` and synthesized
-/// inline in the rewriter pipeline, so a synthesized reply needs no upstream
-/// connection.
+/// Builds the synthesized response for non-transparent rewrite sub-modes (302 redirect /
+/// 200 reject); the caller's serializer adds the status line and framing.
 enum MITMRespondBuilder {
 
-    /// The synthesized response for a synthesize sub-mode, or nil for
-    /// ``CompiledRewriteAction/transparent`` (which is proxied upstream, not
-    /// synthesized).
+    /// Returns the synthesized response for the action, or nil for `.transparent`.
     static func response(for action: CompiledRewriteAction) -> MITMScriptEngine.SynthesizedResponse? {
         switch action {
         case .transparent:
@@ -57,17 +46,13 @@ enum MITMRespondBuilder {
         }
     }
 
-    /// Default body for ``CompiledRewriteAction/reject200Text`` when the user
-    /// left it blank — kept non-empty so a client never treats a zero-length
-    /// 200 as an error.
+    /// Non-empty so clients don't treat a zero-length 200 as an error.
     private static let defaultText = "Success from Anywhere"
 
-    /// Default body for ``CompiledRewriteAction/reject200Data`` when blank:
-    /// base64 for the literal "Anywhere".
+    /// Default body for `.reject200Data` when blank: base64 of "Anywhere".
     private static let defaultDataBase64 = "QW55d2hlcmU="
 
-    /// 43-byte 1×1 transparent GIF89a — the canonical "tracking pixel"
-    /// payload used to satisfy image requests with no visible content.
+    /// 43-byte 1×1 transparent GIF89a (the canonical tracking-pixel payload).
     static let tinyGIF = Data([
         0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00,
         0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x21, 0xF9, 0x04, 0x01, 0x00, 0x00, 0x01,

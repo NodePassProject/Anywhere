@@ -11,14 +11,12 @@ extension TunnelStack {
 
     // MARK: - ICMP Port Unreachable
     //
-    // Sent when UDP arrives at a stale fake IP no longer in the pool (e.g. from a
-    // previous VPN session). The ICMP response causes QUIC/UDP clients to abandon
-    // the stale connection and re-resolve DNS, instead of retrying indefinitely.
+    // Sent for UDP to a stale fake IP (e.g. from a previous VPN session) so
+    // QUIC/UDP clients abandon it and re-resolve DNS instead of retrying forever.
 
-    /// Crafts and queues an ICMP Destination Unreachable (Port Unreachable)
-    /// response. `srcIP`/`dstIP` are raw address bytes (4 for IPv4, 16 for
-    /// IPv6) — the original datagram's source/destination, which the builders
-    /// place into the response as destination/source respectively.
+    /// Crafts and queues an ICMP Port Unreachable response. `srcIP`/`dstIP` are
+    /// the original datagram's raw source/destination bytes; the builders swap
+    /// them into the response.
     func sendICMPPortUnreachable(
         srcIP: Data,
         srcPort: UInt16,

@@ -12,31 +12,21 @@ private let logger = AnywhereLogger(category: "RawTCPSocket")
 
 // MARK: - RawTransport
 
-/// Protocol abstracting the raw I/O layer used by TLS/Reality handshakes and
-/// proxy chaining.
-///
-/// Both ``RawTCPSocket`` (real TCP) and ``TunneledTransport`` (tunneled TCP via a
-/// proxy chain) conform.
+/// Raw I/O transport abstraction used by TLS/Reality handshakes and proxy chaining.
 protocol RawTransport: AnyObject {
-    /// Whether the transport is connected and ready for I/O.
     var isTransportReady: Bool { get }
 
-    /// Sends data through the transport.
     func send(data: Data, completion: @escaping (Error?) -> Void)
 
-    /// Sends data without tracking completion.
     func send(data: Data)
 
-    /// Receives up to `maximumLength` bytes from the transport.
     func receive(completion: @escaping (Data?, Bool, Error?) -> Void)
 
-    /// Closes the transport and cancels all pending operations.
     func forceCancel()
 }
 
 // MARK: - SocketError
 
-/// Errors that can occur during socket/transport operations.
 enum SocketError: Error, LocalizedError {
     case resolutionFailed(String)
     case socketCreationFailed(String)
@@ -44,9 +34,7 @@ enum SocketError: Error, LocalizedError {
     case notConnected
     case sendFailed(String)
     case receiveFailed(String)
-    /// POSIX I/O failure. Preserves the raw `errno` so callers can classify
-    /// by code (e.g. demote `ECONNRESET` logs) instead of comparing
-    /// `strerror` output.
+    /// POSIX failure preserving the raw `errno` so callers can classify by code.
     case posixError(Operation, errno: Int32)
 
     enum Operation {
@@ -74,7 +62,6 @@ enum SocketError: Error, LocalizedError {
         }
     }
 
-    /// `errno` for POSIX-backed failures; `nil` for the string-only cases.
     var posixErrno: Int32? {
         if case .posixError(_, let errno) = self { return errno }
         return nil
@@ -83,22 +70,17 @@ enum SocketError: Error, LocalizedError {
 
 // MARK: - IPEndpoint
 
-/// A numeric IPv4/IPv6 address + port packed into a `sockaddr_storage`, ready
-/// to hand to `connect(2)` or `sendto(2)`.
-///
-/// Shared between ``RawTCPSocket`` and ``RawUDPSocket`` so neither file needs to
-/// duplicate the `inet_pton` / family-branch boilerplate.
+/// A numeric IPv4/IPv6 address + port packed into a `sockaddr_storage` for
+/// `connect(2)`/`sendto(2)`.
 struct IPEndpoint {
     /// Socket family — `AF_INET` or `AF_INET6`.
     let family: Int32
 
-    /// Address length to pass to BSD socket APIs.
     let length: socklen_t
 
     private let storage: sockaddr_storage
 
-    /// Parses `ip` as an IPv4 or IPv6 literal. Returns `nil` if the string
-    /// isn't a valid literal for its inferred family.
+    /// Parses `ip` as an IPv4 or IPv6 literal; fails if it isn't a valid literal.
     init?(ip: String, port: UInt16) {
         var storage = sockaddr_storage()
         let family: Int32
@@ -145,50 +127,16 @@ struct IPEndpoint {
 
 // MARK: - RawTCPSocket
 
-/// A TCP transport using BSD (POSIX) sockets with asynchronous I/O.
-/// All callers reach this through the ``RawTransport`` protocol.
+/// A TCP transport over non-blocking BSD sockets with DispatchSource-driven I/O.
 ///
-/// ### DNS
-/// DNS resolution is performed via ``DNSResolver`` to avoid tunnel routing
-/// loops, and the resolved IP address strings are fed directly into the socket
-/// via `inet_pton`. This bypasses the system resolver at connect time.
-///
-/// ### Socket Options (match Xray-core `sockopt_darwin.go`)
-/// - `O_NONBLOCK`     — non-blocking socket for async I/O via DispatchSource.
-/// - `SO_NOSIGPIPE`   — prevents SIGPIPE on write to a broken pipe (Darwin-specific).
-/// - `TCP_NODELAY`    — disables Nagle's algorithm.
-/// - `SO_KEEPALIVE`   — enables TCP keepalive.
-/// - `TCP_KEEPALIVE`  — idle seconds before the first probe (Darwin name; Linux is TCP_KEEPIDLE).
-/// - `TCP_KEEPINTVL`  — interval between probes.
-/// - `TCP_KEEPCNT`    — number of failed probes before the kernel drops the connection.
-///
-/// ### Threading
-/// All socket I/O and state-machine transitions are serialized on an internal
-/// serial dispatch queue (`ioQueue`). All DispatchSources (read/write/timer)
-/// are bound to that queue, so their handlers are implicitly serialized
-/// against each other. The `state` property is additionally protected by an
-/// unfair lock so that `isTransportReady` and `forceCancel()` can be called
-/// safely from any thread without deadlocking on `ioQueue`. `forceCancel()`
-/// synchronously latches the cancelled state and then dispatches teardown to
-/// `ioQueue`; any blocks already pending on the queue re-check state and bail
-/// out.
-///
-/// ### Loopback
-/// Inside a `NEPacketTunnelProvider`, the provider's own socket traffic is
-/// kernel-excluded from the tunnel, so a direct `connect(2)` here does not
-/// loop back. Loopback targets (127.0.0.0/8, ::1) are always routed via
-/// `lo0`. No explicit interface binding — we rely on the OS routing table
-/// plus the kernel-level NE bypass.
-///
-/// ### `initialData`
-/// When provided, `initialData` is eagerly enqueued on the send buffer as
-/// soon as connect completes. No kernel TFO (`connectx`) — we trade one
-/// RTT in the best case for a simpler non-blocking connect flow. Callers
-/// (TLS ClientHello, Reality ClientHello) stay correct because the first
-/// `receive` still waits on the server's response.
+/// All I/O and state transitions run on the serial `ioQueue`; `state` is
+/// additionally lock-protected so `isTransportReady` and `forceCancel()` are
+/// safe from any thread. Socket options match Xray-core `sockopt_darwin.go`.
+/// The provider's own sockets are kernel-excluded from the tunnel, so a direct
+/// `connect(2)` here does not loop back. `initialData` is enqueued once
+/// connect completes (no kernel TFO — one extra RTT for a simpler flow).
 nonisolated class RawTCPSocket: RawTransport {
 
-    /// The current connection state.
     enum State {
         case setup
         case ready
@@ -198,8 +146,7 @@ nonisolated class RawTCPSocket: RawTransport {
 
     // MARK: Private types
 
-    /// An entry in the partial-send FIFO. The head may have a non-zero
-    /// `offset` representing bytes already written.
+    /// Partial-send FIFO entry; `offset` counts bytes already written.
     private struct PendingSend {
         var data: Data
         var offset: Int
@@ -216,12 +163,9 @@ nonisolated class RawTCPSocket: RawTransport {
     private let stateLock = UnfairLock()
     private var _state: State = .setup
 
-    /// Completions waiting for full teardown (fd close + dispatch source cancel
-    /// handlers fired). Drained by `notifyTeardownComplete` once the last
-    /// handler runs. Protected by `stateLock`.
+    /// Completions awaiting full teardown (fd closed). Protected by `stateLock`.
     private var teardownCompletions: [@Sendable () -> Void] = []
-    /// Set once teardown has fully finished. Subsequent `forceCancel(completion:)`
-    /// calls fire their completion synchronously. Protected by `stateLock`.
+    /// Set once teardown has finished. Protected by `stateLock`.
     private var teardownComplete = false
 
     /// The current state of the transport. Thread-safe.
@@ -231,25 +175,19 @@ nonisolated class RawTCPSocket: RawTransport {
 
     // MARK: Concurrency
 
-    /// Serial queue for all socket I/O and state transitions.
-    /// All DispatchSources are bound to this queue, so their event handlers
-    /// run here and are naturally serialized against each other and against
-    /// async operations dispatched from outside.
+    /// Serial queue for all socket I/O; all DispatchSources are bound to it.
     private let ioQueue = DispatchQueue(label: AWCore.Identifier.rawTCPSocketQueue,
                                         qos: .userInitiated)
 
     // MARK: Socket & DispatchSources
 
-    /// The socket file descriptor. `-1` when no socket is open.
-    /// Mutated only on `ioQueue`; read cross-thread only via the sticky
-    /// `.cancelled` state check.
+    /// Socket file descriptor; `-1` when closed. Mutated only on `ioQueue`.
     private var socketFD: Int32 = -1
 
     /// Monitors socket readability. Armed on demand while a receive is pending.
     private var readSource: DispatchSourceRead?
 
-    /// Monitors socket writability. Armed during non-blocking connect and when
-    /// a send has buffered a partial write.
+    /// Monitors writability; armed during connect and partial-send waits.
     private var writeSource: DispatchSourceWrite?
 
     /// Per-attempt connect timer.
@@ -265,32 +203,24 @@ nonisolated class RawTCPSocket: RawTransport {
     private var remainingPort: UInt16 = 0
     private var pendingInitialData: Data?
 
-    /// Times this socket's dial for the live "Dial" stat. The timing and
-    /// recording live in ``MetricTimer``, keeping this socket free of metrics
-    /// code; it only ``MetricTimer/start()``s and ``MetricTimer/stop()``s the
-    /// timer. Direct/bypass dials set `dialTimer.enabled = false` before
-    /// connecting so only proxied first-hop dials are counted.
+    /// Times the dial for the live "Dial" stat; direct/bypass dials disable it
+    /// so only proxied first-hop dials are counted.
     var dialTimer = MetricTimer(.dial)
 
     // MARK: Send pipeline
 
-    /// Partial-send FIFO. Each entry is drained in order.
+    /// Partial-send FIFO.
     private var sendQueue: [PendingSend] = []
 
     // MARK: Receive pipeline
 
-    /// One receive may be in flight at a time; the contract is that callers
-    /// call `receive` again only after the previous completion fires.
+    /// At most one receive in flight; callers issue receives serially.
     private var pendingReceiveCompletion: ((Data?, Bool, Error?) -> Void)?
 
-    /// Latched when the remote half-closes; subsequent `receive` calls return
-    /// EOF immediately without touching the socket.
+    /// Latched on remote half-close; later receives return EOF immediately.
     private var receivedEOF = false
 
-    /// Reusable scratch for `recv(2)`. Sized at the per-call cap so every
-    /// receive hands the kernel one contiguous buffer. Allocated lazily on
-    /// first receive to avoid paying the cost for sockets that never read
-    /// (e.g., connect-failed).
+    /// Reusable `recv(2)` scratch, allocated lazily on first receive.
     private static let recvScratchSize = 65535
     private var recvScratch: UnsafeMutableRawPointer?
 
@@ -305,28 +235,13 @@ nonisolated class RawTCPSocket: RawTransport {
         return false
     }
 
-    /// Connects to a remote host asynchronously.
-    ///
-    /// DNS resolution runs on the internal `ioQueue` via ``DNSResolver`` —
-    /// returns immediately on a fresh or stale cache hit (stale entries
-    /// refresh in the background); blocks only on a cold miss. Each resolved
-    /// IP address is tried in order; on failure we fall through to the next.
-    ///
-    /// When `initialData` is non-empty, it is enqueued for send as soon as the
-    /// socket becomes writable (after connect completes).
-    ///
-    /// - Parameters:
-    ///   - host: The remote hostname or IP address.
-    ///   - port: The remote port number.
-    ///   - initialData: Optional data to send immediately after connect.
-    ///   - completion: Called with `nil` on success or an error on failure. Fires on the internal `ioQueue`.
+    /// Connects asynchronously, trying each resolved IP in order; `initialData`
+    /// is enqueued once connect completes. `completion` fires on `ioQueue`.
     func connect(host: String, port: UInt16,
                  initialData: Data? = nil,
                  completion: @escaping (Error?) -> Void) {
         ioQueue.async { [self] in
-            // If forceCancel() was called before we ran, bail immediately. No
-            // teardown path involves `completion` here because we never
-            // stored it.
+            // Cancelled before we ran; completion was never stored, so fire it here.
             if case .cancelled = state {
                 completion(SocketError.connectionFailed("Cancelled"))
                 return
@@ -335,8 +250,6 @@ nonisolated class RawTCPSocket: RawTransport {
             let ips = DNSResolver.shared.resolveAll(host)
             guard !ips.isEmpty else {
                 let err = SocketError.resolutionFailed("DNS resolution failed for \(host)")
-                // Move to .failed if still in setup; keep .cancelled if already
-                // latched.
                 stateLock.withLock {
                     if case .setup = _state { _state = .failed(err) }
                 }
@@ -347,21 +260,15 @@ nonisolated class RawTCPSocket: RawTransport {
             remainingIPs = ips
             remainingPort = port
             pendingInitialData = initialData
-            // Stash the completion before any further state transitions so
-            // that forceCancel()'s teardown block can fire it if we get
-            // pre-empted.
+            // Stash before further transitions so a racing forceCancel() can fire it.
             connectCompletion = completion
-            // Start the dial timer here, after DNS, so the "Dial" stat measures
-            // the TCP connect across IP attempts and excludes resolution.
+            // Start after DNS so the Dial stat excludes resolution.
             dialTimer.start()
             tryConnectNext()
         }
     }
 
-    /// Sends data through the socket.
-    ///
-    /// Data is enqueued on `ioQueue` and written non-blockingly. Partial
-    /// writes are re-armed via a write-ready dispatch source.
+    /// Enqueues data for non-blocking write; partial writes re-arm the write source.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         ioQueue.async { [self] in
             switch state {
@@ -385,12 +292,8 @@ nonisolated class RawTCPSocket: RawTransport {
         }
     }
 
-    /// Receives up to `maximumLength` bytes from the socket.
-    ///
-    /// Completion semantics match the prior implementation:
-    /// - `(data, false, nil)` — data received successfully.
-    /// - `(nil, true, nil)` — EOF (remote closed).
-    /// - `(nil, true, error)` — a receive error occurred.
+    /// Receives once. Completion: `(data, false, nil)` on data,
+    /// `(nil, true, nil)` on EOF, `(nil, true, error)` on failure.
     func receive(completion: @escaping (Data?, Bool, Error?) -> Void) {
         ioQueue.async { [self] in
             if receivedEOF {
@@ -407,10 +310,8 @@ nonisolated class RawTCPSocket: RawTransport {
                 completion(nil, true, SocketError.notConnected)
                 return
             }
-            // Contract: callers issue receive serially.
+            // Contract: receives are serial; don't clobber a pending completion.
             if pendingReceiveCompletion != nil {
-                // Unexpected — prior callback hasn't fired. Don't clobber it;
-                // surface an error on this one.
                 completion(nil, true, SocketError.receiveFailed("Concurrent receive"))
                 return
             }
@@ -419,22 +320,14 @@ nonisolated class RawTCPSocket: RawTransport {
         }
     }
 
-    /// Closes the socket and cancels all pending operations.
-    ///
-    /// Safe to call from any thread. The cancelled state is set synchronously
-    /// under the state lock so subsequent `isTransportReady` reads and queued
-    /// blocks observe it immediately. Actual socket/source teardown and
-    /// completion fan-out happen asynchronously on `ioQueue` to keep the data
-    /// structures free of races.
+    /// Safe from any thread; latches `.cancelled` synchronously, then tears
+    /// down on `ioQueue`.
     func forceCancel() {
         forceCancel(completion: {})
     }
 
-    /// Awaitable variant of `forceCancel`. The completion fires once the
-    /// underlying file descriptor is fully closed (i.e. after both
-    /// dispatch-source cancel handlers have run on `ioQueue`). Multiple
-    /// concurrent callers all see their completion fired exactly once when
-    /// teardown finishes; calls after teardown is complete fire immediately.
+    /// Variant whose completion fires exactly once, after the fd is fully
+    /// closed; calls after teardown completes fire immediately.
     func forceCancel(completion: @escaping @Sendable () -> Void) {
         enum Action { case startTeardown, queue, fireImmediately }
 
@@ -480,8 +373,7 @@ nonisolated class RawTCPSocket: RawTransport {
         }
     }
 
-    /// Drains queued teardown completions. Called from `tearDownSocket`'s
-    /// completion path once the fd is closed.
+    /// Drains queued teardown completions once the fd is closed.
     private func notifyTeardownComplete() {
         let completions: [@Sendable () -> Void] = stateLock.withLock {
             teardownComplete = true
@@ -558,8 +450,7 @@ nonisolated class RawTCPSocket: RawTransport {
         tryConnectNext()
     }
 
-    /// Applies Darwin-specific TCP tuning. Errors are logged but not fatal —
-    /// a missing option should not sink the connection.
+    /// Applies Darwin-specific TCP tuning; a missing option is not fatal.
     private func applyTCPSocketOptions(fd: Int32) {
         SocketHelpers.setInt(fd, level: SOL_SOCKET, name: SO_NOSIGPIPE, value: 1)
         SocketHelpers.setInt(fd, level: IPPROTO_TCP, name: TCP_NODELAY, value: 1)
@@ -581,7 +472,6 @@ nonisolated class RawTCPSocket: RawTransport {
         t.resume()
     }
 
-    /// Timer fired: current attempt timed out. Try the next address.
     private func handleConnectTimeout() {
         // If we've already transitioned out of setup, the timer lost the race.
         guard case .setup = state else { return }
@@ -630,15 +520,11 @@ nonisolated class RawTCPSocket: RawTransport {
         connectTimer?.cancel()
         connectTimer = nil
 
-        // Refuse to overwrite a concurrent .cancelled. Teardown will fire the
-        // completion in that case.
+        // A racing .cancelled wins; teardown fires the completion.
         guard transitionFromSetup(to: .ready) else { return }
 
-        // Report the dial latency (TCP connect time). MetricTimer no-ops for
-        // direct/bypass dials and while a latency probe has recording suspended.
         dialTimer.stop()
 
-        // Enqueue initialData for the first outgoing bytes (TFO-equivalent).
         if let data = pendingInitialData, !data.isEmpty {
             sendQueue.append(PendingSend(data: data, offset: 0, completion: nil))
         }
@@ -704,13 +590,11 @@ nonisolated class RawTCPSocket: RawTransport {
                     c?(nil)
                     continue
                 }
-                // Partial — keep head, re-arm write source.
                 sendQueue[0] = head
                 armWriteSourceForSend()
                 return
             }
 
-            // sent <= 0
             let e = errno
             if sent == 0 || e == EAGAIN || e == EWOULDBLOCK || e == EINTR {
                 // EAGAIN or spurious 0 — wait for writable.
@@ -724,7 +608,6 @@ nonisolated class RawTCPSocket: RawTransport {
             stateLock.withLock {
                 if case .ready = _state { _state = .failed(err) }
             }
-            // Also fail any pending receive.
             if let completion = pendingReceiveCompletion {
                 pendingReceiveCompletion = nil
                 disarmReadSource()
@@ -786,9 +669,7 @@ nonisolated class RawTCPSocket: RawTransport {
             Darwin.recv(fd, scratch, Self.recvScratchSize, 0)
         }
         if n > 0 {
-            // Copy exactly `n` bytes into the returned Data. The scratch is
-            // reused on the next recv, so the returned Data must own its
-            // bytes — can't hand out a `Data(bytesNoCopy:)` view.
+            // Scratch is reused, so the returned Data must own its bytes (no bytesNoCopy).
             let buf = Data(bytes: scratch, count: n)
             pendingReceiveCompletion = nil
             disarmReadSource()
@@ -830,10 +711,8 @@ nonisolated class RawTCPSocket: RawTransport {
 
     // MARK: - State transitions
 
-    /// Transitions only if the current state is `.setup`. Returns true if the
-    /// transition occurred. Used to guarantee that `.cancelled` is sticky:
-    /// once `forceCancel()` latches the cancelled state, no later code path
-    /// can move us to `.ready` or `.failed`.
+    /// Transitions only from `.setup`, keeping `.cancelled` sticky. Returns
+    /// whether the transition occurred.
     @discardableResult
     private func transitionFromSetup(to new: State) -> Bool {
         stateLock.withLock {
@@ -847,20 +726,13 @@ nonisolated class RawTCPSocket: RawTransport {
 
     // MARK: - Teardown
 
-    /// Closes the current fd and tears down its DispatchSources.
-    ///
-    /// The close is deferred to the sources' cancel handler so that
-    /// libdispatch is done monitoring the descriptor before we actually close
-    /// it — this is required by the `DispatchSource` contract. Must run on
-    /// `ioQueue`.
+    /// Closes the fd after its DispatchSources cancel — required by the
+    /// DispatchSource contract. Must run on `ioQueue`.
     private func tearDownSocket() {
         tearDownSocket(completion: {})
     }
 
-    /// Variant of `tearDownSocket` that fires `completion` once the fd is
-    /// actually closed (after both dispatch-source cancel handlers have run).
-    /// Internal callers that don't need to know when teardown finishes can use
-    /// the no-arg form.
+    /// Variant that fires `completion` once the fd is actually closed.
     private func tearDownSocket(completion: @escaping @Sendable () -> Void) {
         if let scratch = recvScratch {
             recvScratch = nil
@@ -882,16 +754,14 @@ nonisolated class RawTCPSocket: RawTransport {
             return
         }
 
-        // No sources to wait on — close immediately.
         if rs == nil && ws == nil {
             _ = Darwin.close(fdToClose)
             completion()
             return
         }
 
-        // Count cancel handlers; the last one to fire closes the fd, then
-        // fires the completion. Cancel handlers run on `ioQueue` (serial), so
-        // the counter needs no lock.
+        // Last cancel handler closes the fd; handlers run serially on `ioQueue`,
+        // so the counter needs no lock.
         var pending = (rs != nil ? 1 : 0) + (ws != nil ? 1 : 0)
         let closeHandler: () -> Void = {
             pending -= 1

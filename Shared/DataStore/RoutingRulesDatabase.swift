@@ -10,11 +10,8 @@ import SQLite3
 
 private let logger = AnywhereLogger(category: "RoutingRulesDatabase")
 
-/// Read-only SQLite database for bundled routing rules (replaces JSON resource files).
-///
-/// Tables:
-/// - `rules(source, type, value)` — domain/IP rules keyed by source name
-/// - `metadata(key, value)` — JSON-encoded lists and mappings
+/// Read-only SQLite database of bundled routing rules: `rules(source, type, value)`
+/// and `metadata(key, value)` with JSON-encoded values.
 final class RoutingRulesDatabase {
     static let shared = RoutingRulesDatabase()
 

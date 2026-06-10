@@ -11,10 +11,6 @@ import Foundation
 
 extension ProxyConfiguration {
 
-    /// Parses a configuration from a serialized dictionary.
-    ///
-    /// Used by PacketTunnelProvider (from tunnel start options / app messages)
-    /// and DomainRouter (from routing.json configs).
     static func parse(from configurationDict: [String: Any]) -> ProxyConfiguration? {
         guard let serverAddress = configurationDict["serverAddress"] as? String else {
             return nil
@@ -32,7 +28,6 @@ extension ProxyConfiguration {
 
         let resolvedIP = configurationDict["resolvedIP"] as? String
 
-        // Parse outbound protocol
         let protocolStr = (configurationDict["outboundProtocol"] as? String) ?? "vless"
         let proto = OutboundProtocol(rawValue: protocolStr) ?? .vless
 
@@ -66,8 +61,7 @@ extension ProxyConfiguration {
             let rawDown = (configurationDict["hysteriaDownloadMbps"] as? Int) ?? 0
             let congestionControl = (configurationDict["hysteriaCongestionControl"] as? String)
                 .flatMap(HysteriaCongestionControl.init(rawValue:)) ?? .brutal
-            // Fall back to legacy `tlsServerName` when `hysteriaSNI` is absent,
-            // then fall back to `serverAddress` so SNI is always populated.
+            // Fall back to legacy tlsServerName, then serverAddress so SNI is always populated.
             let explicitSNI = (configurationDict["hysteriaSNI"] as? String)
                 ?? (configurationDict["tlsServerName"] as? String)
             outbound = .hysteria(
@@ -169,7 +163,6 @@ extension ProxyConfiguration {
             )
         }
 
-        // Parse proxy chain if present
         var chain: [ProxyConfiguration]? = nil
         if let chainDicts = configurationDict["chain"] as? [[String: Any]] {
             chain = chainDicts.compactMap { ProxyConfiguration.parse(from: $0) }
@@ -186,8 +179,7 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parses the security layer from dict keys. VLESS-only — never called
-    /// for other outbounds, which don't carry a security layer.
+    /// Parses the security layer from dict keys. VLESS-only.
     private static func parseSecurityLayer(
         from configurationDict: [String: Any],
         serverAddress: String

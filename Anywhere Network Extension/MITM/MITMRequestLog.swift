@@ -9,70 +9,27 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITM")
 
-/// Per-``MITMSession`` cache of in-flight request method+URL so that
-/// the response-phase script can populate `ctx.method` / `ctx.url` with
-/// the originating request's values. Owned by the session, shared
-/// across both HTTP/1 streams and the HTTP/2 rewriter.
-///
-/// Two independent stores live here because HTTP/1 and HTTP/2 use
-/// different correlation keys. HTTP/1 has no per-request identifier on
-/// the wire, so we rely on the order-of-arrival contract of the spec
-/// (responses match requests in order) and use a FIFO. HTTP/2 streams
-/// are correlated by stream ID, which is unique within a connection.
-///
-/// Not thread-safe. ``MITMSession`` serializes all access on its lwIP
-/// queue.
+/// Per-session cache of in-flight request method+URL for response-phase script context;
+/// HTTP/1 uses a FIFO, HTTP/2 a stream-ID map. Not thread-safe — serialized on the lwIP queue.
 final class MITMRequestLog {
 
     struct Record {
         let method: String?
         let url: String?
-        /// Bytes (a serialized response head + optional body) that the
-        /// request stream synthesized via ``Anywhere.respond`` for a
-        /// PIPELINED follow-on request while this record was the
-        /// newest in-flight entry. They must be written to the client
-        /// *after* the upstream response that matches this record so
-        /// the client's pipeline-order assumption holds (RFC 9112
-        /// §9.3.2: responses come back in the same order as requests).
-        /// Drained by the response stream when the matching response
-        /// body finishes streaming. See
-        /// ``MITMRequestLog/attachSynthAfterLastHTTP1`` for the push
-        /// side.
+        /// Synthesized response bytes queued behind this record's upstream response to preserve pipeline order (RFC 9112 §9.3.2).
         var synthAfter: Data = Data()
     }
 
-    /// HTTP/1 pipeline. Request-stream pushes on each request head;
-    /// response-stream pops on each response head. Concurrent
-    /// requests on a single HTTP/1 connection are vanishingly rare in
-    /// modern HTTPS, but a queue still keeps the mapping correct if a
-    /// client does happen to pipeline.
+    /// HTTP/1 FIFO; keeps request/response correlation correct if a client pipelines.
     private var http1Queue: [Record] = []
 
-    /// Upper bound on ``http1Queue``. HTTP/1 correlation is FIFO with no
-    /// per-request key on the wire, so a push/pop imbalance — e.g. a request
-    /// whose response downgrades to read-until-close or a protocol upgrade and
-    /// never pops, on a client that also pipelines — would otherwise let the
-    /// queue grow for the connection's lifetime. Real pipelining depth is tiny;
-    /// this is a memory safety bound mirroring ``maxHTTP2Streams``. Past it the
-    /// oldest unmatched record is dropped, which only degrades a later
-    /// response's ctx.method/ctx.url (and any synth-after it held) — never a
-    /// crash or unbounded growth.
+    /// Cap against push/pop imbalance; eviction only degrades ctx.method/ctx.url.
     private static let maxHTTP1Queue = 256
 
-    /// HTTP/2 stream → record map. Set by the inbound (request) leg on
-    /// HEADERS, cleared by the outbound (response) leg on the matching
-    /// HEADERS. A stream that closes without a response (RST_STREAM) would
-    /// leave a stale entry, so ``recordHTTP2`` caps the map at
-    /// ``maxHTTP2Streams`` and evicts the oldest (lowest, monotonic) stream
-    /// ID when full — otherwise a peer opening many unanswered streams
-    /// (e.g. an HTTP/2 rapid-reset pattern) could grow it without bound for
-    /// the connection's lifetime.
+    /// HTTP/2 stream → record map; RST_STREAM without a response leaves stale entries, so it's capped with oldest-ID eviction.
     private var http2Streams: [UInt32: Record] = [:]
 
-    /// Upper bound on ``http2Streams``. Well above the spec-default
-    /// SETTINGS_MAX_CONCURRENT_STREAMS (100) so a saturated connection
-    /// doesn't evict records for streams still awaiting a response. Records
-    /// are tiny (two optional strings), so the cap costs a few tens of KiB.
+    /// Well above the spec-default SETTINGS_MAX_CONCURRENT_STREAMS (100) so live streams aren't evicted.
     private static let maxHTTP2Streams = 512
 
     init() {}
@@ -81,67 +38,36 @@ final class MITMRequestLog {
 
     func recordHTTP1(method: String?, url: String?) {
         if http1Queue.count >= Self.maxHTTP1Queue {
-            // Desync safety valve (see ``maxHTTP1Queue``): drop the oldest
-            // unmatched record rather than grow without bound. Only reachable
-            // when responses have stopped popping in step with requests.
             http1Queue.removeFirst()
         }
         http1Queue.append(Record(method: method, url: url))
     }
 
-    /// Returns the oldest unmatched request record and removes it,
-    /// or nil when the queue is empty. Used at response-head time.
     func popHTTP1() -> Record? {
         guard !http1Queue.isEmpty else { return nil }
         return http1Queue.removeFirst()
     }
 
-    /// Returns the oldest unmatched request record without removing
-    /// it. Used by interim 1xx response heads (100 Continue, 103
-    /// Early Hints) that need the originating request context for
-    /// script ctx but mustn't consume the queue — the final response
-    /// follows and is the one that should pop.
+    /// Peek for interim 1xx responses, which must not advance the queue; the final response pops.
     func peekHTTP1() -> Record? {
         http1Queue.first
     }
 
-    /// True when no HTTP/1 requests are awaiting a response. The
-    /// request stream uses this to decide whether a freshly
-    /// synthesized response can go straight to the client (queue
-    /// empty: no pipelined predecessor, emit now) or must be deferred
-    /// behind an in-flight response (queue non-empty: attach to the
-    /// newest record via ``attachSynthAfterLastHTTP1``).
+    /// Whether a synthesized response can be emitted immediately or must defer behind an in-flight response.
     var isHTTP1QueueEmpty: Bool {
         http1Queue.isEmpty
     }
 
-    /// Hard cap on per-record ``synthAfter`` accumulation. A chatty
-    /// request script that fires ``Anywhere.respond`` against every
-    /// pipelined request while one slow upstream response is still
-    /// streaming would otherwise pile responses into a single record's
-    /// ``synthAfter``, eating the Network Extension's memory budget.
-    /// Past the cap, additional synth bytes are dropped with a warning
-    /// rather than queued; the affected requests get no response on
-    /// the wire, but every previously-queued synth still flushes
-    /// cleanly when the head-of-queue response completes.
+    /// Cap on per-record synthAfter so pipelined `Anywhere.respond` bursts can't
+    /// exhaust memory; excess bytes are dropped with a warning.
     private static let maxSynthAfterBytes: Int = 1 * 1024 * 1024
 
-    /// Appends ``bytes`` to the ``synthAfter`` buffer on the most
-    /// recently pushed HTTP/1 request record. Used when a request
-    /// short-circuits via ``Anywhere.respond`` while earlier
-    /// pipelined requests are still waiting on upstream responses —
-    /// the synthesized bytes are held until the response stream
-    /// finishes emitting that earlier request's response, preserving
-    /// pipeline order. No-op when the queue is empty (callers in that
-    /// case emit immediately via ``pendingClientBytes`` instead).
+    /// Queues bytes behind the newest in-flight record; no-op when the queue is empty (caller emits immediately).
     func attachSynthAfterLastHTTP1(_ bytes: Data) {
         guard !http1Queue.isEmpty else { return }
         let idx = http1Queue.count - 1
         let projected = http1Queue[idx].synthAfter.count + bytes.count
         if projected > Self.maxSynthAfterBytes {
-            // Drop with a warning rather than grow without bound: a
-            // partial pipeline result is better than risking the
-            // session's memory.
             logger.warning("[MITM] synthAfter buffer would reach \(projected) B, over cap \(Self.maxSynthAfterBytes) B; dropping \(bytes.count) B of pipelined synth response")
             return
         }
@@ -153,25 +79,16 @@ final class MITMRequestLog {
     func recordHTTP2(streamID: UInt32, method: String?, url: String?) {
         if http2Streams[streamID] == nil, http2Streams.count >= Self.maxHTTP2Streams,
            let oldest = http2Streams.keys.min() {
-            // Evict the oldest tracked stream rather than grow unbounded.
-            // Losing its record only degrades a later response's script
-            // ctx.method/ctx.url to nil — never a crash.
             http2Streams.removeValue(forKey: oldest)
         }
         http2Streams[streamID] = Record(method: method, url: url)
     }
 
-    /// Returns and clears the record for ``streamID``, or nil when no
-    /// request was logged for it.
     func popHTTP2(streamID: UInt32) -> Record? {
         http2Streams.removeValue(forKey: streamID)
     }
 
-    /// Returns the record for ``streamID`` without removing it. Used
-    /// by interim 1xx response HEADERS that need ``ctx.method`` /
-    /// ``ctx.url`` for script context but mustn't consume the record —
-    /// the matching final response follows on the same stream and is
-    /// the one that should pop.
+    /// Peek for interim 1xx HEADERS, which must not consume the record; the final response pops.
     func peekHTTP2(streamID: UInt32) -> Record? {
         http2Streams[streamID]
     }

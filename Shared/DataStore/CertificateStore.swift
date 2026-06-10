@@ -9,11 +9,8 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// Manages user-trusted certificate SHA-256 fingerprints.
-///
-/// Fingerprints are stored in App Group UserDefaults so both the main app
-/// and the Network Extension can access them. TLSClient checks these
-/// when system trust evaluation fails.
+/// User-trusted certificate SHA-256 fingerprints, stored in App Group
+/// UserDefaults so both the main app and the Network Extension can read them.
 @MainActor
 @Observable
 final class CertificateStore {
@@ -25,8 +22,7 @@ final class CertificateStore {
         fingerprints = AWCore.getTrustedCertificateFingerprints()
     }
 
-    /// Adds a SHA-256 fingerprint (hex string, case-insensitive).
-    /// Returns `false` if the fingerprint is invalid or already exists.
+    /// Adds a SHA-256 fingerprint (hex, case-insensitive); false if invalid or already present.
     @discardableResult
     func add(_ fingerprint: String) -> Bool {
         let normalized = Self.normalize(fingerprint)
@@ -37,14 +33,12 @@ final class CertificateStore {
         return true
     }
 
-    /// Removes a fingerprint by value.
     func remove(_ fingerprint: String) {
         let normalized = Self.normalize(fingerprint)
         fingerprints.removeAll { $0 == normalized }
         save()
     }
 
-    /// Removes fingerprints at the given offsets.
     func remove(atOffsets offsets: IndexSet) {
         fingerprints.remove(atOffsets: offsets)
         save()

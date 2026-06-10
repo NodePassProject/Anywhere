@@ -42,9 +42,8 @@ final class MITMRuleSetStore {
         save()
     }
 
-    /// Flips a single set's ``MITMRuleSet/enabled`` flag and persists, so the
-    /// toggle takes effect immediately — including for read-only subscribed
-    /// sets, which never go through the draft-based editor's `save()`.
+    /// Flips one set's enabled flag and persists immediately — covers read-only
+    /// subscribed sets, which never go through the draft-based editor.
     func setRuleSet(_ id: UUID, enabled: Bool) {
         guard let index = ruleSets.firstIndex(where: { $0.id == id }) else { return }
         guard ruleSets[index].enabled != enabled else { return }
@@ -69,19 +68,14 @@ final class MITMRuleSetStore {
 
     // MARK: - Per-set rule CRUD
 
-    /// Looks up a rule set by id. Returns nil if it was removed after the
-    /// caller last read it, such as while an editor sheet is still on screen.
     func ruleSet(id: UUID) -> MITMRuleSet? {
         ruleSets.first(where: { $0.id == id })
     }
 
     func addRule(_ rule: MITMRule, toRuleSet ruleSetID: UUID) {
         guard let index = ruleSets.firstIndex(where: { $0.id == ruleSetID }) else { return }
-        // Bound local growth like the subscription path (refreshRuleSet) does:
-        // the matcher recompiles every rule on each reload and evaluates them
-        // per request head on the tunnel's serial queue, so an unbounded set
-        // stalls the data path. The editor UI should surface the limit before
-        // calling this.
+        // Cap like the subscription path: every rule is recompiled on reload and
+        // evaluated per request head, so an unbounded set stalls the data path.
         guard ruleSets[index].rules.count < MITMRuleSet.maxRuleCount else { return }
         ruleSets[index].rules.append(rule)
         save()
@@ -114,13 +108,9 @@ final class MITMRuleSetStore {
 
     // MARK: - Subscription
 
-    /// Fetches the subscription URL, parses the response as an `.amrs` rule
-    /// set, and replaces the subscribed set's domain suffixes, rewrite
-    /// target, and rules in place. The set's ``MITMRuleSet/id`` (its
-    /// ``MITMScriptStore`` scope key) and user-given ``MITMRuleSet/name``
-    /// are preserved across refreshes so the scope and any rename stick.
-    /// Returns the updated set so callers can refresh their view state
-    /// without a second main-actor lookup.
+    /// Fetches and parses the subscription as `.amrs`, replacing the set's
+    /// suffixes and rules in place; `id` and `name` are preserved so the
+    /// script-store scope and any rename stick. Returns the updated set.
     @discardableResult
     func refreshRuleSet(id: UUID) async throws -> MITMRuleSet {
         guard let index = ruleSets.firstIndex(where: { $0.id == id }),
@@ -140,10 +130,8 @@ final class MITMRuleSetStore {
         guard parsed.rules.count <= MITMRuleSet.maxRuleCount else {
             throw MITMRuleSetRefreshError.tooManyRules
         }
-        // Re-resolve the index after the await. The store is @MainActor, so a
-        // concurrent delete/move during the network fetch could have shifted or
-        // removed the set, leaving the pre-await `index` stale (a wrong write,
-        // or an out-of-bounds trap if the array shrank).
+        // Re-resolve after the await: a delete/move during the fetch could have
+        // shifted or removed the set, leaving the pre-await `index` stale.
         guard let writeIndex = ruleSets.firstIndex(where: { $0.id == id }) else {
             throw MITMRuleSetRefreshError.ruleSetRemoved
         }

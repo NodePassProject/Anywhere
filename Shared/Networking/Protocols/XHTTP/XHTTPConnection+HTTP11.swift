@@ -1,5 +1,5 @@
 //
-//  XHTTPConfiguration.swift
+//  XHTTPConnection+HTTP11.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/30/26.
@@ -50,7 +50,6 @@ extension XHTTPConnection {
     // MARK: packet-up Setup
 
     func performPacketUpSetup(completion: @escaping (Error?) -> Void) {
-        // Send GET request on the download connection
         let request = buildDownloadGETRequest()
 
         guard let requestData = request.data(using: .utf8) else {
@@ -80,8 +79,6 @@ extension XHTTPConnection {
                         self?.uploadReceive = closures.receive
                         self?.uploadCancel = closures.cancel
                         self?.lock.unlock()
-                        // Drain HTTP/1.1 POST responses in background to prevent
-                        // TCP receive-buffer saturation (see startUploadResponseDrain).
                         self?.startUploadResponseDrain()
                         completion(nil)
                     case .failure(let error):
@@ -94,17 +91,7 @@ extension XHTTPConnection {
 
     // MARK: Upload Response Drain
 
-    /// Starts a background loop that continuously reads from the upload connection
-    /// and discards all data (HTTP/1.1 responses to POST requests).
-    ///
-    /// In HTTP/1.1 packet-up mode each POST request receives an HTTP response
-    /// (e.g. `HTTP/1.1 200 OK …`).  If these responses are never consumed they
-    /// accumulate in the TCP receive buffer.  Once the buffer fills the server's
-    /// response writes block, preventing it from processing further requests on
-    /// this connection and causing intermittent stalls.
-    ///
-    /// HTTP/2 does not need this because upload-stream responses are consumed
-    /// inline by the shared H2 frame reader (`receiveH2Data`).
+    /// Discards POST responses in a loop; otherwise they fill the TCP receive buffer and stall the server.
     func startUploadResponseDrain() {
         drainNextUploadResponse()
     }
@@ -120,9 +107,8 @@ extension XHTTPConnection {
         uploadReceive { [weak self] data, isComplete, error in
             guard let self else { return }
             if error != nil || isComplete {
-                return // Upload connection closed — stop draining.
+                return
             }
-            // Discard the received data (HTTP response bytes) and keep draining.
             self.drainNextUploadResponse()
         }
     }
@@ -130,7 +116,6 @@ extension XHTTPConnection {
     // MARK: stream-up Setup
 
     func performStreamUpSetup(completion: @escaping (Error?) -> Void) {
-        // 1. Send GET request on the download connection (same as packet-up)
         let request = buildDownloadGETRequest()
 
         guard let requestData = request.data(using: .utf8) else {
@@ -143,14 +128,12 @@ extension XHTTPConnection {
                 completion(XHTTPError.setupFailed(error.localizedDescription))
                 return
             }
-            // 2. Read GET response headers
             self?.receiveResponseHeaders { [weak self] headerError in
                 if let headerError {
                     completion(headerError)
                     return
                 }
 
-                // 3. Establish the upload connection and send streaming POST headers
                 guard let self, let factory = self.uploadConnectionFactory else {
                     completion(XHTTPError.setupFailed("No upload connection factory"))
                     return
@@ -169,7 +152,6 @@ extension XHTTPConnection {
                         self.uploadCancel = closures.cancel
                         self.lock.unlock()
 
-                        // 4. Send streaming POST request headers on upload connection
                         let postRequest = self.buildStreamUpPOSTRequest()
 
                         guard let postData = postRequest.data(using: .utf8) else {
@@ -194,8 +176,7 @@ extension XHTTPConnection {
 
     // MARK: Detached leg Setup (up/download detach)
 
-    /// Download leg of a detached session over HTTP/1.1: send the GET and read
-    /// response headers. No upload connection — the upload is a separate leg.
+    /// Download leg of a detached session: sends the GET and reads response headers.
     func performDownloadOnlyHTTP11Setup(completion: @escaping (Error?) -> Void) {
         let request = buildDownloadGETRequest()
         guard let requestData = request.data(using: .utf8) else {
@@ -211,11 +192,9 @@ extension XHTTPConnection {
         }
     }
 
-    /// Upload leg of a detached session over HTTP/1.1. This leg's own primary
-    /// transport *is* the upload connection, so `uploadSend`/`uploadReceive` are
-    /// aliased to it and the `sendStreamUp` / `sendPacketUp` paths write to it.
-    /// `uploadCancel` is left nil — `downloadCancel` already tears down this
-    /// transport, avoiding a double cancel.
+    /// Upload leg of a detached session: its own transport *is* the upload connection,
+    /// so `uploadSend`/`uploadReceive` alias it. `uploadCancel` stays nil —
+    /// `downloadCancel` already tears down this transport, avoiding a double cancel.
     func performUploadOnlyHTTP11Setup(completion: @escaping (Error?) -> Void) {
         lock.lock()
         uploadSend = downloadSend
@@ -223,7 +202,6 @@ extension XHTTPConnection {
         lock.unlock()
 
         if mode == .streamUp {
-            // Open the streaming POST on this leg's transport.
             let postRequest = buildStreamUpPOSTRequest()
             guard let postData = postRequest.data(using: .utf8) else {
                 completion(XHTTPError.setupFailed("Failed to encode stream-up POST request"))
@@ -237,8 +215,7 @@ extension XHTTPConnection {
                 }
             }
         } else {
-            // packet-up: each send() is its own POST; drain responses to keep the
-            // TCP receive buffer from saturating (see startUploadResponseDrain).
+            // packet-up: each send() is its own POST.
             startUploadResponseDrain()
             completion(nil)
         }
@@ -246,8 +223,7 @@ extension XHTTPConnection {
 
     // MARK: - Request Builders
 
-    /// Builds a GET request for the download stream (used by packet-up and stream-up).
-    /// Session ID is placed according to sessionPlacement config.
+    /// Builds the GET request for the download stream; session ID placed per config.
     func buildDownloadGETRequest() -> String {
         var path = configuration.normalizedPath
         var request = ""
@@ -265,8 +241,7 @@ extension XHTTPConnection {
         return request
     }
 
-    /// Builds a streaming POST request for stream-up upload.
-    /// Session ID placed according to config, no sequence number, chunked transfer.
+    /// Builds the streaming stream-up POST: session ID per config, no seq, chunked transfer.
     func buildStreamUpPOSTRequest() -> String {
         let method = configuration.uplinkHTTPMethod
         var path = configuration.normalizedPath
@@ -291,8 +266,7 @@ extension XHTTPConnection {
 
     // MARK: - HTTP Response Header Parsing
 
-    /// Reads bytes from the download connection until `\r\n\r\n` is found.
-    /// Validates the status line contains "200".
+    /// Reads until `\r\n\r\n` and validates the status line contains "200".
     func receiveResponseHeaders(completion: @escaping (Error?) -> Void) {
         downloadReceive { [weak self] data, _, error in
             guard let self else {
@@ -316,7 +290,6 @@ extension XHTTPConnection {
             let headerEnd = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
             guard let range = self.headerBuffer.range(of: headerEnd) else {
                 self.lock.unlock()
-                // Haven't received the full header yet, keep reading
                 self.receiveResponseHeaders(completion: completion)
                 return
             }
@@ -326,13 +299,11 @@ extension XHTTPConnection {
             self.headerBuffer.removeAll()
             self.downloadHeadersParsed = true
 
-            // Feed leftover data into chunked decoder
             if !leftover.isEmpty {
                 self.chunkedDecoder.feed(leftover)
             }
             self.lock.unlock()
 
-            // Validate HTTP 200 response
             guard let headerString = String(data: Data(headerData), encoding: .utf8) else {
                 completion(XHTTPError.httpError("Cannot decode response headers"))
                 return
@@ -383,12 +354,11 @@ extension XHTTPConnection {
         nextSeq += 1
         lock.unlock()
 
-        // Split data into chunks of scMaxEachPostBytes
+        // Split into POSTs of at most scMaxEachPostBytes, one seq each.
         let maxSize = configuration.scMaxEachPostBytes
         if data.count <= maxSize {
             sendSinglePost(data: data, seq: seq, uploadSend: uploadSend, completion: completion)
         } else {
-            // Send first chunk with current seq, remaining chunks will use subsequent seqs
             let firstChunk = data.prefix(maxSize)
             let remaining = data.suffix(from: maxSize)
             sendSinglePost(data: Data(firstChunk), seq: seq, uploadSend: uploadSend) { [weak self] error in
@@ -396,7 +366,6 @@ extension XHTTPConnection {
                     completion(error)
                     return
                 }
-                // Recurse for remaining data
                 self?.sendPacketUp(data: Data(remaining), completion: completion)
             }
         }
@@ -413,14 +382,12 @@ extension XHTTPConnection {
         var path = configuration.normalizedPath
         var headerBlock = ""
 
-        // Apply session ID and sequence number metadata
         applySessionId(to: &headerBlock, path: &path)
         applySeq(to: &headerBlock, path: &path, seq: seq)
 
-        // Determine body vs non-body data placement
         let bodyData: Data
         if configuration.uplinkDataPlacement != .body {
-            // Encode data in headers or cookies instead of body
+            // Non-body placement: base64url-encode the data into headers or cookies.
             let encoded = data.base64EncodedString()
                 .replacingOccurrences(of: "+", with: "-")
                 .replacingOccurrences(of: "/", with: "_")
@@ -470,8 +437,7 @@ extension XHTTPConnection {
         }
         requestData.append(bodyData)
 
-        // Completion fires as soon as bytes are accepted by the upload transport;
-        // rate limiting between POSTs is enforced one layer up by flushPacketUpBatch.
+        // Rate limiting between POSTs is enforced upstream by flushPacketUpBatch.
         uploadSend(requestData, completion)
     }
 }

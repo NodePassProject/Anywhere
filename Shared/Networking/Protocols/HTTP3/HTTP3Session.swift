@@ -11,26 +11,17 @@ private let logger = AnywhereLogger(category: "HTTP3Session")
 
 // MARK: - HTTP3StreamHandler
 
-/// A handler for one QUIC stream's lifecycle within an ``HTTP3Session``.
-///
-/// The session demuxes incoming QUIC stream data and connection-level errors
-/// to the registered handler for each stream ID. Naive's CONNECT tunnels
-/// (``HTTP3Stream``) and XHTTP's request/response streams both conform, so a
-/// single session can multiplex either kind without the connection layer
-/// knowing which protocol is running on top.
+/// Per-stream handler to which the session demuxes QUIC stream data and
+/// connection-level errors.
 protocol HTTP3StreamHandler: AnyObject {
-    // Requirements are `nonisolated`: handlers run on the QUICConnection's serial
-    // queue, never the main actor. Without this, the project's default
-    // main-actor isolation would force conformers' `quicStreamID` to @MainActor
-    // and warn on every nonisolated access (in both this stream type and Naive's).
+    // Requirements are nonisolated: handlers run on the QUICConnection's serial
+    // queue, never the main actor (the project default isolation).
 
     /// The assigned QUIC stream ID, or nil before one has been opened.
     nonisolated var quicStreamID: Int64? { get }
-    /// Delivers raw QUIC stream payload (HTTP/3 frames) for this stream.
-    /// Called on the session queue.
+    /// Delivers raw QUIC stream payload (HTTP/3 frames). Called on the session queue.
     nonisolated func handleStreamData(_ data: Data, fin: Bool)
-    /// Signals that the underlying session failed or closed.
-    /// Called on the session queue.
+    /// Signals that the session failed or closed. Called on the session queue.
     nonisolated func handleSessionError(_ error: Error)
 }
 
@@ -45,62 +36,44 @@ nonisolated class HTTP3Session: PoolableSession {
     // MARK: - Properties
 
     private let quic: QUICConnection
-    /// Shares the QUICConnection's serial queue to avoid cross-queue dispatch
-    /// on the hot receive path (recv_stream_data → session → stream).
+    /// Shares the QUICConnection's serial queue to avoid cross-queue dispatch on the hot receive path.
     var queue: DispatchQueue { quic.queue }
 
-    /// Whether the caller is already on the session/QUIC queue.
     var isOnQueue: Bool { quic.isOnQueue }
 
     private var state: SessionState = .idle
 
-    /// Active streams keyed by QUIC stream ID.
     private var streams: [Int64: any HTTP3StreamHandler] = [:]
-
-    /// Pending ready callbacks (batched while connecting).
     private var readyCallbacks: [(Error?) -> Void] = []
-
-    /// Pool eviction callback.
     var onClose: (() -> Void)?
 
-    /// Server-initiated control stream ID and frame buffer.
     private var serverControlStreamID: Int64?
     private var serverControlBuffer = Data()
-    /// Tracks server-initiated streams whose type byte hasn't been read yet.
+    /// Tracks server-initiated streams whose type byte hasn't been classified yet.
     private var pendingServerStreams: [Int64: Data] = [:]
-    /// True once we've parsed the server's SETTINGS frame on its control stream.
     /// RFC 9114 §7.2.4: SETTINGS MUST be the first frame on the control stream.
     private var serverSettingsReceived = false
 
-    /// Peer-advertised MAX_FIELD_SECTION_SIZE from SETTINGS. RFC 9114 §4.2.2.
-    /// Defaults to unlimited until SETTINGS arrives.
+    /// Peer-advertised MAX_FIELD_SECTION_SIZE (RFC 9114 §4.2.2). UInt64.max = unlimited.
     private(set) var peerMaxFieldSectionSize: UInt64 = UInt64.max
 
-    /// Peer advertised SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC 9220). Only when
-    /// true may the client issue CONNECT with a `:protocol` pseudo-header.
+    /// RFC 9220: true when the peer allows extended CONNECT with a `:protocol` pseudo-header.
     private(set) var peerSupportsExtendedConnect = false
 
-    /// Peer advertised SETTINGS_H3_DATAGRAM (RFC 9297). Required for CONNECT-UDP
-    /// and other datagram-tunneling extensions.
+    /// RFC 9297: true when the peer enables H3_DATAGRAM (required for CONNECT-UDP).
     private(set) var peerSupportsH3Datagram = false
 
-    // Pool-visible state — accessed from the pool's lock context (arbitrary thread).
-    // Must NOT touch `streams` or other queue-protected state.
+    // Pool-visible state, accessed under _poolLock from arbitrary threads; must not
+    // touch `streams` or other queue-protected state.
     private let _poolLock = UnfairLock()
     private(set) var poolIsClosed = false
-    /// True when ngtcp2 can't open more streams (STREAM_ID_BLOCKED).
-    /// The pool will create a new session instead of reusing this one.
+    /// True when ngtcp2 signals STREAM_ID_BLOCKED; the pool creates a new session instead.
     private(set) var poolIsStreamBlocked = false
     private var _poolStreamCount = 0
     private var _reservedStreams = 0
-    /// Kept in sync with `QUICTuning.naive.initialMaxStreamsBidi` so the pool's
-    /// per-session reservation ceiling doesn't fall below what ngtcp2 is willing
-    /// to open. Undersizing this forces the pool to spin up fresh sessions (and
-    /// pay a handshake) long before the existing connection runs out of stream IDs.
+    /// Must match `QUICTuning.naive.initialMaxStreamsBidi`; undersizing forces premature session churn.
     private let maxConcurrentStreams = 512
 
-    /// Whether the session has active or reserved streams. Thread-safe.
-    /// Used by the pool to avoid evicting sessions that are still in use.
     var hasActiveStreams: Bool {
         _poolLock.lock()
         defer { _poolLock.unlock() }
@@ -109,12 +82,8 @@ nonisolated class HTTP3Session: PoolableSession {
 
     // MARK: - Init
 
-    /// - Parameter tuning: QUIC transport tuning. Defaults to ``QUICTuning/naive``
-    ///   (the preset the Naive HTTP/3 CONNECT path is tuned against); XHTTP-over-h3
-    ///   reuses it since its stream/flow-control needs are comparable.
-    /// - Parameter transport: Optional UDP-relay transport for chained
-    ///   XHTTP-over-h3. When set, QUIC rides it instead of a kernel socket
-    ///   `host`/`port` then identify the server logically rather than naming a dial target.
+    /// - Parameter transport: When set, QUIC rides the relay transport instead of a
+    ///   kernel socket; `host`/`port` identify the server logically, not a dial target.
     init(host: String, port: UInt16, serverName: String, tuning: QUICTuning = .naive,
          transport: QUICDatagramTransport? = nil) {
         self.quic = QUICConnection(host: host, port: port, serverName: serverName,
@@ -123,7 +92,6 @@ nonisolated class HTTP3Session: PoolableSession {
 
     // MARK: - Pool Interface
 
-    /// Atomically reserves a stream slot. Thread-safe (called from pool lock).
     func tryReserveStream() -> Bool {
         _poolLock.lock()
         defer { _poolLock.unlock() }
@@ -134,12 +102,8 @@ nonisolated class HTTP3Session: PoolableSession {
         return true
     }
 
-    /// Pool overflow path: reserves a slot bypassing `maxConcurrentStreams`.
-    /// Used only when every session in the pool is saturated *and* the pool
-    /// has hit its hard session cap — rather than grow unbounded, we queue
-    /// an extra stream onto the least-loaded session and let ngtcp2's
-    /// STREAM_ID_BLOCKED + the caller's retry path handle flow control.
-    /// Returns false if the session is closed or stream-blocked.
+    /// Reserves a slot bypassing `maxConcurrentStreams` when the pool is at its hard
+    /// cap; ngtcp2's STREAM_ID_BLOCKED and the caller's retry path handle backpressure.
     func forceReserveStream() -> Bool {
         _poolLock.lock()
         defer { _poolLock.unlock() }
@@ -148,7 +112,6 @@ nonisolated class HTTP3Session: PoolableSession {
         return true
     }
 
-    /// Current reserved + active stream count. For pool load-balancing.
     var currentStreamLoad: Int {
         _poolLock.lock()
         defer { _poolLock.unlock() }
@@ -157,11 +120,7 @@ nonisolated class HTTP3Session: PoolableSession {
 
     // MARK: - Stream Creation
 
-    /// Pool bookkeeping for turning a reserved slot into an active stream.
-    /// The caller constructs the concrete stream type (Naive CONNECT, XHTTP
-    /// request, …) and registers it via ``registerStream(_:streamID:)`` once
-    /// its QUIC stream ID is assigned. Non-pooled callers (e.g. XHTTP, which
-    /// owns one session per proxy connection) skip this and just register.
+    /// Converts a reserved slot into an active stream. Non-pooled callers skip this.
     func noteStreamStarted() {
         // Called on queue
         _poolLock.lock()
@@ -170,7 +129,6 @@ nonisolated class HTTP3Session: PoolableSession {
         _poolLock.unlock()
     }
 
-    /// Registers a stream after its QUIC stream ID is assigned.
     func registerStream(_ stream: any HTTP3StreamHandler, streamID: Int64) {
         streams[streamID] = stream
     }
@@ -184,25 +142,21 @@ nonisolated class HTTP3Session: PoolableSession {
             }
         }
 
-        // When draining and no streams remain, close the session
         if state == .draining && streams.isEmpty {
             close()
         }
     }
 
     /// Called when openBidiStream fails (STREAM_ID_BLOCKED).
-    /// Marks session as blocked so the pool creates a new one.
     func markStreamBlocked() {
         _poolLock.lock()
         poolIsStreamBlocked = true
-        // Release the reservation that createStream made
         _poolStreamCount = max(0, _poolStreamCount - 1)
         _poolLock.unlock()
     }
 
     // MARK: - Connection Lifecycle
 
-    /// Ensures the QUIC connection and HTTP/3 control streams are ready.
     func ensureReady(completion: @escaping (Error?) -> Void) {
         // Called on queue
         switch state {
@@ -224,8 +178,7 @@ nonisolated class HTTP3Session: PoolableSession {
     private func startConnection() {
         QUICCrypto.registerCallbacks()
 
-        // React immediately when the QUIC connection closes (draining, error, etc.)
-        // so the pool stops handing out streams on this dead session.
+        // Drain pool entries eagerly on close so no new streams go to a dead session.
         quic.connectionClosedHandler = { [weak self] error in
             guard let self else { return }
             self.failSession(error)
@@ -239,11 +192,9 @@ nonisolated class HTTP3Session: PoolableSession {
                     return
                 }
 
-                // Open HTTP/3 control stream
                 self.openControlStreams()
 
-                // Stream data handler — called on quic.queue which IS our queue,
-                // so no dispatch needed (avoids ~1-2μs per packet).
+                // Called on quic.queue (= our queue), so no re-dispatch needed (~1-2μs saved/packet).
                 self.quic.streamDataHandler = { [weak self] streamID, data, fin in
                     self?.handleStreamData(streamID: streamID, data: data, fin: fin)
                 }
@@ -303,19 +254,14 @@ nonisolated class HTTP3Session: PoolableSession {
         let isServerUni = (streamID & 0x03) == 0x03
         guard isServerUni, !data.isEmpty else { return }
 
-        // Server-initiated stream data is consumed immediately (SETTINGS, QPACK,
-        // GOAWAY, etc.) — extend flow control right away so connection-level
-        // credits aren't permanently leaked.
+        // Server-initiated stream data is consumed immediately, so extend flow
+        // control right away — otherwise connection-level credits leak permanently.
         quic.extendStreamOffset(streamID, count: data.count)
 
         if streamID == serverControlStreamID {
-            // Data on the established control stream — parse for SETTINGS/GOAWAY
             serverControlBuffer.append(data)
             processServerControlFrames()
         } else {
-            // Any server-initiated unidirectional stream other than the control
-            // stream needs its type byte read and classified. If the stream is
-            // already known to be non-control (e.g. QPACK) we keep discarding.
             var buf = pendingServerStreams.removeValue(forKey: streamID) ?? Data()
             buf.append(data)
             guard !buf.isEmpty else { return }
@@ -323,8 +269,7 @@ nonisolated class HTTP3Session: PoolableSession {
             switch streamType {
             case 0x00: // Control stream (RFC 9114 §6.2.1)
                 guard serverControlStreamID == nil else {
-                    // RFC 9114 §6.2.1: more than one control stream is a
-                    // connection error of type H3_STREAM_CREATION_ERROR.
+                    // RFC 9114 §6.2.1: a second control stream is H3_STREAM_CREATION_ERROR.
                     failSession(HTTP3Error.connectionFailed("Duplicate server control stream"))
                     return
                 }
@@ -334,13 +279,11 @@ nonisolated class HTTP3Session: PoolableSession {
             case 0x01: // Push (RFC 9114 §6.2.2) — we never send MAX_PUSH_ID
                 failSession(HTTP3Error.connectionFailed("Server opened push stream without MAX_PUSH_ID"))
             case 0x02, 0x03: // QPACK encoder / decoder (RFC 9204 §4.2)
-                // We advertised QPACK_MAX_TABLE_CAPACITY=0 so there's nothing
-                // meaningful on these streams; drain silently.
+                // We advertised QPACK_MAX_TABLE_CAPACITY=0; drain silently.
                 break
             default:
-                // RFC 9114 §6.2: unknown or reserved stream types. Reserved
-                // types follow `0x1f * N + 0x21`; for everything else we
-                // abort reading via STOP_SENDING rather than trust the bytes.
+                // RFC 9114 §6.2: tolerate reserved grease types (0x1f * N + 0x21);
+                // abort anything else with STOP_SENDING.
                 if !isReservedStreamType(streamType) {
                     quic.shutdownStream(streamID, appErrorCode: HTTP3ErrorCode.streamCreationError.rawValue)
                 }
@@ -353,9 +296,8 @@ nonisolated class HTTP3Session: PoolableSession {
         t >= 0x21 && (UInt64(t) - 0x21) % 0x1f == 0
     }
 
-    /// Parses HTTP/3 frames on the server's control stream.
-    /// RFC 9114 §7.2.4: SETTINGS MUST be the first frame; anything else before
-    /// SETTINGS is a connection error (H3_MISSING_SETTINGS).
+    /// Parses frames on the server's control stream. RFC 9114 §7.2.4: SETTINGS
+    /// must be the first frame, else H3_MISSING_SETTINGS.
     private func processServerControlFrames() {
         while !serverControlBuffer.isEmpty {
             guard let (frame, consumed) = HTTP3Framer.parseFrame(from: serverControlBuffer) else {
@@ -386,18 +328,16 @@ nonisolated class HTTP3Session: PoolableSession {
             case HTTP3FrameType.data.rawValue,
                  HTTP3FrameType.headers.rawValue,
                  HTTP3FrameType.pushPromise.rawValue:
-                // These frames are forbidden on the control stream
-                // (RFC 9114 §7.2.1/§7.2.2/§7.2.5): H3_FRAME_UNEXPECTED.
+                // Forbidden on the control stream (RFC 9114 §7.2.1/§7.2.2/§7.2.5): H3_FRAME_UNEXPECTED.
                 failSession(HTTP3Error.connectionFailed("Forbidden frame type \(frame.type) on control stream"))
                 return
             default:
-                break // Unknown/grease types are ignored.
+                break
             }
         }
     }
 
-    /// Parses the server's SETTINGS payload into peer limits we care about.
-    /// Returns false if the payload is malformed.
+    /// Parses the server's SETTINGS payload. Returns false if malformed.
     private func parseServerSettings(_ payload: Data) -> Bool {
         var offset = 0
         var seen = Set<UInt64>()
@@ -418,8 +358,7 @@ nonisolated class HTTP3Session: PoolableSession {
             case HTTP3SettingsID.maxFieldSectionSize.rawValue:
                 peerMaxFieldSectionSize = value
             case HTTP3SettingsID.enableConnectProtocol.rawValue:
-                // RFC 9220 §3: only 0 or 1 are valid; any other value is a
-                // settings error. 1 enables extended CONNECT.
+                // RFC 9220 §3: only 0 or 1 are valid.
                 guard value == 0 || value == 1 else { return false }
                 peerSupportsExtendedConnect = (value == 1)
             case HTTP3SettingsID.h3Datagram.rawValue:
@@ -428,17 +367,15 @@ nonisolated class HTTP3Session: PoolableSession {
                 peerSupportsH3Datagram = (value == 1)
             case HTTP3SettingsID.qpackMaxTableCapacity.rawValue,
                  HTTP3SettingsID.qpackBlockedStreams.rawValue:
-                // We don't use the dynamic table, so we don't need to react.
-                break
+                break // Dynamic table not used; no reaction needed.
             default:
-                break // Unknown / reserved identifiers are ignored.
+                break
             }
         }
         return true
     }
 
-    /// RFC 9114 §4.2.2 — Sum of (name.utf8.count + value.utf8.count + 32)
-    /// over all fields. Returns true if the list fits under the peer's limit.
+    /// RFC 9114 §4.2.2: Σ(name + value + 32) octets over all fields must fit the peer's limit.
     func isWithinPeerFieldSectionLimit(_ headers: [(name: String, value: String)]) -> Bool {
         let limit = peerMaxFieldSectionSize
         if limit == UInt64.max { return true }
@@ -450,32 +387,27 @@ nonisolated class HTTP3Session: PoolableSession {
         return true
     }
 
-    /// Handles a GOAWAY frame: stops accepting new streams and drains existing ones.
     private func handleGoaway(_ payload: Data) {
         guard state == .ready else { return }
         state = .draining
 
-        // Mark session as stream-blocked so the pool creates a new session
         _poolLock.lock()
         poolIsStreamBlocked = true
         _poolLock.unlock()
 
         logger.debug("[HTTP3Session] Received GOAWAY, draining \(streams.count) active streams")
 
-        // If no active streams remain, close immediately
         if streams.isEmpty {
             close()
         }
-        // Otherwise, existing streams continue until they complete naturally.
-        // When the last stream is removed via removeStream(), check for drain completion.
+        // Existing streams continue to completion; removeStream() closes when the last one finishes.
     }
 
     // MARK: - Close
 
     func close() {
-        // Strong `self`, not `[weak self]`: a pooled session dropped off-queue
-        // could be the last reference and deallocate before this ran, skipping
-        // `quic.close()` and leaking the QUIC socket + ngtcp2 state.
+        // Strong `self`: a weakly-captured pooled session could deallocate before
+        // this runs, skipping `quic.close()` and leaking the socket + ngtcp2 state.
         queue.async {
             guard self.state != .closed else { return }
             self.state = .closed

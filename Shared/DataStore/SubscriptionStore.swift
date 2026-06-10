@@ -68,13 +68,12 @@ class SubscriptionStore {
 }
 
 extension SubscriptionStore {
-    /// The subscription that owns a configuration, if any.
     func subscription(for configuration: ProxyConfiguration) -> Subscription? {
         guard let subId = configuration.subscriptionId else { return nil }
         return subscriptions.first { $0.id == subId }
     }
 
-    /// One picker section per non-empty subscription. Reads `ConfigurationStore.shared`.
+    /// One picker section per non-empty subscription.
     var pickerSections: [PickerSection] {
         let configStore = ConfigurationStore.shared
         return subscriptions.compactMap { subscription in
@@ -101,8 +100,7 @@ extension SubscriptionStore {
         update(updated)
     }
 
-    /// Adds a subscription and its configurations atomically, tagging each config with the
-    /// subscription's id. (Selection is handled by the caller / `revalidateSelection`.)
+    /// Adds a subscription and its configurations, tagging each config with the subscription's id.
     func add(_ subscription: Subscription, configurations newConfigurations: [ProxyConfiguration]) {
         // Persist subscription first so an interrupted import never leaves orphan proxies.
         add(subscription)
@@ -118,13 +116,11 @@ extension SubscriptionStore {
     }
 
     /// Re-fetches a subscription and replaces its configurations, matching new configs to
-    /// old ones by name to preserve IDs (and routing-rule assignments). Was
-    /// `VPNViewModel.updateSubscription`; selection fix-up is handled by `revalidateSelection`.
+    /// old ones by name to preserve IDs (and routing-rule assignments).
     func refresh(_ subscription: Subscription) async throws {
         let result = try await SubscriptionFetcher.fetch(url: subscription.url)
 
-        // Match new configurations against old ones by name to preserve IDs.
-        // When multiple configs share a name, they match positionally within that group.
+        // Configs sharing a name match positionally within that group.
         let oldConfigurations = ConfigurationStore.shared.configurations(for: subscription)
         var oldByName: [String: [ProxyConfiguration]] = [:]
         for old in oldConfigurations {
@@ -151,10 +147,8 @@ extension SubscriptionStore {
             ))
         }
 
-        // Atomically replace old configurations with new ones (single observation notification)
         ConfigurationStore.shared.replaceConfigurations(for: subscription.id, with: newConfigurations)
 
-        // Update subscription metadata
         var updated = subscription
         updated.lastUpdate = Date()
         updated.upload = result.upload ?? subscription.upload

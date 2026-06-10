@@ -9,19 +9,14 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "MITM")
 
-/// Result of the deferred upstream dial handed back to ``MITMSession``.
+/// Result of the deferred upstream dial.
 struct MITMDialResult {
     let connection: ProxyConnection
-    /// The proxy client whose lifetime the session now owns (nil for a direct
-    /// connection).
+    /// nil for a direct connection; the session owns its lifetime.
     let proxyClient: ProxyClient?
 }
 
-/// Performs the deferred upstream dial. ``MITMSession`` invokes this once it
-/// has resolved the upstream host/port from the first request (after URL
-/// rewrite); the implementation (``TCPConnection``) dials direct or via the
-/// proxy and returns the connected pipe. The completion runs on the session's
-/// lwIP queue.
+/// Dials the upstream once the first request resolves the host/port; completion runs on the lwIP queue.
 typealias MITMDialer = (
     _ host: String,
     _ port: UInt16,
@@ -32,10 +27,7 @@ final class MITMSession {
 
     // MARK: - Inner Transport (RawTransport adapter for the lwIP side)
 
-    /// Bidirectional pipe between the inner-leg TLS record connection and
-    /// the lwIP-attached caller. Bytes written by ``TLSRecordConnection``
-    /// get forwarded to ``onSendToClient``; bytes received from the client
-    /// land via ``feedFromClient`` and feed any pending receive completion.
+    /// Bidirectional pipe between the inner-leg TLS record connection and the lwIP-attached caller.
     final class InnerTransport: RawTransport {
         let queue: DispatchQueue
         var onSendToClient: ((Data, ((Error?) -> Void)?) -> Void)?
@@ -104,7 +96,6 @@ final class MITMSession {
 
         // MARK: External Inputs
 
-        /// Called when the lwIP path delivers bytes from the client.
         func feedFromClient(_ data: Data) {
             lock.lock()
             if closed {
@@ -121,7 +112,6 @@ final class MITMSession {
             lock.unlock()
         }
 
-        /// Signals an orderly client-side close.
         func endOfClient() {
             lock.lock()
             closed = true
@@ -149,78 +139,38 @@ final class MITMSession {
     private let leafCache: MITMLeafCertCache
     private let policy: MITMRewritePolicy
 
-    /// Shared, cross-session memory of upstreams that can't bridge `h2`. Read
-    /// when choosing the inner leg's ALPN (to avoid committing to `h2` for a
-    /// known HTTP/1.1-only origin) and written when the outer leg discovers one.
+    /// Cross-session memory of upstreams that can't bridge h2.
     private let originCapabilities: MITMOriginCapabilityCache
 
-    /// Performs the deferred upstream dial. Invoked once the first request's
-    /// rewrite resolves the upstream host/port; the implementation
-    /// (``TCPConnection``) returns the connected pipe and transfers the
-    /// ``ProxyClient`` ownership to this session.
     private let dialer: MITMDialer
 
-    /// The proxy client whose lifetime this session owns once the dial
-    /// completes (nil for a direct connection, or before the dial). Retained
-    /// so it isn't deallocated mid-stream; cancelled on teardown.
+    /// Retained so it isn't deallocated mid-stream; nil for a direct connection.
     private var proxyClient: ProxyClient?
 
-    /// The dialed upstream connection, retained from the moment the dial
-    /// succeeds so it can be cancelled even if teardown races the outer TLS
-    /// handshake (before ``outerRecord`` — which otherwise owns its teardown —
-    /// exists).
+    /// Retained so teardown can cancel the dial before the outer handshake completes.
     private var outerConnection: ProxyConnection?
 
-    /// Bytes destined for the upstream produced before the outer leg existed
-    /// (the rewritten first request plus anything the client pipelined while
-    /// the dial ran). Flushed once the outer handshake completes. Capped by
-    /// ``maxPendingClientBytes``.
+    /// Upstream-bound bytes buffered until the outer leg exists; capped by maxPendingClientBytes.
     private var pendingUpstreamBytes = Data()
 
-    /// True once the deferred dial has been kicked off, so additional
-    /// upstream-bound bytes are buffered rather than starting a second dial.
+    /// True while the dial is in flight; further upstream-bound bytes buffer instead of redialing.
     private var dialing = false
 
-    /// The upstream the dial committed to (the first request's resolved
-    /// host/port, with the original destination as fallback). The leg can
-    /// reach only this upstream, so a later request whose transparent rewrite
-    /// resolves a different host/port is torn down instead of misrouted to it
-    /// (see ``resolvedUpstreamMatchesDialed``). nil until the dial is kicked off.
+    /// Upstream the dial committed to; a later request resolving a different one is torn down rather than misrouted.
     private var dialedHost: String?
     private var dialedPort: UInt16?
 
-    /// Whether the client offered TLS 1.3, captured from the ClientHello and
-    /// used to cap the outer leg's max version (the outer leg follows the
-    /// inner negotiation).
+    /// From the ClientHello; caps the outer leg's max TLS version.
     private var clientSupportsTLS13 = false
 
-    /// The SNI the inner leg negotiated against — the key under which the
-    /// shared ``originCapabilities`` cache is both read (when choosing the
-    /// inner ALPN) and written (when the outer leg discovers an h2 mismatch).
-    /// MUST match the read key: ``MITMOriginCapabilityCache`` is documented as
-    /// keyed by SNI, and the SNI is what's stable across the client's retries
-    /// (the destination ``dstHost`` can be a bare IP when the client dialed by
-    /// address while sending a hostname SNI, so keying the write on ``dstHost``
-    /// would store the verdict under a key the next session never checks —
-    /// re-offering h2 forever and looping the connection). Captured in
-    /// ``start(sni:)``.
+    /// originCapabilities key — must be the SNI, not dstHost: only the SNI is stable
+    /// across client retries, and keying on dstHost would re-offer h2 forever and loop.
     private var handshakeSNI: String?
 
-    /// Bytes received from the client before the inner ``TLSServer`` was
-    /// created. Always begins with a complete ClientHello; may also
-    /// contain bytes the client pushed while we were finishing the outer
-    /// handshake. Drained into ``TLSServer/feed(_:)`` once the inner leg
-    /// starts.
+    /// Client bytes buffered until the inner TLSServer exists.
     private var pendingClientBytes: Data
 
-    /// Hard cap on ``pendingClientBytes`` while the outer handshake is
-    /// running. A correct TLS client blocks on the ServerHello after
-    /// emitting its ClientHello, so this buffer stays well under 16 KiB
-    /// in real flows; the cap exists to defend against a hostile or
-    /// buggy local app that dumps arbitrary data into the SOCKS leg
-    /// before TLS negotiation completes. Without a cap, that traffic
-    /// would accumulate without bound. 256 KiB is generous (multi-KB JA3
-    /// extensions, large GREASE blocks) while still catching abuse.
+    /// Pre-handshake buffer cap; 256 KiB tolerates large ClientHellos while bounding memory against a hostile local app.
     private static let maxPendingClientBytes: Int = 256 * 1024
 
     private var tlsServer: TLSServer?
@@ -228,35 +178,25 @@ final class MITMSession {
 
     private let innerTransport: InnerTransport
 
-    /// Inner record connection after handshake. Encrypts and decrypts
-    /// traffic with the client; plaintext stays inside the session.
+    /// Post-handshake record connections; decrypted plaintext stays inside the session.
     private var innerRecord: TLSRecordConnection?
-    /// Outer record connection after handshake. Encrypts and decrypts
-    /// traffic with the real server; plaintext stays inside the session.
     private var outerRecord: TLSRecordConnection?
 
-    /// HTTP/1.1 stream rewriters, one per direction. Each owns the
-    /// message-framing state machine for its half of the connection.
+    /// HTTP/1.1 stream rewriters, one per direction.
     private let requestStream: MITMHTTP1Stream
     private let responseStream: MITMHTTP1Stream
 
-    /// HTTP/2 frame translators, populated only when both legs negotiate
-    /// `h2` ALPN. ``inboundH2`` rewrites client-to-server traffic;
-    /// ``outboundH2`` rewrites server-to-client traffic.
+    /// HTTP/2 frame translators; inbound is created at inner-leg h2 negotiation, outbound once the outer leg confirms h2.
     private var inboundH2: MITMHTTP2Connection?
     private var outboundH2: MITMHTTP2Connection?
 
-    /// The active inbound (client→server) rewriter: the HTTP/2 connection once
-    /// the inner leg negotiated `h2`, otherwise the always-present HTTP/1
-    /// request stream. Lets the pumps shuttle bytes without branching on the
-    /// negotiated protocol at every step.
+    /// Active inbound (client→server) rewriter: h2 when negotiated, else HTTP/1.
     private var inbound: any MITMMessageRewriter {
         if let inboundH2 { return inboundH2 }
         return requestStream
     }
 
-    /// The active outbound (server→client) rewriter: the HTTP/2 connection once
-    /// both legs are `h2`, otherwise the HTTP/1 response stream.
+    /// Active outbound (server→client) rewriter: h2 once both legs are, else HTTP/1.
     private var outbound: any MITMMessageRewriter {
         if let outboundH2 { return outboundH2 }
         return responseStream
@@ -264,33 +204,23 @@ final class MITMSession {
 
     private let h2Rewriter: MITMHTTP2Rewriter
 
-    /// Tracks the client's HTTP/2 receive windows so synth (`Anywhere.respond`)
-    /// bodies are paced to them rather than truncated. Shared by both h2 legs;
-    /// constructed unconditionally (cheap) and only exercised once the legs
-    /// exist. See ``MITMHTTP2FlowController``.
+    /// Tracks the client's HTTP/2 receive windows so synthesized bodies are paced rather than truncated; shared by both h2 legs.
     private let h2FlowController = MITMHTTP2FlowController()
 
-    /// Handle to the JavaScript runtime for this session's rule set,
-    /// shared by both HTTP/1 streams and the HTTP/2 rewriter. The engine
-    /// itself is shared across every connection to the same rule set and
-    /// materializes only when a ``CompiledMITMOperation/script`` rule
-    /// actually fires (see ``MITMScriptEngine/Provider``).
+    /// JS engine handle, shared per rule set; materializes only when a script rule fires.
     private let scriptEngineProvider: MITMScriptEngine.Provider
 
-    /// Cross-direction record of the in-flight request's method+URL so
-    /// the response-phase script ctx can populate `ctx.method` /
-    /// `ctx.url` from the request that produced this response.
+    /// Records the in-flight request's method+URL for response-phase scripts.
     private let requestLog = MITMRequestLog()
 
     private var torn = false
 
-    /// Set by the lwIP-side caller to receive inner-leg bytes that need
-    /// to be written back to the client.
+    /// Set by the lwIP-side caller to write inner-leg bytes back to the client.
     var onSendToClient: ((Data, ((Error?) -> Void)?) -> Void)? {
         didSet { innerTransport.onSendToClient = onSendToClient }
     }
 
-    /// Called when the session tears down. `error` is nil for a clean close.
+    /// Called on teardown; `error` is nil for a clean close.
     var onTeardown: ((Error?) -> Void)?
 
     // MARK: - Init
@@ -314,14 +244,9 @@ final class MITMSession {
         self.dialer = dialer
         self.lwipQueue = lwipQueue
         self.innerTransport = InnerTransport(queue: lwipQueue)
-        // One JS engine per rule set, shared across every connection to
-        // it and keyed by the matched set's id so it lines up with the
-        // ``Anywhere.store`` scope. A nil scope (no matched set) only
-        // arises when no script rule can fire, so no engine is built then.
+        // Keyed by the matched set's id so it lines up with the Anywhere.store scope.
         self.scriptEngineProvider = MITMScriptEngine.Provider(scope: policy.set(for: dstHost)?.id)
-        // ``effectiveAuthority`` is late-bound: the rewriters start with nil;
-        // a transparent ``MITMOperation/rewrite`` on the first request sets it
-        // (and the dial target) once the replacement host is known.
+        // effectiveAuthority is late-bound by a transparent rewrite on the first request.
         self.requestStream = MITMHTTP1Stream(
             host: dstHost,
             phase: .httpRequest,
@@ -351,32 +276,16 @@ final class MITMSession {
 
     // MARK: - Lifecycle
 
-    /// Starts the inner-leg TLS handshake first, negotiating ALPN + TLS
-    /// version from the client's own ClientHello. The upstream is dialed
-    /// lazily — only once the first request resolves the destination (after
-    /// URL rewrite) — and the outer leg then follows the inner-negotiated
-    /// ALPN. Requests fully answered by a 302 / reject rewrite (or
-    /// `Anywhere.respond`) never trigger a dial. Must be called on `lwipQueue`.
+    /// Starts the inner-leg TLS handshake; the upstream dial is deferred until
+    /// the first request resolves the destination. Must be called on lwipQueue.
     func start(sni: String) {
-        // When the HTTP/1 response leg sees a 101 / CONNECT-2xx the connection
-        // becomes an opaque tunnel; flip the request leg to passthrough too and
-        // flush whatever it had buffered upstream, so client→server tunnel bytes
-        // (e.g. WebSocket frames) aren't stranded in its head parser.
         responseStream.onProtocolUpgrade = { [weak self] in
             self?.handleResponseUpgrade()
         }
-        // Capture the SNI as the origin-capability cache key so the later
-        // ``markHTTP1Only`` write uses the same key as the ``isHTTP1Only`` read
-        // below (see ``handshakeSNI``).
         handshakeSNI = sni
         let parsed = parseClientHello(pendingClientBytes)
         let clientALPNs = parsed?.alpnProtocols ?? []
-        // Fail-closed default: when the ClientHello fails to parse we assume
-        // the client does NOT support TLS 1.3, so the inner leg just offers
-        // TLS 1.2. A 1.3-capable client (which by spec also supports 1.2)
-        // negotiates 1.2 and the handshake still succeeds — only a
-        // hypothetical 1.3-only client would be affected, and none exist in
-        // practice.
+        // Unparseable ClientHello fails closed to TLS 1.2; any 1.3-capable client also speaks 1.2.
         clientSupportsTLS13 = parsed?.supportedVersions.contains(0x0304) ?? false
         startInnerHandshakeFromClientOffer(
             sni: sni,
@@ -385,10 +294,7 @@ final class MITMSession {
         )
     }
 
-    /// Feeds bytes received from the client. Until the inner ``TLSServer``
-    /// exists (i.e. while the outer handshake is still in progress) we
-    /// hold the bytes in ``pendingClientBytes``; afterwards they go to the
-    /// inner ``TLSServer`` or, post-handshake, to the inner transport.
+    /// Routes client bytes to the current inner-leg stage.
     func feedClientBytes(_ data: Data) {
         guard !torn else { return }
         if innerRecord != nil {
@@ -396,12 +302,6 @@ final class MITMSession {
         } else if let tlsServer {
             tlsServer.feed(data)
         } else {
-            // Outer handshake still running — buffer for the inner
-            // ``TLSServer`` once it is created. Capped at
-            // ``maxPendingClientBytes`` to defend the Network
-            // Extension's memory budget from a hostile local app that
-            // dumps arbitrary bytes into the SOCKS leg before the
-            // outer handshake completes.
             if pendingClientBytes.count + data.count > Self.maxPendingClientBytes {
                 logger.warning("[MITM] \(dstHost): pre-handshake buffer would exceed \(Self.maxPendingClientBytes) B; tearing down session")
                 cancel(error: nil)
@@ -411,24 +311,19 @@ final class MITMSession {
         }
     }
 
-    /// Signals an orderly client-side close.
     func clientDidClose() {
         guard !torn else { return }
         if innerRecord != nil {
             innerTransport.endOfClient()
         } else {
-            // Client closed mid-handshake — tear everything down.
             cancel(error: nil)
         }
     }
 
-    /// Tears the session down. Best-effort.
     func cancel(error: Error? = nil) {
         guard !torn else { return }
         torn = true
-        // Disarm any in-flight script resume so it can't write to a
-        // torn-down leg or fire a stale completion once its off-queue hop
-        // returns.
+        // Disarm in-flight script resumes before they can write to torn legs.
         requestStream.markTorn()
         responseStream.markTorn()
         inboundH2?.markTorn()
@@ -440,11 +335,7 @@ final class MITMSession {
         innerRecord = nil
         outerRecord?.cancel()
         outerRecord = nil
-        // The proxy client + dialed connection are owned solely by this session
-        // once the dial completes (TCPConnection transferred them via the
-        // dialer). ``outerRecord.cancel()`` tears down the connection once the
-        // outer handshake wraps it; cancelling ``outerConnection`` directly
-        // covers a teardown that races the handshake. cancel() is idempotent.
+        // outerConnection covers the pre-handshake race window; cancel() is idempotent.
         outerConnection?.cancel()
         outerConnection = nil
         proxyClient?.cancel()
@@ -457,9 +348,6 @@ final class MITMSession {
 
     // MARK: - Inner Handshake
 
-    /// Starts the inner-leg TLS server, negotiating from the supplied ALPN /
-    /// TLS-version sets (derived from the client's own offer). The outer leg is
-    /// dialed later and made to follow whichever ALPN this negotiates.
     private func startInnerHandshake(sni: String, alpns: [String], tlsVersions: Set<UInt16>) {
         do {
             let leaf = try leafCache.leaf(for: sni)
@@ -474,8 +362,6 @@ final class MITMSession {
             server.delegate = self
             tlsServer = server
 
-            // Drive in any bytes already buffered (the ClientHello plus
-            // anything the client sent while we were setting up).
             server.feed(pendingClientBytes)
             pendingClientBytes.removeAll(keepingCapacity: false)
         } catch {
@@ -483,12 +369,7 @@ final class MITMSession {
         }
     }
 
-    /// Inner-first entry point. Picks the inner handshake's ALPN + TLS-version
-    /// sets from the client's offer — its preference order wins — but withholds
-    /// `h2` for origins a prior session recorded as HTTP/1.1-only (see
-    /// ``originCapabilities``), since committing to it would only force a
-    /// teardown once the outer leg can't match it. Falls back to ``http/1.1``
-    /// when no usable ALPN remains.
+    /// Picks ALPN and TLS versions from the client's offer, withholding h2 from origins recorded HTTP/1.1-only.
     private func startInnerHandshakeFromClientOffer(
         sni: String,
         clientALPNs: [String],
@@ -496,11 +377,6 @@ final class MITMSession {
     ) {
         let supported: Set<String> = ["h2", "http/1.1"]
         var intersected = clientALPNs.filter { supported.contains($0) }
-        // If a prior session learned this origin can't bridge `h2` (see
-        // ``startOuterHandshakeAfterDial``), don't commit the inner leg to it
-        // again: the outer leg would only rediscover the mismatch and tear the
-        // session down. Dropping `h2` here makes the client negotiate
-        // `http/1.1`, which the upstream accepts — no teardown, no retry loop.
         if originCapabilities.isHTTP1Only(sni) {
             intersected.removeAll { $0 == "h2" }
         }
@@ -512,27 +388,14 @@ final class MITMSession {
 
     // MARK: - Outer Handshake (deferred)
 
-    /// Runs the outer TLS handshake over the freshly-dialed upstream
-    /// ``connection``, offering the inner-negotiated ALPN so both legs commit
-    /// to the same application protocol: the inner leg negotiates against the
-    /// client and the outer leg follows it. On success the buffered first
-    /// request is flushed and shuttling begins. An ALPN the upstream can't
-    /// honor (e.g. inner `h2` vs an http/1.1-only origin) can't be bridged, so
-    /// the origin is recorded as HTTP/1.1-only and the session tears down. The
-    /// client retries, and because the inner leg now declines to offer `h2` for
-    /// that origin (see ``startInnerHandshakeFromClientOffer``) the retry
-    /// negotiates `http/1.1` and completes — no loop.
+    /// Runs the outer TLS handshake offering the inner-negotiated ALPN; on a mismatch the
+    /// origin is recorded HTTP/1.1-only and the session tears down so the retry avoids h2.
     private func startOuterHandshakeAfterDial(
         over connection: ProxyConnection,
         host: String,
         innerALPN: String
     ) {
-        // Fingerprint: the outer leg performs a REAL TLS handshake to the
-        // origin, so correctness matters and camouflage does not — use the
-        // ``.nonBrowser`` minimal client (no ALPS/GREASE/cert-compression/ECH/
-        // padding), matching a generic OpenSSL-style client. A browser
-        // fingerprint's ALPS trips strict origins (Google's GFE) into a fatal
-        // `unexpected_message`.
+        // .nonBrowser: a browser fingerprint's ALPS trips strict origins (Google GFE) into fatal unexpected_message.
         let configuration = TLSConfiguration(
             serverName: host,
             alpn: [innerALPN],
@@ -551,12 +414,7 @@ final class MITMSession {
                 }
                 switch result {
                 case .success(let record):
-                    // The legs are bridged byte-for-byte (HTTP/1) or via the
-                    // frame translators (h2); we can't convert between h2 and
-                    // http/1.1. The inner leg already committed to the client's
-                    // ALPN, so the outer must match it. An empty upstream ALPN is
-                    // acceptable only when the inner leg is http/1.1 (the
-                    // plaintext default).
+                    // No h2↔http/1.1 conversion; an empty upstream ALPN is acceptable only for http/1.1.
                     let outerOK: Bool
                     if innerALPN == "h2" {
                         outerOK = record.negotiatedALPN == "h2"
@@ -572,13 +430,8 @@ final class MITMSession {
                     self.outerRecord = record
                     self.finishDialAndShuttle(inner: inner, outer: record)
                 case .failure(let error):
-                    // `no_application_protocol` (alert 120) is the strict-RFC
-                    // counterpart of the empty-ALPN case above: an upstream that
-                    // rejected our h2-only offer outright. Record it so the
-                    // client's retry negotiates http/1.1 and succeeds instead of
-                    // looping on h2. Gated on `innerALPN == "h2"` — a 120 when we
-                    // offered http/1.1 means the origin speaks neither, which the
-                    // http/1.1-only verdict would misrepresent.
+                    // Alert 120 (no_application_protocol, RFC 7301) on an h2 offer:
+                    // record http/1.1-only so the retry negotiates it.
                     if innerALPN == "h2", case TLSError.alert(level: _, description: 120) = error {
                         self.originCapabilities.markHTTP1Only(self.handshakeSNI ?? self.dstHost)
                     }
@@ -590,9 +443,6 @@ final class MITMSession {
 
     // MARK: - ClientHello parsing
 
-    /// Best-effort parse of the buffered inner ClientHello. Returns nil
-    /// if the buffer is empty or doesn't yet hold a complete record —
-    /// callers fall back to permissive defaults in that case.
     private func parseClientHello(_ buffer: Data) -> TLSClientHelloParsed? {
         guard !buffer.isEmpty else { return nil }
         return try? TLSClientHelloParser.parse(buffer)
@@ -600,67 +450,38 @@ final class MITMSession {
 
     // MARK: - Shuttle
 
-    /// Completes the dial: wires up the h2 translators (the inbound leg already
-    /// exists from the inner handshake; the outbound leg is created here when
-    /// both legs negotiated h2), flushes the buffered first request upstream,
-    /// and starts the outbound pump. The inbound pump is already running (it
-    /// triggered the dial) and switches to forwarding now that ``outerRecord``
-    /// is set.
+    /// Completes the dial: wires up h2 translators, flushes the buffered first request, starts the outbound pump.
     private func finishDialAndShuttle(inner: TLSRecordConnection, outer: TLSRecordConnection) {
         if inner.negotiatedALPN == "h2", outer.negotiatedALPN == "h2", let inLeg = inboundH2 {
             let outLeg = MITMHTTP2Connection(direction: .outbound, rewriter: h2Rewriter, flowController: h2FlowController, lwipQueue: lwipQueue)
-            // SETTINGS_HEADER_TABLE_SIZE advertised by one endpoint bounds the
-            // *peer's* HPACK encoder, which the opposing leg decodes (RFC 7541
-            // §4.2). Weak captures break the otherwise-mutual leg retain cycle;
-            // both legs share the serial lwipQueue, so the synchronous cross-leg
-            // call can't race the other leg's ``process(_:)``.
+            // SETTINGS_HEADER_TABLE_SIZE bounds the peer's HPACK encoder (RFC 7541 §4.2),
+            // so each leg must inform the other's decoder. Weak captures break the cycle.
             inLeg.onObservedPeerHeaderTableSize = { [weak outLeg] size in
                 outLeg?.configureDecoderTableSize(size)
             }
             outLeg.onObservedPeerHeaderTableSize = { [weak inLeg] size in
                 inLeg?.configureDecoderTableSize(size)
             }
-            // A buffered-rewrite RESPONSE whose body exceeds the client's
-            // flow-control window is handed from the outbound leg to the inbound
-            // leg — which receives the client's WINDOW_UPDATEs and owns the
-            // client-bound buffer — for paced delivery, so a large rewritten body
-            // can't overflow the window into a connection-wide GOAWAY (see
-            // ``MITMHTTP2Connection.onPacedResponse`` / ``queuePacedClientResponse``).
-            // Weak capture: same mutual-retain-cycle break as above; the call is
-            // synchronous on the shared lwipQueue from the outbound flush.
+            // Bodies overflowing a peer's flow-control window hop to the other leg
+            // for paced delivery (avoids GOAWAY / FLOW_CONTROL_ERROR).
             outLeg.onPacedResponse = { [weak inLeg] streamID, headerBlock, body, endStream in
-                // nil (inbound leg gone — teardown) declines, so the outbound leg
-                // emits inline; harmless since teardown suppresses emission anyway.
+                // nil during teardown declines; the outbound leg then emits inline.
                 inLeg?.queuePacedClientResponse(streamID: streamID, headerBlock: headerBlock, body: body, endStream: endStream) ?? false
             }
-            // Request-direction mirror: a buffered-rewrite REQUEST body that
-            // exceeds the upstream window is handed from the inbound leg to the
-            // outbound leg — which receives the server's WINDOW_UPDATEs and owns
-            // the server-bound buffer — for paced delivery, so it can't overflow
-            // the server's window into a FLOW_CONTROL_ERROR. Weak capture: same
-            // mutual-retain-cycle break; the call is synchronous on the shared
-            // lwipQueue from the inbound flush.
             inLeg.onPacedRequest = { [weak outLeg] streamID, body, endStream in
                 outLeg?.queuePacedServerRequest(streamID: streamID, body: body, endStream: endStream) ?? false
             }
-            // A client RST / abandon of a stream whose request body the outbound
-            // leg is pacing drops it, so a cancelled request isn't delivered and
-            // its buffer isn't pinned until teardown.
+            // Drop a paced request body on RST so the buffer isn't pinned until teardown.
             inLeg.onUpstreamRequestAborted = { [weak outLeg] streamID in
                 outLeg?.dropPacedRequest(streamID)
             }
-            // The inbound leg may have already decoded the client's SETTINGS
-            // (the h2 preface arrives before the dial completes); replay the
-            // observed header-table size to the just-created outbound decoder so
-            // it doesn't desync.
+            // Replay the table size observed pre-dial so the new decoder's HPACK state stays in sync.
             if let observed = inLeg.lastObservedPeerHeaderTableSize {
                 outLeg.configureDecoderTableSize(observed)
             }
             outboundH2 = outLeg
         }
-        // Flush the rewritten first request (and anything the client pipelined
-        // during the dial) upstream, in order, before the inbound pump forwards
-        // any new bytes. ``LegSendSerializer`` preserves enqueue order.
+        // Flush the buffered first request before the inbound pump forwards new ones.
         let buffered = pendingUpstreamBytes
         pendingUpstreamBytes = Data()
         if !buffered.isEmpty {
@@ -669,12 +490,7 @@ final class MITMSession {
                 self.lwipQueue.async { self.cancel(error: sendError) }
             }
         }
-        // The deferred dial processed the first request(s) before the outbound leg
-        // existed, so any buffered-rewrite request body too large for the upstream
-        // window was held on the inbound leg (its HEADERS are part of ``buffered``
-        // just flushed above). Hand each to the outbound pacer now, in stream-ID
-        // order, and flush the first window's worth toward the server — enqueued
-        // after the HEADERS on the shared outer send serializer, so order holds.
+        // Hand paced request bodies held pre-dial to the new pacer and drain the first window.
         if let outLeg = outboundH2, let inLeg = inboundH2 {
             for held in inLeg.takeHeldPacedRequests() {
                 outLeg.queuePacedServerRequest(streamID: held.streamID, body: held.body, endStream: held.endStream)
@@ -690,33 +506,13 @@ final class MITMSession {
         startOutboundPump(inner: inner, outer: outer)
     }
 
-    /// Chunked-send helper. Splits ``data`` into ``chunkSize``-byte
-    /// pieces and writes each one sequentially, chaining the next
-    /// write off the previous send's completion callback. Achieves
-    /// two things:
-    ///   - Caps the per-send TLS record buffer to ``chunkSize``,
-    ///     instead of letting a ``buildTLSRecords`` allocate the
-    ///     entire (post-script) body in one ~MiB blob (the codec cap
-    ///     of ``MITMBodyCodec.maxBufferedBodyBytes`` is 4 MiB).
-    ///   - Applies upstream backpressure: the next chunk only
-    ///     dispatches after the current chunk's send completes, so a
-    ///     slow underlying transport throttles us instead of letting
-    ///     us queue arbitrary bytes into NWConnection.
-    /// 64 KiB is chosen as 4× the TLS record plaintext cap (16 KiB)
-    /// — enough to amortize per-send overhead without pinning more
-    /// than ~64 KiB of encrypted bytes in the send pipeline per leg.
+    /// sendChunked chunk size; 64 KiB = 4× the TLS plaintext record cap, bounding in-flight bytes per leg.
     private static let pumpChunkSize: Int = 64 * 1024
 
-    /// Per-leg send serializers, keyed by record identity, created
-    /// lazily on first send. See ``LegSendSerializer``.
+    /// Per-leg send serializers, keyed by record identity, created lazily.
     private var legSenders: [ObjectIdentifier: LegSendSerializer] = [:]
 
-    /// Chunked, per-leg-serialized send. Splits ``data`` into
-    /// ``pumpChunkSize`` pieces written sequentially (next chunk only
-    /// after the previous send completes) to cap the per-send TLS record
-    /// buffer and apply transport backpressure, and serializes whole
-    /// blobs on the same leg so concurrent writers can't interleave
-    /// their chunks. Must be called on ``lwipQueue``.
+    /// Serializes per-leg sends so concurrent callers can't interleave bytes mid-frame. Must be called on lwipQueue.
     private func sendChunked(
         _ data: Data,
         via record: TLSRecordConnection,
@@ -733,21 +529,8 @@ final class MITMSession {
         sender.enqueue(data, completion: completion)
     }
 
-    /// Serializes chunked sends on a single TLS leg. ``sendChunked``
-    /// breaks a logical blob into several ``TLSRecordConnection/send``
-    /// calls; that connection's send lock keeps each call's records
-    /// contiguous and sequence-ordered but does NOT stop a second
-    /// concurrent caller's chunks from landing between this caller's. On
-    /// the inner leg two writers coexist — the inbound pump's synth
-    /// (`injected`) bytes and the outbound pump's response
-    /// (`transformed`) bytes — so unserialized chunking would interleave
-    /// their bytes and split an HTTP/2 frame (or HTTP/1 message)
-    /// mid-payload, desyncing the receiver. This drains one enqueued blob
-    /// to completion before starting the next, giving each blob the
-    /// all-or-nothing atomicity a single ``send`` call has but a
-    /// multi-chunk ``sendChunked`` does not.
-    ///
-    /// All methods must run on the ``queue`` passed at init.
+    /// Drains one enqueued blob to completion before the next so concurrent writers
+    /// can't split a frame mid-payload. All methods must run on queue.
     private final class LegSendSerializer {
         private let record: TLSRecordConnection
         private let queue: DispatchQueue
@@ -785,8 +568,7 @@ final class MITMSession {
             }
             let take = min(chunkSize, data.distance(from: offset, to: data.endIndex))
             let chunkEnd = data.index(offset, offsetBy: take)
-            // Fresh ``Data`` so the encoder sees a contiguous slab and the
-            // zero-copy slice doesn't outlive this iteration.
+            // Copy so the encoder sees a contiguous slab.
             let chunk = Data(data[offset..<chunkEnd])
             record.send(data: chunk) { [weak self] error in
                 guard let self else {
@@ -810,20 +592,7 @@ final class MITMSession {
         }
     }
 
-    /// Reads plaintext from the inner record (= what the client sent) and
-    /// writes it to the outer record (= towards the real server).
-    ///
-    /// Request-phase scripts can short-circuit a request via
-    /// ``MITMScriptEngine/SynthesizedResponse`` (the JS-side
-    /// `Anywhere.respond(...)` hook). When that happens the stream /
-    /// h2 translator emits zero upstream bytes but populates a
-    /// client-bound buffer with the synthesized response; we drain
-    /// that buffer here and write straight to the inner record,
-    /// bypassing the upstream leg entirely. This synth write and the
-    /// outbound pump's response write can both target the inner leg at
-    /// once; ``sendChunked``'s per-leg ``LegSendSerializer`` drains each
-    /// whole blob before the next so their chunks never interleave on
-    /// the wire.
+    /// Pumps client plaintext upstream, or drains synthesized responses back to the client.
     private func startInboundPump(inner: TLSRecordConnection) {
         inner.receive { [weak self] data, error in
             guard let self else { return }
@@ -836,13 +605,6 @@ final class MITMSession {
                     self.cancel(error: nil)
                     return
                 }
-                // The completion runs on lwipQueue — inline when no script ran,
-                // or later from the parked resume. It drains any client-bound
-                // synth bytes (a 302 / reject rewrite or request-phase
-                // Anywhere.respond) to the inner leg, then either forwards the
-                // peer-bound bytes upstream (post-dial) or buffers them and
-                // triggers the deferred dial (pre-dial), re-arming the read to
-                // keep the one-read-in-flight back-pressure intact across a park.
                 let handle: (Data) -> Void = { [weak self] transformed in
                     guard let self, !self.torn else { return }
                     let injected = self.inbound.drainPendingClientBytes()
@@ -852,17 +614,7 @@ final class MITMSession {
                             self.lwipQueue.async { self.cancel(error: sendError) }
                         }
                     }
-                    // Flush any paced request body the outbound leg queued during
-                    // this feed toward the server (a buffered-rewrite request body
-                    // too large for the upstream window — see
-                    // ``MITMHTTP2Connection.onPacedRequest``). Always run AFTER the
-                    // request HEADERS/DATA in ``transformed`` so the body follows
-                    // its HEADERS on the shared outer serializer; for an early-open
-                    // handoff (HEADERS already on the wire, ``transformed`` empty)
-                    // there is nothing to order against. nil/empty for HTTP/1 and
-                    // whenever no handoff occurred this pass. The remainder drains
-                    // later as the server's WINDOW_UPDATEs arrive on the outbound
-                    // pump.
+                    // Must run after `transformed` so the paced request body follows its HEADERS. Empty for HTTP/1.
                     let flushPacedRequest: (TLSRecordConnection) -> Void = { [weak self] outer in
                         guard let self else { return }
                         let pacedReq = self.outboundH2?.drainPendingServerBytes() ?? Data()
@@ -873,11 +625,7 @@ final class MITMSession {
                         }
                     }
                     guard !transformed.isEmpty else {
-                        // Buffered fragments (CONTINUATION pending, partial
-                        // preface, body buffered for rewrite, etc.) or a request
-                        // fully answered on the inner leg (302 / reject /
-                        // Anywhere.respond). Post-dial, still flush any paced
-                        // request body an early-open handoff queued. Loop back.
+                        // Buffered fragment or fully-answered synth; still flush any paced request body.
                         if let outer = self.outerRecord {
                             flushPacedRequest(outer)
                         }
@@ -885,30 +633,13 @@ final class MITMSession {
                         return
                     }
                     if let outer = self.outerRecord {
-                        // The dial is committed to the first request's upstream;
-                        // a later request that resolves a different one can't be
-                        // reached here. Tear down so the client retries it on a
-                        // fresh connection rather than misrouting it to the
-                        // dialed host.
-                        //
-                        // ARCHITECTURAL LIMITATION (HTTP/2): there is a single
-                        // outer leg per connection, so we cannot proxy two
-                        // authorities over one h2 connection. A rewrite rule
-                        // that sends some requests to a different host will, on
-                        // a coalesced h2 connection, tear the whole connection
-                        // down (cancelling every in-flight stream) the moment
-                        // such a request arrives — the client then re-opens and
-                        // may re-coalesce, so traffic split across hosts by rule
-                        // can thrash. Scoping the teardown to the offending
-                        // stream isn't possible with one upstream leg; a true
-                        // multi-host h2 proxy would need per-authority outer legs.
+                        // One outer leg can't carry two authorities; a request resolving
+                        // a different upstream is torn down rather than misrouted.
                         guard self.resolvedUpstreamMatchesDialed() else {
                             logger.warning("[MITM] \(self.dstHost): request resolved an upstream different from the dialed one; tearing down so the client retries")
                             self.cancel(error: nil)
                             return
                         }
-                        // Post-dial: forward upstream, then the paced body (if any)
-                        // after the HEADERS/DATA it belongs behind.
                         self.sendChunked(transformed, via: outer) { [weak self] sendError in
                             guard let self else { return }
                             if let sendError {
@@ -919,8 +650,6 @@ final class MITMSession {
                         }
                         flushPacedRequest(outer)
                     } else {
-                        // Pre-dial: the first request that needs the upstream.
-                        // Buffer it and kick off the deferred dial.
                         self.bufferUpstreamAndDial(transformed, inner: inner)
                     }
                 }
@@ -929,12 +658,7 @@ final class MITMSession {
         }
     }
 
-    /// Pre-dial handler for the first upstream-bound bytes. Buffers them
-    /// (capped like ``pendingClientBytes``) and, on the first call, resolves the
-    /// upstream from the request's transparent rewrite (or the original
-    /// destination when there was none) and invokes the ``dialer``. Subsequent
-    /// calls — more body or pipelined requests arriving while the dial runs —
-    /// only accumulate. Always re-arms the inbound read.
+    /// Buffers upstream-bound bytes and kicks off the deferred dial; mid-dial calls only buffer.
     private func bufferUpstreamAndDial(_ transformed: Data, inner: TLSRecordConnection) {
         if pendingUpstreamBytes.count + transformed.count > Self.maxPendingClientBytes {
             logger.warning("[MITM] \(dstHost): pre-dial upstream buffer would exceed \(Self.maxPendingClientBytes) B; tearing down session")
@@ -943,10 +667,6 @@ final class MITMSession {
         }
         pendingUpstreamBytes.append(transformed)
         if dialing {
-            // A request pipelined while the first dial is in flight that
-            // resolves a different upstream can't be reached on this leg; tear
-            // down rather than flushing it to the dialed host once the handshake
-            // completes.
             guard resolvedUpstreamMatchesDialed() else {
                 logger.warning("[MITM] \(dstHost): pipelined request resolved an upstream different from the dialed one; tearing down so the client retries")
                 cancel(error: nil)
@@ -956,9 +676,7 @@ final class MITMSession {
             return
         }
         dialing = true
-        // First-request-wins for the connection's upstream: a transparent
-        // rewrite on the first request surfaces the replacement host/port,
-        // otherwise dial the original destination.
+        // A transparent rewrite may have replaced the host/port.
         let resolved = inbound.resolvedUpstream
         let host = resolved?.host ?? dstHost
         let port = resolved?.port ?? dstPort
@@ -986,13 +704,7 @@ final class MITMSession {
         startInboundPump(inner: inner)
     }
 
-    /// Whether the upstream the rewriters now resolve still matches the one the
-    /// connection dialed. The dial commits to the first request's upstream; a
-    /// later request whose transparent rewrite resolves a different host/port
-    /// can't be reached on this leg, so the caller tears down (the client
-    /// retries it on a fresh connection) rather than forwarding it to the dialed
-    /// host. Uses the same host/port + original-destination fallback the dial
-    /// resolved with. True before the dial — there is nothing to diverge from.
+    /// False when the current request resolves a different upstream than dialed; always true pre-dial.
     private func resolvedUpstreamMatchesDialed() -> Bool {
         guard let dialedHost, let dialedPort else { return true }
         let resolved = inbound.resolvedUpstream
@@ -1000,13 +712,7 @@ final class MITMSession {
             && (resolved?.port ?? dstPort) == dialedPort
     }
 
-    /// Invoked (on the lwIP queue) when the HTTP/1 response leg detects a
-    /// protocol switch (101) or CONNECT tunnel. The response leg has already
-    /// entered passthrough; flip the request leg too and forward whatever it had
-    /// buffered to the upstream, so the now-opaque client→server byte stream
-    /// flows instead of piling up unparsed in the request leg's head parser
-    /// (the WebSocket / tunnel deadlock). HTTP/2 has its own CONNECT handling,
-    /// so this fires only on the HTTP/1 path.
+    /// 101/CONNECT-2xx: flips the request leg to passthrough and flushes its buffer. HTTP/1 only.
     private func handleResponseUpgrade() {
         guard !torn else { return }
         let buffered = requestStream.forcePassthrough()
@@ -1017,8 +723,7 @@ final class MITMSession {
         }
     }
 
-    /// Reads plaintext from the outer record (= what the real server sent)
-    /// and writes it to the inner record (= towards the client).
+    /// Pumps server plaintext from the outer record to the inner record.
     private func startOutboundPump(inner: TLSRecordConnection, outer: TLSRecordConnection) {
         outer.receive { [weak self] data, error in
             guard let self else { return }
@@ -1028,15 +733,8 @@ final class MITMSession {
                     return
                 }
                 guard let data, !data.isEmpty else {
-                    // Upstream half-closed. For an HTTP/1 read-until-close
-                    // body the close *is* the body terminator, so give the
-                    // response stream a chance to run a buffered script on
-                    // what it accumulated and flush the rewritten response
-                    // to the client before teardown. HTTP/2 frames every
-                    // body with END_STREAM, so it never withholds anything
-                    // here. ``finish`` is completion-based: if it parks on a
-                    // buffered until-close script, teardown waits for the
-                    // resume to deliver the flushed bytes.
+                    // Upstream half-closed: an HTTP/1 close terminates the body, so flush
+                    // buffered rewrites first; HTTP/2 frames bodies with END_STREAM.
                     guard self.outboundH2 == nil else {
                         self.cancel(error: nil)
                         return
@@ -1053,18 +751,9 @@ final class MITMSession {
                     }
                     return
                 }
-                // Completion runs on lwipQueue — inline when no script ran,
-                // or later from the parked resume. Forwards the peer-bound
-                // bytes to the client, then re-arms the read.
                 let handle: (Data) -> Void = { [weak self] transformed in
                     guard let self, !self.torn else { return }
-                    // Drain the outbound leg's queued server-bound bytes and send
-                    // them to the server: flow-control credit it issued for a
-                    // buffered response body (so the server keeps sending while the
-                    // body is held instead of stalling at its window), plus any
-                    // paced request-body DATA a server WINDOW_UPDATE just unblocked
-                    // (see ``MITMHTTP2Connection.queuePacedServerRequest``). Mirrors
-                    // the inbound leg's pendingClientBytes drain; HTTP/1 has neither.
+                    // Drain flow-control credit and any paced request DATA unblocked by a WINDOW_UPDATE. Empty for HTTP/1.
                     let serverCredit = self.outbound.drainPendingServerBytes()
                     if !serverCredit.isEmpty {
                         self.sendChunked(serverCredit, via: outer) { [weak self] sendError in
@@ -1072,18 +761,8 @@ final class MITMSession {
                             self.lwipQueue.async { self.cancel(error: sendError) }
                         }
                     }
-                    // A buffered-rewrite response body that overflowed the
-                    // client's flow-control window was handed to the inbound leg
-                    // during this outbound feed (see
-                    // ``MITMHTTP2Connection.onPacedResponse``). Its HEADERS + first
-                    // window now sit in the inbound leg's client-bound buffer;
-                    // flush them toward the client now rather than waiting on the
-                    // next inbound read — which may never come if the client is
-                    // blocked awaiting this very response. The remainder drains
-                    // later as the client's WINDOW_UPDATEs arrive on the inbound
-                    // pump. Inner-leg sends are serialized, so this and the
-                    // ``transformed`` bytes (other streams) keep their wire order.
-                    // nil/empty for HTTP/1 and whenever no handoff occurred.
+                    // Flush a paced response's HEADERS + first window now; the client may
+                    // be blocked on it and the next inbound read may never come.
                     let pacedInit = self.inboundH2?.drainPendingClientBytes() ?? Data()
                     if !pacedInit.isEmpty {
                         self.sendChunked(pacedInit, via: inner) { [weak self] sendError in
@@ -1115,8 +794,6 @@ final class MITMSession {
 extension MITMSession: TLSServerDelegate {
 
     func tlsServer(_ server: TLSServer, didProduceOutput data: Data) {
-        // Inner-side wire bytes (ServerHello, encrypted handshake, alerts)
-        // — forward to the client via the lwIP-attached sink.
         onSendToClient?(data, nil)
     }
 
@@ -1132,10 +809,7 @@ extension MITMSession: TLSServerDelegate {
         innerRecord = record
         tlsServer = nil
 
-        // When the client negotiated h2, the inbound translator must exist now
-        // so it can decode the first request's HEADERS before the deferred
-        // outer leg is dialed. The outbound translator is created after the
-        // dial in ``finishDialAndShuttle``. http/1.1 uses ``requestStream``.
+        // Created now so it can decode the first request before the deferred dial.
         if record.negotiatedALPN == "h2" {
             inboundH2 = MITMHTTP2Connection(direction: .inbound, rewriter: h2Rewriter, flowController: h2FlowController, lwipQueue: lwipQueue)
         }

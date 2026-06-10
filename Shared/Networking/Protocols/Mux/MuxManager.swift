@@ -25,16 +25,13 @@ nonisolated class MuxManager {
         globalID: Data?,
         completion: @escaping (Result<MuxSession, Error>) -> Void
     ) {
-        // Remove dead clients
         clients.removeAll { $0.closed }
 
-        // Find a non-full client
         if let client = clients.first(where: { !$0.isFull }) {
             client.createSession(network: network, host: host, port: port, globalID: globalID, completion: completion)
             return
         }
 
-        // Create a new client
         let client = MuxClient(configuration: configuration, flowQueue: flowQueue)
         clients.append(client)
 

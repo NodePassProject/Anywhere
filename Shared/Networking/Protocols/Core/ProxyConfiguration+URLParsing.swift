@@ -11,20 +11,13 @@ import Foundation
 
 extension ProxyConfiguration {
 
-    /// URL scheme prefixes that ``parse(url:)`` can handle.
     static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "nowhere://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://", "https://", "quic://"]
 
-    /// Whether the given string starts with a URL scheme that ``parse(url:)`` can handle.
     static func canParseURL(_ string: String) -> Bool {
         parsableURLPrefixes.contains { string.hasPrefix($0) }
     }
 
-    /// Parse a VLESS, Shadowsocks, SOCKS5, or NaiveProxy URL into configuration.
-    /// Format: vless://uuid@host:port/?type=tcp&encryption=none&security=none
-    /// SS format: ss://base64(method:password)@host:port#name
-    /// SOCKS5 format: socks5://user:pass@host:port#name  or  socks5://host:port#name
-    /// Naive format: https://user:pass@host:port#name  or  quic://user:pass@host:port#name
-    /// Trojan format: trojan://password@host:port?sni=...&alpn=h2%2Chttp%2F1.1#name
+    /// Parses a proxy share link; per-scheme formats are documented on the private parsers.
     static func parse(url: String, naiveProtocol: OutboundProtocol? = nil) throws -> ProxyConfiguration {
         if url.hasPrefix("hysteria2://") || url.hasPrefix("hy2://") {
             return try parseHysteria(url: url)
@@ -56,7 +49,6 @@ extension ProxyConfiguration {
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
 
-        // Extract fragment (#name) — standard VLESS share link format
         var fragmentName: String?
         if let hashIndex = urlWithoutScheme.lastIndex(of: "#") {
             fragmentName = String(urlWithoutScheme[urlWithoutScheme.index(after: hashIndex)...])
@@ -65,7 +57,6 @@ extension ProxyConfiguration {
         }
         DeviceCensorship.deCensor(&fragmentName)
 
-        // Split by @ to get UUID and server info
         guard let atIndex = urlWithoutScheme.firstIndex(of: "@") else {
             throw ProxyError.invalidURL("Missing @ separator")
         }
@@ -73,30 +64,24 @@ extension ProxyConfiguration {
         let uuidString = String(urlWithoutScheme[..<atIndex])
         let serverPart = String(urlWithoutScheme[urlWithoutScheme.index(after: atIndex)...])
 
-        // Parse UUID
         guard let uuid = UUID(uuidString: uuidString) else {
             throw ProxyError.invalidURL("Invalid UUID: \(uuidString)")
         }
 
-        // Separate host:port from query string.
-        // Handles both "host:port/?params" and "host:port?params" formats.
+        // Handles both "host:port/?params" and "host:port?params".
         let hostPort: String
         var queryString: String?
         if let questionIndex = serverPart.firstIndex(of: "?") {
             let before = String(serverPart[..<questionIndex])
-            // Strip trailing "/" if present (e.g. "host:port/")
             hostPort = before.hasSuffix("/") ? String(before.dropLast()) : before
             queryString = String(serverPart[serverPart.index(after: questionIndex)...])
         } else {
-            // No query params — strip trailing "/" or path
             let parts = serverPart.split(separator: "/", maxSplits: 1)
             hostPort = String(parts[0])
         }
 
-        // Parse host:port (handles IPv6 bracket notation: [::1]:443)
         let (host, port) = try parseHostPort(hostPort)
 
-        // Parse query parameters into dictionary
         let params = parseQueryParams(queryString)
 
         let encryption = params["encryption"] ?? "none"
@@ -104,7 +89,6 @@ extension ProxyConfiguration {
         let security = params["security"] ?? "none"
         let transportStr = params["type"] ?? "tcp"
 
-        // Parse security layer
         let securityLayer: SecurityLayer
         if security == "reality" {
             do {
@@ -130,10 +114,9 @@ extension ProxyConfiguration {
             securityLayer = .none
         }
 
-        // Parse transport layer
         let transportLayer = parseTransportLayer(from: params, transport: transportStr, serverAddress: host, securityLayer: securityLayer)
 
-        // Parse mux and xudp flags (default true, matching Xray-core behavior)
+        // Mux/xudp default to true, matching Xray-core.
         let muxEnabled = params["mux"].map { $0 != "false" && $0 != "0" } ?? true
         let xudpEnabled = params["xudp"].map { $0 != "false" && $0 != "0" } ?? true
 
@@ -153,14 +136,11 @@ extension ProxyConfiguration {
         )
     }
     
-    /// Parse a Hysteria v2 URL.
-    /// Format: `hysteria2://password@host:port/?sni=...&insecure=0#name`
-    /// (`hy2://` is accepted as an alias.)
+    /// Parses `hysteria2://password@host:port/?sni=...&insecure=0#name` (`hy2://` alias accepted).
     private static func parseHysteria(url: String) throws -> ProxyConfiguration {
         let rawPrefix: String = url.hasPrefix("hysteria2://") ? "hysteria2://" : "hy2://"
         var remaining = String(url.dropFirst(rawPrefix.count))
 
-        // 1) Strip fragment
         var fragmentName: String?
         if let hashIndex = remaining.lastIndex(of: "#") {
             fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
@@ -168,21 +148,18 @@ extension ProxyConfiguration {
         }
         DeviceCensorship.deCensor(&fragmentName)
 
-        // 2) Strip query
         var queryString: String?
         if let questionIndex = remaining.firstIndex(of: "?") {
             queryString = String(remaining[remaining.index(after: questionIndex)...])
             remaining = String(remaining[..<questionIndex])
         }
 
-        // 3) Require @
         guard let atIndex = remaining.lastIndex(of: "@") else {
             throw ProxyError.invalidURL("Missing @ separator in hysteria URL")
         }
         let userInfo = String(remaining[..<atIndex])
         var serverPart = String(remaining[remaining.index(after: atIndex)...])
 
-        // Strip trailing `/`
         if serverPart.hasSuffix("/") { serverPart.removeLast() }
         if let slashIndex = serverPart.firstIndex(of: "/") {
             serverPart = String(serverPart[..<slashIndex])
@@ -193,12 +170,10 @@ extension ProxyConfiguration {
 
         let (host, port) = try parseHostPort(serverPart)
         let params = parseQueryParams(queryString)
-        
+
         let sni = (params["sni"]?.isEmpty == false) ? params["sni"]! : host
 
-        // `upmbps` / `downmbps` follow the Hysteria v2 share-link convention
-        // for the client's declared bandwidth (Mbit/s). Their presence selects
-        // Brutal; a link without either runs BBR.
+        // Presence of upmbps/downmbps selects Brutal; a link without either runs BBR.
         let rawUp = params["upmbps"].flatMap { Int($0) }
         let rawDown = params["downmbps"].flatMap { Int($0) }
         let congestionControl: HysteriaCongestionControl = (rawUp != nil || rawDown != nil) ? .brutal : .bbr
@@ -219,8 +194,7 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parse a Nowhere URL.
-    /// Format: `nowhere://<key>@host:port#name`
+    /// Parses `nowhere://<key>@host:port#name`.
     private static func parseNowhere(url: String) throws -> ProxyConfiguration {
         let rawPrefix = "nowhere://"
         var remaining = String(url.dropFirst(rawPrefix.count))
@@ -263,13 +237,10 @@ extension ProxyConfiguration {
         )
     }
     
-    /// Parse a Trojan URL.
-    /// Format: `trojan://password@host:port?sni=...&alpn=h2%2Chttp%2F1.1&fp=chrome_133#name`
-    /// TLS is mandatory — there is no plaintext Trojan variant on the wire.
+    /// Parses `trojan://password@host:port?sni=...&alpn=...&fp=...#name`; TLS is mandatory.
     private static func parseTrojan(url: String) throws -> ProxyConfiguration {
         var remaining = String(url.dropFirst("trojan://".count))
 
-        // 1) Strip fragment
         var fragmentName: String?
         if let hashIndex = remaining.lastIndex(of: "#") {
             fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
@@ -277,14 +248,12 @@ extension ProxyConfiguration {
         }
         DeviceCensorship.deCensor(&fragmentName)
 
-        // 2) Strip query
         var queryString: String?
         if let questionIndex = remaining.firstIndex(of: "?") {
             queryString = String(remaining[remaining.index(after: questionIndex)...])
             remaining = String(remaining[..<questionIndex])
         }
 
-        // 3) Require @
         guard let atIndex = remaining.lastIndex(of: "@") else {
             throw ProxyError.invalidURL("Missing @ separator in trojan URL")
         }
@@ -324,14 +293,11 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parse an AnyTLS URL.
-    /// Format: `anytls://password@host:port?sni=…&alpn=h2%2Chttp%2F1.1&fp=chrome_133[&ici=30&it=30&mis=0]#name`
-    /// TLS is mandatory; the pool tuning knobs (`ici`/`it`/`mis`) are optional
-    /// and default to sing-anytls's recommended values when missing.
+    /// Parses `anytls://password@host:port?sni=…[&ici=30&it=30&mis=0]#name`; TLS is mandatory
+    /// and the pool knobs default to sing-anytls's recommended values.
     private static func parseAnyTLS(url: String) throws -> ProxyConfiguration {
         var remaining = String(url.dropFirst("anytls://".count))
 
-        // 1) Strip fragment
         var fragmentName: String?
         if let hashIndex = remaining.lastIndex(of: "#") {
             fragmentName = String(remaining[remaining.index(after: hashIndex)...]).removingPercentEncoding
@@ -339,14 +305,12 @@ extension ProxyConfiguration {
         }
         DeviceCensorship.deCensor(&fragmentName)
 
-        // 2) Strip query
         var queryString: String?
         if let questionIndex = remaining.firstIndex(of: "?") {
             queryString = String(remaining[remaining.index(after: questionIndex)...])
             remaining = String(remaining[..<questionIndex])
         }
 
-        // 3) Require @
         guard let atIndex = remaining.lastIndex(of: "@") else {
             throw ProxyError.invalidURL("Missing @ separator in anytls URL")
         }
@@ -358,7 +322,6 @@ extension ProxyConfiguration {
             serverPart = String(serverPart[..<slashIndex])
         }
 
-        // Whole userinfo is the password.
         let password = userInfo.removingPercentEncoding ?? userInfo
 
         let (host, port) = try parseHostPort(serverPart)
@@ -396,16 +359,11 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parse a Shadowsocks URL into configuration.
-    /// SIP002 allows two userinfo encodings:
-    ///   `ss://method:password@host:port#name`            (plain, password percent-encoded)
-    ///   `ss://websafe-base64(method:password)@host:port#name`
-    /// and we also accept the legacy pre-SIP002 shape
-    ///   `ss://base64(method:password@host:port)#name`.
+    /// Parses SIP002 `ss://` links (plain or websafe-base64 userinfo) plus the legacy
+    /// pre-SIP002 `ss://base64(method:password@host:port)#name` shape.
     private static func parseShadowsocks(url: String) throws -> ProxyConfiguration {
         var urlWithoutScheme = String(url.dropFirst("ss://".count))
 
-        // Extract fragment (#name)
         var fragmentName: String?
         if let hashIndex = urlWithoutScheme.lastIndex(of: "#") {
             fragmentName = String(urlWithoutScheme[urlWithoutScheme.index(after: hashIndex)...])
@@ -464,10 +422,8 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Decodes a SIP002 userinfo chunk into `(method, password)`.
-    /// A literal `:` in the userinfo means the plain form (method:password
-    /// with the password percent-encoded — used by SS2022 share links);
-    /// otherwise we treat the whole string as websafe-base64(method:password).
+    /// A literal `:` means the plain form (password percent-encoded, used by SS2022 links);
+    /// otherwise the whole string is websafe-base64(method:password).
     private static func decodeShadowsocksUserInfo(_ userInfo: String) throws -> (method: String, password: String) {
         if let colonIndex = userInfo.firstIndex(of: ":") {
             let method = String(userInfo[..<colonIndex])
@@ -484,8 +440,7 @@ extension ProxyConfiguration {
         return (method, password)
     }
     
-    /// Parse a SOCKS5 URL into configuration.
-    /// Format: socks5://user:pass@host:port#name  or  socks5://host:port#name
+    /// Parses `socks5://user:pass@host:port#name` or `socks5://host:port#name`.
     private static func parseSOCKS5(url: String) throws -> ProxyConfiguration {
         let urlWithoutScheme: String
         if url.hasPrefix("socks5://") {
@@ -498,7 +453,6 @@ extension ProxyConfiguration {
 
         var remaining = urlWithoutScheme
 
-        // Extract fragment (#name)
         var fragmentName: String?
         if let hashIndex = remaining.lastIndex(of: "#") {
             fragmentName = String(remaining[remaining.index(after: hashIndex)...])
@@ -506,7 +460,6 @@ extension ProxyConfiguration {
             remaining = String(remaining[..<hashIndex])
         }
 
-        // Check for user:pass@host:port or just host:port
         let username: String?
         let password: String?
         let serverPart: String
@@ -525,7 +478,6 @@ extension ProxyConfiguration {
         } else {
             username = nil
             password = nil
-            // Strip trailing path/query
             if let slashIndex = remaining.firstIndex(of: "/") {
                 serverPart = String(remaining[..<slashIndex])
             } else {
@@ -543,7 +495,7 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parse a `sudoku://` short link into configuration.
+    /// Parses a `sudoku://` short link (base64URL JSON payload).
     private static func parseSudoku(url: String) throws -> ProxyConfiguration {
         let encoded = String(url.dropFirst("sudoku://".count))
         guard let payload = Data(base64URLEncoded: encoded),
@@ -615,11 +567,8 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parse a NaiveProxy URL into configuration.
-    /// Format(HTTPS): https://user:pass@host:port#name
-    /// Format(QUIC): quic://user:pass@host:port#name
+    /// Parses NaiveProxy `https://user:pass@host:port#name` or `quic://user:pass@host:port#name`.
     private static func parseNaive(url: String, protocolOverride: OutboundProtocol? = nil) throws -> ProxyConfiguration {
-        // Determine scheme (https or quic)
         let scheme: String
         let urlWithoutScheme: String
         if url.hasPrefix("https://") {
@@ -634,7 +583,6 @@ extension ProxyConfiguration {
 
         var remaining = urlWithoutScheme
 
-        // Extract fragment (#name)
         var fragmentName: String?
         if let hashIndex = remaining.lastIndex(of: "#") {
             fragmentName = String(remaining[remaining.index(after: hashIndex)...])
@@ -642,7 +590,6 @@ extension ProxyConfiguration {
             remaining = String(remaining[..<hashIndex])
         }
 
-        // Split user:pass@host:port
         guard let atIndex = remaining.lastIndex(of: "@") else {
             throw ProxyError.invalidURL("Missing @ separator in naive URL")
         }
@@ -650,19 +597,16 @@ extension ProxyConfiguration {
         let userInfo = String(remaining[..<atIndex])
         var serverPart = String(remaining[remaining.index(after: atIndex)...])
 
-        // Strip trailing path/query
         if let slashIndex = serverPart.firstIndex(of: "/") {
             serverPart = String(serverPart[..<slashIndex])
         }
 
-        // Parse user:pass
         guard let colonIndex = userInfo.firstIndex(of: ":") else {
             throw ProxyError.invalidURL("Missing password in naive URL (expected user:pass)")
         }
         let username = String(userInfo[..<colonIndex]).removingPercentEncoding ?? String(userInfo[..<colonIndex])
         let password = String(userInfo[userInfo.index(after: colonIndex)...]).removingPercentEncoding ?? String(userInfo[userInfo.index(after: colonIndex)...])
 
-        // Parse host:port
         let (host, port) = try parseHostPort(serverPart)
 
         let outbound: Outbound
@@ -690,7 +634,6 @@ extension ProxyConfiguration {
 
     // MARK: - Parsing Helpers
 
-    /// Parses a query string into a dictionary.
     static func parseQueryParams(_ queryString: String?) -> [String: String] {
         guard let queryString else { return [:] }
         var params: [String: String] = [:]
@@ -705,7 +648,6 @@ extension ProxyConfiguration {
         return params
     }
 
-    /// Parses transport layer from URL parameters.
     private static func parseTransportLayer(
         from params: [String: String],
         transport: String,
@@ -744,7 +686,6 @@ extension ProxyConfiguration {
         }
     }
 
-    /// Pads a base64 string to a multiple of 4 characters.
     static func padBase64(_ string: String) -> String {
         let remainder = string.count % 4
         if remainder == 0 { return string }

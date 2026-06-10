@@ -14,9 +14,7 @@ final class RequestLog {
     private let lock = NSLock()
     private var entries: [Entry] = []
 
-    /// Records one routing decision. Caller supplies the protocol, resolved host
-    /// (domain if known, else IP literal), port, the route the connection took,
-    /// and whether it fell through to the default outbound.
+    /// Records one routing decision; `host` is the domain if known, else the IP literal.
     func record(
         proto: String,
         host: String,
@@ -39,8 +37,7 @@ final class RequestLog {
         lock.unlock()
     }
 
-    /// Returns all entries within the retention window. Safe to call
-    /// from any thread.
+    /// Returns all entries within the retention window; safe from any thread.
     func snapshot() -> [Entry] {
         let now = CFAbsoluteTimeGetCurrent()
         lock.lock()
@@ -50,8 +47,7 @@ final class RequestLog {
         return result
     }
 
-    /// Caller must hold ``lock``. Drops aged-out entries, then trims
-    /// the oldest if the buffer still exceeds the entry cap.
+    /// Caller must hold `lock`.
     private func compact(now: CFAbsoluteTime) {
         let cutoff = now - TunnelConstants.requestLogRetentionInterval
         entries.removeAll { $0.timestamp < cutoff }

@@ -10,12 +10,10 @@ import Security
 
 enum HysteriaProtocol {
 
-    /// Frame type varint prefixed on every Hysteria TCP request
-    /// (`FrameTypeTCPRequest`).
+    /// Frame type varint prefixed on every Hysteria TCP request.
     static let tcpRequestFrameType: UInt64 = 0x401
 
     /// QUIC application error codes defined by the Hysteria v2 protocol.
-    /// `closeErrCodeOK = 0x100`, `closeErrCodeProtocolError = 0x101`.
     static let closeErrCodeOK: UInt64 = 0x100
     static let closeErrCodeProtocolError: UInt64 = 0x101
 
@@ -39,9 +37,7 @@ enum HysteriaProtocol {
 
     // MARK: - VarInt (QUIC RFC 9000 §16)
 
-    /// Encodes an unsigned integer in QUIC variable-length format.
-    /// Range limits: 6-bit (1 byte), 14-bit (2 bytes), 30-bit (4 bytes),
-    /// 62-bit (8 bytes). Returns nil if `value` exceeds the 62-bit maximum.
+    /// Encodes a QUIC varint; nil if `value` exceeds the 62-bit maximum.
     static func encodeVarInt(_ value: UInt64) -> Data? {
         if value < (1 << 6) {
             return Data([UInt8(value)])
@@ -69,8 +65,7 @@ enum HysteriaProtocol {
         return nil
     }
 
-    /// Decodes a QUIC varint from `data` starting at `offset`.
-    /// Returns the value and number of consumed bytes, or nil on short input.
+    /// Decodes a QUIC varint at `offset`, returning (value, bytesConsumed); nil on short input.
     static func decodeVarInt(from data: Data, offset: Int = 0) -> (UInt64, Int)? {
         guard offset < data.count else { return nil }
         let first = data[data.index(data.startIndex, offsetBy: offset)]
@@ -97,7 +92,6 @@ enum HysteriaProtocol {
 
     /// Builds a Hysteria v2 TCP request: varint(0x401) + varint(addrLen) +
     /// addr + varint(padLen) + random padding.
-    /// `address` is a UTF-8 "host:port" string.
     static func encodeTCPRequest(address: String) -> Data {
         let addrBytes = Data(address.utf8)
         let padLen = Int.random(in: tcpRequestPaddingRange)
@@ -113,8 +107,7 @@ enum HysteriaProtocol {
     }
 
     /// Parses a Hysteria v2 TCP response: uint8 status + varint(msgLen) + msg
-    /// + varint(padLen) + pad. Returns (status, message, totalBytesConsumed)
-    /// or nil if the buffer is incomplete.
+    /// + varint(padLen) + pad. Nil if the buffer is incomplete.
     static func parseTCPResponse(from data: Data) -> (status: UInt8, message: String, consumed: Int)? {
         guard !data.isEmpty else { return nil }
         var offset = 0
@@ -176,13 +169,8 @@ enum HysteriaProtocol {
         return out
     }
 
-    /// Parses a UDP datagram payload received from the server.
-    ///
-    /// `data` may be a zero-copy view into the QUIC receive buffer (see
-    /// `quicRecvDatagramCB`). The returned `UDPMessage.data` is deep-copied
-    /// via `subdata(in:)` so it remains valid past the recv-datagram callback
-    /// — `Data(slice)` would share storage with the caller's buffer and
-    /// dangle the moment ngtcp2 reuses the recv buffer for the next packet.
+    /// Parses a UDP datagram payload from the server; the returned `data` is
+    /// deep-copied so it remains valid past the recv-datagram callback.
     static func decodeUDPMessage(_ data: Data) -> UDPMessage? {
         guard data.count >= udpHeaderFixedSize else { return nil }
         var offset = 0
@@ -204,13 +192,9 @@ enum HysteriaProtocol {
         let fragCount = data[data.index(data.startIndex, offsetBy: offset)]
         offset += 1
 
-        // Require at least one byte of payload after the address — the
-        // `offset + addrLen < data.count` check below uses `<`, not `<=`.
-        // The application-layer drop in `handleIncomingDatagram` still
-        // defends `receiveLoop`'s EOF-on-empty contract, but enforcing the
-        // wire-level rule here also defends `assembleFragment` against an
-        // attacker feeding a stream of zero-byte fragments to churn defrag
-        // slots.
+        // Require ≥1 payload byte after the address (the bound check below
+        // uses `<`, not `<=`) — defends defrag slots against zero-byte
+        // fragment streams.
         guard let (addrLen, addrLenLen) = decodeVarInt(from: data, offset: offset),
               addrLen > 0, addrLen <= UInt64(maxAddressLength) else { return nil }
         offset += addrLenLen
@@ -220,11 +204,9 @@ enum HysteriaProtocol {
         guard let address = String(data: data[addrStart..<addrEnd], encoding: .utf8) else { return nil }
         offset += Int(addrLen)
 
-        // Deep-copy via `subdata(in:)`: when `data` is the QUIC recv-datagram
-        // zero-copy view (`Data(bytesNoCopy:..., deallocator: .none)`), the
-        // bytes ngtcp2 backs it with are reused for the next packet the moment
-        // we return from the callback. `Data(slice)` would share that storage
-        // and dangle; `subdata(in:)` always allocates fresh storage.
+        // Deep-copy via `subdata(in:)`: `data` may be ngtcp2's zero-copy recv
+        // view whose backing bytes are reused after the callback returns;
+        // `Data(slice)` would share that storage and dangle.
         let payloadStart = data.index(data.startIndex, offsetBy: offset)
         let payload = data.subdata(in: payloadStart..<data.endIndex)
         return UDPMessage(
@@ -239,9 +221,8 @@ enum HysteriaProtocol {
         return udpHeaderFixedSize + varIntLength(UInt64(addrBytes)) + addrBytes
     }
 
-    /// Splits `data` into N fragments so each serialized datagram fits
-    /// within `maxDatagramSize`. Each fragment carries the same PacketID and
-    /// full addr header. Returns one unfragmented message when data fits.
+    /// Splits `data` into fragments whose serialized datagrams fit
+    /// `maxDatagramSize`; one unfragmented message when it fits.
     static func fragmentUDP(
         sessionID: UInt32,
         packetID: UInt16,
@@ -276,8 +257,7 @@ enum HysteriaProtocol {
 
     // MARK: - Padding generation
 
-    /// Random ASCII padding `[A-Za-z0-9]` of `length` bytes. Used as cover
-    /// traffic — server never inspects the contents.
+    /// Random `[A-Za-z0-9]` cover-traffic padding; the server never inspects it.
     static func randomPadding(length: Int) -> Data {
         guard length > 0 else { return Data() }
         let alphabet: [UInt8] = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".utf8)

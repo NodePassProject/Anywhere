@@ -8,12 +8,7 @@
 import Foundation
 
 extension ProxyClient {
-    /// Connects through a SOCKS5 proxy server.
-    ///
-    /// Supports three modes:
-    /// - **TCP CONNECT**: SOCKS5 handshake → raw bidirectional tunnel.
-    /// - **UDP ASSOCIATE**: SOCKS5 handshake → UDP relay via ``SOCKS5UDPProxyConnection``.
-    /// - **TLS**: When `security == "tls"`, wraps the TCP connection with TLS before the handshake.
+    /// Connects through a SOCKS5 proxy via TCP CONNECT or UDP ASSOCIATE.
     func connectWithSOCKS5(
         command: ProxyCommand,
         destinationHost: String,
@@ -27,7 +22,6 @@ extension ProxyClient {
         )
     }
 
-    /// SOCKS5 over plain TCP: TCP → SOCKS5 handshake.
     private func connectSOCKS5Direct(
         command: ProxyCommand,
         destinationHost: String,
@@ -57,8 +51,6 @@ extension ProxyClient {
         }
     }
 
-    /// Performs the SOCKS5 handshake, dispatching on `.udp` for UDP ASSOCIATE
-    /// or CONNECT otherwise.
     private func performSOCKS5Handshake(
         transport: any RawTransport,
         command: ProxyCommand,
@@ -86,8 +78,7 @@ extension ProxyClient {
                 }
                 switch result {
                 case .success(let relay):
-                    // For chained outbounds, the relay socket must ride the
-                    // same chain as the control channel.
+                    // The relay socket must ride the same chain as the control channel.
                     self.openSOCKS5UDPRelay(
                         relayHost: relay.host,
                         relayPort: relay.port
@@ -136,10 +127,8 @@ extension ProxyClient {
         }
     }
 
-    /// Opens a UDP-shaped `ProxyConnection` aimed at the SOCKS5 relay address.
-    /// Rebuilds the chain (outer chain or inherited `parentChain`) so the
-    /// relay rides the proxied path; falls back to a kernel UDP socket
-    /// otherwise.
+    /// Opens a UDP relay to the SOCKS5-assigned address, riding the same proxied
+    /// path as the control channel.
     func openSOCKS5UDPRelay(
         relayHost: String,
         relayPort: UInt16,

@@ -17,14 +17,12 @@ enum MuxSessionStatus: UInt8 {
     case keepAlive = 0x04
 }
 
-/// Frame option flags (bitmask).
 struct MuxOption: OptionSet {
     let rawValue: UInt8
     static let data  = MuxOption(rawValue: 0x01)
     static let error = MuxOption(rawValue: 0x02)
 }
 
-/// Network type for mux sessions.
 enum MuxNetwork: UInt8 {
     case tcp = 0x01
     case udp = 0x02
@@ -39,7 +37,6 @@ private enum MuxAddressType: UInt8 {
 
 // MARK: - MuxFrameMetadata
 
-/// Metadata portion of a mux frame.
 struct MuxFrameMetadata {
     var sessionID: UInt16
     var status: MuxSessionStatus
@@ -57,26 +54,20 @@ struct MuxFrameMetadata {
         buf.append(UInt8(sessionID >> 8))
         buf.append(UInt8(sessionID & 0xFF))
 
-        // Status (1B)
         buf.append(status.rawValue)
-
-        // Option (1B)
         buf.append(option.rawValue)
 
         // Address block for New frames
         if status == .new, let network, let host = targetHost, let port = targetPort {
-            // Network (1B)
             buf.append(network.rawValue)
 
             // Port (2B big-endian) — port-first format
             buf.append(UInt8(port >> 8))
             buf.append(UInt8(port & 0xFF))
 
-            // Address
             encodeAddress(host, into: &buf)
 
-            // GlobalID (8B) for UDP New frames — only when XUDP is active
-            // Without XUDP, omit GlobalID (matching Xray-core: only written when b.UDP != nil)
+            // GlobalID (8B) — omitted unless XUDP is active
             if network == .udp, let gid = globalID, gid.count == 8 {
                 buf.append(gid)
             }
@@ -85,8 +76,7 @@ struct MuxFrameMetadata {
         return buf
     }
 
-    /// Decodes metadata from raw bytes.
-    /// Returns `(metadata, bytesConsumed)` or `nil` if insufficient data.
+    /// Returns `(metadata, bytesConsumed)`, or `nil` if insufficient data.
     static func decode(from data: Data) -> (MuxFrameMetadata, Int)? {
         guard data.count >= 4 else { return nil }  // minimum: 2B id + 1B status + 1B option
 
@@ -107,19 +97,16 @@ struct MuxFrameMetadata {
             option: option
         )
 
-        // New frames carry address info
         if status == .new {
             guard data.count >= offset + 1 else { return nil }
             guard let network = MuxNetwork(rawValue: data[base + offset]) else { return nil }
             metadata.network = network
             offset += 1
 
-            // Port (2B big-endian)
             guard data.count >= offset + 2 else { return nil }
             metadata.targetPort = UInt16(data[base + offset]) << 8 | UInt16(data[base + offset + 1])
             offset += 2
 
-            // Address
             guard let (host, addrLen) = decodeAddress(from: data, offset: offset) else { return nil }
             metadata.targetHost = host
             offset += addrLen
@@ -209,7 +196,6 @@ struct MuxFrameMetadata {
 // MARK: - Frame Encoding
 
 enum MuxFrame {
-    /// Encodes a complete mux frame (metadata length + metadata + optional payload).
     static func encode(metadata: MuxFrameMetadata, payload: Data?) -> Data {
         let metaBytes = metadata.encode()
         let metaLen = UInt16(metaBytes.count)
@@ -220,7 +206,6 @@ enum MuxFrame {
         frame.append(UInt8(metaLen >> 8))
         frame.append(UInt8(metaLen & 0xFF))
 
-        // Metadata
         frame.append(metaBytes)
 
         // Payload (if HasData flag set)
@@ -245,7 +230,6 @@ nonisolated class MuxFrameParser {
     /// Compaction threshold — avoid O(n) shifts until dead space is significant.
     private static let compactThreshold = 4096
 
-    /// Feeds raw bytes into the parser and returns any complete frames.
     func feed(_ data: Data) -> [(metadata: MuxFrameMetadata, payload: Data?)] {
         buffer.append(data)
         var results: [(MuxFrameMetadata, Data?)] = []
@@ -257,7 +241,6 @@ nonisolated class MuxFrameParser {
 
             let metaLen = Int(UInt16(buffer[bufferOffset]) << 8 | UInt16(buffer[bufferOffset + 1]))
 
-            // Need full metadata
             guard remaining >= 2 + metaLen else { break }
 
             let metaStart = bufferOffset + 2
@@ -273,13 +256,11 @@ nonisolated class MuxFrameParser {
             var payload: Data?
 
             if metadata.option.contains(.data) {
-                // Need 2 bytes for payload length
                 guard remaining >= consumed + 2 else { break }
 
                 let payloadLen = Int(UInt16(buffer[bufferOffset + consumed]) << 8 | UInt16(buffer[bufferOffset + consumed + 1]))
                 consumed += 2
 
-                // Need full payload
                 guard remaining >= consumed + payloadLen else {
                     // Revert — not enough payload data yet
                     break
@@ -295,7 +276,6 @@ nonisolated class MuxFrameParser {
             bufferOffset += consumed
         }
 
-        // Compact buffer only when dead space exceeds threshold
         if bufferOffset > Self.compactThreshold {
             buffer.removeSubrange(0..<bufferOffset)
             bufferOffset = 0
@@ -308,7 +288,6 @@ nonisolated class MuxFrameParser {
         return results
     }
 
-    /// Resets the parser state.
     func reset() {
         buffer.removeAll()
         bufferOffset = 0

@@ -56,7 +56,6 @@ struct SubscriptionFetcher {
 
         let httpResponse = response as? HTTPURLResponse
 
-        // Parse response headers
         let profileTitle = parseProfileTitle(from: httpResponse)
         let userInfo = parseSubscriptionUserInfo(from: httpResponse)
 
@@ -88,7 +87,6 @@ struct SubscriptionFetcher {
             )
         }
 
-        // Parse VLESS and Shadowsocks lines
         let configurations = bodyString
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }

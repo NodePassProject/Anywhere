@@ -7,9 +7,7 @@
 
 import Foundation
 
-/// Counts down `remaining` callbacks and fires `completion` when the last one
-/// arrives. Used to fan in async-teardown notifications from a `ProxyClient`'s
-/// raw socket plus its chain clients into a single completion.
+/// Fans in `remaining` async-teardown callbacks into a single `completion`.
 private final class TeardownCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var remaining: Int
@@ -31,11 +29,7 @@ private final class TeardownCounter: @unchecked Sendable {
 
 // MARK: - ProxyClient
 
-/// Client for establishing proxy connections over TCP or UDP.
-///
-///
-/// Supports multiple transports (TCP, WebSocket, HTTP Upgrade, XHTTP) and security layers
-/// (TLS, Reality). For the XTLS Vision flow, the connection is wrapped in a ``VLESSVisionConnection``.
+/// Establishes proxy connections over the supported transports and security layers.
 nonisolated class ProxyClient {
     let configuration: ProxyConfiguration
     let useResolvedAddressForDirectDial: Bool
@@ -45,10 +39,7 @@ nonisolated class ProxyClient {
     var tlsClient: TLSClient?
     var tlsConnection: TLSRecordConnection?
 
-    /// Sockets/TLS/Reality clients dialed for an XHTTP connection — the single
-    /// combined leg, or both legs of an up/download-detached session. Retained
-    /// here for the connection's lifetime; released when the ``ProxyClient`` is
-    /// torn down (the sockets themselves are closed via ``XHTTPConnection/cancel()``).
+    /// Sockets/TLS/Reality clients dialed for XHTTP legs, retained for the connection's lifetime.
     private var retainedXHTTPObjects: [AnyObject] = []
     private var webSocketConnection: WebSocketConnection?
     private var httpUpgradeConnection: HTTPUpgradeConnection?
@@ -56,34 +47,17 @@ nonisolated class ProxyClient {
     private var xhttpConnection: XHTTPConnection?
 
     /// Proxy tunnel from a previous chain link (for proxy chaining).
-    /// When set, all transport connections use this tunnel instead of creating a ``RawTCPSocket``.
     var tunnel: ProxyConnection?
-    /// Intermediate chain proxy clients (retained for lifecycle management).
     private var chainClients: [ProxyClient] = []
 
-    /// For a chain link, the prefix `chain[0..<index]` that brought traffic to
-    /// this link's server. Lets the link rebuild that prefix for an extra dial
-    /// (e.g. SOCKS5 opening its UDP-ASSOCIATE relay socket). Empty otherwise.
+    /// For a chain link, the chain prefix leading to this link's server, so it can rebuild
+    /// that prefix for an extra dial (e.g. SOCKS5's UDP-ASSOCIATE relay). Empty otherwise.
     let parentChain: [ProxyConfiguration]
 
-    /// Whether this client dials the **default outbound** — the single signal the
-    /// live Dial/Handshake gauges key off (see ``handshakeTimed``). The caller on
-    /// the connection path decides it from the tunnel's `isDefaultConfiguration`;
-    /// chain hops, rule-routed proxies, and latency probes leave it `false` so
-    /// their timings stay out of the home stats.
+    /// Whether this client dials the default outbound, gating the live Dial/Handshake stats;
+    /// chain hops, rule-routed proxies, and latency probes leave it `false`.
     let isDefaultProxy: Bool
 
-    /// Creates a new proxy client with the given configuration.
-    ///
-    /// - Parameters:
-    ///   - configuration: The proxy server configuration.
-    ///   - tunnel: Optional tunnel from a previous chain link (for proxy chaining).
-    ///   - useResolvedAddressForDirectDial: Whether direct first-hop transports should
-    ///     prefer `resolvedIP` over `serverAddress`. Intended for latency testing only.
-    ///   - parentChain: Chain prefix leading to this link's server. Empty for non-chain-link clients.
-    ///   - isDefaultProxy: Whether this client dials the default outbound, gating
-    ///     the live Dial/Handshake stats. Defaults to `false`; only the connection
-    ///     path's top-level client (and the default-only mux carrier) sets it.
     init(
         configuration: ProxyConfiguration,
         tunnel: ProxyConnection? = nil,
@@ -98,9 +72,7 @@ nonisolated class ProxyClient {
         self.isDefaultProxy = isDefaultProxy
     }
 
-    /// Host used for direct first-hop transport dials when not already tunneled through
-    /// another proxy. Normal VPN traffic keeps using the configured hostname so DNS can
-    /// refresh naturally; latency tests may opt into the pre-resolved IP.
+    /// Host for direct first-hop dials: the hostname normally, the pre-resolved IP for latency tests.
     var directDialHost: String {
         useResolvedAddressForDirectDial ? configuration.connectAddress : configuration.serverAddress
     }
@@ -121,8 +93,7 @@ nonisolated class ProxyClient {
     private func handshakeTimed(
         _ completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) -> (Result<ProxyConnection, Error>) -> Void {
-        // Bracket the full proxy setup as a perf span for every dial (not only
-        // the default proxy), stopping on success — matches MetricTimer.timing.
+        // Perf span covers every dial (not only the default proxy), stopped on success.
         let span = PerformanceMonitor.span(.proxyHandshake)
         let timed: (Result<ProxyConnection, Error>) -> Void = { result in
             if case .success = result { span.stop() }
@@ -181,7 +152,6 @@ nonisolated class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         guard let chain = configuration.chain, !chain.isEmpty, tunnel == nil else {
-            // No chain, or tunnel already provided — connect directly
             connectWithCommand(
                 command: command,
                 destinationHost: destinationHost,
@@ -236,9 +206,8 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Per-hop transport commands for a chain wrapped by `outerProtocol`.
-    /// Walks backwards from the outer protocol's required upstream command.
-    /// Fails when any link can't service what the link above it demands.
+    /// Per-hop transport commands for a chain wrapped by `outerProtocol`; fails when a
+    /// link can't service what the link above it demands.
     static func computeChainHopCommands(
         chain: [ProxyConfiguration],
         outerProtocol: OutboundProtocol,
@@ -255,8 +224,7 @@ nonisolated class ProxyClient {
         return computeChainHopCommands(chain: chain, lastDeliver: lastDeliver)
     }
 
-    /// Variant for chains that don't sit under a wrapping outer protocol;
-    /// the caller specifies the last hop's required output transport.
+    /// Variant for chains without a wrapping outer protocol; the caller specifies the last hop's output.
     static func computeChainHopCommands(
         chain: [ProxyConfiguration],
         lastDeliver: ProxyCommand
@@ -270,9 +238,7 @@ nonisolated class ProxyClient {
             for i in stride(from: chain.count - 2, through: 0, by: -1) {
                 let nextHop = chain[i + 1]
                 let downstreamCmd = commands[i + 1]
-                // Config-aware (not just protocol-level): a VLESS hop reached
-                // over XHTTP-h3 rides QUIC, so it needs a `.udp` relay from
-                // below even though plain VLESS would ask for `.tcp`.
+                // Config-aware: a VLESS hop over XHTTP-h3 rides QUIC, so it needs .udp from below.
                 guard let req = nextHop.upstreamCommand(for: downstreamCmd) else {
                     return .failure(ProxyError.protocolError(
                         "Chain hop \(nextHop.outboundProtocol.name) doesn't support \(downstreamCmd) downstream — needed by the hop above it"
@@ -284,19 +250,6 @@ nonisolated class ProxyClient {
         return .success(commands)
     }
 
-    /// Builds a chain tunnel by connecting through each proxy in the chain.
-    /// Thin wrapper that supplies instance-state defaults to the self-free
-    /// recursive helper.
-    ///
-    /// - Parameters:
-    ///   - chain: The ordered list of chain proxies (outermost first).
-    ///   - index: The current chain link index being connected.
-    ///   - currentTunnel: The tunnel from the previous chain link (nil for the first).
-    ///   - hopCommands: Per-hop transport command (`.tcp` or `.udp`) for each chain link.
-    ///   - finalDestination: Overrides the last hop's target (defaults to this proxy's server).
-    ///   - track: If set, takes ownership of each created chain-hop client
-    ///     instead of appending to `self.chainClients`.
-    ///   - completion: Called with the final tunnel connection.
     func buildChainTunnel(
         chain: [ProxyConfiguration],
         index: Int,
@@ -323,11 +276,8 @@ nonisolated class ProxyClient {
         )
     }
 
-    /// Self-free chain build for callers that don't anchor hops in a
-    /// `ProxyClient`'s `chainClients` (e.g. the pooled chained Hysteria
-    /// path, where ``HysteriaClient`` retains the hops). Surviving the
-    /// first caller's lifetime matters because the build is shared across
-    /// concurrent `acquireChained` waiters.
+    /// Chain build for pooled transports where the pool retains the hops and the
+    /// build may outlive the first caller.
     static func buildDetachedChainTunnel(
         chain: [ProxyConfiguration],
         hopCommands: [ProxyCommand],
@@ -348,8 +298,7 @@ nonisolated class ProxyClient {
         )
     }
 
-    /// Self-free recursive hop dispatch. Shared by ``buildChainTunnel``
-    /// (instance) and ``buildDetachedChainTunnel`` (static).
+    /// Self-free recursive hop dispatch shared by the instance and detached chain builders.
     private static func dispatchChainHop(
         chain: [ProxyConfiguration],
         index: Int,
@@ -409,22 +358,13 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Cancels the connection and releases all resources. Returns synchronously;
-    /// the underlying TCP teardown happens asynchronously. Callers that need
-    /// to wait for the file descriptor to actually close should use
-    /// ``cancel(completion:)``.
     func cancel() {
         cancel(completion: {})
     }
 
-    /// Awaitable variant of ``cancel()``. Fires `completion` once every
-    /// underlying socket (this client's `connection` and any `chainClients`
-    /// it owns) has fully torn down — fd closed, dispatch-source cancel
-    /// handlers fired. Higher-level wrappers (TLS, WebSocket, gRPC, etc.) are
-    /// torn down synchronously here since they don't own fds of their own.
+    /// Fires `completion` once every underlying socket has fully torn down (fd closed).
     func cancel(completion: @escaping @Sendable () -> Void) {
-        // Synchronous teardown of higher-level wrappers — they don't hold fds
-        // directly; their cancels are fast bookkeeping.
+        // Higher-level wrappers don't hold fds — teardown is synchronous bookkeeping.
         webSocketConnection?.cancel()
         webSocketConnection = nil
         httpUpgradeConnection?.cancel()
@@ -433,8 +373,7 @@ nonisolated class ProxyClient {
         grpcConnection = nil
         xhttpConnection?.cancel()
         xhttpConnection = nil
-        // The XHTTP leg(s)' sockets are torn down via xhttpConnection.cancel()
-        // above; drop the extra client references kept alive during the session.
+        // XHTTP sockets are torn down via xhttpConnection.cancel(); just drop the references.
         retainedXHTTPObjects.removeAll()
         realityConnection?.cancel()
         realityConnection = nil
@@ -446,8 +385,7 @@ nonisolated class ProxyClient {
         tlsClient = nil
         tunnel = nil
 
-        // Awaitable teardowns: the raw socket and any chain clients (each of
-        // which owns its own raw socket).
+        // Awaitable teardowns: the raw socket and each chain client (each owns its own raw socket).
         let socket = connection
         connection = nil
         let chains = chainClients
@@ -468,10 +406,6 @@ nonisolated class ProxyClient {
 
     // MARK: - Protocol Handshake
 
-    /// Wraps an established transport connection in the appropriate outbound
-    /// protocol (VLESS or Shadowsocks) for the requested command. The
-    /// per-protocol bodies live in ``ProxyClient+VLESS.swift`` and
-    /// ``ProxyClient+Shadowsocks.swift``.
     private func sendProtocolHandshake(
         over connection: ProxyConnection,
         command: ProxyCommand,
@@ -504,7 +438,6 @@ nonisolated class ProxyClient {
 
     // MARK: - Connection Routing
 
-    /// Routes the connection through the appropriate transport and security layers.
     private func connectWithCommand(
         command: ProxyCommand,
         destinationHost: String,
@@ -518,7 +451,6 @@ nonisolated class ProxyClient {
             return
         }
 
-        // Centralised capability check — only VLESS carries mux framing.
         if command == .mux, !configuration.outboundProtocol.supportsMux {
             completion(.failure(ProxyError.protocolError(
                 "Mux is not supported with \(configuration.outboundProtocol.name)"
@@ -606,12 +538,8 @@ nonisolated class ProxyClient {
             return
         }
 
-        // Only VLESS reaches this point.
-        //
-        // Vision needs a TLS-1.3-record-like layer to drive its padding /
-        // direct-copy state machine, supplied by either VLESS Encryption (any
-        // transport) or a raw TCP transport carrying TLS/REALITY — see
-        // ``transportSupportsVision``.
+        // Only VLESS reaches this point; Vision needs a TLS-record-like layer
+        // (VLESS Encryption, or a raw TCP transport carrying TLS/Reality).
         switch configuration.transportLayer {
         case .ws:
             connectWithWebSocket(command: command, destinationHost: destinationHost, destinationPort: destinationPort, initialData: initialData, completion: completion)
@@ -643,7 +571,6 @@ nonisolated class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         if let tunnel = self.tunnel {
-            // Chained: use tunnel instead of RawTCPSocket
             let directProxyConnection = DirectProxyConnection(connection: TunneledTransport(tunnel: tunnel))
             sendProtocolHandshake(
                 over: directProxyConnection, command: command, destinationHost: destinationHost,
@@ -753,7 +680,6 @@ nonisolated class ProxyClient {
 
     // MARK: - WebSocket Connection
 
-    /// Connects using WebSocket transport. Routes to WSS (TLS) or plain WS.
     private func connectWithWebSocket(
         command: ProxyCommand,
         destinationHost: String,
@@ -767,8 +693,7 @@ nonisolated class ProxyClient {
         }
 
         if case .tls(let baseTLSConfig) = configuration.securityLayer {
-            // WSS: TCP → TLS → WebSocket → VLESS
-            // Force ALPN to http/1.1 (Xray-core tls.WithNextProto("http/1.1"))
+            // Force ALPN to http/1.1 (Xray-core tls.WithNextProto("http/1.1")).
             let wsTlsConfig = TLSConfiguration(
                 serverName: baseTLSConfig.serverName,
                 alpn: ["http/1.1"],
@@ -802,14 +727,12 @@ nonisolated class ProxyClient {
             }
         } else {
             if let tunnel = self.tunnel {
-                // Chained plain WS: Tunnel → WebSocket → VLESS
                 let wsConnection = WebSocketConnection(tunnel: tunnel, configuration: wsConfig)
                 performWebSocketUpgrade(
                     wsConnection: wsConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData, completion: completion
                 )
             } else {
-                // Plain WS: TCP → WebSocket → VLESS
                 let transport = RawTCPSocket()
                 self.connection = transport
 
@@ -832,7 +755,6 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Performs WebSocket upgrade then sends the protocol handshake.
     private func performWebSocketUpgrade(
         wsConnection: WebSocketConnection,
         command: ProxyCommand,
@@ -863,7 +785,6 @@ nonisolated class ProxyClient {
 
     // MARK: - HTTP Upgrade Connection
 
-    /// Connects using HTTP upgrade transport. Routes to HTTPS or plain HTTP.
     private func connectWithHTTPUpgrade(
         command: ProxyCommand,
         destinationHost: String,
@@ -877,7 +798,6 @@ nonisolated class ProxyClient {
         }
 
         if case .tls(let tlsConfiguration) = configuration.securityLayer {
-            // HTTPS Upgrade: TCP → TLS → HTTP Upgrade → raw TCP over TLS → VLESS
             let tlsClient = TLSClient(configuration: tlsConfiguration)
             self.tlsClient = tlsClient
 
@@ -906,14 +826,12 @@ nonisolated class ProxyClient {
             }
         } else {
             if let tunnel = self.tunnel {
-                // Chained plain HTTP Upgrade: Tunnel → HTTP Upgrade → VLESS
                 let huConnection = HTTPUpgradeConnection(tunnel: tunnel, configuration: huConfig)
                 performHTTPUpgrade(
                     huConnection: huConnection, command: command, destinationHost: destinationHost,
                     destinationPort: destinationPort, initialData: initialData, completion: completion
                 )
             } else {
-                // Plain HTTP Upgrade: TCP → HTTP Upgrade → raw TCP → VLESS
                 let transport = RawTCPSocket()
                 self.connection = transport
 
@@ -936,7 +854,6 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Performs HTTP upgrade then sends the protocol handshake.
     private func performHTTPUpgrade(
         huConnection: HTTPUpgradeConnection,
         command: ProxyCommand,
@@ -967,8 +884,7 @@ nonisolated class ProxyClient {
 
     // MARK: - gRPC Connection
 
-    /// Returns the TLS configuration to use for gRPC. ALPN is forced to `h2` because
-    /// gRPC requires HTTP/2.
+    /// ALPN is forced to `h2` because gRPC requires HTTP/2.
     private func sanitizedGRPCTLSConfiguration(from base: TLSConfiguration) -> TLSConfiguration {
         TLSConfiguration(
             serverName: base.serverName,
@@ -977,8 +893,6 @@ nonisolated class ProxyClient {
         )
     }
 
-    /// Connects using gRPC transport, opening a single bidirectional gRPC stream over
-    /// HTTP/2. Routes through Reality, TLS, or plain TCP based on configuration.
     private func connectWithGRPC(
         command: ProxyCommand,
         destinationHost: String,
@@ -991,8 +905,7 @@ nonisolated class ProxyClient {
             return
         }
 
-        // Resolve the :authority to send over HTTP/2 from the TLS / Reality SNI when
-        // no explicit override is configured.
+        // The :authority falls back to the TLS/Reality SNI when no override is configured.
         let tlsServerName: String?
         if case .tls(let tls) = configuration.securityLayer { tlsServerName = tls.serverName }
         else { tlsServerName = nil }
@@ -1006,7 +919,7 @@ nonisolated class ProxyClient {
         )
 
         if case .reality(let realityConfig) = configuration.securityLayer {
-            // Reality + gRPC: Reality handles its own ALPN internally; layer gRPC on top.
+            // Reality handles its own ALPN internally; layer gRPC on top.
             let realityClient = RealityClient(configuration: realityConfig)
             self.realityClient = realityClient
 
@@ -1041,7 +954,6 @@ nonisolated class ProxyClient {
         }
 
         if case .tls(let baseTLSConfig) = configuration.securityLayer {
-            // gRPC over TLS: force ALPN `h2`, handshake, then open the HTTP/2 stream.
             let grpcTLSConfig = sanitizedGRPCTLSConfiguration(from: baseTLSConfig)
             let tlsClient = TLSClient(configuration: grpcTLSConfig)
             self.tlsClient = tlsClient
@@ -1076,7 +988,6 @@ nonisolated class ProxyClient {
             return
         }
 
-        // Plain gRPC (no TLS).
         if let tunnel = self.tunnel {
             let grpcConnection = GRPCConnection(tunnel: tunnel, configuration: grpcConfig, authority: authority)
             performGRPCSetup(
@@ -1104,7 +1015,6 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Performs the gRPC HTTP/2 setup then sends the VLESS protocol handshake.
     private func performGRPCSetup(
         grpcConnection: GRPCConnection,
         command: ProxyCommand,
@@ -1154,12 +1064,6 @@ nonisolated class ProxyClient {
     }
 
     /// Mirrors Xray-core's `decideHTTPVersion` for split HTTP.
-    ///
-    /// - Reality always uses HTTP/2.
-    /// - No TLS means plain HTTP/1.1.
-    /// - TLS with a single `http/1.1` ALPN stays on HTTP/1.1.
-    /// - TLS with a single `h3` ALPN expects QUIC/HTTP/3.
-    /// - Everything else uses HTTP/2.
     private func decideXHTTPHTTPVersion(for securityLayer: SecurityLayer? = nil) -> XHTTPHTTPVersion {
         let security = securityLayer ?? configuration.securityLayer
         if case .reality = security {
@@ -1185,11 +1089,7 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Removes unsupported ALPN entries from XHTTP-over-TCP handshakes.
-    ///
-    /// This client only implements XHTTP over TCP as HTTP/1.1 or HTTP/2. The
-    /// TLS handshake for that path should not advertise protocols such as `h3`
-    /// that require a different transport underneath.
+    /// Strips ALPN entries (e.g. `h3`) that the chosen HTTP version can't satisfy over TCP.
     private func sanitizedXHTTPTLSConfiguration(
         from base: TLSConfiguration,
         httpVersion: XHTTPHTTPVersion
@@ -1224,12 +1124,7 @@ nonisolated class ProxyClient {
         )
     }
 
-    /// Connects using XHTTP transport. Routes to plain HTTP, HTTPS, or Reality.
-    ///
-    /// Mode & HTTP version resolution follows Xray-core's split HTTP dialer:
-    /// - Reality → stream-one with HTTP/2
-    /// - TLS → HTTP/1.1, HTTP/2, or HTTP/3 based on ALPN
-    /// - none → packet-up with HTTP/1.1
+    /// Mode and HTTP version resolution follow Xray-core's split HTTP dialer.
     private func connectWithXHTTP(
         command: ProxyCommand,
         destinationHost: String,
@@ -1242,12 +1137,8 @@ nonisolated class ProxyClient {
             return
         }
 
-        // ALPN "h3" routes XHTTP over HTTP/3-over-QUIC; every other ALPN uses
-        // HTTP/1.1 or HTTP/2 over TCP+TLS. Each leg's transport is dialed by the
-        // shared XHTTP leg factory (see `dialXHTTPTransport`).
         let httpVersion = decideXHTTPHTTPVersion()
 
-        // Resolve mode: auto → actual mode
         var resolvedMode: XHTTPMode
         if xhttpConfig.mode == .auto {
             if case .reality = configuration.securityLayer {
@@ -1259,13 +1150,8 @@ nonisolated class ProxyClient {
             resolvedMode = xhttpConfig.mode
         }
 
-        // Up/download detach: when `downloadSettings` is set, the GET (download)
-        // stream is dialed to a separate server while the POST (upload) stays on
-        // this node, the two correlated by a shared session ID. stream-one is a
-        // single bidirectional stream and can't carry a split, so promote it to
-        // stream-up. Each leg independently picks its HTTP version (1.1/2/3) and
-        // may be direct or chained — the shared leg factory handles every
-        // combination.
+        // Up/download detach splits GET and POST across servers, correlated by a shared
+        // session ID; stream-one can't split, so promote it to stream-up.
         if let downloadSettings = xhttpConfig.downloadSettings {
             if resolvedMode == .streamOne { resolvedMode = .streamUp }
             let downloadHTTPVersion = decideXHTTPHTTPVersion(for: downloadSettings.securityLayer)
@@ -1279,8 +1165,6 @@ nonisolated class ProxyClient {
             return
         }
 
-        // Normal single-server connection. The transport (plain/TLS/Reality/HTTP3)
-        // and route (direct/tunnel/chain) are resolved by the leg factory.
         let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? UUID().uuidString.lowercased() : ""
         connectXHTTPCombined(
             xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, httpVersion: httpVersion,
@@ -1291,12 +1175,8 @@ nonisolated class ProxyClient {
 
     // MARK: Combined XHTTP (single server)
 
-    /// Connects a normal (non-detached) XHTTP session to this node's own server.
-    /// The transport — plain TCP, TLS, Reality, or HTTP/3-over-QUIC — and the
-    /// route (direct, over an inbound tunnel, or through a freshly built chain)
-    /// are resolved by the shared leg factory. HTTP/1.1 can't multiplex, so
-    /// packet-up / stream-up dial a second connection for the upload POST via the
-    /// upload factory; HTTP/2 and HTTP/3 carry both directions over one transport.
+    /// HTTP/1.1 can't multiplex, so packet-up/stream-up dial a second connection for
+    /// the upload POST; HTTP/2 and HTTP/3 carry both directions over one transport.
     private func connectXHTTPCombined(
         xhttpConfig: XHTTPConfiguration,
         mode: XHTTPMode,
@@ -1334,7 +1214,6 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Performs XHTTP setup then sends the protocol handshake.
     private func performXHTTPSetup(
         xhttpConnection: XHTTPConnection,
         command: ProxyCommand,
@@ -1363,14 +1242,8 @@ nonisolated class ProxyClient {
 
     // MARK: XHTTP up/download detach
 
-    /// Connects an XHTTP session whose download (GET) and upload (POST) legs use
-    /// different servers/transports, joined by a shared session ID. The download
-    /// leg is the coordinator the VLESS layer rides on — its `receive` is the
-    /// downlink — and it owns the upload leg, whose `send` is the uplink. Each leg
-    /// independently picks its HTTP version (1.1/2/3); the upload leg follows this
-    /// node's route (direct or chained), while the download leg always dials its
-    /// own server directly — a distinct download source is the whole point of the
-    /// split, so it is never routed back through this node's chain.
+    /// Dials separate upload (POST) and download (GET) legs joined by a shared session ID.
+    /// The download leg is the coordinator and always dials its own server directly.
     private func connectXHTTPDetached(
         xhttpConfig: XHTTPConfiguration,
         downloadSettings: XHTTPDownloadSettings,
@@ -1385,7 +1258,6 @@ nonisolated class ProxyClient {
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
         let uploadRoute = consumeMainXHTTPRoute()
-        // 1. Upload (main) leg → this node's own server, over our route.
         dialXHTTPLeg(
             endpoint: mainXHTTPEndpoint(), httpVersion: mainHTTPVersion, route: uploadRoute,
             xhttp: xhttpConfig, mode: mode, sessionId: sessionId, role: .uploadOnly, uploadFactory: nil
@@ -1398,7 +1270,6 @@ nonisolated class ProxyClient {
             case .failure(let error):
                 completion(.failure(error))
             case .success(let uploadLeg):
-                // 2. Download leg → the downloadSettings server, always direct.
                 self.dialXHTTPLeg(
                     endpoint: self.downloadXHTTPEndpoint(downloadSettings), httpVersion: downloadHTTPVersion,
                     route: .direct, xhttp: downloadSettings.xhttp, mode: mode, sessionId: sessionId,
@@ -1410,15 +1281,12 @@ nonisolated class ProxyClient {
                     }
                     switch downloadResult {
                     case .failure(let error):
-                        // The upload leg was dialed but never joined to
-                        // `xhttpConnection`, so a later `cancel()` can't reach it.
-                        // Tear it down here (closes its socket / H3 session) so an
-                        // unreachable download server can't leak the upload leg.
+                        // The upload leg never joined xhttpConnection, so a later cancel()
+                        // can't reach it — tear it down here to avoid a leak.
                         uploadLeg.cancel()
                         completion(.failure(error))
                     case .success(let downloadLeg):
-                        // 3. Join the legs: the download leg is the coordinator the
-                        //    VLESS layer rides on, and it owns the upload leg.
+                        // Download leg is the coordinator; it owns the upload leg.
                         downloadLeg.uploadChannel = uploadLeg
                         self.xhttpConnection = downloadLeg
                         self.performXHTTPSetup(
@@ -1436,8 +1304,7 @@ nonisolated class ProxyClient {
 
     /// Where one XHTTP leg's server lives and how the connection to it is secured.
     private struct XHTTPEndpoint {
-        /// Host for a direct kernel dial — a pre-resolved IP when latency testing,
-        /// otherwise the server address.
+        /// Host for a direct kernel dial (a pre-resolved IP when latency testing).
         let directHost: String
         /// Logical server identity, used as the HTTP/3 host when chained.
         let chainHost: String
@@ -1449,23 +1316,17 @@ nonisolated class ProxyClient {
 
     /// How an XHTTP leg reaches its server.
     private enum XHTTPLegRoute {
-        /// Open a fresh kernel socket (TCP) or UDP socket (HTTP/3) to the server.
         case direct
-        /// Ride an already-established proxy tunnel (this node is a chain link).
         case overTunnel(ProxyConnection)
-        /// Build a chain to the server, then ride its last hop.
         case buildChain([ProxyConfiguration])
     }
 
-    /// The dialed transport for one XHTTP leg: a byte stream (HTTP/1.1 or HTTP/2)
-    /// or an HTTP/3 QUIC session.
+    /// The dialed transport for one XHTTP leg: a byte stream or an HTTP/3 QUIC session.
     private enum XHTTPDialedTransport {
         case byteStream(TransportClosures)
         case http3(HTTP3Session)
     }
 
-    /// The endpoint for this node's own XHTTP server (the combined connection, or a
-    /// detached session's upload leg).
     private func mainXHTTPEndpoint() -> XHTTPEndpoint {
         XHTTPEndpoint(
             directHost: directDialHost,
@@ -1476,7 +1337,6 @@ nonisolated class ProxyClient {
         )
     }
 
-    /// The endpoint for a detached session's download server.
     private func downloadXHTTPEndpoint(_ downloadSettings: XHTTPDownloadSettings) -> XHTTPEndpoint {
         XHTTPEndpoint(
             directHost: downloadSettings.serverAddress,
@@ -1487,8 +1347,7 @@ nonisolated class ProxyClient {
         )
     }
 
-    /// SNI / HTTP/3 server name carried by a security layer (the address itself
-    /// when the leg is unsecured).
+    /// SNI / HTTP/3 server name carried by a security layer (the fallback when unsecured).
     private func xhttpServerName(for security: SecurityLayer, fallback: String) -> String {
         switch security {
         case .tls(let tlsConfig): return tlsConfig.serverName
@@ -1497,10 +1356,7 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Resolves how the main (this-node) leg reaches its server, consuming
-    /// `self.tunnel` if present so it is dialed exactly once. A chain link rides the
-    /// inbound tunnel; the chain exit builds a tunnel from `configuration.chain`;
-    /// otherwise the leg dials directly.
+    /// Resolves the main leg's route, consuming `self.tunnel` so it is dialed exactly once.
     private func consumeMainXHTTPRoute() -> XHTTPLegRoute {
         if let tunnel = self.tunnel {
             self.tunnel = nil
@@ -1512,9 +1368,7 @@ nonisolated class ProxyClient {
         return .direct
     }
 
-    /// Dials one XHTTP leg and wraps it in an ``XHTTPConnection`` with the given
-    /// role. Shared by the combined single-server connection (`.combined`) and each
-    /// leg of a detached session (`.uploadOnly` / `.downloadOnly`).
+    /// Dials one XHTTP leg and wraps it in an `XHTTPConnection` with the given role.
     private func dialXHTTPLeg(
         endpoint: XHTTPEndpoint,
         httpVersion: XHTTPHTTPVersion,
@@ -1549,12 +1403,8 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Dials the underlying transport for one XHTTP leg, applying the endpoint's
-    /// security and the leg's HTTP version, routed direct / over an existing tunnel
-    /// / through a freshly built chain. HTTP/1.1 and HTTP/2 ride a byte stream (TCP,
-    /// TLS, or Reality); HTTP/3 rides a QUIC session whose datagram transport
-    /// encodes the route. Dialed sockets/clients are retained via
-    /// ``retainedXHTTPObjects``; chain hops via ``chainClients``.
+    /// HTTP/1.1 and HTTP/2 ride a byte stream; HTTP/3 rides a QUIC session whose
+    /// datagram transport encodes the route.
     private func dialXHTTPTransport(
         endpoint: XHTTPEndpoint,
         httpVersion: XHTTPHTTPVersion,
@@ -1591,8 +1441,6 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Dials a single byte-stream XHTTP transport — plain TCP, TLS, or Reality —
-    /// either directly (`overTunnel == nil`) or riding an existing proxy tunnel.
     private func dialXHTTPByteStream(
         host: String,
         port: UInt16,
@@ -1638,10 +1486,8 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Builds the HTTP/3 QUIC session for one XHTTP leg. QUIC performs TLS
-    /// natively, so there is no TLSClient/RealityClient here — the route is encoded
-    /// as the session's datagram transport: `direct` opens a real UDP socket, while
-    /// a tunnel (or a freshly built `.udp` chain) carries the QUIC datagrams.
+    /// QUIC performs TLS natively, so the route is encoded as the session's datagram
+    /// transport instead of a TLS/Reality client.
     private func dialXHTTPHTTP3Session(
         endpoint: XHTTPEndpoint,
         route: XHTTPLegRoute,
@@ -1675,11 +1521,8 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Builds the upload-connection factory for a combined HTTP/1.1 session: a
-    /// second byte stream to this node's own server (HTTP/1.1 can't multiplex the
-    /// upload POST onto the download GET's connection). Mirrors the main leg's
-    /// security; routes through a freshly built chain when configured, else direct
-    /// (an inbound tunnel is already consumed by the download connection).
+    /// Upload-connection factory for combined HTTP/1.1 sessions; the download leg already
+    /// consumed any inbound tunnel, so this routes direct or through a fresh chain.
     private func makeXHTTPUploadFactory(
         security: SecurityLayer,
         httpVersion: XHTTPHTTPVersion

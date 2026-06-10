@@ -3,7 +3,6 @@
 //  Anywhere
 //
 //  Sample data for Xcode Previews, shared between iOS and tvOS targets.
-//  No dependency on VPNViewModel or persistent stores.
 //
 
 #if DEBUG
@@ -21,8 +20,6 @@ enum SampleData {
         TLSConfiguration(serverName: "example.com")
     )
 
-    /// Builds a VLESS `Outbound` with the app's current defaults and the
-    /// provided transport/security/flow so the sample data stays terse.
     private static func sampleVLESS(
         flow: String? = nil,
         transport: TransportLayer = .tcp,

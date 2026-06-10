@@ -12,9 +12,7 @@ private let logger = AnywhereLogger(category: "Shadowsocks")
 // MARK: - ShadowsocksConnection
 
 /// Wraps a transport-layer ProxyConnection with Shadowsocks AEAD encryption.
-///
-/// The address header is prepended to the first `send()` call's data
-/// (encrypted as part of the stream, not a separate message).
+/// The address header is prepended to the first send, encrypted as part of the stream.
 nonisolated class ShadowsocksConnection: ProxyConnection {
     private let inner: ProxyConnection
     private let writer: ShadowsocksAEADWriter
@@ -34,7 +32,6 @@ nonisolated class ShadowsocksConnection: ProxyConnection {
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         do {
             var plaintext = Data()
-            // Prepend address header to first send
             lock.lock()
             if let header = addressHeader {
                 plaintext.append(header)

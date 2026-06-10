@@ -13,42 +13,20 @@ private let logger = AnywhereLogger(category: "TLS")
 
 // MARK: - TLSRecordConnection
 
-/// TLS application-layer record encryption/decryption wrapper (supports TLS 1.2 and 1.3).
-///
-/// Encrypts outgoing data into TLS Application Data records and decrypts incoming records.
-/// Sequence numbers are tracked independently for client and server directions.
-///
-/// **TLS 1.3**: Content type is inside the encrypted payload; nonce = IV XOR padded_seq;
-/// AAD = record header (5 bytes).
-///
-/// **TLS 1.2 AEAD (GCM)**: Explicit 8-byte nonce prepended to ciphertext;
-/// nonce = implicit_IV(4) || explicit(8); AAD = seq(8) || type(1) || version(2) || length(2).
-///
-/// **TLS 1.2 AEAD (ChaCha20)**: No explicit nonce; nonce = IV XOR padded_seq;
-/// AAD = seq(8) || type(1) || version(2) || length(2).
-///
-/// **TLS 1.2 CBC**: HMAC-then-encrypt with explicit IV per record.
-///
-/// Supports a "direct" mode (``receiveRaw(completion:)`` / ``sendRaw(data:completion:)``)
-/// that bypasses encryption for Vision direct-copy transitions.
+/// TLS 1.2/1.3 application-data record encryption/decryption over a raw transport,
+/// with a raw passthrough mode for Vision direct-copy.
 nonisolated class TLSRecordConnection {
 
     // MARK: Properties
 
-    /// The underlying transport (``RawTCPSocket`` for direct connections,
-    /// ``TunneledTransport`` for proxy-chained connections).
     var connection: (any RawTransport)?
 
     /// The negotiated TLS version (0x0303 = TLS 1.2, 0x0304 = TLS 1.3).
     let tlsVersion: UInt16
 
-    /// The negotiated ALPN protocol (e.g. "h2", "http/1.1"). Empty string
-    /// when the peer did not select one. Set by the handshake driver
-    /// (``TLSClient`` / ``TLSServer``) right before this connection is
-    /// handed back to its owner.
+    /// Negotiated ALPN protocol; empty when the peer selected none.
     var negotiatedALPN: String = ""
 
-    // TLS encryption keys
     private let clientKey: Data
     private let clientIV: Data
     private let serverKey: Data
@@ -58,58 +36,35 @@ nonisolated class TLSRecordConnection {
     private let clientMACKey: Data
     private let serverMACKey: Data
 
-    // Cipher suite for AEAD dispatch (AES-GCM vs ChaCha20-Poly1305)
     private let cipherSuite: UInt16
 
-    // Cached symmetric keys
     private let clientSymmetricKey: SymmetricKey
     private let serverSymmetricKey: SymmetricKey
 
-    // Sequence numbers
     private var clientSeqNum: UInt64 = 0
     private var serverSeqNum: UInt64 = 0
     private let seqLock = UnfairLock()
 
-    /// Serialises the encrypt-then-enqueue path so that TLS records arrive at
-    /// the socket queue in sequence-number order.  Without this, two concurrent
-    /// `send` calls can allocate consecutive sequence numbers but enqueue the
-    /// encrypted records in reverse order, causing TLS decryption failures on
-    /// the server and a "Broken pipe" on the next write.
+    /// Serialises encrypt-then-enqueue so records reach the socket in sequence-number order.
     private let sendLock = UnfairLock()
 
     /// Maximum plaintext per record (RFC 8446 §5.1, RFC 5246 §6.2.1).
     private static let maxRecordPlaintext = 16384
 
-    // Receive buffer for batching reads
     private var receiveBuffer = Data(capacity: 256 * 1024)
     private let receiveLock = UnfairLock()
 
     // MARK: Initialization
 
-    /// Side of the TLS connection this record layer represents. The math
-    /// is identical for client and server — only the "which key encrypts
-    /// outbound, which decrypts inbound" assignment swaps.
+    /// Local role; selects which key pair encrypts outbound vs decrypts inbound.
     enum Direction {
-        /// Local role is client: encrypt with clientKey, decrypt with serverKey.
         case client
-        /// Local role is server: encrypt with serverKey, decrypt with clientKey.
         case server
     }
 
-    /// Whether this connection encrypts in the client or server direction.
-    /// Defaults to ``Direction/client`` so existing call sites keep their
-    /// previous behaviour.
     let direction: Direction
 
-    /// Creates a new TLS 1.3 record connection with pre-derived TLS keys.
-    ///
-    /// - Parameters:
-    ///   - clientKey: The client-to-server encryption key.
-    ///   - clientIV: The client-to-server initialization vector (12 bytes).
-    ///   - serverKey: The server-to-client encryption key.
-    ///   - serverIV: The server-to-client initialization vector (12 bytes).
-    ///   - cipherSuite: The negotiated TLS 1.3 cipher suite.
-    ///   - direction: Whether the local endpoint is the client or server.
+    /// Creates a TLS 1.3 record connection from pre-derived traffic keys (12-byte IVs).
     init(clientKey: Data, clientIV: Data, serverKey: Data, serverIV: Data,
          cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256,
          direction: Direction = .client) {
@@ -126,17 +81,8 @@ nonisolated class TLSRecordConnection {
         self.direction = direction
     }
 
-    /// Creates a new TLS 1.2 record connection with pre-derived keys.
-    ///
-    /// - Parameters:
-    ///   - clientKey: The client-to-server encryption key.
-    ///   - clientIV: The client-to-server IV (4 bytes for GCM, 12 for ChaCha20, 16 for CBC).
-    ///   - serverKey: The server-to-client encryption key.
-    ///   - serverIV: The server-to-client IV.
-    ///   - clientMACKey: The client MAC key (empty for AEAD suites).
-    ///   - serverMACKey: The server MAC key (empty for AEAD suites).
-    ///   - cipherSuite: The negotiated TLS 1.2 cipher suite.
-    ///   - protocolVersion: The TLS protocol version (e.g. 0x0303 for TLS 1.2).
+    /// Creates a TLS 1.2 record connection from pre-derived keys.
+    /// IVs are 4 bytes for GCM, 12 for ChaCha20, 16 for CBC; MAC keys are empty for AEAD.
     init(
         tls12ClientKey clientKey: Data,
         clientIV: Data,
@@ -165,9 +111,7 @@ nonisolated class TLSRecordConnection {
         self.direction = direction
     }
 
-    /// Pre-populates the receive buffer with data that was read during the
-    /// TLS handshake but belongs to the application layer (e.g. NewSessionTicket).
-    /// Must be called before any `receive()` calls.
+    /// Buffers application bytes read during the handshake; call before any `receive()`.
     func prependToReceiveBuffer(_ data: Data) {
         receiveLock.lock()
         receiveBuffer.append(data)
@@ -175,15 +119,6 @@ nonisolated class TLSRecordConnection {
     }
 
     // MARK: - Direction-aware Key/IV Selection
-    //
-    // ``send`` always encrypts in the local-egress direction and ``receive``
-    // always decrypts in the local-ingress direction. The four key/IV
-    // fields are populated using TLS 1.3's "client_*" and "server_*"
-    // labels — which coincide with local egress/ingress only when the
-    // local role is the client. For ``Direction/server`` we pick the
-    // opposite pair.
-    //
-    // The same swap applies to per-direction sequence numbers.
 
     private var egressKey: Data { direction == .server ? serverKey : clientKey }
     private var egressIV: Data { direction == .server ? serverIV : clientIV }
@@ -201,11 +136,7 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Send (Encrypted)
 
-    /// Sends data through the Reality tunnel, encrypting it as a TLS Application Data record.
-    ///
-    /// - Parameters:
-    ///   - data: The plaintext data to encrypt and send.
-    ///   - completion: Called with `nil` on success or an error on failure.
+    /// Encrypts data as TLS Application Data records and sends it.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         sendLock.lock()
         guard let connection else {
@@ -223,9 +154,6 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Sends data through the Reality tunnel without tracking completion.
-    ///
-    /// - Parameter data: The plaintext data to encrypt and send.
     func send(data: Data) {
         sendLock.lock()
         guard let connection else {
@@ -243,16 +171,7 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Receive (Encrypted)
 
-    /// Receives and decrypts data from the Reality tunnel.
-    ///
-    /// Uses buffered reading to process multiple TLS records per network read,
-    /// reducing system call overhead.
-    ///
-    /// - Parameter completion: Called with decrypted data, or an error naming
-    ///   the precise record-layer failure (authentication, MAC, padding,
-    ///   malformed framing, or a peer alert). The Reality layer maps an AEAD
-    ///   authentication failure to its direct-copy diagnostic; see
-    ///   ``RealityProxyConnection``.
+    /// Receives and decrypts data, batching multiple TLS records per network read.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         receiveLock.lock()
         let processed = processBuffer()
@@ -277,11 +196,7 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Send / Receive (Raw, Unencrypted)
 
-    /// Receives raw data without decryption (for Vision direct-copy mode).
-    ///
-    /// Returns any buffered data first, then reads directly from the socket.
-    ///
-    /// - Parameter completion: Called with raw data or an error.
+    /// Receives raw data without decryption (Vision direct-copy mode); drains buffered data first.
     func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         receiveLock.lock()
         if !receiveBuffer.isEmpty {
@@ -316,11 +231,7 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Sends raw data without encryption (for Vision direct-copy mode).
-    ///
-    /// - Parameters:
-    ///   - data: The raw data to send.
-    ///   - completion: Called with `nil` on success or an error on failure.
+    /// Sends raw data without encryption (Vision direct-copy mode).
     func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         guard let connection else {
             completion(TLSRecordError.connectionUnavailable)
@@ -329,9 +240,6 @@ nonisolated class TLSRecordConnection {
         connection.send(data: data, completion: completion)
     }
 
-    /// Sends raw data without encryption and without tracking completion.
-    ///
-    /// - Parameter data: The raw data to send.
     func sendRaw(data: Data) {
         guard let connection else { return }
         connection.send(data: data)
@@ -339,11 +247,7 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Cancel
 
-    /// Closes the connection and releases all resources.
-    ///
-    /// Sends a TLS close_notify alert (best-effort) before closing, matching
-    /// Xray-core's `tlsCloseTimeout` behavior. The close_notify is fire-and-forget;
-    /// we don't wait for the server's response (Xray-core waits up to 250ms).
+    /// Closes the connection, sending a best-effort fire-and-forget close_notify first.
     func cancel() {
         sendCloseNotify()
 
@@ -376,13 +280,11 @@ nonisolated class TLSRecordConnection {
             sendLock.unlock()
         } catch {
             sendLock.unlock()
-            // Best-effort, ignore errors
         }
     }
 
     // MARK: - Internal Buffer Processing
 
-    /// Result of processing buffered TLS records.
     private enum BufferResult {
         case data(Data)
         case error(Error)
@@ -390,7 +292,6 @@ nonisolated class TLSRecordConnection {
         case skip
     }
 
-    /// Fetches more data from the network and processes it.
     private func fetchMore(completion: @escaping (Data?, Error?) -> Void) {
         guard let connection else {
             completion(nil, TLSRecordError.connectionUnavailable)
@@ -438,13 +339,8 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Processes all complete TLS records in the receive buffer.
-    ///
-    /// Returns batched decrypted data from multiple records to reduce callback overhead.
-    /// Uses an offset to track consumed bytes and compacts once at the end, avoiding
-    /// per-record `removeSubrange` calls that create intermediate slices retaining
-    /// the entire original backing store.
-    /// Must be called while holding `receiveLock`.
+    /// Decrypts all complete records in the buffer into one batch, compacting once at the
+    /// end to avoid per-record `removeSubrange` slices. Caller must hold `receiveLock`.
     private func processBuffer() -> BufferResult? {
         if receiveBuffer.count == 0 {
             return nil
@@ -453,12 +349,10 @@ nonisolated class TLSRecordConnection {
         var batchedData = Data(capacity: receiveBuffer.count)
         var hasError: Error? = nil
         var recordsProcessed = 0
-        // The failing record (+ any trailing bytes) held back so cleanly
-        // decrypted records earlier in this batch can be delivered first; the
-        // next read re-attempts these bytes and surfaces the failure.
+        // Failing record held back so cleanly decrypted records deliver first;
+        // the error resurfaces on the next read.
         var bytesPendingReplay: Data? = nil
 
-        // Track how many bytes from the front have been consumed
         var consumed = 0
 
         while receiveBuffer.count - consumed >= 5 {
@@ -503,18 +397,7 @@ nonisolated class TLSRecordConnection {
                         batchedData.append(decrypted)
                     }
                 } catch {
-                    // Surface every decrypt failure with its real cause —
-                    // authentication, MAC, padding, malformed framing, or a
-                    // named alert. Classifying an authentication failure as a
-                    // possible direct-copy switch is the Reality layer's job
-                    // (``RealityProxyConnection``), not this generic record
-                    // layer's.
-                    //
-                    // A TLS alert is terminal and names itself, so there's no
-                    // point holding it back behind buffered data. Every other
-                    // failure keeps the failing record (+ trailing bytes) so we
-                    // can flush already-decrypted records first, then re-raise
-                    // on the next read.
+                    // Alerts are terminal; anything else is held back for replay on the next read.
                     if case TLSRecordError.tlsAlert = error {
                         receiveBuffer.removeAll()
                         consumed = 0
@@ -538,7 +421,6 @@ nonisolated class TLSRecordConnection {
             }
         }
 
-        // Single compaction: remove all consumed bytes at once
         if consumed > 0 {
             if consumed >= receiveBuffer.count {
                 receiveBuffer = Data()
@@ -549,8 +431,6 @@ nonisolated class TLSRecordConnection {
 
         if let error = hasError {
             if !batchedData.isEmpty {
-                // Deliver the records that decrypted cleanly; the held-back
-                // bytes surface the failure on the next read.
                 if let pending = bytesPendingReplay {
                     receiveBuffer = pending
                 }
@@ -572,9 +452,7 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - TLS Record Crypto (Dispatch)
 
-    /// Encrypts plaintext into one or more TLS Application Data records.
-    /// Splits at the maximum (16384 bytes) to prevent record_overflow.
-    /// Sequence numbers are reserved atomically so concurrent sends stay ordered.
+    /// Encrypts plaintext into Application Data records, splitting at 16384 bytes to avoid record_overflow.
     private func buildTLSRecords(for data: Data) throws -> Data {
         if data.count <= Self.maxRecordPlaintext {
             return try encryptSingleRecord(plaintext: data, contentType: 0x17)
@@ -591,7 +469,6 @@ nonisolated class TLSRecordConnection {
         return records
     }
 
-    /// Encrypts a single record, dispatching to the appropriate version-specific method.
     private func encryptSingleRecord(plaintext: Data, contentType: UInt8) throws -> Data {
         try PerformanceMonitor.measure(.tlsEncrypt) {
             if tlsVersion >= 0x0304 {
@@ -602,7 +479,6 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Decrypts a single record, dispatching to the appropriate version-specific method.
     private func decryptTLSRecord(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
         try PerformanceMonitor.measure(.tlsDecrypt) {
             if tlsVersion >= 0x0304 {
@@ -615,11 +491,8 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - TLS 1.3 Record Crypto
 
-    /// TLS 1.3 record encryption.
-    ///
-    /// Inner plaintext = payload || content_type(1).
-    /// Nonce = IV XOR padded_seq. AAD = record_header(5).
-    /// Record = header(5) || ciphertext || tag(16).
+    /// TLS 1.3 record: inner = payload || type(1); nonce = IV XOR padded_seq;
+    /// AAD = header(5); record = header(5) || ciphertext || tag(16).
     private func encryptTLS13Record(plaintext: Data, contentType: UInt8 = 0x17) throws -> Data {
         seqLock.lock()
         let seqNum: UInt64
@@ -655,7 +528,6 @@ nonisolated class TLSRecordConnection {
         return record
     }
 
-    /// TLS 1.3 record decryption.
     private func decryptTLS13Record(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
         guard ciphertext.count >= 16 else {
             throw TLSRecordError.ciphertextTooShort
@@ -693,17 +565,13 @@ nonisolated class TLSRecordConnection {
             return Data()
         }
 
-        // TLS 1.3 alerts are encrypted, so the real type (0x15) only shows
-        // up as the inner content type. A close_notify is an orderly
-        // shutdown — drop it and let the read drain to EOF. Any other alert
-        // is the peer rejecting the connection: surface it so the teardown
-        // names the real cause instead of leaking the 2-byte alert body
-        // upstream as application data.
+        // TLS 1.3 alerts arrive encrypted, so 0x15 only shows as the inner type.
+        // close_notify is an orderly shutdown; any other alert surfaces as the failure cause.
         if innerContentType == 0x15 {
             let body = decrypted.prefix(Int(contentLen))
             let level = body.first ?? 0
             let description = body.count >= 2 ? body[body.startIndex + 1] : 0
-            if description == 0 { // close_notify — orderly shutdown, drain to EOF
+            if description == 0 { // close_notify
                 return Data()
             }
             throw TLSRecordError.tlsAlert(level: level, description: description)
@@ -714,9 +582,6 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - TLS 1.2 Record Crypto
 
-    /// TLS 1.2 record encryption.
-    ///
-    /// Dispatches between AEAD (GCM/ChaCha20) and CBC+HMAC cipher suites.
     private func encryptTLS12Record(plaintext: Data, contentType: UInt8 = 0x17) throws -> Data {
         seqLock.lock()
         let seqNum: UInt64
@@ -738,26 +603,20 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// TLS 1.2 AEAD encryption (AES-GCM or ChaCha20-Poly1305).
-    ///
-    /// **AES-GCM**: nonce = implicit_IV(4) || explicit_nonce(8); explicit nonce in record.
-    /// **ChaCha20**: nonce = IV(12) XOR padded_seq; no explicit nonce in record.
-    /// AAD = seq(8) || type(1) || version(2) || plaintext_length(2).
+    /// TLS 1.2 AEAD: GCM nonce = implicit_IV(4) || explicit_seq(8) (explicit sent in record);
+    /// ChaCha20 nonce = IV(12) XOR padded_seq; AAD = seq(8) || type(1) || version(2) || length(2).
     private func encryptTLS12AEAD(plaintext: Data, contentType: UInt8, seqNum: UInt64, version: UInt16) throws -> Data {
         let isChaCha = TLSCipherSuite.isChaCha20(cipherSuite)
         let explicitNonceLen = isChaCha ? 0 : 8
 
-        // Build nonce
         let nonce: Data
         let explicitNonce: Data
         if isChaCha {
-            // ChaCha20: XOR IV with padded seq (same as TLS 1.3)
             var n = egressIV
             xorSeqIntoNonce(&n, seqNum: seqNum)
             nonce = n
             explicitNonce = Data()
         } else {
-            // AES-GCM: implicit(4) || explicit(8) where explicit = seq number
             var seqBytes = Data(count: 8)
             for i in 0..<8 { seqBytes[i] = UInt8((seqNum >> ((7 - i) * 8)) & 0xFF) }
             var n = egressIV  // 4 bytes implicit
@@ -766,7 +625,6 @@ nonisolated class TLSRecordConnection {
             explicitNonce = seqBytes
         }
 
-        // Build AAD: seq(8) || type(1) || version(2) || length(2)
         var aad = Data(capacity: 13)
         for i in 0..<8 { aad.append(UInt8((seqNum >> ((7 - i) * 8)) & 0xFF)) }
         aad.append(contentType)
@@ -777,7 +635,6 @@ nonisolated class TLSRecordConnection {
 
         let (ct, tag) = try sealAEAD(plaintext: plaintext, nonce: nonce, aad: aad, key: egressSymmetricKey)
 
-        // Record: header(5) || [explicit_nonce(8)] || ciphertext || tag(16)
         let recordPayloadLen = explicitNonceLen + ct.count + tag.count
         var record = Data(capacity: 5 + recordPayloadLen)
         record.append(contentType)
@@ -791,11 +648,8 @@ nonisolated class TLSRecordConnection {
         return record
     }
 
-    /// TLS 1.2 CBC+HMAC encryption.
-    ///
-    /// MAC = HMAC(mac_key, seq || type || version || length || plaintext).
-    /// Encrypt: AES-CBC(key, random_IV, plaintext || MAC || padding).
-    /// Record: header(5) || IV(16) || encrypted.
+    /// TLS 1.2 CBC: MAC-then-encrypt — AES-CBC(key, random_IV, plaintext || HMAC || padding);
+    /// record = header(5) || IV(16) || ciphertext.
     private func encryptTLS12CBC(plaintext: Data, contentType: UInt8, seqNum: UInt64, version: UInt16) throws -> Data {
         let useSHA384 = TLSCipherSuite.usesSHA384(cipherSuite)
         let useSHA256: Bool
@@ -809,30 +663,25 @@ nonisolated class TLSRecordConnection {
             useSHA256 = false
         }
 
-        // Compute MAC
         let mac = TLS12KeyDerivation.tls10MAC(
             macKey: egressMACKey, seqNum: seqNum,
             contentType: contentType, protocolVersion: version,
             payload: plaintext, useSHA384: useSHA384, useSHA256: useSHA256
         )
 
-        // plaintext || MAC
         var data = plaintext
         data.append(mac)
 
-        // Padding: pad to block size (16 for AES)
         let blockSize = 16
         let paddingLen = blockSize - (data.count % blockSize)
         let paddingByte = UInt8(paddingLen - 1)
         data.append(contentsOf: [UInt8](repeating: paddingByte, count: paddingLen))
 
-        // Generate random IV
         var iv = Data(count: blockSize)
         guard iv.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, blockSize, $0.baseAddress!) }) == errSecSuccess else {
             throw TLSRecordError.ivGenerationFailed
         }
 
-        // AES-CBC encrypt (no PKCS7 padding — we handle it ourselves)
         var encrypted = Data(count: data.count)
         var numBytesEncrypted = 0
         let cbcKey = egressKey
@@ -859,7 +708,6 @@ nonisolated class TLSRecordConnection {
             throw TLSRecordError.encryptionFailed
         }
 
-        // Record: header(5) || IV(16) || encrypted
         let recordPayloadLen = blockSize + numBytesEncrypted
         var record = Data(capacity: 5 + recordPayloadLen)
         record.append(contentType)
@@ -872,7 +720,6 @@ nonisolated class TLSRecordConnection {
         return record
     }
 
-    /// TLS 1.2 record decryption.
     private func decryptTLS12Record(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
         if TLSCipherSuite.isAEAD(cipherSuite) {
             return try decryptTLS12AEAD(ciphertext: ciphertext, header: header, seqNum: seqNum)
@@ -881,7 +728,6 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// TLS 1.2 AEAD decryption.
     private func decryptTLS12AEAD(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
         let isChaCha = TLSCipherSuite.isChaCha20(cipherSuite)
         let explicitNonceLen = isChaCha ? 0 : 8
@@ -892,11 +738,9 @@ nonisolated class TLSRecordConnection {
             throw TLSRecordError.ciphertextTooShort
         }
 
-        // Extract explicit nonce and payload
         let explicitNonce = isChaCha ? Data() : Data(ciphertext.prefix(explicitNonceLen))
         let payload = Data(ciphertext.suffix(from: ciphertext.startIndex + explicitNonceLen))
 
-        // Build nonce
         let nonce: Data
         if isChaCha {
             var n = ingressIV
@@ -908,7 +752,7 @@ nonisolated class TLSRecordConnection {
             nonce = n
         }
 
-        // Build AAD: seq(8) || type(1) || version(2) || plaintext_length(2)
+        // AAD: seq(8) || type(1) || version(2) || plaintext_length(2)
         let plaintextLen = payload.count - 16
         var aad = Data(capacity: 13)
         for i in 0..<8 { aad.append(UInt8((seqNum >> ((7 - i) * 8)) & 0xFF)) }
@@ -924,7 +768,6 @@ nonisolated class TLSRecordConnection {
         return try openAEAD(ciphertext: ct, tag: tag, nonce: nonce, aad: aad, key: ingressSymmetricKey)
     }
 
-    /// TLS 1.2 CBC+HMAC decryption.
     private func decryptTLS12CBC(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
         let blockSize = 16
         let version = tlsVersion
@@ -934,7 +777,6 @@ nonisolated class TLSRecordConnection {
             throw TLSRecordError.ciphertextTooShort
         }
 
-        // Extract IV (first block) and encrypted data
         let iv = Data(ciphertext.prefix(blockSize))
         let encrypted = Data(ciphertext.suffix(from: ciphertext.startIndex + blockSize))
 
@@ -942,7 +784,6 @@ nonisolated class TLSRecordConnection {
             throw TLSRecordError.malformedRecord("CBC ciphertext not block-aligned")
         }
 
-        // AES-CBC decrypt
         var decrypted = Data(count: encrypted.count)
         var numBytesDecrypted = 0
         let cbcKey = ingressKey
@@ -975,7 +816,6 @@ nonisolated class TLSRecordConnection {
         let paddingByte = Int(decrypted.last ?? 0)
         let paddingLen = paddingByte + 1
 
-        // Constant-time padding validation: check all padding bytes without early return
         var paddingGood: UInt8 = 0
         if paddingLen > decrypted.count {
             paddingGood = 1  // Invalid
@@ -991,13 +831,11 @@ nonisolated class TLSRecordConnection {
 
         decrypted = decrypted.prefix(decrypted.count - paddingLen)
 
-        // Determine MAC size
         let macSize = TLSCipherSuite.macLength(cipherSuite)
         guard decrypted.count >= macSize else {
             throw TLSRecordError.malformedRecord("decrypted record too short for MAC")
         }
 
-        // Extract and verify MAC
         let payload = Data(decrypted.prefix(decrypted.count - macSize))
         let receivedMAC = Data(decrypted.suffix(macSize))
 
@@ -1019,7 +857,6 @@ nonisolated class TLSRecordConnection {
             payload: payload, useSHA384: useSHA384, useSHA256: useSHA256
         )
 
-        // Constant-time comparison to prevent timing attacks
         guard receivedMAC.count == expectedMAC.count,
               constantTimeEqual(receivedMAC, expectedMAC) else {
             throw TLSRecordError.macVerificationFailed
@@ -1028,7 +865,7 @@ nonisolated class TLSRecordConnection {
         return payload
     }
 
-    /// Constant-time comparison of two Data values to prevent timing side-channel attacks.
+    /// Constant-time comparison to prevent timing side channels.
     private func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
         guard a.count == b.count else { return false }
         var diff: UInt8 = 0
@@ -1040,7 +877,6 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - AEAD Helpers
 
-    /// Seals plaintext with the appropriate AEAD (AES-GCM or ChaCha20-Poly1305).
     private func sealAEAD(plaintext: Data, nonce: Data, aad: Data, key: SymmetricKey) throws -> (ciphertext: Data, tag: Data) {
         if TLSCipherSuite.isChaCha20(cipherSuite) {
             let nonceObj = try ChaChaPoly.Nonce(data: nonce)
@@ -1053,12 +889,8 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Opens ciphertext with the appropriate AEAD.
-    ///
-    /// A tag-verification failure is normalized to
-    /// ``TLSRecordError/recordAuthenticationFailed`` so callers can distinguish
-    /// "the keys no longer match these bytes" (which Reality reads as a possible
-    /// direct-copy switch) from genuinely malformed input.
+    /// Normalizes AEAD tag failures to `recordAuthenticationFailed` so callers can
+    /// distinguish key mismatch from malformed input.
     private func openAEAD(ciphertext: Data, tag: Data, nonce: Data, aad: Data, key: SymmetricKey) throws -> Data {
         do {
             if TLSCipherSuite.isChaCha20(cipherSuite) {

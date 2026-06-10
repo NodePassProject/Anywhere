@@ -13,39 +13,16 @@ class DomainRouter {
 
     // MARK: - Tier model
     //
-    // Each rule source owns its own set of matching structures, so cross-source
-    // priority is enforced by the order tiers are queried, not by trie insert
-    // order. Within a tier, suffix rules win over keyword rules; deepest suffix
-    // and longest CIDR prefix still win, but that competition is now scoped to
-    // a single source.
-    //
-    // Priority (highest first): User > ADBlock > Built-in > Country Bypass.
+    // Cross-source priority is tier query order (User > ADBlock > Built-in > Country
+    // Bypass); within a tier, suffix beats keyword and deepest/longest match wins.
 
     // MARK: - Action interning (see fileprivate `ActionTable` below)
 
     // MARK: - Keyword automaton
 
-    /// Aho–Corasick automaton for `domainKeyword` matching: finds the
-    /// longest pattern occurring as a substring of the input in a single
-    /// O(D) walk, independent of the number of patterns. Replaces the
-    /// previous O(N·D) per-pattern `String.contains` loop.
-    ///
-    /// Memory model: a class-per-node tree is built during ``insert`` (so
-    /// the wide branching factor at the root stays cheap to mutate), then
-    /// at ``finalize()`` time the structure is BFS-laid-out across flat
-    /// columns — failure / dictSuffix / actionID / patternLength /
-    /// insertionOrder — plus CSR-style edges. The scratch tree is dropped
-    /// after finalize; the frozen form has no per-node heap allocation
-    /// and no per-node Dictionary, which is the dominant cost of the
-    /// class-based form.
-    ///
-    /// Lifecycle:
-    ///   1. Build: call ``insert(_:actionID:)`` for each rule.
-    ///   2. Finalize: call ``finalize()`` once after all inserts.
-    ///   3. Lookup: call ``lookup(_:)``. Read-only after finalize.
-    ///
-    /// Inserting after ``finalize()`` traps. Lookup before ``finalize()``
-    /// returns `ActionTable.noneID`. Build-once-read-many by design.
+    /// Aho–Corasick automaton for `domainKeyword`: longest substring match in one
+    /// O(D) walk. `finalize()` flattens the build tree into BFS-ordered flat columns
+    /// plus CSR edges; inserting after it traps.
     private final class KeywordAutomaton {
 
         // MARK: Build state (dropped on finalize)
@@ -53,9 +30,7 @@ class DomainRouter {
         private final class BuildNode {
             var children: [UInt8: BuildNode] = [:]
             var failure: BuildNode?
-            /// Nearest accepting ancestor reachable via failure links —
-            /// lets ``lookup`` enumerate all patterns ending at a state
-            /// without walking the full failure chain each step.
+            /// Nearest accepting ancestor via failure links; lets lookup skip the full failure chain.
             var dictSuffix: BuildNode?
             var actionID: Int16 = ActionTable.noneID
             var patternLength: UInt16 = 0
@@ -78,9 +53,7 @@ class DomainRouter {
         private var patternLength: ContiguousArray<UInt16> = []
         private var insertionOrder: ContiguousArray<Int32> = []
 
-        /// CSR edges. Node `i`'s outgoing edges live at indices
-        /// `[edgeStart[i], edgeStart[i + 1])`, sorted by byte. Length of
-        /// `edgeStart` is `nodeCount + 1` once finalized.
+        /// CSR edges: node `i`'s edges live at `[edgeStart[i], edgeStart[i + 1])`, sorted by byte.
         private var edgeStart: ContiguousArray<Int32> = []
         private var edgeByte: ContiguousArray<UInt8> = []
         private var edgeTarget: ContiguousArray<Int32> = []
@@ -90,9 +63,7 @@ class DomainRouter {
         func insert(_ pattern: String, actionID: Int16) {
             guard !pattern.isEmpty else { return }
             let bytes = Array(pattern.utf8)
-            // Domain patterns are bounded by 253 octets per RFC 1035; UInt16
-            // is comfortable headroom. Anything bigger is almost certainly
-            // garbage input — drop silently rather than truncate.
+            // RFC 1035 caps domains at 253 octets; anything past UInt16.max is garbage — drop silently.
             guard bytes.count <= Int(UInt16.max) else { return }
 
             var node = buildRoot!
@@ -113,8 +84,8 @@ class DomainRouter {
 
         // MARK: Finalize
 
-        /// Builds failure / dictSuffix links and flattens the trie into the
-        /// frozen columns above. Idempotent; subsequent inserts trap.
+        /// Builds failure/dictSuffix links and freezes the flat columns.
+        /// Idempotent; subsequent inserts trap.
         func finalize() {
             guard !finalized else { return }
             guard let root = buildRoot else {
@@ -122,12 +93,8 @@ class DomainRouter {
                 return
             }
 
-            // Single BFS pass: at each node we (a) compute failure for each
-            // child using the standard AC formula — safe because failure
-            // links always point at strictly shallower depth, which BFS has
-            // already laid out — and (b) emit the child's row into the flat
-            // columns. Children are visited in sorted-byte order so each
-            // node's CSR edge row is sorted, enabling early-exit lookup.
+            // Failure links point at strictly shallower depth, so BFS order lays out a
+            // child's failure target first; sorted-byte children keep CSR rows sorted.
             var queue: [BuildNode] = []
             queue.reserveCapacity(64)
             root.nodeID = 0
@@ -148,9 +115,8 @@ class DomainRouter {
 
                 let sortedChildren = u.children.sorted { $0.key < $1.key }
                 for (byte, v) in sortedChildren {
-                    // AC failure: walk u.failure ancestors until one has a child
-                    // for `byte` (and isn't `v` itself), else fall back to root.
-                    // u.failure is nil only for root; treat that as "stay at root".
+                    // Standard AC failure: nearest ancestor-of-failure with a
+                    // `byte` child (≠ v), else root. u.failure is nil only for root.
                     var f = u.failure
                     while let cur = f, cur.children[byte] == nil, cur !== root {
                         f = cur.failure
@@ -168,8 +134,6 @@ class DomainRouter {
                     v.nodeID = childID
                     queue.append(v)
 
-                    // `v.failure` is set above and has a nodeID because BFS
-                    // already visited it (depth strictly shallower than v).
                     nFailure.append(v.failure!.nodeID)
                     nDictSuffix.append(v.dictSuffix?.nodeID ?? -1)
                     nActionID.append(v.actionID)
@@ -197,14 +161,9 @@ class DomainRouter {
 
         // MARK: Read API
 
-        /// Returns the best-matching action ID, or `ActionTable.noneID` if
-        /// no pattern in the automaton occurs as a substring of `domain`
-        /// (the host's raw UTF-8 bytes).
+        /// Best-matching action ID, or `ActionTable.noneID` when no pattern matches.
         func lookup(_ domain: UnsafeBufferPointer<UInt8>) -> Int16 {
-            // No patterns ⇒ no possible match. After `finalize()` the node
-            // columns always carry the root row, so gate on the edge table
-            // (empty iff nothing was inserted) to skip the O(D) walk for
-            // tiers that have no keyword rules.
+            // Empty edge table means nothing was inserted; skip the walk for keyword-free tiers.
             guard finalized, !edgeByte.isEmpty else { return ActionTable.noneID }
 
             var bestID: Int16 = ActionTable.noneID
@@ -213,8 +172,6 @@ class DomainRouter {
             var nodeID: Int32 = 0
 
             for byte in domain {
-                // Walk failure links until either a child for `byte` exists
-                // or we land at root with no match.
                 var nextID = childTarget(nodeID: nodeID, byte: byte)
                 while nextID < 0 && nodeID != 0 {
                     nodeID = failure[Int(nodeID)]
@@ -222,7 +179,7 @@ class DomainRouter {
                 }
                 if nextID >= 0 { nodeID = nextID }
 
-                // Enumerate accepting nodes reachable via the dictSuffix chain.
+                // Enumerate accepting nodes via the dictSuffix chain.
                 var hit: Int32 = nodeID
                 while hit >= 0 {
                     let aid = actionID[Int(hit)]
@@ -241,9 +198,7 @@ class DomainRouter {
             return bestID
         }
 
-        /// Returns the target nodeID for an edge `byte` from `nodeID`, or
-        /// -1 if no such edge exists. Rows are sorted by byte, so the scan
-        /// exits early once `edgeByte > byte`.
+        /// Edge target for `byte` from `nodeID`, or -1; rows are sorted so the scan exits early.
         private func childTarget(nodeID: Int32, byte: UInt8) -> Int32 {
             let start = Int(edgeStart[Int(nodeID)])
             let end = Int(edgeStart[Int(nodeID) + 1])
@@ -261,14 +216,9 @@ class DomainRouter {
     // MARK: - Tier state
 
     private struct TierMatchers {
-        /// Per-tier interner. Every matcher in this tier stores `Int16`
-        /// IDs into this table and resolves back at the tier boundary
-        /// (see `lookupDomain` / `lookupIPv4` / `lookupIPv6`).
+        /// Per-tier interner; matchers store `Int16` IDs resolved back at the tier boundary.
         var actionTable = ActionTable()
 
-        /// Reverse-label trie for `domainSuffix` matching. Each edge is
-        /// one dot-separated label; walking deeper matches a
-        /// more-specific suffix.
         var suffixTrie = FlatLabelTrie<Int16>()
         var keywordAutomaton = KeywordAutomaton()
         var ipv4Trie = CIDRv4Trie()
@@ -299,16 +249,13 @@ class DomainRouter {
             ipRuleCount += 1
         }
 
-        /// Builds the keyword automaton's failure links and freezes
-        /// the suffix trie. Call once per tier after all inserts;
-        /// lookups before this return nil.
+        /// Call once per tier after all inserts; lookups before this return nil.
         mutating func finalize() {
             keywordAutomaton.finalize()
             suffixTrie.freeze()
         }
 
-        /// Domain Suffix wins over Domain Keyword: only fall back to the
-        /// keyword automaton when the suffix trie does not match.
+        /// Suffix wins over keyword.
         func lookupDomain(_ domain: UnsafeBufferPointer<UInt8>) -> RouteTarget? {
             if let id = suffixTrie.lookup(domain) {
                 return actionTable.resolve(id)
@@ -338,37 +285,26 @@ class DomainRouter {
 
     private var tiers: [TierMatchers] = Tier.allCases.map { _ in TierMatchers() }
 
-    // Proxy configurations for rule-assigned proxies
     private var configurationMap: [UUID: ProxyConfiguration] = [:]
 
-    /// Guards ``tiers`` + ``configurationMap`` against the cross-queue split of
-    /// the data plane: routing lookups now come from both ``lwipQueue`` (TCP
-    /// accept) and ``udpQueue`` (UDP new-flow), while ``loadRoutingConfiguration``
-    /// / ``reset`` rebuild the tables on ``lwipQueue`` at start/restart. Reads
-    /// take the lock briefly; the (rare, restart-only) reload holds it across
-    /// the compile so a concurrent lookup never observes a half-built tier. The
-    /// reload reads UserDefaults/JSON only — it never calls back into a data-plane
-    /// queue — so there is no lock-ordering cycle.
+    /// Guards `tiers` + `configurationMap` (lookups run on both the lwIP and UDP queues);
+    /// reloads hold the lock across the whole compile so a lookup never sees a half-built tier.
     private let routingLock = UnfairLock()
 
     // MARK: - Loading
 
-    /// Clears all routing rules and configurations.
-    /// Used when switching to global mode to ensure no stale rules affect routing.
+    /// Clears all rules and configurations (e.g. when switching to global mode).
     func reset() {
         routingLock.withLock { resetUnlocked() }
     }
 
-    /// Clears the tables. Caller must hold ``routingLock`` (or run before the
-    /// router is visible to any other queue).
+    /// Caller must hold ``routingLock``.
     private func resetUnlocked() {
         tiers = Tier.allCases.map { _ in TierMatchers() }
         configurationMap.removeAll()
     }
 
-    /// Reads routing configuration from App Group UserDefaults and compiles rules
-    /// into per-tier matching structures. Holds ``routingLock`` across the whole
-    /// compile so cross-queue lookups block until the new tables are complete.
+    /// Compiles rules from App Group UserDefaults into per-tier matchers under `routingLock`.
     func loadRoutingConfiguration() {
         routingLock.withLock { loadRoutingConfigurationLocked() }
     }
@@ -393,13 +329,8 @@ class DomainRouter {
             }
         }
 
-        // Tiered rule loading. Each tier reads from its own array. Every rule is
-        // loaded regardless of its target — including rules that point at the proxy
-        // currently selected as the default. Dropping such "redundant with the
-        // default" rules is unsound: a more-specific rule in the same tier, or any
-        // rule in a lower-priority tier, could otherwise match instead and route the
-        // connection somewhere other than the default the dropped rule intended.
-        // Keeping them preserves both within-tier specificity and cross-tier priority.
+        // Rules targeting the current default proxy still load: dropping them is
+        // unsound since a more-specific or lower-tier rule could match instead.
         if let entries = json["userRules"] as? [[String: Any]] {
             loadRuleEntries(entries, into: .user)
         }
@@ -496,7 +427,6 @@ class DomainRouter {
 
     // MARK: - Matching (public API)
 
-    /// Whether any routing rules have been loaded across any tier.
     var hasRules: Bool {
         routingLock.withLock {
             for i in tiers.indices where !tiers[i].isEmpty { return true }
@@ -507,10 +437,8 @@ class DomainRouter {
     /// Matches a domain by walking tiers in priority order. First hit wins.
     func matchDomain(_ domain: String) -> RouteTarget? {
         guard !domain.isEmpty else { return nil }
-        // Lowercase once (allocation-free when already lowercase ASCII) and
-        // hand the contiguous UTF-8 bytes to every tier, so neither the
-        // suffix trie nor the keyword automaton re-splits or re-allocates
-        // per tier. Timed outside routingLock so the monitor lock stays a leaf.
+        // Lowercase once and share the UTF-8 bytes across tiers; timed outside
+        // routingLock so the monitor lock stays a leaf.
         return PerformanceMonitor.measure(.routingDomain) {
             var lowered = Self.asciiLowercasedIfNeeded(domain)
             return routingLock.withLock {
@@ -519,9 +447,7 @@ class DomainRouter {
         }
     }
 
-    /// Walks tiers in priority order over already-lowercased UTF-8 bytes.
-    /// Iterates by index so the per-tier `TierMatchers` value isn't copied
-    /// (which would retain/release all its backing buffers) on each lookup.
+    /// Iterates by index so the per-tier `TierMatchers` value isn't copied on each lookup.
     private func matchDomainBytes(_ bytes: UnsafeBufferPointer<UInt8>) -> RouteTarget? {
         for i in tiers.indices {
             if let action = tiers[i].lookupDomain(bytes) { return action }
@@ -539,8 +465,7 @@ class DomainRouter {
                 if ip.contains(":") {
                     var addr = in6_addr()
                     guard inet_pton(AF_INET6, ip, &addr) == 1 else { return nil }
-                    // Pack the 16 address bytes into a 128-bit pair once, then reuse
-                    // it across every tier rather than re-packing per tier.
+                    // Pack to a 128-bit pair once; reuse across tiers.
                     let (hi, lo) = withUnsafeBytes(of: &addr) { raw -> (UInt64, UInt64) in
                         CIDRv6Trie.pack16(raw.bindMemory(to: UInt8.self))
                     }
@@ -559,8 +484,7 @@ class DomainRouter {
         }
     }
 
-    /// Resolves a RouteTarget to a ProxyConfiguration.
-    /// Returns nil for .direct/.reject or when the configuration UUID is not found.
+    /// Returns nil for .direct/.reject or when the configuration UUID is unknown.
     func resolveConfiguration(action: RouteTarget) -> ProxyConfiguration? {
         switch action {
         case .direct, .reject:
@@ -572,11 +496,8 @@ class DomainRouter {
 
     // MARK: - Case folding
 
-    /// Lowercases ASCII `A`–`Z` only, returning the input unchanged (no
-    /// allocation) when it is already lowercase ASCII. Any uppercase ASCII
-    /// or non-ASCII byte defers to Unicode-aware `lowercased()`, so
-    /// query-time case folding matches the `lowercased()` applied to rules
-    /// at load time.
+    /// Returns the input unchanged (no allocation) when already lowercase ASCII;
+    /// otherwise falls back to `lowercased()` to match load-time folding.
     private static func asciiLowercasedIfNeeded(_ s: String) -> String {
         for b in s.utf8 where (b >= 0x41 && b <= 0x5A) || b >= 0x80 {
             return s.lowercased()
@@ -614,7 +535,6 @@ class DomainRouter {
         return result
     }
 
-    /// Parses "addr/prefix" IPv6 CIDR into (network bytes, prefix length).
     private static func parseIPv6CIDR(_ cidr: String) -> (network: [UInt8], prefixLen: Int)? {
         let parts = cidr.split(separator: "/", maxSplits: 1)
         guard parts.count == 2,
@@ -641,18 +561,8 @@ class DomainRouter {
 
 // MARK: - Action interning
 //
-// Each matcher node used to carry an `Optional<RouteTarget>` (~32 B due
-// to the `UUID` payload in `.proxy`). For tiers with thousands of CIDR
-// nodes this dominates the per-node footprint. `ActionTable` interns
-// distinct actions into a small `Int16` ID so nodes only need to store
-// a 2-byte handle, and resolves IDs back to `RouteTarget` at the tier
-// boundary. `.direct`/`.reject` are reserved IDs so they cost no table
-// space; `.proxy(UUID)` entries dedupe by UUID. `noneID` is the "no
-// action at this node" sentinel.
-//
-// Scoped `fileprivate` (not nested in `DomainRouter`) so the CIDR
-// trie value types below can refer to its sentinel constants without
-// crossing a `private` lexical boundary.
+// Interning `RouteTarget` (~32 B with UUID payload) to an `Int16` ID keeps matcher
+// nodes small. `fileprivate` rather than nested so the CIDR tries can use the sentinels.
 fileprivate struct ActionTable {
     static let noneID: Int16 = -1
     static let directID: Int16 = 0
@@ -690,26 +600,8 @@ fileprivate struct ActionTable {
 
 // MARK: - CIDR Patricia tries
 //
-// Path-compressed binary tries for longest-prefix-match on IP addresses.
-// Each non-root node owns the bit-string of the edge from its parent;
-// runs of single-child nodes collapse into one. Compared with a bit-
-// per-node binary trie, a /24 rule contributes 1–2 nodes instead of
-// 24, and for sparse CIDR sets the total node count drops from
-// O(prefix-length × rules) to O(rules). One trie per tier; cross-tier
-// priority is handled by DomainRouter. Lookup is O(W) in the address
-// width (32 for IPv4, 128 for IPv6), independent of rule count.
-//
-// Storage: nodes are value types stored in a single contiguous `[Node]`
-// arena per trie; children are 4-byte indices instead of 8-byte class
-// references, and there is no per-node Swift class header / refcount.
-// Each node carries an `Int16` action ID into the tier's `ActionTable`
-// rather than a fat `Optional<RouteTarget>`. The result is 16 B/node
-// for IPv4 and 32 B/node for IPv6, vs. ~80 B before.
-//
-// The v4 and v6 tries are deliberately separate types: IPv4 edges only
-// need 32 bits of storage, so the v4 node stays at half the size of
-// the v6 node and the v4 hot loop becomes a tight `UInt32` walk with
-// no 128-bit shifts.
+// Path-compressed binary tries for longest-prefix match, nodes in one contiguous
+// arena; v4 and v6 are separate types so the v4 hot loop avoids 128-bit shifts.
 
 struct CIDRv4Trie {
     /// 4 + 4 + 4 + 2 + 1 + 1 padding = 16 bytes, 4-byte aligned.
@@ -725,8 +617,7 @@ struct CIDRv4Trie {
 
     // MARK: - Insert
 
-    /// Inserts a CIDR rule. More-specific prefixes override less-specific
-    /// ones during lookup; duplicate prefixes overwrite (last-write-wins).
+    /// More-specific prefixes win at lookup; duplicate prefixes overwrite.
     mutating func insert(network: UInt32, prefixLen: Int, actionID: Int16) {
         let len = UInt8(prefixLen)
         let bits = Self.maskTop(network, len)
@@ -735,10 +626,8 @@ struct CIDRv4Trie {
 
     // MARK: - Lookup
 
-    /// Looks up an IPv4 address. Returns the deepest action along the path,
-    /// or `ActionTable.noneID` if no rule matches. The walk runs over an
-    /// unsafe buffer and reads each child node once into a local, avoiding
-    /// the repeated bounds-checked subscripts on the hot path.
+    /// Deepest action along the path, or `ActionTable.noneID`. Reads each child once
+    /// into a local to avoid bounds-checked subscripts on the hot path.
     func lookup(_ ip: UInt32) -> Int16 {
         nodes.withUnsafeBufferPointer { buf in
             var bits = ip
@@ -799,8 +688,6 @@ struct CIDRv4Trie {
             let midBits = Self.maskTop(childBits, lcp)
             let existingNewBits = Self.shiftLeft(childBits, lcp)
 
-            // Allocate the mid node first so subsequent appends don't shift
-            // its index.
             var mid = Node()
             mid.bits = midBits
             mid.bitLen = lcp
@@ -852,8 +739,7 @@ struct CIDRv4Trie {
         return bits << n
     }
 
-    /// Keep only the top `n` bits; zero the rest. Used both to canonicalize
-    /// incoming rules and to extract the shared prefix when splitting an edge.
+    /// Keep only the top `n` bits; zero the rest.
     private static func maskTop(_ bits: UInt32, _ n: UInt8) -> UInt32 {
         if n == 0 { return 0 }
         if n >= 32 { return bits }
@@ -870,9 +756,8 @@ struct CIDRv4Trie {
 }
 
 struct CIDRv6Trie {
-    /// 8 + 8 + 4 + 4 + 2 + 1 + 5 padding = 32 bytes, 8-byte aligned.
-    /// Edges are MSB-first packed into a 128-bit window split across two
-    /// `UInt64`s; bits past `bitLen` are kept zero by invariant.
+    /// 8 + 8 + 4 + 4 + 2 + 1 + 5 padding = 32 bytes, 8-byte aligned. Edge bits are
+    /// MSB-first across (bitsHi, bitsLo); bits past `bitLen` stay zero by invariant.
     private struct Node {
         var bitsHi: UInt64 = 0
         var bitsLo: UInt64 = 0
@@ -895,10 +780,7 @@ struct CIDRv6Trie {
 
     // MARK: - Lookup
 
-    /// Looks up a packed 128-bit IPv6 address (see ``pack16``). Returns the
-    /// deepest action along the path, or `ActionTable.noneID`. The address
-    /// is packed once by the caller and reused across tiers; the walk runs
-    /// over an unsafe buffer and reads each child node once into a local.
+    /// Deepest action along the path for a packed 128-bit address, or `ActionTable.noneID`.
     func lookup(hi hi0: UInt64, lo lo0: UInt64) -> Int16 {
         nodes.withUnsafeBufferPointer { buf in
             var hi = hi0
@@ -1042,9 +924,7 @@ struct CIDRv6Trie {
         return cap
     }
 
-    /// Pack up to 16 big-endian bytes into a (hi, lo) 128-bit pair. Callable
-    /// from ``DomainRouter`` so a v6 address is packed once per lookup and
-    /// shared across tiers.
+    /// Packs up to 16 big-endian bytes into a (hi, lo) 128-bit pair.
     static func pack16(_ buf: UnsafeBufferPointer<UInt8>) -> (UInt64, UInt64) {
         var hi: UInt64 = 0
         var lo: UInt64 = 0

@@ -7,74 +7,25 @@
 
 import Foundation
 
-/// Debug-only instrument for the data plane's send/receive path.
-///
-/// Throughput and latency are governed by a chain of "heavy load" stages —
-/// socket syscalls, TLS record crypto, routing-rule evaluation, the MITM
-/// engine, the proxy transports — plus several bounded buffers/queues that
-/// silently throttle or drop when overwhelmed. ``ConnectionMetrics`` only tracks
-/// connection *establishment* (dial/handshake) for the home-screen cards; it
-/// says nothing about which stage is slow once data is flowing, or where
-/// backpressure builds. This fills that gap with three record types:
-///
-/// - **Spans** (``Component``) — a timed interval around a stage. ``measure(_:_:)``
-///   wraps a synchronous body; ``span(_:)`` + ``Span/stop()`` brackets a
-///   completion-handler boundary. Aggregated into count / avg / p50 / p99 / max.
-/// - **Gauges** (``Gauge``) — a sampled level (a backlog size, a queue depth),
-///   tracked as current / peak / mean with rising-edge high-water warnings.
-/// - **Events** (``Event``) — a counter for discrete overwhelm incidents
-///   (a drop, a stall retry, an eviction).
-///
-/// Design constraints
-/// ==================
-/// - **Debug-only, zero-cost in release.** Every recording body is `#if DEBUG`.
-///   The public API (``measure(_:_:)`` / ``span(_:)`` / ``gauge(_:_:highWater:)``
-///   / ``event(_:)`` / ``start()`` / ``stop()``) exists in all builds but, in
-///   release, compiles to the bare work / a no-op — call sites need no
-///   `#if DEBUG`. ``Span`` is an empty, zero-size struct in release so the
-///   optimizer elides it entirely (mirrors how ``MetricTimer`` is used
-///   unconditionally at call sites).
-/// - **Opt-in by category, to control noise.** ``enabledCategories`` gates *both*
-///   recording and printing, so a disabled ``Category`` costs ~nothing even in
-///   debug. Set it via the ``defaultEnabledCategories`` constant in this file, or
-///   launch with the `ANYWHERE_PERF` environment variable (e.g.
-///   `ANYWHERE_PERF=tls,backpressure`, or `all`). The constant is the reliable
-///   control for the system-launched Network Extension, where a shell/scheme env
-///   var may not reach the tunnel process.
-/// - **Thread-safe leaf lock, never held across work or logging.** Recorded from
-///   every data-plane queue (`lwipQueue`, `udpQueue`, per-socket `ioQueue`, the
-///   QUIC queue, `scriptQueue`). A single ``UnfairLock`` guards the aggregates;
-///   it is taken/released *inside each record call* — never across the timed
-///   body (so nested spans can't self-deadlock os_unfair_lock) and never across
-///   an ``AnywhereLogger`` call. ``report()`` snapshots under the lock, releases,
-///   then formats and logs (like ``ConnectionMetrics/snapshot()``).
-///
-/// `nonisolated` (like the other networking primitives) so it stays off the main
-/// actor under the project's default-`MainActor` isolation; safety comes from the
-/// lock, not the actor.
+/// Debug-only instrument for the data plane: timed spans, sampled gauges, and
+/// overwhelm counters, opt-in by category. The lock is a leaf lock never held
+/// across timed work or logging, so nested spans cannot self-deadlock.
 nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Category (the print/enable filter)
 
-    /// Coarse groupings used to opt instrumentation in and out. Each ``Component``
-    /// / ``Gauge`` / ``Event`` belongs to exactly one. Flip categories on via
-    /// ``defaultEnabledCategories`` or the `ANYWHERE_PERF` env var so you only see
-    /// the stages you're investigating.
+    /// Gates recording and printing; enable via `defaultEnabledCategories` or
+    /// the `ANYWHERE_PERF` env var.
     struct Category: OptionSet, Sendable {
         let rawValue: Int
-        /// Raw socket send/receive syscalls (TCP / UDP / QUIC).
         static let socket       = Category(rawValue: 1 << 0)
-        /// TLS record crypto and the TLS handshake.
         static let tls          = Category(rawValue: 1 << 1)
-        /// Proxy dial/handshake and per-chunk proxy send/receive latency.
         static let proxy        = Category(rawValue: 1 << 2)
-        /// Domain/IP routing-rule evaluation.
         static let routing      = Category(rawValue: 1 << 3)
-        /// The MITM engine — rewrite passes and user-script execution.
         static let mitm         = Category(rawValue: 1 << 4)
-        /// Per-connection TCP up/downlink pipeline health (backlogs, stalls).
+        /// Per-connection TCP pipeline health (backlogs, stalls).
         static let pipeline     = Category(rawValue: 1 << 5)
-        /// System-wide overwhelm — output queue depth, UDP flow table, drops.
+        /// System-wide overwhelm (output queue depth, UDP flow table, drops).
         static let backpressure = Category(rawValue: 1 << 6)
 
         static let all: Category = [
@@ -84,16 +35,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Component (timed spans)
 
-    /// A timed stage in the send/receive path. To add one: append a case, then a
-    /// row in ``category``, ``displayName``, and ``slowThresholdNanos`` — storage
-    /// (sized to `allCases.count`) and reporting then pick it up unchanged.
-    ///
-    /// Some spans are **network-bound** (a handshake round-trip, a proxy
-    /// send/receive that waits on a flow-control window): their elapsed time is
-    /// dominated by the wire, not by CPU, so a per-span "slow" warning would be
-    /// noise. Those carry `slowThresholdNanos == .max` (never warn) but are still
-    /// aggregated — the p50/p99/max of `proxy.recv` is exactly how you spot an
-    /// unresponsive upstream.
+    /// A timed stage in the send/receive path.
     enum Component: Int, CaseIterable, Sendable {
         case socketSendTCP
         case socketReceiveTCP
@@ -149,9 +91,8 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
             }
         }
 
-        /// A single span slower than this logs an inline warning (rate-limited).
-        /// `.max` disables the warning for network-bound spans that legitimately
-        /// wait on the wire (handshakes, proxy send/receive).
+        /// Spans slower than this log a rate-limited warning; `.max` disables
+        /// it for network-bound spans that legitimately wait on the wire.
         var slowThresholdNanos: UInt64 {
             switch self {
             case .socketSendTCP, .socketReceiveTCP, .socketSendUDP,
@@ -164,8 +105,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
             case .mitmRewrite:
                 return 5_000_000          // 5 ms per rewrite pass
             case .mitmScript:
-                return 5_000_000_000      // 5 s — heavy JS is legitimate; the
-                                          // MITMScriptWatchdog owns the hard cap
+                return 5_000_000_000      // 5 s — MITMScriptWatchdog owns the hard cap
             case .tlsHandshake, .proxyHandshake, .proxySend, .proxyReceive:
                 return .max               // network-bound: aggregate, never warn
             }
@@ -174,9 +114,8 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Gauge (sampled levels)
 
-    /// A sampled level — a backlog or queue depth. The high-water threshold is
-    /// supplied at the *call site* (from `TunnelConstants`, which is
-    /// Network-Extension-only), so this `Shared` type stays free of NE symbols.
+    /// A sampled level (backlog, queue depth). High-water thresholds come from
+    /// call sites so this `Shared` type stays free of NE-only symbols.
     enum Gauge: Int, CaseIterable, Sendable {
         case tcpDownlinkBacklog
         case tcpUploadBacklog
@@ -206,9 +145,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Event (overwhelm counters)
 
-    /// A discrete overwhelm incident: a drop, a stall retry, an eviction. These
-    /// already drive a one-off log line in the data plane; counting them here
-    /// turns "it happened" into "it happened N times this session".
+    /// A counted overwhelm incident (drop, stall retry, eviction).
     enum Event: Int, CaseIterable, Sendable {
         case downlinkStallRetry
         case lwipWriteFatal
@@ -238,16 +175,10 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Configuration (what prints)
 
-    /// **Edit this to choose what you want to see.** Empty = silent (the default,
-    /// so the monitor never adds noise until asked). Examples:
-    /// `[.tls, .backpressure]`, or `.all`. Overridden at launch by the
-    /// `ANYWHERE_PERF` env var when present.
+    /// Edit to control what prints (empty = silent); `ANYWHERE_PERF` overrides.
     static let defaultEnabledCategories: Category = []
 
-    /// The resolved filter: ``defaultEnabledCategories``, overridden by the
-    /// `ANYWHERE_PERF` environment variable when set (comma/space-separated
-    /// category names, or `all` / `none`). Resolved once, on first use. Empty in
-    /// release — nothing records or prints.
+    /// Resolved once at launch; always empty in release.
     static let enabledCategories: Category = {
         #if DEBUG
         return Category.resolveFromEnvironment(default: defaultEnabledCategories)
@@ -258,9 +189,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Public API — spans
 
-    /// Times `body` as a ``Component`` span. In release (and for a disabled
-    /// category) this is exactly `body()` — no timing, no overhead. Use for any
-    /// synchronous stage (crypto, routing, a non-blocking syscall, a rewrite pass).
+    /// Times `body` as a span; in release (or a disabled category) this is exactly `body()`.
     @inline(__always)
     static func measure<T>(_ component: Component, _ body: () throws -> T) rethrows -> T {
         #if DEBUG
@@ -274,9 +203,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
         #endif
     }
 
-    /// Opens a ``Component`` span for a completion-handler / async boundary;
-    /// balance it with exactly one ``Span/stop()`` (typically inside the single
-    /// completion wrapper). In release ``Span`` is a zero-size no-op.
+    /// Opens a span across a completion-handler boundary; balance with exactly one `stop()`.
     @inline(__always)
     static func span(_ component: Component) -> Span {
         #if DEBUG
@@ -286,9 +213,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
         #endif
     }
 
-    /// A half-open span token. Created by ``PerformanceMonitor/span(_:)``, closed
-    /// by ``stop()``. Empty (zero-size) in release so it and its `stop()` are
-    /// elided at the call site.
+    /// A half-open span token; zero-size in release so the optimizer elides it.
     struct Span: Sendable {
         #if DEBUG
         fileprivate let component: Component
@@ -306,9 +231,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Public API — gauges & events
 
-    /// Samples a ``Gauge`` level. `highWater` (from a `TunnelConstants` value at
-    /// the call site) triggers a one-shot rising-edge warning when crossed; pass
-    /// `0` to disable that warning. No-op in release / disabled category.
+    /// Samples a gauge; `highWater > 0` arms a rising-edge warning. No-op in release.
     @inline(__always)
     static func gauge(_ gauge: Gauge, _ value: Int, highWater: Int = 0) {
         #if DEBUG
@@ -317,7 +240,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
         #endif
     }
 
-    /// Increments an ``Event`` counter. No-op in release / disabled category.
+    /// Increments an event counter; no-op in release.
     @inline(__always)
     static func event(_ event: Event) {
         #if DEBUG
@@ -328,27 +251,23 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     // MARK: - Public API — lifecycle
 
-    /// Begins a measurement session: clears prior aggregates and arms the
-    /// periodic report. Hooked at tunnel start (alongside `AnywhereLogger.logSink`
-    /// install). No-op in release, or when no category is enabled.
+    /// Clears aggregates and arms the periodic report; no-op in release.
     static func start() {
         #if DEBUG
         shared.startReporting()
         #endif
     }
 
-    /// Ends the session: prints a final report and resets. Hooked at tunnel stop.
+    /// Prints a final report and resets.
     static func stop() {
         #if DEBUG
         shared.stopReporting()
         #endif
     }
 
-    /// Prints the current report immediately (in addition to the periodic one).
+    /// Prints the current report immediately without disturbing the periodic window.
     static func report() {
         #if DEBUG
-        // A peek at the current window; does not reset, so it won't disturb the
-        // periodic windowing.
         shared.emitReport(reason: "on-demand", resetAfter: false)
         #endif
     }
@@ -359,27 +278,21 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
     static let shared = PerformanceMonitor()
 
-    /// Log2 histogram resolution: bucket `i` (i ≥ 1) holds spans in
-    /// `[2^(i-1), 2^i)` nanoseconds; bucket 0 holds zero. 34 buckets cover up to
-    /// ~2^33 ns ≈ 8.6 s, which saturates the top bucket.
+    /// Log2 histogram: bucket `i` holds `[2^(i-1), 2^i)` ns, bucket 0 holds zero;
+    /// 34 buckets cover ~8.6 s (top bucket saturates).
     private static let bucketCount = 34
-    /// Periodic report cadence.
     private static let reportInterval: DispatchTimeInterval = .seconds(5)
 
     private let lock = UnfairLock()
     private let logger = AnywhereLogger(category: "Perf")
 
     private var spanStats: [SpanStat]
-    /// Flat `componentCount × bucketCount` histogram, indexed
-    /// `component.rawValue * bucketCount + bucket` — one allocation, no per-stat
-    /// nested arrays.
+    /// Flat array indexed `component.rawValue * bucketCount + bucket`.
     private var spanBuckets: [UInt32]
     private var gaugeStats: [GaugeStat]
     private var eventCounts: [UInt64]
-    /// Last slow-warning timestamp per component (ticks), for rate-limiting.
-    private var lastSlowWarnTicks: [UInt64]
-    /// One second in continuous-time ticks — the per-component slow-warn floor.
-    private let slowWarnIntervalTicks: UInt64
+    private var lastSlowWarnTicks: [UInt64]          // per-component rate-limiting
+    private let slowWarnIntervalTicks: UInt64          // 1 s floor between slow warns
 
     private let timerQueue = DispatchQueue(label: "com.argsment.Anywhere.perf", qos: .utility)
     private var reportTimer: DispatchSourceTimer?
@@ -461,9 +374,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
                        repeating: Self.reportInterval,
                        leeway: .seconds(1))
         timer.setEventHandler { [weak self] in
-            // Each periodic line reflects only the window since the last one:
-            // snapshot-and-reset atomically so successive reports show recent
-            // behaviour instead of a diluted lifetime average.
+            // Reset each window so reports aren't diluted lifetime averages.
             self?.emitReport(reason: "window", resetAfter: true)
         }
         reportTimer = timer
@@ -473,15 +384,11 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
     private func stopReporting() {
         reportTimer?.cancel()
         reportTimer = nil
-        // Final window since the last periodic report; the reset clears state
-        // for the next session.
         emitReport(reason: "final", resetAfter: true)
     }
 
-    /// Snapshots all state under the lock — optionally resetting it in the same
-    /// critical section, so no records are lost across a window boundary — then
-    /// releases the lock and formats/logs. String-building and `os_log` never
-    /// run under the hot-path lock.
+    /// Snapshots (and optionally resets) in one critical section; string-building
+    /// and logging happen after the lock is released.
     private func emitReport(reason: String, resetAfter: Bool) {
         let enabled = Self.enabledCategories
         guard !enabled.isEmpty else { return }
@@ -523,7 +430,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
         logger.debug("[perf] ── report (\(reason)) ──\n" + lines.joined(separator: "\n"))
     }
 
-    /// Zeroes all aggregates. Caller must hold ``lock``.
+    /// Zeroes all aggregates. Caller must hold `lock`.
     private func resetLocked() {
         for i in spanStats.indices { spanStats[i] = SpanStat() }
         for i in spanBuckets.indices { spanBuckets[i] = 0 }
@@ -572,12 +479,8 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
         return min(bucketCount - 1, bits)
     }
 
-    /// Approximate percentile from the log2 histogram: the arithmetic midpoint
-    /// of the bucket in which the p-th sample falls (the bucket spans
-    /// `[2^(i-1), 2^i)` ns), clamped to the observed `max` so a coarse top
-    /// bucket can never read higher than the largest real sample (a percentile
-    /// is by definition ≤ max). The buckets are 2× wide, so treat p50/p99 as a
-    /// band, not an exact figure — `avg` and `max` are exact.
+    /// Approximate percentile: the midpoint of the log2 bucket holding the p-th
+    /// sample, clamped to the observed `max` — treat as a band, not exact.
     private static func percentileNanos(_ buckets: [UInt32], base: Int, count: UInt64, max maxNanos: UInt64, p: Double) -> UInt64 {
         guard count > 0 else { return 0 }
         let target = UInt64((Double(count) * p).rounded(.up))
@@ -602,7 +505,6 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
         return String(format: "%.2fs", Double(ns) / 1_000_000_000)
     }
 
-    /// Right-pads a metric name to a fixed width for legible column alignment.
     private static func pad(_ name: String) -> String {
         let width = 24
         return name.count >= width ? name : name + String(repeating: " ", count: width - name.count)
@@ -632,10 +534,8 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
 
 #if DEBUG
 private extension PerformanceMonitor.Category {
-    /// Parses the `ANYWHERE_PERF` env var into a category set. Recognizes
-    /// comma/space-separated names (`socket`, `tls`, `proxy`, `routing`, `mitm`,
-    /// `pipeline`, `backpressure`), plus `all` and `none`. Falls back to
-    /// `fallback` when the variable is unset.
+    /// Parses `ANYWHERE_PERF` (comma/space-separated names, or `all`/`none`);
+    /// falls back when unset.
     static func resolveFromEnvironment(default fallback: PerformanceMonitor.Category) -> PerformanceMonitor.Category {
         guard let raw = ProcessInfo.processInfo.environment["ANYWHERE_PERF"]?
             .trimmingCharacters(in: .whitespacesAndNewlines)

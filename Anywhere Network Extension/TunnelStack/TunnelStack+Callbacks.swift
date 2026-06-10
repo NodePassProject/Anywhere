@@ -25,10 +25,7 @@ private final class RejectFloodTracker {
     func shouldDrop(host: String) -> Bool {
         let now = CFAbsoluteTimeGetCurrent()
         let cutoff = now - window
-        // Reap fully-stale hosts on demand (at most once per window) so the key
-        // set stays bounded by "distinct hosts rejected in the last `window`
-        // seconds" instead of growing for the process lifetime — a reject /
-        // ad-block rule set can otherwise match thousands of unique domains.
+        // Reap stale hosts at most once per window so the key set stays bounded.
         if now - lastSweep > window {
             timestamps = timestamps.filter { _, ts in ts.contains { $0 >= cutoff } }
             lastSweep = now
@@ -49,23 +46,11 @@ extension TunnelStack {
 
     /// Registers C callbacks that route lwIP events through ``shared``.
     func registerCallbacks() {
-        // Output: lwIP → tunnel packet flow (batched)
-        // Accumulates output packets during synchronous lwip_bridge_input processing,
-        // then flushes them all in a single writePackets call. This reduces kernel
-        // crossings from N per batch to 1, speeding up ACK delivery to the OS TCP
-        // stack and improving upload throughput.
-        //
-        // The bridge hands us either a pbuf payload (zero-copy single-pbuf path,
-        // released via pbuf_free) or a heap buffer holding the flattened chain
-        // (released via mem_free). We wrap the pointer with `Data(bytesNoCopy:...)`
-        // so writePackets reads directly from lwIP's memory — saving one
-        // payload-sized memcpy per packet vs. the previous `Data(bytes:count:)`.
-        //
-        // The `Data` deallocator is `.none`; ``pendingReleases`` (appended
-        // under the same lock) is the actual owner of the pbuf/heap buffer
-        // and is fired in a single ``lwipQueue.async`` per drain iteration.
-        // Releases must stay on lwipQueue because `pbuf_free` / `mem_free`
-        // mutate per-pool freelists with no locking under NO_SYS=1.
+        // Output: lwIP → tunnel packet flow, batched. `Data(bytesNoCopy:)` with
+        // a `.none` deallocator lets writePackets read lwIP's memory directly;
+        // ``pendingReleases`` is the actual owner, and releases must stay on
+        // lwipQueue (pbuf_free/mem_free mutate freelists with no locking under
+        // NO_SYS=1).
         lwip_bridge_set_output_fn { data, len, isIPv6, releaseCtx, release in
             guard let shared = TunnelStack.shared, let data, let release else { return }
             let byteCount = Int(len)
@@ -73,11 +58,6 @@ extension TunnelStack {
             let packet = Data(bytesNoCopy: mutableData, count: byteCount, deallocator: .none)
             let proto: NSNumber = isIPv6 != 0 ? TunnelStack.ipv6Proto : TunnelStack.ipv4Proto
             let pending = TunnelStack.PendingRelease(ctx: releaseCtx, fn: release)
-            // Append under the buffer lock and decide whether to start a
-            // drain on ``outputQueue``. The drain loop owns the writePackets
-            // calls and pulls subsequent batches under the same lock — no
-            // round-trip via ``lwipQueue`` between batches, so the drain
-            // cadence is no longer gated by lwIP work on ``lwipQueue``.
             let needsKick: Bool = shared.outputBufferLock.withLock {
                 shared.outputPackets.append(packet)
                 shared.outputProtocols.append(proto)
@@ -91,22 +71,16 @@ extension TunnelStack {
             }
         }
 
-        // TCP SYN filter: reject `.reject`-classified destinations at SYN
-        // time so we never complete the 3WHS for them. Saves the SYN-ACK +
-        // final ACK + accept_cb path for every rejected connection and
-        // gives the client a clean ECONNREFUSED instead of a closed
-        // post-handshake connection. SNI-based rejects are not visible
-        // here (no ClientHello yet) and still land in `TCPConnection`.
+        // TCP SYN filter: reject `.reject` destinations at SYN time — never
+        // completes the 3WHS, giving the client a clean ECONNREFUSED. SNI-based
+        // rejects (no ClientHello yet) still land in `TCPConnection`.
         lwip_bridge_set_tcp_syn_filter_fn { _, _, dstIP, dstPort, isIPv6 in
             guard let shared = TunnelStack.shared, let dstIP else {
                 return Int32(LWIP_BRIDGE_SYN_PASS)
             }
             let dstIPString = TunnelStack.ipAddrToString(dstIP, isIPv6: isIPv6 != 0)
 
-            // Helper: log + record + return DROP if the host is flooding,
-            // RESET otherwise. The tracker keys on the human-readable host
-            // (domain for fake-IP rejects, IP literal for IP-CIDR rejects),
-            // matching what the user sees in the request log.
+            // DROP if the host is flooding, RESET otherwise.
             func reject(host: String, reason: String) -> Int32 {
                 shared.requestLog.record(proto: "TCP", host: host, port: dstPort, routeTarget: .reject)
                 if rejectFloodTracker.shouldDrop(host: host) {
@@ -134,9 +108,8 @@ extension TunnelStack {
             }
         }
 
-        // TCP accept: create a new TCPConnection for each incoming connection.
-        // `.reject` cases were already handled at SYN by the filter above and
-        // never reach this callback. SNI-based rejects are decided later.
+        // TCP accept: create a TCPConnection per incoming connection. `.reject`
+        // was already handled by the SYN filter.
         lwip_bridge_set_tcp_accept_fn { srcIP, srcPort, dstIP, dstPort, isIPv6, pcb in
             guard let shared = TunnelStack.shared,
                   let pcb, let dstIP,
@@ -149,23 +122,18 @@ extension TunnelStack {
 
             var dstHost = dstIPString
             var connectionConfiguration = defaultConfiguration
-            // Committed routing identity. Defaults to the active default outbound
-            // (no rule matched); overridden per branch below. Drives both the
-            // dial path (via ``TCPConnection``) and traffic accounting.
+            // Committed routing identity; drives the dial path and accounting.
             var routeTarget = shared.defaultRouteTarget
-            // Enable TLS ClientHello sniffing only on real-IP connections.
-            // Fake-IP connections already know the domain via the fake-IP pool;
-            // sniffing would add latency for no benefit (and could miscategorize
-            // if the SNI disagrees with the DNS-resolved name).
+            // Sniff TLS ClientHello only on real-IP connections — fake-IP ones
+            // already know the domain, and an SNI disagreeing with the
+            // DNS-resolved name could miscategorize.
             var sniffSNI = false
 
-            // True until a routing rule matches — i.e. the connection falls
-            // through to the default outbound. Surfaced in the request log.
+            // True until a routing rule matches — i.e. the default outbound is used.
             var viaDefault = true
 
             switch shared.resolveFakeIP(dstIPString, dstPort: dstPort, proto: "TCP") {
             case .passthrough:
-                // Real IP — check IP CIDR rules. `.reject` was filtered at SYN.
                 if let action = shared.domainRouter.matchIP(dstIPString) {
                     viaDefault = false
                     switch action {
@@ -186,8 +154,7 @@ extension TunnelStack {
                 sniffSNI = true
             case .resolved(let domain, let target, let configuration):
                 dstHost = domain
-                // `target == nil` means no domain rule matched — keep the default
-                // route already assigned above.
+                // `target == nil` → no domain rule matched; keep the default route.
                 switch target {
                 case .direct:
                     routeTarget = .direct
@@ -217,10 +184,8 @@ extension TunnelStack {
                 viaDefault: viaDefault
             )
 
-            // Fake-IP MITM: domain is known at accept time, but we still
-            // need the ClientHello bytes to drive ``TLSServer``. Force
-            // sniffing on so the bytes land in ``TCPConnection.pendingData``;
-            // the connection wakes ``mitmEnabled`` once ``applySNI`` runs.
+            // Fake-IP MITM: the domain is known, but TLSServer still needs the
+            // ClientHello bytes — force sniffing on so they get buffered.
             if shared.mitmEnabled && shared.mitmPolicy.matches(dstHost) {
                 sniffSNI = true
             }
@@ -272,7 +237,6 @@ extension TunnelStack {
     // MARK: - Fake-IP Resolution
 
     /// Result of resolving a fake IP to its domain and routing configuration.
-    /// Shared by the TCP accept callback and the Swift UDP path (``handleInboundUDP``).
     enum FakeIPResolution {
         /// IP is not a fake IP — use original IP as host and the default route.
         case passthrough
@@ -280,15 +244,13 @@ extension TunnelStack {
         /// domain rule matched (caller uses the default). `configuration` is the
         /// dialing config for a `.proxy` target.
         case resolved(domain: String, target: RouteTarget?, configuration: ProxyConfiguration?)
-        /// Connection should be dropped (rejected by rule). Carries the
-        /// resolved domain so the request log can record the rejected host.
+        /// Rejected by rule; carries the resolved domain for the request log.
         case drop(domain: String)
         /// Fake IP not in pool (stale from previous session) — drop and signal unreachable.
         case unreachable
     }
 
     /// Resolves a destination IP through the fake-IP pool and domain router.
-    /// Shared by the TCP accept callback and the Swift UDP path (``handleInboundUDP``).
     func resolveFakeIP(_ ip: String, dstPort: UInt16, proto: String) -> FakeIPResolution {
         guard FakeIPPool.isFakeIP(ip) else { return .passthrough }
 

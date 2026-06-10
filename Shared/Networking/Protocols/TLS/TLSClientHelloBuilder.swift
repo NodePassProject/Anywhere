@@ -17,7 +17,6 @@ struct TLSClientHelloBuilder {
         0x8A8A, 0x9A9A, 0xAAAA, 0xBABA, 0xCACA, 0xDADA, 0xEAEA, 0xFAFA
     ]
 
-    /// Returns a GREASE value deterministically selected by `seed`.
     private static func grease(_ seed: UInt8) -> UInt16 {
         greaseTable[Int(seed) % greaseTable.count]
     }
@@ -28,7 +27,6 @@ struct TLSClientHelloBuilder {
 
     // MARK: - Deterministic Pseudo-Random Derivation
 
-    /// Derives deterministic pseudo-random bytes from the connection random + label.
     private static func derivePRBytes(from random: Data, label: String, length: Int) -> Data {
         var result = Data()
         var counter: UInt8 = 0
@@ -253,8 +251,7 @@ struct TLSClientHelloBuilder {
 
     // MARK: - BoringSSL Padding
 
-    /// Calculates BoringSSL-style padding: if the full record (5 + ClientHello) is 256–511 bytes,
-    /// pad to exactly 512. Returns the padding data length (excluding extension header).
+    /// BoringSSL-style padding: 256–511-byte ClientHellos pad to exactly 512; returns the padding data length (excluding the extension header).
     private static func boringPaddingDataLength(clientHelloLen: Int) -> Int? {
         let unpaddedLen = clientHelloLen
         guard unpaddedLen > 0xFF && unpaddedLen < 0x200 else { return nil }
@@ -264,8 +261,7 @@ struct TLSClientHelloBuilder {
 
     // MARK: - Chrome Extension Shuffling
 
-    /// Shuffles extension data blocks deterministically for the Chrome fingerprint.
-    /// GREASE extensions and padding are kept at their original positions.
+    /// Deterministically shuffles extensions for the Chrome fingerprint; GREASE and padding keep their positions.
     private static func shuffleChromeExtensions(_ exts: inout [Data], random: Data) {
         var fixed = Set<Int>()
         for i in 0..<exts.count {
@@ -297,7 +293,6 @@ struct TLSClientHelloBuilder {
 
     // MARK: - P256 Key Derivation (Firefox)
 
-    /// Derives a deterministic P256 public key from the connection random.
     private static func deriveP256PublicKey(from random: Data) -> Data {
         let seed = Data(SHA256.hash(data: random + Data("p256-fingerprint".utf8)))
         if let key = try? P256.KeyAgreement.PrivateKey(rawRepresentation: seed) {
@@ -308,35 +303,23 @@ struct TLSClientHelloBuilder {
 
     // MARK: - X25519MLKEM768 Key Share Generation
 
-    /// Generates an X25519MLKEM768 hybrid key share for fingerprinting.
-    ///
-    /// The key share data is 1216 bytes: 1184 bytes (ML-KEM-768 encapsulation
-    /// key) + 32 bytes of the real X25519 public key. Servers that don't support
-    /// ML-KEM will negotiate using the separate X25519 key share entry, so the
-    /// ML-KEM portion is never actually used for key exchange.
-    ///
-    /// Concatenates ML-KEM-768 encapsulation key + X25519 public key into
-    /// a hybrid key share (1216 bytes total).
+    /// 1216-byte X25519MLKEM768 hybrid key share: 1184-byte ML-KEM-768 encapsulation key + 32-byte X25519 key.
     private static func mlkem768HybridKeyShare(mlkemEncapsulationKey: Data, publicKey: Data) -> Data {
-        var hybrid = mlkemEncapsulationKey  // 1184 bytes
-        hybrid.append(publicKey)             // 32 bytes
-        return hybrid                        // 1216 bytes total
+        var hybrid = mlkemEncapsulationKey
+        hybrid.append(publicKey)
+        return hybrid
     }
 
     // MARK: - BoringGREASEECH (Chrome style)
 
-    /// Builds a GREASE ECH extension matching BoringSSL's default.
-    /// KDF=HKDF-SHA256(0x0001), AEAD=AES-128-GCM(0x0001).
-    /// Payload length picked from [128,160,192,224] + 16 AEAD overhead.
+    /// GREASE ECH matching BoringSSL: HKDF-SHA256, AES-128-GCM, payload length from [128,160,192,224] plus 16-byte AEAD overhead.
     private static func boringGREASEECH(random: Data) -> Data {
         let echPayloadLens = [144, 176, 208, 240]
         let echPayloadLen = echPayloadLens[Int(random[30]) % echPayloadLens.count]
         return greaseECHExt(random: random, kdfId: 0x0001, aeadId: 0x0001, payloadLen: echPayloadLen)
     }
 
-    /// Builds a GREASE ECH extension matching Firefox's style.
-    /// KDF=HKDF-SHA256, AEAD randomly chosen between AES-128-GCM and ChaCha20-Poly1305.
-    /// Fixed payload length of 239.
+    /// GREASE ECH matching Firefox: HKDF-SHA256, AEAD picked between AES-128-GCM and ChaCha20-Poly1305, fixed 239-byte payload.
     private static func firefoxGREASEECH(random: Data) -> Data {
         let echAead: UInt16 = (random[30] % 2 == 0) ? 0x0001 : 0x0003
         return greaseECHExt(random: random, kdfId: 0x0001, aeadId: echAead, payloadLen: 239)
@@ -344,11 +327,7 @@ struct TLSClientHelloBuilder {
 
     // MARK: - Fingerprinted ClientHello Builder
 
-    /// Build a TLS ClientHello with browser-specific fingerprint emulation.
-    ///
-    /// Each fingerprint produces a ClientHello matching the corresponding browser's
-    /// real TLS implementation (cipher suites, extensions, ordering) as defined by
-    /// the uTLS library.
+    /// Builds a TLS ClientHello emulating the given browser fingerprint (cipher suites, extensions, ordering per uTLS).
     static func buildRawClientHello(
         fingerprint: TLSFingerprint,
         random: Data,
@@ -386,7 +365,6 @@ struct TLSClientHelloBuilder {
         )
     }
 
-    /// Assembles a complete ClientHello handshake message from pre-built parts.
     private static func assembleClientHello(
         random: Data,
         sessionId: Data,
@@ -457,11 +435,8 @@ struct TLSClientHelloBuilder {
 
     // MARK: - Non-Browser (minimal, honest client)
 
-    /// Minimal, standards-correct TLS 1.3 (+ 1.2 fallback) ClientHello for REAL
-    /// handshakes where correctness matters and camouflage does not — e.g. the
-    /// MITM outer leg. Advertises only capabilities we actually implement: no
-    /// GREASE, no ALPS, no certificate compression, no ECH, no padding, no
-    /// extension shuffle. X25519-only.
+    /// Minimal, standards-correct TLS 1.3/1.2 ClientHello for real handshakes (e.g. the MITM outer
+    /// leg): advertises only implemented capabilities — no GREASE, ALPS, ECH, padding, or shuffle; X25519 only.
     private static func buildNonBrowser(
         serverName: String, publicKey: Data, alpn: [String]?
     ) -> (Data, Data, Bool) {
@@ -1059,7 +1034,6 @@ struct TLSClientHelloBuilder {
     private static func buildAndroid11(
         random: Data, serverName: String, publicKey: Data, alpn: [String]?
     ) -> (Data, Data, Bool) {
-        // Android 11 OkHttp: no GREASE, no TLS 1.3, minimal extensions
         let suites = cipherSuitesData([
             0xC02B, 0xC02C,                                   // ECDHE ECDSA AES-GCM
             0xCCA9,                                            // ECDHE ECDSA ChaCha20
@@ -1153,7 +1127,6 @@ struct TLSClientHelloBuilder {
     private static func build360_7(
         random: Data, serverName: String, publicKey: Data, alpn: [String]?
     ) -> (Data, Data, Bool) {
-        // 360 Browser 7.5: legacy TLS 1.0-1.2 only, no GREASE, no TLS 1.3
         let suites = cipherSuitesData([
             0xC00A,                                            // ECDHE_ECDSA_AES_256_CBC_SHA
             0xC014,                                            // ECDHE_RSA_AES_256_CBC_SHA
@@ -1205,16 +1178,7 @@ struct TLSClientHelloBuilder {
 
     // MARK: - QUIC ClientHello
 
-    /// Builds a TLS 1.3 ClientHello for QUIC transport (no TLS record wrapping).
-    ///
-    /// The ClientHello includes:
-    /// - SNI extension for the server name
-    /// - ALPN extension (typically "h3")
-    /// - Supported versions (TLS 1.3 only)
-    /// - Key share (P-256)
-    /// - QUIC transport parameters extension (0x39)
-    ///
-    /// Returns a raw TLS Handshake message (type + 3-byte length + body).
+    /// Builds a raw TLS 1.3 ClientHello handshake message for QUIC (no record wrapping).
     static func buildQUICClientHello(
         random: Data,
         serverName: String,
@@ -1223,14 +1187,12 @@ struct TLSClientHelloBuilder {
         quicTransportParams: Data,
         pskExtension: Data? = nil
     ) -> Data {
-        // TLS 1.3 cipher suites
         let suites = cipherSuitesData([
             0x1301, // TLS_AES_128_GCM_SHA256
             0x1302, // TLS_AES_256_GCM_SHA384
             0x1303, // TLS_CHACHA20_POLY1305_SHA256
         ])
 
-        // Extensions
         var extsData = Data()
         extsData.append(buildSNIExtension(serverName: serverName))
         extsData.append(supportedGroupsExt([0x001D, 0x0017])) // x25519, secp256r1
@@ -1265,7 +1227,6 @@ struct TLSClientHelloBuilder {
         )
     }
 
-    /// Wrap a ClientHello message in a TLS record.
     static func wrapInTLSRecord(clientHello: Data) -> Data {
         var record = Data()
         record.append(0x16) // Content type: Handshake
@@ -1276,29 +1237,12 @@ struct TLSClientHelloBuilder {
         return record
     }
 
-    /// Rewrites the `supported_versions` extension of an assembled (but
-    /// not record-wrapped) ClientHello to remove TLS 1.3 (`0x0304`) and
-    /// any GREASE values, leaving only TLS 1.2 (and below) on offer. The
-    /// extension-list length and the handshake length fields are
-    /// adjusted to match the new size; everything else is preserved.
-    ///
-    /// Used by the MITM outer leg when the inner client only supports
-    /// TLS 1.2: forcing the upstream to negotiate 1.2 keeps the two
-    /// legs version-equivalent.
-    ///
-    /// Note: the BoringSSL padding extension is sized by the per-
-    /// fingerprint builder before clamping and isn't recomputed here,
-    /// so the resulting ClientHello is a few bytes short of the
-    /// canonical Chrome-padded length. That's fine for the MITM use
-    /// case — the inner leg is already a TLS server we mint, so any
-    /// observer who cares about fingerprints can already see this is
-    /// a proxied connection. Don't reuse this clamp for paths that do
-    /// rely on fingerprint camouflage (e.g. Reality / VLESS).
+    /// Strips TLS 1.3 (0x0304) and GREASE values from supported_versions, leaving TLS 1.2 and below.
+    /// BoringSSL padding is not recomputed — do not use on fingerprint-camouflage paths (e.g. Reality / VLESS).
     static func clampSupportedVersionsToTLS12(_ clientHello: Data) -> Data {
         let bytes = [UInt8](clientHello)
         guard bytes.count >= 4, bytes[0] == 0x01 else { return clientHello }
 
-        // Walk the ClientHello body to find the extensions block.
         var pos = 4 + 2 + 32                                          // hs header + legacy_version + random
         guard pos < bytes.count else { return clientHello }
         let sidLen = Int(bytes[pos]); pos += 1 + sidLen
@@ -1336,9 +1280,7 @@ struct TLSClientHelloBuilder {
                     v += 2
                 }
 
-                // RFC 8701: GREASE values are 0x?A?A — both nibbles equal
-                // to 0xA. They're TLS 1.3 ossification probes and have
-                // no meaning in TLS 1.2; drop along with 0x0304.
+                // RFC 8701 GREASE values (0x?A?A) have no meaning in TLS 1.2; drop along with 0x0304.
                 let filtered = versions.filter { $0 != 0x0304 && ($0 & 0x0F0F) != 0x0A0A }
                 guard !filtered.isEmpty else { return clientHello }
 

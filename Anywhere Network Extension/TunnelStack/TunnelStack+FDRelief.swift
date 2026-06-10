@@ -13,23 +13,14 @@ extension TunnelStack {
 
     // MARK: - FD-Pressure Relief
     //
-    // When `socket(2)` returns `EMFILE`, ``FDPressureRelief`` calls back into
-    // here so we can close idle direct-bypass UDP flows and let the caller
-    // retry. The policy biases by priority tier (see ``FDReliefPriority``): a
-    // `.userVisible` requester (TCP, or QUIC carrying proxied traffic) fails
-    // in a way the user sees, so it gets a lower idle threshold and a higher
-    // eviction budget than a `.bestEffort` requester. Best-effort (direct UDP)
-    // eviction stays conservative because evicting an almost-active UDP flow
-    // just shifts the retry storm — UDP is lossy by design, so failing the new
-    // flow is acceptable when no truly-idle victim exists.
-    //
-    // Only flows with `holdsDirectFD == true` are eligible. Proxied flows
-    // either share mux/SS sockets (closing them doesn't free a per-flow
-    // FD) or hold TCP FDs we want to preserve under the user-visible-first
-    // policy.
+    // When `socket(2)` returns `EMFILE`, ``FDPressureRelief`` calls back here
+    // to close idle direct-bypass UDP flows so the caller can retry. A
+    // `.userVisible` requester fails in a way the user sees, so it gets a lower
+    // idle threshold and a higher eviction budget than `.bestEffort`. Only
+    // flows with `holdsDirectFD == true` are eligible — proxied flows share
+    // mux/SS sockets or hold TCP FDs we want to preserve.
 
-    /// Minimum idle seconds before a flow becomes eligible for eviction, per
-    /// priority tier. User-visible is aggressive; best-effort is conservative.
+    /// Minimum idle seconds before a flow becomes eviction-eligible, per tier.
     private static let minIdleForUserVisibleRelief: CFAbsoluteTime = 1.0
     private static let minIdleForBestEffortRelief: CFAbsoluteTime = 30.0
 
@@ -37,18 +28,10 @@ extension TunnelStack {
     private static let maxEvictionsForUserVisibleRelief = 4
     private static let maxEvictionsForBestEffortRelief = 1
 
-    /// Installs the process-wide FD-pressure handler. Called from ``start``
-    /// and ``restartStackNow``; matched by ``clearFDPressureReliefHandler``
-    /// in ``stop``.
-    ///
-    /// The handler is invoked from socket-creation queues (RawUDPSocket /
-    /// RawTCPSocket / QUICSocket I/O queues) and synchronously crosses into
-    /// `udpQueue`, which owns ``udpFlows``. Deadlock-safe: the only place
-    /// `udpQueue` sync-waits on a socket I/O queue is the victim flow's
-    /// ``UDPFlow/closeSync`` (`cancelSync`), and that victim is a *distinct*,
-    /// idle flow — never the mid-connect requester (excluded by
-    /// ``UDPFlow/holdsDirectFD``) — whose per-socket I/O queue never waits back
-    /// on `udpQueue`. So no queue in the chain waits on its own predecessor.
+    /// Installs the process-wide FD-pressure handler. Invoked from socket I/O
+    /// queues and sync-hops onto `udpQueue`. Deadlock-safe: the only udpQueue
+    /// sync-wait onto a socket queue is the victim's `closeSync`, and the
+    /// victim is a distinct idle flow — never the mid-connect requester.
     func installFDPressureReliefHandler() {
         FDPressureRelief.handler = { [weak self] priority in
             guard let self else { return false }
@@ -58,14 +41,12 @@ extension TunnelStack {
         }
     }
 
-    /// Removes the process-wide FD-pressure handler.
     func clearFDPressureReliefHandler() {
         FDPressureRelief.handler = nil
     }
 
-    /// Closes idle direct-bypass UDP flows by LRU to free FDs for the
-    /// requester. Must be called on `udpQueue`. Returns `true` if any flow
-    /// was evicted.
+    /// Closes idle direct-bypass UDP flows by LRU. Must be called on
+    /// `udpQueue`. Returns `true` if any flow was evicted.
     fileprivate func evictDirectUDPFlowsForFDPressure(priority: FDReliefPriority) -> Bool {
         let now = MonotonicClock.now
         let minIdle: TimeInterval

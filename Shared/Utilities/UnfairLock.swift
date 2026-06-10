@@ -30,9 +30,7 @@ final class UnfairLock {
     }
 }
 
-/// A read-write lock that allows multiple concurrent readers or one exclusive writer.
-/// Uses pthread_rwlock for efficient reader-writer synchronization.
-/// Ideal for data structures with frequent reads and infrequent writes.
+/// A pthread_rwlock wrapper: multiple concurrent readers or one exclusive writer.
 final class ReadWriteLock {
     private var _lock = pthread_rwlock_t()
 
@@ -40,31 +38,26 @@ final class ReadWriteLock {
         pthread_rwlock_init(&_lock, nil)
     }
 
-    /// Acquire read lock (shared - multiple readers allowed)
     @inline(__always)
     func readLock() {
         pthread_rwlock_rdlock(&_lock)
     }
 
-    /// Release read lock
     @inline(__always)
     func readUnlock() {
         pthread_rwlock_unlock(&_lock)
     }
 
-    /// Acquire write lock (exclusive - blocks all other access)
     @inline(__always)
     func writeLock() {
         pthread_rwlock_wrlock(&_lock)
     }
 
-    /// Release write lock
     @inline(__always)
     func writeUnlock() {
         pthread_rwlock_unlock(&_lock)
     }
 
-    /// Execute a read operation with automatic lock management
     @inline(__always)
     func withReadLock<T>(_ body: () throws -> T) rethrows -> T {
         readLock()
@@ -72,7 +65,6 @@ final class ReadWriteLock {
         return try body()
     }
 
-    /// Execute a write operation with automatic lock management
     @inline(__always)
     func withWriteLock<T>(_ body: () throws -> T) rethrows -> T {
         writeLock()

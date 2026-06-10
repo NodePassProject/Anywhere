@@ -3,16 +3,9 @@
 //  Anywhere
 //
 //  Incremental, bounds-checked parser that extracts the SNI hostname from an
-//  inbound TLS ClientHello. Used by TCPConnection to enable domain-based
-//  routing for traffic that reaches the tunnel by real IP (hardcoded IPs, DoH
-//  clients, etc.) — cases where the fake-IP ↔ domain mapping is unavailable.
-//
-//  The parser is strictly passive: it buffers up to
-//  ``TunnelConstants/tlsSnifferBufferLimit`` bytes, walks the record /
-//  handshake / extensions structure with explicit bounds checks, and returns
-//  a terminal state as soon as the first byte rules out TLS or the first
-//  server_name extension is reached. No bytes beyond the ClientHello are
-//  retained.
+//  inbound TLS ClientHello, enabling domain-based routing for traffic that
+//  reaches the tunnel by real IP. Strictly passive; buffers at most
+//  tlsSnifferBufferLimit bytes.
 //
 
 import Foundation
@@ -20,15 +13,14 @@ import Foundation
 struct TLSClientHelloSniffer {
 
     enum State: Equatable {
-        /// Need more bytes to decide. Keep calling ``feed(_:)``.
+        /// Need more bytes to decide.
         case needMore
         /// First bytes do not start with a TLS Handshake record (0x16).
         case notTLS
         /// SNI extracted from a well-formed ClientHello (lowercased).
         case found(serverName: String)
-        /// Input is TLS-shaped but SNI cannot be extracted — malformed record,
-        /// no server_name extension, or buffer cap reached. Caller should
-        /// fall back to the IP-based routing decision.
+        /// TLS-shaped but SNI unavailable (malformed, absent, or cap reached);
+        /// caller should fall back to IP-based routing.
         case unavailable
     }
 
@@ -40,13 +32,12 @@ struct TLSClientHelloSniffer {
         self.bufferLimit = bufferLimit
     }
 
-    /// Appends `data` and advances the parse state. Returns the new state.
-    /// After a terminal state is reached, further calls are no-ops.
+    /// Appends `data` and returns the new state; no-ops after a terminal state.
     mutating func feed(_ data: Data) -> State {
         guard state == .needMore, !data.isEmpty else { return state }
 
-        // Fast reject before copying: a real TLS record starts with 0x16.
-        // This keeps the buffer empty for non-TLS protocols.
+        // Fast reject before copying: a TLS record starts with 0x16, so the
+        // buffer stays empty for non-TLS protocols.
         if buffer.isEmpty, data[data.startIndex] != 0x16 {
             state = .notTLS
             return state

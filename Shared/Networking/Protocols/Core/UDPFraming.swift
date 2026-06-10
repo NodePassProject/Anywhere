@@ -16,7 +16,6 @@ protocol UDPFramingCapable: AnyObject {
 }
 
 extension UDPFramingCapable {
-    /// Frame a UDP packet with 2-byte length prefix
     func frameUDPPacket(_ data: Data) -> Data {
         var framedData = Data(capacity: 2 + data.count)
         let length = UInt16(data.count)
@@ -26,8 +25,6 @@ extension UDPFramingCapable {
         return framedData
     }
 
-    /// Extract a complete UDP packet from the buffer
-    /// Returns nil if not enough data is available
     func extractUDPPacket() -> Data? {
         let available = udpBuffer.count - udpBufferOffset
         guard available >= 2 else { return nil }
@@ -50,7 +47,6 @@ extension UDPFramingCapable {
         return packet
     }
 
-    /// Clear UDP buffer state
     func clearUDPBuffer() {
         udpBuffer = Data()
         udpBufferOffset = 0

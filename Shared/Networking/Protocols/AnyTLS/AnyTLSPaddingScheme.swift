@@ -9,29 +9,19 @@ import Foundation
 import CommonCrypto
 import Security
 
-/// Parsed AnyTLS padding scheme.
-///
-/// The on-the-wire scheme is a `key=value`-line text blob; the value for each
-/// numeric key is a comma-separated list of `min-max` ranges or the literal
-/// `c` ("checkpoint" — keep going only if more payload remains). Per outgoing
-/// packet the session picks the entry for `pktCounter`, generates a concrete
-/// list of byte-counts, and slices the outbound stream accordingly. After
-/// `stop` packets the session stops applying padding.
+/// Parsed AnyTLS padding scheme: `key=value` lines where numeric keys map to
+/// comma-separated `min-max` ranges or the literal `c` (checkpoint).
 final class AnyTLSPaddingScheme {
 
-    /// Sentinel for the literal `c` marker — `Session.writeConn` treats it as
-    /// "if no more payload remains, break; otherwise continue to next size".
+    /// Sentinel for the `c` (checkpoint) marker: break if no payload remains, else continue.
     static let checkMark: Int = -1
 
-    /// The exact bytes the server hashes when it compares the client's
-    /// `padding-md5` setting. Stored verbatim so a re-export round-trips.
     let rawBytes: Data
 
-    /// MD5(rawBytes) hex (lowercase). Sent in cmdSettings as `padding-md5=…`.
+    /// MD5(rawBytes) hex (lowercase); sent in cmdSettings as `padding-md5=…`.
     let md5Hex: String
 
-    /// After `stop` packets, the writer sets `sendPadding = false` and stops
-    /// invoking the schedule. From sing-anytls's default this is 8.
+    /// Padding is applied to the first `stop` packets only (default: 8).
     let stop: UInt32
 
     /// `key → raw value string` (e.g. `"2" → "400-500,c,500-1000"`).
@@ -44,9 +34,7 @@ final class AnyTLSPaddingScheme {
         self.scheme = scheme
     }
 
-    /// Verbatim copy of `padding.DefaultPaddingScheme` — the bytes the
-    /// server expects so cmdSettings's `padding-md5` matches without
-    /// triggering a cmdUpdatePaddingScheme.
+    /// Verbatim copy of Go's `padding.DefaultPaddingScheme` so the server's `padding-md5` check passes.
     static let `default`: AnyTLSPaddingScheme = {
         let raw = Data("""
         stop=8
@@ -67,8 +55,7 @@ final class AnyTLSPaddingScheme {
         )
     }()
 
-    /// Parses a raw scheme blob. Returns `nil` when `stop` is missing or
-    /// non-numeric — matches Go's `NewPaddingFactory`.
+    /// Returns `nil` when `stop` is missing or non-numeric — matches Go's `NewPaddingFactory`.
     static func parse(_ raw: Data) -> AnyTLSPaddingScheme? {
         let map = AnyTLSProtocol.decodeStringMap(raw)
         guard let stopString = map["stop"], let stop = UInt32(stopString) else {
@@ -84,11 +71,7 @@ final class AnyTLSPaddingScheme {
         )
     }
 
-    /// Returns the size schedule for `packet`. Entries of `checkMark` (-1)
-    /// represent the `c` marker; positive ints are concrete byte counts.
-    /// `min-max` ranges are resolved with a CSPRNG draw exactly as
-    /// `crypto/rand.Int` does in the Go reference, so each call returns a
-    /// fresh schedule.
+    /// Schedule for `packet`: ranges resolved via CSPRNG, `c` becomes `checkMark`.
     func generateRecordPayloadSizes(packet: UInt32) -> [Int] {
         guard let value = scheme[String(packet)] else { return [] }
         var out: [Int] = []
@@ -122,16 +105,13 @@ final class AnyTLSPaddingScheme {
             SecRandomCopyBytes(kSecRandomDefault, buf.count, buf.baseAddress!)
         }
         if status != errSecSuccess {
-            // Crypto-grade entropy failed; falling back keeps padding
-            // non-deterministic without aborting the connection.
+            // Fallback keeps padding non-deterministic without aborting the connection.
             raw = UInt64(arc4random()) << 32 | UInt64(arc4random())
         }
         return lo + Int(raw % span)
     }
 
-    /// MD5 is required for wire compatibility — anytls servers compare the
-    /// hex digest against `padding-md5` from cmdSettings. Not used for any
-    /// security-relevant purpose.
+    /// MD5 is required for wire compatibility (`padding-md5` check), not security.
     private static func md5Hex(of data: Data) -> String {
         var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
         data.withUnsafeBytes { ptr in

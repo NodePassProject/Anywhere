@@ -22,13 +22,10 @@ final class MITMCertificateStore {
 
     // MARK: - Configuration
 
-    /// App Group identifier used as the keychain access group. The same
-    /// value is used by both the app target and the Network Extension via
-    /// the ``keychain-access-groups`` entitlement.
+    /// Keychain access group shared by the app target and the Network Extension.
     private let accessGroup: String
 
-    /// Service tag for keychain queries. All MITM keychain items share
-    /// this service so deleting / regenerating only affects MITM data.
+    /// Scopes all MITM keychain items so delete/regenerate touches nothing else.
     private static let service = "com.argsment.Anywhere.MITM"
 
     private static let privateKeyTag = "\(service).caPrivateKey".data(using: .utf8)!
@@ -48,9 +45,7 @@ final class MITMCertificateStore {
 
     // MARK: - CA Lifecycle
 
-    /// Returns the persisted CA cert + private key, generating them on first
-    /// use. Generation tries the Secure Enclave first and silently falls
-    /// back to a software key when the device or sandbox doesn't allow it.
+    /// Returns the persisted CA cert + private key, generating them on first use.
     func loadOrCreateCA() throws -> (privateKey: SecKey, certificateDER: Data) {
         lock.lock()
         defer { lock.unlock() }
@@ -61,44 +56,27 @@ final class MITMCertificateStore {
         do {
             return try generateCAUnlocked()
         } catch {
-            // Generation failed. The CA keychain items are shared between the
-            // app and the extension via the App Group, and the ``NSLock`` above
-            // only serializes one process — so the usual cause is a CA private
-            // key that already exists without a matching cert:
-            //   • a concurrent generator in the other process won the race and
-            //     persisted both items between our load and our generate, or
-            //   • an earlier run left the key stranded (its cert add failed or
-            //     the cert item was independently evicted).
-            // ``generatePrivateKey`` then trips ``errSecDuplicateItem`` on the
-            // existing tag and every retry wedges MITM until a manual
-            // ``regenerate()``. Recover automatically:
-            //   1. Re-read — covers the race where the other process just
-            //      finished writing both items.
+            // The App Group keychain is shared with the extension (NSLock is
+            // intra-process): either the other process won the race (re-read), or
+            // an orphaned key from a failed cert write hit errSecDuplicateItem (drop it).
             if let existing = try? loadCAUnlocked() {
                 return existing
             }
-            //   2. A key present with the cert still missing is genuinely
-            //      orphaned: drop it and generate once more so a fresh,
-            //      cert-matched key replaces it. (A non-duplicate failure leaves
-            //      no key here, so surface the real error instead of retrying
-            //      pointlessly.)
+            // Non-duplicate failures leave no key, so surface the real error.
             guard (try? readPrivateKeyUnlocked()) != nil else { throw error }
             deletePrivateKey()
             return try generateCAUnlocked()
         }
     }
 
-    /// Returns the persisted CA cert + private key, or `nil` if neither has
-    /// been generated yet. Read-only; safe to call from the Network
-    /// Extension at connect time.
+    /// Returns the persisted CA cert + private key, or `nil` if not yet generated.
     func loadCA() -> (privateKey: SecKey, certificateDER: Data)? {
         lock.lock()
         defer { lock.unlock() }
         return try? loadCAUnlocked()
     }
 
-    /// Wipes the persisted CA and generates a fresh one. Any previously
-    /// installed root profile is invalidated by this operation.
+    /// Wipes the persisted CA and generates a fresh one, invalidating any installed root profile.
     @discardableResult
     func regenerate() throws -> (privateKey: SecKey, certificateDER: Data) {
         lock.lock()
@@ -157,14 +135,11 @@ final class MITMCertificateStore {
 
     // MARK: - Export
 
-    /// DER-encoded CA certificate, suitable for ``SecCertificateCreateWithData``.
     func exportCertificateDER() -> Data? {
         loadCA()?.certificateDER
     }
 
-    /// Builds a `.mobileconfig` profile that wraps the CA cert. Lets the
-    /// user install the root via Safari/AirDrop without a third-party tool.
-    /// The profile is rebuilt every call — never persisted.
+    /// Builds a `.mobileconfig` profile wrapping the CA cert; rebuilt every call, never persisted.
     func exportMobileConfig() -> Data? {
         guard let certDER = exportCertificateDER() else { return nil }
 
@@ -204,23 +179,8 @@ final class MITMCertificateStore {
 
     // MARK: - Leaf Signing Inputs
 
-    /// Returns a fresh 16-byte serial.
-    ///
-    /// Previously this mixed 8 bytes of randomness with an 8-byte
-    /// monotonic counter stored in the keychain. The intent was to
-    /// guarantee (issuer, serial) uniqueness across extension
-    /// restarts, but the counter was guarded by an
-    /// intra-process ``NSLock`` while the keychain item itself is
-    /// shared with the main app via the App Group — two processes
-    /// minting concurrently could read the same counter, write
-    /// counter+1, and produce duplicate low-8-byte serials. RFC 5280
-    /// §4.1.2.2 requires (issuer, serial) to be unique, and strict
-    /// validators reject duplicates.
-    ///
-    /// 16 bytes of cryptographic randomness gives 2^128 entropy, so
-    /// the birthday-collision probability across the lifetime of
-    /// any one CA is negligible (~one collision per 2^64 issued
-    /// certs), eliminating the cross-process race entirely.
+    /// Returns a fresh 16-byte random serial. Randomness, not a shared counter:
+    /// two App Group processes could mint duplicates (RFC 5280 §4.1.2.2).
     func nextSerial() -> Data {
         return randomSerial()
     }
@@ -251,12 +211,8 @@ final class MITMCertificateStore {
             try writeCertificateUnlocked(certDER)
             return (privateKey, certDER)
         } catch {
-            // ``generatePrivateKey`` already persisted the key
-            // (kSecAttrIsPermanent), but building or storing its certificate
-            // failed — leaving a key with no matching cert. Deleting it is
-            // required for recovery: the next generateCAUnlocked() re-adds the
-            // same kSecAttrApplicationTag and would otherwise fail with
-            // errSecDuplicateItem, wedging MITM until a manual regenerate().
+            // The key was already persisted (kSecAttrIsPermanent); delete it or
+            // the next call hits errSecDuplicateItem on the same tag.
             deletePrivateKey()
             throw MITMCertificateStoreError.certificateBuildFailed(error)
         }
@@ -303,25 +259,9 @@ final class MITMCertificateStore {
     }
 
     private func generateSoftwareKey() throws -> SecKey {
-        // Software fallback runs when the Secure Enclave is
-        // unavailable (e.g. simulator or older devices). The CA
-        // private key signs every leaf the MITM mints, so its
-        // compromise is equivalent to handing an attacker a universal
-        // signing key for any host the device trusts.
-        //
-        // Defenses:
-        //   - ``kSecAttrIsExtractable = false`` blocks
-        //     ``SecKeyCopyExternalRepresentation`` from exporting the
-        //     raw scalar — any process in the same App Group that
-        //     binds the item still gets a ``SecKey`` reference, but
-        //     cannot pull the private bytes out. (The reference can
-        //     still produce signatures via ``SecKeyCreateSignature``,
-        //     which is what the leaf-minting path needs.)
-        //   - ``kSecAttrSynchronizable = false`` prevents the key
-        //     from ever leaving this device via iCloud Keychain.
-        //   - ``…ThisDeviceOnly`` accessibility class is preserved
-        //     so a restore from backup cannot re-instantiate the
-        //     same key material on another device.
+        // Fallback when the Secure Enclave is unavailable (simulator, older devices).
+        // Non-extractable, non-synchronizable, ThisDeviceOnly: the CA key signs every
+        // MITM leaf, so it must never leave the device.
         let attrs: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeySizeInBits as String: 256,
@@ -412,12 +352,8 @@ final class MITMCertificateStore {
     }
 
     // MARK: - Private — Keychain (Legacy serial item)
-    //
-    // The monotonic serial counter that lived here was removed when
-    // ``nextSerial`` switched to 16 bytes of randomness (see its doc).
-    // ``deleteSerial`` is retained only so ``deleteUnlocked`` still
-    // purges the stale keychain item on installs that ran the old code.
 
+    /// Purges the legacy monotonic-counter item left behind by old installs.
     private func deleteSerial() {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -440,11 +376,8 @@ final class MITMCertificateStore {
                 return bytes
             }
         }
-        // SecRandomCopyBytes failed repeatedly (extremely rare). Returning the
-        // zero-filled buffer would let ``normalizeSerial`` collapse every such
-        // serial to 1, guaranteeing (issuer, serial) collisions that strict
-        // validators reject. Fall back to a v4 UUID's 122 random bits — sourced
-        // independently of SecRandom and never all-zero in practice.
+        // SecRandomCopyBytes failed repeatedly (extremely rare); a zero buffer would
+        // collapse every serial to 1. A v4 UUID gives 122 random bits, never all-zero.
         return withUnsafeBytes(of: UUID().uuid) { Data($0) }
     }
 }

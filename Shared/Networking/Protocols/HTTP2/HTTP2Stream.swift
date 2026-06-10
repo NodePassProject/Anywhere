@@ -9,13 +9,8 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "HTTP2Stream")
 
-/// A single CONNECT tunnel multiplexed on an ``HTTP2Session``.
-///
-/// Conforms to ``HTTPTunnel`` so a proxy layer can wrap it (NaiveProxy does so
-/// via ``NaiveTunnelAdapter``). Each stream has its own flow-control window; the
-/// CONNECT response headers are exposed via ``responseHeaders`` so the proxy
-/// layer can run its own negotiation (e.g. NaiveProxy padding), keeping this
-/// type free of any proxy-protocol specifics.
+/// A single CONNECT tunnel multiplexed on an HTTP/2 session, with its own flow-control
+/// window; response headers are exposed so the proxy layer can run its own negotiation.
 nonisolated class HTTP2Stream: HTTPTunnel {
 
     // MARK: - State
@@ -51,11 +46,9 @@ nonisolated class HTTP2Stream: HTTPTunnel {
     private var endStreamReceived = false
     private var streamError: Error?
 
-    // CONNECT handshake callback
     private var connectCompletion: ((Error?) -> Void)?
 
-    /// CONNECT response headers, set when the 200 response arrives. The proxy
-    /// layer reads these to run its own negotiation (e.g. NaiveProxy padding).
+    /// CONNECT response headers exposed for proxy-layer negotiation.
     private(set) var responseHeaders: [(name: String, value: String)] = []
 
     var isConnected: Bool { state == .open }
@@ -184,14 +177,12 @@ nonisolated class HTTP2Stream: HTTPTunnel {
 
     // MARK: - Session Callbacks (called on session.queue)
 
-    /// Handles a HEADERS frame routed to this stream by the session.
     func handleHeaders(_ frame: HTTP2Frame) {
         guard let session, let decoded = session.hpackDecoder.decodeHeaders(from: frame.payload) else {
             handleStreamError(HTTP2Error.protocolError("Failed to decode headers on stream \(streamID)"))
             return
         }
-        // This client stack consumes responses (no re-encode/forwarding), so the
-        // never-indexed marker is irrelevant here — take just the decoded fields.
+        // No re-encode/forwarding here, so the never-indexed marker can be ignored.
         let headers = decoded.fields
 
         guard let statusHeader = headers.first(where: { $0.name == ":status" }) else {
@@ -216,7 +207,6 @@ nonisolated class HTTP2Stream: HTTPTunnel {
         }
     }
 
-    /// Handles a DATA frame payload routed to this stream by the session.
     func handleData(_ payload: Data, endStream: Bool) {
         if endStream {
             endStreamReceived = true
@@ -241,19 +231,16 @@ nonisolated class HTTP2Stream: HTTPTunnel {
             session?.removeStream(self)
         }
 
-        // No more frames will arrive; free the session slot now even if
-        // buffered data still needs to be consumed by receiveData().
+        // END_STREAM: free the session slot now even if buffered data remains unread.
         if endStream && state != .closed {
             session?.removeStream(self)
         }
     }
 
-    /// Handles RST_STREAM for this stream.
     func handleReset(errorCode: UInt32) {
         handleStreamError(HTTP2Error.streamReset(streamID))
     }
 
-    /// Handles session-level errors (GOAWAY, transport failure).
     func handleSessionError(_ error: Error) {
         handleStreamError(error)
     }
@@ -276,8 +263,7 @@ nonisolated class HTTP2Stream: HTTPTunnel {
 
     // MARK: - Flow Control (called by session on session.queue)
 
-    /// Acknowledges data the consumer has actually read, opening per-stream
-    /// and connection-level receive windows. Must be called on `session.queue`.
+    /// Opens per-stream and connection receive windows for data the consumer actually read.
     private func acknowledgeConsumedData(count: Int) {
         recvConsumed += count
         if recvConsumed >= recvWindowSize / 2 {

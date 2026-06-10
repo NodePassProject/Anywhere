@@ -11,13 +11,11 @@ import Foundation
 struct WebSocketConfiguration: Codable, Equatable, Hashable {
     /// Host header value (defaults to server address).
     let host: String
-    /// WebSocket path (default "/").
     let path: String
     /// Custom HTTP headers to send during the upgrade handshake.
     let headers: [String: String]
     /// Maximum early data bytes to embed in the upgrade request (0 = disabled).
     let maxEarlyData: Int
-    /// Header name used to carry early data (default "Sec-WebSocket-Protocol").
     let earlyDataHeaderName: String
     /// Heartbeat (ping) interval in seconds. 0 = disabled. Matches Xray-core's `heartbeatPeriod`.
     let heartbeatPeriod: UInt32
@@ -39,8 +37,6 @@ struct WebSocketConfiguration: Codable, Equatable, Hashable {
     }
 
     /// Parse WebSocket parameters from VLESS URL query parameters.
-    ///
-    /// Expected parameters: `type=ws&host=example.com&path=/ws&ed=2048`
     static func parse(from params: [String: String], serverAddress: String) -> WebSocketConfiguration? {
         let host = params["host"] ?? serverAddress
         let path = (params["path"] ?? "/").removingPercentEncoding ?? "/"
@@ -54,7 +50,6 @@ struct WebSocketConfiguration: Codable, Equatable, Hashable {
     }
 }
 
-/// WebSocket transport errors.
 enum WebSocketError: Error, LocalizedError {
     case upgradeFailed(String)
     case invalidFrame(String)

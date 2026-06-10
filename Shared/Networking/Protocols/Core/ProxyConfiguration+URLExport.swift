@@ -17,7 +17,6 @@ extension ProxyConfiguration {
     }
 
     /// Export configuration as a shareable URL string.
-    /// Produces `vless://...` for VLESS or `ss://...` for Shadowsocks.
     func toURL() -> String {
         switch outboundProtocol {
         case .vless:
@@ -103,13 +102,11 @@ extension ProxyConfiguration {
         let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var params: [String] = []
-        // SNI is always populated; only emit when it differs from the server
-        // address to keep share links short.
+        // Emit SNI only when it differs from the server address to keep links short.
         if sni != serverAddress {
             params.append("sni=\(sni)")
         }
-        // Emit the bandwidth params only for Brutal; their presence is what a
-        // reader uses to tell Brutal from BBR on import.
+        // Presence of the bandwidth params is what distinguishes Brutal from BBR on import.
         if congestionControl == .brutal {
             params.append("upmbps=\(uploadMbps)")
             params.append("downmbps=\(downloadMbps)")
@@ -161,8 +158,7 @@ extension ProxyConfiguration {
         if tls.fingerprint != .chrome133 {
             params.append("fp=\(tls.fingerprint.rawValue)")
         }
-        // Only emit pool tuners when they differ from the sing-anytls defaults
-        // so most exported share links stay short.
+        // Emit pool tuners only when they differ from the sing-anytls defaults.
         if ici != 30 { params.append("ici=\(ici)") }
         if it != 30 { params.append("it=\(it)") }
         if mis != 0 { params.append("mis=\(mis)") }
@@ -273,8 +269,8 @@ extension ProxyConfiguration {
             if xhttp.mode != .auto {
                 params.append("mode=\(xhttp.mode.rawValue)")
             }
-            // Round-trip the up/download detach through the `extra` blob. (Other
-            // advanced XHTTP fields are intentionally not exported.)
+            // Up/download detach round-trips via the `extra` blob; other advanced
+            // XHTTP fields are intentionally not exported.
             if let ds = xhttp.downloadSettings, let extra = Self.xhttpExtraParam(for: ds) {
                 params.append("extra=\(extra)")
             }
@@ -283,9 +279,7 @@ extension ProxyConfiguration {
         }
     }
 
-    /// Builds the URL-encoded `extra` query value carrying `downloadSettings`, in
-    /// the JSON shape ``XHTTPConfiguration/parseDownloadSettings(from:)`` reads, so
-    /// a node with up/download detach round-trips through share links.
+    /// Builds the URL-encoded `extra` query value carrying the up/download detach settings.
     private static func xhttpExtraParam(for ds: XHTTPDownloadSettings) -> String? {
         var dl: [String: Any] = [
             "address": ds.serverAddress,
@@ -313,15 +307,13 @@ extension ProxyConfiguration {
         let extra: [String: Any] = ["downloadSettings": dl]
         guard let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
               let json = String(data: data, encoding: .utf8) else { return nil }
-        // Keep JSON punctuation readable but escape characters that would break
-        // query-param splitting (`&`, `=`, `+`, `#`).
+        // Escape only the characters that would break query-param splitting (& = + #).
         var allowed = CharacterSet.urlQueryAllowed
         allowed.remove(charactersIn: "&=+#")
         return json.addingPercentEncoding(withAllowedCharacters: allowed) ?? json
     }
 
-    /// Serializes an ``XHTTPConfiguration`` to the `xhttpSettings` JSON shape,
-    /// emitting only fields that differ from defaults.
+    /// Emits only fields that differ from defaults.
     private static func xhttpSettingsJSON(_ xhttp: XHTTPConfiguration) -> [String: Any] {
         var j: [String: Any] = ["host": xhttp.host]
         if xhttp.path != "/" { j["path"] = xhttp.path }

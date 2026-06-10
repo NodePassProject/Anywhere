@@ -7,8 +7,6 @@
 
 import Foundation
 
-/// XHTTP transport mode.
-///
 /// Matches Xray-core's `XmuxMode` enum in `splithttp/config.go`.
 enum XHTTPMode: String, Codable, CaseIterable, Hashable {
     case auto
@@ -26,8 +24,6 @@ enum XHTTPMode: String, Codable, CaseIterable, Hashable {
     }
 }
 
-/// Metadata placement for session ID, sequence numbers, and padding.
-///
 /// Matches Xray-core placement constants in `splithttp/common.go`.
 enum XHTTPPlacement: String, Codable, Equatable, Hashable {
     case path
@@ -38,82 +34,54 @@ enum XHTTPPlacement: String, Codable, Equatable, Hashable {
     case body
 }
 
-/// X-Padding generation method.
-///
 /// Matches Xray-core `PaddingMethod` in `splithttp/xpadding.go`.
 enum XHTTPPaddingMethod: String, Codable, Equatable, Hashable {
     case repeatX = "repeat-x"
     case tokenish
 }
 
-/// XHTTP transport configuration.
-///
-/// Matches Xray-core's `splithttp.Config` protobuf definition.
-/// Advanced fields are populated from the `extra` JSON blob in VLESS share links.
+/// Matches Xray-core's `splithttp.Config`; advanced fields come from the `extra` JSON blob in VLESS share links.
 struct XHTTPConfiguration: Codable, Equatable, Hashable {
-    /// Host header value (defaults to server address).
     let host: String
-    /// URL path (default "/").
     let path: String
-    /// Transport mode (default `.auto`).
     let mode: XHTTPMode
-    /// Custom HTTP headers.
     let headers: [String: String]
-    /// When false, adds `Content-Type: application/grpc` header (default false).
+    /// When false, adds `Content-Type: application/grpc` header.
     let noGRPCHeader: Bool
-    /// Maximum bytes per POST body in packet-up mode (default 1,000,000).
     let scMaxEachPostBytes: Int
-    /// Minimum interval between consecutive POSTs in ms (default 30).
     let scMinPostsIntervalMs: Int
 
     // X-Padding settings (from extra)
-    /// Range for padding bytes. Default 100-1000.
     let xPaddingBytesFrom: Int
     let xPaddingBytesTo: Int
-    /// Enable custom padding obfuscation mode (default false → uses Referer-based padding).
+    /// When false, uses Referer-based padding instead.
     let xPaddingObfsMode: Bool
-    /// Padding parameter key (default "x_padding"). Only used when xPaddingObfsMode=true.
     let xPaddingKey: String
-    /// Padding header name (default "X-Padding"). Only used when xPaddingObfsMode=true.
     let xPaddingHeader: String
-    /// Padding placement (default "queryInHeader"). Only used when xPaddingObfsMode=true.
     let xPaddingPlacement: XHTTPPlacement
-    /// Padding method (default "repeat-x").
     let xPaddingMethod: XHTTPPaddingMethod
 
     // Uplink settings (from extra)
-    /// HTTP method for uplink requests (default "POST").
     let uplinkHTTPMethod: String
 
     // Session/seq placement (from extra)
-    /// Where to place session ID (default "path").
     let sessionPlacement: XHTTPPlacement
-    /// Parameter key for session ID. Auto-determined by placement if empty.
+    /// Auto-determined by placement if empty.
     let sessionKey: String
-    /// Where to place sequence number (default "path").
     let seqPlacement: XHTTPPlacement
-    /// Parameter key for sequence number. Auto-determined by placement if empty.
+    /// Auto-determined by placement if empty.
     let seqKey: String
 
     // Uplink data placement (from extra)
-    /// Where to place uplink data in POST (default "body").
     let uplinkDataPlacement: XHTTPPlacement
-    /// Parameter key for uplink data chunks (default "x_data").
     let uplinkDataKey: String
-    /// Chunk size for data in headers/cookies (default 0 = no chunking).
+    /// 0 = no chunking.
     let uplinkChunkSize: Int
 
-    /// Separate download source for XHTTP up/download detach. When set, the GET
-    /// (download) stream is dialed to a different server with its own
-    /// security/transport while the POST (upload) stays on this node, the two
-    /// correlated by a shared session ID.
-    ///
-    /// Boxed in a reference type to break the value-type recursion this would
-    /// otherwise create (``XHTTPConfiguration`` → settings → download-side
-    /// `xhttp:` ``XHTTPConfiguration``). Access via ``downloadSettings``.
+    /// Boxed to break the value-type recursion through `XHTTPDownloadSettings.xhttp`.
     private let _downloadSettings: XHTTPDownloadSettingsBox?
 
-    /// Separate download source, or `nil` when up/download are not detached.
+    /// `nil` when up/download are not detached.
     var downloadSettings: XHTTPDownloadSettings? { _downloadSettings?.value }
 
     init(
@@ -206,8 +174,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return p
     }
 
-    /// Normalized query string extracted from path (portion after "?").
-    /// Matches Xray-core `GetNormalizedQuery()` in `config.go`.
+    /// Query string extracted from path (after "?"); matches Xray-core `GetNormalizedQuery()`.
     var normalizedQuery: String {
         let parts = path.split(separator: "?", maxSplits: 1)
         if parts.count > 1 {
@@ -216,8 +183,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return ""
     }
 
-    /// Normalized session key, auto-determined by placement if not set.
-    /// Matches Xray-core `GetNormalizedSessionKey()` in `config.go`.
+    /// Auto-determined by placement if unset; matches Xray-core `GetNormalizedSessionKey()`.
     var normalizedSessionKey: String {
         if !sessionKey.isEmpty { return sessionKey }
         switch sessionPlacement {
@@ -227,8 +193,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         }
     }
 
-    /// Normalized seq key, auto-determined by placement if not set.
-    /// Matches Xray-core `GetNormalizedSeqKey()` in `config.go`.
+    /// Auto-determined by placement if unset; matches Xray-core `GetNormalizedSeqKey()`.
     var normalizedSeqKey: String {
         if !seqKey.isEmpty { return seqKey }
         switch seqPlacement {
@@ -238,7 +203,6 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         }
     }
 
-    /// Generate padding value using configured method and random length.
     func generatePadding() -> String {
         let length = Int.random(in: xPaddingBytesFrom...max(xPaddingBytesFrom, xPaddingBytesTo))
         switch xPaddingMethod {
@@ -249,8 +213,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         }
     }
 
-    /// Generates tokenish padding (base62 random string targeting a Huffman byte length).
-    /// Simplified version of Xray-core `GenerateTokenishPaddingBase62` in `xpadding.go`.
+    /// Simplified port of Xray-core `GenerateTokenishPaddingBase62` in `xpadding.go`.
     private func generateTokenishPadding(targetBytes: Int) -> String {
         // base62 chars average ~0.8 bytes per char in Huffman encoding
         let n = max(1, Int(ceil(Double(targetBytes) / 0.8)))
@@ -263,22 +226,14 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return result
     }
 
-    /// Parse XHTTP parameters from VLESS URL query parameters.
-    ///
-    /// Expected parameters: `type=xhttp&host=example.com&path=/xhttp&mode=packet-up&extra={...}`
-    ///
-    /// Host fallback chain matches Xray-core `dialer.go:264-273`:
-    /// 1. Explicit `host` URL parameter
-    /// 2. TLS ServerName (SNI)
-    /// 3. Reality ServerName
-    /// 4. Server address (IP/hostname from URL authority)
+    /// Parses XHTTP parameters from VLESS URL query parameters. Host fallback matches
+    /// Xray-core dialer.go: `host` param → TLS SNI → Reality serverName → server address.
     static func parse(from params: [String: String], serverAddress: String, tlsServerName: String? = nil, realityServerName: String? = nil) -> XHTTPConfiguration? {
         let host = params["host"] ?? tlsServerName ?? realityServerName ?? serverAddress
         let path = (params["path"] ?? "/").removingPercentEncoding ?? "/"
         let modeStr = params["mode"] ?? "auto"
         let mode = XHTTPMode(rawValue: modeStr) ?? .auto
 
-        // Parse extra JSON blob if present
         var extra: [String: Any] = [:]
         if let extraStr = params["extra"],
            let decoded = extraStr.removingPercentEncoding,
@@ -291,10 +246,8 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return build(host: host, path: path, mode: mode, extra: extra, downloadSettings: downloadSettings)
     }
 
-    /// Builds an ``XHTTPConfiguration`` from an `xhttpSettings` /
-    /// `splithttpSettings` JSON object (the download leg's transport block),
-    /// where the advanced fields live at the top level rather than under a
-    /// nested `extra`. Never produces its own nested detach.
+    /// Builds from an `xhttpSettings`/`splithttpSettings` JSON object (advanced
+    /// fields are top-level, not under `extra`); never produces its own nested detach.
     static func parse(fromJSON json: [String: Any], serverAddress: String, tlsServerName: String? = nil, realityServerName: String? = nil) -> XHTTPConfiguration {
         let host = (json["host"] as? String) ?? tlsServerName ?? realityServerName ?? serverAddress
         let path = (json["path"] as? String) ?? "/"
@@ -302,10 +255,8 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return build(host: host, path: path, mode: mode, extra: json, downloadSettings: nil)
     }
 
-    /// Parses the `downloadSettings` object from the `extra` blob into a separate
-    /// download source. Returns `nil` when absent or unusable (missing
-    /// address/port, or an invalid Reality key), so the node falls back to a
-    /// normal single-server connection. Field names match the share-link JSON.
+    /// Parses `downloadSettings` from `extra`; returns nil when absent or unusable
+    /// so callers fall back to a normal single-server connection.
     static func parseDownloadSettings(from json: [String: Any]?) -> XHTTPDownloadSettings? {
         guard let json else { return nil }
         guard let address = ((json["address"] as? String) ?? (json["server"] as? String)), !address.isEmpty else {
@@ -331,8 +282,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             tls = mapDownloadTLS(json["tlsSettings"] as? [String: Any], serverAddress: address)
         case "reality":
             guard let r = mapDownloadReality(json["realitySettings"] as? [String: Any], serverAddress: address) else {
-                // Reality requested but the public key is missing/invalid — drop the
-                // detach entirely so the node still connects on its main server.
+                // Public key missing/invalid — drop detach, fall back to main server.
                 return nil
             }
             reality = r
@@ -350,7 +300,6 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
                                      security: security, tls: tls, reality: reality, xhttp: xhttp)
     }
 
-    /// Maps a `tlsSettings` JSON object to a ``TLSConfiguration``.
     private static func mapDownloadTLS(_ json: [String: Any]?, serverAddress: String) -> TLSConfiguration {
         let serverName = (json?["serverName"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? serverAddress
         var alpn: [String]? = nil
@@ -363,9 +312,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return TLSConfiguration(serverName: serverName, alpn: alpn, fingerprint: fp)
     }
 
-    /// Maps a `realitySettings` JSON object to a ``RealityConfiguration``.
-    /// Returns `nil` when the public key is missing or not a valid 32-byte key
-    /// (base64url or standard base64).
+    /// Returns nil when the public key is missing or not a valid 32-byte key (base64url or base64).
     private static func mapDownloadReality(_ json: [String: Any]?, serverAddress: String) -> RealityConfiguration? {
         guard let json, let pbkString = json["publicKey"] as? String, !pbkString.isEmpty else { return nil }
         guard let publicKey = (Data(base64URLEncoded: pbkString) ?? Data(base64Encoded: pbkString)),
@@ -376,11 +323,8 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return RealityConfiguration(serverName: serverName, publicKey: publicKey, shortId: shortId, fingerprint: fp)
     }
 
-    /// Core builder shared by URL-param parsing and download-leg JSON parsing.
-    /// Reads the advanced fields from `extra` — either the share-link `extra`
-    /// blob, or an `xhttpSettings` object whose advanced fields are top-level.
+    /// Core builder shared by URL-param and JSON parsing; reads advanced fields from `extra`.
     private static func build(host: String, path: String, mode: XHTTPMode, extra: [String: Any], downloadSettings: XHTTPDownloadSettings?) -> XHTTPConfiguration {
-        // Headers from extra
         var headers: [String: String] = [:]
         if let extraHeaders = extra["headers"] as? [String: String] {
             headers = extraHeaders
@@ -388,8 +332,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
 
         let noGRPCHeader = extra["noGRPCHeader"] as? Bool ?? false
 
-        // scMaxEachPostBytes: can be int or {"from":N,"to":N}
-        // We use the "to" value as the max (client picks random within range)
+        // scMaxEachPostBytes can be an int or {"from":N,"to":N}; use "to" as the max.
         var scMaxEachPostBytes = 1_000_000
         if let range = extra["scMaxEachPostBytes"] as? [String: Any] {
             scMaxEachPostBytes = range["to"] as? Int ?? 1_000_000
@@ -397,7 +340,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             scMaxEachPostBytes = val
         }
 
-        // scMinPostsIntervalMs: can be int or {"from":N,"to":N}
+        // scMinPostsIntervalMs likewise.
         var scMinPostsIntervalMs = 30
         if let range = extra["scMinPostsIntervalMs"] as? [String: Any] {
             scMinPostsIntervalMs = range["to"] as? Int ?? 30
@@ -405,7 +348,6 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             scMinPostsIntervalMs = val
         }
 
-        // xPaddingBytes
         var xPaddingFrom = 100
         var xPaddingTo = 1000
         if let range = extra["xPaddingBytes"] as? [String: Any] {
@@ -431,7 +373,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
 
         let uplinkDataPlacement = XHTTPPlacement(rawValue: extra["uplinkDataPlacement"] as? String ?? "body") ?? .body
 
-        // uplinkDataKey defaults depend on placement (Xray-core Build() in transport_internet.go)
+        // Defaults depend on placement — matches Xray-core Build() in transport_internet.go.
         let defaultUplinkDataKey: String
         switch uplinkDataPlacement {
         case .header: defaultUplinkDataKey = "X-Data"
@@ -440,7 +382,6 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         }
         let uplinkDataKey = extra["uplinkDataKey"] as? String ?? defaultUplinkDataKey
 
-        // uplinkChunkSize defaults depend on placement (Xray-core Build() in transport_internet.go)
         let defaultUplinkChunkSize: Int
         switch uplinkDataPlacement {
         case .header: defaultUplinkChunkSize = 4096
@@ -479,22 +420,15 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
 
 // MARK: - XHTTP Download Settings (up/download detach)
 
-/// A separate download source for XHTTP: the GET (download) stream is dialed to
-/// this server with these settings while the POST (upload) stream stays on the
-/// main node, the two correlated by a shared session ID. Holds the subset of a
-/// stream's settings that `downloadSettings` carries in a VLESS share link.
+/// Separate download source: the GET leg dials this server while the POST leg
+/// stays on the main node, correlated by a shared session ID.
 struct XHTTPDownloadSettings: Codable, Equatable, Hashable {
-    /// Download server address.
     let serverAddress: String
-    /// Download server port.
     let serverPort: UInt16
-    /// Security tag for the download leg: `"none"`, `"tls"`, or `"reality"`.
+    /// `"none"`, `"tls"`, or `"reality"`.
     let security: String
-    /// TLS settings when `security == "tls"`.
     let tls: TLSConfiguration?
-    /// Reality settings when `security == "reality"`.
     let reality: RealityConfiguration?
-    /// Download-side XHTTP request config (its own host/path/headers/padding).
     /// Never carries its own nested `downloadSettings`.
     let xhttp: XHTTPConfiguration
 
@@ -519,11 +453,8 @@ struct XHTTPDownloadSettings: Codable, Equatable, Hashable {
     }
 }
 
-/// Reference box that lets ``XHTTPConfiguration`` (a value type) hold a
-/// ``XHTTPDownloadSettings`` whose `xhttp` is itself an ``XHTTPConfiguration``,
-/// without becoming infinitely sized. Immutable, so value semantics are
-/// preserved; `Codable`/`Equatable`/`Hashable` delegate transparently to the
-/// wrapped value so the box never appears in JSON or affects equality.
+/// Immutable reference box breaking the value-type recursion; conformances
+/// delegate to the wrapped value, so the box never appears in JSON or affects equality.
 final class XHTTPDownloadSettingsBox: Codable, Equatable, Hashable {
     let value: XHTTPDownloadSettings
 
@@ -546,7 +477,6 @@ final class XHTTPDownloadSettingsBox: Codable, Equatable, Hashable {
     }
 }
 
-/// XHTTP transport errors.
 enum XHTTPError: Error, LocalizedError {
     case setupFailed(String)
     case httpError(String)

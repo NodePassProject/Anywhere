@@ -9,30 +9,22 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "HTTP3Pool")
 
-/// Pools ``HTTP3Session`` instances (each a QUIC connection) for reuse
-/// across CONNECT streams. Adds idle eviction plus soft/hard caps on top
-/// of ``SessionPool``'s scaffolding to keep QUIC connection growth bounded.
+/// Pools HTTP3Session QUIC connections for reuse across CONNECT streams,
+/// with idle eviction and soft/hard caps.
 nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
 
     static let shared = HTTP3SessionPool()
 
-    /// Last activity time per session (for idle eviction).
     private var lastActivity: [ObjectIdentifier: CFAbsoluteTime] = [:]
 
-    /// Soft cap on sessions per pool key. When reached, acquire tries to
-    /// evict an idle session before creating a new one.
+    /// Soft cap: try to evict an idle session before creating a new one.
     private static let maxSessionsPerKey = 8
 
-    /// Hard cap on sessions per pool key. If every session is busy, the pool
-    /// may grow past the soft cap up to this ceiling to avoid breaking live
-    /// streams. Beyond this, acquire reuses the least-busy session instead
-    /// of opening another — preventing runaway growth under sustained load.
+    /// Hard cap: beyond this, pile onto the least-loaded session instead of opening another.
     private static let hardMaxSessionsPerKey = 16
 
-    /// Sessions idle longer than this are evicted.
     private static let idleTimeout: TimeInterval = 60
 
-    /// Periodic cleanup timer.
     private var cleanupTimer: DispatchSourceTimer?
     private let cleanupQueue = DispatchQueue(label: AWCore.Identifier.http3PoolCleanupQueue)
 
@@ -56,23 +48,17 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
 
         lock.lock()
 
-        // Evict closed, stream-blocked, and idle sessions.
         evictStale(key: key)
 
         if let existing = sessions[key]?.first(where: { $0.tryReserveStream() }) {
             lastActivity[ObjectIdentifier(existing)] = CFAbsoluteTimeGetCurrent()
             session = existing
         } else if let overflow = overflowSession(key: key) {
-            // Hard cap hit and every session is saturated — pile onto the
-            // least-loaded one rather than grow the pool unbounded.
             lastActivity[ObjectIdentifier(overflow)] = CFAbsoluteTimeGetCurrent()
             session = overflow
         } else {
-            // Soft cap: never close a session that still has live streams —
-            // doing so would abort in-flight tunnels on unrelated
-            // destinations. Prefer evicting an idle session; if all are
-            // busy, allow the pool to grow past the soft cap (up to
-            // `hardMaxSessionsPerKey`) rather than break working streams.
+            // Never close a session with live streams; evict an idle one if
+            // possible, otherwise grow past the soft cap up to the hard cap.
             let currentCount = sessions[key]?.count ?? 0
             if currentCount >= Self.maxSessionsPerKey {
                 if let victim = sessions[key]?.first(where: { !$0.hasActiveStreams }) {
@@ -105,10 +91,8 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
         }
     }
 
-    /// Returns the least-loaded existing session when the pool is at its
-    /// hard cap, bypassing per-session `maxConcurrentStreams`. Returns nil
-    /// when we still have room to grow the pool. Must be called with `lock`
-    /// held.
+    /// Returns the least-loaded session when the pool is at its hard cap.
+    /// Must be called with `lock` held.
     private func overflowSession(key: String) -> HTTP3Session? {
         guard let pool = sessions[key], pool.count >= Self.hardMaxSessionsPerKey else {
             return nil
@@ -123,8 +107,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
 
     // MARK: - Eviction
 
-    /// Removes closed, stream-blocked, and idle sessions from `key`'s bucket.
-    /// Must be called with ``lock`` held.
+    /// Removes closed, stream-blocked, and idle sessions. Must be called with ``lock`` held.
     private func evictStale(key: String) {
         let now = CFAbsoluteTimeGetCurrent()
         sessions[key]?.removeAll { session in
@@ -132,7 +115,6 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
                 lastActivity.removeValue(forKey: ObjectIdentifier(session))
                 return true
             }
-            // Only evict idle sessions that have NO active streams.
             if !session.hasActiveStreams,
                let activity = lastActivity[ObjectIdentifier(session)],
                now - activity > Self.idleTimeout {
@@ -147,8 +129,7 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
         }
     }
 
-    /// Drops the bucket entry plus the activity record. The base implementation
-    /// is otherwise sufficient.
+    /// Also clears the activity record for the removed session.
     override func removeSession(_ session: HTTP3Session, key: String) {
         super.removeSession(session, key: key)
         lock.lock()
@@ -201,7 +182,6 @@ nonisolated final class HTTP3SessionPool: SessionPool<HTTP3Session> {
         }
     }
 
-    /// Closes every pooled session and clears the activity table.
     override func closeAll() {
         lock.lock()
         lastActivity.removeAll()

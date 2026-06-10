@@ -15,24 +15,14 @@ class FakeIPPool {
         let domain: String
     }
 
-    // IPv4: 198.18.0.0/15 → offsets 1..131071 available; we cap LRU at a
-    // much smaller size (see ``TunnelConstants/fakeIPPoolSize``).
-    // IPv6: 2001:db8::/96 (RFC 3849 documentation prefix) → offset packed
-    // into low 32 bits, bytes 0-3 = 0x2001:0db8 and bytes 4-11 must be zero
-    // (the strict check is in `ipv6ToOffset`). Range used in practice:
-    // 2001:db8::1 through 2001:db8::<fakeIPPoolSize-as-hex>.
-    //
-    // The fake-IPv6 prefix must not fall inside any route excluded from
-    // the tunnel (see ``PacketTunnelProvider.bypassIPv6Routes``), or the
-    // kernel will hand fake packets to the physical interface and they
-    // will black-hole. ULA (fc00::/7) is excluded for local-network access,
-    // so fake addresses must live outside it — the documentation prefix
-    // is non-routable on the public internet and not on any bypass list.
+    // IPv4: 198.18.0.0/15, offsets 1...fakeIPPoolSize (LRU-capped).
+    // IPv6: 2001:db8::/96 (RFC 3849), offset in the low 32 bits. The prefix must
+    // not fall inside any route excluded from the tunnel (bypassIPv6Routes) or
+    // fake packets black-hole; that rules out ULA (fc00::/7).
 
-    /// Protects all mutable state (maps, LRU list, nextOffset).
+    /// Protects all mutable state.
     private let lock = UnfairLock()
 
-    // Bidirectional maps
     private var domainToOffset: [String: Int] = [:]
     private var offsetToEntry: [Int: Entry] = [:]
 
@@ -51,14 +41,12 @@ class FakeIPPool {
 
     // MARK: - Static Helpers
 
-    /// Fast check: is this IP in the fake IPv4 (198.18.0.0/15) or IPv6
-    /// (2001:db8::/96) range? Fakes within /96 always collapse to the
-    /// `2001:db8::` prefix in lwIP's canonical ntoa output.
+    /// Is this IP in the fake IPv4 or IPv6 range? A string-prefix check suffices:
+    /// lwIP's canonical ntoa always renders fakes with the `2001:db8::` prefix.
     static func isFakeIP(_ ip: String) -> Bool {
         ip.hasPrefix("198.18.") || ip.hasPrefix("198.19.") || ip.hasPrefix("2001:db8::")
     }
 
-    /// Convert an offset to 4-byte IPv4 address.
     static func ipv4Bytes(offset: Int) -> (UInt8, UInt8, UInt8, UInt8) {
         let ip32 = TunnelConstants.fakeIPPoolBaseIPv4 + UInt32(offset)
         return (
@@ -69,16 +57,15 @@ class FakeIPPool {
         )
     }
 
-    /// Convert an offset to 16-byte IPv6 address (2001:db8:: + offset).
     static func ipv6Bytes(offset: Int) -> [UInt8] {
         // 2001:0db8:0000:0000:0000:0000:XXXX:XXXX
         return [
-            0x20, 0x01,  // 2001
-            0x0D, 0xB8,  // :0db8
-            0x00, 0x00,  // :0000
-            0x00, 0x00,  // :0000
-            0x00, 0x00,  // :0000
-            0x00, 0x00,  // :0000
+            0x20, 0x01,
+            0x0D, 0xB8,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x00, 0x00,
             UInt8((offset >> 24) & 0xFF),
             UInt8((offset >> 16) & 0xFF),
             UInt8((offset >> 8) & 0xFF),
@@ -88,23 +75,19 @@ class FakeIPPool {
 
     // MARK: - Pool Operations
 
-    /// Allocate (or reuse) an offset for the given domain.
-    /// Use `ipv4Bytes(offset:)` or `ipv6Bytes(offset:)` to get the actual address bytes.
+    /// Allocates (or reuses) the offset for a domain.
     func allocate(domain: String) -> Int {
         lock.withLock {
-            // Already allocated? Touch LRU and return existing offset
             if let offset = domainToOffset[domain] {
                 touchLRU(offset)
                 return offset
             }
 
-            // Need a new offset
             let offset: Int
             if nextOffset <= TunnelConstants.fakeIPPoolSize {
                 offset = nextOffset
                 nextOffset += 1
             } else {
-                // Pool full — evict LRU
                 offset = evictLRU()
             }
 
@@ -116,7 +99,6 @@ class FakeIPPool {
         }
     }
 
-    /// Look up an entry by its fake IP string (IPv4 or IPv6).
     func lookup(ip: String) -> Entry? {
         lock.withLock {
             guard let offset = ipToOffset(ip) else { return nil }
@@ -126,7 +108,6 @@ class FakeIPPool {
         }
     }
 
-    /// Clear all mappings (called on full stop).
     func reset() {
         lock.withLock {
             domainToOffset.removeAll()
@@ -138,7 +119,6 @@ class FakeIPPool {
         }
     }
 
-    /// Returns the number of active entries.
     var count: Int { lock.withLock { domainToOffset.count } }
 
     // MARK: - IP ↔ Offset Conversion
@@ -196,7 +176,6 @@ class FakeIPPool {
                 guard bytes[i] == 0 else { return nil }
             }
 
-            // Extract offset from bytes 12-15
             let offset = (Int(bytes[12]) << 24) | (Int(bytes[13]) << 16)
                        | (Int(bytes[14]) << 8) | Int(bytes[15])
             guard offset >= 1, offset <= TunnelConstants.fakeIPPoolSize else { return nil }
@@ -220,8 +199,7 @@ class FakeIPPool {
 
     private func evictLRU() -> Int {
         guard let tail = lruTail else {
-            // Should never happen — pool is full so LRU list cannot be empty.
-            // Fall back to offset 1 rather than crashing.
+            // Unreachable (pool is full ⇒ LRU nonempty); fall back rather than crash.
             logger.debug("[FakeIPPool] evictLRU called on empty list, falling back to offset 1")
             return 1
         }

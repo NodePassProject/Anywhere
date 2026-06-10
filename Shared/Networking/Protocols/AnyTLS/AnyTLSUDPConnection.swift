@@ -7,13 +7,8 @@
 
 import Foundation
 
-/// UDP-over-AnyTLS wrapper.
-///
-/// Wraps an `AnyTLSStream` whose other end is the AnyTLS server's UoT
-/// handler. Once the UoT request `[isConnect=1][SocksaddrSerializer(dest)]`
-/// has been written by `connectWithAnyTLS`, every UDP datagram in either
-/// direction is just `[length BE u16][payload]` — exactly the framing the
-/// shared `UDPFramingCapable` helper provides.
+/// UDP-over-AnyTLS wrapper: after the UoT request `[isConnect=1][SocksaddrSerializer(dest)]`,
+/// every datagram in either direction is `[length BE u16][payload]`.
 nonisolated final class AnyTLSUDPConnection: ProxyConnection, UDPFramingCapable {
 
     private let inner: AnyTLSStream

@@ -7,10 +7,8 @@
 
 import Foundation
 
-/// Wraps a `RawUDPSocket` as a `ProxyConnection` with pull-based `receive`
-/// semantics. The socket's push-based receive loop is armed lazily on the
-/// first `receiveRaw` call; incoming datagrams are queued or delivered into
-/// a parked completion.
+/// Wraps a `RawUDPSocket` as a pull-based `ProxyConnection`; the socket's
+/// push receive loop is armed lazily on the first `receiveRaw`.
 nonisolated final class DirectUDPProxyConnection: ProxyConnection {
 
     private let socket: RawUDPSocket
@@ -73,12 +71,7 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
             return
         }
 
-        // Single-pending discipline — overlapping receives are an API
-        // violation. The previous overwrite-and-forget behavior silently
-        // leaked the earlier completion (a closure capturing the UDPFlow's
-        // receive loop, which would then hang forever waiting on a result
-        // that never came). Swap the stale completion out under the lock
-        // and surface a defined error to it so the caller learns.
+        // Single-pending discipline: fail any stale overlapping receive instead of letting it hang.
         let stale = pendingReceive
         pendingReceive = completion
         recvLock.unlock()
@@ -127,7 +120,6 @@ nonisolated final class DirectUDPProxyConnection: ProxyConnection {
         }
         let cb = pendingReceive
         pendingReceive = nil
-        // Stash so a future receiveRaw surfaces it if no one was waiting.
         if cb == nil {
             receiveError = error
         }

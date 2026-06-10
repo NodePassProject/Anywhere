@@ -28,26 +28,20 @@ class TCPConnection {
     let dstPort: UInt16
     let lwipQueue: DispatchQueue
 
-    /// The destination the proxy will be asked to connect to. Initialized
-    /// from the tcp_accept signal and may be replaced with the SNI hostname
-    /// once sniffing resolves.
+    /// Dial destination, fixed at accept time; an SNI re-route deliberately
+    /// keeps the caller's own DNS choice.
     private(set) var dstHost: String
 
-    /// The routing configuration for this connection. Mutable because a
-    /// successful SNI sniff can re-match a domain rule that points to a
-    /// different proxy.
+    /// Routing configuration; an SNI re-match may swap it to a different proxy.
     private(set) var configuration: ProxyConfiguration
 
     private var proxyClient: ProxyClient?
     private var proxyConnection: ProxyConnection?
     private var proxyConnecting = false
 
-    /// Committed routing identity for this connection — the single source of
-    /// truth for both traffic accounting and the dial path. Mutable: a
-    /// successful SNI sniff can re-match a domain rule and change the route.
+    /// Committed routing identity for traffic accounting and the dial path; an SNI re-match can change it.
     private var routeTarget: RouteTarget
 
-    /// Dial straight out iff the committed route is ``RouteTarget/direct``.
     private var bypass: Bool {
         if case .direct = routeTarget { return true }
         return false
@@ -57,43 +51,21 @@ class TCPConnection {
     private var closed = false
 
     // MARK: MITM
-    //
-    // ``mitmEnabled`` flips on after ``applySNI`` (real-IP path) or
-    // ``init`` (fake-IP path) determines that the SNI matches the user's
-    // MITM rules. Once set, ``connectProxy``/``connectDirect`` branch off
-    // to ``startMITMSession`` which terminates and re-establishes TLS
-    // around the existing proxy/direct outbound leg.
+
     private var mitmEnabled = false
-    /// SNI captured at MITM-decision time. The fake-IP path knows the
-    /// hostname at accept time; the real-IP path picks it up via the
-    /// existing sniffer.
+    /// SNI captured at MITM-decision time; inner TLS server name and rewrite-match host.
     private var mitmSNI: String?
     private var mitmSession: MITMSession?
 
     // MARK: SNI Sniffing
-    //
-    // When present, the connection is in the "sniff" phase: inbound bytes are
-    // buffered (in `pendingData`) and fed to the sniffer before the proxy is
-    // dialed. The first terminal state (.found / .notTLS / .unavailable)
-    // commits the route and kicks off the proxy connect. Cleared to nil once
-    // the route is committed.
+
+    /// Non-nil during the sniff phase; inbound bytes buffer in `pendingData` until the route commits.
     private var sniffer: TLSClientHelloSniffer?
 
     // MARK: Backpressure State
 
-    /// Downlink backlog: proxy-received bytes queued for lwIP's TCP send
-    /// buffer. Receives are issued whenever this drops below
-    /// `TunnelConstants.drainLowWaterMark` and no receive is in flight, so
-    /// the next chunk lands ready to push as lwIP's snd_buf frees up.
-    ///
-    /// Head-offset layout: bytes in `[0, pendingWriteOffset)` have been handed
-    /// to `tcp_write` and are no longer needed, bytes in
-    /// `[pendingWriteOffset, pendingWrite.count)` are still waiting. We advance
-    /// the offset instead of `removeSubrange(0..<offset)` on every partial
-    /// drain — that memmove is O(tail) per cycle and gets expensive when the
-    /// backlog is large. Compaction happens only when the dead prefix outgrows
-    /// the live suffix (see ``drainPendingWrite``), which keeps amortized cost
-    /// O(1) per byte with at most ~2× memory overhead.
+    /// Downlink backlog awaiting lwIP's send buffer. `[0, pendingWriteOffset)` is already
+    /// written; compaction is deferred until the dead prefix outgrows the live suffix.
     private var pendingWrite = Data()
     private var pendingWriteOffset = 0
 
@@ -102,39 +74,13 @@ class TCPConnection {
         pendingWrite.count - pendingWriteOffset
     }
 
-    /// True from the moment `tryArmReceive` dispatches a proxy receive until
-    /// its completion runs on `lwipQueue`. Guarantees at most one outstanding
-    /// receive at a time (the proxy transports require serial receives).
+    /// At most one outstanding proxy receive; the transports require serial receives.
     private var receiveInFlight = false
 
     // MARK: Upload Pipeline
     //
-    // FIFO buffer of bytes received from lwIP, drained by ``pumpUploadSends``
-    // through `proxyConnection.send` one chunk at a time.
-    //
-    // Single-flight is mandatory: several proxy transports (Vision over
-    // HTTP/2, gRPC, others) can split one logical `send` internally when a
-    // flow-control window is exhausted, then resume the remainder later
-    // when a window update arrives. With two LWIP chunks in flight, the
-    // later chunk's bytes can interleave with the earlier chunk's
-    // remainder, corrupting the byte stream the proxy sees. Even
-    // transports that look like a plain TCP stream (NWConnection.send
-    // preserves enqueue order) sit under framing layers that may reorder
-    // around backpressure. Until every transport guarantees strict
-    // serialisation of overlapping `send` calls, we serialise here.
-    //
-    // Ordering invariants:
-    // - Bytes are appended at the tail by ``handleReceivedData`` and consumed
-    //   at the head by ``pumpUploadSends`` in order. ``bufferOffset`` is the
-    //   live-data head; ``buffer[bufferOffset..<buffer.count]`` is the unsent
-    //   suffix. The dead prefix is compacted lazily when it grows past the
-    //   live suffix (matches the downlink's ``pendingWrite`` strategy).
-    // - At most one `proxyConnection.send` call is outstanding at a time.
-    //   The next chunk is issued only after the previous completion runs.
-    //
-    // Backpressure: ``lwip_bridge_tcp_recved`` runs only on send completion
-    // (one ack per send for that send's bytes), so the local TCP receive
-    // window naturally caps total bytes in the pipeline at lwIP's TCP_WND.
+    // Single-flight is mandatory: transports can split a logical send and resume it later,
+    // so two in-flight chunks would interleave; deferred tcp_recved makes TCP_WND the cap.
     private struct UploadPipeline {
         var buffer = Data()
         var bufferOffset = 0
@@ -149,16 +95,12 @@ class TCPConnection {
 
     private var activityTimer: ActivityTimer?
     private var handshakeTimer: DispatchWorkItem?
-    /// Fires if the sniff phase doesn't resolve within
-    /// `TunnelConstants.sniffDeadline` — commits the IP-based route so
-    /// server-speaks-first protocols don't stall waiting for a ClientHello.
+    /// Commits the IP-based route if the sniff doesn't resolve in time.
     private var sniffDeadline: DispatchWorkItem?
     private var uplinkDone = false
     private var downlinkDone = false
 
-    /// One-shot reporter that logs this connection's terminal failure at
-    /// most once. All transport error paths funnel through it so the LWIP
-    /// boundary emits exactly one error line per dead connection.
+    /// Logs this connection's terminal failure at most once.
     private let failureReporter = ConnectionFailureReporter(prefix: "[TCP]", logger: logger)
 
     // MARK: Lifecycle
@@ -177,9 +119,7 @@ class TCPConnection {
             self.sniffer = TLSClientHelloSniffer()
         }
 
-        // Handshake timeout (Xray-core Timeout.Handshake = 60s) — covers both
-        // the SNI-sniff wait and the proxy dial, so a stalled client can't
-        // hold a connection open indefinitely before we ever call connect.
+        // Covers both the sniff wait and the proxy dial so a stalled client can't hold the connection open.
         let timer = DispatchWorkItem { [weak self] in
             guard let self, !self.closed else { return }
             if self.isEstablishing {
@@ -195,16 +135,11 @@ class TCPConnection {
         handshakeTimer = timer
         lwipQueue.asyncAfter(deadline: .now() + TunnelConstants.handshakeTimeout, execute: timer)
 
-        // If we're sniffing, wait for the first ClientHello bytes in
-        // `handleReceivedData` before choosing a route. Otherwise commit
-        // immediately using the IP-derived configuration.
         if sniffer == nil {
             beginConnecting()
         } else {
-            // Safety net: non-TLS protocols where the server speaks first
-            // (SSH, SMTP, FTP) never send client bytes of their own accord.
-            // If we haven't decided by `sniffDeadline`, commit the IP-based
-            // route and proceed.
+            // Server-speaks-first protocols (SSH, SMTP, FTP) never send client
+            // bytes; commit the IP-based route at the deadline.
             let deadline = DispatchWorkItem { [weak self] in
                 guard let self, !self.closed, self.sniffer != nil else { return }
                 self.sniffer = nil
@@ -215,23 +150,18 @@ class TCPConnection {
         }
     }
 
-    /// Cancels the sniff deadline timer. Called whenever the sniff phase
-    /// resolves (successful SNI, fast reject, cap reached, close, abort).
     private func cancelSniffDeadline() {
         sniffDeadline?.cancel()
         sniffDeadline = nil
     }
 
-    /// Appends to `pendingData` and enforces ``TunnelConstants/tcpMaxPendingDataSize``.
-    /// Aborts the connection if the cap would be exceeded and returns `false`
-    /// so callers can bail out early.
+    /// Appends to `pendingData`; aborts and returns `false` if the cap would be exceeded.
     @discardableResult
     private func appendPendingData(bytes ptr: UnsafePointer<UInt8>, count: Int) -> Bool {
         if pendingData.count + count > TunnelConstants.tcpMaxPendingDataSize {
             logger.warning("[TCP] pendingData cap exceeded for \(dstHost):\(dstPort) (\(pendingData.count) + \(count) > \(TunnelConstants.tcpMaxPendingDataSize)), aborting")
             PerformanceMonitor.event(.pendingDataCapAbort)
-            // Bottleneck-driven abort: the warning above describes both the
-            // cause and the termination. Suppress any later spurious error.
+            // The warning above already covers this abort; suppress duplicates.
             failureReporter.markReported()
             abort()
             return false
@@ -240,32 +170,22 @@ class TCPConnection {
         return true
     }
 
-    /// True while the connection is still establishing — either waiting for
-    /// SNI bytes or dialing the proxy. Used by the handshake timer.
+    /// Still waiting for SNI bytes or dialing the proxy; drives the handshake timer.
     private var isEstablishing: Bool {
         proxyConnecting || sniffer != nil
     }
 
     // MARK: - lwIP Callbacks (called on lwipQueue)
 
-    /// Handles data received from the local app via lwIP (upload path).
-    ///
-    /// Appends the segment to the upload pipeline buffer and schedules a pump
-    /// (deferred via `lwipQueue.async` so all segments from one
-    /// `lwip_bridge_input` batch coalesce into the next pump invocation).
-    /// The pump ships a single chunk per `proxyConnection.send` call and
-    /// waits for its completion before issuing the next; bytes that arrive
-    /// during that window pile up in the buffer and ride out as the next
-    /// chunk, preserving the proxy-level byte stream order.
+    /// Upload path: data from the local app via lwIP.
     func handleReceivedData(bytes ptr: UnsafeRawPointer, count: Int) {
         guard !closed, count > 0 else { return }
         activityTimer?.update()
 
         let bytePtr = ptr.assumingMemoryBound(to: UInt8.self)
 
-        // SNI sniff phase: buffer bytes and feed the sniffer before dialing.
         // The sniffer and appendPendingData both copy eagerly, so a bytesNoCopy
-        // wrapper is safe here — the Data never outlives this function.
+        // wrapper is safe — the Data never outlives this function.
         if sniffer != nil {
             let data = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: ptr), count: count, deallocator: .none)
             if let state = sniffer?.feed(data) {
@@ -294,14 +214,10 @@ class TCPConnection {
             return
         }
 
-        // MITM: once the session is up, all client bytes feed the inner
-        // TLS server (or, post-handshake, the inner record connection's
-        // transport). The lwIP downlink is driven by ``MITMSession`` —
-        // we do not touch ``uploadPipeline`` while MITM is active.
+        // MITM: client bytes feed the inner TLS leg; the upload pipeline stays untouched.
         if let mitmSession {
             let chunk = Data(bytes: bytePtr, count: count)
-            // Acknowledge to lwIP up-front; MITMSession owns flow control
-            // for the inner leg and the outer leg is a different pipe.
+            // Ack to lwIP up-front; MITMSession owns inner-leg flow control.
             acknowledgeReceivedBytes(count)
             mitmSession.feedClientBytes(chunk)
             return
@@ -318,18 +234,8 @@ class TCPConnection {
         schedulePumpIfNeeded()
     }
 
-    /// Schedules a pump on `lwipQueue.async` if one isn't already pending and
-    /// the pipeline is idle. The async hop deliberately defers the pump
-    /// until after the current synchronous batch of `lwip_bridge_input`
-    /// callbacks finishes — this coalesces a burst of TCP segments into
-    /// one large send.
-    ///
-    /// While a send is in flight, scheduling a new pump is a no-op: bytes
-    /// keep accumulating in the buffer and the completion's tail call to
-    /// ``pumpUploadSends`` ships them as the next chunk. This is what
-    /// keeps steady-state sends fat (the buffer fills during the network
-    /// round-trip) and avoids fragmenting the stream into per-segment
-    /// sends.
+    /// The async hop coalesces a synchronous burst of lwIP callbacks into one large
+    /// send; while a send is in flight, the completion's tail call ships what accumulated.
     private func schedulePumpIfNeeded() {
         guard !uploadPipeline.isPumpScheduled,
               !uploadPipeline.sendInFlight,
@@ -340,18 +246,7 @@ class TCPConnection {
         }
     }
 
-    /// Issues a single `proxyConnection.send` call carrying the head slice
-    /// of the pipeline buffer (up to ``TunnelConstants/uploadChunkSize``
-    /// bytes), if no send is already in flight. Called from the deferred
-    /// async after a batch of incoming bytes (``schedulePumpIfNeeded``)
-    /// and synchronously from each completion to drain whatever
-    /// accumulated meanwhile.
-    ///
-    /// Strict single-flight: several proxy transports (Vision over HTTP/2,
-    /// gRPC, …) can split one logical `send` internally on flow-control
-    /// exhaustion and resume the remainder later. Issuing a second send
-    /// while the first's remainder is still pending would let the second
-    /// chunk's bytes interleave with the first's tail at the proxy.
+    /// Issues one `proxyConnection.send` with the head slice of the pipeline buffer; strict single-flight.
     private func pumpUploadSends(fromSchedule: Bool = false) {
         if fromSchedule {
             uploadPipeline.isPumpScheduled = false
@@ -376,21 +271,11 @@ class TCPConnection {
                     self.abort()
                     return
                 }
-                // Successful proxy-side accept counts as uplink activity. The
-                // lwIP-ingress update in ``handleReceivedData`` fires only when
-                // new bytes arrive from the local app; a long upload that
-                // backpressures the app (no new ingress) but keeps draining
-                // through the proxy would otherwise look idle to the activity
-                // timer and get closed mid-stream.
+                // Count proxy-side accepts as uplink activity; a long upload that
+                // backpressures the app would otherwise look idle and close mid-stream.
                 self.activityTimer?.update()
-                // Acknowledge this chunk to lwIP and flush any resulting
-                // window update so the local TCP peer can feed us the next
-                // batch without an extra output-queue hop.
                 self.acknowledgeReceivedBytes(chunkSize)
-                // Drain the next chunk synchronously: bytes accumulated
-                // during the in-flight window can ship without another
-                // async hop, recovering the chained-flush behaviour that
-                // keeps per-send chunks fat.
+                // Drain synchronously so bytes accumulated in-flight ship without another hop.
                 self.pumpUploadSends()
             }
         }
@@ -398,18 +283,11 @@ class TCPConnection {
         proxyConnection.send(data: chunk, completion: completion)
     }
 
-    /// Acknowledges local-app bytes to lwIP once they have been accepted by
-    /// the proxy transport. Also flushes the resulting window update packet so
-    /// the local TCP peer can resume sending without waiting for the deferred
-    /// output callback.
+    /// Acks local-app bytes to lwIP once the proxy leg accepted them, then
+    /// flushes the window update so the peer can resume sending promptly.
     private func acknowledgeReceivedBytes(_ byteCount: Int) {
         guard byteCount > 0 else { return }
-        // Uplink payload from the local app that the proxy/direct leg has
-        // accepted, attributed to this connection's committed route. Every
-        // non-rejected uplink ack funnels through here (pump completions, the
-        // VLESS handshake-carried initial data, and the MITM client bytes), so
-        // it's the single per-target tally point for uplink. Rejects advance the
-        // window via ``lwip_bridge_tcp_recved`` directly and stay uncounted.
+        // Single uplink tally point; rejects call tcp_recved directly, uncounted.
         TunnelStack.shared?.addBytesOut(Int64(byteCount), target: routeTarget)
         var remaining = byteCount
         while remaining > 0 {
@@ -417,18 +295,12 @@ class TCPConnection {
             remaining -= Int(part)
             lwip_bridge_tcp_recved(pcb, part)
         }
-        // `tcp_output` synchronously fires lwIP's output_fn for any pending
-        // segments, which appends to ``outputPackets`` and kicks
-        // ``drainOutputLoop`` on ``outputQueue``.
+        // tcp_output synchronously fires the output callback and kicks the drain loop.
         lwip_bridge_tcp_output(pcb)
     }
 
-    /// Removes and returns a `take`-byte head slice of the pipeline buffer.
-    /// Advances ``UploadPipeline/bufferOffset`` for partial slices and lazily
-    /// compacts when the dead prefix outgrows the live suffix, matching the
-    /// downlink ``pendingWrite`` strategy. Whole-buffer consumption hands off
-    /// the existing storage and replaces the buffer with a fresh `Data`, so
-    /// the in-flight chunk's backing isn't mutated under it.
+    /// Removes and returns the `take`-byte head slice; whole-buffer consumption hands
+    /// off the storage so the in-flight chunk's backing isn't mutated under it.
     private func sliceUploadBuffer(_ take: Int) -> Data {
         if take == uploadBufferCount {
             let chunk: Data
@@ -453,10 +325,7 @@ class TCPConnection {
         return chunk
     }
 
-    /// Called when the local app acknowledges receipt of data sent via lwIP.
-    ///
-    /// Drains pending data into the now-available send buffer space,
-    /// and resumes the receive loop once fully drained.
+    /// Client ACK freed lwIP send-buffer space; drain more downlink backlog.
     func handleSent(len: UInt16) {
         guard !closed else { return }
         drainPendingWrite()
@@ -465,9 +334,8 @@ class TCPConnection {
     func handleRemoteClose() {
         guard !closed else { return }
 
-        // Client FIN'd before we finished sniffing. If we never received any
-        // bytes, there's nothing to forward — drop the connection. Otherwise
-        // commit the tentative IP-based route and forward what we have.
+        // Client FIN'd mid-sniff: nothing buffered → drop; otherwise commit
+        // the IP-based route and forward what we have.
         if sniffer != nil {
             sniffer = nil
             cancelSniffDeadline()
@@ -478,8 +346,7 @@ class TCPConnection {
             beginConnecting()
         }
 
-        // MITM: the orderly close pushes through the inner TLS leg so the
-        // upstream sees the same end-of-stream signal.
+        // Propagate the orderly close through the inner TLS leg.
         mitmSession?.clientDidClose()
 
         uplinkDone = true
@@ -490,10 +357,8 @@ class TCPConnection {
         }
     }
 
-    /// Surfaces why lwIP tore this connection down. Without this log the
-    /// connection simply vanishes from the user's perspective — no send/receive
-    /// error fires because the PCB has already been freed by the time
-    /// `tcp_err` runs.
+    /// Logs why lwIP tore this connection down — by the time `tcp_err` runs
+    /// the PCB is already freed, so no other error path fires.
     func handleError(err: Int32) {
         let reason = TransportErrorLogger.describeLwIPError(err)
         if err == -15 { // ERR_CLSD — orderly close, not a failure
@@ -501,15 +366,12 @@ class TCPConnection {
         } else if err == -14 { // ERR_RST — always local-app-initiated in TUN mode
             logger.debug("[TCP] lwIP peer reset: \(endpointDescription): \(reason)")
         } else if err == -13, TunnelStack.shared?.isTearingDown == true {
-            // ERR_ABRT during a deliberate full-stack teardown (shutdown/restart).
-            // Outside teardown, ERR_ABRT indicates lwIP's own pressure aborts
-            // (tcp_kill_prio / tcp_kill_timewait) — those stay at warning below.
+            // ERR_ABRT during deliberate teardown; otherwise it's an lwIP pressure abort and warns below.
             logger.debug("[TCP] lwIP aborted connection (tunnel teardown): \(endpointDescription): \(reason)")
         } else {
             logger.warning("[TCP] lwIP aborted connection: \(endpointDescription): \(reason)")
         }
-        // The connection ends here — suppress any later spurious error log
-        // that might fire as in-flight callbacks unwind.
+        // Suppress spurious error logs as in-flight callbacks unwind.
         failureReporter.markReported()
         closed = true
         releaseProxy()
@@ -523,12 +385,8 @@ class TCPConnection {
         failureReporter.report(operation: operation, endpoint: endpointDescription, error: error)
     }
 
-    /// Terminal handler for a failed outbound dial.
-    ///
-    /// - Parameter bufferedClientData: client bytes the dial path moved out of
-    ///   ``pendingData`` before dialing (e.g. a handshake-carried ClientHello).
-    ///   They are restored ahead of any bytes that arrived while dialing so the
-    ///   whole unacknowledged run is covered when forcing the FIN.
+    /// Terminal handler for a failed dial; restores `bufferedClientData` ahead of
+    /// later arrivals so the whole unacknowledged run is covered.
     private func handleConnectFailure(_ error: Error, bufferedClientData: Data?) {
         reportFailure("Connect", error: error)
         guard case SocketError.resolutionFailed = error else {
@@ -545,12 +403,8 @@ class TCPConnection {
         }
     }
 
-    /// True when ``pendingData`` begins with a TLS handshake record — content
-    /// type 22 (`0x16`) followed by the SSL3/TLS major version 3 (`0x03`). Used
-    /// to decide whether a fatal TLS alert is the right "do not retry" signal
-    /// (client mid-handshake) or whether a bare FIN must do (plain HTTP, other
-    /// protocols). Iterates rather than subscripts so it is index-offset safe
-    /// on a sliced ``Data``.
+    /// True when `pendingData` starts with a TLS handshake record (0x16, 0x03);
+    /// iterates rather than subscripts so it is index-offset safe on sliced `Data`.
     private func bufferedBytesAreTLSHandshake() -> Bool {
         var iterator = pendingData.makeIterator()
         return iterator.next() == 0x16 && iterator.next() == 0x03
@@ -558,21 +412,11 @@ class TCPConnection {
 
     // MARK: - Route Commit
 
-    /// Kicks off the outbound connection using the currently committed
-    /// routing (`configuration`, `bypass`, `dstHost`). Idempotent — no-op
-    /// once the connect has started or completed.
-    ///
-    /// Synthesize-mode shortcut: when MITM is on and the matched rule's
-    /// action produces its own response (302 redirect / 200 reject),
-    /// skip the proxy/direct dial entirely and hand the connection to a
-    /// no-outer-leg ``MITMSession``.
+    /// Kicks off the outbound connection on the committed route. Idempotent.
     private func beginConnecting() {
         guard !closed, !proxyConnecting, proxyConnection == nil, mitmSession == nil else { return }
-        // MITM defers the upstream dial: start the session now (inner TLS
-        // handshake first) and let it dial via the ``MITMDialer`` once the
-        // first request resolves the destination — a transparent rewrite may
-        // change the host, and a 302 / reject answers on the inner leg without
-        // dialing at all. Non-MITM dials eagerly.
+        // MITM defers the dial into the session: a rewrite may change the host,
+        // and a 302 / reject answers without dialing at all.
         if mitmEnabled {
             startMITMSession()
             return
@@ -584,40 +428,23 @@ class TCPConnection {
         }
     }
 
-    /// Re-evaluates routing using the hostname extracted from the TLS
-    /// ClientHello. Updates `configuration` and `bypass` in place so the
-    /// subsequent ``beginConnecting()`` sees the SNI-based decision.
-    ///
-    /// ``dstHost`` is never rewritten here: the IP-derived value the
-    /// caller (or the fake-IP pool) already picked is preserved. The
-    /// caller's own DNS resolution is the authoritative source of truth
-    /// for the destination IP; rewriting to the SNI hostname would force
-    /// either the outbound proxy or our own ``getaddrinfo`` to re-resolve
-    /// and possibly land on a different CDN edge than the one the local
-    /// app picked (breaks latency tests, risks cert/host mismatches).
-    ///
-    /// Must be called only while in sniff phase (sniffer has just cleared).
+    /// Re-evaluates routing from the sniffed SNI; call only after the sniffer is cleared.
+    /// `dstHost` is never rewritten — the caller's own DNS resolution is authoritative.
     private func applySNI(_ sni: String) {
         guard let stack = TunnelStack.shared else { return }
         let router = stack.domainRouter
 
-        // MITM policy is evaluated independently of routing: routing selects
-        // the upstream leg, while MITM decides whether to intercept TLS.
+        // MITM (intercept TLS?) is decided independently of routing (which leg).
         if stack.mitmEnabled, stack.mitmPolicy.matches(sni) {
             mitmEnabled = true
             mitmSNI = sni
-            // The upstream destination is no longer decided here: a transparent
-            // ``MITMOperation/rewrite`` on the first request can change it, so
-            // the dial is deferred into ``MITMSession`` (see ``startMITMSession``).
         }
 
         guard let action = router.matchDomain(sni) else {
-            // No domain rule — keep the IP-derived route as-is.
+            // No domain rule — keep the IP-derived route.
             return
         }
 
-        // A successful SNI re-match is always a routing-rule decision (never the
-        // default), so these are recorded with `viaDefault: false`.
         switch action {
         case .direct:
             routeTarget = .direct
@@ -628,9 +455,7 @@ class TCPConnection {
             logger.debug("[TCP] SNI rejected by routing rule: \(sni) (\(dstHost):\(dstPort))")
             rejectWithTLSAlert()
         case .proxy(let id):
-            // Override any IP-derived route: an IP-CIDR hit on the tentative dst
-            // may have set a direct/other route at accept time, but the domain
-            // rule now wins.
+            // The domain rule wins over any IP-CIDR route set at accept time.
             routeTarget = .proxy(id)
             if let resolved = router.resolveConfiguration(action: action) {
                 configuration = resolved
@@ -697,11 +522,8 @@ class TCPConnection {
         guard !proxyConnecting && proxyConnection == nil && !closed else { return }
         proxyConnecting = true
 
-        // If the protocol can embed the caller's first bytes in its handshake
-        // (VLESS + its transports), extract pendingData into initialData here.
-        // Otherwise leave pendingData intact so the post-connect send path
-        // below forwards it — ``ProxyClient.connectWithCommand`` drops the
-        // `initialData` argument for those protocols.
+        // Protocols whose handshake carries a payload take pendingData as
+        // initialData so the first bytes ride the handshake.
         let initialData: Data?
         if configuration.outboundProtocol.handshakeCarriesInitialData {
             initialData = pendingData.isEmpty ? nil : pendingData
@@ -739,8 +561,7 @@ class TCPConnection {
                     }
 
                     if let initialData {
-                        // ProxyClient reports success only after VLESS
-                        // handshake-carried initialData has been accepted.
+                        // Connect success implies handshake-carried initialData was accepted.
                         self.acknowledgeReceivedBytes(initialData.count)
                     }
                     if !self.pendingData.isEmpty {
@@ -759,12 +580,8 @@ class TCPConnection {
 
     // MARK: - MITM Session
 
-    /// Starts a deferred-dial MITM session. No upstream is dialed yet: the
-    /// inner TLS handshake runs first and ``MITMSession`` calls back through the
-    /// ``MITMDialer`` (see ``makeMITMDialer``) once the first request resolves
-    /// the destination. A 302 / reject rewrite is answered on the inner leg and
-    /// never dials. The handshake timer is disarmed and the activity timer armed
-    /// here, since there is no eager dial to do it.
+    /// Starts a deferred-dial MITM session: the inner TLS handshake runs first and
+    /// the upstream dial waits until the first request resolves the destination.
     private func startMITMSession() {
         guard let stack = TunnelStack.shared else { abort(); return }
         let sni = mitmSNI ?? dstHost
@@ -797,8 +614,7 @@ class TCPConnection {
         let initialClientHello = pendingData
         pendingData.removeAll(keepingCapacity: true)
 
-        // Pass SNI as ``dstHost`` instead of the IP-derived value so rewriters
-        // match the hostname used in configured rules.
+        // Pass the SNI, not the IP-derived host, so rewrite rules match by hostname.
         let session = MITMSession(
             dstHost: sni,
             dstPort: dstPort,
@@ -809,8 +625,7 @@ class TCPConnection {
             dialer: makeMITMDialer(),
             lwipQueue: lwipQueue
         )
-        // Inner-leg downlink: bytes the inner TLS server writes go straight
-        // to the lwIP send buffer.
+        // Inner-leg downlink: inner TLS server output goes straight to lwIP.
         session.onSendToClient = { [weak self] data, completion in
             guard let self else { completion?(SocketError.notConnected); return }
             self.lwipQueue.async {
@@ -818,7 +633,6 @@ class TCPConnection {
                     completion?(SocketError.notConnected)
                     return
                 }
-                // Downlink activity in MITM mode — non-MITM path updates this in ``tryArmReceive``.
                 self.activityTimer?.update()
                 self.writeToLWIP(data)
                 completion?(nil)
@@ -838,8 +652,7 @@ class TCPConnection {
         }
         mitmSession = session
 
-        // We've consumed the bytes the client already sent; ack them so
-        // the client peer can keep going.
+        // Ack the consumed ClientHello so the client can keep sending.
         if !initialClientHello.isEmpty {
             acknowledgeReceivedBytes(initialClientHello.count)
         }
@@ -847,12 +660,8 @@ class TCPConnection {
         session.start(sni: sni)
     }
 
-    /// Builds the ``MITMDialer`` the session invokes to dial the upstream once
-    /// it has resolved the destination from the first request. Dials direct or
-    /// via the committed proxy route (``bypass`` / ``configuration`` were fixed
-    /// at ``applySNI`` time); the resulting connection and proxy client are
-    /// handed to — and owned by — the session. The completion runs on
-    /// ``lwipQueue``.
+    /// Builds the dialer for the session's deferred dial on the committed route; the
+    /// session owns the resulting connection, and completion runs on `lwipQueue`.
     private func makeMITMDialer() -> MITMDialer {
         return { [weak self] host, port, completion in
             guard let self else { completion(.failure(SocketError.notConnected)); return }
@@ -871,8 +680,7 @@ class TCPConnection {
                         }
                         self.lwipQueue.async {
                             if let error {
-                                // The session's ``onTeardown`` reports the
-                                // failure; don't double-report it here.
+                                // onTeardown reports the failure; don't double-report.
                                 completion(.failure(error))
                             } else {
                                 completion(.success(MITMDialResult(connection: connection, proxyClient: nil)))
@@ -896,8 +704,7 @@ class TCPConnection {
                             case .success(let conn):
                                 completion(.success(MITMDialResult(connection: conn, proxyClient: client)))
                             case .failure(let error):
-                                // The session's ``onTeardown`` reports the
-                                // failure; don't double-report it here.
+                                // onTeardown reports the failure; don't double-report.
                                 completion(.failure(error))
                             }
                         }
@@ -909,19 +716,8 @@ class TCPConnection {
 
     // MARK: - Proxy Receive Loop
 
-    /// Issues the next proxy receive if the downlink backlog is below the
-    /// low-water mark and no receive is already in flight.
-    ///
-    /// Overlapping the next receive with the ongoing drain keeps the lwIP
-    /// send buffer saturated: by the time a client ACK frees space, a fresh
-    /// chunk is already queued in `pendingWrite` ready to push. Without this
-    /// overlap, a big receive (e.g. a speed-test server pushing >1 MB per
-    /// read) forces stop-and-wait — the proxy socket's receive window stays
-    /// closed for the entire drain, and upstream throttles.
-    ///
-    /// Backpressure still applies: when `pendingWrite.count` is at or above
-    /// `drainLowWaterMark`, this is a no-op, so receives naturally pause
-    /// whenever lwIP can't keep up.
+    /// Issues the next proxy receive when the backlog is below `drainLowWaterMark`
+    /// and none is in flight; overlapping receive with drain avoids stop-and-wait.
     private func tryArmReceive() {
         guard !closed,
               !receiveInFlight,
@@ -960,11 +756,8 @@ class TCPConnection {
 
     // MARK: - lwIP Write Helper
 
-    /// Writes as many bytes as possible from buffer to lwIP's TCP send buffer.
-    /// Returns bytes written. Returns -1 on fatal (non-transient) tcp_write error.
-    ///
-    /// When `retryOnEmpty` is true, calls `tcp_output` once to flush if the send
-    /// buffer is initially full, then retries — used by the initial write path.
+    /// Writes as much as lwIP's send buffer accepts; returns bytes written, or -1 on a
+    /// fatal tcp_write error. `retryOnEmpty` flushes a full buffer once so ACKs free snd_buf.
     private func feedLWIP(_ base: UnsafeRawPointer, count: Int, retryOnEmpty: Bool = false) -> Int {
         var offset = 0
         while offset < count {
@@ -987,10 +780,8 @@ class TCPConnection {
         return offset
     }
 
-    /// Appends data received from the proxy onto the downlink backlog, then
-    /// drains as much as lwIP will accept. All order-preservation lives in
-    /// `pendingWrite`, so a concurrently prefetched receive can land without
-    /// racing ahead of the chunk currently being drained.
+    /// Appends proxy data to the downlink backlog and drains what lwIP accepts;
+    /// ordering lives in `pendingWrite`, so a prefetched receive can't race the drain.
     private func writeToLWIP(_ data: Data) {
         guard !closed, !data.isEmpty else { return }
         TunnelStack.shared?.addBytesIn(Int64(data.count), target: routeTarget)
@@ -999,14 +790,8 @@ class TCPConnection {
         drainPendingWrite()
     }
 
-    /// Drains ``pendingWrite`` into lwIP's TCP send buffer and, on progress,
-    /// arms the next proxy receive if we've dropped below the low-water mark.
-    ///
-    /// Called from ``handleSent(len:)`` on every client ACK, from
-    /// ``writeToLWIP(_:)`` after new proxy data is appended, and from a
-    /// 250 ms fallback timer when `tcp_write` couldn't place any bytes (snd_buf
-    /// full / zero window). That fallback is rare in practice — `handleSent`
-    /// drives nearly all progress — but bounds recovery time if no ACKs arrive.
+    /// Drains `pendingWrite` into lwIP and re-arms the proxy receive on progress;
+    /// driven by client ACKs, with a fallback retry timer when nothing was placed.
     private func drainPendingWrite() {
         guard !closed else { return }
 
@@ -1035,25 +820,18 @@ class TCPConnection {
             if written > 0 {
                 pendingWriteOffset += written
                 if pendingWriteOffset >= pendingWrite.count {
-                    // Fully drained — reset to keep the backing allocation
-                    // and clear both ends in one O(1) step.
+                    // Fully drained — keep the backing allocation.
                     pendingWrite.removeAll(keepingCapacity: true)
                     pendingWriteOffset = 0
                 } else if pendingWriteOffset > pendingWrite.count - pendingWriteOffset {
-                    // Dead prefix larger than live suffix: compact now so the
-                    // buffer never balloons past ~2× the live backlog.
+                    // Compact once the dead prefix outgrows the live suffix (~2× cap).
                     pendingWrite.removeSubrange(0..<pendingWriteOffset)
                     pendingWriteOffset = 0
                 }
                 lwip_bridge_tcp_output(pcb)
-                // tcp_output above generates output packets via lwIP's output_fn,
-                // which kicks ``drainOutputLoop`` on ``outputQueue`` — no explicit
-                // inline flush needed.
             } else {
-                // Nothing drained (ERR_MEM / zero window) — schedule a delayed
-                // retry. Skip `tryArmReceive` on purpose: piling more upstream
-                // bytes onto a stalled connection only grows `pendingWrite`.
-                // Once the retry makes progress, the tail call rearms.
+                // Nothing drained (ERR_MEM / zero window) — retry after a delay;
+                // don't rearm the receive while stalled.
                 PerformanceMonitor.event(.downlinkStallRetry)
                 lwipQueue.asyncAfter(deadline: .now() + .milliseconds(TunnelConstants.drainRetryDelayMs)) { [weak self] in
                     guard let self, !self.closed else { return }
@@ -1063,15 +841,13 @@ class TCPConnection {
             }
         }
 
-        // Made progress (or nothing was pending): prefetch the next chunk if
-        // the backlog is below the low-water mark.
+        // Prefetch the next chunk now that the backlog shrank.
         tryArmReceive()
     }
 
     // MARK: - Close / Abort
 
-    /// Best-effort flush of pending data into lwIP send buffer before close.
-    /// Data written here will be delivered before the FIN segment.
+    /// Best-effort flush before close so drained bytes precede the FIN.
     private func flushPendingToLWIP() {
         let live = pendingWriteCount
         guard live > 0 else { return }
@@ -1096,17 +872,8 @@ class TCPConnection {
         Unmanaged.passUnretained(self).release()
     }
 
-    /// Tears the connection down with a clean FIN instead of a RST.
-    ///
-    /// `tcp_close` in lwIP downgrades to RST whenever the receive window is
-    /// below `TCP_WND_MAX` — i.e. when bytes were delivered via `tcp_recv_cb`
-    /// but never acknowledged via `tcp_recved`. The sniffed ClientHello in
-    /// `pendingData` is exactly that: received but unacknowledged because we
-    /// never forwarded it upstream. A mid-handshake RST is widely interpreted
-    /// by TLS stacks as a transient failure, which drives browsers and HTTP
-    /// clients to retry aggressively — defeating the point of the reject
-    /// rule. Advancing the window first lets `close()` send a real FIN, which
-    /// clients treat as a deliberate peer close and don't retry.
+    /// Tears down with a clean FIN: lwIP's `tcp_close` downgrades to RST while
+    /// un-recved bytes hold the window down, and a mid-handshake RST makes clients retry.
     private func rejectGracefully() {
         guard !closed else { return }
         var remaining = pendingData.count
@@ -1118,16 +885,8 @@ class TCPConnection {
         close()
     }
 
-    /// Writes a fatal TLS Alert (`access_denied`) before the FIN.
-    ///
-    /// Used after a TLS ClientHello has been sniffed and the routing rule
-    /// rejected the SNI. A bare FIN mid-handshake is ambiguous: many TLS
-    /// clients surface it as a transient `connection closed by peer` and
-    /// retry. A fatal Alert is the protocol-level "do not retry" signal —
-    /// the client's TLS stack reports a definitive handshake failure with
-    /// the alert code and the calling app stops trying. The alert sits
-    /// before any keys are negotiated, so it goes out as plaintext on the
-    /// wire — no MITM cert is required.
+    /// Writes a fatal `access_denied` alert before the FIN — the protocol-level "do not
+    /// retry" signal; it precedes key negotiation, so it goes out as plaintext.
     private func rejectWithTLSAlert() {
         guard !closed else { return }
         // type=21 (alert), legacy_record_version=0x0303 (TLS 1.2),

@@ -7,19 +7,16 @@
 
 import Foundation
 
-/// Both ``TLSClient`` and ``QUICTLSHandler`` call into this instead of
-/// constructing a new `UserDefaults` instance on every validation.
-/// Values are refreshed when the `certificatePolicyChanged` Darwin notification fires.
+/// Shared certificate-policy cache; values are refreshed when the
+/// `certificatePolicyChanged` Darwin notification fires.
 enum CertificatePolicy {
     private static let lock = UnfairLock()
     private static var _allowInsecure = AWCore.getAllowInsecure()
     private static var _trustedFingerprints = AWCore.getTrustedCertificateFingerprints()
 
-    /// One-time observer registration (called via `startObserving()`).
     private static var observerRegistered = false
 
-    /// Registers a Darwin notification observer for `certificatePolicyChanged`.
-    /// Safe to call multiple times — only the first call has effect.
+    /// Registers the Darwin notification observer; idempotent.
     static func startObserving() {
         lock.lock()
         defer { lock.unlock() }
@@ -28,7 +25,7 @@ enum CertificatePolicy {
 
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
-            nil, // no instance context needed
+            nil,
             { _, _, _, _, _ in
                 CertificatePolicy.reload()
             },
@@ -38,8 +35,7 @@ enum CertificatePolicy {
         )
     }
 
-    /// Re-reads both values from UserDefaults.
-    /// Called automatically on `certificatePolicyChanged`; can also be called manually.
+    /// Re-reads policy values from UserDefaults.
     static func reload() {
         lock.lock()
         defer { lock.unlock() }

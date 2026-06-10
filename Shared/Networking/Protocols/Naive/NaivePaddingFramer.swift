@@ -7,18 +7,9 @@
 
 import Foundation
 
-/// Encodes and decodes NaiveProxy padding frames for the first N read/write operations.
+/// Encodes and decodes NaiveProxy padding frames for the first `maxFrames` reads/writes; afterwards data passes through unframed.
 ///
-/// Wire format per frame:
-/// ```
-/// [1 byte] payload_size >> 8
-/// [1 byte] payload_size & 0xFF
-/// [1 byte] padding_size
-/// [payload_size bytes] payload
-/// [padding_size bytes] zeros
-/// ```
-///
-/// After `maxFrames` frames have been processed, data passes through unframed.
+/// Wire format: `[2B payload_size BE][1B padding_size][payload][padding zeros]`.
 struct NaivePaddingFramer {
     static let frameHeaderSize = 3
     static let maxPaddingSize = 255
@@ -27,7 +18,6 @@ struct NaivePaddingFramer {
     private(set) var numReadFrames = 0
     private(set) var numWrittenFrames = 0
 
-    // Read state machine
     private enum ReadState {
         case payloadLength1
         case payloadLength2
@@ -44,19 +34,13 @@ struct NaivePaddingFramer {
         self.maxFrames = maxFrames
     }
 
-    /// Whether padding is still active for reads.
     var isReadPaddingActive: Bool { numReadFrames < maxFrames }
-
-    /// Whether padding is still active for writes.
     var isWritePaddingActive: Bool { numWrittenFrames < maxFrames }
 
     // MARK: - Read
 
-    /// Reads padded input and extracts payload bytes.
-    ///
-    /// Handles partial reads — the framer's state machine resumes across calls.
-    /// Returns the number of payload bytes written to `output`.
-    /// A return value of 0 means only padding/header bytes were consumed (not EOF).
+    /// Resumes across partial reads; returns bytes appended to `output`.
+    /// A return value of 0 means only header/padding was consumed — not EOF.
     mutating func read(padded: Data, into output: inout Data) -> Int {
         var offset = 0
         let startCount = output.count
@@ -116,9 +100,7 @@ struct NaivePaddingFramer {
 
     // MARK: - Write
 
-    /// Wraps `payload` in a padding frame with the given padding size.
-    ///
-    /// Returns the framed data (header + payload + zero-padding).
+    /// Returns header + payload + zero-padding.
     mutating func write(payload: Data, paddingSize: Int) -> Data {
         let paddingSize = min(paddingSize, Self.maxPaddingSize)
         let frameSize = Self.frameHeaderSize + payload.count + paddingSize

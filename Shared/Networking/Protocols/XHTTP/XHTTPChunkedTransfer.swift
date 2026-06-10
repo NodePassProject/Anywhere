@@ -1,5 +1,5 @@
 //
-//  XHTTPConfiguration.swift
+//  XHTTPChunkedTransfer.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/30/26.
@@ -9,28 +9,22 @@ import Foundation
 
 // MARK: - ChunkedTransferDecoder
 
-/// Stateful chunked transfer encoding decoder (HTTP/1.1 RFC 7230 §4.1).
-///
-/// Handles partial reads: data can be fed incrementally and chunks extracted as they become complete.
+/// Stateful chunked transfer encoding decoder (HTTP/1.1 RFC 7230 §4.1). Handles partial reads.
 struct ChunkedTransferDecoder {
     private var buffer = Data()
     private var _isFinished = false
 
     var isFinished: Bool { _isFinished }
 
-    /// Feed raw data from the transport into the decoder.
     mutating func feed(_ data: Data) {
         buffer.append(data)
     }
 
-    /// Try to extract the next complete chunk from the buffer.
-    ///
-    /// Returns the chunk payload (without framing), or `nil` if not enough data is available yet.
-    /// Returns empty `Data()` if a zero-length terminator chunk is found (EOF).
+    /// Returns the next complete chunk's payload (without framing), or nil if more data is needed;
+    /// the zero-length terminator sets `isFinished`.
     mutating func nextChunk() -> Data? {
         guard !_isFinished else { return nil }
 
-        // Look for the chunk-size line ending with \r\n
         let crlf = Data([0x0D, 0x0A])
         guard let crlfRange = buffer.range(of: crlf) else {
             return nil
@@ -48,7 +42,6 @@ struct ChunkedTransferDecoder {
         }
 
         if chunkSize == 0 {
-            // Terminal chunk
             _isFinished = true
             // Consume "0\r\n\r\n" (the trailing CRLF after the zero chunk)
             let termEnd = crlfRange.upperBound
@@ -59,11 +52,10 @@ struct ChunkedTransferDecoder {
             return nil
         }
 
-        // Check if we have the full chunk data + trailing \r\n
         let dataStart = crlfRange.upperBound
         let needed = dataStart + Int(chunkSize) + 2 // chunk data + \r\n
         guard buffer.endIndex >= needed else {
-            return nil // Need more data
+            return nil
         }
 
         let chunkData = buffer.subdata(in: dataStart..<dataStart + Int(chunkSize))

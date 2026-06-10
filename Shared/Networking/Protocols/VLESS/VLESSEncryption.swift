@@ -7,21 +7,8 @@
 
 import Foundation
 
-/// Parsed form of a VLESS `encryption` (client) field as defined by Xray-core's
-/// `mlkem768x25519plus` scheme.
-///
-/// Wire format:
-/// ```
-/// mlkem768x25519plus.<xor>.<rtt>[.<padSeg>...].<base64Key>[.<base64Key>...]
-/// ```
-/// where:
-///  - `<xor>` ∈ `{native, xorpub, random}`
-///  - `<rtt>` ∈ `{1rtt, 0rtt}`
-///  - `<padSeg>` is a short (length < 20) hyphen-triple like `100-111-1111`,
-///    alternating between length specs and gap specs
-///  - `<base64Key>` is base64url-encoded; 32 bytes = X25519 public key,
-///    1184 bytes = ML-KEM-768 encapsulation key. Multiple keys form an
-///    NFS relay chain in the order written.
+/// Parsed VLESS `encryption` (client) field, Xray-core's `mlkem768x25519plus` scheme:
+/// `mlkem768x25519plus.<xor>.<rtt>[.<padSeg>...].<base64Key>[.<base64Key>...]`.
 struct VLESSEncryptionConfig: Equatable, Hashable {
 
     enum XORMode: UInt8 {
@@ -37,17 +24,12 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
 
     let xorMode: XORMode
     let rttMode: RTTMode
-    /// Raw padding spec (e.g. `"100-111-1111.50-0-3333"`) preserved verbatim
-    /// for re-serialization. Empty when none was specified, in which case
-    /// the runtime falls back to its built-in default schedule.
+    /// Raw padding spec preserved verbatim for re-serialization; empty means use the default schedule.
     let padding: String
-    /// One or more public keys in NFS-relay order. Each is either 32 bytes
-    /// (X25519) or 1184 bytes (ML-KEM-768 encapsulation key).
+    /// Public keys in NFS-relay order: 32 bytes = X25519, 1184 = ML-KEM-768 encapsulation key.
     let publicKeys: [Data]
 
-    /// `Account.Seconds` value (0 for 1-RTT, 1 for 0-RTT) used by the
-    /// outbound handshake. The actual ticket lifetime is decided by the
-    /// server; the client only signals "I want 0-RTT".
+    /// `Account.Seconds` wire value: 0 for 1-RTT, 1 for 0-RTT; the server decides the actual ticket lifetime.
     var seconds: UInt32 {
         rttMode == .zeroRTT ? 1 : 0
     }
@@ -78,12 +60,8 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
         }
     }
 
-    /// Parse the `encryption` field of a VLESS account.
-    ///
-    /// Returns `nil` for the `"none"` and empty-string sentinels (no
-    /// encryption layer). Throws ``ParseError`` for any other malformed
-    /// value so the caller can surface a precise error to the user instead
-    /// of silently downgrading to plaintext.
+    /// Returns `nil` for the `"none"`/empty sentinels; throws for any other malformed
+    /// value rather than silently downgrading to plaintext.
     static func parse(_ string: String) throws -> VLESSEncryptionConfig? {
         if string.isEmpty || string == "none" {
             return nil
@@ -114,9 +92,8 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
             throw ParseError.unknownRTTMode(String(segments[2]))
         }
 
-        // Segments after rtt are padding (length < 20) followed by base64url
-        // public keys (length >= 20). Matches Xray-core's `len(r) < 20`
-        // heuristic in infra/conf/vless.go.
+        // Segments shorter than 20 chars are padding specs, the rest are base64url
+        // keys — matches Xray-core's `len(r) < 20` heuristic.
         var paddingSegments: [String] = []
         var publicKeys: [Data] = []
         for raw in segments[3...] {
@@ -144,8 +121,7 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
         )
     }
 
-    /// Re-encode this config as the canonical `mlkem768x25519plus...` string.
-    /// Round-trips with ``parse(_:)`` for any value produced by ``parse(_:)``.
+    /// Re-encodes as the canonical `mlkem768x25519plus...` string; round-trips with `parse`.
     func encoded() -> String {
         var parts: [String] = ["mlkem768x25519plus"]
         switch xorMode {

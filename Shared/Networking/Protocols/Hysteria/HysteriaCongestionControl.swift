@@ -23,10 +23,8 @@ enum HysteriaCongestionControl: String, Codable, Hashable, CaseIterable {
 
     // MARK: - Brutal bandwidth knobs
     //
-    // Mbit/s ranges and defaults for the user-configured upload/download
-    // rates. Only meaningful under `.brutal`. The clamps are applied at every
-    // construction boundary (URL, dict, Clash, Codable) so the associated
-    // values on `Outbound.hysteria` are always valid regardless of source.
+    // Clamped at every construction boundary (URL, dict, Clash, Codable) so
+    // `Outbound.hysteria` values are always in range regardless of source.
 
     static let uploadMbpsRange: ClosedRange<Int> = 0...1000
     static let uploadMbpsDefault: Int = 20

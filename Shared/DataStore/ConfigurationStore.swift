@@ -50,8 +50,7 @@ class ConfigurationStore {
         coordinate()
     }
 
-    /// Atomically replaces all configurations for a subscription in a single assignment,
-    /// so observers are notified only once with the final state.
+    /// Replaces a subscription's configurations in a single assignment so observers are notified once.
     func replaceConfigurations(for subscriptionId: UUID, with newConfigurations: [ProxyConfiguration]) {
         var updated = configurations.filter { $0.subscriptionId != subscriptionId }
         updated.append(contentsOf: newConfigurations)
@@ -60,8 +59,7 @@ class ConfigurationStore {
         coordinate()
     }
 
-    /// Reorders standalone configurations (those without a `subscriptionId`) while
-    /// leaving subscription-owned configurations at their original absolute positions.
+    /// Reorders standalone configurations; subscription-owned ones keep their absolute positions.
     func moveStandaloneConfigurations(fromOffsets source: IndexSet, toOffset destination: Int) {
         let standaloneIndices = configurations.indices.filter { configurations[$0].subscriptionId == nil }
         var standalone = standaloneIndices.map { configurations[$0] }
@@ -77,9 +75,7 @@ class ConfigurationStore {
 
     // MARK: - Coordination
 
-    /// After any change to the proxy list, keep dependent state consistent: re-validate the
-    /// VPN's active selection and drop orphaned routing-rule assignments, then re-sync routing
-    /// to the Network Extension. This coordination lives in the store, not in views.
+    /// Keeps the VPN selection and routing-rule state consistent after any change to the proxy list.
     private func coordinate() {
         let chains = ChainStore.shared.chains
         VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
@@ -110,15 +106,12 @@ class ConfigurationStore {
 }
 
 extension ConfigurationStore {
-    /// Whether any configurations exist.
     var hasConfigurations: Bool { !configurations.isEmpty }
 
-    /// All configurations belonging to a subscription.
     func configurations(for subscription: Subscription) -> [ProxyConfiguration] {
         configurations.filter { $0.subscriptionId == subscription.id }
     }
 
-    /// Standalone configurations (no subscription) as picker items.
     var standalonePickerItems: [PickerItem] {
         configurations
             .filter { $0.subscriptionId == nil }

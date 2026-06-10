@@ -10,8 +10,6 @@ import Foundation
 // MARK: - WebSocketConnection
 
 /// WebSocket connection implementing RFC 6455 framing over an arbitrary transport.
-///
-/// Closure-based transport abstraction avoids modifying ``RawTCPSocket`` or ``TLSRecordConnection``.
 nonisolated class WebSocketConnection {
 
     // MARK: Transport closures
@@ -29,8 +27,7 @@ nonisolated class WebSocketConnection {
     private var upgraded = false
     private var heartbeatTimer: DispatchSourceTimer?
 
-    /// Maximum receive buffer size (1 MB). Protects against unbounded growth
-    /// from a misbehaving server sending large frames without consumption.
+    /// Caps receive buffer growth (1 MB) against a misbehaving server.
     private static let maxReceiveBufferSize = 1_048_576
 
     static let chromeUserAgent = ProxyUserAgent.chrome
@@ -41,8 +38,6 @@ nonisolated class WebSocketConnection {
 
     // MARK: - Initializers
 
-    /// Designated initializer. Takes a pre-built ``TransportClosures`` so the
-    /// three convenience inits below are each one line.
     init(transport: TransportClosures, configuration: WebSocketConfiguration) {
         self.configuration = configuration
         self.transportSend = transport.send
@@ -51,35 +46,26 @@ nonisolated class WebSocketConnection {
         self._isConnected = true
     }
 
-    /// Creates a WebSocket connection over a plain ``RawTCPSocket``.
     convenience init(transport: RawTCPSocket, configuration: WebSocketConfiguration) {
         self.init(transport: TransportClosures(rawTCP: transport), configuration: configuration)
     }
 
-    /// Creates a WebSocket connection over a ``TLSRecordConnection`` (WSS).
     convenience init(tlsConnection: TLSRecordConnection, configuration: WebSocketConfiguration) {
         self.init(transport: TransportClosures(tls: tlsConnection), configuration: configuration)
     }
 
-    /// Creates a WebSocket connection over a proxy tunnel (for proxy chaining).
     convenience init(tunnel: ProxyConnection, configuration: WebSocketConfiguration) {
         self.init(transport: TransportClosures(tunnel: tunnel), configuration: configuration)
     }
 
     // MARK: - HTTP Upgrade Handshake
 
-    /// Performs the WebSocket HTTP upgrade handshake.
-    ///
-    /// - Parameters:
-    ///   - earlyData: Optional early data to embed in the upgrade request header.
-    ///   - completion: Called with `nil` on success or an error on failure.
+    /// Performs the WebSocket HTTP upgrade handshake, optionally embedding early data in a request header.
     func performUpgrade(earlyData: Data? = nil, completion: @escaping (Error?) -> Void) {
-        // Generate 16-byte random key, base64-encoded
         var keyBytes = [UInt8](repeating: 0, count: 16)
         _ = SecRandomCopyBytes(kSecRandomDefault, 16, &keyBytes)
         let wsKey = Data(keyBytes).base64EncodedString()
 
-        // Build HTTP upgrade request
         var request = "GET \(configuration.path) HTTP/1.1\r\n"
         request += "Host: \(configuration.host)\r\n"
         request += "Upgrade: websocket\r\n"
@@ -87,18 +73,15 @@ nonisolated class WebSocketConnection {
         request += "Sec-WebSocket-Key: \(wsKey)\r\n"
         request += "Sec-WebSocket-Version: 13\r\n"
 
-        // Custom headers from configuration
         for (key, value) in configuration.headers {
             request += "\(key): \(value)\r\n"
         }
 
-        // Default User-Agent (Chrome UA) if not set in custom headers.
-        // Matches Xray-core's GetRequestHeader() which sets utils.ChromeUA.
+        // Default to Chrome UA if unset, matching Xray-core's GetRequestHeader().
         if !configuration.headers.keys.contains(where: { $0.lowercased() == "user-agent" }) {
             request += "User-Agent: \(Self.chromeUserAgent)\r\n"
         }
 
-        // Early data: base64url-encode and place in the configured header
         if let earlyData, !earlyData.isEmpty, configuration.maxEarlyData > 0 {
             let dataToEmbed = earlyData.prefix(configuration.maxEarlyData)
             let encoded = dataToEmbed.base64URLEncodedString()
@@ -142,7 +125,6 @@ nonisolated class WebSocketConnection {
             let headerData: Data? = self.lock.withLock {
                 self.receiveBuffer.append(data)
 
-                // Look for the end of HTTP headers
                 let headerEnd: Data = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
                 guard let range = self.receiveBuffer.range(of: headerEnd) else {
                     return nil
@@ -159,7 +141,6 @@ nonisolated class WebSocketConnection {
                 return
             }
 
-            // Validate HTTP 101 response
             guard let headerString = String(data: headerData, encoding: .utf8) else {
                 completion(WebSocketError.upgradeFailed("Cannot decode response headers"))
                 return
@@ -185,7 +166,6 @@ nonisolated class WebSocketConnection {
         transportSend(frame, completion)
     }
 
-    /// Sends data as a binary WebSocket frame without tracking completion.
     func send(data: Data) {
         send(data: data) { _ in }
     }
@@ -199,7 +179,6 @@ nonisolated class WebSocketConnection {
         receiveMore(completion: completion)
     }
 
-    /// Cancels the connection.
     func cancel() {
         lock.withLock {
             _isConnected = false
@@ -211,16 +190,13 @@ nonisolated class WebSocketConnection {
     }
 
     deinit {
-        // Reclaim the heartbeat timer if dropped without cancel() (same pattern
-        // as AnyTLSClient). `DispatchSource.cancel()` is thread-safe.
+        // Reclaim the heartbeat timer if dropped without cancel(); DispatchSource.cancel() is thread-safe.
         heartbeatTimer?.cancel()
     }
 
     // MARK: - Heartbeat (Ping Sender)
 
-    /// Starts a periodic ping sender matching Xray-core's heartbeat behavior.
-    /// Sends a WebSocket Ping frame every `heartbeatPeriod` seconds.
-    /// Stops automatically if the send fails (connection closed).
+    /// Periodic Ping sender matching Xray-core's heartbeat; stops when a send fails.
     private func startHeartbeat() {
         let period = configuration.heartbeatPeriod
         guard period > 0 else { return }
@@ -253,7 +229,6 @@ nonisolated class WebSocketConnection {
 
     // MARK: - Frame Building (Client → Server, MUST be masked)
 
-    /// Builds a WebSocket frame with masking (client → server).
     private func buildFrame(opcode: UInt8, payload: Data) -> Data {
         var frame = Data()
 
@@ -295,7 +270,6 @@ nonisolated class WebSocketConnection {
 
     // MARK: - Frame Parsing (Server → Client, NOT masked)
 
-    /// Result of attempting to extract a frame from the buffer.
     private enum FrameResult {
         case binary(Data)
         case ping(Data)
@@ -334,7 +308,6 @@ nonisolated class WebSocketConnection {
         let totalFrameSize = headerSize + Int(payloadLength)
         guard receiveBuffer.count >= totalFrameSize else { return nil }
 
-        // Extract payload
         var payload: Data
         if isMasked {
             let maskStart = headerSize - 4
@@ -355,7 +328,6 @@ nonisolated class WebSocketConnection {
             payload = receiveBuffer.subdata(in: payloadStart..<payloadStart + Int(payloadLength))
         }
 
-        // Consume the frame from the buffer in a single compaction step.
         // Copying the remainder into a new Data releases the original backing store.
         if totalFrameSize >= receiveBuffer.count {
             receiveBuffer = Data()
@@ -392,17 +364,15 @@ nonisolated class WebSocketConnection {
         case .binary(let data):
             completion(data, nil)
         case .ping(let payload):
-            // Auto-respond with Pong containing the same payload
+            // RFC 6455: echo payload in Pong
             let pongFrame = buildFrame(opcode: 0x0A, payload: payload)
             transportSend(pongFrame) { [weak self] _ in
-                // Continue receiving the next data frame
                 self?.receive(completion: completion)
             }
         case .pong:
             // Unsolicited pong, ignore and continue receiving
             receive(completion: completion)
         case .close(let code, let reason):
-            // Echo close frame back
             var closePayload = Data()
             closePayload.append(UInt8(code >> 8))
             closePayload.append(UInt8(code & 0xFF))
@@ -413,7 +383,6 @@ nonisolated class WebSocketConnection {
         }
     }
 
-    /// Reads more data from the transport and tries to extract a frame.
     private func receiveMore(completion: @escaping (Data?, Error?) -> Void) {
         transportReceive { [weak self] data, _, error in
             guard let self else {

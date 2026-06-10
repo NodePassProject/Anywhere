@@ -74,9 +74,8 @@ extension ProxyClient {
         }
     }
 
-    /// Pooled chained dial via ``HysteriaClient/acquireChained``. On cache
-    /// miss, builds the chain and hands its hops to the pool entry so they
-    /// outlive any single flow.
+    /// Acquires a pooled chained Hysteria client, building the chain on cache
+    /// miss so that its hops outlive any single flow.
     private func connectPooledChainedHysteria(
         hyConfig: HysteriaConfiguration,
         chain: [ProxyConfiguration],
@@ -86,8 +85,7 @@ extension ProxyClient {
     ) {
         let chainSignature = chain.map { $0.id.uuidString }.joined(separator: ":")
 
-        // Validate the chain synchronously so config errors don't get
-        // deferred behind a pool registration.
+        // Validate the chain synchronously so config errors aren't deferred behind pool registration.
         let cascadeCommands: [ProxyCommand]
         switch Self.computeChainHopCommands(
             chain: chain,
@@ -108,9 +106,8 @@ extension ProxyClient {
         HysteriaClient.acquireChained(
             configuration: hyConfig,
             chainSignature: chainSignature,
-            // Builder is self-free: one build is shared across concurrent
-            // `acquireChained` waiters, so it must outlive any single
-            // caller's `ProxyClient`.
+            // Builder must be self-free: one build is shared across concurrent
+            // waiters and outlives any single caller's ProxyClient.
             builder: { builderCompletion in
                 var holders: [ProxyClient] = []
                 let holdersLock = UnfairLock()

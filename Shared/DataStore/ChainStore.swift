@@ -45,9 +45,7 @@ class ChainStore {
 
     // MARK: - Coordination
 
-    /// After any change to the chain list, keep dependent state consistent: re-validate the
-    /// VPN's active selection and drop orphaned routing-rule assignments, then re-sync routing
-    /// to the Network Extension. This coordination lives in the store, not in views.
+    /// Keeps the VPN selection and routing-rule state consistent after any change to the chain list.
     private func coordinate() {
         let configurations = ConfigurationStore.shared.configurations
         VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
@@ -76,7 +74,6 @@ class ChainStore {
 
 extension ChainStore {
     /// Valid chains (those resolving to ≥2 proxies) as picker items.
-    /// Reads `ConfigurationStore.shared` to resolve each chain's proxies.
     var pickerItems: [PickerItem] {
         let configurations = ConfigurationStore.shared.configurations
         return chains.compactMap { chain in

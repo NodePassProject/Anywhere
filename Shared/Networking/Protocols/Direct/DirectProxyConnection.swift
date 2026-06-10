@@ -11,9 +11,6 @@ import Foundation
 nonisolated class DirectProxyConnection: ProxyConnection {
     let connection: any RawTransport
 
-    /// Creates a new direct proxy connection.
-    ///
-    /// - Parameter connection: The underlying transport.
     init(connection: any RawTransport) {
         self.connection = connection
     }

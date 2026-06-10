@@ -11,9 +11,6 @@ import Foundation
 nonisolated class RealityProxyConnection: ProxyConnection {
     private let realityConnection: TLSRecordConnection
 
-    /// Creates a new Reality-backed proxy connection.
-    ///
-    /// - Parameter realityConnection: The underlying TLS record connection.
     init(realityConnection: TLSRecordConnection) {
         self.realityConnection = realityConnection
     }
@@ -36,12 +33,9 @@ nonisolated class RealityProxyConnection: ProxyConnection {
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         realityConnection.receive { data, error in
             if let error {
-                // An AEAD authentication failure on a Reality connection means
-                // the record no longer decrypts with the handshake-derived keys
-                // — the server may have switched to Vision direct-copy. Surface
-                // the Reality-specific diagnostic for that one case; every other
-                // record-layer error (MAC, padding, malformed framing, alerts)
-                // propagates with its real description.
+                // AEAD auth failure means the record no longer decrypts with the derived
+                // keys — the server may have switched to Vision direct-copy. Only that
+                // case maps to the Reality-specific error; everything else propagates.
                 if case TLSRecordError.recordAuthenticationFailed = error {
                     completion(nil, RealityError.decryptionFailed)
                     return

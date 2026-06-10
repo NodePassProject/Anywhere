@@ -7,10 +7,8 @@
 
 import Foundation
 
-/// Handles NaiveProxy padding header generation and response parsing.
 enum NaivePaddingNegotiator {
 
-    /// Negotiated padding type.
     enum PaddingType: Int {
         case none = 0
         case variant1 = 1
@@ -18,11 +16,7 @@ enum NaivePaddingNegotiator {
 
     // MARK: - Non-Indexed HPACK Characters
 
-    /// The 17 printable ASCII characters (0x20–0x7f) whose HPACK Huffman codes are >= 8 bits,
-    /// iterated in Huffman table order. These are used to generate padding header values
-    /// that cannot be compactly indexed by HPACK, making them indistinguishable from real headers.
-    ///
-    /// Characters: ! " # $ & ' ( ) * + , ; < > ? @ X
+    /// The 17 printable ASCII characters with HPACK Huffman codes >= 8 bits; values built from them resist HPACK static indexing.
     private static let nonIndexCodes: [UInt8] = [
         0x21, // '!'
         0x22, // '"'
@@ -44,10 +38,6 @@ enum NaivePaddingNegotiator {
     ]
 
     /// Generates a random padding header value of 16–32 non-indexed characters.
-    ///
-    /// The first 16 characters are selected using 4-bit chunks from a random 64-bit value
-    /// (indexing into the first 16 entries of `nonIndexCodes`). Remaining characters use
-    /// the 17th entry ('X').
     static func generatePaddingValue() -> String {
         let length = Int.random(in: 16...32)
         var uniqueBits = UInt64.random(in: 0...UInt64.max)
@@ -67,11 +57,7 @@ enum NaivePaddingNegotiator {
 
     // MARK: - Request Headers
 
-    /// Generates the padding-related headers for a CONNECT request.
-    ///
-    /// - Parameter fastOpen: If `true`, includes the `fastopen: 1` header (used when
-    ///   the server's padding type is already known from a previous connection).
-    /// - Returns: An array of (name, value) header pairs.
+    /// Padding headers for a CONNECT request; `fastOpen` adds `fastopen: 1` to skip negotiation when the padding type is cached.
     static func requestHeaders(fastOpen: Bool = false) -> [(name: String, value: String)] {
         var headers: [(name: String, value: String)] = []
         headers.append((name: "padding", value: generatePaddingValue()))
@@ -84,12 +70,10 @@ enum NaivePaddingNegotiator {
 
     // MARK: - Padding Type Cache
 
-    /// Caches negotiated padding types per server so subsequent connections
-    /// can send the `fastopen: 1` header and skip the negotiation round-trip.
+    /// Negotiated padding type per server, enabling `fastopen` to skip the round-trip on reuse.
     private static let cacheLock = UnfairLock()
     private static var paddingTypeCache: [String: PaddingType] = [:]
 
-    /// Returns the cached padding type for the given server, or `nil` if unknown.
     static func cachedPaddingType(host: String, port: UInt16, sni: String) -> PaddingType? {
         let key = "\(host):\(port):\(sni)"
         cacheLock.lock()
@@ -97,7 +81,6 @@ enum NaivePaddingNegotiator {
         return paddingTypeCache[key]
     }
 
-    /// Caches a successfully negotiated padding type for future connections.
     static func cachePaddingType(_ type: PaddingType, host: String, port: UInt16, sni: String) {
         let key = "\(host):\(port):\(sni)"
         cacheLock.lock()
@@ -107,12 +90,7 @@ enum NaivePaddingNegotiator {
 
     // MARK: - Response Parsing
 
-    /// Parses the server's response headers to determine the negotiated padding type.
-    ///
-    /// Logic (matching the C++ reference implementation):
-    /// 1. If `padding-type-reply` header exists, parse its value as a padding type.
-    /// 2. Otherwise, if `padding` header exists, assume `.variant1` (backward compatibility).
-    /// 3. Otherwise, `.none`.
+    /// Parses the negotiated padding type from response headers; a bare `padding` header implies `.variant1` (backward compatibility, matching the C++ reference).
     static func parseResponse(headers: [(name: String, value: String)]) -> PaddingType {
         if let replyHeader = headers.first(where: { $0.name.lowercased() == "padding-type-reply" }) {
             let trimmed = replyHeader.value.trimmingCharacters(in: .whitespaces)

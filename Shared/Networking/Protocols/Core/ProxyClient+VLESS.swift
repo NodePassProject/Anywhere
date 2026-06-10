@@ -14,30 +14,19 @@ extension ProxyClient {
     /// The base Vision flow string sent on the wire (suffix stripped).
     fileprivate static let visionFlow = "xtls-rprx-vision"
 
-    /// Whether the configured flow is the Vision flow.
     var isVisionFlow: Bool {
         guard case .vless(_, _, let flow, _, _, _, _) = configuration.outbound else { return false }
         return flow == Self.visionFlow
     }
 
-    /// Whether a non-trivial VLESS `encryption` (the `mlkem768x25519plus`
-    /// scheme) is configured. When set, the encryption layer is itself a
-    /// TLS-1.3-equivalent secure channel, so Vision can run over it without an
-    /// outer TLS/REALITY transport — see ``validateOuterTLSForVision(_:)``.
+    /// Whether the `mlkem768x25519plus` encryption scheme is configured.
     var hasVLESSEncryption: Bool {
         guard case .vless(_, let encryption, _, _, _, _, _) = configuration.outbound else { return false }
         return !encryption.isEmpty && encryption != "none"
     }
 
-    /// Whether the configured transport can carry the Vision flow. Vision needs
-    /// a TLS-1.3-record-like layer to drive its padding / direct-copy state
-    /// machine, which is provided by either of two cases:
-    ///   1. VLESS Encryption — its AEAD records masquerade as TLS 1.3
-    ///      `application_data`, so Vision works over *any* transport; or
-    ///   2. a raw TCP transport carrying TLS / REALITY (the security layer is
-    ///      validated separately by ``validateOuterTLSForVision(_:)``).
-    /// Framed transports (WebSocket / HTTPUpgrade / gRPC / XHTTP) qualify only
-    /// via case 1.
+    /// Vision needs TLS-1.3-record framing: VLESS encryption provides it over any
+    /// transport; otherwise only raw TCP carrying TLS/REALITY qualifies.
     var transportSupportsVision: Bool {
         if hasVLESSEncryption { return true }
         if case .tcp = configuration.transportLayer { return true }
@@ -46,11 +35,8 @@ extension ProxyClient {
 
     // MARK: - VLESS protocol handshake
 
-    /// VLESS protocol handshake on top of an established transport.
-    ///
-    /// - If the encryption field is `"none"` or empty: plaintext VLESS.
-    /// - Otherwise: run the `mlkem768x25519plus` encryption handshake first,
-    ///   then VLESS on top.
+    /// VLESS protocol handshake on top of an established transport; runs the
+    /// `mlkem768x25519plus` handshake first when encryption is configured.
     func sendVLESSProtocolHandshake(
         over connection: ProxyConnection,
         command: ProxyCommand,
@@ -60,12 +46,8 @@ extension ProxyClient {
         supportsVision: Bool,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        // Parse the encryption field upfront. `nil` means the legacy
-        // `"none"` / empty value — proceed with plaintext VLESS as before.
-        // Anything else means the new `mlkem768x25519plus` scheme: on
-        // iOS < 26 we MUST refuse to dial. A silent downgrade would send
-        // the plaintext request header — including UUID and destination —
-        // to a server that expects the encrypted handshake.
+        // A nil config means "none"/empty → plaintext VLESS. On iOS < 26 the encrypted
+        // scheme must refuse, not silently downgrade and expose the plaintext UUID.
         let vlessEncryption: String
         if case .vless(_, let encryption, _, _, _, _, _) = configuration.outbound {
             vlessEncryption = encryption
@@ -131,9 +113,7 @@ extension ProxyClient {
         )
     }
 
-    /// Per-command VLESS handshake on top of an already-prepared transport.
-    /// Split out so the encryption-enabled path can chain into it after the
-    /// `mlkem768x25519plus` handshake completes.
+    /// Per-command VLESS handshake; the encryption path chains into it.
     fileprivate func continueVLESSHandshake(
         over connection: ProxyConnection,
         command: ProxyCommand,
@@ -182,14 +162,8 @@ extension ProxyClient {
                     return
                 }
                 let vision = self.wrapWithVision(proxyConnection)
-                // Wait for the introductory Vision-padded send (initial
-                // payload or empty padding) to be accepted by the inner
-                // transport before declaring the connect successful.
-                // Otherwise fire-and-forget here would race with the
-                // upload pipeline's first `send` issued from the caller's
-                // success callback — the pump's bytes could reach the
-                // framing layer before the padded intro and corrupt the
-                // proxy-side byte stream.
+                // Await the Vision-padded intro before signalling success; a racing
+                // first send could otherwise precede it and corrupt the byte stream.
                 let introCompletion: (Error?) -> Void = { error in
                     if let error {
                         completion(.failure(ProxyError.connectionFailed(error.localizedDescription)))
@@ -210,12 +184,8 @@ extension ProxyClient {
 
     // MARK: - Vision
 
-    /// Validates that the outer TLS connection is TLS 1.3 when using Vision flow.
-    /// Matches Xray-core `outbound.go` lines 346-355.
-    ///
-    /// VLESS Encryption is exempt: its AEAD records masquerade as TLS 1.3
-    /// `application_data` (`0x17 0x03 0x03` framing), giving Vision the same
-    /// record structure it keys off without a real outer TLS layer.
+    /// Vision requires outer TLS 1.3; VLESS encryption is exempt because its AEAD
+    /// records already use TLS 1.3 `application_data` framing.
     fileprivate func validateOuterTLSForVision(_ connection: ProxyConnection) -> Error? {
         if hasVLESSEncryption {
             return nil
@@ -229,7 +199,6 @@ extension ProxyClient {
         return nil
     }
 
-    /// Wraps a VLESS connection with the XTLS Vision layer.
     fileprivate func wrapWithVision(_ connection: ProxyConnection) -> VLESSVisionConnection {
         let vlessUUID: UUID
         if case .vless(let u, _, _, _, _, _, _) = configuration.outbound {

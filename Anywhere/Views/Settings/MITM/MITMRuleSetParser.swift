@@ -49,11 +49,8 @@ enum MITMRuleSetParser {
         "hostname",
     ]
 
-    /// Splits a `<key> = <value>` line on its first `=`. The key is
-    /// lowercased and matched against ``recognizedHeaders``; an
-    /// unrecognized key returns nil so the caller falls through and tries
-    /// the line as a rule. The value is trimmed of surrounding whitespace
-    /// and otherwise returned verbatim.
+    /// Splits a `<key> = <value>` line on its first `=`. An unrecognized
+    /// key returns nil so the caller falls through and tries the line as a rule.
     private static func parseHeader(_ line: String) -> (key: String, value: String)? {
         guard let equal = line.firstIndex(of: "=") else { return nil }
         let key = line[line.startIndex..<equal]
@@ -67,18 +64,13 @@ enum MITMRuleSetParser {
 
     // MARK: - Rewrite sub-mode parsing
 
-    /// Parses the numeric sub-mode and trailing fields of a `rewrite`
-    /// (operation `0`) rule into a ``MITMRewriteAction``:
+    /// Sub-mode table for `rewrite` (operation `0`):
     ///
     ///     0  transparent       <full-url>     rewrite the URL (+ dial on host change)
     ///     1  302 redirect      <full-url>     synthesize a 302 to the URL
     ///     2  200 reject (text) [<content>]    synthesize a text/plain 200
     ///     3  200 reject (gif)                 synthesize the canned 1×1 GIF
     ///     4  200 reject (data) [<base64>]     synthesize an octet-stream 200
-    ///
-    /// Returns nil on an unknown sub-mode, a missing/invalid URL (modes 0/1),
-    /// or the wrong field count, so the line is dropped like any other
-    /// unparseable rule.
     private static func parseRewriteAction(subMode: String, fields: [String]) -> MITMRewriteAction? {
         switch subMode.trimmingCharacters(in: .whitespaces) {
         case "0":
@@ -101,9 +93,8 @@ enum MITMRuleSetParser {
         }
     }
 
-    /// Validates that ``raw`` is an absolute URL with a host (the replacement
-    /// is always a full URL). Returns the trimmed string, or nil. The runtime
-    /// re-parses and wire-safety-validates it in ``MITMRewritePolicy``.
+    /// Validates that `raw` is an absolute URL with a host. Partial validation
+    /// only — the runtime re-validates in `MITMRewritePolicy`.
     private static func validRewriteURL(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty,
@@ -199,9 +190,7 @@ enum MITMRuleSetParser {
         }
     }
 
-    /// Parses the action token and its trailing fields of a `body-json`
-    /// (operation `5`) rule into a ``MITMJSONOperation``. Field layout per
-    /// action (each field CSV-quoted like any other):
+    /// Field layout for `body-json` (operation `5`) actions:
     ///
     ///     add                      <path>, <value>
     ///     replace                  <path>, <value>
@@ -211,12 +200,9 @@ enum MITMRuleSetParser {
     ///     remove-where-key-exists  <path>, <key>
     ///     remove-where-field-in    <path>, <field>, <values>
     ///
-    /// Action tokens are matched case-insensitively and accept both the
-    /// hyphenated form and a bare alias (`replaceRecursive`). `<value>` /
-    /// `<values>` are JSON literals (`true`, `42`, `{"a":1}`); a string
-    /// that isn't valid JSON is taken literally (see ``MITMJSONPatch``).
-    /// Returns nil on an unknown action or the wrong field count, so the
-    /// line is dropped like any other unparseable rule.
+    /// Tokens matched case-insensitively; hyphenated and camelCase aliases
+    /// both accepted. `<value>` / `<values>` are JSON literals; a non-JSON
+    /// string is taken literally (see `MITMJSONPatch`).
     private static func parseJSONOperation(action rawAction: String, fields: [String]) -> MITMJSONOperation? {
         switch rawAction.trimmingCharacters(in: .whitespaces).lowercased() {
         case "add":
@@ -253,10 +239,8 @@ enum MITMRuleSetParser {
         }
     }
 
-    /// CSV-style split. A field that begins with `"` is read until the
-    /// matching unescaped `"`, with `""` inside a quoted field producing a
-    /// literal `"`. Whitespace around unquoted fields is trimmed; whitespace
-    /// inside a quoted field is preserved.
+    /// CSV-style split. `""` inside a quoted field produces a literal `"`;
+    /// whitespace around unquoted fields is trimmed but preserved inside quotes.
     private static func splitCSV(_ input: String) -> [String] {
         var fields: [String] = []
         var current = ""
@@ -305,19 +289,15 @@ enum MITMRuleSetParser {
         (try? NSRegularExpression(pattern: pattern, options: [])) != nil
     }
 
-    /// Validates a `search` field for the replace operations, which run the
-    /// substitution through `String.replacing` and so compile to a Swift
-    /// ``Regex`` rather than an `NSRegularExpression`. Checked with the same
-    /// engine the runtime uses so an importable rule is one that will run.
+    /// Validates a `search` pattern using Swift `Regex` (not `NSRegularExpression`)
+    /// to match the engine the runtime uses at substitution time.
     private static func isValidSearchRegex(_ search: String) -> Bool {
         (try? Regex(search)) != nil
     }
 
-    /// Validates a `script` field: base64 → UTF-8 → JavaScript parse.
-    /// Wraps the source in the same IIFE the runtime uses so a rule
-    /// that imports cleanly here is one the runtime can compile.
-    /// Parse-only — does not evaluate, so user code with side effects
-    /// is not run at import time.
+    /// Validates a `script` field: base64 → UTF-8 → JavaScript syntax check.
+    /// Wraps source in the same IIFE the runtime uses. Parse-only — never
+    /// evaluates, so user code with side effects is not run at import time.
     private static func isValidScriptBase64(_ b64: String) -> Bool {
         guard let raw = Data(base64Encoded: b64),
               let source = String(data: raw, encoding: .utf8)
