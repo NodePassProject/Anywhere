@@ -1292,45 +1292,49 @@ final class MITMScriptEngine {
 
     private func installStoreGlobals(on anywhere: JSValue) {
         let store = JSValue(newObjectIn: context)!
-        let storeGet: @convention(block) (String) -> JSValue = { [weak self] key in
+        let storeGet: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
             let ctx = JSContext.current()!
             guard let scope = self?.currentInvocation?.scope,
-                  let bytes = MITMScriptStore.shared.get(scope: scope, key: key)
+                  let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk)
             else { return JSValue(undefinedIn: ctx) }
             return Self.makeUint8Array(in: ctx, from: bytes)
         }
-        let storeGetString: @convention(block) (String) -> JSValue = { [weak self] key in
+        let storeGetString: @convention(block) (String, Bool) -> JSValue = { [weak self] key, onDisk in
             let ctx = JSContext.current()!
             guard let scope = self?.currentInvocation?.scope,
-                  let bytes = MITMScriptStore.shared.get(scope: scope, key: key),
+                  let bytes = MITMScriptStore.shared.get(scope: scope, key: key, onDisk: onDisk),
                   let str = String(data: bytes, encoding: .utf8)
             else { return JSValue(undefinedIn: ctx) }
             return JSValue(object: str, in: ctx)
         }
-        let storeSet: @convention(block) (String, JSValue) -> Void = { [weak self] key, val in
+        let storeSet: @convention(block) (String, JSValue, Bool) -> Void = { [weak self] key, val, onDisk in
             let ctx = JSContext.current()!
             guard let scope = self?.currentInvocation?.scope else { return }
             let bytes = Self.bytesFromValue(val, in: ctx) ?? Data()
             do {
-                try MITMScriptStore.shared.set(scope: scope, key: key, value: bytes)
+                try MITMScriptStore.shared.set(scope: scope, key: key, value: bytes, onDisk: onDisk)
             } catch MITMScriptStore.StoreError.capacityExceeded {
+                let cap = onDisk ? MITMScriptDiskStore.maxBytesPerScope : MITMScriptStore.maxBytesPerScope
                 let err = JSValue(
-                    newErrorFromMessage: "Anywhere.store: capacity exceeded (per-scope cap is \(MITMScriptStore.maxBytesPerScope) bytes)",
+                    newErrorFromMessage: "Anywhere.store: capacity exceeded (per-scope cap is \(cap) bytes)",
                     in: ctx
                 )
+                ctx.exception = err
+            } catch MITMScriptStore.StoreError.writeFailed {
+                let err = JSValue(newErrorFromMessage: "Anywhere.store: on-disk write failed", in: ctx)
                 ctx.exception = err
             } catch {
                 let err = JSValue(newErrorFromMessage: "Anywhere.store: \(error)", in: ctx)
                 ctx.exception = err
             }
         }
-        let storeDelete: @convention(block) (String) -> Void = { [weak self] key in
+        let storeDelete: @convention(block) (String, Bool) -> Void = { [weak self] key, onDisk in
             guard let scope = self?.currentInvocation?.scope else { return }
-            MITMScriptStore.shared.delete(scope: scope, key: key)
+            MITMScriptStore.shared.delete(scope: scope, key: key, onDisk: onDisk)
         }
-        let storeKeys: @convention(block) () -> [String] = { [weak self] in
+        let storeKeys: @convention(block) (Bool) -> [String] = { [weak self] onDisk in
             guard let scope = self?.currentInvocation?.scope else { return [] }
-            return MITMScriptStore.shared.keys(scope: scope)
+            return MITMScriptStore.shared.keys(scope: scope, onDisk: onDisk)
         }
         store.setObject(storeGet, forKeyedSubscript: "get" as NSString)
         store.setObject(storeGetString, forKeyedSubscript: "getString" as NSString)

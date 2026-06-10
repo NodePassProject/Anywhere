@@ -7,9 +7,8 @@
 
 import Foundation
 
-/// In-memory key/value store backing `Anywhere.store`, namespaced per rule set and reclaimed by
-/// purgeExcept on reload. No disk persistence — the NE exits when the tunnel stops, so scripts
-/// must handle missing keys. Writes past the per-scope or process-wide cap throw capacityExceeded.
+/// Key/value store backing `Anywhere.store`, namespaced per rule set and reclaimed by
+/// purgeExcept on reload.
 final class MITMScriptStore {
 
     static let shared = MITMScriptStore()
@@ -22,6 +21,8 @@ final class MITMScriptStore {
 
     enum StoreError: Error {
         case capacityExceeded
+        /// On-disk backing only: the atomic file write (or serialization) failed.
+        case writeFailed
     }
 
     private let lock = NSLock()
@@ -33,13 +34,15 @@ final class MITMScriptStore {
 
     private init() {}
 
-    func get(scope: UUID, key: String) -> Data? {
+    func get(scope: UUID, key: String, onDisk: Bool = false) -> Data? {
+        if onDisk { return MITMScriptDiskStore.shared.get(scope: scope, key: key) }
         lock.lock(); defer { lock.unlock() }
         return buckets[scope]?[key]
     }
 
     /// Upserts `key` within `scope`; throws without modifying state if the write would exceed either cap.
-    func set(scope: UUID, key: String, value: Data) throws {
+    func set(scope: UUID, key: String, value: Data, onDisk: Bool = false) throws {
+        if onDisk { return try MITMScriptDiskStore.shared.set(scope: scope, key: key, value: value) }
         lock.lock(); defer { lock.unlock() }
         // Avoid `var bucket = buckets[scope]`: aliasing the COW storage makes every write
         // copy the whole bucket; mutating through `buckets[scope, default:]` stays in-place.
@@ -60,7 +63,8 @@ final class MITMScriptStore {
         totalBytes = projectedTotal
     }
 
-    func delete(scope: UUID, key: String) {
+    func delete(scope: UUID, key: String, onDisk: Bool = false) {
+        if onDisk { return MITMScriptDiskStore.shared.delete(scope: scope, key: key) }
         lock.lock(); defer { lock.unlock() }
         guard var bucket = buckets[scope] else { return }
         if let existing = bucket[key] {
@@ -77,21 +81,23 @@ final class MITMScriptStore {
         }
     }
 
-    func keys(scope: UUID) -> [String] {
+    func keys(scope: UUID, onDisk: Bool = false) -> [String] {
+        if onDisk { return MITMScriptDiskStore.shared.keys(scope: scope) }
         lock.lock(); defer { lock.unlock() }
         return buckets[scope].map { Array($0.keys) } ?? []
     }
-
-    /// Drops every bucket not in `activeIDs` — the store's only GC trigger. Returns the dropped count.
+    
     @discardableResult
     func purgeExcept(activeIDs: Set<UUID>) -> Int {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         let stale = buckets.keys.filter { !activeIDs.contains($0) }
         for id in stale {
             totalBytes -= (bucketSizes[id] ?? 0)
             buckets.removeValue(forKey: id)
             bucketSizes.removeValue(forKey: id)
         }
-        return stale.count
+        lock.unlock()
+        let diskPurged = MITMScriptDiskStore.shared.purgeExcept(activeIDs: activeIDs)
+        return stale.count + diskPurged
     }
 }
