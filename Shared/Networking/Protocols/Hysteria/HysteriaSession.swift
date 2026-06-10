@@ -114,6 +114,14 @@ nonisolated final class HysteriaSession {
     /// - Parameter transport: Optional UDP-relay transport for chained Hysteria; QUIC rides it instead of a kernel socket.
     init(configuration: HysteriaConfiguration, transport: QUICDatagramTransport? = nil) {
         self.configuration = configuration
+        // Only the direct kernel-socket path can rotate ports; a chained transport has no
+        // socket to hop, and an unparseable spec disables hopping rather than failing the dial.
+        let hopping: QUICPortHopping?
+        if transport == nil, let spec = configuration.portHopping, let ranges = spec.ranges {
+            hopping = QUICPortHopping(ports: ranges, interval: TimeInterval(spec.intervalSeconds))
+        } else {
+            hopping = nil
+        }
         self.quic = QUICConnection(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
@@ -121,6 +129,7 @@ nonisolated final class HysteriaSession {
             alpn: ["h3"],
             datagramsEnabled: true,
             tuning: .hysteria(congestionControl: configuration.congestionControl, uploadMbps: configuration.uploadMbps),
+            portHopping: hopping,
             transport: transport
         )
     }

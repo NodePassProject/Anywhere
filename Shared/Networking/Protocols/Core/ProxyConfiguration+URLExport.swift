@@ -96,20 +96,24 @@ extension ProxyConfiguration {
     }
     
     private func toHysteriaURL() -> String {
-        guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni) = outbound else {
+        guard case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let sni) = outbound else {
             return ""
         }
         let encodedPassword = password.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
         var params: [String] = []
-        // Emit SNI only when it differs from the server address to keep links short.
-        if sni != serverAddress {
-            params.append("sni=\(sni)")
-        }
-        // Presence of the bandwidth params is what distinguishes Brutal from BBR on import.
         if congestionControl == .brutal {
             params.append("upmbps=\(uploadMbps)")
             params.append("downmbps=\(downloadMbps)")
+        }
+        if let portHopping {
+            params.append("mport=\(portHopping.portsSpec)")
+            if portHopping.intervalSeconds != HysteriaPortHopping.defaultIntervalSeconds {
+                params.append("hop-interval=\(portHopping.intervalSeconds)")
+            }
+        }
+        if sni != serverAddress {
+            params.append("sni=\(sni)")
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         return "hysteria2://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)/\(query)#\(fragment)"

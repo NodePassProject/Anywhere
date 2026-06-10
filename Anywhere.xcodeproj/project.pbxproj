@@ -212,6 +212,7 @@
 				Networking/Protocols/Hysteria/HysteriaCongestionControl.swift,
 				Networking/Protocols/Hysteria/HysteriaConnection.swift,
 				Networking/Protocols/Hysteria/HysteriaHTTP3Codec.swift,
+				Networking/Protocols/Hysteria/HysteriaPortHopping.swift,
 				Networking/Protocols/Hysteria/HysteriaProtocol.swift,
 				Networking/Protocols/Hysteria/HysteriaSession.swift,
 				Networking/Protocols/Hysteria/HysteriaUDPConnection.swift,
