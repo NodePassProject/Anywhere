@@ -226,10 +226,17 @@ class DomainRouter {
         var domainRuleCount = 0
         var ipRuleCount = 0
 
+        /// Suffix rules are buffered as `(byte range into the payload, interned action)`.
+        /// This skips the scratch node tree and its per-node dictionary.
+        var suffixRecords: [FlatLabelTrie<Int16>.BulkEntry] = []
+
         var isEmpty: Bool { domainRuleCount == 0 && ipRuleCount == 0 }
 
-        mutating func insertSuffix(_ suffix: String, action: RouteTarget) {
-            suffixTrie.insert(suffix: suffix, payload: actionTable.intern(action))
+        /// `offset`/`length` index into the mapped routing payload, which stays
+        /// valid until `finalize` copies the matched label bytes out.
+        mutating func collectSuffix(offset: Int, length: Int, action: RouteTarget) {
+            suffixRecords.append(.init(offset: Int32(offset), length: Int32(length),
+                                       payload: actionTable.intern(action), order: Int32(suffixRecords.count)))
             domainRuleCount += 1
         }
 
@@ -248,11 +255,11 @@ class DomainRouter {
             ipv6Trie.insert(network: network, prefixLen: prefixLen, actionID: actionTable.intern(action))
             ipRuleCount += 1
         }
-
-        /// Call once per tier after all inserts; lookups before this return nil.
-        mutating func finalize() {
+        
+        mutating func finalize(base: UnsafeBufferPointer<UInt8>) {
             keywordAutomaton.finalize()
-            suffixTrie.freeze()
+            suffixTrie.buildBulk(base: base, entries: &suffixRecords)
+            suffixRecords = []
         }
 
         /// Suffix wins over keyword.
@@ -312,116 +319,152 @@ class DomainRouter {
     private func loadRoutingConfigurationLocked() {
         resetUnlocked()
 
-        guard let data = AWCore.getRoutingData(),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard let data = AWCore.getRoutingData() else {
             logger.debug("[DomainRouter] No routing data available")
             return
         }
-
-        // Configurations (tier-independent)
-        if let configurations = json["configs"] as? [String: Any] {
-            for (key, value) in configurations {
-                guard let configurationId = UUID(uuidString: key),
-                      let configurationDict = value as? [String: Any] else { continue }
-                if let configuration = ProxyConfiguration.parse(from: configurationDict) {
-                    configurationMap[configurationId] = configuration
-                }
+        
+        do {
+            try data.withUnsafeBytes { raw in
+                let base = raw.bindMemory(to: UInt8.self)
+                var reader = RoutingBinaryReader(bytes: base, data: data, owner: self)
+                try reader.run()
+                for i in tiers.indices { tiers[i].finalize(base: base) }
             }
+        } catch {
+            resetUnlocked()
+            logger.error("[DomainRouter] Routing payload parse failed: \(error)")
+            return
         }
-
-        // Rules targeting the current default proxy still load: dropping them is
-        // unsound since a more-specific or lower-tier rule could match instead.
-        if let entries = json["userRules"] as? [[String: Any]] {
-            loadRuleEntries(entries, into: .user)
-        }
-        if let entries = json["adBlockRules"] as? [[String: Any]] {
-            loadRuleEntries(entries, into: .adBlock)
-        }
-        if let entries = json["builtInRules"] as? [[String: Any]] {
-            loadRuleEntries(entries, into: .builtIn)
-        }
-        if let entries = json["bypassRules"] as? [[String: Any]] {
-            loadBypassEntries(entries, into: .bypass)
-        }
-
-        for i in tiers.indices { tiers[i].finalize() }
 
         logger.debug("[DomainRouter] Loaded tiers — user: \(self.tiers[Tier.user.rawValue].domainRuleCount)+\(self.tiers[Tier.user.rawValue].ipRuleCount), adBlock: \(self.tiers[Tier.adBlock.rawValue].domainRuleCount)+\(self.tiers[Tier.adBlock.rawValue].ipRuleCount), builtIn: \(self.tiers[Tier.builtIn.rawValue].domainRuleCount)+\(self.tiers[Tier.builtIn.rawValue].ipRuleCount), bypass: \(self.tiers[Tier.bypass.rawValue].domainRuleCount)+\(self.tiers[Tier.bypass.rawValue].ipRuleCount); \(self.configurationMap.count) configurations")
     }
 
-    private func loadRuleEntries(_ entries: [[String: Any]], into tier: Tier) {
-        for rule in entries {
-            guard let actionStr = rule["action"] as? String else { continue }
-
-            let action: RouteTarget
-            if actionStr == "direct" {
-                action = .direct
-            } else if actionStr == "reject" {
-                action = .reject
-            } else if actionStr == "proxy",
-                      let configurationIdStr = rule["configId"] as? String,
-                      let configurationId = UUID(uuidString: configurationIdStr) {
-                action = .proxy(configurationId)
-            } else {
-                continue
+    // MARK: - Streaming ingestion
+    
+    fileprivate func ingestConfigurations(_ slice: Data) {
+        guard let configurations = try? JSONSerialization.jsonObject(with: slice) as? [String: Any] else { return }
+        for (key, value) in configurations {
+            guard let configurationId = UUID(uuidString: key),
+                  let configurationDict = value as? [String: Any],
+                  let configuration = ProxyConfiguration.parse(from: configurationDict) else { continue }
+            configurationMap[configurationId] = configuration
+        }
+    }
+    
+    fileprivate func ingestRule(tierIndex: Int, action: RouteTarget, type: RoutingRuleType,
+                                valueStart: Int, length: Int, base: UnsafeBufferPointer<UInt8>) {
+        switch type {
+        case .domainSuffix:
+            tiers[tierIndex].collectSuffix(offset: valueStart, length: length, action: action)
+        case .domainKeyword:
+            tiers[tierIndex].insertKeyword(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self), action: action)
+        case .ipCIDR:
+            if let parsed = Self.parseIPv4CIDR(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self)) {
+                tiers[tierIndex].insertIPv4(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
             }
-
-            if let domainRules = rule["domainRules"] as? [[String: Any]] {
-                for dr in domainRules {
-                    guard let type = Self.parseRuleType(dr["type"]),
-                          let value = dr["value"] as? String else { continue }
-                    let lowered = value.lowercased()
-                    switch type {
-                    case .domainSuffix:
-                        tiers[tier.rawValue].insertSuffix(lowered, action: action)
-                    case .domainKeyword:
-                        tiers[tier.rawValue].insertKeyword(lowered, action: action)
-                    case .ipCIDR, .ipCIDR6:
-                        break
-                    }
-                }
-            }
-
-            if let ipRules = rule["ipRules"] as? [[String: Any]] {
-                for ir in ipRules {
-                    guard let type = Self.parseRuleType(ir["type"]),
-                          let value = ir["value"] as? String else { continue }
-                    switch type {
-                    case .ipCIDR:
-                        if let parsed = Self.parseIPv4CIDR(value) {
-                            tiers[tier.rawValue].insertIPv4(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
-                        }
-                    case .ipCIDR6:
-                        if let parsed = Self.parseIPv6CIDR(value) {
-                            tiers[tier.rawValue].insertIPv6(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
-                        }
-                    case .domainSuffix, .domainKeyword:
-                        break
-                    }
-                }
+        case .ipCIDR6:
+            if let parsed = Self.parseIPv6CIDR(String(decoding: base[valueStart..<valueStart + length], as: UTF8.self)) {
+                tiers[tierIndex].insertIPv6(network: parsed.network, prefixLen: parsed.prefixLen, action: action)
             }
         }
     }
 
-    /// Bypass rules use a flat {type, value} shape with an implicit `.direct` action.
-    private func loadBypassEntries(_ entries: [[String: Any]], into tier: Tier) {
-        for rule in entries {
-            guard let type = Self.parseRuleType(rule["type"]),
-                  let value = rule["value"] as? String else { continue }
-            switch type {
-            case .domainSuffix:
-                tiers[tier.rawValue].insertSuffix(value.lowercased(), action: .direct)
-            case .domainKeyword:
-                tiers[tier.rawValue].insertKeyword(value.lowercased(), action: .direct)
-            case .ipCIDR:
-                if let parsed = Self.parseIPv4CIDR(value) {
-                    tiers[tier.rawValue].insertIPv4(network: parsed.network, prefixLen: parsed.prefixLen, action: .direct)
-                }
-            case .ipCIDR6:
-                if let parsed = Self.parseIPv6CIDR(value) {
-                    tiers[tier.rawValue].insertIPv6(network: parsed.network, prefixLen: parsed.prefixLen, action: .direct)
-                }
+    // MARK: - Payload reader
+
+    private struct RoutingBinaryReader {
+        enum ReadError: Error { case badMagic, truncated, malformed }
+
+        let bytes: UnsafeBufferPointer<UInt8>
+        let data: Data
+        let owner: DomainRouter
+        private var i = 0
+        private var count: Int { bytes.count }
+
+        mutating func run() throws {
+            try expectMagic()
+
+            let configLength = Int(try u32())
+            let configStart = i
+            try advance(configLength)
+            if configLength > 0 {
+                owner.ingestConfigurations(data.subdata(in: (data.startIndex + configStart)..<(data.startIndex + configStart + configLength)))
             }
+
+            var remainingEntries = try u32()
+            while remainingEntries > 0 {
+                try readEntry()
+                remainingEntries -= 1
+            }
+        }
+
+        private mutating func readEntry() throws {
+            guard let tier = RoutingBinaryFormat.Tier(rawValue: try u8()) else { throw ReadError.malformed }
+            let action = try readAction()
+
+            var remainingRules = try u32()
+            while remainingRules > 0 {
+                let typeByte = try u8()
+                let length = Int(try u16())
+                let valueStart = i
+                try advance(length)
+                if let type = RoutingRuleType(rawValue: Int(typeByte)) {
+                    owner.ingestRule(tierIndex: Int(tier.rawValue), action: action, type: type,
+                                     valueStart: valueStart, length: length, base: bytes)
+                }
+                remainingRules -= 1
+            }
+        }
+
+        private mutating func readAction() throws -> RouteTarget {
+            switch RoutingBinaryFormat.Action(rawValue: try u8()) {
+            case .direct: return .direct
+            case .reject: return .reject
+            case .proxy: return .proxy(try readUUID())
+            case nil: throw ReadError.malformed
+            }
+        }
+
+        // MARK: Primitives
+
+        private mutating func expectMagic() throws {
+            let magic = RoutingBinaryFormat.magic
+            guard i + magic.count <= count else { throw ReadError.truncated }
+            for k in 0..<magic.count where bytes[i + k] != magic[k] { throw ReadError.badMagic }
+            i += magic.count
+        }
+
+        private mutating func u8() throws -> UInt8 {
+            guard i < count else { throw ReadError.truncated }
+            defer { i += 1 }
+            return bytes[i]
+        }
+
+        private mutating func u16() throws -> UInt16 {
+            guard i + 2 <= count else { throw ReadError.truncated }
+            defer { i += 2 }
+            return UInt16(bytes[i]) | (UInt16(bytes[i + 1]) << 8)
+        }
+
+        private mutating func u32() throws -> UInt32 {
+            guard i + 4 <= count else { throw ReadError.truncated }
+            defer { i += 4 }
+            return UInt32(bytes[i]) | (UInt32(bytes[i + 1]) << 8) | (UInt32(bytes[i + 2]) << 16) | (UInt32(bytes[i + 3]) << 24)
+        }
+
+        private mutating func advance(_ n: Int) throws {
+            guard n >= 0, i + n <= count else { throw ReadError.truncated }
+            i += n
+        }
+
+        private mutating func readUUID() throws -> UUID {
+            guard i + 16 <= count else { throw ReadError.truncated }
+            let u = UUID(uuid: (bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3],
+                                bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7],
+                                bytes[i + 8], bytes[i + 9], bytes[i + 10], bytes[i + 11],
+                                bytes[i + 12], bytes[i + 13], bytes[i + 14], bytes[i + 15]))
+            i += 16
+            return u
         }
     }
 
@@ -506,11 +549,6 @@ class DomainRouter {
     }
 
     // MARK: - CIDR Parsing
-
-    private static func parseRuleType(_ rawValue: Any?) -> RoutingRuleType? {
-        guard let rawValue = rawValue as? Int else { return nil }
-        return RoutingRuleType(rawValue: rawValue)
-    }
 
     /// Parses "A.B.C.D/prefix" into (network, prefixLen) with host bits zeroed.
     private static func parseIPv4CIDR(_ cidr: String) -> (network: UInt32, prefixLen: Int)? {

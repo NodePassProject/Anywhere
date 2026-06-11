@@ -356,7 +356,7 @@ final class AWCore {
 
     private static let routingDataURL = FileManager.default
         .containerURL(forSecurityApplicationGroupIdentifier: Identifier.appGroupSuite)!
-        .appendingPathComponent("routing.json")
+        .appendingPathComponent("routing.bin")
     
     static func getRoutingData() -> Data? {
         try? Data(contentsOf: routingDataURL, options: .mappedIfSafe)

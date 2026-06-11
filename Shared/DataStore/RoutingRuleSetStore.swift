@@ -18,7 +18,7 @@ struct RoutingRuleSet: Identifiable, Equatable {
 }
 
 struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
-    static let maxRuleCount = 10000
+    static let maxRuleCount = 100000
 
     let id: UUID
     var name: String
@@ -276,52 +276,31 @@ class RoutingRuleSetStore {
         }
 
         await Task.detached {
-            var userRules: [[String: Any]] = []
-            var adBlockRules: [[String: Any]] = []
-            var builtInRules: [[String: Any]] = []
+            var entries: [RoutingBinaryWriter.Entry] = []
             var configurationsDict: [String: Any] = [:]
 
             for ruleSet in snapshot {
                 guard let assignedId = ruleSet.assignedConfigurationId else { continue }
 
-                let domainRules: [RoutingRule]
+                let rules: [RoutingRule]
                 if ruleSet.isCustom,
                    let customId = UUID(uuidString: ruleSet.id),
                    let custom = customSnapshot.first(where: { $0.id == customId }) {
-                    domainRules = custom.rules
+                    rules = custom.rules
                 } else {
-                    domainRules = await Self.loadRules(for: ruleSet.name)
+                    rules = await Self.loadRules(for: ruleSet.name)
                 }
-                guard !domainRules.isEmpty else { continue }
-
-                let domainRulesArray: [[String: Any]] = domainRules.compactMap {
-                    switch $0.type {
-                    case .domainSuffix, .domainKeyword:
-                        return ["type": $0.type.rawValue, "value": $0.value]
-                    case .ipCIDR, .ipCIDR6:
-                        return nil
-                    }
-                }
-                let ipRulesArray: [[String: Any]] = domainRules.compactMap {
-                    switch $0.type {
-                    case .ipCIDR, .ipCIDR6:
-                        return ["type": $0.type.rawValue, "value": $0.value]
-                    case .domainSuffix, .domainKeyword:
-                        return nil
-                    }
-                }
-                var ruleEntry: [String: Any] = ["domainRules": domainRulesArray]
-                if !ipRulesArray.isEmpty {
-                    ruleEntry["ipRules"] = ipRulesArray
-                }
-
+                guard !rules.isEmpty else { continue }
+                
+                let action: RoutingBinaryFormat.Action
+                var configId: UUID?
                 if assignedId == "DIRECT" {
-                    ruleEntry["action"] = "direct"
+                    action = .direct
                 } else if assignedId == "REJECT" {
-                    ruleEntry["action"] = "reject"
-                } else if let configuration = resolvedTargets[assignedId] {
-                    ruleEntry["action"] = "proxy"
-                    ruleEntry["configId"] = assignedId
+                    action = .reject
+                } else if let configuration = resolvedTargets[assignedId], let id = UUID(uuidString: assignedId) {
+                    action = .proxy
+                    configId = id
                     var serialized = serializeConfiguration(configuration)
                     if let resolvedIP = VPNViewModel.resolveServerAddress(configuration.serverAddress) {
                         serialized["resolvedIP"] = resolvedIP
@@ -331,34 +310,24 @@ class RoutingRuleSetStore {
                     continue
                 }
 
-                if ruleSet.isCustom {
-                    userRules.append(ruleEntry)
-                } else if ruleSet.name == "ADBlock" {
-                    adBlockRules.append(ruleEntry)
-                } else {
-                    builtInRules.append(ruleEntry)
-                }
+                let tier: RoutingBinaryFormat.Tier = ruleSet.isCustom ? .user
+                    : (ruleSet.name == "ADBlock" ? .adBlock : .builtIn)
+                entries.append(.init(tier: tier, action: action, configId: configId, rules: rules))
             }
 
-            var bypassRules: [[String: Any]] = []
             let countryCode = AWCore.getBypassCountryCode()
             if !countryCode.isEmpty {
-                let rules = await CountryBypassCatalog.shared.rules(for: countryCode)
-                bypassRules = rules.map {
-                    ["type": $0.type.rawValue, "value": $0.value]
+                let bypass = await CountryBypassCatalog.shared.rules(for: countryCode)
+                if !bypass.isEmpty {
+                    entries.append(.init(tier: .bypass, action: .direct, configId: nil, rules: bypass))
                 }
             }
+            
+            let configurationData = (try? JSONSerialization.data(withJSONObject: configurationsDict, options: .sortedKeys))
+                ?? Data([0x7B, 0x7D])  // "{}"
+            let data = RoutingBinaryWriter.encode(configurationData: configurationData, entries: entries)
 
-            var routing: [String: Any] = ["configs": configurationsDict]
-            if !userRules.isEmpty { routing["userRules"] = userRules }
-            if !adBlockRules.isEmpty { routing["adBlockRules"] = adBlockRules }
-            if !builtInRules.isEmpty { routing["builtInRules"] = builtInRules }
-            if !bypassRules.isEmpty { routing["bypassRules"] = bypassRules }
-
-            // sortedKeys makes the bytes deterministic, so an unchanged
-            // payload is detected here and produces no write and no reload.
-            if let data = try? JSONSerialization.data(withJSONObject: routing, options: .sortedKeys),
-               data != AWCore.getRoutingData() {
+            if data != AWCore.getRoutingData() {
                 AWCore.setRoutingData(data)
                 AWCore.notifyRoutingChanged()
             }
@@ -572,6 +541,81 @@ extension RoutingRuleSetStore {
         }
 
         return configurationDict
+    }
+}
+
+private struct RoutingBinaryWriter {
+    struct Entry {
+        let tier: RoutingBinaryFormat.Tier
+        let action: RoutingBinaryFormat.Action
+        let configId: UUID?
+        let rules: [RoutingRule]
+    }
+
+    private var bytes: [UInt8] = []
+
+    static func encode(configurationData: Data, entries: [Entry]) -> Data {
+        var w = RoutingBinaryWriter()
+        w.bytes.reserveCapacity(configurationData.count + entries.reduce(0) { $0 + $1.rules.count * 24 } + 16)
+
+        w.append(RoutingBinaryFormat.magic)
+        w.u32(UInt32(configurationData.count))
+        w.append(configurationData)
+        w.u32(UInt32(entries.count))
+
+        for entry in entries {
+            w.bytes.append(entry.tier.rawValue)
+            w.bytes.append(entry.action.rawValue)
+            if entry.action == .proxy, let id = entry.configId {
+                w.append(withUnsafeBytes(of: id.uuid) { Array($0) })
+            }
+            let ruleCountOffset = w.bytes.count
+            w.u32(0)  // back-patched once the kept rules are counted
+            var kept: UInt32 = 0
+            for rule in entry.rules {
+                // Case-fold domain values here, on the host: the extension stores
+                // suffix rules straight from these bytes (no per-rule folding),
+                // and folding once on the memory-rich host matches the lookup
+                // path, which lowercases the queried host. CIDR values are
+                // case-insensitive already and pass through untouched.
+                let value: String
+                switch rule.type {
+                case .domainSuffix, .domainKeyword: value = rule.value.lowercased()
+                case .ipCIDR, .ipCIDR6: value = rule.value
+                }
+                let utf8 = Array(value.utf8)
+                guard utf8.count <= Int(UInt16.max) else { continue }
+                w.bytes.append(UInt8(rule.type.rawValue))
+                w.u16(UInt16(utf8.count))
+                w.append(utf8)
+                kept += 1
+            }
+            w.patchU32(at: ruleCountOffset, kept)
+        }
+
+        return Data(w.bytes)
+    }
+
+    private mutating func u16(_ v: UInt16) {
+        bytes.append(UInt8(truncatingIfNeeded: v))
+        bytes.append(UInt8(truncatingIfNeeded: v >> 8))
+    }
+
+    private mutating func u32(_ v: UInt32) {
+        bytes.append(UInt8(truncatingIfNeeded: v))
+        bytes.append(UInt8(truncatingIfNeeded: v >> 8))
+        bytes.append(UInt8(truncatingIfNeeded: v >> 16))
+        bytes.append(UInt8(truncatingIfNeeded: v >> 24))
+    }
+
+    private mutating func append(_ slice: [UInt8]) { bytes.append(contentsOf: slice) }
+    private mutating func append(_ slice: Data) { bytes.append(contentsOf: slice) }
+
+    private mutating func patchU32(at offset: Int, _ v: UInt32) {
+        bytes[offset] = UInt8(truncatingIfNeeded: v)
+        bytes[offset + 1] = UInt8(truncatingIfNeeded: v >> 8)
+        bytes[offset + 2] = UInt8(truncatingIfNeeded: v >> 16)
+        bytes[offset + 3] = UInt8(truncatingIfNeeded: v >> 24)
     }
 }
 
