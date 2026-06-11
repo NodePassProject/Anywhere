@@ -17,7 +17,7 @@ struct ConnectionStatsView: View {
     private static let udpConnectionCeiling: Double = 256
     private static let memoryCeiling: Double = 50 * 1024 * 1024
     
-    private static let cardWidth: CGFloat = 160
+    private static let cardWidth: CGFloat = 170
     private static let cardSpacing: CGFloat = 10
     
     @State private var availableWidth: CGFloat = 330
@@ -36,7 +36,7 @@ struct ConnectionStatsView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity)
+        .frame(minWidth: 350, maxWidth: .infinity)
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width
         } action: { width in
