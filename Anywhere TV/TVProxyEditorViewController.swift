@@ -79,6 +79,9 @@ class TVProxyEditorViewController: UITableViewController {
 
     // Nowhere fields
     private var nowhereKey = ""
+    private var nowhereSpec = ""
+    private var nowhereSNI = ""
+    private var nowhereALPN = ""
 
     // Trojan fields
     private var trojanPassword = ""
@@ -157,7 +160,7 @@ class TVProxyEditorViewController: UITableViewController {
              vlessXHTTPDownloadRealityShortId
         case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps,
              hysteriaPorts, hysteriaHopInterval, hysteriaSNI
-        case nowhereKey
+        case nowhereKey, nowhereSpec, nowhereSNI, nowhereALPN
         case trojanPassword, trojanSNI, trojanALPN, trojanFingerprint
         case anytlsPassword, anytlsSNI, anytlsALPN, anytlsFingerprint
         case ssPassword, ssMethod
@@ -222,6 +225,7 @@ class TVProxyEditorViewController: UITableViewController {
             }
         } else if isNowhere {
             serverRows.append(.text(label: String(localized: "Key"), value: nowhereKey, placeholder: String(localized: "Key"), key: .nowhereKey, secure: true))
+            serverRows.append(.text(label: String(localized: "Spec"), value: nowhereSpec, placeholder: String(localized: "Spec"), key: .nowhereSpec))
         } else if isTrojan {
             serverRows.append(.text(label: String(localized: "Password"), value: trojanPassword, placeholder: String(localized: "Password"), key: .trojanPassword, secure: true))
         } else if isAnyTLS {
@@ -329,6 +333,11 @@ class TVProxyEditorViewController: UITableViewController {
             let tlsTitle = (vlessTransport == "xhttp" && vlessXHTTPDownloadEnabled)
                 ? String(localized: "TLS (Upload)") : String(localized: "TLS")
             sections.append((tlsTitle, tlsRows))
+        } else if isNowhere {
+            sections.append((String(localized: "TLS"), [
+                .text(label: String(localized: "SNI"), value: nowhereSNI, placeholder: String(localized: "SNI"), key: .nowhereSNI),
+                .text(label: String(localized: "ALPN"), value: nowhereALPN, placeholder: String(localized: "ALPN"), key: .nowhereALPN),
+            ]))
         } else if isTrojan {
             sections.append((String(localized: "TLS"), [
                 .text(label: String(localized: "SNI"), value: trojanSNI, placeholder: String(localized: "SNI"), key: .trojanSNI),
@@ -490,6 +499,9 @@ class TVProxyEditorViewController: UITableViewController {
         }
         if isNowhere {
             return !nowhereKey.isEmpty
+                && nowhereKey.utf8.count <= 255
+                && nowhereSpec.utf8.count <= 255
+                && nowhereALPN.utf8.count <= 255
         }
         if isTrojan { return !trojanPassword.isEmpty }
         if isAnyTLS { return !anytlsPassword.isEmpty }
@@ -702,6 +714,9 @@ class TVProxyEditorViewController: UITableViewController {
         case .hysteriaHopInterval: hysteriaHopIntervalText = value
         case .hysteriaSNI: hysteriaSNI = value
         case .nowhereKey: nowhereKey = value
+        case .nowhereSpec: nowhereSpec = value
+        case .nowhereSNI: nowhereSNI = value
+        case .nowhereALPN: nowhereALPN = value
         case .trojanPassword: trojanPassword = value
         case .trojanSNI: trojanSNI = value
         case .trojanALPN: trojanALPN = value
@@ -823,8 +838,11 @@ class TVProxyEditorViewController: UITableViewController {
             hysteriaPortsSpec = portHopping?.portsSpec ?? ""
             hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
             hysteriaSNI = sni
-        case .nowhere(let key):
+        case .nowhere(let key, let spec, let tls):
             nowhereKey = key
+            nowhereSpec = spec ?? ""
+            nowhereSNI = tls.serverName
+            nowhereALPN = tls.alpn?.first ?? ""
         case .trojan(let password, let tls):
             trojanPassword = password
             trojanSNI = tls.serverName
@@ -1064,8 +1082,13 @@ class TVProxyEditorViewController: UITableViewController {
                 sni: sni
             )
         case .nowhere:
+            let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
+            let spec = nowhereSpec.isEmpty ? nil : nowhereSpec
+            let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
             outbound = .nowhere(
-                key: nowhereKey
+                key: nowhereKey,
+                spec: spec,
+                tls: TLSConfiguration(serverName: sni, alpn: alpn)
             )
         case .trojan:
             let sni = trojanSNI.isEmpty ? bareAddress : trojanSNI

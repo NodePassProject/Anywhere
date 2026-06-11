@@ -75,7 +75,9 @@ extension ProxyConfiguration {
             )
         case .nowhere:
             outbound = .nowhere(
-                key: (configurationDict["nowhereKey"] as? String) ?? ""
+                key: (configurationDict["nowhereKey"] as? String) ?? "",
+                spec: (configurationDict["nowhereSpec"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                tls: Self.parseNowhereTLS(from: configurationDict, serverAddress: serverAddress)
             )
         case .trojan:
             let password = (configurationDict["trojanPassword"] as? String) ?? ""
@@ -286,6 +288,17 @@ extension ProxyConfiguration {
         default:
             return .tcp
         }
+    }
+
+    /// Reconstructs the Nowhere TLS configuration from serialized dict keys.
+    private static func parseNowhereTLS(
+        from dict: [String: Any],
+        serverAddress: String
+    ) -> TLSConfiguration {
+        let sni = (dict["nowhereSNI"] as? String) ?? (dict["tlsServerName"] as? String) ?? serverAddress
+        let alpnString = (dict["nowhereALPN"] as? String) ?? (dict["tlsAlpn"] as? String)
+        let alpn = alpnString.flatMap { $0.isEmpty ? nil : [$0] }
+        return TLSConfiguration(serverName: sni, alpn: alpn)
     }
 
     /// Reconstructs the Trojan mandatory TLS configuration from serialized dict keys.

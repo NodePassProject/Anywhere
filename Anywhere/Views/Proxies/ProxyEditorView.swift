@@ -75,6 +75,9 @@ struct ProxyEditorView: View {
 
     // Nowhere fields
     @State private var nowhereKey = ""
+    @State private var nowhereSpec = ""
+    @State private var nowhereSNI = ""
+    @State private var nowhereALPN = ""
 
     // Trojan fields
     @State private var trojanPassword = ""
@@ -149,6 +152,9 @@ struct ProxyEditorView: View {
         }
         if isNowhere {
             return !nowhereKey.isEmpty
+                && nowhereKey.utf8.count <= 255
+                && nowhereSpec.utf8.count <= 255
+                && nowhereALPN.utf8.count <= 255
         }
         if isTrojan {
             return !trojanPassword.isEmpty
@@ -347,6 +353,14 @@ struct ProxyEditorView: View {
                         .multilineTextAlignment(.trailing)
                 } label: {
                     TextWithColorfulIcon(title: "Key", comment: nil, systemName: "key.fill", foregroundColor: .white, backgroundColor: .green)
+                }
+                LabeledContent {
+                    TextField("Spec", text: $nowhereSpec)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "Spec", comment: nil, systemName: "slider.horizontal.3", foregroundColor: .white, backgroundColor: .teal)
                 }
             } else if isTrojan {
                 LabeledContent {
@@ -683,6 +697,26 @@ struct ProxyEditorView: View {
                     }
                 }
             }
+        } else if isNowhere {
+            Section("TLS") {
+                LabeledContent {
+                    TextField("SNI", text: $nowhereSNI)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "SNI", comment: nil, systemName: "network", foregroundColor: .white, backgroundColor: .blue)
+                }
+                LabeledContent {
+                    TextField("ALPN", text: $nowhereALPN)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
+                }
+            }
         } else if isTrojan {
             Section("TLS") {
                 LabeledContent {
@@ -1001,8 +1035,11 @@ struct ProxyEditorView: View {
             hysteriaPortsSpec = portHopping?.portsSpec ?? ""
             hysteriaHopIntervalText = String(portHopping?.intervalSeconds ?? HysteriaPortHopping.defaultIntervalSeconds)
             hysteriaSNI = sni
-        case .nowhere(let key):
+        case .nowhere(let key, let spec, let tls):
             nowhereKey = key
+            nowhereSpec = spec ?? ""
+            nowhereSNI = tls.serverName
+            nowhereALPN = tls.alpn?.first ?? ""
         case .trojan(let password, let tls):
             trojanPassword = password
             trojanSNI = tls.serverName
@@ -1248,8 +1285,13 @@ struct ProxyEditorView: View {
                 sni: sni
             )
         case .nowhere:
+            let sni = nowhereSNI.isEmpty ? bareAddress : nowhereSNI
+            let spec = nowhereSpec.isEmpty ? nil : nowhereSpec
+            let alpn: [String]? = nowhereALPN.isEmpty ? nil : [nowhereALPN]
             outbound = .nowhere(
-                key: nowhereKey
+                key: nowhereKey,
+                spec: spec,
+                tls: TLSConfiguration(serverName: sni, alpn: alpn)
             )
         case .trojan:
             let sni = trojanSNI.isEmpty ? bareAddress : trojanSNI

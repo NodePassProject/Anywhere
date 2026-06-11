@@ -75,8 +75,8 @@ nonisolated final class NowhereSession {
         self.quic = QUICConnection(
             host: configuration.proxyHost,
             port: configuration.proxyPort,
-            serverName: configuration.proxyHost,
-            alpn: [NowhereProtocol.alpn],
+            serverName: configuration.tls.serverName,
+            alpn: [configuration.protocolSpec.effectiveALPN],
             datagramsEnabled: true,
             tuning: .nowhere,
             transport: transport
@@ -139,7 +139,10 @@ nonisolated final class NowhereSession {
 
         let frame: Data
         do {
-            frame = try NowhereProtocol.makeAuthFrame(key: configuration.key)
+            frame = try NowhereProtocol.makeAuthFrame(
+                key: configuration.key,
+                protocolSpec: configuration.protocolSpec
+            )
         } catch {
             failSession(error)
             return

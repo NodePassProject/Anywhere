@@ -423,8 +423,15 @@ extension RoutingRuleSetStore {
                 configurationDict["hysteriaHopInterval"] = portHopping.intervalSeconds
             }
             configurationDict["hysteriaSNI"] = sni
-        case .nowhere(let key):
+        case .nowhere(let key, let spec, let tls):
             configurationDict["nowhereKey"] = key
+            if let spec, !spec.isEmpty {
+                configurationDict["nowhereSpec"] = spec
+            }
+            configurationDict["nowhereSNI"] = tls.serverName
+            if let alpn = tls.alpn?.first, !alpn.isEmpty {
+                configurationDict["nowhereALPN"] = alpn
+            }
         case .trojan(let password, let tls):
             configurationDict["trojanPassword"] = password
             configurationDict["trojanSNI"] = tls.serverName

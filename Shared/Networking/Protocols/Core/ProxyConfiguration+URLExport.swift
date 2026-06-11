@@ -16,6 +16,12 @@ extension ProxyConfiguration {
         serverAddress.contains(":") ? "[\(serverAddress)]" : serverAddress
     }
 
+    private func encodedQueryValue(_ value: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&#=")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
     /// Export configuration as a shareable URL string.
     func toURL() -> String {
         switch outboundProtocol {
@@ -120,12 +126,23 @@ extension ProxyConfiguration {
     }
 
     private func toNowhereURL() -> String {
-        guard case .nowhere(let key) = outbound else {
+        guard case .nowhere(let key, let spec, let tls) = outbound else {
             return ""
         }
         let encodedKey = key.addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)#\(fragment)"
+        var params: [String] = []
+        if let spec, !spec.isEmpty {
+            params.append("spec=\(encodedQueryValue(spec))")
+        }
+        if tls.serverName != serverAddress {
+            params.append("sni=\(encodedQueryValue(tls.serverName))")
+        }
+        if let alpn = tls.alpn?.first, !alpn.isEmpty {
+            params.append("alpn=\(encodedQueryValue(alpn))")
+        }
+        let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
+        return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
 
     private func toTrojanURL() -> String {

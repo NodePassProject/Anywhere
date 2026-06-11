@@ -12608,6 +12608,9 @@
     "SOCKS5" : {
       "shouldTranslate" : false
     },
+    "Spec" : {
+      "shouldTranslate" : false
+    },
     "Stream One" : {
       "shouldTranslate" : false
     },

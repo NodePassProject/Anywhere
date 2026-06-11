@@ -17,16 +17,24 @@ extension ProxyClient {
         destinationPort: UInt16,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        guard case .nowhere(let key) = configuration.outbound else {
+        guard case .nowhere(let key, let spec, let tls) = configuration.outbound else {
             completion(.failure(ProxyError.protocolError("Nowhere key not set")))
             return
         }
 
-        let nwConfig = NowhereConfiguration(
-            proxyHost: configuration.serverAddress,
-            proxyPort: configuration.serverPort,
-            key: key
-        )
+        let nwConfig: NowhereConfiguration
+        do {
+            nwConfig = try NowhereConfiguration(
+                proxyHost: configuration.serverAddress,
+                proxyPort: configuration.serverPort,
+                key: key,
+                spec: spec,
+                tls: tls
+            )
+        } catch {
+            completion(.failure(error))
+            return
+        }
 
         let bracketedHost = destinationHost.contains(":") ? "[\(destinationHost)]" : destinationHost
         let destination = "\(bracketedHost):\(destinationPort)"
