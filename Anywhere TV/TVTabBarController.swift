@@ -15,15 +15,12 @@ class TVTabBarController: UITabBarController {
         let home = UINavigationController(rootViewController: TVHomeViewController())
         home.tabBarItem = UITabBarItem(title: String(localized: "Home"), image: UIImage(systemName: "house"), tag: 0)
 
-        let proxies = UINavigationController(rootViewController: TVProxyListViewController())
+        let proxies = UINavigationController(rootViewController: TVProxiesPageViewController())
         proxies.tabBarItem = UITabBarItem(title: String(localized: "Proxies"), image: UIImage(systemName: "network"), tag: 1)
 
-        let chains = UINavigationController(rootViewController: TVChainListViewController())
-        chains.tabBarItem = UITabBarItem(title: String(localized: "Chains"), image: UIImage(systemName: "point.bottomleft.forward.to.point.topright.scurvepath.fill"), tag: 2)
-
         let settings = UINavigationController(rootViewController: TVSettingsViewController())
-        settings.tabBarItem = UITabBarItem(title: String(localized: "Settings"), image: UIImage(systemName: "gearshape"), tag: 3)
+        settings.tabBarItem = UITabBarItem(title: String(localized: "Settings"), image: UIImage(systemName: "gearshape"), tag: 2)
 
-        viewControllers = [home, proxies, chains, settings]
+        viewControllers = [home, proxies, settings]
     }
 }

@@ -1,5 +1,5 @@
 //
-//  ProxyListView.swift
+//  ProxiesPageView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/1/26.
@@ -8,15 +8,24 @@
 import SwiftUI
 import NetworkExtension
 
-struct ProxyListView: View {
+private enum ListSegment {
+    case servers, chains
+}
+
+struct ProxiesPageView: View {
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(SubscriptionStore.self) private var subscriptionStore
+    @Environment(ChainStore.self) private var chainStore
     private let coordinator = ProxyRowCoordinator.shared
+    private let chainCoordinator = ChainRowCoordinator.shared
 
+    @State private var segment: ListSegment = .servers
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
+    @State private var showingChainAddSheet = false
     @State private var configurationToEdit: ProxyConfiguration?
+    @State private var chainToEdit: ProxyChain?
     @State private var updatingSubscription: Subscription?
     @State private var showingSubscriptionError = false
     @State private var subscriptionErrorMessage = ""
@@ -34,32 +43,49 @@ struct ProxyListView: View {
 
     var body: some View {
         List {
-            Section {
-                ForEach(standaloneItems) { item in
-                    proxyRow(item, editingDisabled: false)
-                }
-            }
-            ForEach(subscriptionStore.subscriptions) { subscription in
-                let editingDisabled = SubscriptionDomainHelper.shouldDisableProxyEditing(for: subscription.url)
+            if segment == .servers {
                 Section {
-                    if !collapsedSubscriptions.contains(subscription.id) {
-                        ForEach(items(for: subscription)) { item in
-                            proxyRow(item, editingDisabled: editingDisabled)
-                        }
+                    ForEach(standaloneItems) { item in
+                        proxyRow(item, editingDisabled: false)
                     }
-                } header: {
-                    subscriptionHeader(subscription)
+                }
+                ForEach(subscriptionStore.subscriptions) { subscription in
+                    let editingDisabled = SubscriptionDomainHelper.shouldDisableProxyEditing(for: subscription.url)
+                    Section {
+                        if !collapsedSubscriptions.contains(subscription.id) {
+                            ForEach(items(for: subscription)) { item in
+                                proxyRow(item, editingDisabled: editingDisabled)
+                            }
+                        }
+                    } header: {
+                        subscriptionHeader(subscription)
+                    }
+                }
+            } else {
+                ForEach(chainCoordinator.models) { item in
+                    chainRow(item)
                 }
             }
         }
         .overlay {
-            if configStore.configurations.isEmpty {
+            if segment == .servers, configStore.configurations.isEmpty {
                 ContentUnavailableView("No Proxies", systemImage: "network")
+            } else if segment == .chains, chainCoordinator.models.isEmpty {
+                ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
             }
+        }
+        .safeAreaInset(edge: .top) {
+            Picker("", selection: $segment) {
+                Text("Servers").tag(ListSegment.servers)
+                Text("Chains").tag(ListSegment.chains)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 8)
         }
         .navigationTitle("Proxies")
         .toolbar {
-            if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 {
+            if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 {
                 if #available(iOS 27.0, *) {
                     ToolbarItemGroup {
                         NavigationLink {
@@ -86,11 +112,16 @@ struct ProxyListView: View {
             
             ToolbarItemGroup {
                 Button {
-                    let visible = configStore.configurations.filter { configuration in
-                        guard let subId = configuration.subscriptionId else { return true }
-                        return !collapsedSubscriptions.contains(subId)
+                    switch segment {
+                    case .servers:
+                        let visible = configStore.configurations.filter { configuration in
+                            guard let subId = configuration.subscriptionId else { return true }
+                            return !collapsedSubscriptions.contains(subId)
+                        }
+                        viewModel.testLatencies(for: visible)
+                    case .chains:
+                        viewModel.testAllChainLatencies(chains: chainStore.chains, configurations: configStore.configurations)
                     }
-                    viewModel.testLatencies(for: visible)
                 } label: {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
                 }
@@ -103,7 +134,7 @@ struct ProxyListView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet)
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet, showingChainAddSheet: $showingChainAddSheet)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {
@@ -111,9 +142,19 @@ struct ProxyListView: View {
                 configStore.add(configuration); viewModel.selectIfNone(configuration)
             }
         }
+        .sheet(isPresented: $showingChainAddSheet) {
+            ChainEditorView { chain in
+                chainStore.add(chain)
+            }
+        }
         .sheet(item: $configurationToEdit) { configuration in
             ProxyEditorView(configuration: configuration) { updated in
                 configStore.update(updated)
+            }
+        }
+        .sheet(item: $chainToEdit) { chain in
+            ChainEditorView(chain: chain) { updated in
+                chainStore.update(updated)
             }
         }
         .alert("Update Failed", isPresented: $showingSubscriptionError) {
@@ -235,76 +276,25 @@ struct ProxyListView: View {
             onDelete: { if let configuration = config(item.id) { configStore.delete(configuration) } }
         )
     }
-}
 
-// MARK: - Proxy Row
+    private func chain(_ id: UUID) -> ProxyChain? {
+        chainStore.chains.first { $0.id == id }
+    }
 
-private struct ProxyRowView: View {
-    let item: ProxyListItem
-    let editingDisabled: Bool
-    let onSelect: () -> Void
-    let onTestLatency: () -> Void
-    let onCopyLink: () -> Void
-    let onEdit: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
-        Button(action: onSelect) {
-            HStack {
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text(item.name)
-                            .font(.body.weight(.medium))
-                        if item.isSelected {
-                            Image(systemName: "checkmark")
-                                .font(.caption.bold())
-                                .foregroundStyle(.tint)
-                        }
-                    }
-                    HStack(spacing: 4) {
-                        ForEach(Array(item.tags.enumerated()), id: \.offset) { index, tag in
-                            if index > 0 { Text("·") }
-                            Text(tag)
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                LatencyLabel(latency: item.latency)
-                    .onTapGesture(perform: onTestLatency)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button(action: onTestLatency) {
-                Label("Test Latency", systemImage: "gauge.with.dots.needle.67percent")
-            }
-            if !editingDisabled {
-                Button(action: onCopyLink) {
-                    Label("Copy Link", systemImage: "doc.on.doc")
-                }
-                Button(action: onEdit) {
-                    Label("Edit", systemImage: "pencil")
-                }
-                Button(role: .destructive, action: onDelete) {
-                    Label("Delete", systemImage: "trash")
-                }
-            }
-        }
-        .swipeActions(edge: .trailing) {
-            if !editingDisabled {
-                Button(role: .destructive, action: onDelete) {
-                    Label("Delete", systemImage: "trash")
-                }
-                Button(action: onEdit) {
-                    Label("Edit", systemImage: "pencil")
-                }
-                .tint(.orange)
-            }
-        }
+    @ViewBuilder
+    private func chainRow(_ item: ChainListItem) -> some View {
+        ChainRowView(
+            item: item,
+            onSelect: {
+                guard item.isValid, let chain = chain(item.id) else { return }
+                viewModel.selectChain(chain, configurations: configStore.configurations)
+            },
+            onTestLatency: {
+                guard let chain = chain(item.id) else { return }
+                viewModel.testChainLatency(for: chain, configurations: configStore.configurations)
+            },
+            onEdit: { chainToEdit = chain(item.id) },
+            onDelete: { if let chain = chain(item.id) { chainStore.delete(chain) } }
+        )
     }
 }

@@ -815,7 +815,7 @@ class TVProxyEditorViewController: UITableViewController {
         switch configuration.outbound {
         case .vless:
             break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let sni, let portHopping):
+        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let sni):
             hysteriaPassword = password
             hysteriaCC = congestionControl
             hysteriaUploadMbpsText = String(uploadMbps)
@@ -1060,7 +1060,7 @@ class TVProxyEditorViewController: UITableViewController {
                 congestionControl: hysteriaCC,
                 uploadMbps: up,
                 downloadMbps: down,
-                portHopping: portHopping.
+                portHopping: portHopping,
                 sni: sni
             )
         case .nowhere:

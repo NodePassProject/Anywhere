@@ -7,6 +7,7 @@
 
 import Foundation
 import Observation
+import SwiftUI
 
 @MainActor
 @Observable
@@ -41,6 +42,11 @@ class ChainStore {
         chains.removeAll { $0.id == chain.id }
         save()
         coordinate()
+    }
+
+    func move(fromOffsets source: IndexSet, toOffset destination: Int) {
+        chains.move(fromOffsets: source, toOffset: destination)
+        save()
     }
 
     // MARK: - Coordination
