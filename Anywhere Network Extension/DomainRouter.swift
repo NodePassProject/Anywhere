@@ -304,7 +304,7 @@ class DomainRouter {
         configurationMap.removeAll()
     }
 
-    /// Compiles rules from App Group UserDefaults into per-tier matchers under `routingLock`.
+    /// Compiles rules from the App Group routing file into per-tier matchers under `routingLock`.
     func loadRoutingConfiguration() {
         routingLock.withLock { loadRoutingConfigurationLocked() }
     }

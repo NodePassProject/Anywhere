@@ -80,7 +80,7 @@ class ConfigurationStore {
         let chains = ChainStore.shared.chains
         VPNViewModel.shared.revalidateSelection(configurations: configurations, chains: chains)
         RoutingRuleSetStore.shared.clearOrphans(configurations: configurations, chains: chains)
-        Task { await RoutingRuleSetStore.shared.syncToAppGroup() }
+        RoutingRuleSetStore.shared.scheduleSyncToAppGroup()
     }
 
     // MARK: - Persistence

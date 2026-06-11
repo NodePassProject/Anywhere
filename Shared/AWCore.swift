@@ -7,6 +7,8 @@
 
 import Foundation
 
+private let logger = AnywhereLogger(category: "AWCore")
+
 final class AWCore {
     // MARK: - Identifiers
 
@@ -109,7 +111,6 @@ final class AWCore {
         static let onboardingCompleted = "onboardingCompleted"
         static let proxyMode = "proxyMode"
         static let remnawaveHWIDEnabled = "remnawaveHWIDEnabled"
-        static let routingData = "routingData"
         static let ruleSetAssignments = "ruleSetAssignments"
         static let selectedConfigurationId = "selectedConfigurationId"
         static let selectedChainId = "selectedChainId"
@@ -182,14 +183,6 @@ final class AWCore {
         }
     }
     
-    static func getRoutingData() -> Data? {
-        userDefaults.data(forKey: UserDefaultsKey.routingData)
-    }
-
-    static func setRoutingData(_ data: Data) {
-        userDefaults.set(data, forKey: UserDefaultsKey.routingData)
-    }
-
     // Settings
     static func getAlwaysOnEnabled() -> Bool {
         userDefaults.bool(forKey: UserDefaultsKey.alwaysOnEnabled)
@@ -359,6 +352,26 @@ final class AWCore {
         userDefaults.set(value, forKey: UserDefaultsKey.tunnelIncludeCellularServices)
     }
     
+    // MARK: - Routing Data
+
+    private static let routingDataURL = FileManager.default
+        .containerURL(forSecurityApplicationGroupIdentifier: Identifier.appGroupSuite)!
+        .appendingPathComponent("routing.json")
+    
+    static func getRoutingData() -> Data? {
+        try? Data(contentsOf: routingDataURL, options: .mappedIfSafe)
+    }
+    
+    static func setRoutingData(_ data: Data) {
+        do {
+            try data.write(to: routingDataURL, options: [.atomic, .noFileProtection])
+            // Shed the legacy UserDefaults copy left behind by earlier builds.
+            userDefaults.removeObject(forKey: "routingData")
+        } catch {
+            logger.error("Failed to write routing data: \(error)")
+        }
+    }
+
     // MARK: - Darwin Notification Names
 
     enum Notification {

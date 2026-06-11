@@ -79,10 +79,14 @@ class RoutingRuleSetStore {
         didSet {
             guard bypassCountryCode != oldValue else { return }
             AWCore.setBypassCountryCode(bypassCountryCode)
-            scheduleSync()
-            AWCore.notifyTunnelSettingsChanged()
+            scheduleSyncToAppGroup()
         }
     }
+
+    /// Tail of the sync chain; each scheduled run awaits its predecessor.
+    @ObservationIgnored private var queuedSync: Task<Void, Never>?
+
+    private static let syncDebounceInterval: Duration = .seconds(2)
 
     var adBlockRuleSet: RoutingRuleSet? {
         ruleSets.first(where: { $0.name == "ADBlock" })
@@ -107,6 +111,7 @@ class RoutingRuleSetStore {
         }
 
         rebuildRuleSets(assignments: assignments)
+        scheduleSyncToAppGroup()
     }
 
     private func rebuildRuleSets(assignments: [String: String]? = nil) {
@@ -138,7 +143,7 @@ class RoutingRuleSetStore {
         guard let index = ruleSets.firstIndex(where: { $0.id == ruleSet.id }) else { return }
         ruleSets[index].assignedConfigurationId = configurationId
         saveAssignments()
-        scheduleSync()
+        scheduleSyncToAppGroup()
     }
 
     func resetAssignments() {
@@ -151,7 +156,7 @@ class RoutingRuleSetStore {
             ruleSets[index].assignedConfigurationId = nil
         }
         saveAssignments()
-        scheduleSync()
+        scheduleSyncToAppGroup()
     }
 
     /// Resets assignments referencing ids not in `availableIds`; returns the affected rule set names.
@@ -254,12 +259,10 @@ class RoutingRuleSetStore {
 
     // MARK: - App Group Sync
 
-    func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain], serializeConfiguration: @escaping @Sendable (ProxyConfiguration) -> [String: Any]) async {
+    private func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain], serializeConfiguration: @escaping @Sendable (ProxyConfiguration) -> [String: Any]) async {
         let snapshot = ruleSets
         let customSnapshot = customRuleSets
-
-        // Resolve targets (including chain composites) on the main actor so the
-        // detached worker only sees Sendable lookup data.
+        
         var resolvedTargets: [String: ProxyConfiguration] = [:]
         for ruleSet in snapshot {
             guard let assignedId = ruleSet.assignedConfigurationId,
@@ -352,11 +355,13 @@ class RoutingRuleSetStore {
             if !builtInRules.isEmpty { routing["builtInRules"] = builtInRules }
             if !bypassRules.isEmpty { routing["bypassRules"] = bypassRules }
 
-            if let data = try? JSONSerialization.data(withJSONObject: routing) {
+            // sortedKeys makes the bytes deterministic, so an unchanged
+            // payload is detected here and produces no write and no reload.
+            if let data = try? JSONSerialization.data(withJSONObject: routing, options: .sortedKeys),
+               data != AWCore.getRoutingData() {
                 AWCore.setRoutingData(data)
+                AWCore.notifyRoutingChanged()
             }
-
-            AWCore.notifyRoutingChanged()
         }.value
     }
 
@@ -373,25 +378,30 @@ class RoutingRuleSetStore {
         if let data = try? JSONEncoder().encode(customRuleSets) {
             JSONBlobStore.shared.save(.customRuleSets, data: data)
         }
-        scheduleSync()
+        scheduleSyncToAppGroup()
     }
-
-    /// Schedules a routing re-sync to the Network Extension after any rule/assignment/bypass change.
-    private func scheduleSync() {
-        Task { await syncToAppGroup() }
+    
+    func scheduleSyncToAppGroup() {
+        let previous = queuedSync
+        previous?.cancel()
+        queuedSync = Task {
+            try? await Task.sleep(for: Self.syncDebounceInterval)
+            guard !Task.isCancelled else { return }
+            await previous?.value
+            // Superseded while waiting — the newer task carries the work.
+            guard !Task.isCancelled else { return }
+            await syncToAppGroup()
+        }
     }
 }
 
 // MARK: - App Group Sync & Orphan Cleanup (convenience)
 
 extension RoutingRuleSetStore {
-    func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain]) async {
-        await syncToAppGroup(configurations: configurations, chains: chains, serializeConfiguration: Self.serializeConfiguration)
-    }
-
-    func syncToAppGroup() async {
+    private func syncToAppGroup() async {
         await syncToAppGroup(configurations: ConfigurationStore.shared.configurations,
-                             chains: ChainStore.shared.chains)
+                             chains: ChainStore.shared.chains,
+                             serializeConfiguration: Self.serializeConfiguration)
     }
 
     /// Clears assignments whose target proxy/chain no longer exists and records the affected names for the UI.

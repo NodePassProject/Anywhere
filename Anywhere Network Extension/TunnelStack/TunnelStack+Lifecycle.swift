@@ -320,7 +320,6 @@ extension TunnelStack {
             guard running, let configuration else { return }
             
             let proxyMode = AWCore.getProxyMode()
-            let bypassCountryCode = AWCore.getBypassCountryCode()
             let hideVPNIcon = AWCore.getHideVPNIcon()
             let advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()
             let encryptedDNSEnabled = AWCore.getEncryptedDNSEnabled()
@@ -359,14 +358,13 @@ extension TunnelStack {
             }
 
             let proxyModeChanged = proxyMode != self.proxyMode
-            let bypassCountryChanged = bypassCountryCode != self.bypassCountryCode
             let hideVPNIconChanged = hideVPNIcon != self.hideVPNIcon
             let advertiseIPv6ToAppsChanged = advertiseIPv6ToApps != self.advertiseIPv6ToApps
             let encryptedDNSEnabledChanged = encryptedDNSEnabled != self.encryptedDNSEnabled
             let encryptedDNSProtocolChanged = encryptedDNSProtocol != self.encryptedDNSProtocol
             let encryptedDNSServerChanged = encryptedDNSServer != self.encryptedDNSServer
 
-            guard proxyModeChanged || bypassCountryChanged || hideVPNIconChanged || advertiseIPv6ToAppsChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else {
+            guard proxyModeChanged || hideVPNIconChanged || advertiseIPv6ToAppsChanged || encryptedDNSEnabledChanged || encryptedDNSProtocolChanged || encryptedDNSServerChanged else {
                 return
             }
             
