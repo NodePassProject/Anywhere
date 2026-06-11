@@ -54,6 +54,10 @@ struct StatsResponse: Codable, Sendable {
     var dialMs: Int?
     /// Most recent proxy handshake time (TCP-connected → tunnel ready) in ms.
     var handshakeMs: Int?
+    /// Session-average first-hop TCP dial time in ms; nil until a dial this session.
+    var avgDialMs: Int?
+    /// Session-average proxy handshake time in ms.
+    var avgHandshakeMs: Int?
 
     init(
         bytesIn: Int64,
@@ -63,7 +67,9 @@ struct StatsResponse: Codable, Sendable {
         udpConnectionCount: Int = 0,
         memoryBytes: UInt64 = 0,
         dialMs: Int? = nil,
-        handshakeMs: Int? = nil
+        handshakeMs: Int? = nil,
+        avgDialMs: Int? = nil,
+        avgHandshakeMs: Int? = nil
     ) {
         self.bytesIn = bytesIn
         self.bytesOut = bytesOut
@@ -73,6 +79,8 @@ struct StatsResponse: Codable, Sendable {
         self.memoryBytes = memoryBytes
         self.dialMs = dialMs
         self.handshakeMs = handshakeMs
+        self.avgDialMs = avgDialMs
+        self.avgHandshakeMs = avgHandshakeMs
     }
 
     // Tolerant decoder: missing keys default to zero/nil so app and extension
@@ -87,6 +95,8 @@ struct StatsResponse: Codable, Sendable {
         memoryBytes = try c.decodeIfPresent(UInt64.self, forKey: .memoryBytes) ?? 0
         dialMs = try c.decodeIfPresent(Int.self, forKey: .dialMs)
         handshakeMs = try c.decodeIfPresent(Int.self, forKey: .handshakeMs)
+        avgDialMs = try c.decodeIfPresent(Int.self, forKey: .avgDialMs)
+        avgHandshakeMs = try c.decodeIfPresent(Int.self, forKey: .avgHandshakeMs)
     }
 }
 

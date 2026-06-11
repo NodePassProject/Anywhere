@@ -1,5 +1,5 @@
 //
-//  ChainListView.swift
+//  ChainRowView.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/8/26.
@@ -7,83 +7,7 @@
 
 import SwiftUI
 
-struct ChainListView: View {
-    @Environment(VPNViewModel.self) private var viewModel
-    @Environment(ChainStore.self) private var chainStore
-    @Environment(ConfigurationStore.self) private var configStore
-    private let coordinator = ChainRowCoordinator.shared
-
-    @State private var showingAddSheet = false
-    @State private var showingNotEnoughProxiesAlert = false
-    @State private var chainToEdit: ProxyChain?
-
-    var body: some View {
-        List {
-            ForEach(coordinator.models) { item in
-                ChainRowView(
-                    item: item,
-                    onSelect: {
-                        guard item.isValid, let chain = chain(item.id) else { return }
-                        viewModel.selectChain(chain, configurations: configStore.configurations)
-                    },
-                    onTestLatency: {
-                        guard let chain = chain(item.id) else { return }
-                        viewModel.testChainLatency(for: chain, configurations: configStore.configurations)
-                    },
-                    onEdit: { chainToEdit = chain(item.id) },
-                    onDelete: { if let chain = chain(item.id) { chainStore.delete(chain) } }
-                )
-            }
-        }
-        .overlay {
-            if coordinator.models.isEmpty {
-                ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
-            }
-        }
-        .navigationTitle("Chains")
-        .toolbar {
-            ToolbarItemGroup {
-                Button {
-                    viewModel.testAllChainLatencies(chains: chainStore.chains, configurations: configStore.configurations)
-                } label: {
-                    Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
-                }
-                Button {
-                    if configStore.configurations.count < 2 {
-                        showingNotEnoughProxiesAlert = true
-                    } else {
-                        showingAddSheet = true
-                    }
-                } label: {
-                    Label("Add", systemImage: "plus")
-                }
-            }
-        }
-        .sheet(isPresented: $showingAddSheet) {
-            ChainEditorView { chain in
-                chainStore.add(chain)
-            }
-        }
-        .sheet(item: $chainToEdit) { chain in
-            ChainEditorView(chain: chain) { updated in
-                chainStore.update(updated)
-            }
-        }
-        .alert("Not Enough Proxies", isPresented: $showingNotEnoughProxiesAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("A proxy chain needs at least 2 proxies.")
-        }
-    }
-
-    private func chain(_ id: UUID) -> ProxyChain? {
-        chainStore.chains.first { $0.id == id }
-    }
-}
-
-// MARK: - Chain Row
-
-private struct ChainRowView: View {
+struct ChainRowView: View {
     let item: ChainListItem
     let onSelect: () -> Void
     let onTestLatency: () -> Void

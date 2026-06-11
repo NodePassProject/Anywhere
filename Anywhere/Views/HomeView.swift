@@ -19,6 +19,7 @@ struct HomeView: View {
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
+    @State private var showingChainAddSheet = false
 
     private var isConnected: Bool {
         viewModel.vpnStatus == .connected
@@ -67,12 +68,17 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet)
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet, showingChainAddSheet: $showingChainAddSheet)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {
             ProxyEditorView { configuration in
                 configStore.add(configuration); viewModel.selectIfNone(configuration)
+            }
+        }
+        .sheet(isPresented: $showingChainAddSheet) {
+            ChainEditorView { chain in
+                chainStore.add(chain)
             }
         }
         .alert("VPN Error", isPresented: Binding(
@@ -148,8 +154,7 @@ private struct PowerButton: View {
                     Circle()
                         .fill(.clear)
                         .frame(width: isCompact ? 50 : 140)
-                        .glassEffect(.clear, in: .circle)
-                        .shadow(color: isConnected ? .cyan.opacity(0.4) : .black.opacity(0.08), radius: isConnected ? 24 : 8)
+                        .glassEffect(.regular, in: .circle)
                 } else {
                     Circle()
                         .fill(.white.opacity(0.2))
@@ -286,7 +291,7 @@ private struct CardCapsule<Content: View>: View {
             content
                 .padding(16)
                 .contentShape(Capsule())
-                .glassEffect(.clear.interactive(), in: .capsule)
+                .glassEffect(.regular.interactive(), in: .capsule)
         } else {
             content
                 .padding(16)

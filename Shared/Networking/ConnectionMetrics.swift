@@ -31,12 +31,18 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
     private var pendingDialMs: Int?
     private var dialMs: Int?
     private var handshakeMs: Int?
+    private var dialTotalMs = 0
+    private var dialSampleCount = 0
+    private var handshakeTotalMs = 0
+    private var handshakeSampleCount = 0
     /// >0 while a latency-test probe is running; recording is suppressed.
     private var suspendDepth = 0
 
     struct Snapshot {
         let dialMs: Int?
         let handshakeMs: Int?
+        let avgDialMs: Int?
+        let avgHandshakeMs: Int?
     }
 
     /// Records a measured latency; no-op while recording is suspended.
@@ -50,17 +56,27 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
                 pendingDialMs = ms
             case .handshake:
                 // Default proxy only: commit the pending dial and the post-TCP
-                // remainder together for the same connection.
+                // remainder together for the same connection. The dial is
+                // consumed so it can't be double-counted into the averages.
+                let remainder: Int
                 if let dial = pendingDialMs {
+                    pendingDialMs = nil
                     dialMs = dial
-                    handshakeMs = max(0, ms - dial)
+                    dialTotalMs += dial
+                    dialSampleCount += 1
+                    remainder = max(0, ms - dial)
                 } else {
-                    handshakeMs = ms
+                    remainder = ms
                 }
+                handshakeMs = remainder
+                handshakeTotalMs += remainder
+                handshakeSampleCount += 1
             case .handshakeNoDial:
                 // QUIC: clear the dial gauge so a stale pending dial is never paired.
                 dialMs = nil
                 handshakeMs = ms
+                handshakeTotalMs += ms
+                handshakeSampleCount += 1
             }
         }
         lock.unlock()
@@ -83,7 +99,12 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
     func snapshot() -> Snapshot {
         lock.lock()
         defer { lock.unlock() }
-        return Snapshot(dialMs: dialMs, handshakeMs: handshakeMs)
+        return Snapshot(
+            dialMs: dialMs,
+            handshakeMs: handshakeMs,
+            avgDialMs: dialSampleCount > 0 ? dialTotalMs / dialSampleCount : nil,
+            avgHandshakeMs: handshakeSampleCount > 0 ? handshakeTotalMs / handshakeSampleCount : nil
+        )
     }
 
     func reset() {
@@ -91,6 +112,10 @@ nonisolated final class ConnectionMetrics: @unchecked Sendable {
         pendingDialMs = nil
         dialMs = nil
         handshakeMs = nil
+        dialTotalMs = 0
+        dialSampleCount = 0
+        handshakeTotalMs = 0
+        handshakeSampleCount = 0
         lock.unlock()
     }
 }

@@ -10,11 +10,13 @@ import SwiftUI
 struct ContentView: View {
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
+    @Environment(ChainStore.self) private var chainStore
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Environment(DeepLinkManager.self) private var deepLinkManager
     @State private var selectedTab: AppTab = .home
     @State private var showingDeepLinkAddSheet = false
     @State private var showingManualAddSheet = false
+    @State private var showingChainAddSheet = false
     @State private var pendingDeepLinkURL: String?
 
     private var showOrphanedAlert: Binding<Bool> {
@@ -36,13 +38,18 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
                 DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                    AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)
+                    AddProxyView(showingManualAddSheet: $showingManualAddSheet, showingChainAddSheet: $showingChainAddSheet, deepLinkURL: pendingDeepLinkURL)
                 }
             }
             .sheet(isPresented: $showingManualAddSheet) {
                 ProxyEditorView { configuration in
                     configStore.add(configuration)
                     viewModel.selectIfNone(configuration)
+                }
+            }
+            .sheet(isPresented: $showingChainAddSheet) {
+                ChainEditorView { chain in
+                    chainStore.add(chain)
                 }
             }
             .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {
@@ -57,29 +64,29 @@ struct ContentView: View {
     private var tabView: some View {
         if #available(iOS 18.0, *) {
             TabView(selection: $selectedTab) {
-                Tab("Home", image: "anywhere", value: .home) {
+                Tab(value: .home) {
                     NavigationStack {
                         HomeView()
                     }
                     .colorScheme(.dark)
+                } label: {
+                    Image("anywhere")
                 }
-
-                Tab("Proxies", systemImage: "network", value: .proxies) {
+                
+                Tab(value: .proxies) {
                     NavigationStack {
-                        ProxyListView()
+                        ProxiesPageView()
                     }
+                } label: {
+                    Image(systemName: "network")
                 }
-
-                Tab("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill", value: .chains) {
-                    NavigationStack {
-                        ChainListView()
-                    }
-                }
-
-                Tab("Settings", systemImage: "gearshape", value: .settings) {
+                
+                Tab(value: .settings) {
                     NavigationStack {
                         SettingsView()
                     }
+                } label: {
+                    Image(systemName: "gearshape")
                 }
             }
             .tabViewStyle(.sidebarAdaptable)
@@ -92,16 +99,10 @@ struct ContentView: View {
                 .tag(AppTab.home)
 
                 NavigationStack {
-                    ProxyListView()
+                    ProxiesPageView()
                 }
                 .tabItem { Label("Proxies", systemImage: "network") }
                 .tag(AppTab.proxies)
-
-                NavigationStack {
-                    ChainListView()
-                }
-                .tabItem { Label("Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill") }
-                .tag(AppTab.chains)
 
                 NavigationStack {
                     SettingsView()
@@ -114,5 +115,5 @@ struct ContentView: View {
 }
 
 private enum AppTab: Hashable {
-    case home, proxies, chains, settings
+    case home, proxies, settings
 }
