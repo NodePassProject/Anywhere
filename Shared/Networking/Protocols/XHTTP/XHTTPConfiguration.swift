@@ -308,7 +308,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         } else if let s = json?["alpn"] as? String, !s.isEmpty {
             alpn = s.split(separator: ",").map(String.init)
         }
-        let fp = (json?["fingerprint"] as? String).flatMap { TLSFingerprint(rawValue: $0) } ?? .chrome133
+        let fp = (json?["fingerprint"] as? String).flatMap { TLSFingerprint(rawValue: $0) } ?? .chrome120
         return TLSConfiguration(serverName: serverName, alpn: alpn, fingerprint: fp)
     }
 
@@ -319,7 +319,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
               publicKey.count == 32 else { return nil }
         let serverName = (json["serverName"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? serverAddress
         let shortId = Data(hexString: (json["shortId"] as? String) ?? "") ?? Data()
-        let fp = (json["fingerprint"] as? String).flatMap { TLSFingerprint(rawValue: $0) } ?? .chrome133
+        let fp = (json["fingerprint"] as? String).flatMap { TLSFingerprint(rawValue: $0) } ?? .chrome120
         return RealityConfiguration(serverName: serverName, publicKey: publicKey, shortId: shortId, fingerprint: fp)
     }
 

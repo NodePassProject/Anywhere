@@ -48,7 +48,7 @@ struct ProxyEditorView: View {
     @State private var vlessRealitySNI = ""
     @State private var vlessRealityPublicKey = ""
     @State private var vlessRealityShortId = ""
-    @State private var vlessFingerprint: TLSFingerprint = .chrome133
+    @State private var vlessFingerprint: TLSFingerprint = .chrome120
     
     @State private var vlessXHTTPDownloadEnabled = false
     @State private var vlessXHTTPDownloadAddress = ""
@@ -62,7 +62,7 @@ struct ProxyEditorView: View {
     @State private var vlessXHTTPDownloadRealitySNI = ""
     @State private var vlessXHTTPDownloadRealityPublicKey = ""
     @State private var vlessXHTTPDownloadRealityShortId = ""
-    @State private var vlessXHTTPDownloadFingerprint: TLSFingerprint = .chrome133
+    @State private var vlessXHTTPDownloadFingerprint: TLSFingerprint = .chrome120
     
     // Hysteria fields
     @State private var hysteriaPassword = ""
@@ -80,13 +80,13 @@ struct ProxyEditorView: View {
     @State private var trojanPassword = ""
     @State private var trojanSNI = ""
     @State private var trojanALPN = ""
-    @State private var trojanFingerprint: TLSFingerprint = .chrome133
+    @State private var trojanFingerprint: TLSFingerprint = .chrome120
 
     // AnyTLS fields
     @State private var anytlsPassword = ""
     @State private var anytlsSNI = ""
     @State private var anytlsALPN = ""
-    @State private var anytlsFingerprint: TLSFingerprint = .chrome133
+    @State private var anytlsFingerprint: TLSFingerprint = .chrome120
 
     // Shadowsocks fields
     @State private var ssPassword = ""

@@ -140,7 +140,7 @@ extension ProxyConfiguration {
             let joined = alpn.joined(separator: ",")
             params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
         }
-        if tls.fingerprint != .chrome133 {
+        if tls.fingerprint != .chrome120 {
             params.append("fp=\(tls.fingerprint.rawValue)")
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
@@ -159,7 +159,7 @@ extension ProxyConfiguration {
             let joined = alpn.joined(separator: ",")
             params.append("alpn=\(joined.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? joined)")
         }
-        if tls.fingerprint != .chrome133 {
+        if tls.fingerprint != .chrome120 {
             params.append("fp=\(tls.fingerprint.rawValue)")
         }
         // Emit pool tuners only when they differ from the sing-anytls defaults.

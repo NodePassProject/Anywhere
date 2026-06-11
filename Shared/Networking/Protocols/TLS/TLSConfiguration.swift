@@ -22,7 +22,7 @@ struct TLSConfiguration {
     let minVersion: TLSVersion?         // nil = no constraint
     let maxVersion: TLSVersion?         // nil = no constraint
 
-    init(serverName: String, alpn: [String]? = nil, fingerprint: TLSFingerprint = .chrome133,
+    init(serverName: String, alpn: [String]? = nil, fingerprint: TLSFingerprint = .chrome120,
          minVersion: TLSVersion? = nil, maxVersion: TLSVersion? = nil) {
         self.serverName = serverName
         self.alpn = alpn
@@ -43,8 +43,8 @@ struct TLSConfiguration {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
 
-        let fpString = params["fp"] ?? "chrome_133"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+        let fpString = params["fp"] ?? "chrome_120"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
 
         let minVersion = Self.parseTLSVersion(params["minVersion"])
         let maxVersion = Self.parseTLSVersion(params["maxVersion"])
@@ -78,7 +78,7 @@ extension TLSConfiguration: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         serverName = try container.decode(String.self, forKey: .serverName)
         alpn = try container.decodeIfPresent([String].self, forKey: .alpn)
-        fingerprint = try container.decodeIfPresent(TLSFingerprint.self, forKey: .fingerprint) ?? .chrome133
+        fingerprint = try container.decodeIfPresent(TLSFingerprint.self, forKey: .fingerprint) ?? .chrome120
         minVersion = try container.decodeIfPresent(TLSVersion.self, forKey: .minVersion)
         maxVersion = try container.decodeIfPresent(TLSVersion.self, forKey: .maxVersion)
     }

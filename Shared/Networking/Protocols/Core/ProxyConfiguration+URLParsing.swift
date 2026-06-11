@@ -287,8 +287,8 @@ extension ProxyConfiguration {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
 
-        let fpString = params["fp"] ?? "chrome_133"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+        let fpString = params["fp"] ?? "chrome_120"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
 
         let tls = TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
 
@@ -343,8 +343,8 @@ extension ProxyConfiguration {
             alpn = alpnString.split(separator: ",").map { String($0) }
         }
 
-        let fpString = params["fp"] ?? "chrome_133"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+        let fpString = params["fp"] ?? "chrome_120"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
 
         let ici = params["ici"].flatMap { Int($0) } ?? 30
         let it  = params["it"].flatMap  { Int($0) } ?? 30

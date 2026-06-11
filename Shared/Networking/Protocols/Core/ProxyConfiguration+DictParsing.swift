@@ -193,8 +193,8 @@ extension ProxyConfiguration {
             if let alpnString = configurationDict["tlsAlpn"] as? String, !alpnString.isEmpty {
                 alpn = alpnString.split(separator: ",").map { String($0) }
             }
-            let fpString = (configurationDict["tlsFingerprint"] as? String) ?? "chrome_133"
-            let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+            let fpString = (configurationDict["tlsFingerprint"] as? String) ?? "chrome_120"
+            let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
             return .tls(TLSConfiguration(
                 serverName: sni, alpn: alpn, fingerprint: fingerprint
             ))
@@ -206,8 +206,8 @@ extension ProxyConfiguration {
            publicKey.count == 32 {
             let shortIdHex = (configurationDict["realityShortId"] as? String) ?? ""
             let shortId = Data(hexString: shortIdHex) ?? Data()
-            let fpString = (configurationDict["realityFingerprint"] as? String) ?? "chrome_133"
-            let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+            let fpString = (configurationDict["realityFingerprint"] as? String) ?? "chrome_120"
+            let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
             return .reality(RealityConfiguration(
                 serverName: serverName, publicKey: publicKey,
                 shortId: shortId, fingerprint: fingerprint
@@ -300,8 +300,8 @@ extension ProxyConfiguration {
         }
         let fpString = (dict["trojanFingerprint"] as? String)
             ?? (dict["tlsFingerprint"] as? String)
-            ?? "chrome_133"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+            ?? "chrome_120"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
         return TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
     }
 
@@ -317,8 +317,8 @@ extension ProxyConfiguration {
         }
         let fpString = (dict["anytlsFingerprint"] as? String)
             ?? (dict["tlsFingerprint"] as? String)
-            ?? "chrome_133"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+            ?? "chrome_120"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
         return TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
     }
 

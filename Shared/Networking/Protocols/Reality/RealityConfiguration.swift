@@ -13,7 +13,7 @@ struct RealityConfiguration {
     let shortId: Data               // 0-8 bytes identifier
     let fingerprint: TLSFingerprint // Browser fingerprint to mimic
 
-    init(serverName: String, publicKey: Data, shortId: Data, fingerprint: TLSFingerprint = .chrome133) {
+    init(serverName: String, publicKey: Data, shortId: Data, fingerprint: TLSFingerprint = .chrome120) {
         self.serverName = serverName
         self.publicKey = publicKey
         self.shortId = shortId
@@ -38,8 +38,8 @@ struct RealityConfiguration {
         let sidString = params["sid"] ?? ""
         let shortId = Data(hexString: sidString) ?? Data()
 
-        let fpString = params["fp"] ?? "chrome_133"
-        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome133
+        let fpString = params["fp"] ?? "chrome_120"
+        let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
 
         return RealityConfiguration(
             serverName: sni,
@@ -96,49 +96,54 @@ extension RealityConfiguration: Equatable, Hashable {
 }
 
 enum TLSFingerprint: String, Codable, CaseIterable {
-    // Latest / Auto fingerprints (matching uTLS Auto mappings)
+    // Chrome
     case chrome133 = "chrome_133"
-    case firefox148 = "firefox_148"
-    case safari26 = "safari_26"
-    case ios14 = "ios_14"
-    case edge85 = "edge_85"
-
-    // Legacy fingerprints (kept for backward compatibility)
     case chrome120 = "chrome_120"
-    case firefox120 = "firefox_120"
-    case safari16 = "safari_16"
-    case edge106 = "edge_106"
+    case chrome106 = "chrome_106"
 
-    case random = "random"
+    // Firefox
+    case firefox148 = "firefox_148"
+    case firefox120 = "firefox_120"
+
+    // Safari
+    case safari26 = "safari_26"
+
+    // Edge
+    case edge106 = "edge_106"
 
     /// Minimal ClientHello for real (non-camouflage) handshakes, e.g. the MITM outer leg.
     /// Browser fingerprints advertise ALPS, which needs a ClientEncryptedExtensions we don't
     /// send — strict origins (e.g. Google's GFE) abort with `unexpected_message`.
     case nonBrowser = "non_browser"
 
+    /// Tolerant decoder: proxies saved with a since-removed fingerprint
+    /// (e.g. `ios_14`, `edge_85`, `safari_16`, `random`) fall back to Chrome 120
+    /// rather than failing to decode.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = TLSFingerprint(rawValue: raw) ?? .chrome120
+    }
+
     var displayName: String {
         switch self {
         case .chrome133:  return "Chrome 133"
-        case .firefox148: return "Firefox 148"
-        case .safari26:   return "Safari 26.3"
-        case .ios14:      return "iOS 14"
-        case .edge85:     return "Edge 85"
         case .chrome120:  return "Chrome 120"
+        case .chrome106:  return "Chrome 106"
+        case .firefox148: return "Firefox 148"
         case .firefox120: return "Firefox 120"
-        case .safari16:   return "Safari 16.0"
+        case .safari26:   return "Safari 26.3"
         case .edge106:    return "Edge 106"
-        case .random:     return "Random"
         case .nonBrowser: return "Non-Browser"
         }
     }
 
     /// User-selectable camouflage fingerprints; `nonBrowser` is intentionally excluded.
     static var allCases: [TLSFingerprint] {
-        [.chrome133, .firefox148, .safari26, .ios14, .edge85,
-         .chrome120, .firefox120, .safari16, .edge106, .random]
+        [.chrome133, .chrome120, .chrome106,
+         .firefox148, .firefox120,
+         .safari26,
+         .edge106]
     }
-
-    static let concreteFingerprints: [TLSFingerprint] = allCases.filter { $0 != .random }
 }
 
 enum RealityError: Error, LocalizedError {

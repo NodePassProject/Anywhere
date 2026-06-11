@@ -338,16 +338,8 @@ struct TLSClientHelloBuilder {
         omitPQKeyShares: Bool = false,
         mlkemEncapsulationKey: Data? = nil
     ) -> Data {
-        let resolved: TLSFingerprint
-        if fingerprint == .random {
-            let options = TLSFingerprint.concreteFingerprints
-            resolved = options[Int(random[0]) % options.count]
-        } else {
-            resolved = fingerprint
-        }
-
         let (suites, extensions, padded) = buildFingerprintedParts(
-            fingerprint: resolved,
+            fingerprint: fingerprint,
             random: random,
             serverName: serverName,
             publicKey: publicKey,
@@ -421,15 +413,11 @@ struct TLSClientHelloBuilder {
         case .nonBrowser: return buildNonBrowser(serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .chrome133:  return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
         case .chrome120:  return buildChrome120(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
+        case .chrome106:  return buildChrome106(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .firefox148: return buildFirefox148(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
         case .firefox120: return buildFirefox120(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .safari26:   return buildSafari26(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares, mlkemEncapsulationKey: mlkemEncapsulationKey)
-        case .safari16:   return buildSafari16(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
-        case .ios14:      return buildIOS14(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
-        case .edge85:     return buildEdge85(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
         case .edge106:    return buildEdge106(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn)
-        case .random:
-            return buildChrome133(random: random, serverName: serverName, publicKey: publicKey, alpn: alpn, omitPQKeyShares: omitPQKeyShares)
         }
     }
 
@@ -601,6 +589,66 @@ struct TLSClientHelloBuilder {
             greaseExt(gExt2),
         ]
 
+        shuffleChromeExtensions(&exts, random: random)
+
+        var extensionsData = Data()
+        for e in exts { extensionsData.append(e) }
+
+        return (suites, extensionsData, true)
+    }
+
+    // MARK: - Chrome 106 (HelloChrome_106_Shuffle — Chrome 120 without ECH)
+
+    private static func buildChrome106(
+        random: Data, serverName: String, publicKey: Data, alpn: [String]?
+    ) -> (Data, Data, Bool) {
+        let gCipher  = grease(random[24])
+        let gExt1    = grease(random[25])
+        let gGroup   = grease(random[26])
+        let gVersion = grease(random[28])
+        var gExt2    = grease(random[29])
+        if gExt2 == gExt1 { gExt2 = grease(random[29] &+ 1) }
+
+        let suites = cipherSuitesData([
+            gCipher,
+            0x1301, 0x1302, 0x1303,
+            0xC02B, 0xC02F, 0xC02C, 0xC030,
+            0xCCA9, 0xCCA8,
+            0xC013, 0xC014,
+            0x009C, 0x009D,
+            0x002F, 0x0035
+        ])
+
+        let protocols = alpn ?? ["h2", "http/1.1"]
+
+        var exts: [Data] = [
+            greaseExt(gExt1),
+            buildSNIExtension(serverName: serverName),
+            extendedMasterSecretExt(),
+            renegotiationInfoExt(),
+            supportedGroupsExt([gGroup, 0x001D, 0x0017, 0x0018]),
+            ecPointFormatsExt(),
+            sessionTicketExt(),
+            alpnExt(protocols),
+            statusRequestExt(),
+            signatureAlgorithmsExt([
+                0x0403, 0x0804, 0x0401,
+                0x0503, 0x0805, 0x0501,
+                0x0806, 0x0601
+            ]),
+            sctExt(),
+            keyShareExt([
+                (group: gGroup, keyData: Data([0x00])),
+                (group: 0x001D, keyData: publicKey)
+            ]),
+            pskKeyExchangeModesExt(),
+            supportedVersionsExt([gVersion, 0x0304, 0x0303]),
+            compressCertExt([0x0002]),                        // Brotli
+            applicationSettingsExt(["h2"]),                   // ALPS (original codepoint)
+            greaseExt(gExt2),
+        ]
+
+        // Chrome 106+ shuffles non-GREASE, non-padding extensions
         shuffleChromeExtensions(&exts, random: random)
 
         var extensionsData = Data()
@@ -787,182 +835,6 @@ struct TLSClientHelloBuilder {
             pskKeyExchangeModesExt(),
             supportedVersionsExt([gVersion, 0x0304, 0x0303]),
             compressCertExt([0x0001]),                        // Zlib
-            greaseExt(gExt2),
-        ]
-
-        var extensionsData = Data()
-        for e in exts { extensionsData.append(e) }
-
-        return (suites, extensionsData, true)
-    }
-
-    // MARK: - Safari 16.0 (legacy)
-
-    private static func buildSafari16(
-        random: Data, serverName: String, publicKey: Data, alpn: [String]?
-    ) -> (Data, Data, Bool) {
-        let gCipher  = grease(random[24])
-        let gExt1    = grease(random[25])
-        let gGroup   = grease(random[26])
-        let gVersion = grease(random[28])
-        var gExt2    = grease(random[29])
-        if gExt2 == gExt1 { gExt2 = grease(random[29] &+ 1) }
-
-        let suites = cipherSuitesData([
-            gCipher,
-            0x1301, 0x1302, 0x1303,
-            0xC02C, 0xC02B, 0xCCA9,
-            0xC030, 0xC02F, 0xCCA8,
-            0xC00A, 0xC009,
-            0xC014, 0xC013,
-            0x009D, 0x009C,
-            0x0035, 0x002F,
-            0xC008, 0xC012, 0x000A
-        ])
-
-        let protocols = alpn ?? ["h2", "http/1.1"]
-
-        let exts: [Data] = [
-            greaseExt(gExt1),
-            buildSNIExtension(serverName: serverName),
-            extendedMasterSecretExt(),
-            renegotiationInfoExt(),
-            supportedGroupsExt([gGroup, 0x001D, 0x0017, 0x0018, 0x0019]),
-            ecPointFormatsExt(),
-            alpnExt(protocols),
-            statusRequestExt(),
-            signatureAlgorithmsExt([
-                0x0403, 0x0804, 0x0401,
-                0x0503, 0x0203,
-                0x0805, 0x0805,
-                0x0501,
-                0x0806, 0x0601,
-                0x0201
-            ]),
-            sctExt(),
-            keyShareExt([
-                (group: gGroup, keyData: Data([0x00])),
-                (group: 0x001D, keyData: publicKey)
-            ]),
-            pskKeyExchangeModesExt(),
-            supportedVersionsExt([gVersion, 0x0304, 0x0303, 0x0302, 0x0301]),
-            compressCertExt([0x0001]),
-            greaseExt(gExt2),
-        ]
-
-        var extensionsData = Data()
-        for e in exts { extensionsData.append(e) }
-
-        return (suites, extensionsData, true)
-    }
-
-    // MARK: - iOS 14 (HelloIOS_Auto)
-
-    private static func buildIOS14(
-        random: Data, serverName: String, publicKey: Data, alpn: [String]?
-    ) -> (Data, Data, Bool) {
-        let gCipher  = grease(random[24])
-        let gExt1    = grease(random[25])
-        let gGroup   = grease(random[26])
-        let gVersion = grease(random[28])
-        var gExt2    = grease(random[29])
-        if gExt2 == gExt1 { gExt2 = grease(random[29] &+ 1) }
-
-        let suites = cipherSuitesData([
-            gCipher,
-            0x1301, 0x1302, 0x1303,                         // TLS 1.3
-            0xC02C, 0xC02B, 0xCCA9,                         // ECDHE ECDSA (GCM, ChaCha)
-            0xC030, 0xC02F, 0xCCA8,                         // ECDHE RSA (GCM, ChaCha)
-            0xC024, 0xC023, 0xC00A, 0xC009,                 // ECDHE ECDSA CBC
-            0xC028, 0xC027, 0xC014, 0xC013,                 // ECDHE RSA CBC
-            0x009D, 0x009C,                                   // RSA GCM
-            0x003D, 0x003C,                                   // RSA CBC SHA256
-            0x0035, 0x002F,                                   // RSA CBC SHA
-            0xC008, 0xC012, 0x000A                           // 3DES (legacy)
-        ])
-
-        let protocols = alpn ?? ["h2", "http/1.1"]
-
-        let exts: [Data] = [
-            greaseExt(gExt1),
-            buildSNIExtension(serverName: serverName),
-            extendedMasterSecretExt(),
-            renegotiationInfoExt(),
-            supportedGroupsExt([gGroup, 0x001D, 0x0017, 0x0018, 0x0019]),
-            ecPointFormatsExt(),
-            alpnExt(protocols),
-            statusRequestExt(),
-            signatureAlgorithmsExt([
-                0x0403, 0x0804, 0x0401,
-                0x0503, 0x0203,
-                0x0805, 0x0805,                               // Intentional duplicate (real iOS)
-                0x0501,
-                0x0806, 0x0601,
-                0x0201
-            ]),
-            sctExt(),
-            keyShareExt([
-                (group: gGroup, keyData: Data([0x00])),
-                (group: 0x001D, keyData: publicKey)
-            ]),
-            pskKeyExchangeModesExt(),
-            supportedVersionsExt([gVersion, 0x0304, 0x0303, 0x0302, 0x0301]),
-            greaseExt(gExt2),
-        ]
-
-        var extensionsData = Data()
-        for e in exts { extensionsData.append(e) }
-
-        return (suites, extensionsData, true)
-    }
-
-    // MARK: - Edge 85 (HelloEdge_Auto)
-
-    private static func buildEdge85(
-        random: Data, serverName: String, publicKey: Data, alpn: [String]?
-    ) -> (Data, Data, Bool) {
-        let gCipher  = grease(random[24])
-        let gExt1    = grease(random[25])
-        let gGroup   = grease(random[26])
-        let gVersion = grease(random[28])
-        var gExt2    = grease(random[29])
-        if gExt2 == gExt1 { gExt2 = grease(random[29] &+ 1) }
-
-        let suites = cipherSuitesData([
-            gCipher,
-            0x1301, 0x1302, 0x1303,                         // TLS 1.3
-            0xC02B, 0xC02F, 0xC02C, 0xC030,                 // ECDHE AES-GCM
-            0xCCA9, 0xCCA8,                                   // ECDHE ChaCha20
-            0xC013, 0xC014,                                   // ECDHE AES-CBC
-            0x009C, 0x009D,                                   // RSA AES-GCM
-            0x002F, 0x0035                                    // RSA AES-CBC
-        ])
-
-        let protocols = alpn ?? ["h2", "http/1.1"]
-
-        let exts: [Data] = [
-            greaseExt(gExt1),
-            buildSNIExtension(serverName: serverName),
-            extendedMasterSecretExt(),
-            renegotiationInfoExt(),
-            supportedGroupsExt([gGroup, 0x001D, 0x0017, 0x0018]),
-            ecPointFormatsExt(),
-            sessionTicketExt(),
-            alpnExt(protocols),
-            statusRequestExt(),
-            signatureAlgorithmsExt([
-                0x0403, 0x0804, 0x0401,
-                0x0503, 0x0805, 0x0501,
-                0x0806, 0x0601
-            ]),
-            sctExt(),
-            keyShareExt([
-                (group: gGroup, keyData: Data([0x00])),
-                (group: 0x001D, keyData: publicKey)
-            ]),
-            pskKeyExchangeModesExt(),
-            supportedVersionsExt([gVersion, 0x0304, 0x0303, 0x0302, 0x0301]),
-            compressCertExt([0x0002]),                        // Brotli
             greaseExt(gExt2),
         ]
 

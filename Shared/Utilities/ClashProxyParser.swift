@@ -417,7 +417,7 @@ struct ClashProxyParser {
 
     private static func parseFingerprint(_ node: Node) -> TLSFingerprint {
         let raw = getString(node, key: "client-fingerprint")
-        return TLSFingerprint(rawValue: mapFingerprint(raw)) ?? .chrome133
+        return TLSFingerprint(rawValue: mapFingerprint(raw)) ?? .chrome120
     }
 
     /// Parses a Clash bandwidth string (e.g. `"30 Mbps"`, `"30"`) into Mbit/s, or `def` if unparseable.
@@ -491,10 +491,10 @@ struct ClashProxyParser {
         case "chrome":  return TLSFingerprint.chrome133.rawValue
         case "firefox": return TLSFingerprint.firefox148.rawValue
         case "safari":  return TLSFingerprint.safari26.rawValue
-        case "ios":     return TLSFingerprint.ios14.rawValue
-        case "edge":    return TLSFingerprint.edge85.rawValue
-        case "random":  return TLSFingerprint.random.rawValue
-        default:        return fp ?? TLSFingerprint.chrome133.rawValue
+        case "ios":     return TLSFingerprint.chrome120.rawValue
+        case "edge":    return TLSFingerprint.edge106.rawValue
+        case "random":  return TLSFingerprint.chrome120.rawValue
+        default:        return fp ?? TLSFingerprint.chrome120.rawValue
         }
     }
 }
