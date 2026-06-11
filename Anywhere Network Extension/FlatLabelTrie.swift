@@ -161,3 +161,196 @@ struct FlatLabelTrie<Payload> {
         return deepest
     }
 }
+
+// MARK: - Bulk construction
+//
+// `insert`/`freeze` build a scratch tree of `BuildNode` objects, each carrying a
+// `[String: BuildNode]` children dictionary. For a rule set with hundreds of
+// thousands of sibling suffixes that dictionary alone runs to tens of MB —
+// transient scaffolding many times larger than the compiled output, which is
+// what overflowed the Network Extension's memory limit.
+//
+// `buildBulk` skips the tree entirely. Given suffix entries as byte ranges into a
+// shared buffer, it sorts them into reversed-label order, lays out a compact node
+// arena (parallel `Int32` arrays, no per-node dictionary, labels referenced by
+// offset into the buffer rather than copied), and flattens that to the same CSR
+// arrays `freeze` produces. Peak memory tracks the output, not the input, and
+// there are no power-of-two dictionary jumps. `insert`/`freeze` stay for the
+// small users (MITM); a given trie uses one path or the other.
+
+extension FlatLabelTrie {
+    /// A suffix to bulk-insert: `offset`/`length` delimit its UTF-8 bytes (already
+    /// lowercased) in the buffer passed to ``buildBulk(base:entries:)``; `order`
+    /// is the collection index, used only to break ties between identical
+    /// suffixes so the last-collected one wins (matching `insert`'s overwrite).
+    struct BulkEntry {
+        var offset: Int32
+        var length: Int32
+        var payload: Payload
+        var order: Int32
+    }
+
+    /// Builds the frozen trie from `entries` (sorted in place). `base` must remain
+    /// valid for the call; matched label bytes are copied into the trie before it
+    /// returns, so `base` need not outlive it.
+    mutating func buildBulk(base: UnsafeBufferPointer<UInt8>, entries: inout [BulkEntry]) {
+        guard !frozen else { return }
+        frozen = true
+        buildRoot = nil
+        isEmpty = entries.isEmpty
+
+        let dot = UInt8(ascii: ".")
+
+        // Reversed-label order (TLD first), ties broken by collection order so a
+        // repeated suffix's last occurrence overwrites — same as `insert`.
+        entries.sort { a, b in
+            let c = Self.compareReversedLabels(base, a.offset, a.length, b.offset, b.length, dot: dot)
+            return c != 0 ? c < 0 : a.order < b.order
+        }
+
+        // Node arena (root = node 0). Labels reference `base` by offset/length.
+        var nodeParent: [Int32] = [-1]
+        var nodeLabelOffset: [Int32] = [0]
+        var nodeLabelLength: [Int32] = [0]
+        var payloads: [Payload?] = [nil]
+
+        // Open path from root to the deepest current node; `stackLabel*` holds the
+        // label of each node above the root, aligned so depth d ↔ index d - 1.
+        var stackNode: [Int32] = [0]
+        var stackLabelOffset: [Int32] = []
+        var stackLabelLength: [Int32] = []
+
+        // Current entry's reversed labels, reused across entries.
+        var labelOffset: [Int32] = []
+        var labelLength: [Int32] = []
+        labelOffset.reserveCapacity(8)
+        labelLength.reserveCapacity(8)
+
+        for entry in entries {
+            labelOffset.removeAll(keepingCapacity: true)
+            labelLength.removeAll(keepingCapacity: true)
+            var end = Int(entry.offset) + Int(entry.length)
+            let low = Int(entry.offset)
+            while let label = Self.nextLabel(base, &end, low, dot) {
+                labelOffset.append(Int32(label.start))
+                labelLength.append(Int32(label.length))
+            }
+
+            // Longest run of leading labels shared with the open path.
+            var matched = 0
+            let openLabels = stackNode.count - 1
+            while matched < labelOffset.count, matched < openLabels,
+                  Self.bytesEqual(base, labelOffset[matched], labelLength[matched],
+                                  stackLabelOffset[matched], stackLabelLength[matched]) {
+                matched += 1
+            }
+
+            // Drop the diverged tail of the open path.
+            if stackNode.count > matched + 1 {
+                stackNode.removeLast(stackNode.count - (matched + 1))
+                stackLabelOffset.removeLast(stackLabelOffset.count - matched)
+                stackLabelLength.removeLast(stackLabelLength.count - matched)
+            }
+
+            // Append nodes for the labels past the shared prefix.
+            var k = matched
+            while k < labelOffset.count {
+                let id = Int32(nodeParent.count)
+                nodeParent.append(stackNode[stackNode.count - 1])
+                nodeLabelOffset.append(labelOffset[k])
+                nodeLabelLength.append(labelLength[k])
+                payloads.append(nil)
+                stackNode.append(id)
+                stackLabelOffset.append(labelOffset[k])
+                stackLabelLength.append(labelLength[k])
+                k += 1
+            }
+
+            // Deepest node carries the payload (root for an empty suffix — never matched).
+            payloads[Int(stackNode[stackNode.count - 1])] = entry.payload
+        }
+
+        // Flatten the arena to CSR. Children are contiguous per parent; because
+        // entries were sorted, each parent's children are also label-sorted.
+        let nodeCount = nodeParent.count
+        var cursor = [Int32](repeating: 0, count: nodeCount)        // child count, then write cursor
+        for i in 1..<nodeCount { cursor[Int(nodeParent[i])] += 1 }
+
+        var starts = [Int32](repeating: 0, count: nodeCount + 1)
+        for n in 0..<nodeCount { starts[n + 1] = starts[n] + cursor[n] }
+        let edgeCount = Int(starts[nodeCount])
+
+        for n in 0..<nodeCount { cursor[n] = starts[n] }            // reuse as write cursor
+        var targets = [Int32](repeating: 0, count: edgeCount)
+        for i in 1..<nodeCount {
+            let parent = Int(nodeParent[i])
+            targets[Int(cursor[parent])] = Int32(i)
+            cursor[parent] += 1
+        }
+
+        var labelOffsets = [Int32](repeating: 0, count: edgeCount + 1)
+        var labelBytes: [UInt8] = []
+        labelBytes.reserveCapacity(edgeCount * 8)
+        for e in 0..<edgeCount {
+            let node = Int(targets[e])
+            let off = Int(nodeLabelOffset[node])
+            let len = Int(nodeLabelLength[node])
+            for k in 0..<len { labelBytes.append(base[off + k]) }
+            labelOffsets[e + 1] = Int32(labelBytes.count)
+        }
+
+        nodePayload = ContiguousArray(payloads)
+        edgeRangeStart = ContiguousArray(starts)
+        edgeLabelOffset = ContiguousArray(labelOffsets)
+        edgeLabelBytes = ContiguousArray(labelBytes)
+        edgeTarget = ContiguousArray(targets)
+    }
+
+    /// Next label scanning right-to-left from `end` (exclusive) down to `low`,
+    /// skipping empty labels — matching `split(separator: ".")` then `.reversed()`.
+    /// Advances `end` past the consumed label and its separator.
+    private static func nextLabel(_ base: UnsafeBufferPointer<UInt8>, _ end: inout Int, _ low: Int, _ dot: UInt8) -> (start: Int, length: Int)? {
+        while end > low {
+            var start = end
+            while start > low && base[start - 1] != dot { start -= 1 }
+            let length = end - start
+            end = start - 1
+            if length > 0 { return (start, length) }
+        }
+        return nil
+    }
+
+    private static func bytesEqual(_ base: UnsafeBufferPointer<UInt8>, _ off1: Int32, _ len1: Int32, _ off2: Int32, _ len2: Int32) -> Bool {
+        guard len1 == len2 else { return false }
+        let a = Int(off1), b = Int(off2)
+        var k = 0
+        while k < Int(len1) {
+            if base[a + k] != base[b + k] { return false }
+            k += 1
+        }
+        return true
+    }
+
+    /// Orders two suffixes by label sequence read right-to-left (the trie's
+    /// descent order): compare TLD, then next label inward, etc.; a shorter
+    /// sequence sorts first. Returns <0, 0, or >0.
+    private static func compareReversedLabels(_ base: UnsafeBufferPointer<UInt8>, _ aOff: Int32, _ aLen: Int32, _ bOff: Int32, _ bLen: Int32, dot: UInt8) -> Int {
+        var aEnd = Int(aOff) + Int(aLen); let aLow = Int(aOff)
+        var bEnd = Int(bOff) + Int(bLen); let bLow = Int(bOff)
+        while true {
+            let a = nextLabel(base, &aEnd, aLow, dot)
+            let b = nextLabel(base, &bEnd, bLow, dot)
+            if a == nil && b == nil { return 0 }
+            guard let la = a else { return -1 }
+            guard let lb = b else { return 1 }
+            let n = min(la.length, lb.length)
+            var k = 0
+            while k < n {
+                let x = base[la.start + k], y = base[lb.start + k]
+                if x != y { return x < y ? -1 : 1 }
+                k += 1
+            }
+            if la.length != lb.length { return la.length < lb.length ? -1 : 1 }
+        }
+    }
+}
