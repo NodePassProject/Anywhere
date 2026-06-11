@@ -51,7 +51,9 @@ final class StatsRecorder {
             udpConnectionCount: live?.udpConnectionCount ?? 0,
             memoryBytes: live?.memoryBytes ?? 0,
             dialMs: timings.dialMs,
-            handshakeMs: timings.handshakeMs
+            handshakeMs: timings.handshakeMs,
+            avgDialMs: timings.avgDialMs,
+            avgHandshakeMs: timings.avgHandshakeMs
         )
     }
 }

@@ -13,26 +13,28 @@ import Observation
 @Observable
 class ConnectionStatsModel {
     static let shared = ConnectionStatsModel()
-
-    /// Cumulative session byte totals; each equals the sum across `routes`.
+    
     private(set) var bytesIn: Int64 = 0
     private(set) var bytesOut: Int64 = 0
-
-    /// Per-route payload split, sorted by total bytes descending; rejected
-    /// traffic carries no payload and never appears.
+    
     private(set) var routes: [RouteTrafficEntry] = []
-
-    /// Latest instantaneous gauges, refreshed wholesale on every poll.
+    
     private(set) var tcpConnectionCount: Int = 0
     private(set) var udpConnectionCount: Int = 0
     private(set) var memoryBytes: UInt64 = 0
-
-    /// Most recent connection-establishment timings (ms); nil until first measured.
+    
     private(set) var dialMs: Int?
     private(set) var handshakeMs: Int?
+    
+    private(set) var avgDialMs: Int?
+    private(set) var avgHandshakeMs: Int?
+    
+    private(set) var uploadBytesPerSecond: Int64?
+    private(set) var downloadBytesPerSecond: Int64?
 
     @ObservationIgnored private var statsTask: Task<Void, Never>?
     @ObservationIgnored private weak var session: NETunnelProviderSession?
+    @ObservationIgnored private var lastRateSample: (bytesIn: Int64, bytesOut: Int64, at: ContinuousClock.Instant)?
 
     func startPolling(session: NETunnelProviderSession) {
         self.session = session
@@ -50,6 +52,7 @@ class ConnectionStatsModel {
         statsTask?.cancel()
         statsTask = nil
         session = nil
+        lastRateSample = nil
     }
 
     func reset() {
@@ -61,6 +64,11 @@ class ConnectionStatsModel {
         memoryBytes = 0
         dialMs = nil
         handshakeMs = nil
+        avgDialMs = nil
+        avgHandshakeMs = nil
+        uploadBytesPerSecond = nil
+        downloadBytesPerSecond = nil
+        lastRateSample = nil
     }
 
     private func pollStats() async {
@@ -79,6 +87,7 @@ class ConnectionStatsModel {
 
         guard let response,
               let stats = try? JSONDecoder().decode(StatsResponse.self, from: response) else { return }
+        updateRates(bytesIn: stats.bytesIn, bytesOut: stats.bytesOut)
         self.bytesIn = stats.bytesIn
         self.bytesOut = stats.bytesOut
         self.routes = stats.routes
@@ -87,6 +96,26 @@ class ConnectionStatsModel {
         self.memoryBytes = stats.memoryBytes
         self.dialMs = stats.dialMs
         self.handshakeMs = stats.handshakeMs
+        self.avgDialMs = stats.avgDialMs
+        self.avgHandshakeMs = stats.avgHandshakeMs
+    }
+
+    private func updateRates(bytesIn: Int64, bytesOut: Int64) {
+        let now = ContinuousClock.now
+        defer { lastRateSample = (bytesIn, bytesOut, now) }
+        // A backwards counter means the tunnel restarted; rebaseline silently.
+        guard let last = lastRateSample,
+              bytesIn >= last.bytesIn, bytesOut >= last.bytesOut else {
+            uploadBytesPerSecond = nil
+            downloadBytesPerSecond = nil
+            return
+        }
+        let elapsed = last.at.duration(to: now)
+        let seconds = Double(elapsed.components.seconds)
+            + Double(elapsed.components.attoseconds) / 1e18
+        guard seconds > 0 else { return }
+        downloadBytesPerSecond = Int64(Double(bytesIn - last.bytesIn) / seconds)
+        uploadBytesPerSecond = Int64(Double(bytesOut - last.bytesOut) / seconds)
     }
 }
 
@@ -106,6 +135,10 @@ extension ConnectionStatsModel {
         model.memoryBytes = 31_000_000
         model.dialMs = 62
         model.handshakeMs = 200
+        model.avgDialMs = 50
+        model.avgHandshakeMs = 150
+        model.uploadBytesPerSecond = 1_200_000
+        model.downloadBytesPerSecond = 5_100_000
         return model
     }
 }
