@@ -107,8 +107,6 @@ enum TLSError: Error, LocalizedError {
     case certificateValidationFailed(String)
     case connectionFailed(String)
     case unsupportedTLSVersion
-    /// Fatal alert from the peer during the handshake; `description` is the RFC 8446 §6
-    /// alert code (e.g. 120 = no_application_protocol).
     case alert(level: UInt8, description: UInt8)
 
     var errorDescription: String? {

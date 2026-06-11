@@ -14,8 +14,6 @@ private let logger = AnywhereLogger(category: "Reality")
 
 // MARK: - RealityClient
 
-/// Reality client: embeds AES-GCM–encrypted auth metadata in the ClientHello SessionId,
-/// performs X25519 ECDH mutual authentication, and derives TLS 1.3 keys from the transcript.
 nonisolated class RealityClient {
     private let configuration: RealityConfiguration
     private var connection: (any RawTransport)?
@@ -24,7 +22,8 @@ nonisolated class RealityClient {
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var authKey: Data?
     private var storedClientHello: Data?
-    private var mlkemPrivateKeyStorage: Any? // MLKEM768.PrivateKey when the SDK provides it.
+    private var sentSessionID: Data?
+    private var mlkemPrivateKeyStorage: Any?
 
     private var tls13 = TLS13HandshakeState()
     private var serverCertVerified = false
@@ -50,7 +49,6 @@ nonisolated class RealityClient {
             return
         }
 
-        // Build the ClientHello first so TCP Fast Open can carry it in the SYN.
         let clientHello: Data
         do {
             clientHello = try buildRealityClientHello(privateKey: privateKey)
@@ -107,7 +105,6 @@ nonisolated class RealityClient {
         do {
             let clientHello = try buildRealityClientHello(privateKey: privateKey)
 
-            // Store for TLS transcript (without 5-byte TLS record header)
             storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
 
             guard let connection else {
@@ -131,15 +128,13 @@ nonisolated class RealityClient {
 
     // MARK: - ClientHello
 
-    /// Builds a TLS ClientHello with the Reality SessionId (version + timestamp + shortId,
-    /// AES-GCM encrypted with a key derived from ECDH with the server).
     private func buildRealityClientHello(privateKey: Curve25519.KeyAgreement.PrivateKey) throws -> Data {
         var random = Data(count: 32)
         guard random.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
             throw RealityError.handshakeFailed("Failed to generate random bytes")
         }
 
-        // Build SessionId with Reality metadata in first 16 bytes
+        // SessionId carries the Reality metadata in the first 16 bytes.
         var sessionId = Data(count: 32)
         sessionId[0] = 26  // Xray-core version 26.4.25
         sessionId[1] = 4
@@ -152,7 +147,6 @@ nonisolated class RealityClient {
         sessionId[6] = UInt8((timestamp >> 8) & 0xFF)
         sessionId[7] = UInt8(timestamp & 0xFF)
 
-        // shortId in bytes 8-15, zero-padded to 8 bytes (matching Xray-core's fixed [8]byte)
         let shortIdLen = min(configuration.shortId.count, 8)
         for i in 0..<shortIdLen {
             sessionId[8 + i] = configuration.shortId[i]
@@ -169,7 +163,6 @@ nonisolated class RealityClient {
             throw RealityError.handshakeFailed("Failed to derive auth key")
         }
 
-        // Generate ML-KEM-768 key pair for PQ hybrid key share (iOS 26+)
         var mlkemEncapsulationKey: Data?
         #if compiler(>=6.2)
         if #available(iOS 26.0, macOS 26.0, tvOS 26.0, watchOS 26.0, visionOS 26.0, *) {
@@ -180,8 +173,7 @@ nonisolated class RealityClient {
         }
         #endif
 
-        // The zero-SessionId ClientHello is the AES-GCM AAD (Xray-core protocol);
-        // the field is patched in place below.
+        // The zero-SessionId ClientHello is the AES-GCM AAD; the field is patched in place below.
         let zeroSessionId = Data(count: 32)
         var rawClientHello = TLSClientHelloBuilder.buildRawClientHello(
             fingerprint: configuration.fingerprint,
@@ -192,7 +184,6 @@ nonisolated class RealityClient {
             mlkemEncapsulationKey: mlkemEncapsulationKey
         )
 
-        // AES-GCM output is ciphertext (16 B) + tag (16 B) = 32 B, filling the SessionId field exactly.
         let nonce = random.suffix(12)
         let plaintext = sessionId.prefix(16)
 
@@ -203,9 +194,9 @@ nonisolated class RealityClient {
             aad: rawClientHello
         )
 
-        // SessionId offset: type(1) + length(3) + legacy_version(2) + random(32) + sid_len(1) = 39.
         let sessionIdOffset = 1 + 3 + 2 + 32 + 1
         rawClientHello.replaceSubrange(sessionIdOffset..<(sessionIdOffset + 32), with: encryptedSessionId)
+        sentSessionID = encryptedSessionId
 
         return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: rawClientHello)
     }
@@ -221,9 +212,9 @@ nonisolated class RealityClient {
         if buffer.count >= 5 {
             let contentType = buffer[0]
 
-            if contentType == 0x16 { // Handshake
+            if contentType == TLSContentType.handshake {
                 self.continueReceivingHandshake(buffer: buffer, completion: completion)
-            } else if contentType == 0x15 { // Alert
+            } else if contentType == TLSContentType.alert {
                 let alertLevel = buffer.count > 5 ? buffer[5] : 0
                 let alertDesc = buffer.count > 6 ? buffer[6] : 0
                 completion(.failure(RealityError.handshakeFailed("TLS Alert: level=\(alertLevel), desc=\(alertDesc)")))
@@ -300,8 +291,7 @@ nonisolated class RealityClient {
 
         do {
             let sharedSecretData: Data
-            if keyShareGroup == 0x11EC && serverKeyShare.count == 1120 {
-                // X25519MLKEM768 hybrid: shared_secret = mlkem_ss || x25519_ss
+            if keyShareGroup == TLSNamedGroup.x25519MLKEM768 && serverKeyShare.count == 1120 {
                 let mlkemCiphertext = serverKeyShare.prefix(1088)
                 let x25519Key = serverKeyShare.suffix(32)
                 let x25519PubKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: x25519Key)
@@ -310,7 +300,6 @@ nonisolated class RealityClient {
                 let mlkemData = try decapsulateMLKEM(ciphertext: Data(mlkemCiphertext))
                 sharedSecretData = mlkemData + x25519Data
             } else {
-                // Pure X25519
                 let serverPubKey = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: serverKeyShare)
                 let sharedSecret = try privateKey.sharedSecretFromKeyAgreement(with: serverPubKey)
                 sharedSecretData = sharedSecret.withUnsafeBytes { Data($0) }
@@ -345,14 +334,14 @@ nonisolated class RealityClient {
 
             if offset + 5 + recordLen > buffer.count { return false }
 
-            if buffer[offset] == 0x16 && offset + 5 < buffer.count && buffer[offset + 5] == 0x02 {
+            if buffer[offset] == TLSContentType.handshake && offset + 5 < buffer.count && buffer[offset + 5] == TLSHandshakeType.serverHello {
                 return true
             }
 
             offset += 5 + recordLen
         }
 
-        return offset > 0  // records complete but no ServerHello — let parseServerHello handle it
+        return offset > 0
     }
 
     /// Extracts the ServerHello handshake message from the buffer (without TLS record header).
@@ -362,9 +351,9 @@ nonisolated class RealityClient {
             let contentType = buffer[offset]
             let recordLen = Int(buffer[offset + 3]) << 8 | Int(buffer[offset + 4])
 
-            if contentType == 0x16 {
+            if contentType == TLSContentType.handshake {
                 let recordStart = offset + 5
-                if recordStart < buffer.count && buffer[recordStart] == 0x02 {
+                if recordStart < buffer.count && buffer[recordStart] == TLSHandshakeType.serverHello {
                     return buffer.subdata(in: recordStart..<min(recordStart + recordLen, buffer.count))
                 }
             }
@@ -374,31 +363,55 @@ nonisolated class RealityClient {
         return Data()
     }
 
-    /// Extracts the server's key share, group, and cipher suite from the ServerHello.
     private func parseServerHello(data: Data) -> (keyShare: Data, group: UInt16, cipherSuite: UInt16)? {
         var offset = 0
 
         while offset + 5 < data.count {
             let contentType = data[offset]
-            guard contentType == 0x16 else { break }
+            guard contentType == TLSContentType.handshake else { break }
 
             let recordLen = Int(data[offset + 3]) << 8 | Int(data[offset + 4])
             offset += 5
 
             guard offset + recordLen <= data.count else { break }
-            guard data[offset] == 0x02 else {
+            guard data[offset] == TLSHandshakeType.serverHello else {
                 offset += recordLen
                 continue
             }
 
-            var shOffset = offset + 1 + 3 + 2 + 32
+            // Let's validate this ServerHello. The rules:
+            //
+            // - helloRetryRequest is forbidden
+            // - the server must have echoed our legacy session ID
+            // - the chosen compression option must be zero
+            let randomOffset = offset + 1 + 3 + 2
+            guard randomOffset + 32 <= data.count else { return nil }
+            if data.subdata(in: randomOffset..<(randomOffset + 32)) == TLSRandom.helloRetryRequest {
+                return nil
+            }
+
+            var shOffset = randomOffset + 32
             guard shOffset < data.count else { return nil }
 
             let sessionIdLen = Int(data[shOffset])
+            guard shOffset + 1 + sessionIdLen <= data.count else { return nil }
+            let sessionIDEcho = data.subdata(in: (shOffset + 1)..<(shOffset + 1 + sessionIdLen))
+            if let sent = sentSessionID, sessionIDEcho != sent {
+                return nil
+            }
             shOffset += 1 + sessionIdLen
 
-            guard shOffset + 2 <= data.count else { return nil }
+            guard shOffset + 3 <= data.count else { return nil }
             let cipherSuite = UInt16(data[shOffset]) << 8 | UInt16(data[shOffset + 1])
+            switch cipherSuite {
+            case TLSCipherSuite.TLS_AES_128_GCM_SHA256,
+                 TLSCipherSuite.TLS_AES_256_GCM_SHA384,
+                 TLSCipherSuite.TLS_CHACHA20_POLY1305_SHA256:
+                break
+            default:
+                return nil
+            }
+            guard data[shOffset + 2] == 0 else { return nil }
 
             shOffset += 3
             guard shOffset + 2 <= data.count else { return nil }
@@ -410,30 +423,26 @@ nonisolated class RealityClient {
             guard extEnd <= data.count else { return nil }
 
             while shOffset + 4 <= extEnd {
-                let extType = Int(data[shOffset]) << 8 | Int(data[shOffset + 1])
+                let extType = UInt16(data[shOffset]) << 8 | UInt16(data[shOffset + 1])
                 let extDataLen = Int(data[shOffset + 2]) << 8 | Int(data[shOffset + 3])
                 shOffset += 4
                 let extDataStart = shOffset
 
-                if extType == 0x0033 {
+                if extType == TLSExtensionType.keyShare {
                     guard shOffset + 4 <= data.count else { return nil }
-                    let group = Int(data[shOffset]) << 8 | Int(data[shOffset + 1])
+                    let group = UInt16(data[shOffset]) << 8 | UInt16(data[shOffset + 1])
                     let keyLen = Int(data[shOffset + 2]) << 8 | Int(data[shOffset + 3])
                     shOffset += 4
 
-                    if group == 0x001D && keyLen == 32 {
-                        // Pure X25519
+                    if group == TLSNamedGroup.x25519 && keyLen == 32 {
                         guard shOffset + 32 <= data.count else { return nil }
-                        return (data.subdata(in: shOffset..<(shOffset + 32)), 0x001D, cipherSuite)
-                    } else if group == 0x11EC && keyLen == 1120 {
-                        // X25519MLKEM768 hybrid: 1088 bytes ML-KEM ciphertext + 32 bytes X25519
+                        return (data.subdata(in: shOffset..<(shOffset + 32)), TLSNamedGroup.x25519, cipherSuite)
+                    } else if group == TLSNamedGroup.x25519MLKEM768 && keyLen == 1120 {
                         guard shOffset + 1120 <= data.count else { return nil }
-                        return (data.subdata(in: shOffset..<(shOffset + 1120)), 0x11EC, cipherSuite)
+                        return (data.subdata(in: shOffset..<(shOffset + 1120)), TLSNamedGroup.x25519MLKEM768, cipherSuite)
                     }
                 }
 
-                // Anchor on extDataStart — the 0x0033 branch may have advanced
-                // shOffset past the start of extData without returning.
                 shOffset = extDataStart + extDataLen
             }
 
@@ -467,12 +476,10 @@ nonisolated class RealityClient {
 
             guard offset + 5 + recordLen <= buffer.count else { break }
 
-            if contentType == 0x14 || contentType == 0x16 {
-                // ChangeCipherSpec or plaintext handshake — skip
+            if contentType == TLSContentType.changeCipherSpec || contentType == TLSContentType.handshake {
                 offset += 5 + recordLen
                 continue
-            } else if contentType == 0x17 {
-                // Encrypted handshake (Application Data wrapper)
+            } else if contentType == TLSContentType.applicationData {
                 let recordHeader = buffer.subdata(in: offset..<(offset + 5))
                 let ciphertext = buffer.subdata(in: (offset + 5)..<(offset + 5 + recordLen))
 
@@ -496,35 +503,49 @@ nonisolated class RealityClient {
                         guard hsOffset + 4 + hsLen <= decrypted.count else { break }
 
                         let hsMessage = decrypted.subdata(in: hsOffset..<(hsOffset + 4 + hsLen))
-                        fullTranscript.append(hsMessage)
+                        let hsBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
 
-                        if hsType == 0x0B { // Certificate
-                            let certBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
-                            serverCertVerified = verifyRealityCertificate(certBody: certBody)
-                        } else if hsType == 0x19 { // CompressedCertificate (RFC 8879)
-                            let certBody = decrypted.subdata(in: (hsOffset + 4)..<(hsOffset + 4 + hsLen))
-                            if let decompressed = decompressCertificate(certBody) {
+                        switch hsType {
+                        case TLSHandshakeType.certificate:
+                            fullTranscript.append(hsMessage)
+                            serverCertVerified = verifyRealityCertificate(certBody: hsBody)
+
+                        case TLSHandshakeType.compressedCertificate:
+                            fullTranscript.append(hsMessage)
+                            if let decompressed = decompressCertificate(hsBody) {
                                 serverCertVerified = verifyRealityCertificate(certBody: decompressed)
                             } else {
                                 logger.warning("[Reality] Failed to decompress CompressedCertificate")
                             }
-                        }
 
-                        if hsType == 0x14 { // Finished
+                        case TLSHandshakeType.finished:
+                            let expectedVerifyData = kd.serverFinishedPayload(
+                                serverTrafficSecret: keys.serverTrafficSecret,
+                                transcript: fullTranscript
+                            )
+                            guard hsBody.count == expectedVerifyData.count,
+                                  Self.constantTimeEqual(hsBody, expectedVerifyData) else {
+                                completion(.failure(RealityError.handshakeFailed("Server Finished verification failed")))
+                                return
+                            }
+                            fullTranscript.append(hsMessage)
                             foundServerFinished = true
+
+                        default:
+                            fullTranscript.append(hsMessage)
                         }
 
                         hsOffset += 4 + hsLen
                     }
                 } catch {
-                    // Decrypt failures fall through to the outer guard below.
+                    completion(.failure(RealityError.handshakeFailed("Record decryption failed")))
+                    return
                 }
             }
 
             offset += 5 + recordLen
 
-            // Post-Finished records (e.g. NewSessionTicket) use application keys;
-            // stop here so TLSRecordConnection handles them with correct sequence numbers.
+            // Post-Finished records (e.g. NewSessionTicket) use application keys.
             if foundServerFinished { break }
         }
 
@@ -606,12 +627,12 @@ nonisolated class RealityClient {
             return
         }
 
-        var ccsRecord = Data([0x14, 0x03, 0x03, 0x00, 0x01, 0x01])
+        var ccsRecord = Data([TLSContentType.changeCipherSpec, 0x03, 0x03, 0x00, 0x01, 0x01])
 
-        let verifyData = kd.computeFinishedVerifyData(clientTrafficSecret: keys.clientTrafficSecret, transcript: transcript)
+        let verifyData = kd.clientFinishedPayload(clientTrafficSecret: keys.clientTrafficSecret, transcript: transcript)
 
         var finishedMsg = Data()
-        finishedMsg.append(0x14) // Finished
+        finishedMsg.append(TLSHandshakeType.finished)
         finishedMsg.append(0x00)
         finishedMsg.append(0x00)
         finishedMsg.append(UInt8(verifyData.count))
@@ -645,14 +666,14 @@ nonisolated class RealityClient {
         var offset = 0
         while offset + 5 < data.count {
             let contentType = data[offset]
-            if contentType != 0x16 { break }
+            if contentType != TLSContentType.handshake { break }
 
             let recordLen = Int(data[offset + 3]) << 8 | Int(data[offset + 4])
             offset += 5
 
             if offset + recordLen > data.count { break }
 
-            if data[offset] == 0x02 { // ServerHello
+            if data[offset] == TLSHandshakeType.serverHello {
                 return true
             }
 
@@ -664,8 +685,6 @@ nonisolated class RealityClient {
 
     // MARK: - Certificate Verification
 
-    /// Verifies the Reality server certificate: signature == HMAC-SHA512(AuthKey, ed25519PublicKey),
-    /// matching Xray-core's `VerifyPeerCertificate` in `reality.go`.
     private func verifyRealityCertificate(certBody: Data) -> Bool {
         guard let authKey else { return false }
 
@@ -678,21 +697,17 @@ nonisolated class RealityClient {
         return Self.constantTimeEqual(Data(hmac), signature)
     }
 
-    /// Extracts the first DER certificate from a TLS 1.3 Certificate message body.
-    ///
-    /// Format: contextLen(1) + context + listLen(3) + [certLen(3) + certDER + extLen(2) + ext]*
     private static func extractFirstCertificate(from certBody: Data) -> Data? {
         var offset = 0
 
-        // request context (1 byte length + context bytes, always 0 for server cert)
         guard offset < certBody.count else { return nil }
         let contextLen = Int(certBody[offset])
         offset += 1 + contextLen
 
         guard offset + 3 <= certBody.count else { return nil }
-        offset += 3  // certificate list length (3 bytes)
+        offset += 3
 
-        guard offset + 3 <= certBody.count else { return nil }  // first cert data length
+        guard offset + 3 <= certBody.count else { return nil }
         let certLen = Int(certBody[offset]) << 16 | Int(certBody[offset + 1]) << 8 | Int(certBody[offset + 2])
         offset += 3
 
@@ -700,15 +715,11 @@ nonisolated class RealityClient {
         return certBody.subdata(in: offset..<(offset + certLen))
     }
 
-    /// Extracts the ed25519 public key and signature from a DER X.509 certificate;
-    /// `nil` means a real website certificate rather than a Reality one.
     private static func extractEd25519Components(from certDER: Data) -> (publicKey: Data, signature: Data)? {
         var offset = 0
 
-        // Outer SEQUENCE (Certificate)
         guard parseDERSequence(certDER, offset: &offset) != nil else { return nil }
 
-        // TBSCertificate SEQUENCE
         let tbsHeaderStart = offset
         guard let tbsLen = parseDERSequence(certDER, offset: &offset) else { return nil }
         let tbsEnd = offset + tbsLen
@@ -730,9 +741,9 @@ nonisolated class RealityClient {
         offset = tbsEnd
 
         guard let sigAlgLen = parseDERSequence(certDER, offset: &offset) else { return nil }
-        offset += sigAlgLen  // skip signatureAlgorithm
+        offset += sigAlgLen
 
-        guard offset < certDER.count, certDER[offset] == 0x03 else { return nil }  // signatureValue BIT STRING
+        guard offset < certDER.count, certDER[offset] == 0x03 else { return nil }
         offset += 1
         guard let sigBitStringLen = parseDERLength(certDER, offset: &offset) else { return nil }
         guard sigBitStringLen >= 1, offset < certDER.count, certDER[offset] == 0x00 else { return nil }
@@ -741,7 +752,6 @@ nonisolated class RealityClient {
         return (pubKey, signature)
     }
 
-    /// Parses a DER SEQUENCE tag and returns the content length.
     private static func parseDERSequence(_ data: Data, offset: inout Int) -> Int? {
         guard offset < data.count, data[offset] == 0x30 else { return nil }
         offset += 1
@@ -770,8 +780,6 @@ nonisolated class RealityClient {
 
     // MARK: - CompressedCertificate (RFC 8879)
 
-    /// Decompresses a CompressedCertificate (RFC 8879):
-    /// algorithm(2) + uncompressed_length(3) + compressed_length(3) + data.
     private func decompressCertificate(_ body: Data) -> Data? {
         guard body.count >= 8 else { return nil }
 
@@ -826,6 +834,7 @@ nonisolated class RealityClient {
         ephemeralPrivateKey = nil
         authKey = nil
         storedClientHello = nil
+        sentSessionID = nil
         mlkemPrivateKeyStorage = nil
         tls13 = TLS13HandshakeState()
         serverCertVerified = false

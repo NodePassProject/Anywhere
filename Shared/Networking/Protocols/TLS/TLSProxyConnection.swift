@@ -7,7 +7,6 @@
 
 import Foundation
 
-/// Proxy connection over a standard TLS ``TLSRecordConnection`` transport.
 nonisolated class TLSProxyConnection: ProxyConnection {
     private let tlsConnection: TLSRecordConnection
 
@@ -31,9 +30,6 @@ nonisolated class TLSProxyConnection: ProxyConnection {
     }
 
     override func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
-        // Plain TLS has no Reality/Vision direct-copy concept, so record-layer
-        // failures — including AEAD authentication failures — surface verbatim
-        // with their real ``TLSRecordError`` description.
         tlsConnection.receive(completion: completion)
     }
 

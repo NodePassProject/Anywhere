@@ -13,18 +13,16 @@ private let logger = AnywhereLogger(category: "TLS")
 
 // MARK: - TLSRecordConnection
 
-/// TLS 1.2/1.3 application-data record encryption/decryption over a raw transport,
-/// with a raw passthrough mode for Vision direct-copy.
 nonisolated class TLSRecordConnection {
 
     // MARK: Properties
 
     var connection: (any RawTransport)?
 
-    /// The negotiated TLS version (0x0303 = TLS 1.2, 0x0304 = TLS 1.3).
+    /// The negotiated TLS version.
     let tlsVersion: UInt16
 
-    /// Negotiated ALPN protocol; empty when the peer selected none.
+    /// The value of the ALPN sent by the peer; empty when the peer selected none.
     var negotiatedALPN: String = ""
 
     private let clientKey: Data
@@ -32,7 +30,6 @@ nonisolated class TLSRecordConnection {
     private let serverKey: Data
     private let serverIV: Data
 
-    // MAC keys for TLS 1.2 CBC cipher suites (empty for AEAD)
     private let clientMACKey: Data
     private let serverMACKey: Data
 
@@ -45,10 +42,8 @@ nonisolated class TLSRecordConnection {
     private var serverSeqNum: UInt64 = 0
     private let seqLock = UnfairLock()
 
-    /// Serialises encrypt-then-enqueue so records reach the socket in sequence-number order.
     private let sendLock = UnfairLock()
 
-    /// Maximum plaintext per record (RFC 8446 §5.1, RFC 5246 §6.2.1).
     private static let maxRecordPlaintext = 16384
 
     private var receiveBuffer = Data(capacity: 256 * 1024)
@@ -56,7 +51,6 @@ nonisolated class TLSRecordConnection {
 
     // MARK: Initialization
 
-    /// Local role; selects which key pair encrypts outbound vs decrypts inbound.
     enum Direction {
         case client
         case server
@@ -64,7 +58,6 @@ nonisolated class TLSRecordConnection {
 
     let direction: Direction
 
-    /// Creates a TLS 1.3 record connection from pre-derived traffic keys (12-byte IVs).
     init(clientKey: Data, clientIV: Data, serverKey: Data, serverIV: Data,
          cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256,
          direction: Direction = .client) {
@@ -81,8 +74,6 @@ nonisolated class TLSRecordConnection {
         self.direction = direction
     }
 
-    /// Creates a TLS 1.2 record connection from pre-derived keys.
-    /// IVs are 4 bytes for GCM, 12 for ChaCha20, 16 for CBC; MAC keys are empty for AEAD.
     init(
         tls12ClientKey clientKey: Data,
         clientIV: Data,
@@ -136,7 +127,6 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Send (Encrypted)
 
-    /// Encrypts data as TLS Application Data records and sends it.
     func send(data: Data, completion: @escaping (Error?) -> Void) {
         sendLock.lock()
         guard let connection else {
@@ -171,7 +161,6 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Receive (Encrypted)
 
-    /// Receives and decrypts data, batching multiple TLS records per network read.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         receiveLock.lock()
         let processed = processBuffer()
@@ -196,7 +185,6 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Send / Receive (Raw, Unencrypted)
 
-    /// Receives raw data without decryption (Vision direct-copy mode); drains buffered data first.
     func receiveRaw(completion: @escaping (Data?, Error?) -> Void) {
         receiveLock.lock()
         if !receiveBuffer.isEmpty {
@@ -231,7 +219,6 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Sends raw data without encryption (Vision direct-copy mode).
     func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
         guard let connection else {
             completion(TLSRecordError.connectionUnavailable)
@@ -247,7 +234,6 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - Cancel
 
-    /// Closes the connection, sending a best-effort fire-and-forget close_notify first.
     func cancel() {
         sendCloseNotify()
 
@@ -259,7 +245,6 @@ nonisolated class TLSRecordConnection {
         connection = nil
     }
 
-    /// Sends a TLS close_notify alert record (best-effort, fire-and-forget).
     private func sendCloseNotify() {
         sendLock.lock()
         guard let connection else {
@@ -268,13 +253,12 @@ nonisolated class TLSRecordConnection {
         }
 
         do {
-            // Alert: level=warning(1), desc=close_notify(0)
-            let alertPayload = Data([0x01, 0x00])
+            let alertPayload = Data([TLSAlertLevel.warning, TLSAlertDescription.closeNotify])
             let record: Data
             if tlsVersion >= 0x0304 {
-                record = try encryptTLS13Record(plaintext: alertPayload, contentType: 0x15)
+                record = try encryptTLS13Record(plaintext: alertPayload, contentType: TLSContentType.alert)
             } else {
-                record = try encryptTLS12Record(plaintext: alertPayload, contentType: 0x15)
+                record = try encryptTLS12Record(plaintext: alertPayload, contentType: TLSContentType.alert)
             }
             connection.send(data: record)
             sendLock.unlock()
@@ -339,8 +323,6 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Decrypts all complete records in the buffer into one batch, compacting once at the
-    /// end to avoid per-record `removeSubrange` slices. Caller must hold `receiveLock`.
     private func processBuffer() -> BufferResult? {
         if receiveBuffer.count == 0 {
             return nil
@@ -349,8 +331,6 @@ nonisolated class TLSRecordConnection {
         var batchedData = Data(capacity: receiveBuffer.count)
         var hasError: Error? = nil
         var recordsProcessed = 0
-        // Failing record held back so cleanly decrypted records deliver first;
-        // the error resurfaces on the next read.
         var bytesPendingReplay: Data? = nil
 
         var consumed = 0
@@ -363,6 +343,12 @@ nonisolated class TLSRecordConnection {
                 let p = ptr.bindMemory(to: UInt8.self)
                 contentType = p[consumed]
                 recordLen = UInt16(p[consumed + 3]) << 8 | UInt16(p[consumed + 4])
+            }
+
+            let maxCiphertext = tlsVersion >= 0x0304 ? 16384 + 256 : 16384 + 2048
+            guard Int(recordLen) <= maxCiphertext else {
+                receiveBuffer.removeAll()
+                return .error(TLSRecordError.malformedRecord("record overflow (\(recordLen) bytes)"))
             }
 
             let totalLen = 5 + Int(recordLen)
@@ -378,7 +364,7 @@ nonisolated class TLSRecordConnection {
 
             recordsProcessed += 1
 
-            if contentType == 0x17 { // Application Data
+            if contentType == TLSContentType.applicationData {
                 seqLock.lock()
                 let seqNum: UInt64
                 if direction == .server {
@@ -397,7 +383,6 @@ nonisolated class TLSRecordConnection {
                         batchedData.append(decrypted)
                     }
                 } catch {
-                    // Alerts are terminal; anything else is held back for replay on the next read.
                     if case TLSRecordError.tlsAlert = error {
                         receiveBuffer.removeAll()
                         consumed = 0
@@ -411,12 +396,33 @@ nonisolated class TLSRecordConnection {
                     hasError = error
                     break
                 }
-            } else if contentType == 0x15 { // Alert
-                consumed += totalLen
-                hasError = TLSRecordError.unexpectedAlert
+            } else if contentType == TLSContentType.alert {
+                if tlsVersion < 0x0304 {
+                    seqLock.lock()
+                    let seqNum: UInt64
+                    if direction == .server {
+                        seqNum = clientSeqNum
+                        clientSeqNum += 1
+                    } else {
+                        seqNum = serverSeqNum
+                        serverSeqNum += 1
+                    }
+                    seqLock.unlock()
+
+                    consumed += totalLen
+                    if let alert = try? decryptTLSRecord(ciphertext: body, header: header, seqNum: seqNum),
+                       alert.count >= 2 {
+                        hasError = TLSRecordError.tlsAlert(level: alert[alert.startIndex],
+                                                           description: alert[alert.startIndex + 1])
+                    } else {
+                        hasError = TLSRecordError.unexpectedAlert
+                    }
+                } else {
+                    consumed += totalLen
+                    hasError = TLSRecordError.unexpectedAlert
+                }
                 break
             } else {
-                // Other content types (ChangeCipherSpec, etc.) are skipped
                 consumed += totalLen
             }
         }
@@ -452,10 +458,9 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - TLS Record Crypto (Dispatch)
 
-    /// Encrypts plaintext into Application Data records, splitting at 16384 bytes to avoid record_overflow.
     private func buildTLSRecords(for data: Data) throws -> Data {
         if data.count <= Self.maxRecordPlaintext {
-            return try encryptSingleRecord(plaintext: data, contentType: 0x17)
+            return try encryptSingleRecord(plaintext: data, contentType: TLSContentType.applicationData)
         }
 
         let chunkCount = (data.count + Self.maxRecordPlaintext - 1) / Self.maxRecordPlaintext
@@ -463,7 +468,7 @@ nonisolated class TLSRecordConnection {
         var offset = 0
         while offset < data.count {
             let end = min(offset + Self.maxRecordPlaintext, data.count)
-            records.append(try encryptSingleRecord(plaintext: Data(data[offset..<end]), contentType: 0x17))
+            records.append(try encryptSingleRecord(plaintext: Data(data[offset..<end]), contentType: TLSContentType.applicationData))
             offset = end
         }
         return records
@@ -491,9 +496,7 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - TLS 1.3 Record Crypto
 
-    /// TLS 1.3 record: inner = payload || type(1); nonce = IV XOR padded_seq;
-    /// AAD = header(5); record = header(5) || ciphertext || tag(16).
-    private func encryptTLS13Record(plaintext: Data, contentType: UInt8 = 0x17) throws -> Data {
+    private func encryptTLS13Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
         seqLock.lock()
         let seqNum: UInt64
         if direction == .server {
@@ -517,7 +520,7 @@ nonisolated class TLSRecordConnection {
             buffer[plaintext.count] = contentType
         }
 
-        let aad = Data([0x17, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
+        let aad = Data([TLSContentType.applicationData, 0x03, 0x03, UInt8(encryptedLen >> 8), UInt8(encryptedLen & 0xFF)])
 
         let (sealedCt, sealedTag) = try sealAEAD(plaintext: innerPlaintext, nonce: nonce, aad: aad, key: egressSymmetricKey)
 
@@ -545,7 +548,6 @@ nonisolated class TLSRecordConnection {
             throw TLSRecordError.emptyDecryptedData
         }
 
-        // Strip inner content type and padding (RFC 8446 §5.4)
         var innerContentType: UInt8 = 0
         let contentLen: ssize_t = decrypted.withUnsafeBytes { ptr -> ssize_t in
             let p = ptr.bindMemory(to: UInt8.self)
@@ -561,17 +563,15 @@ nonisolated class TLSRecordConnection {
         }
 
         // Skip handshake records (e.g. NewSessionTicket)
-        if innerContentType == 0x16 {
+        if innerContentType == TLSContentType.handshake {
             return Data()
         }
 
-        // TLS 1.3 alerts arrive encrypted, so 0x15 only shows as the inner type.
-        // close_notify is an orderly shutdown; any other alert surfaces as the failure cause.
-        if innerContentType == 0x15 {
+        if innerContentType == TLSContentType.alert {
             let body = decrypted.prefix(Int(contentLen))
             let level = body.first ?? 0
             let description = body.count >= 2 ? body[body.startIndex + 1] : 0
-            if description == 0 { // close_notify
+            if description == TLSAlertDescription.closeNotify {
                 return Data()
             }
             throw TLSRecordError.tlsAlert(level: level, description: description)
@@ -582,7 +582,7 @@ nonisolated class TLSRecordConnection {
 
     // MARK: - TLS 1.2 Record Crypto
 
-    private func encryptTLS12Record(plaintext: Data, contentType: UInt8 = 0x17) throws -> Data {
+    private func encryptTLS12Record(plaintext: Data, contentType: UInt8 = TLSContentType.applicationData) throws -> Data {
         seqLock.lock()
         let seqNum: UInt64
         if direction == .server {
@@ -603,8 +603,6 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// TLS 1.2 AEAD: GCM nonce = implicit_IV(4) || explicit_seq(8) (explicit sent in record);
-    /// ChaCha20 nonce = IV(12) XOR padded_seq; AAD = seq(8) || type(1) || version(2) || length(2).
     private func encryptTLS12AEAD(plaintext: Data, contentType: UInt8, seqNum: UInt64, version: UInt16) throws -> Data {
         let isChaCha = TLSCipherSuite.isChaCha20(cipherSuite)
         let explicitNonceLen = isChaCha ? 0 : 8
@@ -619,7 +617,7 @@ nonisolated class TLSRecordConnection {
         } else {
             var seqBytes = Data(count: 8)
             for i in 0..<8 { seqBytes[i] = UInt8((seqNum >> ((7 - i) * 8)) & 0xFF) }
-            var n = egressIV  // 4 bytes implicit
+            var n = egressIV
             n.append(seqBytes)
             nonce = n
             explicitNonce = seqBytes
@@ -648,8 +646,6 @@ nonisolated class TLSRecordConnection {
         return record
     }
 
-    /// TLS 1.2 CBC: MAC-then-encrypt — AES-CBC(key, random_IV, plaintext || HMAC || padding);
-    /// record = header(5) || IV(16) || ciphertext.
     private func encryptTLS12CBC(plaintext: Data, contentType: UInt8, seqNum: UInt64, version: UInt16) throws -> Data {
         let useSHA384 = TLSCipherSuite.usesSHA384(cipherSuite)
         let useSHA256: Bool
@@ -692,7 +688,7 @@ nonisolated class TLSRecordConnection {
                         CCCrypt(
                             CCOperation(kCCEncrypt),
                             CCAlgorithm(kCCAlgorithmAES),
-                            0,  // No padding
+                            0,
                             keyPtr.baseAddress!, cbcKey.count,
                             ivPtr.baseAddress!,
                             inPtr.baseAddress!, data.count,
@@ -732,7 +728,7 @@ nonisolated class TLSRecordConnection {
         let isChaCha = TLSCipherSuite.isChaCha20(cipherSuite)
         let explicitNonceLen = isChaCha ? 0 : 8
         let version = tlsVersion
-        let contentType = header.first ?? 0x17
+        let contentType = header.first ?? TLSContentType.applicationData
 
         guard ciphertext.count >= explicitNonceLen + 16 else {
             throw TLSRecordError.ciphertextTooShort
@@ -747,12 +743,11 @@ nonisolated class TLSRecordConnection {
             xorSeqIntoNonce(&n, seqNum: seqNum)
             nonce = n
         } else {
-            var n = ingressIV  // 4 bytes implicit
+            var n = ingressIV
             n.append(explicitNonce)
             nonce = n
         }
 
-        // AAD: seq(8) || type(1) || version(2) || plaintext_length(2)
         let plaintextLen = payload.count - 16
         var aad = Data(capacity: 13)
         for i in 0..<8 { aad.append(UInt8((seqNum >> ((7 - i) * 8)) & 0xFF)) }
@@ -771,7 +766,7 @@ nonisolated class TLSRecordConnection {
     private func decryptTLS12CBC(ciphertext: Data, header: Data, seqNum: UInt64) throws -> Data {
         let blockSize = 16
         let version = tlsVersion
-        let contentType = header.first ?? 0x17
+        let contentType = header.first ?? TLSContentType.applicationData
 
         guard ciphertext.count >= blockSize * 2 else {
             throw TLSRecordError.ciphertextTooShort
@@ -794,7 +789,7 @@ nonisolated class TLSRecordConnection {
                         CCCrypt(
                             CCOperation(kCCDecrypt),
                             CCAlgorithm(kCCAlgorithmAES),
-                            0,  // No PKCS7 padding
+                            0,
                             keyPtr.baseAddress!, cbcKey.count,
                             ivPtr.baseAddress!,
                             inPtr.baseAddress!, encrypted.count,
@@ -812,13 +807,12 @@ nonisolated class TLSRecordConnection {
 
         decrypted = decrypted.prefix(numBytesDecrypted)
 
-        // Validate and strip padding (constant-time to mitigate Lucky13)
         let paddingByte = Int(decrypted.last ?? 0)
         let paddingLen = paddingByte + 1
 
         var paddingGood: UInt8 = 0
         if paddingLen > decrypted.count {
-            paddingGood = 1  // Invalid
+            paddingGood = 1
         } else {
             for i in (decrypted.count - paddingLen)..<decrypted.count {
                 paddingGood |= decrypted[i] ^ UInt8(paddingByte)
@@ -865,7 +859,6 @@ nonisolated class TLSRecordConnection {
         return payload
     }
 
-    /// Constant-time comparison to prevent timing side channels.
     private func constantTimeEqual(_ a: Data, _ b: Data) -> Bool {
         guard a.count == b.count else { return false }
         var diff: UInt8 = 0
@@ -889,8 +882,6 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// Normalizes AEAD tag failures to `recordAuthenticationFailed` so callers can
-    /// distinguish key mismatch from malformed input.
     private func openAEAD(ciphertext: Data, tag: Data, nonce: Data, aad: Data, key: SymmetricKey) throws -> Data {
         do {
             if TLSCipherSuite.isChaCha20(cipherSuite) {
@@ -907,7 +898,6 @@ nonisolated class TLSRecordConnection {
         }
     }
 
-    /// XORs the 8-byte big-endian sequence number into the last 8 bytes of the nonce.
     @inline(__always)
     private func xorSeqIntoNonce(_ nonce: inout Data, seqNum: UInt64) {
         nonce.withUnsafeMutableBytes { ptr in

@@ -14,18 +14,13 @@ struct TLSClientHelloParsed {
     let supportedGroups: [UInt16]
     let signatureAlgorithms: [UInt16]
     let alpnProtocols: [String]
-    /// Client key_share entries by named group (raw exchange bytes, no group-id/length prefix).
     let keyShares: [UInt16: Data]
     let legacyVersion: UInt16
     let random: Data
     let legacySessionID: Data
     let compressionMethods: [UInt8]
-    /// Whether the client offered extended_master_secret (RFC 7627). Only meaningful for TLS 1.2.
     let extendedMasterSecret: Bool
-    /// RFC 5746: client signals secure renegotiation via `renegotiation_info` extension or
-    /// TLS_EMPTY_RENEGOTIATION_INFO_SCSV (0x00FF). Server MUST NOT emit the extension otherwise.
     let secureRenegotiation: Bool
-    /// Raw ClientHello (4-byte handshake header + body), needed for the TLS 1.3 transcript hash.
     let handshakeMessage: Data
 }
 
@@ -41,9 +36,8 @@ enum TLSClientHelloParser {
 
     /// Parses a single ClientHello record (including the 5-byte record header); trailing records are not tolerated.
     static func parse(_ record: Data) throws -> TLSClientHelloParsed {
-        // Record header: type(1) version(2) length(2)
         guard record.count >= 5 else { throw TLSClientHelloParserError.truncated }
-        guard record[record.startIndex] == 0x16 else { throw TLSClientHelloParserError.notHandshake }
+        guard record[record.startIndex] == TLSContentType.handshake else { throw TLSClientHelloParserError.notHandshake }
 
         let recordLen = (Int(record[record.startIndex + 3]) << 8) | Int(record[record.startIndex + 4])
         guard record.count >= 5 + recordLen else { throw TLSClientHelloParserError.lengthMismatch }
@@ -56,7 +50,7 @@ enum TLSClientHelloParser {
     static func parseHandshakeBody(_ body: Data) throws -> TLSClientHelloParsed {
         var cur = Cursor(body)
         guard let msgType = cur.readU8() else { throw TLSClientHelloParserError.truncated }
-        guard msgType == 0x01 else { throw TLSClientHelloParserError.notClientHello }
+        guard msgType == TLSHandshakeType.clientHello else { throw TLSClientHelloParserError.notClientHello }
         guard let bodyLen = cur.readU24(), let chBody = cur.readBytes(bodyLen) else {
             throw TLSClientHelloParserError.truncated
         }
@@ -72,7 +66,7 @@ enum TLSClientHelloParser {
         var cur = Cursor(body)
         guard let legacyVersion = cur.readU16() else { throw TLSClientHelloParserError.truncated }
         guard let random = cur.readBytes(32) else { throw TLSClientHelloParserError.truncated }
-        guard let sidLen = cur.readU8(), let sessionID = cur.readBytes(Int(sidLen)) else {
+        guard let sidLen = cur.readU8(), sidLen <= 32, let sessionID = cur.readBytes(Int(sidLen)) else {
             throw TLSClientHelloParserError.truncated
         }
         guard let csLen = cur.readU16(), let csData = cur.readBytes(csLen) else {
@@ -131,6 +125,7 @@ enum TLSClientHelloParser {
 
     private static func parseExtensions(_ buf: Data) throws -> ParsedExtensions {
         var result = ParsedExtensions()
+        var observedExtensionTypes = Set<UInt16>()
         var cur = Cursor(buf)
         while !cur.isAtEnd {
             guard let extType = cur.readU16(),
@@ -138,22 +133,26 @@ enum TLSClientHelloParser {
                   let extData = cur.readBytes(extLen) else {
                 throw TLSClientHelloParserError.truncated
             }
+            let (inserted, _) = observedExtensionTypes.insert(UInt16(extType))
+            if !inserted {
+                throw TLSClientHelloParserError.malformed("duplicate extension \(extType)")
+            }
             switch UInt16(extType) {
-            case 0x0000: // server_name
+            case TLSExtensionType.serverName:
                 result.serverName = parseServerName(extData)
-            case 0x0017: // extended_master_secret (RFC 7627) — empty data
+            case TLSExtensionType.extendedMasterSecret:
                 result.extendedMasterSecret = true
-            case 0x002B: // supported_versions (ClientHello: list)
+            case TLSExtensionType.supportedVersions:
                 result.supportedVersions = parseSupportedVersionsClient(extData)
-            case 0x000A: // supported_groups
+            case TLSExtensionType.supportedGroups:
                 result.supportedGroups = parseUInt16List(extData)
-            case 0x000D: // signature_algorithms
+            case TLSExtensionType.signatureAlgorithms:
                 result.signatureAlgorithms = parseUInt16List(extData)
-            case 0x0010: // ALPN
+            case TLSExtensionType.applicationLayerProtocolNegotiation:
                 result.alpnProtocols = parseALPN(extData)
-            case 0x0033: // key_share (ClientHello: list of (group, exchange))
+            case TLSExtensionType.keyShare:
                 result.keyShares = parseKeyShares(extData)
-            case 0xFF01: // renegotiation_info (RFC 5746)
+            case TLSExtensionType.renegotiationInfo:
                 result.renegotiationInfo = true
             default:
                 continue

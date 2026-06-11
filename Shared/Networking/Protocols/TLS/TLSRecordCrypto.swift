@@ -8,18 +8,16 @@
 import Foundation
 import CryptoKit
 
-/// TLS 1.3 record layer cryptographic operations
 struct TLSRecordCrypto {
 
-    /// Encrypt a TLS 1.3 handshake record; returns header + ciphertext + tag.
     static func encryptHandshakeRecord(plaintext: Data, key: SymmetricKey, iv: Data, seqNum: UInt64, cipherSuite: UInt16 = TLSCipherSuite.TLS_AES_128_GCM_SHA256) throws -> Data {
         let nonce = buildNonce(iv: iv, seqNum: seqNum)
 
         var innerPlaintext = plaintext
-        innerPlaintext.append(0x16)
+        innerPlaintext.append(TLSContentType.handshake)
 
         let len = UInt16(innerPlaintext.count + 16)
-        let aad = Data([0x17, 0x03, 0x03, UInt8(len >> 8), UInt8(len & 0xFF)])
+        let aad = Data([TLSContentType.applicationData, 0x03, 0x03, UInt8(len >> 8), UInt8(len & 0xFF)])
 
         let (ct, tag) = try sealAEAD(plaintext: innerPlaintext, key: key, nonce: nonce, aad: aad, cipherSuite: cipherSuite)
 
@@ -81,7 +79,6 @@ struct TLSRecordCrypto {
     }
 
     private static func openAEAD(ciphertext: Data, tag: Data, key: SymmetricKey, nonce: Data, aad: Data, cipherSuite: UInt16) throws -> Data {
-        // Normalize CryptoKit's authentication failure to a named error so callers get a consistent type.
         do {
             if cipherSuite == TLSCipherSuite.TLS_CHACHA20_POLY1305_SHA256 {
                 let nonceObj = try ChaChaPoly.Nonce(data: nonce)
@@ -108,22 +105,17 @@ struct TLSRecordCrypto {
     }
 }
 
-/// Errors from the TLS record layer (authentication, MAC, padding, framing, alerts).
 enum TLSRecordError: Error, LocalizedError {
     case ciphertextTooShort
     case emptyDecryptedData
     case noContentTypeFound
     case encryptionFailed
-
-    /// AEAD authentication tag failed to verify.
     case recordAuthenticationFailed
     case macVerificationFailed
     case invalidPadding
-    /// Record was structurally invalid (misaligned, missing fields, etc.).
     case malformedRecord(String)
     case ivGenerationFailed
     case connectionUnavailable
-    /// Peer sent a TLS alert (RFC 8446 §6); level 2 = fatal.
     case tlsAlert(level: UInt8, description: UInt8)
     case unexpectedAlert
 
@@ -157,7 +149,6 @@ enum TLSRecordError: Error, LocalizedError {
         }
     }
 
-    /// Human name for a TLS alert description code (RFC 8446 §6).
     static func alertName(_ code: UInt8) -> String {
         switch code {
         case 0:   return "close_notify"

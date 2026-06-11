@@ -25,8 +25,6 @@ enum TLSStreamError: Error, LocalizedError {
 
 // MARK: - TLSStreamTransport
 
-/// TLS-over-TCP stream transport with configurable ALPN, supporting direct and
-/// proxy-tunneled connections.
 nonisolated class TLSStreamTransport {
 
     private let host: String
@@ -66,11 +64,10 @@ nonisolated class TLSStreamTransport {
             switch result {
             case .success(let connection):
                 self.tlsConnection = connection
-                self.tlsClient = nil  // Free handshake state
+                self.tlsClient = nil
                 self.isReady = true
                 completion(nil)
             case .failure(let error):
-                // TLSClient self-cleans on failure; explicit cancel keeps teardown ownership clear.
                 self.tlsClient?.cancel()
                 self.tlsClient = nil
                 completion(error)
@@ -96,7 +93,6 @@ nonisolated class TLSStreamTransport {
 
     // MARK: - Receive
 
-    /// Receives decrypted data; completion gets `(nil, nil)` on EOF.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
         guard let tlsConnection, isReady else {
             completion(nil, TLSStreamError.notConnected)
