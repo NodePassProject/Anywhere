@@ -27,3 +27,33 @@ struct RoutingRule: Codable, Equatable, Identifiable {
         lhs.type == rhs.type && lhs.value == rhs.value
     }
 }
+
+/// On-disk layout of the routing payload the host writes and the Network
+/// Extension reads.
+///
+/// All integers little-endian. Layout:
+/// ```
+/// magic       "ARB1"              4 bytes
+/// configLen   UInt32              byte length of the configs JSON blob
+/// configBytes [configLen]         {"<uuid>": {…}, …} (sortedKeys), or "{}"
+/// entryCount  UInt32
+/// entries     entryCount × Entry
+///
+/// Entry:
+///   tier      UInt8               0 user · 1 adBlock · 2 builtIn · 3 bypass
+///   action    UInt8               0 direct · 1 reject · 2 proxy
+///   configId  [16]                raw UUID bytes — present iff action == proxy
+///   ruleCount UInt32
+///   rules     ruleCount × Rule
+///
+/// Rule:
+///   type      UInt8               RoutingRuleType raw value
+///   valueLen  UInt16              UTF-8 byte length
+///   value     [valueLen]          UTF-8 domain/CIDR (folded to lowercase on read)
+/// ```
+enum RoutingBinaryFormat {
+    static let magic: [UInt8] = [0x41, 0x52, 0x42, 0x31]  // "ARB1"
+
+    enum Tier: UInt8 { case user = 0, adBlock = 1, builtIn = 2, bypass = 3 }
+    enum Action: UInt8 { case direct = 0, reject = 1, proxy = 2 }
+}
