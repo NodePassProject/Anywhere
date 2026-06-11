@@ -201,7 +201,7 @@ extension ProxyConfiguration {
         )
     }
 
-    /// Parses `nowhere://<key>@host:port#name`.
+    /// Parses `nowhere://<key>@host:port?spec=...&sni=...&alpn=...#name`.
     private static func parseNowhere(url: String) throws -> ProxyConfiguration {
         let rawPrefix = "nowhere://"
         var remaining = String(url.dropFirst(rawPrefix.count))
@@ -213,7 +213,9 @@ extension ProxyConfiguration {
         }
         DeviceCensorship.deCensor(&fragmentName)
 
+        var queryString: String?
         if let questionIndex = remaining.firstIndex(of: "?") {
+            queryString = String(remaining[remaining.index(after: questionIndex)...])
             remaining = String(remaining[..<questionIndex])
         }
 
@@ -233,13 +235,22 @@ extension ProxyConfiguration {
         }
 
         let (host, port) = try parseHostPort(serverPart)
+        let params = parseQueryParams(queryString)
+        let spec = params["spec"].flatMap { $0.isEmpty ? nil : $0 }
+        let sni = (params["sni"]?.isEmpty == false ? params["sni"] : nil)
+            ?? (params["peer"]?.isEmpty == false ? params["peer"] : nil)
+            ?? host
+        let alpn = params["alpn"].flatMap { $0.isEmpty ? nil : [$0] }
+        let tls = TLSConfiguration(serverName: sni, alpn: alpn)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Nowhere",
             serverAddress: host,
             serverPort: port,
             outbound: .nowhere(
-                key: key
+                key: key,
+                spec: spec,
+                tls: tls
             )
         )
     }

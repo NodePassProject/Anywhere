@@ -13,6 +13,9 @@ nonisolated final class NowhereClient {
         let host: String
         let port: UInt16
         let key: String
+        let spec: String?
+        let sni: String
+        let alpn: String
         let chainSignature: String
     }
 
@@ -25,6 +28,9 @@ nonisolated final class NowhereClient {
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             key: configuration.key,
+            spec: configuration.spec,
+            sni: configuration.tls.serverName,
+            alpn: configuration.protocolSpec.effectiveALPN,
             chainSignature: ""
         )
         registryLock.lock()
@@ -62,6 +68,9 @@ nonisolated final class NowhereClient {
             host: configuration.proxyHost,
             port: configuration.proxyPort,
             key: configuration.key,
+            spec: configuration.spec,
+            sni: configuration.tls.serverName,
+            alpn: configuration.protocolSpec.effectiveALPN,
             chainSignature: chainSignature
         )
 

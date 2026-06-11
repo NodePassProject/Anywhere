@@ -10,12 +10,24 @@ import CryptoKit
 import Security
 
 enum NowhereProtocol {
-    static let alpn = "nowhere/1"
     static let authFrameLength = 72
     static let maxTargetLength = 512
 
-    private static let authMagic = Data("NWQAUTH1".utf8)
-    private static let authInfo = Data("nowhere quic auth v1".utf8)
+    private static let maxInputLength = 255
+    private static let derivedALPNLength = 12
+    private static let specIDLength = 8
+    private static let authMagicLength = 8
+    private static let authInfoLength = 32
+    private static let specCommitmentLength = 32
+
+    struct EffectiveSpec: Hashable {
+        let effectiveALPN: String
+        let derivedALPN: String
+        let effectiveSpecID: String
+        let authMagic: Data
+        let authInfo: Data
+        let specCommitment: Data
+    }
 
     enum UDPType: UInt8 {
         case request = 1
@@ -30,7 +42,39 @@ enum NowhereProtocol {
         let payload: Data
     }
 
-    static func makeAuthFrame(key: String) throws -> Data {
+    static func buildEffectiveSpec(key: String, spec: String?, alpn: String?) throws -> EffectiveSpec {
+        let keyBytes = Data(key.utf8)
+        try validateRequired(keyBytes, name: "shared key")
+
+        let effectiveSpec = if let spec, !spec.isEmpty {
+            try validateOptional(Data(spec.utf8), name: "spec")
+        } else {
+            keyBytes
+        }
+
+        let specSalt = Data(SHA256.hash(data: effectiveSpec))
+        let prk = hkdfExtract(salt: specSalt, input: effectiveSpec)
+        let derivedALPN = base64URLNoPadding(hkdfExpand(prk: prk, info: Data("alpn".utf8), count: derivedALPNLength))
+
+        let effectiveALPN: String
+        if let alpn, !alpn.isEmpty {
+            try validateOptional(Data(alpn.utf8), name: "alpn")
+            effectiveALPN = alpn
+        } else {
+            effectiveALPN = derivedALPN
+        }
+
+        return EffectiveSpec(
+            effectiveALPN: effectiveALPN,
+            derivedALPN: derivedALPN,
+            effectiveSpecID: base64URLNoPadding(hkdfExpand(prk: prk, info: Data("spec id".utf8), count: specIDLength)),
+            authMagic: hkdfExpand(prk: prk, info: Data("auth magic".utf8), count: authMagicLength),
+            authInfo: hkdfExpand(prk: prk, info: Data("auth hmac info".utf8), count: authInfoLength),
+            specCommitment: hkdfExpand(prk: prk, info: Data("spec commitment".utf8), count: specCommitmentLength)
+        )
+    }
+
+    static func makeAuthFrame(key: String, protocolSpec: EffectiveSpec) throws -> Data {
         var nonce = Data(count: 32)
         let rv = nonce.withUnsafeMutableBytes { raw -> Int32 in
             guard let ptr = raw.baseAddress else { return errSecAllocate }
@@ -41,7 +85,8 @@ enum NowhereProtocol {
         }
 
         var message = Data()
-        message.append(authInfo)
+        message.append(protocolSpec.authInfo)
+        message.append(protocolSpec.specCommitment)
         message.append(nonce)
 
         let derived = Data(SHA256.hash(data: Data(key.utf8)))
@@ -51,10 +96,61 @@ enum NowhereProtocol {
         )
 
         var frame = Data(capacity: authFrameLength)
-        frame.append(authMagic)
+        frame.append(protocolSpec.authMagic)
         frame.append(nonce)
         frame.append(contentsOf: tag)
         return frame
+    }
+
+    private static func validateRequired(_ value: Data, name: String) throws {
+        guard !value.isEmpty else {
+            throw ProxyError.protocolError("Missing Nowhere \(name)")
+        }
+        try validateOptional(value, name: name)
+    }
+
+    @discardableResult
+    private static func validateOptional(_ value: Data, name: String) throws -> Data {
+        guard value.count <= maxInputLength else {
+            throw ProxyError.protocolError("Nowhere \(name) exceeds \(maxInputLength) bytes")
+        }
+        return value
+    }
+
+    private static func hkdfExtract(salt: Data, input: Data) -> Data {
+        let code = HMAC<SHA256>.authenticationCode(
+            for: input,
+            using: SymmetricKey(data: salt)
+        )
+        return Data(code)
+    }
+
+    private static func hkdfExpand(prk: Data, info: Data, count: Int) -> Data {
+        var output = Data()
+        var previous = Data()
+        var counter: UInt8 = 1
+
+        while output.count < count {
+            var message = Data()
+            message.append(previous)
+            message.append(info)
+            message.append(counter)
+            previous = Data(HMAC<SHA256>.authenticationCode(
+                for: message,
+                using: SymmetricKey(data: prk)
+            ))
+            output.append(previous)
+            counter &+= 1
+        }
+
+        return output.prefix(count)
+    }
+
+    private static func base64URLNoPadding(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
     }
 
     static func encodeTCPRequest(address: String) throws -> Data {
