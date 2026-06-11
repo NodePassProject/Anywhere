@@ -19,14 +19,12 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
     case qrCode = "qrCode"
     case link = "link"
     case manual = "manual"
-    case chain = "chain"
 
     var image: String {
         switch self {
         case .qrCode: "qrcode.viewfinder"
         case .link: "link"
         case .manual: "hand.point.up.left"
-        case .chain: "point.bottomleft.forward.to.point.topright.scurvepath.fill"
         }
     }
 
@@ -34,8 +32,7 @@ fileprivate enum Method: String, CaseIterable, Identifiable {
         switch self {
         case .qrCode: String(localized: "QR Code")
         case .link: String(localized: "Link")
-        case .manual: String(localized: "Manual Proxy")
-        case .chain: String(localized: "Chain")
+        case .manual: String(localized: "Manual")
         }
     }
 }
@@ -46,7 +43,6 @@ struct AddProxyView: View {
     @Environment(SubscriptionStore.self) private var subscriptionStore
     @Environment(\.dismiss) var dismiss
     @Binding var showingManualAddSheet: Bool
-    @Binding var showingChainAddSheet: Bool
     var deepLinkURL: String?
 
     @State private var selectedMethod: Method?
@@ -58,11 +54,9 @@ struct AddProxyView: View {
     @State private var errorMessage = ""
     @State private var showingRemnawaveHWIDAlert = false
     @State private var pendingSubscriptionURL = ""
-    @State private var showingNotEnoughProxiesAlert = false
 
-    init(showingManualAddSheet: Binding<Bool>, showingChainAddSheet: Binding<Bool>, deepLinkURL: String? = nil) {
+    init(showingManualAddSheet: Binding<Bool>, deepLinkURL: String? = nil) {
         _showingManualAddSheet = showingManualAddSheet
-        _showingChainAddSheet = showingChainAddSheet
         if let deepLinkURL {
             _selectedMethod = State(initialValue: .link)
             _linkURL = State(initialValue: deepLinkURL)
@@ -110,11 +104,6 @@ struct AddProxyView: View {
         } message: {
             Text("Enable \("Remnawave HWID") to continue.")
         }
-        .alert("Not Enough Proxies", isPresented: $showingNotEnoughProxiesAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("A proxy chain needs at least 2 proxies.")
-        }
     }
 
     private var isContinueDisabled: Bool {
@@ -128,7 +117,7 @@ struct AddProxyView: View {
     @ViewBuilder
     var header: some View {
         HStack {
-            Text("Add")
+            Text("Add Proxy")
                 .font(.title2)
                 .fontWeight(.semibold)
 
@@ -276,13 +265,6 @@ struct AddProxyView: View {
         case .manual:
             showingManualAddSheet = true
             dismiss()
-        case .chain:
-            if configStore.configurations.count < 2 {
-                showingNotEnoughProxiesAlert = true
-            } else {
-                showingChainAddSheet = true
-                dismiss()
-            }
         case .none:
             break
         }

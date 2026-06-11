@@ -10,8 +10,7 @@ import SwiftUI
 struct ChainEditorView: View {
     @Environment(ConfigurationStore.self) private var configStore
     @Environment(\.dismiss) private var dismiss
-
-    /// Existing chain to edit, or `nil` for a new chain.
+    
     var chain: ProxyChain?
     var onSave: (ProxyChain) -> Void
 

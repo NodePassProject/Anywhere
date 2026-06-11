@@ -19,7 +19,6 @@ struct HomeView: View {
 
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
-    @State private var showingChainAddSheet = false
 
     private var isConnected: Bool {
         viewModel.vpnStatus == .connected
@@ -68,17 +67,12 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet, showingChainAddSheet: $showingChainAddSheet)
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {
             ProxyEditorView { configuration in
                 configStore.add(configuration); viewModel.selectIfNone(configuration)
-            }
-        }
-        .sheet(isPresented: $showingChainAddSheet) {
-            ChainEditorView { chain in
-                chainStore.add(chain)
             }
         }
         .alert("VPN Error", isPresented: Binding(

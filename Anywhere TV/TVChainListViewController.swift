@@ -119,10 +119,17 @@ class TVChainListViewController: UITableViewController {
     // MARK: - Actions
 
     @objc private func addTapped() {
-        let addVC = TVAddProxyViewController()
-        let nav = UINavigationController(rootViewController: addVC)
-        nav.modalPresentationStyle = .fullScreen
-        present(nav, animated: true)
+        if ConfigurationStore.shared.configurations.count < 2 {
+            let alert = UIAlertController(
+                title: String(localized: "Not Enough Proxies"),
+                message: String(localized: "A proxy chain needs at least 2 proxies."),
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .cancel))
+            present(alert, animated: true)
+            return
+        }
+        presentEditor(for: nil)
     }
 
     @objc private func testAllTapped() {

@@ -8,7 +8,7 @@
 import SwiftUI
 import NetworkExtension
 
-private enum ListSegment {
+private enum ProxyType {
     case servers, chains
 }
 
@@ -20,10 +20,11 @@ struct ProxiesPageView: View {
     private let coordinator = ProxyRowCoordinator.shared
     private let chainCoordinator = ChainRowCoordinator.shared
 
-    @State private var segment: ListSegment = .servers
+    @State private var proxyType: ProxyType = .servers
     @State private var showingAddSheet = false
     @State private var showingManualAddSheet = false
     @State private var showingChainAddSheet = false
+    @State private var showingNotEnoughProxiesAlert = false
     @State private var configurationToEdit: ProxyConfiguration?
     @State private var chainToEdit: ProxyChain?
     @State private var updatingSubscription: Subscription?
@@ -43,7 +44,7 @@ struct ProxiesPageView: View {
 
     var body: some View {
         List {
-            if segment == .servers {
+            if proxyType == .servers {
                 Section {
                     ForEach(standaloneItems) { item in
                         proxyRow(item, editingDisabled: false)
@@ -68,23 +69,24 @@ struct ProxiesPageView: View {
             }
         }
         .overlay {
-            if segment == .servers, configStore.configurations.isEmpty {
+            if proxyType == .servers, configStore.configurations.isEmpty {
                 ContentUnavailableView("No Proxies", systemImage: "network")
-            } else if segment == .chains, chainCoordinator.models.isEmpty {
+            } else if proxyType == .chains, chainCoordinator.models.isEmpty {
                 ContentUnavailableView("No Chains", systemImage: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
             }
         }
-        .safeAreaInset(edge: .top) {
-            Picker("", selection: $segment) {
-                Text("Servers").tag(ListSegment.servers)
-                Text("Chains").tag(ListSegment.chains)
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 8)
-        }
         .navigationTitle("Proxies")
         .toolbar {
+            ToolbarItemGroup(placement: .principal) {
+                Picker("Proxy Type", selection: $proxyType) {
+                    Image(systemName: "server.rack")
+                        .tag(ProxyType.servers)
+                    Image(systemName: "point.bottomleft.forward.to.point.topright.scurvepath.fill")
+                        .tag(ProxyType.chains)
+                }
+                .pickerStyle(.segmented)
+            }
+            
             if standaloneItems.count > 1 || subscriptionStore.subscriptions.count > 1 || chainStore.chains.count > 1 {
                 if #available(iOS 27.0, *) {
                     ToolbarItemGroup {
@@ -112,7 +114,7 @@ struct ProxiesPageView: View {
             
             ToolbarItemGroup {
                 Button {
-                    switch segment {
+                    switch proxyType {
                     case .servers:
                         let visible = configStore.configurations.filter { configuration in
                             guard let subId = configuration.subscriptionId else { return true }
@@ -126,7 +128,16 @@ struct ProxiesPageView: View {
                     Label("Test All", systemImage: "gauge.with.dots.needle.67percent")
                 }
                 Button {
-                    showingAddSheet = true
+                    switch proxyType {
+                    case .servers:
+                        showingAddSheet = true
+                    case .chains:
+                        if configStore.configurations.count < 2 {
+                            showingNotEnoughProxiesAlert = true
+                        } else {
+                            showingChainAddSheet = true
+                        }
+                    }
                 } label: {
                     Label("Add", systemImage: "plus")
                 }
@@ -134,7 +145,7 @@ struct ProxiesPageView: View {
         }
         .sheet(isPresented: $showingAddSheet) {
             DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                AddProxyView(showingManualAddSheet: $showingManualAddSheet, showingChainAddSheet: $showingChainAddSheet)
+                AddProxyView(showingManualAddSheet: $showingManualAddSheet)
             }
         }
         .sheet(isPresented: $showingManualAddSheet) {
@@ -161,6 +172,11 @@ struct ProxiesPageView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(subscriptionErrorMessage)
+        }
+        .alert("Not Enough Proxies", isPresented: $showingNotEnoughProxiesAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("A proxy chain needs at least 2 proxies.")
         }
         .alert("Rename", isPresented: Binding(get: { renamingSubscription != nil }, set: { if !$0 { renamingSubscription = nil } })) {
             TextField("Name", text: $renameText)

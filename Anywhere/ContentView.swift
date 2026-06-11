@@ -10,13 +10,11 @@ import SwiftUI
 struct ContentView: View {
     @Environment(VPNViewModel.self) private var viewModel
     @Environment(ConfigurationStore.self) private var configStore
-    @Environment(ChainStore.self) private var chainStore
     @Environment(RoutingRuleSetStore.self) private var ruleSetStore
     @Environment(DeepLinkManager.self) private var deepLinkManager
     @State private var selectedTab: AppTab = .home
     @State private var showingDeepLinkAddSheet = false
     @State private var showingManualAddSheet = false
-    @State private var showingChainAddSheet = false
     @State private var pendingDeepLinkURL: String?
 
     private var showOrphanedAlert: Binding<Bool> {
@@ -38,18 +36,13 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showingDeepLinkAddSheet, onDismiss: { pendingDeepLinkURL = nil }) {
                 DynamicSheet(animation: .snappy(duration: 0.3, extraBounce: 0)) {
-                    AddProxyView(showingManualAddSheet: $showingManualAddSheet, showingChainAddSheet: $showingChainAddSheet, deepLinkURL: pendingDeepLinkURL)
+                    AddProxyView(showingManualAddSheet: $showingManualAddSheet, deepLinkURL: pendingDeepLinkURL)
                 }
             }
             .sheet(isPresented: $showingManualAddSheet) {
                 ProxyEditorView { configuration in
                     configStore.add(configuration)
                     viewModel.selectIfNone(configuration)
-                }
-            }
-            .sheet(isPresented: $showingChainAddSheet) {
-                ChainEditorView { chain in
-                    chainStore.add(chain)
                 }
             }
             .alert(String(localized: "Routing Rules Updated"), isPresented: showOrphanedAlert) {

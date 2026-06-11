@@ -14,13 +14,11 @@ class TVAddProxyViewController: UITableViewController {
     private enum Method: Int, CaseIterable {
         case link = 0
         case manual = 1
-        case chain = 2
 
         var title: String {
             switch self {
             case .link: String(localized: "Link")
-            case .manual: String(localized: "Manual Proxy")
-            case .chain: String(localized: "Chain")
+            case .manual: String(localized: "Manual")
             }
         }
 
@@ -28,7 +26,6 @@ class TVAddProxyViewController: UITableViewController {
             switch self {
             case .link: "link"
             case .manual: "hand.point.up.left"
-            case .chain: "point.bottomleft.forward.to.point.topright.scurvepath.fill"
             }
         }
     }
@@ -48,7 +45,7 @@ class TVAddProxyViewController: UITableViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = String(localized: "Add")
+        title = String(localized: "Add Proxy")
         tableView = UITableView(frame: .zero, style: .grouped)
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "cell")
         tableView.rowHeight = UITableView.automaticDimension
@@ -186,38 +183,6 @@ class TVAddProxyViewController: UITableViewController {
                 return
             }
 
-            if method == .chain {
-                if ConfigurationStore.shared.configurations.count < 2 {
-                    selectedMethod = nil
-                    tableView.reloadData()
-                    updateContinueButton()
-                    let alert = UIAlertController(
-                        title: String(localized: "Not Enough Proxies"),
-                        message: String(localized: "A proxy chain needs at least 2 proxies."),
-                        preferredStyle: .alert
-                    )
-                    alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .cancel))
-                    present(alert, animated: true)
-                    return
-                }
-                dismiss(animated: true) {
-                    let editor = TVChainEditorViewController { chain in
-                        ChainStore.shared.add(chain)
-                    }
-                    let nav = UINavigationController(rootViewController: editor)
-                    nav.modalPresentationStyle = .fullScreen
-                    // Present from the tab bar controller
-                    if let windowScene = UIApplication.shared.connectedScenes
-                        .compactMap({ $0 as? UIWindowScene })
-                        .first(where: { $0.activationState == .foregroundActive }),
-                       let rootViewController = windowScene.windows
-                        .first(where: { $0.isKeyWindow })?.rootViewController {
-                        rootViewController.present(nav, animated: true)
-                    }
-                }
-                return
-            }
-
             tableView.reloadData()
             updateContinueButton()
 
@@ -281,7 +246,7 @@ class TVAddProxyViewController: UITableViewController {
         let enabled: Bool
         switch selectedMethod {
         case .link: enabled = !linkURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isLoading
-        case .manual, .chain: enabled = true
+        case .manual: enabled = true
         case nil: enabled = false
         }
         navigationItem.rightBarButtonItem?.isEnabled = enabled
