@@ -293,8 +293,7 @@ nonisolated final class AnyTLSSession {
 
     private func handleInbound(_ data: Data) {
         lock.lock()
-        recvBuffer.append(data)
-        // Dispatch outside the lock — frame handlers may reenter via writeControl.
+        recvBuffer.appendCompacting(data)
         var dispatched: [(cmd: UInt8, sid: UInt32, payload: Data)] = []
         while recvBuffer.count >= AnyTLSProtocol.headerSize {
             guard let header = AnyTLSProtocol.decodeFrameHeader(recvBuffer) else { break }

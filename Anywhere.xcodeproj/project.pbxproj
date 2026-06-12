@@ -295,6 +295,7 @@
 				Networking/Socket/SocketHelpers.swift,
 				Utilities/ActivityTimer.swift,
 				Utilities/AnywhereLogger.swift,
+				"Utilities/Data+appendCompacting.swift",
 				"Utilities/Data+init.swift",
 				Utilities/DeviceCensorship.swift,
 				Utilities/SubscriptionDomainHelper.swift,
