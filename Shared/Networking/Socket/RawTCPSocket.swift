@@ -177,7 +177,8 @@ nonisolated class RawTCPSocket: RawTransport {
 
     /// Serial queue for all socket I/O; all DispatchSources are bound to it.
     private let ioQueue = DispatchQueue(label: AWCore.Identifier.rawTCPSocketQueue,
-                                        qos: .userInitiated)
+                                        qos: .userInitiated,
+                                        autoreleaseFrequency: .workItem)
 
     // MARK: Socket & DispatchSources
 

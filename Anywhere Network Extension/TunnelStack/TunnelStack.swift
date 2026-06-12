@@ -43,16 +43,19 @@ class TunnelStack {
     // MARK: Properties
 
     /// Serial queue for all lwIP operations (lwIP is not thread-safe).
-    /// `.userInitiated` — at default QoS the scheduler starves lwIP under load.
-    let lwipQueue = DispatchQueue(label: AWCore.Identifier.lwipQueue, qos: .userInitiated)
+    let lwipQueue = DispatchQueue(label: AWCore.Identifier.lwipQueue,
+                                  qos: .userInitiated,
+                                  autoreleaseFrequency: .workItem)
 
-    /// Serial queue owning the UDP data plane (``udpFlows``, ``ssUDPSessions``,
-    /// ``muxManager``). Cross-queue reads of ``lwipQueue``-owned config go
-    /// through the ``udpConfig()`` snapshot.
-    let udpQueue = DispatchQueue(label: AWCore.Identifier.udpQueue, qos: .userInitiated)
+    /// Serial queue owning the UDP data plane.
+    let udpQueue = DispatchQueue(label: AWCore.Identifier.udpQueue,
+                                 qos: .userInitiated,
+                                 autoreleaseFrequency: .workItem)
 
     /// Queue for writing packets back to the tunnel.
-    let outputQueue = DispatchQueue(label: AWCore.Identifier.outputQueue, qos: .userInitiated)
+    let outputQueue = DispatchQueue(label: AWCore.Identifier.outputQueue,
+                                    qos: .userInitiated,
+                                    autoreleaseFrequency: .workItem)
 
     var packetFlow: NEPacketTunnelFlow?
     var configuration: ProxyConfiguration?
