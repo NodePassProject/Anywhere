@@ -1004,7 +1004,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
             guard let data, !data.isEmpty else {
                 completion(VLESSEncryptionError.connectionClosed); return
             }
-            self.recvLock.withLock { self.inboundBuffer.append(data) }
+            self.recvLock.withLock { self.inboundBuffer.appendCompacting(data) }
             self.establishReadAEAD(completion: completion)
         }
     }
@@ -1045,7 +1045,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
                 guard let data, !data.isEmpty else {
                     completion(nil, error); return
                 }
-                self.recvLock.withLock { self.inboundBuffer.append(data) }
+                self.recvLock.withLock { self.inboundBuffer.appendCompacting(data) }
                 self.pumpRecord(completion: completion)
             }
             return
@@ -1062,7 +1062,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
                 guard let data, !data.isEmpty else {
                     completion(nil, error); return
                 }
-                self.recvLock.withLock { self.inboundBuffer.append(data) }
+                self.recvLock.withLock { self.inboundBuffer.appendCompacting(data) }
                 self.pumpRecord(completion: completion)
             }
             return
@@ -1095,7 +1095,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
                 guard let data, !data.isEmpty else {
                     completion(nil, error); return
                 }
-                self.recvLock.withLock { self.inboundBuffer.append(data) }
+                self.recvLock.withLock { self.inboundBuffer.appendCompacting(data) }
                 self.pumpRecord(completion: completion)
             }
             return

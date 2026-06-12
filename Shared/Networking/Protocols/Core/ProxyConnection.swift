@@ -136,4 +136,3 @@ nonisolated class ProxyConnection: ProxyConnectionProtocol {
         fatalError("Subclass must override cancel")
     }
 }
-
