@@ -71,7 +71,7 @@ class VPNViewModel {
             withoutSelectionPersistence { selectedConfiguration = resolved }
         } else if let savedConfigurationId = AWCore.getSelectedConfigurationId(),
                   let configuration = configurations.first(where: { $0.id == savedConfigurationId }) {
-            selectedConfiguration = configuration
+            withoutSelectionPersistence { selectedConfiguration = configuration }
         } else {
             selectedConfiguration = configurations.first
         }
