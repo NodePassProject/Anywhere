@@ -50,6 +50,10 @@ struct StatsResponse: Codable, Sendable {
     var tcpConnectionCount: Int
     var udpConnectionCount: Int
     var memoryBytes: UInt64
+    /// Cumulative seconds this session has been awake (excludes device sleep).
+    var wakeSeconds: TimeInterval
+    /// Cumulative seconds this session has spent in device sleep.
+    var sleepSeconds: TimeInterval
     /// Most recent first-hop TCP dial time in ms; nil until a dial this session.
     var dialMs: Int?
     /// Most recent proxy handshake time (TCP-connected → tunnel ready) in ms.
@@ -66,6 +70,8 @@ struct StatsResponse: Codable, Sendable {
         tcpConnectionCount: Int = 0,
         udpConnectionCount: Int = 0,
         memoryBytes: UInt64 = 0,
+        wakeSeconds: TimeInterval = 0,
+        sleepSeconds: TimeInterval = 0,
         dialMs: Int? = nil,
         handshakeMs: Int? = nil,
         avgDialMs: Int? = nil,
@@ -77,6 +83,8 @@ struct StatsResponse: Codable, Sendable {
         self.tcpConnectionCount = tcpConnectionCount
         self.udpConnectionCount = udpConnectionCount
         self.memoryBytes = memoryBytes
+        self.wakeSeconds = wakeSeconds
+        self.sleepSeconds = sleepSeconds
         self.dialMs = dialMs
         self.handshakeMs = handshakeMs
         self.avgDialMs = avgDialMs
@@ -93,6 +101,8 @@ struct StatsResponse: Codable, Sendable {
         tcpConnectionCount = try c.decodeIfPresent(Int.self, forKey: .tcpConnectionCount) ?? 0
         udpConnectionCount = try c.decodeIfPresent(Int.self, forKey: .udpConnectionCount) ?? 0
         memoryBytes = try c.decodeIfPresent(UInt64.self, forKey: .memoryBytes) ?? 0
+        wakeSeconds = try c.decodeIfPresent(TimeInterval.self, forKey: .wakeSeconds) ?? 0
+        sleepSeconds = try c.decodeIfPresent(TimeInterval.self, forKey: .sleepSeconds) ?? 0
         dialMs = try c.decodeIfPresent(Int.self, forKey: .dialMs)
         handshakeMs = try c.decodeIfPresent(Int.self, forKey: .handshakeMs)
         avgDialMs = try c.decodeIfPresent(Int.self, forKey: .avgDialMs)

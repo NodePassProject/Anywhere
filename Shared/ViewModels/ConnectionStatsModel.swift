@@ -21,7 +21,11 @@ class ConnectionStatsModel {
     
     private(set) var tcpConnectionCount: Int = 0
     private(set) var udpConnectionCount: Int = 0
+    
     private(set) var memoryBytes: UInt64 = 0
+    
+    private(set) var wakeSeconds: TimeInterval = 0
+    private(set) var sleepSeconds: TimeInterval = 0
     
     private(set) var dialMs: Int?
     private(set) var handshakeMs: Int?
@@ -62,6 +66,8 @@ class ConnectionStatsModel {
         tcpConnectionCount = 0
         udpConnectionCount = 0
         memoryBytes = 0
+        wakeSeconds = 0
+        sleepSeconds = 0
         dialMs = nil
         handshakeMs = nil
         avgDialMs = nil
@@ -94,6 +100,8 @@ class ConnectionStatsModel {
         self.tcpConnectionCount = stats.tcpConnectionCount
         self.udpConnectionCount = stats.udpConnectionCount
         self.memoryBytes = stats.memoryBytes
+        self.wakeSeconds = stats.wakeSeconds
+        self.sleepSeconds = stats.sleepSeconds
         self.dialMs = stats.dialMs
         self.handshakeMs = stats.handshakeMs
         self.avgDialMs = stats.avgDialMs
@@ -133,6 +141,8 @@ extension ConnectionStatsModel {
         model.tcpConnectionCount = 5
         model.udpConnectionCount = 64
         model.memoryBytes = 31_000_000
+        model.wakeSeconds = 3 * 3600 + 24 * 60
+        model.sleepSeconds = 47 * 60
         model.dialMs = 62
         model.handshakeMs = 200
         model.avgDialMs = 50

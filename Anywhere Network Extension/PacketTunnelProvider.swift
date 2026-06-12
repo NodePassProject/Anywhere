@@ -280,13 +280,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     override func sleep(completionHandler: @escaping () -> Void) {
-        // The kernel tears down outbound sockets across sleep, so release the
-        // upstream transports now; best-effort — wake() rebuilds everything anyway.
+        statsRecorder.noteSleep()
         tunnelStack.suspendOutbound()
         completionHandler()
     }
 
     override func wake() {
+        statsRecorder.noteWake()
         tunnelStack.handleWake()
     }
 
