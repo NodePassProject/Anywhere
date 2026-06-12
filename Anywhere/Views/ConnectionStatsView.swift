@@ -35,6 +35,7 @@ struct ConnectionStatsView: View {
             }
         }
         .frame(minWidth: 350, maxWidth: .infinity)
+        .environment(\.statCardUnitLength, Self.unitLength(for: availableWidth))
         .onGeometryChange(for: CGFloat.self) { proxy in
             proxy.size.width
         } action: { width in
@@ -74,7 +75,13 @@ struct ConnectionStatsView: View {
     }
 
     private static func columnCount(for width: CGFloat) -> Int {
-        max(2, Int((width + StatCardSize.spacing + 0.5) / (StatCardSize.unitLength + StatCardSize.spacing)))
+        max(2, Int((width + StatCardSize.spacing) / (StatCardSize.minUnitLength + StatCardSize.spacing)))
+    }
+    
+    private static func unitLength(for width: CGFloat) -> CGFloat {
+        let columns = columnCount(for: width)
+        let unit = (width - CGFloat(columns - 1) * StatCardSize.spacing) / CGFloat(columns)
+        return min(max(unit, StatCardSize.minUnitLength), StatCardSize.maxUnitLength)
     }
 
     private static func packRows(_ units: [StatUnit], columns: Int) -> [[StatUnit]] {
@@ -190,10 +197,10 @@ struct ConnectionStatsView: View {
 enum StatCardSize {
     case small
     case medium
-
-    /// Edge of a 1×1 card; every card is one unit tall.
-    static let unitLength: CGFloat = 170
-    /// Gap between adjacent cards, horizontal and vertical.
+    
+    static let minUnitLength: CGFloat = 160
+    static let maxUnitLength: CGFloat = 200
+    
     static let spacing: CGFloat = 10
 
     var columnSpan: Int {
@@ -203,16 +210,22 @@ enum StatCardSize {
         }
     }
 
-    var width: CGFloat {
-        CGFloat(columnSpan) * Self.unitLength + CGFloat(columnSpan - 1) * Self.spacing
+    func width(unitLength: CGFloat) -> CGFloat {
+        CGFloat(columnSpan) * unitLength + CGFloat(columnSpan - 1) * Self.spacing
     }
+}
 
-    var height: CGFloat { Self.unitLength }
+extension EnvironmentValues {
+    /// Edge of a 1×1 stat card, set by `ConnectionStatsView` from the measured
+    /// width.
+    @Entry var statCardUnitLength: CGFloat = 170
 }
 
 // MARK: - StatCard
 
 struct StatCard<Content: View>: View {
+    @Environment(\.statCardUnitLength) private var unitLength
+
     private let titleKey: LocalizedStringKey
     private let systemImage: String
     private let size: StatCardSize
@@ -238,7 +251,7 @@ struct StatCard<Content: View>: View {
             content
         }
         .padding()
-        .frame(width: size.width, height: size.height, alignment: .topLeading)
+        .frame(width: size.width(unitLength: unitLength), height: unitLength, alignment: .topLeading)
         .modifier(StatCardChrome())
     }
 }

@@ -105,6 +105,7 @@ struct HomeView: View {
 
     private var configurationCard: some View {
         ConfigurationCard(isConnected: isConnected, showingAddSheet: $showingAddSheet)
+            .frame(maxWidth: 500)
     }
 }
 
