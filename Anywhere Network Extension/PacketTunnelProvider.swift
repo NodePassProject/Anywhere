@@ -79,8 +79,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     // MARK: - Tunnel Lifecycle
-
-    override func startTunnel(options: [String : NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+    
+    override func startTunnel(options: [String : NSObject]? = nil) async throws {
         // App starts pass the configuration in `options`; Settings/On-Demand starts
         // pass nil, so fall back to the last persisted configuration.
         let configuration: ProxyConfiguration?
@@ -92,52 +92,42 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         } else {
             configuration = nil
         }
-
+        
         guard let configuration else {
             logger.error("[VPN] Invalid or missing configuration")
-            completionHandler(NSError(domain: AWCore.Identifier.errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"]))
-            return
+            throw NSError(domain: AWCore.Identifier.errorDomain, code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid configuration"])
         }
-
+        
         tunnelStack.onTunnelSettingsNeedReapply = { [weak self] in
             self?.reapplyTunnelSettings()
         }
-
+        
         let settings = buildTunnelSettings()
-
-        setTunnelNetworkSettings(settings) { error in
-            if let error {
-                logger.error("[VPN] Failed to set tunnel settings: \(error.localizedDescription)")
-                completionHandler(error)
-                return
-            }
-            
+        
+        Task {
+            do {
+                try await setTunnelNetworkSettings(settings)
+                
 #if os(iOS)
-            if #available(iOS 18.0, *) {
-                ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
-            }
+                if #available(iOS 18.0, *) {
+                    ControlCenter.shared.reloadControls(ofKind: "com.argsment.Anywhere.Widget.VPNToggle")
+                }
 #endif
-            
-            self.tunnelStack.start(packetFlow: self.packetFlow,
-                                 configuration: configuration)
-            self.startMonitoringPath()
-            self.statsRecorder.start { [weak self] in
-                guard let self else {
+                
+                self.tunnelStack.start(packetFlow: self.packetFlow,
+                                       configuration: configuration)
+                self.startMonitoringPath()
+                self.statsRecorder.start {
                     return StatsRecorder.RawValues(
-                        byteCounts: TrafficByteCounts(),
-                        tcpConnectionCount: 0, udpConnectionCount: 0,
-                        memoryBytes: 0
+                        byteCounts: self.tunnelStack.byteCounts,
+                        tcpConnectionCount: self.tunnelStack.activeTCPConnections,
+                        udpConnectionCount: self.tunnelStack.activeUDPConnections,
+                        memoryBytes: Self.memoryFootprint()
                     )
                 }
-                return StatsRecorder.RawValues(
-                    byteCounts: self.tunnelStack.byteCounts,
-                    tcpConnectionCount: self.tunnelStack.activeTCPConnections,
-                    udpConnectionCount: self.tunnelStack.activeUDPConnections,
-                    memoryBytes: Self.memoryFootprint()
-                )
+            } catch {
+                logger.error("[VPN] Failed to set tunnel settings: \(error.localizedDescription)")
             }
-
-            completionHandler(nil)
         }
     }
 
@@ -279,10 +269,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         return kr == KERN_SUCCESS ? info.phys_footprint : 0
     }
 
-    override func sleep(completionHandler: @escaping () -> Void) {
+    override func sleep() async {
         statsRecorder.noteSleep()
         tunnelStack.suspendOutbound()
-        completionHandler()
     }
 
     override func wake() {
