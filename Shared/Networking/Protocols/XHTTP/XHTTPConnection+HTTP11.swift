@@ -228,7 +228,6 @@ extension XHTTPConnection {
         var path = configuration.normalizedPath
         var request = ""
         applySessionId(to: &request, path: &path)
-        if path.last != "/" { path += "/" }
         let metaQuery = queryParamsForMeta()
         request = buildRequestLine(method: "GET", path: path, queryParts: [metaQuery]) + request
         request += "Host: \(configuration.host)\r\n"
@@ -247,7 +246,6 @@ extension XHTTPConnection {
         var path = configuration.normalizedPath
         var request = ""
         applySessionId(to: &request, path: &path)
-        if path.last != "/" { path += "/" }
         let metaQuery = queryParamsForMeta()
         request = buildRequestLine(method: method, path: path, queryParts: [metaQuery]) + request
         request += "Host: \(configuration.host)\r\n"

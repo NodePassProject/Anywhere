@@ -72,6 +72,12 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
     /// Auto-determined by placement if empty.
     let seqKey: String
 
+    // Session ID generation (from extra)
+    let sessionIDTable: String
+    /// Length range (Xray `RangeConfig`, half-open from/to); 0 → random UUID.
+    let sessionIDLengthFrom: Int
+    let sessionIDLengthTo: Int
+
     // Uplink data placement (from extra)
     let uplinkDataPlacement: XHTTPPlacement
     let uplinkDataKey: String
@@ -104,6 +110,9 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         sessionKey: String = "",
         seqPlacement: XHTTPPlacement = .path,
         seqKey: String = "",
+        sessionIDTable: String = "",
+        sessionIDLengthFrom: Int = 0,
+        sessionIDLengthTo: Int = 0,
         uplinkDataPlacement: XHTTPPlacement = .body,
         uplinkDataKey: String = "",
         uplinkChunkSize: Int = 0,
@@ -128,6 +137,9 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         self.sessionKey = sessionKey
         self.seqPlacement = seqPlacement
         self.seqKey = seqKey
+        self.sessionIDTable = sessionIDTable
+        self.sessionIDLengthFrom = sessionIDLengthFrom
+        self.sessionIDLengthTo = sessionIDLengthTo
         self.uplinkDataPlacement = uplinkDataPlacement
         self.uplinkDataKey = uplinkDataKey
         self.uplinkChunkSize = uplinkChunkSize
@@ -155,6 +167,9 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         sessionKey = try c.decodeIfPresent(String.self, forKey: .sessionKey) ?? ""
         seqPlacement = try c.decodeIfPresent(XHTTPPlacement.self, forKey: .seqPlacement) ?? .path
         seqKey = try c.decodeIfPresent(String.self, forKey: .seqKey) ?? ""
+        sessionIDTable = try c.decodeIfPresent(String.self, forKey: .sessionIDTable) ?? ""
+        sessionIDLengthFrom = try c.decodeIfPresent(Int.self, forKey: .sessionIDLengthFrom) ?? 0
+        sessionIDLengthTo = try c.decodeIfPresent(Int.self, forKey: .sessionIDLengthTo) ?? 0
         uplinkDataPlacement = try c.decodeIfPresent(XHTTPPlacement.self, forKey: .uplinkDataPlacement) ?? .body
         uplinkDataKey = try c.decodeIfPresent(String.self, forKey: .uplinkDataKey) ?? ""
         uplinkChunkSize = try c.decodeIfPresent(Int.self, forKey: .uplinkChunkSize) ?? 0
@@ -201,6 +216,42 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         case .cookie, .query: return "x_seq"
         default: return ""
         }
+    }
+    
+    nonisolated static let predefinedSessionIDTables: [String: String] = [
+        "ALPHABET": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "Alphabet": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+        "BASE36": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "Base62": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+        "HEX": "0123456789ABCDEF",
+        "alphabet": "abcdefghijklmnopqrstuvwxyz",
+        "base36": "0123456789abcdefghijklmnopqrstuvwxyz",
+        "hex": "0123456789abcdef",
+        "number": "0123456789",
+    ]
+    
+    nonisolated func generateSessionID() -> String {
+        var table = sessionIDTable
+        if let predefined = XHTTPConfiguration.predefinedSessionIDTables[table] {
+            table = predefined
+        }
+        // Mirrors RangeConfig.rand() → RandBetween(from, to): half-open [from, to); from==to → from.
+        let length: Int
+        if sessionIDLengthTo <= sessionIDLengthFrom {
+            length = sessionIDLengthFrom
+        } else {
+            length = Int.random(in: sessionIDLengthFrom..<sessionIDLengthTo)
+        }
+        guard !table.isEmpty, length > 0 else {
+            return UUID().uuidString.lowercased()
+        }
+        let chars = Array(table)
+        var id = ""
+        id.reserveCapacity(length)
+        for _ in 0..<length {
+            id.append(chars[Int.random(in: 0..<chars.count)])
+        }
+        return id
     }
 
     func generatePadding() -> String {
@@ -371,6 +422,17 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         let seqPlacement = XHTTPPlacement(rawValue: extra["seqPlacement"] as? String ?? "path") ?? .path
         let seqKey = extra["seqKey"] as? String ?? ""
 
+        let sessionIDTable = extra["sessionIDTable"] as? String ?? ""
+        var sessionIDLengthFrom = 0
+        var sessionIDLengthTo = 0
+        if let range = extra["sessionIDLength"] as? [String: Any] {
+            sessionIDLengthFrom = range["from"] as? Int ?? 0
+            sessionIDLengthTo = range["to"] as? Int ?? 0
+        } else if let val = extra["sessionIDLength"] as? Int {
+            sessionIDLengthFrom = val
+            sessionIDLengthTo = val
+        }
+
         let uplinkDataPlacement = XHTTPPlacement(rawValue: extra["uplinkDataPlacement"] as? String ?? "body") ?? .body
 
         // Defaults depend on placement — matches Xray-core Build() in transport_internet.go.
@@ -410,6 +472,9 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             sessionKey: sessionKey,
             seqPlacement: seqPlacement,
             seqKey: seqKey,
+            sessionIDTable: sessionIDTable,
+            sessionIDLengthFrom: sessionIDLengthFrom,
+            sessionIDLengthTo: sessionIDLengthTo,
             uplinkDataPlacement: uplinkDataPlacement,
             uplinkDataKey: uplinkDataKey,
             uplinkChunkSize: uplinkChunkSize,

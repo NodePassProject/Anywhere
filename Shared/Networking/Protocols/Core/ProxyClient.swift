@@ -1157,7 +1157,7 @@ nonisolated class ProxyClient {
             let downloadHTTPVersion = decideXHTTPHTTPVersion(for: downloadSettings.securityLayer)
             connectXHTTPDetached(
                 xhttpConfig: xhttpConfig, downloadSettings: downloadSettings,
-                mode: resolvedMode, sessionId: UUID().uuidString.lowercased(),
+                mode: resolvedMode, sessionId: xhttpConfig.generateSessionID(),
                 mainHTTPVersion: httpVersion, downloadHTTPVersion: downloadHTTPVersion,
                 command: command, destinationHost: destinationHost, destinationPort: destinationPort,
                 initialData: initialData, completion: completion
@@ -1165,7 +1165,7 @@ nonisolated class ProxyClient {
             return
         }
 
-        let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? UUID().uuidString.lowercased() : ""
+        let sessionId = (resolvedMode == .packetUp || resolvedMode == .streamUp) ? xhttpConfig.generateSessionID() : ""
         connectXHTTPCombined(
             xhttpConfig: xhttpConfig, mode: resolvedMode, sessionId: sessionId, httpVersion: httpVersion,
             command: command, destinationHost: destinationHost, destinationPort: destinationPort,
