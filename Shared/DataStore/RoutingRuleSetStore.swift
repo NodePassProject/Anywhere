@@ -104,12 +104,16 @@ class RoutingRuleSetStore {
     }()
 
     private static let serviceCatalog = ServiceCatalog.load()
+    
+    @ObservationIgnored private var loadedBlob: Data?
 
     private init() {
         bypassCountryCode = AWCore.getBypassCountryCode()
         let assignments = AWCore.getRuleSetAssignments()
 
-        let split = Self.loadCustomSplit()
+        let data = JSONBlobStore.shared.load(.customRuleSets)
+        loadedBlob = data
+        let split = Self.decodeCustomSplit(from: data)
         customRuleSets = split.live
         customTombstones = split.tombstones
 
@@ -117,14 +121,19 @@ class RoutingRuleSetStore {
         scheduleSyncToAppGroup()
     }
     
-    func reload() {
-        bypassCountryCode = AWCore.getBypassCountryCode()
-        let assignments = AWCore.getRuleSetAssignments()
-        
-        let split = Self.loadCustomSplit()
-        customRuleSets = split.live
-        customTombstones = split.tombstones
-        
+    func reload() async {
+        let previous = loadedBlob
+        let outcome = await Task.detached(priority: .utility) {
+            () -> (data: Data?, live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet])? in
+            let data = JSONBlobStore.shared.load(.customRuleSets)
+            guard data != previous else { return nil }
+            let split = Self.decodeCustomSplit(from: data)
+            return (data, split.live, split.tombstones)
+        }.value
+        guard let outcome else { return }
+        loadedBlob = outcome.data
+        customRuleSets = outcome.live
+        customTombstones = outcome.tombstones
         rebuildRuleSets()
         scheduleSyncToAppGroup()
     }
@@ -362,8 +371,9 @@ class RoutingRuleSetStore {
         AWCore.setRuleSetAssignments(dict)
     }
 
-    private static func loadCustomSplit() -> (live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet]) {
-        guard let data = JSONBlobStore.shared.load(.customRuleSets),
+    /// `nonisolated` so the remote-change refresh can decode off the main actor (see `reload`).
+    nonisolated private static func decodeCustomSplit(from data: Data?) -> (live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet]) {
+        guard let data,
               let all = JSONDecoder().decodeSkippingInvalid([CustomRoutingRuleSet].self, from: data) else {
             return ([], [])
         }

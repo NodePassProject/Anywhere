@@ -528,13 +528,13 @@ struct MITMSnapshot: Codable, Equatable {
         try c.encode(enabled, forKey: .enabled)
         try c.encode(ruleSets, forKey: .ruleSets)
     }
-
-    /// Best-effort decode; a missing or undecodable blob yields `empty` (MITM
-    /// disabled). Falls back to the legacy UserDefaults key so the extension
-    /// keeps working during the upgrade window before the host migrates.
+    
     static func load() -> MITMSnapshot {
-        if let data = JSONBlobStore.shared.load(.mitm),
-           let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
+        decode(from: JSONBlobStore.shared.load(.mitm))
+    }
+    
+    nonisolated static func decode(from data: Data?) -> MITMSnapshot {
+        if let data, let snapshot = try? JSONDecoder().decode(MITMSnapshot.self, from: data) {
             return snapshot
         }
         if let data = UserDefaults(suiteName: AWCore.Identifier.appGroupSuite)?.data(forKey: legacyMITMDefaultsKey),

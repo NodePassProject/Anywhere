@@ -16,17 +16,30 @@ class SubscriptionStore {
 
     private(set) var subscriptions: [Subscription] = []
     private var tombstones: [Subscription] = []
+    
+    @ObservationIgnored private var loadedBlob: Data?
 
     private init() {
-        let split = Self.loadSplit()
+        let data = JSONBlobStore.shared.load(.subscriptions)
+        loadedBlob = data
+        let split = Self.decodeSplit(from: data)
         subscriptions = split.live
         tombstones = split.tombstones
     }
-
-    func reload() {
-        let split = Self.loadSplit()
-        subscriptions = split.live
-        tombstones = split.tombstones
+    
+    func reload() async {
+        let previous = loadedBlob
+        let outcome = await Task.detached(priority: .utility) {
+            () -> (data: Data?, live: [Subscription], tombstones: [Subscription])? in
+            let data = JSONBlobStore.shared.load(.subscriptions)
+            guard data != previous else { return nil }
+            let split = Self.decodeSplit(from: data)
+            return (data, split.live, split.tombstones)
+        }.value
+        guard let outcome else { return }
+        loadedBlob = outcome.data
+        subscriptions = outcome.live
+        tombstones = outcome.tombstones
     }
 
     // MARK: - CRUD
@@ -57,10 +70,11 @@ class SubscriptionStore {
     }
 
     // MARK: - Persistence
-
-    private static func loadSplit() -> (live: [Subscription], tombstones: [Subscription]) {
-        guard let data = JSONBlobStore.shared.load(.subscriptions) else { return ([], []) }
-        let all = JSONDecoder().decodeSkippingInvalid([Subscription].self, from: data) ?? []
+    
+    nonisolated private static func decodeSplit(from data: Data?) -> (live: [Subscription], tombstones: [Subscription]) {
+        guard let data, let all = JSONDecoder().decodeSkippingInvalid([Subscription].self, from: data) else {
+            return ([], [])
+        }
         return Tombstone.split(all)
     }
     

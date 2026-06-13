@@ -16,9 +16,13 @@ class ConfigurationStore {
 
     private(set) var configurations: [ProxyConfiguration] = []
     private var tombstones: [ProxyConfiguration] = []
+    
+    @ObservationIgnored private var loadedBlob: Data?
 
     private init() {
-        let split = Self.loadSplit()
+        let data = JSONBlobStore.shared.load(.configurations)
+        loadedBlob = data
+        let split = Self.decodeSplit(from: data)
         configurations = split.live
         tombstones = split.tombstones
         // Must stay deferred: coordinate() reads ChainStore.shared, and the two stores reference
@@ -27,10 +31,19 @@ class ConfigurationStore {
         Task { @MainActor in self.coordinate() }
     }
     
-    func reload() {
-        let split = Self.loadSplit()
-        configurations = split.live
-        tombstones = split.tombstones
+    func reload() async {
+        let previous = loadedBlob
+        let outcome = await Task.detached(priority: .utility) {
+            () -> (data: Data?, live: [ProxyConfiguration], tombstones: [ProxyConfiguration])? in
+            let data = await JSONBlobStore.shared.load(.configurations)
+            guard data != previous else { return nil }
+            let split = Self.decodeSplit(from: data)
+            return (data, split.live, split.tombstones)
+        }.value
+        guard let outcome else { return }
+        loadedBlob = outcome.data
+        configurations = outcome.live
+        tombstones = outcome.tombstones
         coordinate()
     }
 
@@ -110,10 +123,11 @@ class ConfigurationStore {
     }
 
     // MARK: - Persistence
-
-    private static func loadSplit() -> (live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) {
-        guard let data = JSONBlobStore.shared.load(.configurations) else { return ([], []) }
-        let all = JSONDecoder().decodeSkippingInvalid([ProxyConfiguration].self, from: data) ?? []
+    
+    nonisolated private static func decodeSplit(from data: Data?) -> (live: [ProxyConfiguration], tombstones: [ProxyConfiguration]) {
+        guard let data, let all = JSONDecoder().decodeSkippingInvalid([ProxyConfiguration].self, from: data) else {
+            return ([], [])
+        }
         return Tombstone.split(all)
     }
     

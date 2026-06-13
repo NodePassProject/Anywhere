@@ -143,8 +143,9 @@ enum CloudBlobSync {
             logger.info("[iCloud] Store changed remotely; reloading synced stores")
             Task { @MainActor in scheduleRefresh() }
         }
+        Task.detached(priority: .utility) { await JSONBlobStore.shared.compactDuplicates() }
     }
-    
+
     @MainActor
     private static func scheduleRefresh() {
         guard AWCore.getICloudSyncEnabled() else { return }
@@ -152,16 +153,17 @@ enum CloudBlobSync {
         debounce = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
-            refresh()
+            await refresh()
         }
     }
 
     @MainActor
-    private static func refresh() {
-        SubscriptionStore.shared.reload()
-        ChainStore.shared.reload()
-        ConfigurationStore.shared.reload()   // after chains: coordinate() reads configs + chains
-        RoutingRuleSetStore.shared.reload()
-        MITMRuleSetStore.shared.reload()
+    private static func refresh() async {
+        await SubscriptionStore.shared.reload()
+        await ChainStore.shared.reload()
+        await ConfigurationStore.shared.reload()   // after chains: coordinate() reads configs + chains
+        await RoutingRuleSetStore.shared.reload()
+        await MITMRuleSetStore.shared.reload()
+        Task.detached(priority: .utility) { await JSONBlobStore.shared.compactDuplicates() }
     }
 }
