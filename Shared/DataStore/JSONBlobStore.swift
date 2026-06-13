@@ -10,13 +10,11 @@ import SwiftData
 
 private let logger = AnywhereLogger(category: "JSONBlobStore")
 
-/// Opaque JSON blob keyed by name; SwiftData is only the byte-level container,
-/// preserving the existing JSON wire format and decoders.
 @Model
 final class JSONBlob {
-    @Attribute(.unique) var key: String
-    var data: Data
-    var updatedAt: Date
+    var key: String = ""
+    @Attribute(.externalStorage) var data: Data = Data()
+    var updatedAt: Date = Date()
 
     init(key: String, data: Data, updatedAt: Date = .now) {
         self.key = key
@@ -25,9 +23,6 @@ final class JSONBlob {
     }
 }
 
-/// Blob store in the App Group container, shared by the host app (sole writer) and the
-/// Network Extension (read-only). Calls are serialised through an internal queue, and each
-/// uses a fresh `ModelContext` so cross-process reads observe the latest committed state.
 final class JSONBlobStore: @unchecked Sendable {
     static let shared = JSONBlobStore()
 
@@ -40,111 +35,95 @@ final class JSONBlobStore: @unchecked Sendable {
     }
 
     private let container: ModelContainer?
-    private let queue = DispatchQueue(label: "com.argsment.Anywhere.jsonblobstore")
+    let usesCloudKit: Bool
+
+    static var mergeResolver: ((Key, [(data: Data, updatedAt: Date)]) -> Data)?
 
     private init() {
-        let containerURL = FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: AWCore.Identifier.appGroupSuite)!
-        let config = ModelConfiguration(groupContainer: .identifier("group.com.argsment.Anywhere"))
-        do {
-            container = try ModelContainer(for: JSONBlob.self, configurations: config)
-        } catch {
-            logger.error("Failed to open JSONBlob store: \(error)")
-            container = nil
+        let wantsCloudKit = AWCore.isHostApp && AWCore.getICloudSyncEnabled()
+        if wantsCloudKit, let cloudContainer = Self.makeContainer(cloudKit: true) {
+            container = cloudContainer
+            usesCloudKit = true
+        } else {
+            container = Self.makeContainer(cloudKit: false)
+            usesCloudKit = false
         }
-        // Migration is host-only — the NE must not delete legacy data the host hasn't migrated.
-        if container != nil, Bundle.main.bundleIdentifier == AWCore.Identifier.bundle {
-            migrateLegacyDataIfNeeded(containerURL: containerURL)
+    }
+
+    private static func makeContainer(cloudKit: Bool) -> ModelContainer? {
+        let database: ModelConfiguration.CloudKitDatabase =
+            cloudKit ? .private(AWCore.Identifier.iCloudContainer) : .none
+        let config = ModelConfiguration(
+            groupContainer: .identifier(AWCore.Identifier.appGroupSuite),
+            cloudKitDatabase: database
+        )
+        do {
+            return try ModelContainer(for: JSONBlob.self, configurations: config)
+        } catch {
+            logger.error("Failed to open JSONBlob store (cloudKit: \(cloudKit)): \(error)")
+            return nil
         }
     }
 
     // MARK: - Public API
 
     func load(_ key: Key) -> Data? {
-        queue.sync {
-            guard let container else { return nil }
-            let context = ModelContext(container)
-            let raw = key.rawValue
-            let predicate = #Predicate<JSONBlob> { $0.key == raw }
-            var descriptor = FetchDescriptor<JSONBlob>(predicate: predicate)
-            descriptor.fetchLimit = 1
-            return (try? context.fetch(descriptor))?.first?.data
+        guard let container else { return nil }
+        let context = ModelContext(container)
+        let raw = key.rawValue
+        let predicate = #Predicate<JSONBlob> { $0.key == raw }
+        let rows = (try? context.fetch(FetchDescriptor<JSONBlob>(predicate: predicate))) ?? []
+        guard rows.count > 1 else { return rows.first?.data }
+
+        let pairs = rows.map { (data: $0.data, updatedAt: $0.updatedAt) }
+        guard let resolver = Self.mergeResolver else {
+            return pairs.max { $0.updatedAt < $1.updatedAt }?.data
+        }
+
+        let merged = resolver(key, pairs)
+        // CloudKit can't enforce key uniqueness, so devices accumulate duplicate rows per key.
+        // We just merged all of them losslessly, so collapse them back into one row; the deletion
+        // propagates through CloudKit and keeps every device converging on a single row.
+        compact(rows, into: merged, context: context)
+        return merged
+    }
+
+    /// Collapses the duplicate `rows` for a key into their newest row carrying `merged`, deleting
+    /// the rest. Host-only: the cloud-backed store is the single writer that owns this cleanup.
+    private func compact(_ rows: [JSONBlob], into merged: Data, context: ModelContext) {
+        guard usesCloudKit, rows.count > 1 else { return }
+        let ordered = rows.sorted { $0.updatedAt > $1.updatedAt }
+        guard let survivor = ordered.first else { return }
+        if survivor.data != merged { survivor.data = merged }
+        for loser in ordered.dropFirst() {
+            context.delete(loser)
+        }
+        do {
+            try context.save()
+        } catch {
+            logger.error("Failed to compact duplicate JSON blobs: \(error)")
         }
     }
 
     func save(_ key: Key, data: Data) {
-        queue.sync {
-            guard let container else { return }
-            let context = ModelContext(container)
-            let raw = key.rawValue
-            let predicate = #Predicate<JSONBlob> { $0.key == raw }
-            var descriptor = FetchDescriptor<JSONBlob>(predicate: predicate)
-            descriptor.fetchLimit = 1
-            do {
-                if let existing = try context.fetch(descriptor).first {
-                    existing.data = data
-                    existing.updatedAt = .now
-                } else {
-                    context.insert(JSONBlob(key: raw, data: data))
-                }
-                try context.save()
-            } catch {
-                logger.error("Failed to save JSON blob \(raw): \(error)")
+        guard let container else { return }
+        let context = ModelContext(container)
+        let raw = key.rawValue
+        let predicate = #Predicate<JSONBlob> { $0.key == raw }
+        let descriptor = FetchDescriptor<JSONBlob>(
+            predicate: predicate,
+            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
+        )
+        do {
+            if let existing = try context.fetch(descriptor).first {
+                existing.data = data
+                existing.updatedAt = .now
+            } else {
+                context.insert(JSONBlob(key: raw, data: data))
             }
+            try context.save()
+        } catch {
+            logger.error("Failed to save JSON blob \(raw): \(error)")
         }
-    }
-
-    // MARK: - Migration
-
-    /// Idempotent migration from pre-SwiftData JSON files and UserDefaults blobs. Each source
-    /// is written to SwiftData and verified by re-read before removal, so a failure leaves the
-    /// legacy source in place for retry on the next launch.
-    private func migrateLegacyDataIfNeeded(containerURL: URL) {
-        // Very old builds left JSON files in the per-app documents directory.
-        AWCore.migrateToAppGroup(fileName: "configurations.json")
-        AWCore.migrateToAppGroup(fileName: "subscriptions.json")
-        AWCore.migrateToAppGroup(fileName: "chains.json")
-
-        let legacyFiles: [(Key, URL)] = [
-            (.configurations, containerURL.appendingPathComponent("configurations.json")),
-            (.subscriptions, containerURL.appendingPathComponent("subscriptions.json")),
-            (.chains, containerURL.appendingPathComponent("chains.json")),
-        ]
-        for (key, url) in legacyFiles {
-            migrateFileIfNeeded(key: key, url: url)
-        }
-
-        let userDefaults = UserDefaults(suiteName: AWCore.Identifier.appGroupSuite)!
-        let legacyDefaults: [(Key, String)] = [
-            (.customRuleSets, "customRuleSets"),
-            (.mitm, "mitmData"),
-        ]
-        for (key, defaultsKey) in legacyDefaults {
-            migrateUserDefaultsIfNeeded(key: key, userDefaults: userDefaults, defaultsKey: defaultsKey)
-        }
-    }
-
-    private func migrateFileIfNeeded(key: Key, url: URL) {
-        let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: url.path) else { return }
-        if load(key) != nil {
-            try? fileManager.removeItem(at: url)
-            return
-        }
-        guard let data = try? Data(contentsOf: url) else { return }
-        save(key, data: data)
-        guard load(key) != nil else { return }
-        try? fileManager.removeItem(at: url)
-    }
-
-    private func migrateUserDefaultsIfNeeded(key: Key, userDefaults: UserDefaults, defaultsKey: String) {
-        guard let data = userDefaults.data(forKey: defaultsKey) else { return }
-        if load(key) != nil {
-            userDefaults.removeObject(forKey: defaultsKey)
-            return
-        }
-        save(key, data: data)
-        guard load(key) != nil else { return }
-        userDefaults.removeObject(forKey: defaultsKey)
     }
 }

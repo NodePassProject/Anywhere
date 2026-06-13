@@ -13,19 +13,14 @@ final class AWCore {
     // MARK: - Identifiers
 
     enum Identifier {
-        /// Bundle identifier prefix for the Anywhere app family.
         static let bundle = "com.argsment.Anywhere"
         static let appGroupSuite = "group.\(bundle)"
+        static let iCloudContainer = "iCloud.\(bundle)"
         static let errorDomain = bundle
         static let pathMonitorQueue = "\(bundle).path-monitor"
-        /// Label for the serial lwIP queue.
         static let lwipQueue = "\(bundle).lwip"
-        /// Serial MITM script queue; JS runs here off the lwIP queue so a slow
-        /// script can't stall packet processing.
         static let mitmScriptQueue = "\(bundle).mitm-script"
-        /// Serial UDP data-plane queue; UDP bypasses lwIP (`LWIP_UDP 0`).
         static let udpQueue = "\(bundle).udp"
-        /// Dispatch queue label for writes back to the TUN interface.
         static let outputQueue = "\(bundle).output"
 
         // MARK: Proxy socket & protocol queue labels
@@ -67,35 +62,35 @@ final class AWCore {
         /// Concurrent worker queue label for bounded URL-gate regex matching.
         static let mitmGateMatchQueue = "\(bundle).mitm-gate-match"
     }
-
-    /// App Group `UserDefaults` shared with the Network Extension. First access
-    /// registers ``registeredDefaults``; registered values never override user-set keys.
+    
+    static var isHostApp: Bool {
+        Bundle.main.bundleIdentifier == Identifier.bundle
+    }
+    
     private static let userDefaults: UserDefaults = {
         let defaults = UserDefaults(suiteName: Identifier.appGroupSuite)!
         defaults.register(defaults: registeredDefaults)
         return defaults
     }()
-
-    /// Defaults for settings whose unset value isn't the type's natural zero;
-    /// bools defaulting to `false` are omitted.
+    
     private static let registeredDefaults: [String: Any] = [
-        UserDefaultsKey.identifier: UUID().uuidString,
-        UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
-        UserDefaultsKey.bypassCountryCode: "",
-        UserDefaultsKey.trustedCertificateSHA256s: [],
-        UserDefaultsKey.quicPolicy: QUICPolicy.blocked.rawValue,
         UserDefaultsKey.blockWebRTC: true,
+        UserDefaultsKey.bypassCountryCode: "",
         UserDefaultsKey.encryptedDNSProtocol: "doh",
         UserDefaultsKey.encryptedDNSServer: "https://cloudflare-dns.com/dns-query",
+        UserDefaultsKey.identifier: UUID().uuidString,
+        UserDefaultsKey.proxyMode: ProxyMode.rule.rawValue,
+        UserDefaultsKey.quicPolicy: QUICPolicy.automatic.rawValue,
         UserDefaultsKey.reflectionAddresses: ["10.7.0.1"],
+        UserDefaultsKey.trustedCertificateSHA256s: [],
     ]
 
     // MARK: - UserDefaults Keys
 
     private enum UserDefaultsKey {
+        static let advertiseIPv6ToApps = "advertiseIPv6ToApps"
         static let allowInsecure = "allowInsecure"
         static let alwaysOnEnabled = "alwaysOnEnabled"
-        static let quicPolicy = "quicPolicy"
         static let blockWebRTC = "blockWebRTC"
         static let bypassCountryCode = "bypassCountryCode"
         static let encryptedDNSEnabled = "encryptedDNSEnabled"
@@ -103,22 +98,23 @@ final class AWCore {
         static let encryptedDNSServer = "encryptedDNSServer"
         static let experimentalEnabled = "experimentalEnabled"
         static let hideVPNIcon = "hideVPNIcon"
-        static let reflectionEnabled = "reflectionEnabled"
-        static let reflectionAddresses = "reflectionAddresses"
-        static let lastConfigurationData = "lastConfigurationData"
+        static let iCloudSyncEnabled = "iCloudSyncEnabled"
         static let identifier = "identifier"
-        static let advertiseIPv6ToApps = "advertiseIPv6ToApps"
+        static let lastConfigurationData = "lastConfigurationData"
         static let onboardingCompleted = "onboardingCompleted"
         static let proxyMode = "proxyMode"
+        static let quicPolicy = "quicPolicy"
+        static let reflectionAddresses = "reflectionAddresses"
+        static let reflectionEnabled = "reflectionEnabled"
         static let remnawaveHWIDEnabled = "remnawaveHWIDEnabled"
         static let ruleSetAssignments = "ruleSetAssignments"
-        static let selectedConfigurationId = "selectedConfigurationId"
         static let selectedChainId = "selectedChainId"
+        static let selectedConfigurationId = "selectedConfigurationId"
         static let trustedCertificateSHA256s = "trustedCertificateSHA256s"
         static let tunnelIncludeAllNetworks = "tunnelIncludeAllNetworks"
-        static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
         static let tunnelIncludeAPNs = "tunnelIncludeAPNs"
         static let tunnelIncludeCellularServices = "tunnelIncludeCellularServices"
+        static let tunnelIncludeLocalNetworks = "tunnelIncludeLocalNetworks"
     }
 
     /// One-time migration of a JSON file from the app's documents directory into the App Group container.
@@ -148,6 +144,14 @@ final class AWCore {
 
     static func setOnboardingCompleted(_ value: Bool) {
         userDefaults.set(value, forKey: UserDefaultsKey.onboardingCompleted)
+    }
+    
+    static func getICloudSyncEnabled() -> Bool {
+        userDefaults.bool(forKey: UserDefaultsKey.iCloudSyncEnabled)
+    }
+
+    static func setICloudSyncEnabled(_ value: Bool) {
+        userDefaults.set(value, forKey: UserDefaultsKey.iCloudSyncEnabled)
     }
 
     // Tunnel

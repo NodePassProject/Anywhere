@@ -15,16 +15,23 @@ class ChainStore {
     static let shared = ChainStore()
 
     private(set) var chains: [ProxyChain] = []
+    /// Soft-deleted chains kept so the deletion syncs to other devices; hidden from `chains`.
+    private var tombstones: [ProxyChain] = []
 
     private init() {
-        chains = Self.load()
-        // Coordinate dependent state once at launch (deferred so init finishes first).
+        let split = Self.loadSplit()
+        chains = split.live
+        tombstones = split.tombstones
+        // Must stay deferred: coordinate() reads ConfigurationStore.shared, and the two stores
+        // reference each other, so calling it synchronously here re-enters this type's
+        // `static let shared` dispatch_once and deadlocks. Running it after init lets it finish first.
         Task { @MainActor in self.coordinate() }
     }
 
     // MARK: - CRUD
 
     func add(_ chain: ProxyChain) {
+        tombstones.removeAll { $0.id == chain.id }
         chains.append(chain)
         save()
         coordinate()
@@ -40,6 +47,7 @@ class ChainStore {
 
     func delete(_ chain: ProxyChain) {
         chains.removeAll { $0.id == chain.id }
+        recordTombstone(chain)
         save()
         coordinate()
     }
@@ -58,19 +66,34 @@ class ChainStore {
         RoutingRuleSetStore.shared.clearOrphans(configurations: configurations, chains: chains)
         RoutingRuleSetStore.shared.scheduleSyncToAppGroup()
     }
+    
+    func reload() {
+        let split = Self.loadSplit()
+        chains = split.live
+        tombstones = split.tombstones
+        coordinate()
+    }
 
     // MARK: - Persistence
 
-    private static func load() -> [ProxyChain] {
-        guard let data = JSONBlobStore.shared.load(.chains) else { return [] }
-        return JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) ?? []
+    private static func loadSplit() -> (live: [ProxyChain], tombstones: [ProxyChain]) {
+        guard let data = JSONBlobStore.shared.load(.chains) else { return ([], []) }
+        let all = JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) ?? []
+        return Tombstone.split(all)
+    }
+    
+    private func recordTombstone(_ chain: ProxyChain) {
+        var tomb = chain
+        tomb.deletedAt = .now
+        tombstones.removeAll { $0.id == chain.id }
+        tombstones.append(tomb)
     }
 
     private func save() {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(chains)
+            let data = try encoder.encode(chains + tombstones)
             JSONBlobStore.shared.save(.chains, data: data)
         } catch {
             print("Failed to save chains: \(error)")

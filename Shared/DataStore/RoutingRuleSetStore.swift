@@ -25,6 +25,7 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
     var rules: [RoutingRule]
     /// When set, rules are sourced from a remote `.arrs` file and replaced on refresh.
     var subscriptionURL: URL?
+    var deletedAt: Date? = nil
 
     init(name: String, rules: [RoutingRule] = [], subscriptionURL: URL? = nil) {
         self.id = UUID()
@@ -34,7 +35,7 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, rules, subscriptionURL
+        case id, name, rules, subscriptionURL, deletedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -44,6 +45,7 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
         // A single corrupt rule shouldn't take down the whole set.
         self.rules = try c.decodeSkippingInvalid([RoutingRule].self, forKey: .rules)
         self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
+        self.deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -52,6 +54,7 @@ struct CustomRoutingRuleSet: Codable, Identifiable, Equatable {
         try c.encode(name, forKey: .name)
         try c.encode(rules, forKey: .rules)
         try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+        try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 
     /// Returns a parsed http(s) URL whose path ends with `.arrs` (case-insensitive), or nil.
@@ -72,6 +75,7 @@ class RoutingRuleSetStore {
 
     private(set) var ruleSets: [RoutingRuleSet] = []
     private(set) var customRuleSets: [CustomRoutingRuleSet] = []
+    private var customTombstones: [CustomRoutingRuleSet] = []
     /// Names of rule sets whose assigned proxy/chain was deleted, surfaced once for the UI.
     private(set) var orphanedRuleSetNames: [String] = []
     
@@ -105,12 +109,23 @@ class RoutingRuleSetStore {
         bypassCountryCode = AWCore.getBypassCountryCode()
         let assignments = AWCore.getRuleSetAssignments()
 
-        if let data = JSONBlobStore.shared.load(.customRuleSets),
-           let decoded = JSONDecoder().decodeSkippingInvalid([CustomRoutingRuleSet].self, from: data) {
-            customRuleSets = decoded
-        }
+        let split = Self.loadCustomSplit()
+        customRuleSets = split.live
+        customTombstones = split.tombstones
 
         rebuildRuleSets(assignments: assignments)
+        scheduleSyncToAppGroup()
+    }
+    
+    func reload() {
+        bypassCountryCode = AWCore.getBypassCountryCode()
+        let assignments = AWCore.getRuleSetAssignments()
+        
+        let split = Self.loadCustomSplit()
+        customRuleSets = split.live
+        customTombstones = split.tombstones
+        
+        rebuildRuleSets()
         scheduleSyncToAppGroup()
     }
 
@@ -187,12 +202,16 @@ class RoutingRuleSetStore {
     }
 
     func addCustomRuleSet(_ ruleSet: CustomRoutingRuleSet) {
+        customTombstones.removeAll { $0.id == ruleSet.id }
         customRuleSets.append(ruleSet)
         saveCustomRuleSets()
         rebuildRuleSets()
     }
 
     func removeCustomRuleSet(_ id: UUID) {
+        if let removed = customRuleSets.first(where: { $0.id == id }) {
+            recordTombstone(removed)
+        }
         customRuleSets.removeAll { $0.id == id }
         saveCustomRuleSets()
 
@@ -343,8 +362,23 @@ class RoutingRuleSetStore {
         AWCore.setRuleSetAssignments(dict)
     }
 
+    private static func loadCustomSplit() -> (live: [CustomRoutingRuleSet], tombstones: [CustomRoutingRuleSet]) {
+        guard let data = JSONBlobStore.shared.load(.customRuleSets),
+              let all = JSONDecoder().decodeSkippingInvalid([CustomRoutingRuleSet].self, from: data) else {
+            return ([], [])
+        }
+        return Tombstone.split(all)
+    }
+    
+    private func recordTombstone(_ ruleSet: CustomRoutingRuleSet) {
+        var tomb = ruleSet
+        tomb.deletedAt = .now
+        customTombstones.removeAll { $0.id == ruleSet.id }
+        customTombstones.append(tomb)
+    }
+
     private func saveCustomRuleSets() {
-        if let data = try? JSONEncoder().encode(customRuleSets) {
+        if let data = try? JSONEncoder().encode(customRuleSets + customTombstones) {
             JSONBlobStore.shared.save(.customRuleSets, data: data)
         }
         scheduleSyncToAppGroup()

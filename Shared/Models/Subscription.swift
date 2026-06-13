@@ -18,6 +18,7 @@ struct Subscription: Identifiable, Codable {
     var expire: Date?
     var collapsed: Bool
     var isNameCustomized: Bool
+    var deletedAt: Date? = nil
 
     init(id: UUID = UUID(), name: String, url: String, lastUpdate: Date? = nil, upload: Int64? = nil, download: Int64? = nil, total: Int64? = nil, expire: Date? = nil, collapsed: Bool = false, isNameCustomized: Bool = false) {
         self.id = id
@@ -44,5 +45,6 @@ struct Subscription: Identifiable, Codable {
         expire = try container.decodeIfPresent(Date.self, forKey: .expire)
         collapsed = (try? container.decode(Bool.self, forKey: .collapsed)) ?? false
         isNameCustomized = (try? container.decode(Bool.self, forKey: .isNameCustomized)) ?? false
+        deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
 }

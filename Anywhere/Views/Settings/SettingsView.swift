@@ -14,12 +14,19 @@ struct SettingsView: View {
     
     @State private var adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
 
+    @State private var showICloudRestartAlert = false
     @State private var showInsecureAlert = false
 
     var body: some View {
         @Bindable var settings = settings
         @Bindable var ruleSetStore = ruleSetStore
         Form {
+            Section("App") {
+                Toggle(isOn: $settings.iCloudSyncEnabled) {
+                    TextWithColorfulIcon(title: "iCloud Sync", comment: nil, systemName: "icloud.fill", foregroundColor: .blue, backgroundColor: .white)
+                }
+            }
+            
             Section("VPN") {
                 Toggle(isOn: $settings.alwaysOnEnabled) {
                     TextWithColorfulIcon(title: "Always On", comment: nil, systemName: "poweron", foregroundColor: .white, backgroundColor: .green)
@@ -122,6 +129,17 @@ struct SettingsView: View {
                 RoutingRuleSetStore.shared.updateAssignment(adBlockRuleSet, configurationId: newValue ? "REJECT" : nil)
             }
         }
+        .onChange(of: settings.iCloudSyncEnabled) { _, newValue in
+            showICloudRestartAlert = newValue != JSONBlobStore.shared.usesCloudKit
+        }
+        .alert("Restart Required", isPresented: $showICloudRestartAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Restart Anywhere for the change to take effect.")
+        }
+        .onAppear {
+            adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
+        }
         .alert("Allow Insecure", isPresented: $showInsecureAlert) {
             Button("Allow Anyway", role: .destructive) {
                 settings.allowInsecure = true
@@ -129,9 +147,6 @@ struct SettingsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will skip TLS certificate validation, making your connections vulnerable to MITM attacks.")
-        }
-        .onAppear {
-            adBlockEnabled = RoutingRuleSetStore.shared.adBlockRuleSet?.assignedConfigurationId == "REJECT"
         }
     }
 

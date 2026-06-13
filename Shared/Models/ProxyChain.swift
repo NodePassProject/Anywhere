@@ -14,6 +14,7 @@ struct ProxyChain: Identifiable, Codable, Hashable {
     var name: String
     /// Ordered proxy IDs. First is the entry (outermost TCP), last is the exit.
     var proxyIds: [UUID]
+    var deletedAt: Date? = nil
 
     init(id: UUID = UUID(), name: String, proxyIds: [UUID] = []) {
         self.id = id

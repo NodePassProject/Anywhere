@@ -22,7 +22,7 @@ struct TextWithColorfulIcon: View {
                 .frame(width: 19, height: 19)
                 .foregroundStyle(foregroundColor)
                 .padding(5)
-                .background(backgroundColor)
+                .background(backgroundColor.gradient)
                 .clipShape(.rect(cornerRadius: 7))
             Text(String(localized: title, comment: comment))
         }
@@ -46,7 +46,7 @@ struct TextWithColorfulIconAndCustomImage: View {
                 .frame(width: 19, height: 19)
                 .foregroundStyle(foregroundColor)
                 .padding(5)
-                .background(backgroundColor)
+                .background(backgroundColor.gradient)
                 .clipShape(.rect(cornerRadius: 7))
             Text(String(localized: title, comment: comment))
         }

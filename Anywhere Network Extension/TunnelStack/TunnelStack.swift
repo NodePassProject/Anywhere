@@ -463,7 +463,7 @@ class TunnelStack {
         let snapshot = MITMSnapshot.load()
         mitmEnabled = snapshot.enabled
         if snapshot.enabled {
-            mitmPolicy.load(ruleSets: snapshot.ruleSets)
+            mitmPolicy.load(ruleSets: snapshot.liveRuleSets)
         } else {
             mitmPolicy.reset()
         }

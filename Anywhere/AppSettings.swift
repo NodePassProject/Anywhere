@@ -18,6 +18,10 @@ final class AppSettings {
     var experimentalEnabled: Bool {
         didSet { AWCore.setExperimentalEnabled(experimentalEnabled) }
     }
+    
+    var iCloudSyncEnabled: Bool {
+        didSet { AWCore.setICloudSyncEnabled(iCloudSyncEnabled) }
+    }
 
     var remnawaveHWIDEnabled: Bool {
         didSet { AWCore.setRemnawaveHWIDEnabled(remnawaveHWIDEnabled) }
@@ -152,6 +156,7 @@ final class AppSettings {
 
     private init() {
         experimentalEnabled = AWCore.getExperimentalEnabled()
+        iCloudSyncEnabled = AWCore.getICloudSyncEnabled()
         remnawaveHWIDEnabled = AWCore.getRemnawaveHWIDEnabled()
 
         advertiseIPv6ToApps = AWCore.getAdvertiseIPv6ToApps()

@@ -424,6 +424,7 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
     /// When set, the suffixes and rules are sourced from a remote `.amrs` file
     /// and replaced on refresh; `id` and `name` are preserved.
     var subscriptionURL: URL?
+    var deletedAt: Date? = nil
 
     init(
         id: UUID = UUID(),
@@ -449,6 +450,7 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         case domainSuffixes
         case rules
         case subscriptionURL
+        case deletedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -469,6 +471,7 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         // A single corrupt rule shouldn't take down the whole set.
         self.rules = try c.decodeSkippingInvalid([MITMRule].self, forKey: .rules)
         self.subscriptionURL = try c.decodeIfPresent(URL.self, forKey: .subscriptionURL)
+        self.deletedAt = try c.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -479,6 +482,7 @@ struct MITMRuleSet: Codable, Equatable, Identifiable {
         try c.encode(domainSuffixes, forKey: .domainSuffixes)
         try c.encode(rules, forKey: .rules)
         try c.encodeIfPresent(subscriptionURL, forKey: .subscriptionURL)
+        try c.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 
     /// Returns a parsed http(s) URL whose path ends with `.amrs` (case-insensitive), or nil.
@@ -498,6 +502,9 @@ struct MITMSnapshot: Codable, Equatable {
     var ruleSets: [MITMRuleSet]
 
     static let empty = MITMSnapshot(enabled: false, ruleSets: [])
+
+    /// Rule sets minus soft-deleted tombstones — the set the data path should actually apply.
+    var liveRuleSets: [MITMRuleSet] { ruleSets.filter { $0.deletedAt == nil } }
 
     init(enabled: Bool, ruleSets: [MITMRuleSet]) {
         self.enabled = enabled

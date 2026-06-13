@@ -195,6 +195,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     let outbound: Outbound
     /// Proxies to chain through, outermost first; `nil` or empty means a direct connection.
     let chain: [ProxyConfiguration]?
+    var deletedAt: Date? = nil
 
     /// The pre-resolved IP if available, otherwise `serverAddress`.
     var connectAddress: String { resolvedIP ?? serverAddress }
@@ -311,6 +312,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         case http2Username, http2Password
         case http3Username, http3Password
         case chain
+        case deletedAt
     }
 
     /// Folds the flat JSON transport/security/mux/xudp keys into `.vless` associated values.
@@ -450,6 +452,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         }
 
         chain = try container.decodeIfPresent([ProxyConfiguration].self, forKey: .chain)
+        deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
     }
 
     /// Flattens `Outbound` to the flat JSON schema.
@@ -555,6 +558,7 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
         }
 
         try container.encodeIfPresent(chain, forKey: .chain)
+        try container.encodeIfPresent(deletedAt, forKey: .deletedAt)
     }
 }
 

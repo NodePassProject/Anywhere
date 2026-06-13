@@ -22,16 +22,28 @@ final class MITMRuleSetStore {
     }
 
     private(set) var ruleSets: [MITMRuleSet]
+    private var tombstones: [MITMRuleSet] = []
 
     private init() {
         let snapshot = MITMSnapshot.load()
         self.enabled = snapshot.enabled
-        self.ruleSets = snapshot.ruleSets
+        let split = Tombstone.split(snapshot.ruleSets)
+        self.ruleSets = split.live
+        self.tombstones = split.tombstones
+    }
+
+    func reload() {
+        let snapshot = MITMSnapshot.load()
+        enabled = snapshot.enabled
+        let split = Tombstone.split(snapshot.ruleSets)
+        ruleSets = split.live
+        tombstones = split.tombstones
     }
 
     // MARK: - Rule set CRUD
 
     func addRuleSet(_ ruleSet: MITMRuleSet) {
+        tombstones.removeAll { $0.id == ruleSet.id }
         ruleSets.append(ruleSet)
         save()
     }
@@ -52,11 +64,15 @@ final class MITMRuleSetStore {
     }
 
     func removeRuleSets(atOffsets offsets: IndexSet) {
+        recordTombstones(offsets.map { ruleSets[$0] })
         ruleSets.remove(atOffsets: offsets)
         save()
     }
 
     func removeRuleSet(id: UUID) {
+        if let removed = ruleSets.first(where: { $0.id == id }) {
+            recordTombstones([removed])
+        }
         ruleSets.removeAll { $0.id == id }
         save()
     }
@@ -142,9 +158,21 @@ final class MITMRuleSetStore {
     }
 
     // MARK: - Persistence
+    
+    private func recordTombstones(_ removed: [MITMRuleSet]) {
+        guard !removed.isEmpty else { return }
+        let now = Date.now
+        let ids = Set(removed.map { $0.id })
+        tombstones.removeAll { ids.contains($0.id) }
+        for item in removed {
+            var tomb = item
+            tomb.deletedAt = now
+            tombstones.append(tomb)
+        }
+    }
 
     private func save() {
-        MITMSnapshot(enabled: enabled, ruleSets: ruleSets).save()
+        MITMSnapshot(enabled: enabled, ruleSets: ruleSets + tombstones).save()
     }
 }
 

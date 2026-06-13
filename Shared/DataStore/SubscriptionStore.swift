@@ -15,14 +15,24 @@ class SubscriptionStore {
     static let shared = SubscriptionStore()
 
     private(set) var subscriptions: [Subscription] = []
+    private var tombstones: [Subscription] = []
 
     private init() {
-        subscriptions = Self.load()
+        let split = Self.loadSplit()
+        subscriptions = split.live
+        tombstones = split.tombstones
+    }
+
+    func reload() {
+        let split = Self.loadSplit()
+        subscriptions = split.live
+        tombstones = split.tombstones
     }
 
     // MARK: - CRUD
 
     func add(_ subscription: Subscription) {
+        tombstones.removeAll { $0.id == subscription.id }
         subscriptions.append(subscription)
         save()
     }
@@ -37,6 +47,7 @@ class SubscriptionStore {
     func delete(_ subscription: Subscription, configurationStore: ConfigurationStore = .shared) {
         configurationStore.deleteConfigurations(for: subscription.id)
         subscriptions.removeAll { $0.id == subscription.id }
+        recordTombstone(subscription)
         save()
     }
 
@@ -47,14 +58,26 @@ class SubscriptionStore {
 
     // MARK: - Persistence
 
-    private static func load() -> [Subscription] {
-        guard let data = JSONBlobStore.shared.load(.subscriptions) else { return [] }
-        return JSONDecoder().decodeSkippingInvalid([Subscription].self, from: data) ?? []
+    private static func loadSplit() -> (live: [Subscription], tombstones: [Subscription]) {
+        guard let data = JSONBlobStore.shared.load(.subscriptions) else { return ([], []) }
+        let all = JSONDecoder().decodeSkippingInvalid([Subscription].self, from: data) ?? []
+        return Tombstone.split(all)
     }
+    
+    private func recordTombstone(_ subscription: Subscription) {
+        var tomb = subscription
+        tomb.deletedAt = .now
+        tombstones.removeAll { $0.id == subscription.id }
+        tombstones.append(tomb)
+    }
+    
+    @ObservationIgnored private var saveTask: Task<Void, Never>?
 
     private func save() {
-        let snapshot = subscriptions
-        Task.detached {
+        let snapshot = subscriptions + tombstones
+        let previous = saveTask
+        saveTask = Task.detached {
+            await previous?.value
             do {
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
