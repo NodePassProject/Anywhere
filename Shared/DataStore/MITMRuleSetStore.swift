@@ -23,21 +23,33 @@ final class MITMRuleSetStore {
 
     private(set) var ruleSets: [MITMRuleSet]
     private var tombstones: [MITMRuleSet] = []
+    
+    @ObservationIgnored private var loadedBlob: Data?
 
     private init() {
-        let snapshot = MITMSnapshot.load()
+        let data = JSONBlobStore.shared.load(.mitm)
+        loadedBlob = data
+        let snapshot = MITMSnapshot.decode(from: data)
         self.enabled = snapshot.enabled
         let split = Tombstone.split(snapshot.ruleSets)
         self.ruleSets = split.live
         self.tombstones = split.tombstones
     }
-
-    func reload() {
-        let snapshot = MITMSnapshot.load()
-        enabled = snapshot.enabled
-        let split = Tombstone.split(snapshot.ruleSets)
+    
+    func reload() async {
+        let previous = loadedBlob
+        let outcome = await Task.detached(priority: .utility) {
+            () -> (data: Data?, snapshot: MITMSnapshot)? in
+            let data = JSONBlobStore.shared.load(.mitm)
+            guard data != previous else { return nil }
+            return (data, MITMSnapshot.decode(from: data))
+        }.value
+        guard let outcome else { return }
+        loadedBlob = outcome.data
+        let split = Tombstone.split(outcome.snapshot.ruleSets)
         ruleSets = split.live
         tombstones = split.tombstones
+        enabled = outcome.snapshot.enabled
     }
 
     // MARK: - Rule set CRUD
