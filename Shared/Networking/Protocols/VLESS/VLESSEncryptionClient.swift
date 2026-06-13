@@ -751,7 +751,7 @@ nonisolated final class VLESSEncryptionClient {
                                 let xor = VLESSXORConnection(
                                     inner: connection,
                                     outCTR: try VLESSEncryptionCTR(key: unitedKey, iv: state.iv),
-                                    inCTR: try VLESSEncryptionCTR(key: unitedKey, iv: Data(sealedTicket.prefix(16))),
+                                    inCTR: try VLESSEncryptionCTR(key: unitedKey, iv: Data(ticketPayload.prefix(16))),
                                     outSkip: 0,
                                     inSkip: max(0, sealedPaddingBodySize - leftover.count)
                                 )
@@ -867,8 +867,6 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     /// record opens cleanly, the ticket was accepted.
     private var firstRecordSeen = false
 
-    /// Plaintext left over from a record larger than the caller's chunk; drained first.
-    private var plaintextBuffer = Data()
     private let recvLock = UnfairLock()
     private let sendLock = UnfairLock()
     /// Partial-record buffer; seeded with the handshake reader's leftover bytes.
@@ -967,15 +965,6 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
     }
 
     private func receiveAfterReadAEAD(completion: @escaping (Data?, Error?) -> Void) {
-        recvLock.lock()
-        if !plaintextBuffer.isEmpty {
-            let snapshot = plaintextBuffer
-            plaintextBuffer.removeAll(keepingCapacity: true)
-            recvLock.unlock()
-            completion(snapshot, nil)
-            return
-        }
-        recvLock.unlock()
         pumpRecord(completion: completion)
     }
 
