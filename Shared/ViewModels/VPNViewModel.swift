@@ -26,9 +26,11 @@ class VPNViewModel {
                 selectedChainId = nil
                 AWCore.setSelectedChainId(nil)
                 AWCore.setSelectedConfigurationId(selectedConfiguration?.id)
-                // Tell NE to re-filter routing rules against the new default.
-                AWCore.notifyRoutingChanged()
             }
+            // Only the default outbound changed, not the routing rules — the NE
+            // picks up the new default via the setConfiguration IPC below while
+            // connected, or via configureRuntime on the next connect. The routing
+            // matchers are selection-independent, so no routingChanged is posted.
             if vpnStatus == .connected, let selectedConfiguration {
                 sendConfigurationToTunnel(selectedConfiguration)
             }
@@ -159,9 +161,9 @@ class VPNViewModel {
         selectedChainId = chain.id
         AWCore.setSelectedChainId(chain.id)
         AWCore.setSelectedConfigurationId(nil)
+        // didSet's connected branch delivers `resolved` to the NE via IPC; the
+        // routing matchers are unaffected by the default selection, so no routingChanged.
         withoutSelectionPersistence { selectedConfiguration = resolved }
-        // Tell NE to re-filter routing rules against the new default.
-        AWCore.notifyRoutingChanged()
     }
 
     // MARK: - Latency Testing
