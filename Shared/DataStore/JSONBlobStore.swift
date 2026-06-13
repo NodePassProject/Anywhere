@@ -23,7 +23,7 @@ final class JSONBlob {
     }
 }
 
-final class JSONBlobStore: @unchecked Sendable {
+nonisolated final class JSONBlobStore: @unchecked Sendable {
     static let shared = JSONBlobStore()
 
     enum Key: String, CaseIterable {
@@ -36,8 +36,10 @@ final class JSONBlobStore: @unchecked Sendable {
 
     private let container: ModelContainer?
     let usesCloudKit: Bool
+    
+    private let queue = DispatchQueue(label: "com.argsment.Anywhere.jsonblobstore")
 
-    static var mergeResolver: ((Key, [(data: Data, updatedAt: Date)]) -> Data)?
+    nonisolated(unsafe) static var mergeResolver: ((Key, [(data: Data, updatedAt: Date)]) -> Data)?
 
     private init() {
         let wantsCloudKit = AWCore.isHostApp && AWCore.getICloudSyncEnabled()
@@ -66,64 +68,73 @@ final class JSONBlobStore: @unchecked Sendable {
     }
 
     // MARK: - Public API
-
+    
     func load(_ key: Key) -> Data? {
-        guard let container else { return nil }
-        let context = ModelContext(container)
-        let raw = key.rawValue
-        let predicate = #Predicate<JSONBlob> { $0.key == raw }
-        let rows = (try? context.fetch(FetchDescriptor<JSONBlob>(predicate: predicate))) ?? []
-        guard rows.count > 1 else { return rows.first?.data }
+        queue.sync {
+            guard let container else { return nil }
+            let context = ModelContext(container)
+            let raw = key.rawValue
+            let predicate = #Predicate<JSONBlob> { $0.key == raw }
+            let rows = (try? context.fetch(FetchDescriptor<JSONBlob>(predicate: predicate))) ?? []
+            guard rows.count > 1 else { return rows.first?.data }
 
-        let pairs = rows.map { (data: $0.data, updatedAt: $0.updatedAt) }
-        guard let resolver = Self.mergeResolver else {
-            return pairs.max { $0.updatedAt < $1.updatedAt }?.data
+            let pairs = rows.map { (data: $0.data, updatedAt: $0.updatedAt) }
+            guard let resolver = Self.mergeResolver else {
+                return pairs.max { $0.updatedAt < $1.updatedAt }?.data
+            }
+            return resolver(key, pairs)
         }
-
-        let merged = resolver(key, pairs)
-        // CloudKit can't enforce key uniqueness, so devices accumulate duplicate rows per key.
-        // We just merged all of them losslessly, so collapse them back into one row; the deletion
-        // propagates through CloudKit and keeps every device converging on a single row.
-        compact(rows, into: merged, context: context)
-        return merged
     }
+    
+    func compactDuplicates() {
+        guard usesCloudKit, let container, let resolver = Self.mergeResolver else { return }
+        queue.sync {
+            let context = ModelContext(container)
+            var didChange = false
+            for key in Key.allCases {
+                let raw = key.rawValue
+                let predicate = #Predicate<JSONBlob> { $0.key == raw }
+                let rows = (try? context.fetch(FetchDescriptor<JSONBlob>(predicate: predicate))) ?? []
+                guard rows.count > 1 else { continue }
 
-    /// Collapses the duplicate `rows` for a key into their newest row carrying `merged`, deleting
-    /// the rest. Host-only: the cloud-backed store is the single writer that owns this cleanup.
-    private func compact(_ rows: [JSONBlob], into merged: Data, context: ModelContext) {
-        guard usesCloudKit, rows.count > 1 else { return }
-        let ordered = rows.sorted { $0.updatedAt > $1.updatedAt }
-        guard let survivor = ordered.first else { return }
-        if survivor.data != merged { survivor.data = merged }
-        for loser in ordered.dropFirst() {
-            context.delete(loser)
-        }
-        do {
-            try context.save()
-        } catch {
-            logger.error("Failed to compact duplicate JSON blobs: \(error)")
+                let pairs = rows.map { (data: $0.data, updatedAt: $0.updatedAt) }
+                let merged = resolver(key, pairs)
+                let ordered = rows.sorted { $0.updatedAt > $1.updatedAt }
+                guard let survivor = ordered.first else { continue }
+                if survivor.data != merged { survivor.data = merged }
+                for loser in ordered.dropFirst() { context.delete(loser) }
+                didChange = true
+            }
+            guard didChange else { return }
+            do {
+                try context.save()
+            } catch {
+                logger.error("Failed to compact duplicate JSON blobs: \(error)")
+            }
         }
     }
 
     func save(_ key: Key, data: Data) {
-        guard let container else { return }
-        let context = ModelContext(container)
-        let raw = key.rawValue
-        let predicate = #Predicate<JSONBlob> { $0.key == raw }
-        let descriptor = FetchDescriptor<JSONBlob>(
-            predicate: predicate,
-            sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
-        )
-        do {
-            if let existing = try context.fetch(descriptor).first {
-                existing.data = data
-                existing.updatedAt = .now
-            } else {
-                context.insert(JSONBlob(key: raw, data: data))
+        queue.sync {
+            guard let container else { return }
+            let context = ModelContext(container)
+            let raw = key.rawValue
+            let predicate = #Predicate<JSONBlob> { $0.key == raw }
+            let descriptor = FetchDescriptor<JSONBlob>(
+                predicate: predicate,
+                sortBy: [SortDescriptor(\.updatedAt, order: .reverse)]
+            )
+            do {
+                if let existing = try context.fetch(descriptor).first {
+                    existing.data = data
+                    existing.updatedAt = .now
+                } else {
+                    context.insert(JSONBlob(key: raw, data: data))
+                }
+                try context.save()
+            } catch {
+                logger.error("Failed to save JSON blob \(raw): \(error)")
             }
-            try context.save()
-        } catch {
-            logger.error("Failed to save JSON blob \(raw): \(error)")
         }
     }
 }

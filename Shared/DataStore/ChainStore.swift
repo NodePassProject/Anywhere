@@ -17,9 +17,13 @@ class ChainStore {
     private(set) var chains: [ProxyChain] = []
     /// Soft-deleted chains kept so the deletion syncs to other devices; hidden from `chains`.
     private var tombstones: [ProxyChain] = []
+    
+    @ObservationIgnored private var loadedBlob: Data?
 
     private init() {
-        let split = Self.loadSplit()
+        let data = JSONBlobStore.shared.load(.chains)
+        loadedBlob = data
+        let split = Self.decodeSplit(from: data)
         chains = split.live
         tombstones = split.tombstones
         // Must stay deferred: coordinate() reads ConfigurationStore.shared, and the two stores
@@ -67,18 +71,28 @@ class ChainStore {
         RoutingRuleSetStore.shared.scheduleSyncToAppGroup()
     }
     
-    func reload() {
-        let split = Self.loadSplit()
-        chains = split.live
-        tombstones = split.tombstones
+    func reload() async {
+        let previous = loadedBlob
+        let outcome = await Task.detached(priority: .utility) {
+            () -> (data: Data?, live: [ProxyChain], tombstones: [ProxyChain])? in
+            let data = JSONBlobStore.shared.load(.chains)
+            guard data != previous else { return nil }
+            let split = Self.decodeSplit(from: data)
+            return (data, split.live, split.tombstones)
+        }.value
+        guard let outcome else { return }
+        loadedBlob = outcome.data
+        chains = outcome.live
+        tombstones = outcome.tombstones
         coordinate()
     }
 
     // MARK: - Persistence
-
-    private static func loadSplit() -> (live: [ProxyChain], tombstones: [ProxyChain]) {
-        guard let data = JSONBlobStore.shared.load(.chains) else { return ([], []) }
-        let all = JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) ?? []
+    
+    nonisolated private static func decodeSplit(from data: Data?) -> (live: [ProxyChain], tombstones: [ProxyChain]) {
+        guard let data, let all = JSONDecoder().decodeSkippingInvalid([ProxyChain].self, from: data) else {
+            return ([], [])
+        }
         return Tombstone.split(all)
     }
     
