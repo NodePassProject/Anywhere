@@ -86,7 +86,7 @@ Selectable on VLESS; layered under TLS or Reality.
 | Layer | Notes |
 | --- | --- |
 | **TLS** | SNI, ALPN, custom trusted certificates, min/max version, optional insecure mode |
-| **Encrypted Client Hello (ECH)** | HPKE-sealed inner ClientHello (RFC 9180 · X25519/HKDF-SHA256 · AES-128/256-GCM & ChaCha20-Poly1305) · `ECHConfigList` via base64 · accept-confirmation check with retry-config handling |
+| **Encrypted Client Hello (ECH)** | HPKE-sealed inner ClientHello (RFC 9180 · X25519/HKDF-SHA256 · AES-128/256-GCM & ChaCha20-Poly1305) · `ECHConfigList` via base64 or opportunistic DNS discovery (RFC 9460) · accept-confirmation check with retry-config handling |
 | **Reality** | X25519 key exchange · TLS 1.3 fingerprint spoofing |
 | **VLESS Encryption** | Post-quantum `mlkem768x25519plus` (ML-KEM-768 + X25519) with 0-RTT / 1-RTT |
 | **Fingerprints** | Chrome · Firefox · Safari · iOS · Edge · Random |

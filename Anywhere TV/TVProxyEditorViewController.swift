@@ -49,6 +49,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var vlessRealitySNI = ""
     private var vlessRealityPublicKey = ""
     private var vlessRealityShortId = ""
+    private var vlessTLSECHEnabled = false
     private var vlessTLSECH = ""
     private var vlessFingerprint: TLSFingerprint = .chrome120
 
@@ -88,6 +89,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var trojanPassword = ""
     private var trojanSNI = ""
     private var trojanALPN = ""
+    private var trojanECHEnabled = false
     private var trojanECH = ""
     private var trojanFingerprint: TLSFingerprint = .chrome120
 
@@ -95,6 +97,7 @@ class TVProxyEditorViewController: UITableViewController {
     private var anytlsPassword = ""
     private var anytlsSNI = ""
     private var anytlsALPN = ""
+    private var anytlsECHEnabled = false
     private var anytlsECH = ""
     private var anytlsFingerprint: TLSFingerprint = .chrome120
 
@@ -154,7 +157,7 @@ class TVProxyEditorViewController: UITableViewController {
         case vlessHTTPUpgradeHost, vlessHTTPUpgradePath
         case vlessGRPCServiceName, vlessGRPCAuthority, vlessGRPCMode, vlessGRPCUserAgent
         case vlessXHTTPHost, vlessXHTTPPath, vlessXHTTPMode
-        case vlessTLSSNI, vlessTLSALPN, vlessTLSECH, vlessFingerprint
+        case vlessTLSSNI, vlessTLSALPN, vlessTLSECHEnabled, vlessTLSECH, vlessFingerprint
         case vlessRealitySNI, vlessRealityPublicKey, vlessRealityShortId
         case vlessXHTTPDownloadEnabled, vlessXHTTPDownloadAddress, vlessXHTTPDownloadPort
         case vlessXHTTPDownloadHost, vlessXHTTPDownloadPath
@@ -164,8 +167,8 @@ class TVProxyEditorViewController: UITableViewController {
         case hysteriaPassword, hysteriaCC, hysteriaUploadMbps, hysteriaDownloadMbps,
              hysteriaPorts, hysteriaHopInterval, hysteriaSNI
         case nowhereKey, nowhereSpec, nowhereSNI, nowhereALPN
-        case trojanPassword, trojanSNI, trojanALPN, trojanECH, trojanFingerprint
-        case anytlsPassword, anytlsSNI, anytlsALPN, anytlsECH, anytlsFingerprint
+        case trojanPassword, trojanSNI, trojanALPN, trojanECHEnabled, trojanECH, trojanFingerprint
+        case anytlsPassword, anytlsSNI, anytlsALPN, anytlsECHEnabled, anytlsECH, anytlsFingerprint
         case ssPassword, ssMethod
         case sudokuKey, sudokuAEADMethod, sudokuPaddingMin, sudokuPaddingMax
         case sudokuASCIIMode, sudokuCustomTables
@@ -323,7 +326,10 @@ class TVProxyEditorViewController: UITableViewController {
             if isVLESSTLS {
                 tlsRows.append(.text(label: String(localized: "SNI"), value: vlessTLSSNI, placeholder: String(localized: "SNI"), key: .vlessTLSSNI))
                 tlsRows.append(.text(label: String(localized: "ALPN"), value: vlessTLSALPN, placeholder: String(localized: "h2,http/1.1"), key: .vlessTLSALPN))
-                tlsRows.append(.text(label: String(localized: "ECH"), value: vlessTLSECH, placeholder: String(localized: "Base64"), key: .vlessTLSECH))
+                tlsRows.append(.toggle(label: String(localized: "Enable ECH"), isOn: vlessTLSECHEnabled, key: .vlessTLSECHEnabled))
+                if vlessTLSECHEnabled {
+                    tlsRows.append(.text(label: String(localized: "ECH Config"), value: vlessTLSECH, placeholder: String(localized: "Base64"), key: .vlessTLSECH))
+                }
                 tlsRows.append(.selection(label: String(localized: "Fingerprint"), value: vlessFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .vlessFingerprint))
             }
             if isVLESSReality {
@@ -343,19 +349,27 @@ class TVProxyEditorViewController: UITableViewController {
                 .text(label: String(localized: "ALPN"), value: nowhereALPN, placeholder: String(localized: "ALPN"), key: .nowhereALPN),
             ]))
         } else if isTrojan {
-            sections.append((String(localized: "TLS"), [
+            var trojanRows: [RowType] = [
                 .text(label: String(localized: "SNI"), value: trojanSNI, placeholder: String(localized: "SNI"), key: .trojanSNI),
                 .text(label: String(localized: "ALPN"), value: trojanALPN, placeholder: String(localized: "h2,http/1.1"), key: .trojanALPN),
-                .text(label: String(localized: "ECH"), value: trojanECH, placeholder: String(localized: "Base64"), key: .trojanECH),
-                .selection(label: String(localized: "Fingerprint"), value: trojanFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .trojanFingerprint),
-            ]))
+                .toggle(label: String(localized: "Enable ECH"), isOn: trojanECHEnabled, key: .trojanECHEnabled),
+            ]
+            if trojanECHEnabled {
+                trojanRows.append(.text(label: String(localized: "ECH Config"), value: trojanECH, placeholder: String(localized: "Base64"), key: .trojanECH))
+            }
+            trojanRows.append(.selection(label: String(localized: "Fingerprint"), value: trojanFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .trojanFingerprint))
+            sections.append((String(localized: "TLS"), trojanRows))
         } else if isAnyTLS {
-            sections.append((String(localized: "TLS"), [
+            var anytlsRows: [RowType] = [
                 .text(label: String(localized: "SNI"), value: anytlsSNI, placeholder: String(localized: "SNI"), key: .anytlsSNI),
                 .text(label: String(localized: "ALPN"), value: anytlsALPN, placeholder: String(localized: "h2,http/1.1"), key: .anytlsALPN),
-                .text(label: String(localized: "ECH"), value: anytlsECH, placeholder: String(localized: "Base64"), key: .anytlsECH),
-                .selection(label: String(localized: "Fingerprint"), value: anytlsFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .anytlsFingerprint),
-            ]))
+                .toggle(label: String(localized: "Enable ECH"), isOn: anytlsECHEnabled, key: .anytlsECHEnabled),
+            ]
+            if anytlsECHEnabled {
+                anytlsRows.append(.text(label: String(localized: "ECH Config"), value: anytlsECH, placeholder: String(localized: "Base64"), key: .anytlsECH))
+            }
+            anytlsRows.append(.selection(label: String(localized: "Fingerprint"), value: anytlsFingerprint.displayName, options: TLSFingerprint.allCases.map { ($0.displayName, $0.rawValue) }, key: .anytlsFingerprint))
+            sections.append((String(localized: "TLS"), anytlsRows))
         } else if isHysteria {
             var hysteriaRows: [RowType] = [
                 .text(label: String(localized: "SNI"), value: hysteriaSNI, placeholder: String(localized: "SNI"), key: .hysteriaSNI),
@@ -693,6 +707,7 @@ class TVProxyEditorViewController: UITableViewController {
         case .vlessXHTTPMode: vlessXHTTPMode = value
         case .vlessTLSSNI: vlessTLSSNI = value
         case .vlessTLSALPN: vlessTLSALPN = value
+        case .vlessTLSECHEnabled: vlessTLSECHEnabled = value == "true"
         case .vlessTLSECH: vlessTLSECH = value
         case .vlessRealitySNI: vlessRealitySNI = value
         case .vlessRealityPublicKey: vlessRealityPublicKey = value
@@ -727,12 +742,14 @@ class TVProxyEditorViewController: UITableViewController {
         case .trojanPassword: trojanPassword = value
         case .trojanSNI: trojanSNI = value
         case .trojanALPN: trojanALPN = value
+        case .trojanECHEnabled: trojanECHEnabled = value == "true"
         case .trojanECH: trojanECH = value
         case .trojanFingerprint:
             if let fp = TLSFingerprint(rawValue: value) { trojanFingerprint = fp }
         case .anytlsPassword: anytlsPassword = value
         case .anytlsSNI: anytlsSNI = value
         case .anytlsALPN: anytlsALPN = value
+        case .anytlsECHEnabled: anytlsECHEnabled = value == "true"
         case .anytlsECH: anytlsECH = value
         case .anytlsFingerprint:
             if let fp = TLSFingerprint(rawValue: value) { anytlsFingerprint = fp }
@@ -827,6 +844,7 @@ class TVProxyEditorViewController: UITableViewController {
                 vlessTLSSNI = tls.serverName
                 vlessTLSALPN = tls.alpn?.joined(separator: ",") ?? ""
                 vlessFingerprint = tls.fingerprint
+                vlessTLSECHEnabled = tls.echEnabled
                 vlessTLSECH = tls.echConfig ?? ""
             }
             if case .reality(let reality) = configuration.securityLayer {
@@ -857,12 +875,14 @@ class TVProxyEditorViewController: UITableViewController {
             trojanPassword = password
             trojanSNI = tls.serverName
             trojanALPN = tls.alpn?.joined(separator: ",") ?? ""
+            trojanECHEnabled = tls.echEnabled
             trojanECH = tls.echConfig ?? ""
             trojanFingerprint = tls.fingerprint
         case .anytls(let password, _, _, _, let tls):
             anytlsPassword = password
             anytlsSNI = tls.serverName
             anytlsALPN = tls.alpn?.joined(separator: ",") ?? ""
+            anytlsECHEnabled = tls.echEnabled
             anytlsECH = tls.echConfig ?? ""
             anytlsFingerprint = tls.fingerprint
         case .shadowsocks(let password, let method):
@@ -959,7 +979,7 @@ class TVProxyEditorViewController: UITableViewController {
             let sni = vlessTLSSNI.isEmpty ? serverAddress : vlessTLSSNI
             let alpn: [String]? = vlessTLSALPN.isEmpty ? nil : vlessTLSALPN.split(separator: ",").map { String($0) }
             let ech = vlessTLSECH.trimmingCharacters(in: .whitespacesAndNewlines)
-            vlessTLSConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech.isEmpty ? nil : ech, fingerprint: vlessFingerprint)
+            vlessTLSConfiguration = TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: vlessTLSECHEnabled, echConfig: vlessTLSECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: vlessFingerprint)
         }
 
         var vlessRealityConfiguration: RealityConfiguration?
@@ -1070,7 +1090,7 @@ class TVProxyEditorViewController: UITableViewController {
             let ech = trojanECH.trimmingCharacters(in: .whitespacesAndNewlines)
             outbound = .trojan(
                 password: trojanPassword,
-                tls: TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech.isEmpty ? nil : ech, fingerprint: trojanFingerprint)
+                tls: TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: trojanECHEnabled, echConfig: trojanECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: trojanFingerprint)
             )
         case .anytls:
             let sni = anytlsSNI.isEmpty ? bareAddress : anytlsSNI
@@ -1089,7 +1109,7 @@ class TVProxyEditorViewController: UITableViewController {
                 idleCheckInterval: ici,
                 idleTimeout: it,
                 minIdleSession: mis,
-                tls: TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech.isEmpty ? nil : ech, fingerprint: anytlsFingerprint)
+                tls: TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: anytlsECHEnabled, echConfig: anytlsECHEnabled && !ech.isEmpty ? ech : nil, fingerprint: anytlsFingerprint)
             )
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)

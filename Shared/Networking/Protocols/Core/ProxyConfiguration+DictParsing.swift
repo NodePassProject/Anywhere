@@ -198,8 +198,10 @@ extension ProxyConfiguration {
             let fpString = (configurationDict["tlsFingerprint"] as? String) ?? "chrome_120"
             let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
             let ech = (configurationDict["tlsEch"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let echEnabled = configurationDict["tlsEchEnabled"] as? Bool
             return .tls(TLSConfiguration(
-                serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint
+                serverName: sni, alpn: alpn, echEnabled: echEnabled,
+                echConfig: ech, fingerprint: fingerprint
             ))
         }
         if security == "reality",
@@ -300,7 +302,8 @@ extension ProxyConfiguration {
         let alpnString = (dict["nowhereALPN"] as? String) ?? (dict["tlsAlpn"] as? String)
         let alpn = alpnString.flatMap { $0.isEmpty ? nil : [$0] }
         let ech = ((dict["nowhereEch"] as? String) ?? (dict["tlsEch"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
-        return TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
+        let echEnabled = (dict["nowhereEchEnabled"] as? Bool) ?? (dict["tlsEchEnabled"] as? Bool)
+        return TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: echEnabled, echConfig: ech)
     }
 
     /// Reconstructs the Trojan mandatory TLS configuration from serialized dict keys.
@@ -318,7 +321,8 @@ extension ProxyConfiguration {
             ?? "chrome_120"
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
         let ech = ((dict["trojanEch"] as? String) ?? (dict["tlsEch"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
-        return TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
+        let echEnabled = (dict["trojanEchEnabled"] as? Bool) ?? (dict["tlsEchEnabled"] as? Bool)
+        return TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: echEnabled, echConfig: ech, fingerprint: fingerprint)
     }
 
     /// Reconstructs the AnyTLS mandatory TLS configuration from serialized dict keys.
@@ -336,7 +340,8 @@ extension ProxyConfiguration {
             ?? "chrome_120"
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
         let ech = ((dict["anytlsEch"] as? String) ?? (dict["tlsEch"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
-        return TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
+        let echEnabled = (dict["anytlsEchEnabled"] as? Bool) ?? (dict["tlsEchEnabled"] as? Bool)
+        return TLSConfiguration(serverName: sni, alpn: alpn, echEnabled: echEnabled, echConfig: ech, fingerprint: fingerprint)
     }
 
     /// Parses comma-separated "key:value" header pairs from a string.

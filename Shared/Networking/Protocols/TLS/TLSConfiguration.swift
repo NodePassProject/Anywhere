@@ -21,22 +21,43 @@ struct TLSConfiguration {
     let minVersion: TLSVersion?         // nil = no constraint
     let maxVersion: TLSVersion?         // nil = no constraint
 
-    /// Encrypted Client Hello config: a base64 ECHConfigList (as published for
-    /// the server), decoded and sealed against just before the handshake.
-    /// `nil` = no ECH.
+    /// Master switch for Encrypted Client Hello. With an inline `echConfig` that
+    /// ECHConfigList is used; without one, it is discovered at connect time from
+    /// the server domain's DNS HTTPS record (RFC 9460 SvcParamKey 5, `ech`) —
+    /// fail-closed, so a connection that finds none errors out rather than sending
+    /// the real SNI in the clear. `false` = ordinary cleartext-SNI handshake.
+    let echEnabled: Bool
+
+    /// Inline Encrypted Client Hello config: a base64 ECHConfigList (as published
+    /// for the server), decoded and sealed against just before the handshake.
+    /// `nil` when ECH is off, or when it is on but the config is to be discovered
+    /// from DNS (see `echEnabled` / `echIsOpportunistic`).
     let echConfig: String?
+
+    /// ECH is on but carries no inline config, so the ECHConfigList must be
+    /// discovered from DNS. Derived rather than stored: callers only ever set
+    /// "enabled" plus an optional config, and the inline/opportunistic split
+    /// falls out here.
+    var echIsOpportunistic: Bool { echEnabled && echConfig == nil }
 
     let fingerprint: TLSFingerprint
 
     init(serverName: String, alpn: [String]? = nil,
          minVersion: TLSVersion? = nil, maxVersion: TLSVersion? = nil,
-         echConfig: String? = nil,
+         echEnabled: Bool? = nil, echConfig: String? = nil,
          fingerprint: TLSFingerprint = .chrome120) {
         self.serverName = serverName
         self.alpn = alpn
         self.minVersion = minVersion
         self.maxVersion = maxVersion
-        self.echConfig = echConfig
+        // Normalize an empty inline config to nil so `echConfig == nil` is the one
+        // canonical "no inline ECH" test everywhere.
+        let inlineECH = (echConfig?.isEmpty ?? true) ? nil : echConfig
+        // Default ECH on whenever an inline config is supplied — covers share
+        // links and configs saved before the flag existed; pass `echEnabled`
+        // explicitly to force it (opportunistic, no config) or to suppress it.
+        self.echEnabled = echEnabled ?? (inlineECH != nil)
+        self.echConfig = inlineECH
         self.fingerprint = fingerprint
     }
 
@@ -82,7 +103,8 @@ struct TLSConfiguration {
 
     /// The percent-encoded `ech=` query value for a `vless://` URL, or nil when ECH is unset.
     /// Encodes `+`, `/`, and `=` so a base64 ECHConfigList survives the URL round-trip
-    /// (a bare `+` would otherwise decode back to a space).
+    /// (a bare `+` would otherwise decode back to a space). Opportunistic mode (no inline
+    /// config) is not carried in share links — it is sourced from a Clash `ech-opts` block.
     var echQueryValue: String? {
         guard let ech = echConfig, !ech.isEmpty else { return nil }
         var allowed = CharacterSet.urlQueryAllowed
@@ -93,7 +115,7 @@ struct TLSConfiguration {
 
 extension TLSConfiguration: Codable {
     enum CodingKeys: String, CodingKey {
-        case serverName, alpn, fingerprint, minVersion, maxVersion, echConfig
+        case serverName, alpn, fingerprint, minVersion, maxVersion, echEnabled, echConfig
     }
 
     init(from decoder: Decoder) throws {
@@ -103,7 +125,25 @@ extension TLSConfiguration: Codable {
         fingerprint = try container.decodeIfPresent(TLSFingerprint.self, forKey: .fingerprint) ?? .chrome120
         minVersion = try container.decodeIfPresent(TLSVersion.self, forKey: .minVersion)
         maxVersion = try container.decodeIfPresent(TLSVersion.self, forKey: .maxVersion)
-        echConfig = try container.decodeIfPresent(String.self, forKey: .echConfig)
+        let rawECH = try container.decodeIfPresent(String.self, forKey: .echConfig)
+        let inlineECH = (rawECH?.isEmpty ?? true) ? nil : rawECH
+        // Absent flag → infer from inline config, so configs saved before the
+        // flag existed (inline ECH only) keep ECH enabled.
+        echEnabled = try container.decodeIfPresent(Bool.self, forKey: .echEnabled) ?? (inlineECH != nil)
+        echConfig = inlineECH
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(serverName, forKey: .serverName)
+        try container.encodeIfPresent(alpn, forKey: .alpn)
+        try container.encode(fingerprint, forKey: .fingerprint)
+        try container.encodeIfPresent(minVersion, forKey: .minVersion)
+        try container.encodeIfPresent(maxVersion, forKey: .maxVersion)
+        // Persist the flag only when it can't be inferred from `echConfig`
+        // presence, so existing inline / no-ECH configs serialize unchanged.
+        if echEnabled != (echConfig != nil) { try container.encode(echEnabled, forKey: .echEnabled) }
+        try container.encodeIfPresent(echConfig, forKey: .echConfig)
     }
 }
 
@@ -114,6 +154,7 @@ extension TLSConfiguration: Equatable, Hashable {
         lhs.fingerprint == rhs.fingerprint &&
         lhs.minVersion == rhs.minVersion &&
         lhs.maxVersion == rhs.maxVersion &&
+        lhs.echEnabled == rhs.echEnabled &&
         lhs.echConfig == rhs.echConfig
     }
 
@@ -123,6 +164,7 @@ extension TLSConfiguration: Equatable, Hashable {
         hasher.combine(fingerprint)
         hasher.combine(minVersion)
         hasher.combine(maxVersion)
+        hasher.combine(echEnabled)
         hasher.combine(echConfig)
     }
 }

@@ -126,17 +126,14 @@ struct ClashProxyParser {
     private enum ClashECHOpts {
         case disabled
         case enabled(String)
-        /// `enable: true` but no inline `config:` — mihomo's "opportunistic" mode,
-        /// where the ECHConfigList is auto-discovered from a DNS HTTPS record. We
-        /// don't perform that discovery, so this can't be represented.
         case enabledWithoutConfig
     }
 
     /// Parses an `ech-opts` block (mihomo: `enable` bool, `config` base64
     /// ECHConfigList with standard padding, `query-server-name` — the last
-    /// unused, since the cover SNI comes from the config's public_name). ECH is
-    /// only honored with an inline `config:`; callers skip an opportunistic node
-    /// (`enable: true`, no config) rather than silently fall back to cleartext SNI.
+    /// unused, since the cover SNI comes from the config's public_name). With an
+    /// inline `config:` it is honored directly; `enable: true` without a config
+    /// becomes opportunistic discovery.
     private static func parseECHOpts(_ node: Node) -> ClashECHOpts {
         let opts = node["ech-opts"]
         guard opts.type == .map, getBool(opts, key: "enable") == true else { return .disabled }
@@ -144,6 +141,17 @@ struct ClashProxyParser {
             return .enabled(config)
         }
         return .enabledWithoutConfig
+    }
+
+    /// Maps a parsed `ech-opts` outcome onto `TLSConfiguration`'s ECH fields:
+    /// `enabled` is the master switch, `config` the inline ECHConfigList (nil when
+    /// the config is to be discovered opportunistically).
+    private static func echSettings(_ node: Node) -> (config: String?, enabled: Bool) {
+        switch parseECHOpts(node) {
+        case .disabled:             return (nil, false)
+        case .enabled(let config):  return (config, true)
+        case .enabledWithoutConfig: return (nil, true)
+        }
     }
 
     private static func parseVLESSProxy(_ node: Node) -> ProxyConfiguration? {
@@ -184,16 +192,12 @@ struct ClashProxyParser {
                 fingerprint: fingerprint
             ))
         } else if tlsEnabled {
-            let ech: String?
-            switch parseECHOpts(node) {
-            case .disabled: ech = nil
-            case .enabled(let config): ech = config
-            case .enabledWithoutConfig: return nil
-            }
+            let ech = echSettings(node)
             securityLayer = .tls(TLSConfiguration(
                 serverName: serverName,
                 alpn: alpn,
-                echConfig: ech,
+                echEnabled: ech.enabled,
+                echConfig: ech.config,
                 fingerprint: fingerprint
             ))
         } else {
@@ -292,17 +296,13 @@ struct ClashProxyParser {
         let ssOpts = node["ss-opts"]
         if ssOpts.type == .map, getBool(ssOpts, key: "enabled") == true { return nil }
 
-        let ech: String?
-        switch parseECHOpts(node) {
-        case .disabled: ech = nil
-        case .enabled(let config): ech = config
-        case .enabledWithoutConfig: return nil
-        }
+        let ech = echSettings(node)
 
         let tls = TLSConfiguration(
             serverName: parseSNI(node, server: basics.server),
             alpn: getStringSequence(node, key: "alpn"),
-            echConfig: ech,
+            echEnabled: ech.enabled,
+            echConfig: ech.config,
             fingerprint: parseFingerprint(node)
         )
 
@@ -326,17 +326,13 @@ struct ClashProxyParser {
         let idleTimeout = getInt(node, key: "idle-session-timeout") ?? 30
         let minIdleSession = getInt(node, key: "min-idle-session") ?? 0
 
-        let ech: String?
-        switch parseECHOpts(node) {
-        case .disabled: ech = nil
-        case .enabled(let config): ech = config
-        case .enabledWithoutConfig: return nil
-        }
+        let ech = echSettings(node)
 
         let tls = TLSConfiguration(
             serverName: parseSNI(node, server: basics.server),
             alpn: getStringSequence(node, key: "alpn"),
-            echConfig: ech,
+            echEnabled: ech.enabled,
+            echConfig: ech.config,
             fingerprint: parseFingerprint(node)
         )
 

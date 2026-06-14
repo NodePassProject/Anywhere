@@ -697,6 +697,7 @@ nonisolated class ProxyClient {
             let wsTlsConfig = TLSConfiguration(
                 serverName: baseTLSConfig.serverName,
                 alpn: ["http/1.1"],
+                echEnabled: baseTLSConfig.echEnabled,
                 echConfig: baseTLSConfig.echConfig,
                 fingerprint: baseTLSConfig.fingerprint
             )
@@ -890,6 +891,7 @@ nonisolated class ProxyClient {
         TLSConfiguration(
             serverName: base.serverName,
             alpn: ["h2"],
+            echEnabled: base.echEnabled,
             echConfig: base.echConfig,
             fingerprint: base.fingerprint
         )
@@ -1122,6 +1124,7 @@ nonisolated class ProxyClient {
         return TLSConfiguration(
             serverName: base.serverName,
             alpn: sanitizedALPN,
+            echEnabled: base.echEnabled,
             echConfig: base.echConfig,
             fingerprint: base.fingerprint
         )

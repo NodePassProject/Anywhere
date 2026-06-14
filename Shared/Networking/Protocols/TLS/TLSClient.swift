@@ -36,12 +36,18 @@ nonisolated class TLSClient {
     private var storedClientHello: Data?
     private var sentSessionID: Data?
 
-    /// Encrypted Client Hello state, set when `configuration.echConfig` is
-    /// present. Holds the inner-hello transcript material used to detect whether
-    /// the server accepted ECH. `nil` means ECH was not attempted.
+    /// Encrypted Client Hello state, set when ECH is attempted — an inline
+    /// `echConfig` or an opportunistic config discovered from DNS. Holds the
+    /// inner-hello transcript material used to detect whether the server accepted
+    /// ECH. `nil` means ECH was not attempted.
     private var echContext: ECHClientContext?
     /// Set once the ECH accept-confirmation in the ServerHello verifies.
     private(set) var echAccepted = false
+
+    /// ECHConfigList discovered from the server domain's DNS HTTPS record,
+    /// populated by `prepareECH` before the handshake when ECH is enabled without
+    /// an inline `echConfig`. `nil` otherwise.
+    private var resolvedECHConfigList: Data?
 
     /// TLS 1.3 session state (cleared after handshake).
     private var tls13 = TLS13HandshakeState()
@@ -121,37 +127,47 @@ nonisolated class TLSClient {
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         let completion = releasingConnectionOnFailure(completion)
-        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-
-        guard let privateKey = ephemeralPrivateKey else {
-            completion(.failure(TLSError.handshakeFailed("No ephemeral key")))
-            return
-        }
-
-        let clientHello: Data
-        do {
-            clientHello = try buildTLSClientHello(privateKey: privateKey)
-        } catch {
-            completion(.failure(error))
-            return
-        }
-        storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
-
-        let transport = RawTCPSocket()
-        self.connection = transport
-
-        transport.connect(host: host, port: port, initialData: clientHello) { [weak self] error in
-            if let error {
-                completion(.failure(TLSError.connectionFailed(error.localizedDescription)))
-                return
-            }
-
+        prepareECH { [weak self] echError in
             guard let self else {
                 completion(.failure(TLSError.connectionFailed("Client deallocated")))
                 return
             }
+            if let echError {
+                completion(.failure(echError))
+                return
+            }
 
-            self.receiveServerResponse(completion: completion)
+            self.ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+            guard let privateKey = self.ephemeralPrivateKey else {
+                completion(.failure(TLSError.handshakeFailed("No ephemeral key")))
+                return
+            }
+
+            let clientHello: Data
+            do {
+                clientHello = try self.buildTLSClientHello(privateKey: privateKey)
+            } catch {
+                completion(.failure(error))
+                return
+            }
+            self.storedClientHello = clientHello.subdata(in: 5..<clientHello.count)
+
+            let transport = RawTCPSocket()
+            self.connection = transport
+
+            transport.connect(host: host, port: port, initialData: clientHello) { [weak self] error in
+                if let error {
+                    completion(.failure(TLSError.connectionFailed(error.localizedDescription)))
+                    return
+                }
+
+                guard let self else {
+                    completion(.failure(TLSError.connectionFailed("Client deallocated")))
+                    return
+                }
+
+                self.receiveServerResponse(completion: completion)
+            }
         }
     }
 
@@ -161,9 +177,19 @@ nonisolated class TLSClient {
         completion: @escaping (Result<TLSRecordConnection, Error>) -> Void
     ) {
         let completion = releasingConnectionOnFailure(completion)
-        ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
-        self.connection = TunneledTransport(tunnel: tunnel)
-        performTLSHandshake(completion: completion)
+        prepareECH { [weak self] echError in
+            guard let self else {
+                completion(.failure(TLSError.connectionFailed("Client deallocated")))
+                return
+            }
+            if let echError {
+                completion(.failure(echError))
+                return
+            }
+            self.ephemeralPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+            self.connection = TunneledTransport(tunnel: tunnel)
+            self.performTLSHandshake(completion: completion)
+        }
     }
 
     func cancel() {
@@ -224,6 +250,32 @@ nonisolated class TLSClient {
 
     // MARK: - ClientHello
 
+    /// Resolves an opportunistic ECHConfigList from DNS before the handshake.
+    /// Returns immediately with no error unless ECH is enabled without an inline
+    /// `echConfig` (`echIsOpportunistic`). Fail-closed: a discovery miss is
+    /// surfaced as an error so the caller never falls back to a cleartext-SNI
+    /// handshake.
+    private func prepareECH(completion: @escaping (Error?) -> Void) {
+        guard configuration.echIsOpportunistic else {
+            completion(nil)
+            return
+        }
+        let serverName = configuration.serverName
+        DNSResolver.shared.resolveECHConfigList(for: serverName) { [weak self] config in
+            guard let self else {
+                completion(TLSError.connectionFailed("Client deallocated"))
+                return
+            }
+            guard let config else {
+                completion(TLSError.handshakeFailed(
+                    "Opportunistic ECH: no ECH config published in DNS for \(serverName)"))
+                return
+            }
+            self.resolvedECHConfigList = config
+            completion(nil)
+        }
+    }
+
     private func buildTLSClientHello(privateKey: Curve25519.KeyAgreement.PrivateKey) throws -> Data {
         var random = Data(count: 32)
         guard random.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
@@ -237,10 +289,11 @@ nonisolated class TLSClient {
         }
         sentSessionID = sessionId
 
-        // Encrypted Client Hello: when a base64 ECHConfigList is configured,
-        // send a ClientHelloOuter carrying the cover name and the HPKE-sealed
-        // inner.
-        if let echConfigData = ECHConfigResolver.resolveImmediate(configuration.echConfig) {
+        // Encrypted Client Hello: when enabled, send a ClientHelloOuter carrying
+        // the cover name and the HPKE-sealed inner — the ECHConfigList is inline
+        // (base64) or discovered opportunistically from DNS by `prepareECH`.
+        if configuration.echEnabled,
+           let echConfigData = ECHConfigResolver.resolveImmediate(configuration.echConfig) ?? resolvedECHConfigList {
             let configs = try ECHConfigParser.parseConfigList(echConfigData)
             guard let config = ECHConfig.pick(from: configs) else {
                 throw TLSError.handshakeFailed("ECHConfigList contains no usable config")
@@ -266,10 +319,14 @@ nonisolated class TLSClient {
             )
             self.echContext = context
             return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: outerMessage)
-        } else if configuration.echConfig != nil {
+        } else if configuration.echEnabled, configuration.echConfig != nil {
             // ECH was requested but its ECHConfigList isn't valid base64. Fail
             // rather than silently sending the real SNI in the clear.
             throw TLSError.handshakeFailed("ECH requested but its ECHConfigList is not valid base64")
+        } else if configuration.echEnabled {
+            // `prepareECH` is fail-closed, so opportunistic discovery should have
+            // a resolved config by now; guard defensively rather than leak the SNI.
+            throw TLSError.handshakeFailed("Opportunistic ECH requested but no ECH config was discovered")
         }
 
         var rawClientHello = TLSClientHelloBuilder.buildRawClientHello(

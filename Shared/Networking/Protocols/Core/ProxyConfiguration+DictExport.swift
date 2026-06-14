@@ -59,6 +59,7 @@ extension ProxyConfiguration {
                 configurationDict["nowhereALPN"] = alpn
             }
             if let ech = tls.echConfig { configurationDict["nowhereEch"] = ech }
+            if tls.echEnabled != (tls.echConfig != nil) { configurationDict["nowhereEchEnabled"] = tls.echEnabled }
         case .trojan(let password, let tls):
             configurationDict["trojanPassword"] = password
             configurationDict["trojanSNI"] = tls.serverName
@@ -67,6 +68,7 @@ extension ProxyConfiguration {
             }
             configurationDict["trojanFingerprint"] = tls.fingerprint.rawValue
             if let ech = tls.echConfig { configurationDict["trojanEch"] = ech }
+            if tls.echEnabled != (tls.echConfig != nil) { configurationDict["trojanEchEnabled"] = tls.echEnabled }
         case .anytls(let password, let ici, let it, let mis, let tls):
             configurationDict["anytlsPassword"] = password
             configurationDict["anytlsIdleCheckInterval"] = ici
@@ -78,6 +80,7 @@ extension ProxyConfiguration {
             }
             configurationDict["anytlsFingerprint"] = tls.fingerprint.rawValue
             if let ech = tls.echConfig { configurationDict["anytlsEch"] = ech }
+            if tls.echEnabled != (tls.echConfig != nil) { configurationDict["anytlsEchEnabled"] = tls.echEnabled }
         case .shadowsocks(let password, let method):
             configurationDict["ssPassword"] = password
             configurationDict["ssMethod"] = method
@@ -123,6 +126,7 @@ extension ProxyConfiguration {
             }
             configurationDict["tlsFingerprint"] = tls.fingerprint.rawValue
             if let ech = tls.echConfig { configurationDict["tlsEch"] = ech }
+            if tls.echEnabled != (tls.echConfig != nil) { configurationDict["tlsEchEnabled"] = tls.echEnabled }
         }
 
         if outboundProtocol == .vless {

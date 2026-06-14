@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import dnssd
 
 private let logger = AnywhereLogger(category: "DNSResolver")
 
@@ -29,12 +30,35 @@ nonisolated final class DNSResolver {
     /// Backstop cap; TTL-based cleanup normally bounds the cache.
     static let maxEntries = 1024
 
+    /// Clamp bounds for a cached ECH HTTPS-record result.
+    static let echMinTTL: TimeInterval = 60
+    static let echMaxTTL: TimeInterval = 86_400
+    /// How long a "no ECH record" answer is cached.
+    static let echNegativeTTL: TimeInterval = 30
+    /// Per-lookup timeout for the system-resolver HTTPS-record query.
+    static let echQueryTimeout: TimeInterval = 5
+
     private struct CacheEntry {
         let ips: [String]
         let expiry: CFAbsoluteTime
     }
 
+    private struct ECHCacheEntry {
+        /// nil = negative cache: the host publishes no usable ECH record.
+        let config: Data?
+        let expiry: CFAbsoluteTime
+    }
+
     private var cache: [String: CacheEntry] = [:]
+
+    /// ECHConfigList bytes discovered from DNS HTTPS records, keyed by
+    /// lowercased host.
+    private var echCache: [String: ECHCacheEntry] = [:]
+
+    /// Coalesces concurrent ECH lookups for the same host (single-flight): the
+    /// first caller queries DNS, later callers wait on its result.
+    private var echWaiters: [String: [(Data?) -> Void]] = [:]
+
     private let lock = ReadWriteLock()
 
     /// Hosts with a background refresh in flight; coalesces duplicate lookups.
@@ -109,6 +133,10 @@ nonisolated final class DNSResolver {
         let count: Int = lock.withWriteLock {
             generation &+= 1
             inFlightRefreshes.removeAll(keepingCapacity: true)
+            // ECH configs can be split-horizon / GeoDNS specific too; drop them
+            // so the next connection rediscovers against the new path. The
+            // generation bump above also voids an in-flight lookup's commit.
+            echCache.removeAll(keepingCapacity: true)
             let count = cache.count
             cache.removeAll(keepingCapacity: true)
             return count
@@ -220,5 +248,151 @@ nonisolated final class DNSResolver {
             current = info.pointee.ai_next
         }
         return ipv4 + ipv6
+    }
+
+    // MARK: - ECH (HTTPS record) resolution
+
+    /// Resolves the ECHConfigList for `host` from its DNS HTTPS record (RFC 9460
+    /// SvcParamKey 5, `ech`). The query goes through the system resolver — the
+    /// same mDNSResponder path as `getaddrinfo`, so it inherits the same
+    /// tunnel-bypass behavior. Results are cached by the record's TTL and misses
+    /// are negatively cached briefly. `completion` runs on an arbitrary queue
+    /// with the ECHConfigList bytes, or nil when no usable record is published.
+    func resolveECHConfigList(for host: String, completion: @escaping (Data?) -> Void) {
+        let bare = Self.stripBrackets(host)
+        // An IP literal has no domain that could carry an HTTPS record.
+        if bare.isEmpty || Self.isIPAddress(bare) { completion(nil); return }
+
+        let key = Self.cacheKey(for: bare)
+        let now = CFAbsoluteTimeGetCurrent()
+
+        enum Action { case cached(Data?); case joined; case lead(generation: UInt64) }
+        let action: Action = lock.withWriteLock {
+            if let entry = echCache[key], entry.expiry > now {
+                return .cached(entry.config)
+            }
+            if echWaiters[key] != nil {
+                echWaiters[key]?.append(completion)
+                return .joined
+            }
+            echWaiters[key] = []          // claim leadership for this host
+            return .lead(generation: generation)
+        }
+
+        switch action {
+        case .cached(let config):
+            completion(config)
+        case .joined:
+            break                          // resumed by the leader below
+        case .lead(let scheduledGeneration):
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                let result = Self.queryHTTPSRecordECH(host: bare)
+                let (config, waiters): (Data?, [(Data?) -> Void]) = lock.withWriteLock {
+                    let waiters = echWaiters[key] ?? []
+                    echWaiters[key] = nil
+                    // A flush mid-lookup bumps the generation: this result may be
+                    // bound to the pre-change network path, so discard it and let
+                    // callers fail closed and rediscover rather than sealing
+                    // against a stale ECH key.
+                    guard scheduledGeneration == generation else { return (nil, waiters) }
+                    let ttl: TimeInterval = result
+                        .map { min(max(TimeInterval($0.ttl), Self.echMinTTL), Self.echMaxTTL) }
+                        ?? Self.echNegativeTTL
+                    echCache[key] = ECHCacheEntry(config: result?.config,
+                                                  expiry: CFAbsoluteTimeGetCurrent() + ttl)
+                    return (result?.config, waiters)
+                }
+                completion(config)
+                for waiter in waiters { waiter(config) }
+            }
+        }
+    }
+
+    /// Blocking system-resolver query for `host`'s HTTPS record, returning the
+    /// `ech` SvcParam bytes and the record's TTL, or nil on miss/timeout. Drives
+    /// the dns_sd request to completion on the calling (background) queue.
+    private static func queryHTTPSRecordECH(host: String) -> (config: Data, ttl: UInt32)? {
+        final class QueryResult { var config: Data?; var ttl: UInt32 = 0; var answered = false }
+        let result = QueryResult()
+
+        // Non-capturing so it bridges to the C callback; state flows via context.
+        let callback: DNSServiceQueryRecordReply = { _, flags, _, errorCode, _, rrtype, _, rdlen, rdata, ttl, context in
+            guard let context else { return }
+            let result = Unmanaged<QueryResult>.fromOpaque(context).takeUnretainedValue()
+            // MoreComing clear marks the batch complete; note it so the poll loop
+            // stops instead of waiting out the timeout when the host publishes no
+            // usable ECH record (the common negative case resolves promptly).
+            if (flags & kDNSServiceFlagsMoreComing) == 0 { result.answered = true }
+            guard errorCode == kDNSServiceErr_NoError,
+                  rrtype == kHTTPSRecordType, let rdata, rdlen > 0
+            else { return }
+            guard result.config == nil else { return }   // keep the first usable record
+            if let ech = echParseSVCBECH(Data(bytes: rdata, count: Int(rdlen))) {
+                result.config = ech
+                result.ttl = ttl
+            }
+        }
+
+        var serviceRef: DNSServiceRef?
+        let context = Unmanaged.passUnretained(result).toOpaque()
+        let queryError = host.withCString { cHost in
+            DNSServiceQueryRecord(&serviceRef, 0, 0, cHost,
+                                  kHTTPSRecordType, UInt16(kDNSServiceClass_IN), callback, context)
+        }
+        guard queryError == kDNSServiceErr_NoError, let serviceRef else { return nil }
+        defer { DNSServiceRefDeallocate(serviceRef) }
+
+        let fd = DNSServiceRefSockFD(serviceRef)
+        guard fd >= 0 else { return nil }
+
+        let deadline = CFAbsoluteTimeGetCurrent() + echQueryTimeout
+        while result.config == nil, !result.answered {
+            let remaining = deadline - CFAbsoluteTimeGetCurrent()
+            if remaining <= 0 { break }
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&pfd, 1, Int32(remaining * 1000))
+            guard ready > 0, (pfd.revents & Int16(POLLIN)) != 0 else { break }
+            if DNSServiceProcessResult(serviceRef) != kDNSServiceErr_NoError { break }
+        }
+        guard let config = result.config else { return nil }
+        return (config, result.ttl)
+    }
+}
+
+/// DNS RR type for HTTPS records (RFC 9460). Used as a literal to avoid a hard
+/// dependency on `kDNSServiceType_HTTPS`, which is missing from older SDKs.
+private let kHTTPSRecordType: UInt16 = 65
+
+/// Extracts the `ech` SvcParam (SvcParamKey 5) from an HTTPS/SVCB record's RDATA
+/// (RFC 9460): `SvcPriority(2) ++ TargetName ++ SvcParams`, where each SvcParam
+/// is `key(2) ++ length(2) ++ value`. Returns the ECHConfigList bytes, or nil
+/// when absent. TargetName is uncompressed per spec; AliasMode (priority 0,
+/// no params) yields nil. A free function so the C callback can reach it.
+private func echParseSVCBECH(_ rdata: Data) -> Data? {
+    return rdata.withUnsafeBytes { raw -> Data? in
+        let bytes = raw.bindMemory(to: UInt8.self)
+        guard let base = bytes.baseAddress else { return nil }
+        let count = bytes.count
+        var i = 0
+        guard count >= 2 else { return nil }                  // SvcPriority
+        i += 2
+        while i < count {                                     // TargetName labels
+            let labelLen = Int(bytes[i]); i += 1
+            if labelLen == 0 { break }
+            if labelLen & 0xC0 != 0 { return nil }             // no compression in SVCB
+            i += labelLen
+            if i > count { return nil }
+        }
+        while i + 4 <= count {                                // SvcParams
+            let paramKey = Int(bytes[i]) << 8 | Int(bytes[i + 1]); i += 2
+            let valueLen = Int(bytes[i]) << 8 | Int(bytes[i + 1]); i += 2
+            guard i + valueLen <= count else { return nil }
+            if paramKey == 5 {                                 // SvcParamKey "ech"
+                guard valueLen > 0 else { return nil }
+                return Data(bytes: base + i, count: valueLen)
+            }
+            i += valueLen
+        }
+        return nil
     }
 }
