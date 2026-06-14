@@ -19,6 +19,10 @@ private enum ServerHelloResult {
     /// TLS 1.3: server provided a key_share extension with an X25519 public key.
     case tls13(keyShare: Data, cipherSuite: UInt16)
     case tls12(cipherSuite: UInt16, serverRandom: Data, version: UInt16, extendedMasterSecret: Bool)
+    /// The server sent a HelloRetryRequest. We don't perform a second ClientHello
+    /// flight, so this is surfaced as a distinct, terminal outcome rather than a
+    /// generic parse failure.
+    case helloRetryRequest
 }
 
 // MARK: - TLSClient
@@ -31,6 +35,13 @@ nonisolated class TLSClient {
     private var ephemeralPrivateKey: Curve25519.KeyAgreement.PrivateKey?
     private var storedClientHello: Data?
     private var sentSessionID: Data?
+
+    /// Encrypted Client Hello state, set when `configuration.echConfig` is
+    /// present. Holds the inner-hello transcript material used to detect whether
+    /// the server accepted ECH. `nil` means ECH was not attempted.
+    private var echContext: ECHClientContext?
+    /// Set once the ECH accept-confirmation in the ServerHello verifies.
+    private(set) var echAccepted = false
 
     /// TLS 1.3 session state (cleared after handshake).
     private var tls13 = TLS13HandshakeState()
@@ -226,6 +237,41 @@ nonisolated class TLSClient {
         }
         sentSessionID = sessionId
 
+        // Encrypted Client Hello: when a base64 ECHConfigList is configured,
+        // send a ClientHelloOuter carrying the cover name and the HPKE-sealed
+        // inner.
+        if let echConfigData = ECHConfigResolver.resolveImmediate(configuration.echConfig) {
+            let configs = try ECHConfigParser.parseConfigList(echConfigData)
+            guard let config = ECHConfig.pick(from: configs) else {
+                throw TLSError.handshakeFailed("ECHConfigList contains no usable config")
+            }
+            guard let cipherSuite = config.pickCipherSuite() else {
+                throw TLSError.handshakeFailed("ECH config offers no supported cipher suite")
+            }
+
+            var innerRandom = Data(count: 32)
+            guard innerRandom.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
+                throw TLSError.handshakeFailed("Failed to generate inner random")
+            }
+
+            let (outerMessage, context) = try TLSClientHelloBuilder.buildECHClientHello(
+                outerRandom: random,
+                innerRandom: innerRandom,
+                sessionId: sessionId,
+                innerServerName: configuration.serverName,
+                publicKey: privateKey.publicKey.rawRepresentation,
+                alpn: configuration.alpn ?? ["h2", "http/1.1"],
+                config: config,
+                cipherSuite: cipherSuite
+            )
+            self.echContext = context
+            return TLSClientHelloBuilder.wrapInTLSRecord(clientHello: outerMessage)
+        } else if configuration.echConfig != nil {
+            // ECH was requested but its ECHConfigList isn't valid base64. Fail
+            // rather than silently sending the real SNI in the clear.
+            throw TLSError.handshakeFailed("ECH requested but its ECHConfigList is not valid base64")
+        }
+
         var rawClientHello = TLSClientHelloBuilder.buildRawClientHello(
             fingerprint: configuration.fingerprint,
             random: random,
@@ -326,6 +372,14 @@ nonisolated class TLSClient {
         }
 
         switch serverHelloResult {
+        case .helloRetryRequest:
+            // HelloRetryRequest requires re-sending a ClientHello (new key_share,
+            // cookie, and for ECH a re-sealed inner). We don't implement that
+            // second flight; fail with a specific error. The handshake aborts
+            // without leaking the inner SNI, since the ClientHello is already sent.
+            completion(.failure(TLSError.helloRetryRequest))
+            return
+
         case .tls13(let serverKeyShare, let cipherSuite):
             handleTLS13Handshake(
                 buffer: buffer,
@@ -427,7 +481,7 @@ nonisolated class TLSClient {
             let srvRandom = data.subdata(in: randomOffset..<(randomOffset + 32))
 
             if srvRandom == TLSRandom.helloRetryRequest {
-                return nil
+                return .helloRetryRequest
             }
 
             var shOffset = randomOffset + 32
@@ -563,8 +617,22 @@ nonisolated class TLSClient {
 
             tls13.keyDerivation = TLS13KeyDerivation(cipherSuite: cipherSuite)
 
+            // With ECH, the accepted handshake transcript is seeded by the inner
+            // ClientHello. Detect acceptance via the confirmation embedded in the
+            // ServerHello random; on rejection fall back to the outer hello so
+            // the (doomed) handshake still decrypts far enough to read retry configs.
+            var effectiveClientHello = clientHello
+            if let ech = echContext {
+                if echAcceptConfirmed(serverHello: serverHello, ech: ech, kd: tls13.keyDerivation!) {
+                    echAccepted = true
+                    effectiveClientHello = ech.innerTranscriptMessage
+                } else {
+                    ech.rejected = true
+                }
+            }
+
             var transcript = Data()
-            transcript.append(clientHello)
+            transcript.append(effectiveClientHello)
             transcript.append(serverHello)
 
             let (hs, keys) = tls13.keyDerivation!.deriveHandshakeKeys(sharedSecret: sharedSecretData, transcript: transcript)
@@ -577,6 +645,53 @@ nonisolated class TLSClient {
         } catch {
             completion(.failure(TLSError.handshakeFailed("Key derivation failed")))
         }
+    }
+
+    // MARK: - ECH Accept Confirmation
+
+    /// Returns true if the ServerHello signals that ECH was accepted.
+    ///
+    /// The server places an 8-byte confirmation in the last 8 bytes of the
+    /// ServerHello random, derived (with the negotiated cipher suite's hash) as:
+    ///
+    ///     PRK  = HKDF-Extract(salt: 0, IKM: ClientHelloInner.random)
+    ///     conf = Hash(innerTranscript || ServerHello with random[24..32] zeroed)
+    ///     tag  = HKDF-Expand-Label(PRK, "ech accept confirmation", conf, 8)
+    private func echAcceptConfirmed(serverHello: Data, ech: ECHClientContext, kd: TLS13KeyDerivation) -> Bool {
+        let sh = [UInt8](serverHello)
+        guard sh.count >= 38 else { return false }
+
+        var confInput = ech.innerTranscriptMessage
+        confInput.append(contentsOf: sh[0..<30])
+        confInput.append(Data(repeating: 0, count: 8))
+        confInput.append(contentsOf: sh[38...])
+        let confHash = kd.transcriptHash(confInput)
+
+        let prk = kd.extract(inputKeyMaterial: ech.innerRandom, salt: Data()).key
+        let expected = kd.expandLabel(secret: prk, label: "ech accept confirmation", context: confHash, length: 8)
+
+        return constantTimeEqual(expected, Data(sh[30..<38]))
+    }
+
+    /// Extract the `retry_configs` ECHConfigList from the server's
+    /// encrypted_client_hello extension in EncryptedExtensions, if present.
+    private func parseECHRetryConfigList(fromEncryptedExtensions body: Data) -> Data? {
+        let b = [UInt8](body)
+        guard b.count >= 2 else { return nil }
+        let extsTotal = Int(b[0]) << 8 | Int(b[1])
+        let end = min(2 + extsTotal, b.count)
+        var offset = 2
+        while offset + 4 <= end {
+            let extType = UInt16(b[offset]) << 8 | UInt16(b[offset + 1])
+            let extLen = Int(b[offset + 2]) << 8 | Int(b[offset + 3])
+            offset += 4
+            guard offset + extLen <= end else { return nil }
+            if extType == 0xFE0D {
+                return Data(b[offset..<(offset + extLen)])
+            }
+            offset += extLen
+        }
+        return nil
     }
 
     // MARK: - TLS 1.3 Encrypted Handshake Processing
@@ -638,7 +753,12 @@ nonisolated class TLSClient {
                         switch hsType {
                         case TLSHandshakeType.encryptedExtensions:
                             fullTranscript.append(hsMessage)
-                            if let alpn = parseALPNFromEncryptedExtensions(hsBody) {
+                            if let ech = echContext, ech.rejected {
+                                // ECH was rejected; the server may offer fresh
+                                // configs here. Skip ALPN validation — it reflects
+                                // the cover (outer) hello, and we will fail anyway.
+                                ech.retryConfigList = parseECHRetryConfigList(fromEncryptedExtensions: hsBody)
+                            } else if let alpn = parseALPNFromEncryptedExtensions(hsBody) {
                                 guard (configuration.alpn ?? ["h2", "http/1.1"]).contains(alpn) else {
                                     completion(.failure(TLSError.handshakeFailed("Server selected an ALPN we didn't offer")))
                                     return
@@ -708,6 +828,14 @@ nonisolated class TLSClient {
         self.postHandshakeBuffer = remainingBuffer
 
         if foundServerFinished {
+            // ECH rejected: the handshake terminated against the cover name, not
+            // the intended server. Surface the rejection (with any retry configs)
+            // rather than validating the wrong certificate.
+            if let ech = echContext, ech.rejected {
+                completion(.failure(TLSError.echRejected(retryConfigList: ech.retryConfigList)))
+                return
+            }
+
             validateCertificate { [weak self] result in
                 guard let self else { return }
 
@@ -1986,6 +2114,8 @@ nonisolated class TLSClient {
         ephemeralPrivateKey = nil
         storedClientHello = nil
         sentSessionID = nil
+        echContext = nil
+        echAccepted = false
         tls13 = TLS13HandshakeState()
         postHandshakeBuffer = nil
         serverCertificates.removeAll()

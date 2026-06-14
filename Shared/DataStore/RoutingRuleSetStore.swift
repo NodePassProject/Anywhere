@@ -476,6 +476,7 @@ extension RoutingRuleSetStore {
             if let alpn = tls.alpn?.first, !alpn.isEmpty {
                 configurationDict["nowhereALPN"] = alpn
             }
+            if let ech = tls.echConfig { configurationDict["nowhereEch"] = ech }
         case .trojan(let password, let tls):
             configurationDict["trojanPassword"] = password
             configurationDict["trojanSNI"] = tls.serverName
@@ -483,6 +484,7 @@ extension RoutingRuleSetStore {
                 configurationDict["trojanALPN"] = alpn.joined(separator: ",")
             }
             configurationDict["trojanFingerprint"] = tls.fingerprint.rawValue
+            if let ech = tls.echConfig { configurationDict["trojanEch"] = ech }
         case .anytls(let password, let ici, let it, let mis, let tls):
             configurationDict["anytlsPassword"] = password
             configurationDict["anytlsIdleCheckInterval"] = ici
@@ -493,6 +495,7 @@ extension RoutingRuleSetStore {
                 configurationDict["anytlsALPN"] = alpn.joined(separator: ",")
             }
             configurationDict["anytlsFingerprint"] = tls.fingerprint.rawValue
+            if let ech = tls.echConfig { configurationDict["anytlsEch"] = ech }
         case .shadowsocks(let password, let method):
             configurationDict["ssPassword"] = password
             configurationDict["ssMethod"] = method
@@ -537,6 +540,7 @@ extension RoutingRuleSetStore {
                 configurationDict["tlsAlpn"] = alpn.joined(separator: ",")
             }
             configurationDict["tlsFingerprint"] = tls.fingerprint.rawValue
+            if let ech = tls.echConfig { configurationDict["tlsEch"] = ech }
         }
 
         if configuration.outboundProtocol == .vless {

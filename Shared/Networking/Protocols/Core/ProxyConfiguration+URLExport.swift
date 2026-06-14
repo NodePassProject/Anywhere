@@ -22,6 +22,16 @@ extension ProxyConfiguration {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
+    /// `ech=` value for a TLS config, or nil when ECH is not configured.
+    /// Percent-encodes `+`, `/`, and `=` so a base64 ECHConfigList survives the
+    /// URL round-trip (a bare `+` would otherwise decode back to a space).
+    private func echQueryValue(_ tls: TLSConfiguration) -> String? {
+        guard let ech = tls.echConfig, !ech.isEmpty else { return nil }
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&#=+/")
+        return ech.addingPercentEncoding(withAllowedCharacters: allowed) ?? ech
+    }
+
     /// Export configuration as a shareable URL string.
     func toURL() -> String {
         switch outboundProtocol {
@@ -73,8 +83,11 @@ extension ProxyConfiguration {
             if tls.fingerprint != .chrome120 {
                 params.append("fp=\(tls.fingerprint.rawValue)")
             }
+            if let ech = echQueryValue(tls) {
+                params.append("ech=\(ech)")
+            }
         }
-        
+
         if case .reality(let reality) = security {
             params.append("sni=\(reality.serverName)")
             params.append("pbk=\(reality.publicKey.base64URLEncodedString())")
@@ -141,6 +154,9 @@ extension ProxyConfiguration {
         if let alpn = tls.alpn?.first, !alpn.isEmpty {
             params.append("alpn=\(encodedQueryValue(alpn))")
         }
+        if let ech = echQueryValue(tls) {
+            params.append("ech=\(ech)")
+        }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         return "nowhere://\(encodedKey)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
@@ -160,6 +176,9 @@ extension ProxyConfiguration {
         if tls.fingerprint != .chrome120 {
             params.append("fp=\(tls.fingerprint.rawValue)")
         }
+        if let ech = echQueryValue(tls) {
+            params.append("ech=\(ech)")
+        }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
         return "trojan://\(encodedPassword)@\(bracketedServerAddress):\(serverPort)\(query)#\(fragment)"
     }
@@ -178,6 +197,9 @@ extension ProxyConfiguration {
         }
         if tls.fingerprint != .chrome120 {
             params.append("fp=\(tls.fingerprint.rawValue)")
+        }
+        if let ech = echQueryValue(tls) {
+            params.append("ech=\(ech)")
         }
         // Emit pool tuners only when they differ from the sing-anytls defaults.
         if ici != 30 { params.append("ici=\(ici)") }

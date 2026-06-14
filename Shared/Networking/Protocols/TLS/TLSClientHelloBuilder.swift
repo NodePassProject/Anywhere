@@ -1033,6 +1033,178 @@ struct TLSClientHelloBuilder {
         return (suites, extensionsData, false) // No padding
     }
 
+    // MARK: - Encrypted Client Hello (real ECH)
+
+    /// The signature algorithms offered in the inner/outer ECH ClientHellos.
+    private static let echSignatureAlgorithms: [UInt16] = [
+        0x0403, 0x0804, 0x0401,  // ECDSA-P256-SHA256, PSS-SHA256, PKCS1-SHA256
+        0x0503, 0x0805, 0x0501,  // ECDSA-P384-SHA384, PSS-SHA384, PKCS1-SHA384
+        0x0806, 0x0601,          // PSS-SHA512, PKCS1-SHA512
+    ]
+
+    /// Build a ClientHelloInner handshake message.
+    ///
+    /// This is a clean TLS 1.3-only hello carrying the *real* SNI and the ECH
+    /// "inner" marker (extension 0xFE0D = [0x01]). It becomes the negotiated
+    /// ClientHello if the server accepts ECH. The TLS 1.2-only extensions
+    /// (ec_point_formats, session_ticket, renegotiation_info,
+    /// extended_master_secret) are intentionally omitted, since the inner
+    /// negotiates TLS 1.3 only. `sessionId` is empty for the encoded (encrypted)
+    /// form and the outer's session_id for the transcript form.
+    private static func buildECHInnerHello(
+        random: Data, sessionId: Data, serverName: String, publicKey: Data, alpn: [String]?
+    ) -> Data {
+        let suites = cipherSuitesData([0x1301, 0x1302, 0x1303])
+        let protocols = alpn ?? ["h2", "http/1.1"]
+
+        var exts = Data()
+        exts.append(buildSNIExtension(serverName: serverName))
+        exts.append(supportedGroupsExt([0x001D, 0x0017, 0x0018]))   // X25519, secp256r1, secp384r1
+        exts.append(signatureAlgorithmsExt(echSignatureAlgorithms))
+        exts.append(alpnExt(protocols))
+        exts.append(keyShareExt([(group: 0x001D, keyData: publicKey)]))   // X25519 (shared with outer)
+        exts.append(pskKeyExchangeModesExt())
+        exts.append(supportedVersionsExt([0x0304]))                  // TLS 1.3 only
+        exts.append(ext(0xFE0D, Data([0x01])))                       // encrypted_client_hello: inner
+
+        return assembleClientHello(
+            random: random,
+            sessionId: sessionId,
+            cipherSuites: suites,
+            extensions: exts,
+            applyBoringPadding: false
+        )
+    }
+
+    /// Build a ClientHelloOuter handshake message: a Chrome-120-style camouflage
+    /// hello with the cover `publicName` as SNI and a *real* outer
+    /// encrypted_client_hello extension carrying the sealed inner. The X25519
+    /// key share matches the inner's, so the ECDHE result is identical whether
+    /// or not the server accepts ECH.
+    private static func buildECHOuterHello(
+        random: Data, sessionId: Data, publicName: String, publicKey: Data, alpn: [String]?, echExtData: Data
+    ) -> Data {
+        let gCipher  = grease(random[24])
+        let gExt1    = grease(random[25])
+        let gGroup   = grease(random[26])
+        let gVersion = grease(random[28])
+        var gExt2    = grease(random[29])
+        if gExt2 == gExt1 { gExt2 = grease(random[29] &+ 1) }
+
+        let suites = cipherSuitesData([
+            gCipher,
+            0x1301, 0x1302, 0x1303,
+            0xC02B, 0xC02F, 0xC02C, 0xC030,
+            0xCCA9, 0xCCA8,
+            0xC013, 0xC014,
+            0x009C, 0x009D,
+            0x002F, 0x0035,
+        ])
+
+        let protocols = alpn ?? ["h2", "http/1.1"]
+
+        var exts: [Data] = [
+            greaseExt(gExt1),
+            buildSNIExtension(serverName: publicName),
+            extendedMasterSecretExt(),
+            renegotiationInfoExt(),
+            supportedGroupsExt([gGroup, 0x001D, 0x0017, 0x0018]),
+            ecPointFormatsExt(),
+            sessionTicketExt(),
+            alpnExt(protocols),
+            statusRequestExt(),
+            signatureAlgorithmsExt(echSignatureAlgorithms),
+            sctExt(),
+            keyShareExt([
+                (group: gGroup, keyData: Data([0x00])),
+                (group: 0x001D, keyData: publicKey),
+            ]),
+            pskKeyExchangeModesExt(),
+            supportedVersionsExt([gVersion, 0x0304, 0x0303]),
+            compressCertExt([0x0002]),
+            applicationSettingsExt(["h2"]),
+            ext(0xFE0D, echExtData),                                 // encrypted_client_hello: outer
+            greaseExt(gExt2),
+        ]
+
+        shuffleChromeExtensions(&exts, random: random)
+
+        var extensionsData = Data()
+        for e in exts { extensionsData.append(e) }
+
+        return assembleClientHello(
+            random: random,
+            sessionId: sessionId,
+            cipherSuites: suites,
+            extensions: extensionsData,
+            applyBoringPadding: true
+        )
+    }
+
+    /// Assemble a complete ECH ClientHelloOuter and the matching inner-hello
+    /// state, performing the HPKE seal. Returns the outer handshake message to
+    /// put on the wire and an `ECHClientContext` carrying the inner transcript
+    /// material the handshake needs to detect acceptance.
+    ///
+    /// The two-pass assembly implements the chicken-and-egg of the seal's AAD:
+    /// the AAD is the serialized ClientHelloOuter with a zero-filled payload of
+    /// the eventual ciphertext length, so we build the outer once with zeros,
+    /// seal against it, then rebuild with the real ciphertext (same length, so
+    /// every other byte is identical — which is exactly what the server zeroes
+    /// and re-derives).
+    static func buildECHClientHello(
+        outerRandom: Data,
+        innerRandom: Data,
+        sessionId: Data,
+        innerServerName: String,
+        publicKey: Data,
+        alpn: [String]?,
+        config: ECHConfig,
+        cipherSuite: ECHCipherSuite
+    ) throws -> (outerMessage: Data, context: ECHClientContext) {
+        let context = try ECHClientContext(config: config, cipherSuite: cipherSuite)
+
+        // Encoded inner: empty session_id, then header-stripped and padded.
+        let innerEncodedMessage = buildECHInnerHello(
+            random: innerRandom, sessionId: Data(), serverName: innerServerName, publicKey: publicKey, alpn: alpn
+        )
+        let encodedInner = try ECHEncryption.encodeInnerClientHello(
+            innerEncodedMessage, serverName: innerServerName, maxNameLength: Int(config.maxNameLength)
+        )
+        let ciphertextLength = encodedInner.count + ECHEncryption.aeadTagLength
+
+        // Pass 1 — outer with a zero-filled payload, used as the seal's AAD.
+        let zeroExtData = ECHEncryption.outerExtensionData(
+            configID: config.configID, kdfID: cipherSuite.kdfID, aeadID: cipherSuite.aeadID,
+            enc: context.encapsulatedKey, payload: Data(count: ciphertextLength)
+        )
+        let outerForAAD = buildECHOuterHello(
+            random: outerRandom, sessionId: sessionId, publicName: config.publicName,
+            publicKey: publicKey, alpn: alpn, echExtData: zeroExtData
+        )
+        let aad = Data(outerForAAD.dropFirst(4))   // strip the 4-byte handshake header
+        let ciphertext = try context.seal(plaintext: encodedInner, aad: aad)
+
+        // Pass 2 — outer with the real ciphertext (identical length → identical layout).
+        let realExtData = ECHEncryption.outerExtensionData(
+            configID: config.configID, kdfID: cipherSuite.kdfID, aeadID: cipherSuite.aeadID,
+            enc: context.encapsulatedKey, payload: ciphertext
+        )
+        let outerMessage = buildECHOuterHello(
+            random: outerRandom, sessionId: sessionId, publicName: config.publicName,
+            publicKey: publicKey, alpn: alpn, echExtData: realExtData
+        )
+
+        // Transcript inner: identical to the encoded inner but with the outer's
+        // session_id, matching what the server reconstructs and feeds its keys.
+        context.innerTranscriptMessage = buildECHInnerHello(
+            random: innerRandom, sessionId: sessionId, serverName: innerServerName, publicKey: publicKey, alpn: alpn
+        )
+        context.innerRandom = innerRandom
+
+        return (outerMessage, context)
+    }
+
     // MARK: - QUIC ClientHello
 
     /// The signature algorithms offered in the QUIC ClientHello.

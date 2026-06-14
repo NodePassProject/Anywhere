@@ -197,8 +197,9 @@ extension ProxyConfiguration {
             }
             let fpString = (configurationDict["tlsFingerprint"] as? String) ?? "chrome_120"
             let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
+            let ech = (configurationDict["tlsEch"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             return .tls(TLSConfiguration(
-                serverName: sni, alpn: alpn, fingerprint: fingerprint
+                serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint
             ))
         }
         if security == "reality",
@@ -298,7 +299,8 @@ extension ProxyConfiguration {
         let sni = (dict["nowhereSNI"] as? String) ?? (dict["tlsServerName"] as? String) ?? serverAddress
         let alpnString = (dict["nowhereALPN"] as? String) ?? (dict["tlsAlpn"] as? String)
         let alpn = alpnString.flatMap { $0.isEmpty ? nil : [$0] }
-        return TLSConfiguration(serverName: sni, alpn: alpn)
+        let ech = ((dict["nowhereEch"] as? String) ?? (dict["tlsEch"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
+        return TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
     }
 
     /// Reconstructs the Trojan mandatory TLS configuration from serialized dict keys.
@@ -315,7 +317,8 @@ extension ProxyConfiguration {
             ?? (dict["tlsFingerprint"] as? String)
             ?? "chrome_120"
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
-        return TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
+        let ech = ((dict["trojanEch"] as? String) ?? (dict["tlsEch"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
+        return TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
     }
 
     /// Reconstructs the AnyTLS mandatory TLS configuration from serialized dict keys.
@@ -332,7 +335,8 @@ extension ProxyConfiguration {
             ?? (dict["tlsFingerprint"] as? String)
             ?? "chrome_120"
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
-        return TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
+        let ech = ((dict["anytlsEch"] as? String) ?? (dict["tlsEch"] as? String)).flatMap { $0.isEmpty ? nil : $0 }
+        return TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
     }
 
     /// Parses comma-separated "key:value" header pairs from a string.
