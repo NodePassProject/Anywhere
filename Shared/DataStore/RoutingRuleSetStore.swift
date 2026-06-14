@@ -287,7 +287,7 @@ class RoutingRuleSetStore {
 
     // MARK: - App Group Sync
 
-    private func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain], serializeConfiguration: @escaping @Sendable (ProxyConfiguration) -> [String: Any]) async {
+    private func syncToAppGroup(configurations: [ProxyConfiguration], chains: [ProxyChain]) async {
         let snapshot = ruleSets
         let customSnapshot = customRuleSets
         
@@ -329,7 +329,7 @@ class RoutingRuleSetStore {
                 } else if let configuration = resolvedTargets[assignedId], let id = UUID(uuidString: assignedId) {
                     action = .proxy
                     configId = id
-                    var serialized = serializeConfiguration(configuration)
+                    var serialized = configuration.serializedConfiguration
                     if let resolvedIP = VPNViewModel.resolveServerAddress(configuration.serverAddress) {
                         serialized["resolvedIP"] = resolvedIP
                     }
@@ -413,8 +413,7 @@ class RoutingRuleSetStore {
 extension RoutingRuleSetStore {
     private func syncToAppGroup() async {
         await syncToAppGroup(configurations: ConfigurationStore.shared.configurations,
-                             chains: ChainStore.shared.chains,
-                             serializeConfiguration: Self.serializeConfiguration)
+                             chains: ChainStore.shared.chains)
     }
 
     /// Clears assignments whose target proxy/chain no longer exists and records the affected names for the UI.
@@ -428,174 +427,6 @@ extension RoutingRuleSetStore {
     /// Dismisses the orphaned-rule-set notice.
     func acknowledgeOrphans() {
         orphanedRuleSetNames = []
-    }
-
-    // MARK: - Configuration Serialization
-
-    /// Serializes a configuration into the `[String: Any]` shape the Network Extension's routing layer expects.
-    nonisolated static func serializeConfiguration(_ configuration: ProxyConfiguration) -> [String: Any] {
-        let vlessUUID: UUID
-        let vlessEncryption: String
-        let vlessFlow: String?
-        if case .vless(let u, let enc, let fl, _, _, _, _) = configuration.outbound {
-            vlessUUID = u; vlessEncryption = enc; vlessFlow = fl
-        } else {
-            vlessUUID = configuration.id; vlessEncryption = "none"; vlessFlow = nil
-        }
-        var configurationDict: [String: Any] = [
-            "name": configuration.name,
-            "serverAddress": configuration.serverAddress,
-            "serverPort": configuration.serverPort,
-            "uuid": vlessUUID.uuidString,
-            "encryption": vlessEncryption,
-            "flow": vlessFlow ?? "",
-            "security": configuration.securityLayer.tag,
-            "muxEnabled": configuration.muxEnabled,
-            "xudpEnabled": configuration.xudpEnabled,
-            "outboundProtocol": configuration.outboundProtocol.rawValue,
-        ]
-
-        switch configuration.outbound {
-        case .vless: break
-        case .hysteria(let password, let congestionControl, let uploadMbps, let downloadMbps, let portHopping, let sni):
-            configurationDict["hysteriaPassword"] = password
-            configurationDict["hysteriaCongestionControl"] = congestionControl.rawValue
-            configurationDict["hysteriaUploadMbps"] = uploadMbps
-            configurationDict["hysteriaDownloadMbps"] = downloadMbps
-            if let portHopping {
-                configurationDict["hysteriaPorts"] = portHopping.portsSpec
-                configurationDict["hysteriaHopInterval"] = portHopping.intervalSeconds
-            }
-            configurationDict["hysteriaSNI"] = sni
-        case .nowhere(let key, let spec, let tls):
-            configurationDict["nowhereKey"] = key
-            if let spec, !spec.isEmpty {
-                configurationDict["nowhereSpec"] = spec
-            }
-            configurationDict["nowhereSNI"] = tls.serverName
-            if let alpn = tls.alpn?.first, !alpn.isEmpty {
-                configurationDict["nowhereALPN"] = alpn
-            }
-            if let ech = tls.echConfig { configurationDict["nowhereEch"] = ech }
-        case .trojan(let password, let tls):
-            configurationDict["trojanPassword"] = password
-            configurationDict["trojanSNI"] = tls.serverName
-            if let alpn = tls.alpn, !alpn.isEmpty {
-                configurationDict["trojanALPN"] = alpn.joined(separator: ",")
-            }
-            configurationDict["trojanFingerprint"] = tls.fingerprint.rawValue
-            if let ech = tls.echConfig { configurationDict["trojanEch"] = ech }
-        case .anytls(let password, let ici, let it, let mis, let tls):
-            configurationDict["anytlsPassword"] = password
-            configurationDict["anytlsIdleCheckInterval"] = ici
-            configurationDict["anytlsIdleTimeout"] = it
-            configurationDict["anytlsMinIdleSession"] = mis
-            configurationDict["anytlsSNI"] = tls.serverName
-            if let alpn = tls.alpn, !alpn.isEmpty {
-                configurationDict["anytlsALPN"] = alpn.joined(separator: ",")
-            }
-            configurationDict["anytlsFingerprint"] = tls.fingerprint.rawValue
-            if let ech = tls.echConfig { configurationDict["anytlsEch"] = ech }
-        case .shadowsocks(let password, let method):
-            configurationDict["ssPassword"] = password
-            configurationDict["ssMethod"] = method
-        case .socks5(let username, let password):
-            if let username { configurationDict["socks5Username"] = username }
-            if let password { configurationDict["socks5Password"] = password }
-        case .sudoku(let sudoku):
-            configurationDict["sudokuKey"] = sudoku.key
-            configurationDict["sudokuAEADMethod"] = sudoku.aeadMethod.rawValue
-            configurationDict["sudokuPaddingMin"] = sudoku.paddingMin
-            configurationDict["sudokuPaddingMax"] = sudoku.paddingMax
-            configurationDict["sudokuASCIIMode"] = sudoku.asciiMode.rawValue
-            configurationDict["sudokuCustomTables"] = sudoku.customTables
-            configurationDict["sudokuEnablePureDownlink"] = sudoku.enablePureDownlink
-            configurationDict["sudokuHTTPMaskDisable"] = sudoku.httpMask.disable
-            configurationDict["sudokuHTTPMaskMode"] = sudoku.httpMask.mode.rawValue
-            configurationDict["sudokuHTTPMaskTLS"] = sudoku.httpMask.tls
-            configurationDict["sudokuHTTPMaskHost"] = sudoku.httpMask.host
-            configurationDict["sudokuHTTPMaskPathRoot"] = sudoku.httpMask.pathRoot
-            configurationDict["sudokuHTTPMaskMultiplex"] = sudoku.httpMask.multiplex.rawValue
-        case .http11(let username, let password):
-            configurationDict["http11Username"] = username
-            configurationDict["http11Password"] = password
-        case .http2(let username, let password):
-            configurationDict["http2Username"] = username
-            configurationDict["http2Password"] = password
-        case .http3(let username, let password):
-            configurationDict["http3Username"] = username
-            configurationDict["http3Password"] = password
-        }
-
-        if case .reality(let reality) = configuration.securityLayer {
-            configurationDict["realityServerName"] = reality.serverName
-            configurationDict["realityPublicKey"] = reality.publicKey.base64EncodedString()
-            configurationDict["realityShortId"] = reality.shortId.map { String(format: "%02x", $0) }.joined()
-            configurationDict["realityFingerprint"] = reality.fingerprint.rawValue
-        }
-
-        if case .tls(let tls) = configuration.securityLayer {
-            configurationDict["tlsServerName"] = tls.serverName
-            if let alpn = tls.alpn {
-                configurationDict["tlsAlpn"] = alpn.joined(separator: ",")
-            }
-            configurationDict["tlsFingerprint"] = tls.fingerprint.rawValue
-            if let ech = tls.echConfig { configurationDict["tlsEch"] = ech }
-        }
-
-        if configuration.outboundProtocol == .vless {
-            configurationDict["transport"] = configuration.transportLayer.tag
-            if case .ws(let ws) = configuration.transportLayer {
-                configurationDict["wsHost"] = ws.host
-                configurationDict["wsPath"] = ws.path
-                if !ws.headers.isEmpty {
-                    configurationDict["wsHeaders"] = ws.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
-                }
-                configurationDict["wsMaxEarlyData"] = ws.maxEarlyData
-                configurationDict["wsEarlyDataHeaderName"] = ws.earlyDataHeaderName
-            }
-
-            if case .httpUpgrade(let hu) = configuration.transportLayer {
-                configurationDict["huHost"] = hu.host
-                configurationDict["huPath"] = hu.path
-                if !hu.headers.isEmpty {
-                    configurationDict["huHeaders"] = hu.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
-                }
-            }
-
-            if case .grpc(let grpc) = configuration.transportLayer {
-                configurationDict["grpcServiceName"] = grpc.serviceName
-                configurationDict["grpcAuthority"] = grpc.authority
-                configurationDict["grpcMultiMode"] = grpc.multiMode
-                configurationDict["grpcUserAgent"] = grpc.userAgent
-                configurationDict["grpcInitialWindowsSize"] = grpc.initialWindowsSize
-                configurationDict["grpcIdleTimeout"] = grpc.idleTimeout
-                configurationDict["grpcHealthCheckTimeout"] = grpc.healthCheckTimeout
-                configurationDict["grpcPermitWithoutStream"] = grpc.permitWithoutStream
-            }
-
-            if case .xhttp(let xhttp) = configuration.transportLayer {
-                configurationDict["xhttpHost"] = xhttp.host
-                configurationDict["xhttpPath"] = xhttp.path
-                configurationDict["xhttpMode"] = xhttp.mode.rawValue
-                if !xhttp.headers.isEmpty {
-                    configurationDict["xhttpHeaders"] = xhttp.headers.map { "\($0.key):\($0.value)" }.joined(separator: ",")
-                }
-                configurationDict["xhttpNoGRPCHeader"] = xhttp.noGRPCHeader
-                // Carry downloadSettings as one JSON value (lossless) rather than flattening each field.
-                if let ds = xhttp.downloadSettings,
-                   let data = try? JSONEncoder().encode(ds),
-                   let json = String(data: data, encoding: .utf8) {
-                    configurationDict["xhttpDownloadSettings"] = json
-                }
-            }
-        }
-
-        if let chain = configuration.chain, !chain.isEmpty {
-            configurationDict["chain"] = chain.map { Self.serializeConfiguration($0) }
-        }
-
-        return configurationDict
     }
 }
 

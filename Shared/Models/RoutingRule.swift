@@ -14,6 +14,45 @@ enum RoutingRuleType: Int, Codable {
     case domainKeyword = 3  // Domain substring match
 }
 
+extension RoutingRuleType {
+    /// Localized human-readable name.
+    var displayLabel: String {
+        switch self {
+        case .domainSuffix: return String(localized: "Domain Suffix")
+        case .domainKeyword: return String(localized: "Domain Keyword")
+        case .ipCIDR: return String(localized: "IPv4 CIDR")
+        case .ipCIDR6: return String(localized: "IPv6 CIDR")
+        }
+    }
+
+    /// SF Symbol representing the rule type.
+    var iconName: String {
+        switch self {
+        case .domainSuffix: return "globe"
+        case .domainKeyword: return "magnifyingglass"
+        case .ipCIDR, .ipCIDR6: return "network"
+        }
+    }
+
+    /// Canonicalizes a user-entered value: a bare IP gains a `/32` (IPv4) or `/128` (IPv6) suffix.
+    func normalized(_ value: String) -> String {
+        switch self {
+        case .ipCIDR:
+            if !value.contains("/") {
+                return value + "/32"
+            }
+            return value
+        case .ipCIDR6:
+            if !value.contains("/") {
+                return value + "/128"
+            }
+            return value
+        case .domainSuffix, .domainKeyword:
+            return value
+        }
+    }
+}
+
 struct RoutingRule: Codable, Equatable, Identifiable {
     let id = UUID()
     let type: RoutingRuleType

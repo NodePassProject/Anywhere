@@ -41,4 +41,14 @@ struct ProxyChain: Identifiable, Codable, Hashable {
             chain: Array(configs.dropLast())
         )
     }
+
+    /// Display summary for a chain row, resolved against the pool: the member names,
+    /// whether the chain is complete (≥2 proxies, none missing), and the entry/exit addresses.
+    func listDisplayInfo(configurations: [ProxyConfiguration]) -> (names: [String], isValid: Bool, entry: String?, exit: String?) {
+        let proxies = resolveProxies(from: configurations)
+        let isValid = proxies.count == proxyIds.count && proxies.count >= 2
+        let entry = proxies.count >= 2 ? proxies.first?.serverAddress : nil
+        let exit = proxies.count >= 2 ? proxies.last?.serverAddress : nil
+        return (proxies.map(\.name), isValid, entry, exit)
+    }
 }

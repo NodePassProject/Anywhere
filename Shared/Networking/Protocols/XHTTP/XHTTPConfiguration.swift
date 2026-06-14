@@ -484,6 +484,53 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
     }
 }
 
+// MARK: - Editor Export
+
+extension XHTTPConfiguration {
+
+    /// Encodes the non-default "extra" fields back to the JSON string the proxy editor's
+    /// advanced-settings field displays. Empty when every field is at its default.
+    var encodedExtra: String {
+        var dict: [String: Any] = [:]
+
+        if !headers.isEmpty { dict["headers"] = headers }
+        if noGRPCHeader { dict["noGRPCHeader"] = true }
+        if scMaxEachPostBytes != 1_000_000 { dict["scMaxEachPostBytes"] = scMaxEachPostBytes }
+        if scMinPostsIntervalMs != 30 { dict["scMinPostsIntervalMs"] = scMinPostsIntervalMs }
+        if xPaddingBytesFrom != 100 || xPaddingBytesTo != 1000 {
+            dict["xPaddingBytes"] = ["from": xPaddingBytesFrom, "to": xPaddingBytesTo]
+        }
+        if xPaddingObfsMode { dict["xPaddingObfsMode"] = true }
+        if xPaddingKey != "x_padding" { dict["xPaddingKey"] = xPaddingKey }
+        if xPaddingHeader != "X-Padding" { dict["xPaddingHeader"] = xPaddingHeader }
+        if xPaddingPlacement != .queryInHeader { dict["xPaddingPlacement"] = xPaddingPlacement.rawValue }
+        if xPaddingMethod != .repeatX { dict["xPaddingMethod"] = xPaddingMethod.rawValue }
+        if uplinkHTTPMethod != "POST" { dict["uplinkHTTPMethod"] = uplinkHTTPMethod }
+        if sessionPlacement != .path { dict["sessionPlacement"] = sessionPlacement.rawValue }
+        if !sessionKey.isEmpty { dict["sessionKey"] = sessionKey }
+        if seqPlacement != .path { dict["seqPlacement"] = seqPlacement.rawValue }
+        if !seqKey.isEmpty { dict["seqKey"] = seqKey }
+        if uplinkDataPlacement != .body { dict["uplinkDataPlacement"] = uplinkDataPlacement.rawValue }
+        // Data key and chunk size have placement-dependent defaults.
+        let defaultDataKey: String
+        let defaultChunkSize: Int
+        switch uplinkDataPlacement {
+        case .header: defaultDataKey = "X-Data"; defaultChunkSize = 4096
+        case .cookie: defaultDataKey = "x_data"; defaultChunkSize = 3072
+        default: defaultDataKey = ""; defaultChunkSize = 0
+        }
+        if uplinkDataKey != defaultDataKey { dict["uplinkDataKey"] = uplinkDataKey }
+        if uplinkChunkSize != defaultChunkSize { dict["uplinkChunkSize"] = uplinkChunkSize }
+
+        guard !dict.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys, .prettyPrinted]),
+              let str = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return str
+    }
+}
+
 // MARK: - XHTTP Download Settings (up/download detach)
 
 /// Separate download source: the GET leg dials this server while the POST leg
@@ -516,6 +563,57 @@ struct XHTTPDownloadSettings: Codable, Equatable, Hashable {
         case "reality": return reality.map(SecurityLayer.reality) ?? .none
         default:        return .none
         }
+    }
+}
+
+// MARK: - URL Export
+
+extension XHTTPConfiguration {
+    /// XHTTP `xhttpSettings` object for a `vless://` URL's `extra` blob; emits only non-default fields.
+    var urlSettingsJSON: [String: Any] {
+        var j: [String: Any] = ["host": host]
+        if path != "/" { j["path"] = path }
+        if mode != .auto { j["mode"] = mode.rawValue }
+        if !headers.isEmpty { j["headers"] = headers }
+        if noGRPCHeader { j["noGRPCHeader"] = true }
+        return j
+    }
+}
+
+extension XHTTPDownloadSettings {
+    /// The URL-encoded `extra` query value carrying the up/download detach settings,
+    /// or nil when it can't be serialized.
+    var urlExtraParam: String? {
+        var dl: [String: Any] = [
+            "address": serverAddress,
+            "port": Int(serverPort),
+            "security": security,
+        ]
+        if let tls {
+            var t: [String: Any] = [
+                "serverName": tls.serverName,
+                "fingerprint": tls.fingerprint.rawValue,
+            ]
+            if let alpn = tls.alpn, !alpn.isEmpty { t["alpn"] = alpn }
+            dl["tlsSettings"] = t
+        }
+        if let reality {
+            dl["realitySettings"] = [
+                "serverName": reality.serverName,
+                "publicKey": reality.publicKey.base64URLEncodedString(),
+                "shortId": reality.shortId.hexEncodedString(),
+                "fingerprint": reality.fingerprint.rawValue,
+            ]
+        }
+        dl["xhttpSettings"] = xhttp.urlSettingsJSON
+
+        let extra: [String: Any] = ["downloadSettings": dl]
+        guard let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
+              let json = String(data: data, encoding: .utf8) else { return nil }
+        // Escape only the characters that would break query-param splitting (& = + #).
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+#")
+        return json.addingPercentEncoding(withAllowedCharacters: allowed) ?? json
     }
 }
 

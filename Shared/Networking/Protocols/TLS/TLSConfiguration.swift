@@ -79,6 +79,16 @@ struct TLSConfiguration {
         default:    return nil
         }
     }
+
+    /// The percent-encoded `ech=` query value for a `vless://` URL, or nil when ECH is unset.
+    /// Encodes `+`, `/`, and `=` so a base64 ECHConfigList survives the URL round-trip
+    /// (a bare `+` would otherwise decode back to a space).
+    var echQueryValue: String? {
+        guard let ech = echConfig, !ech.isEmpty else { return nil }
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&#=+/")
+        return ech.addingPercentEncoding(withAllowedCharacters: allowed) ?? ech
+    }
 }
 
 extension TLSConfiguration: Codable {

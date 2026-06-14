@@ -22,16 +22,6 @@ extension ProxyConfiguration {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
-    /// `ech=` value for a TLS config, or nil when ECH is not configured.
-    /// Percent-encodes `+`, `/`, and `=` so a base64 ECHConfigList survives the
-    /// URL round-trip (a bare `+` would otherwise decode back to a space).
-    private func echQueryValue(_ tls: TLSConfiguration) -> String? {
-        guard let ech = tls.echConfig, !ech.isEmpty else { return nil }
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "&#=+/")
-        return ech.addingPercentEncoding(withAllowedCharacters: allowed) ?? ech
-    }
-
     /// Export configuration as a shareable URL string.
     func toURL() -> String {
         switch outboundProtocol {
@@ -83,7 +73,7 @@ extension ProxyConfiguration {
             if tls.fingerprint != .chrome120 {
                 params.append("fp=\(tls.fingerprint.rawValue)")
             }
-            if let ech = echQueryValue(tls) {
+            if let ech = tls.echQueryValue {
                 params.append("ech=\(ech)")
             }
         }
@@ -154,7 +144,7 @@ extension ProxyConfiguration {
         if let alpn = tls.alpn?.first, !alpn.isEmpty {
             params.append("alpn=\(encodedQueryValue(alpn))")
         }
-        if let ech = echQueryValue(tls) {
+        if let ech = tls.echQueryValue {
             params.append("ech=\(ech)")
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
@@ -176,7 +166,7 @@ extension ProxyConfiguration {
         if tls.fingerprint != .chrome120 {
             params.append("fp=\(tls.fingerprint.rawValue)")
         }
-        if let ech = echQueryValue(tls) {
+        if let ech = tls.echQueryValue {
             params.append("ech=\(ech)")
         }
         let query = params.isEmpty ? "" : "?\(params.joined(separator: "&"))"
@@ -198,7 +188,7 @@ extension ProxyConfiguration {
         if tls.fingerprint != .chrome120 {
             params.append("fp=\(tls.fingerprint.rawValue)")
         }
-        if let ech = echQueryValue(tls) {
+        if let ech = tls.echQueryValue {
             params.append("ech=\(ech)")
         }
         // Emit pool tuners only when they differ from the sing-anytls defaults.
@@ -314,55 +304,11 @@ extension ProxyConfiguration {
             }
             // Up/download detach round-trips via the `extra` blob; other advanced
             // XHTTP fields are intentionally not exported.
-            if let ds = xhttp.downloadSettings, let extra = Self.xhttpExtraParam(for: ds) {
+            if let ds = xhttp.downloadSettings, let extra = ds.urlExtraParam {
                 params.append("extra=\(extra)")
             }
         case .tcp:
             break
         }
-    }
-
-    /// Builds the URL-encoded `extra` query value carrying the up/download detach settings.
-    private static func xhttpExtraParam(for ds: XHTTPDownloadSettings) -> String? {
-        var dl: [String: Any] = [
-            "address": ds.serverAddress,
-            "port": Int(ds.serverPort),
-            "security": ds.security,
-        ]
-        if let tls = ds.tls {
-            var t: [String: Any] = [
-                "serverName": tls.serverName,
-                "fingerprint": tls.fingerprint.rawValue,
-            ]
-            if let alpn = tls.alpn, !alpn.isEmpty { t["alpn"] = alpn }
-            dl["tlsSettings"] = t
-        }
-        if let r = ds.reality {
-            dl["realitySettings"] = [
-                "serverName": r.serverName,
-                "publicKey": r.publicKey.base64URLEncodedString(),
-                "shortId": r.shortId.hexEncodedString(),
-                "fingerprint": r.fingerprint.rawValue,
-            ]
-        }
-        dl["xhttpSettings"] = xhttpSettingsJSON(ds.xhttp)
-
-        let extra: [String: Any] = ["downloadSettings": dl]
-        guard let data = try? JSONSerialization.data(withJSONObject: extra, options: [.sortedKeys]),
-              let json = String(data: data, encoding: .utf8) else { return nil }
-        // Escape only the characters that would break query-param splitting (& = + #).
-        var allowed = CharacterSet.urlQueryAllowed
-        allowed.remove(charactersIn: "&=+#")
-        return json.addingPercentEncoding(withAllowedCharacters: allowed) ?? json
-    }
-
-    /// Emits only fields that differ from defaults.
-    private static func xhttpSettingsJSON(_ xhttp: XHTTPConfiguration) -> [String: Any] {
-        var j: [String: Any] = ["host": xhttp.host]
-        if xhttp.path != "/" { j["path"] = xhttp.path }
-        if xhttp.mode != .auto { j["mode"] = xhttp.mode.rawValue }
-        if !xhttp.headers.isEmpty { j["headers"] = xhttp.headers }
-        if xhttp.noGRPCHeader { j["noGRPCHeader"] = true }
-        return j
     }
 }

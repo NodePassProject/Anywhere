@@ -98,8 +98,8 @@ struct MITMRuleSetDetailView: View {
                 Section("Rules") {
                     ForEach(rules) { rule in
                         VStack(alignment: .leading) {
-                            Text(MITMRuleSummary.title(for: rule))
-                            Text(MITMRuleSummary.subtitle(for: rule))
+                            Text(rule.summaryTitle)
+                            Text(rule.summarySubtitle)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .truncationMode(.middle)
@@ -246,41 +246,5 @@ struct MITMRuleSetDetailView: View {
         enabled = ruleSet.enabled
         suffixDrafts = ruleSet.domainSuffixes.map { MITMDomainSuffixDraft(value: $0) }
         rules = ruleSet.rules
-    }
-}
-
-fileprivate enum MITMRuleSummary {
-    static func title(for rule: MITMRule) -> String {
-        return "\(rule.phase.description) \(rule.operation.description)"
-    }
-
-    static func subtitle(for rule: MITMRule) -> String {
-        switch rule.operation {
-        case .rewrite(let action):
-            switch action {
-            case .transparent(let url), .redirect302(let url):
-                return url
-            case .reject200Text:
-                return String(localized: "Reject Text")
-            case .reject200Gif:
-                return String(localized: "Reject GIF")
-            case .reject200Data:
-                return String(localized: "Reject Data")
-            }
-        case .headerAdd(let name, _):
-            return name
-        case .headerDelete(let name):
-            return name
-        case .headerReplace(let name, _):
-            return name
-        case .script(let scriptBase64),
-             .streamScript(let scriptBase64):
-            let bytes = Data(base64Encoded: scriptBase64)?.count ?? 0
-            return String(localized: "\(bytes) byte(s)")
-        case .bodyReplace(let search, _):
-            return search
-        case .bodyJSON(let operation):
-            return operation.description
-        }
     }
 }

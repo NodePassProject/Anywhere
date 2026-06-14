@@ -235,7 +235,7 @@ nonisolated final class HysteriaUDPConnection: ProxyConnection {
             completion(HysteriaError.connectionFailed("UDP payload too large to fragment"))
             return
         }
-        let encoded = fragments.map { HysteriaProtocol.encodeUDPMessage($0) }
+        let encoded = fragments.map { $0.encoded }
         self.session.writeDatagrams(encoded) { [weak self] error in
             // Fires on `session.queue`, so direct recursion into `attemptSend` is safe.
             if let qErr = error as? QUICConnection.QUICError,

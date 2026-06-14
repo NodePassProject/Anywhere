@@ -1334,7 +1334,7 @@ nonisolated class ProxyClient {
         XHTTPEndpoint(
             directHost: directDialHost,
             chainHost: configuration.serverAddress,
-            serverName: xhttpServerName(for: configuration.securityLayer, fallback: configuration.serverAddress),
+            serverName: configuration.securityLayer.serverName(fallback: configuration.serverAddress),
             port: configuration.serverPort,
             security: configuration.securityLayer
         )
@@ -1344,19 +1344,10 @@ nonisolated class ProxyClient {
         XHTTPEndpoint(
             directHost: downloadSettings.serverAddress,
             chainHost: downloadSettings.serverAddress,
-            serverName: xhttpServerName(for: downloadSettings.securityLayer, fallback: downloadSettings.serverAddress),
+            serverName: downloadSettings.securityLayer.serverName(fallback: downloadSettings.serverAddress),
             port: downloadSettings.serverPort,
             security: downloadSettings.securityLayer
         )
-    }
-
-    /// SNI / HTTP/3 server name carried by a security layer (the fallback when unsecured).
-    private func xhttpServerName(for security: SecurityLayer, fallback: String) -> String {
-        switch security {
-        case .tls(let tlsConfig): return tlsConfig.serverName
-        case .reality(let realityConfig): return realityConfig.serverName
-        case .none: return fallback
-        }
     }
 
     /// Resolves the main leg's route, consuming `self.tunnel` so it is dialed exactly once.

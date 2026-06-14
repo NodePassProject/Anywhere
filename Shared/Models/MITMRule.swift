@@ -345,6 +345,44 @@ struct MITMRule: Codable, Equatable, Identifiable {
     }
 }
 
+extension MITMRule {
+    /// Row title: the phase and operation names.
+    var summaryTitle: String {
+        "\(phase.description) \(operation.description)"
+    }
+
+    /// Row subtitle: the operation's most salient parameter.
+    var summarySubtitle: String {
+        switch operation {
+        case .rewrite(let action):
+            switch action {
+            case .transparent(let url), .redirect302(let url):
+                return url
+            case .reject200Text:
+                return String(localized: "Reject Text")
+            case .reject200Gif:
+                return String(localized: "Reject GIF")
+            case .reject200Data:
+                return String(localized: "Reject Data")
+            }
+        case .headerAdd(let name, _):
+            return name
+        case .headerDelete(let name):
+            return name
+        case .headerReplace(let name, _):
+            return name
+        case .script(let scriptBase64),
+             .streamScript(let scriptBase64):
+            let bytes = Data(base64Encoded: scriptBase64)?.count ?? 0
+            return String(localized: "\(bytes) byte(s)")
+        case .bodyReplace(let search, _):
+            return search
+        case .bodyJSON(let operation):
+            return operation.description
+        }
+    }
+}
+
 /// Sub-mode of the rewrite operation; cases map 1:1 to the import format's
 /// numeric ids (transparent 0, redirect302 1, reject200Text 2, reject200Gif 3,
 /// reject200Data 4). Only `transparent` dials upstream — it rewrites the URL
