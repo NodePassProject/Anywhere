@@ -11,13 +11,13 @@ enum TunnelConstants {
 
     // MARK: - Connection Timeouts
 
-    /// Inactivity timeout for TCP connections (Xray-core `connIdle`, default 300s).
+    /// Inactivity timeout for TCP connections (default 300s).
     static let connectionIdleTimeout: TimeInterval = 300
-    /// Timeout after uplink (local → remote) finishes (Xray-core `downlinkOnly`, default 1s).
+    /// Timeout after uplink (local → remote) finishes (default 1s).
     static let downlinkOnlyTimeout: TimeInterval = 1
-    /// Timeout after downlink (remote → local) finishes (Xray-core `uplinkOnly`, default 1s).
+    /// Timeout after downlink (remote → local) finishes (default 1s).
     static let uplinkOnlyTimeout: TimeInterval = 1
-    /// Timeout for the entire connection setup phase (Xray-core `Timeout.Handshake`, 60s).
+    /// Timeout for the entire connection setup phase (60s).
     static let handshakeTimeout: TimeInterval = 60
     /// Max wait for a TLS ClientHello before falling back to IP-based routing,
     /// so server-speaks-first protocols (SSH, SMTP, FTP) don't stall.

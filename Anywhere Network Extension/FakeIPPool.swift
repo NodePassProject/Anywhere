@@ -26,7 +26,7 @@ class FakeIPPool {
     private var domainToOffset: [String: Int] = [:]
     private var offsetToEntry: [Int: Entry] = [:]
 
-    // LRU doubly-linked list — O(1) touch/evict (matches Xray-core cache.Lru)
+    // LRU doubly-linked list — O(1) touch/evict
     private class LRUNode {
         let offset: Int
         var prev: LRUNode?

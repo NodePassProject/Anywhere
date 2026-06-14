@@ -33,7 +33,7 @@ nonisolated class MuxClient {
 
     private var frameParser = MuxFrameParser()
 
-    // 16s idle timer (matching Xray-core)
+    // 16s idle timer
     private var idleTimer: DispatchSourceTimer?
     private static let idleTimeout: TimeInterval = 16
 

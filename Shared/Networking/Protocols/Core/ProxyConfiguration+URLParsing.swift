@@ -116,7 +116,7 @@ extension ProxyConfiguration {
 
         let transportLayer = parseTransportLayer(from: params, transport: transportStr, serverAddress: host, securityLayer: securityLayer)
 
-        // Mux/xudp default to true, matching Xray-core.
+        // Mux/xudp default to true.
         let muxEnabled = params["mux"].map { $0 != "false" && $0 != "0" } ?? true
         let xudpEnabled = params["xudp"].map { $0 != "false" && $0 != "0" } ?? true
 

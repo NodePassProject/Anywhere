@@ -16,8 +16,6 @@ extension XHTTPConnection {
     /// HTTP/2 connection preface (RFC 7540 §3.5).
     static let h2Preface = Data("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
 
-    static let h2FrameHeaderSize = 9
-
     // Frame types
     static let h2FrameData: UInt8 = 0x00
     static let h2FrameHeaders: UInt8 = 0x01
@@ -43,94 +41,7 @@ extension XHTTPConnection {
     // MARK: HTTP/2 Frame I/O
 
     func buildH2Frame(type: UInt8, flags: UInt8, streamId: UInt32, payload: Data) -> Data {
-        var frame = Data(capacity: Self.h2FrameHeaderSize + payload.count)
-        // Length (24-bit)
-        let len = UInt32(payload.count)
-        frame.append(UInt8((len >> 16) & 0xFF))
-        frame.append(UInt8((len >> 8) & 0xFF))
-        frame.append(UInt8(len & 0xFF))
-        frame.append(type)
-        frame.append(flags)
-        // Stream ID (31-bit, R=0)
-        let sid = streamId & 0x7FFFFFFF
-        frame.append(UInt8((sid >> 24) & 0xFF))
-        frame.append(UInt8((sid >> 16) & 0xFF))
-        frame.append(UInt8((sid >> 8) & 0xFF))
-        frame.append(UInt8(sid & 0xFF))
-        frame.append(payload)
-        return frame
-    }
-
-    /// Parses one complete frame from h2ReadBuffer, or returns nil if incomplete.
-    private func parseH2Frame() -> (type: UInt8, flags: UInt8, streamId: UInt32, payload: Data)? {
-        guard h2ReadBuffer.count >= Self.h2FrameHeaderSize else { return nil }
-
-        let b = h2ReadBuffer
-        let length = (UInt32(b[b.startIndex]) << 16) | (UInt32(b[b.startIndex + 1]) << 8) | UInt32(b[b.startIndex + 2])
-        let type = b[b.startIndex + 3]
-        let flags = b[b.startIndex + 4]
-        let streamId = (UInt32(b[b.startIndex + 5]) << 24) | (UInt32(b[b.startIndex + 6]) << 16) | (UInt32(b[b.startIndex + 7]) << 8) | UInt32(b[b.startIndex + 8])
-        let sid = streamId & 0x7FFFFFFF
-
-        let totalSize = Self.h2FrameHeaderSize + Int(length)
-        guard h2ReadBuffer.count >= totalSize else { return nil }
-
-        let payload = h2ReadBuffer.subdata(in: h2ReadBuffer.startIndex + Self.h2FrameHeaderSize ..< h2ReadBuffer.startIndex + totalSize)
-        h2ReadBuffer.removeFirst(totalSize)
-        if h2ReadBuffer.isEmpty {
-            h2ReadBuffer = Data()
-        } else {
-            h2ReadBuffer = Data(h2ReadBuffer)
-        }
-
-        return (type, flags, sid, payload)
-    }
-
-    /// Reads from transport into h2ReadBuffer until at least one full frame is available.
-    func readH2Frame(completion: @escaping (Result<(type: UInt8, flags: UInt8, streamId: UInt32, payload: Data), Error>) -> Void) {
-        lock.lock()
-        if let frame = parseH2Frame() {
-            // Trampoline every 16th consecutive synchronous parse to prevent stack overflow.
-            h2ReadDepth += 1
-            let needsTrampoline = h2ReadDepth >= 16
-            if needsTrampoline { h2ReadDepth = 0 }
-            lock.unlock()
-            if needsTrampoline {
-                DispatchQueue.global().async { completion(.success(frame)) }
-            } else {
-                completion(.success(frame))
-            }
-            return
-        }
-        h2ReadDepth = 0
-        lock.unlock()
-
-        downloadReceive { [weak self] data, _, error in
-            guard let self else {
-                completion(.failure(XHTTPError.connectionClosed))
-                return
-            }
-            if let error {
-                completion(.failure(error))
-                return
-            }
-            guard let data, !data.isEmpty else {
-                completion(.failure(XHTTPError.connectionClosed))
-                return
-            }
-
-            self.lock.lock()
-            self.h2ReadBuffer.append(data)
-            if self.h2ReadBuffer.count > Self.maxH2ReadBufferSize {
-                self.h2ReadBuffer.removeAll()
-                self.lock.unlock()
-                completion(.failure(XHTTPError.connectionClosed))
-                return
-            }
-            self.lock.unlock()
-
-            self.readH2Frame(completion: completion)
-        }
+        H2Framing.frame(type: type, flags: flags, streamId: streamId, payload: payload)
     }
 
     // MARK: HTTP/2 HPACK Encoder (simplified, no Huffman)
@@ -242,7 +153,8 @@ extension XHTTPConnection {
     }
 
     /// Encodes HEADERS for an upload POST stream; `seq` is nil for stream-up, set per batch for packet-up.
-    func encodeH2UploadHeaders(seq: Int64?, contentLength: Int? = nil) -> Data {
+    /// `uplinkData` carries a packet-up payload in headers/cookies under non-body placement.
+    func encodeH2UploadHeaders(seq: Int64?, contentLength: Int? = nil, uplinkData: [UplinkDataField] = []) -> Data {
         var block = Data()
 
         // Pseudo-header order matches Go's http2.Transport: :authority, :method, :path, :scheme
@@ -298,7 +210,7 @@ extension XHTTPConnection {
         // :scheme https — static table index 7
         block.append(0x87)
 
-        // Xray-core packet-up (PostPacket) omits Content-Type; only stream-up sends application/grpc.
+        // packet-up omits Content-Type; only stream-up sends application/grpc.
         if seq == nil, !configuration.noGRPCHeader {
             var ctBytes = Self.hpackEncodeInteger(31, prefixBits: 6)
             ctBytes[0] |= 0x40
@@ -344,6 +256,21 @@ extension XHTTPConnection {
                 block.append(contentsOf: Self.hpackEncodeString("\(configuration.normalizedSeqKey)=\(seq)"))
             default:
                 break
+            }
+        }
+
+        // Uplink data placement — packet-up payload carried in headers or cookies.
+        // Encoded "without indexing" since these are large, single-use values.
+        for field in uplinkData {
+            switch field {
+            case .header(let name, let value):
+                block.append(0x00) // literal header field without indexing, new name
+                block.append(contentsOf: Self.hpackEncodeString(name.lowercased()))
+                block.append(contentsOf: Self.hpackEncodeString(value))
+            case .cookie(let pair):
+                // cookie (static index 32) without indexing → 4-bit prefix, high nibble 0.
+                block.append(contentsOf: Self.hpackEncodeInteger(32, prefixBits: 4))
+                block.append(contentsOf: Self.hpackEncodeString(pair))
             }
         }
 

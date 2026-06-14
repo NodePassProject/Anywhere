@@ -59,7 +59,7 @@ nonisolated class HTTPUpgradeConnection {
 
     // MARK: - HTTP Upgrade Handshake
 
-    /// Performs the HTTP upgrade handshake, matching Xray-core's httpupgrade dialer.
+    /// Performs the HTTP upgrade handshake.
     func performUpgrade(completion: @escaping (Error?) -> Void) {
         var request = "GET \(configuration.path) HTTP/1.1\r\n"
         request += "Host: \(configuration.host)\r\n"
@@ -70,7 +70,7 @@ nonisolated class HTTPUpgradeConnection {
             request += "\(key): \(value)\r\n"
         }
 
-        // Fall back to Chrome UA if not set, matching Xray-core's httpupgrade dialer.
+        // Fall back to Chrome UA if not set.
         if !configuration.headers.keys.contains(where: { $0.lowercased() == "user-agent" }) {
             request += "User-Agent: \(Self.chromeUserAgent)\r\n"
         }
@@ -91,7 +91,7 @@ nonisolated class HTTPUpgradeConnection {
         }
     }
 
-    /// Reads the HTTP 101 response, validating status and Upgrade/Connection headers per Xray-core's `ConnRF.Read()` (case-insensitive).
+    /// Reads the HTTP 101 response, validating status and Upgrade/Connection headers (case-insensitive).
     private func receiveUpgradeResponse(completion: @escaping (Error?) -> Void) {
         transportReceive { [weak self] data, _, error in
             guard let self else {

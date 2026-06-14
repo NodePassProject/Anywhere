@@ -8,9 +8,9 @@
 import Foundation
 import CommonCrypto
 
-/// AES-256-CTR keystream for VLESS encryption's `xorpub`/`random` modes. Matches
-/// Xray-core's `NewCTR`: key = BLAKE3-derive(context "VLESS", key), 16-byte IV as
-/// the initial big-endian counter. Stateful — one instance per direction.
+/// AES-256-CTR keystream for VLESS encryption's `xorpub`/`random` modes:
+/// key = BLAKE3-derive(context "VLESS", key), 16-byte IV as the initial
+/// big-endian counter. Stateful — one instance per direction.
 final class VLESSEncryptionCTR {
     private var cryptor: CCCryptorRef?
     private let lock = UnfairLock()

@@ -136,7 +136,7 @@ nonisolated class RealityClient {
 
         // SessionId carries the Reality metadata in the first 16 bytes.
         var sessionId = Data(count: 32)
-        sessionId[0] = 26  // Xray-core version 26.4.25
+        sessionId[0] = 26  // protocol version 26.4.25
         sessionId[1] = 4
         sessionId[2] = 25
         sessionId[3] = 0

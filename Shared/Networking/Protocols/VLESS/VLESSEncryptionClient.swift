@@ -30,7 +30,7 @@ enum VLESSEncryptionError: Error, LocalizedError {
 
 // MARK: - Wire constants
 
-/// AEAD framing constants (must match Xray-core's `proxy/vless/encryption/common.go`).
+/// AEAD framing constants for the VLESS encryption wire format.
 private enum VLESSWire {
     /// TLS 1.3 record header byte 0 (`application_data`).
     static let recordTypeApplicationData: UInt8 = 23
@@ -59,7 +59,7 @@ private enum VLESSWire {
     static let pfsClientHelloLength = 18 + pfsClientHelloPayloadLength + 16
 }
 
-// MARK: - AEAD wrapper (matches Go's AEAD struct in common.go)
+// MARK: - AEAD wrapper
 
 /// CryptoKit AEAD with a 12-byte big-endian-incrementing nonce; each seal/open
 /// without an explicit nonce advances the counter by one (matches Go's AEAD struct).
@@ -1116,7 +1116,7 @@ nonisolated final class VLESSEncryptedConnection: ProxyConnection {
 
     // MARK: Vision direct-copy (bypass AEAD)
 
-    // Vision direct copy peels only our AEAD layer (Xray-core's `UnwrapRawConn`);
+    // Vision direct copy peels only our AEAD layer (unwrapping to the raw conn);
     // delegating to `inner` keeps random-mode XOR masking and outer TLS intact.
 
     override func sendDirectRaw(data: Data, completion: @escaping (Error?) -> Void) {

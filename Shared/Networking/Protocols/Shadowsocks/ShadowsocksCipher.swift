@@ -26,7 +26,7 @@ enum ShadowsocksCipher {
         }
     }
 
-    /// Salt size (called IV size in Xray-core).
+    /// Salt size (also called IV size).
     var saltSize: Int { keySize }
 
     /// AEAD authentication tag size (16 for all AEAD ciphers).

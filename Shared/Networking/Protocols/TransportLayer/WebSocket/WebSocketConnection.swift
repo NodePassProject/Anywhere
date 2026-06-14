@@ -77,7 +77,7 @@ nonisolated class WebSocketConnection {
             request += "\(key): \(value)\r\n"
         }
 
-        // Default to Chrome UA if unset, matching Xray-core's GetRequestHeader().
+        // Default to Chrome UA if unset.
         if !configuration.headers.keys.contains(where: { $0.lowercased() == "user-agent" }) {
             request += "User-Agent: \(Self.chromeUserAgent)\r\n"
         }
@@ -196,7 +196,7 @@ nonisolated class WebSocketConnection {
 
     // MARK: - Heartbeat (Ping Sender)
 
-    /// Periodic Ping sender matching Xray-core's heartbeat; stops when a send fails.
+    /// Periodic Ping sender (heartbeat); stops when a send fails.
     private func startHeartbeat() {
         let period = configuration.heartbeatPeriod
         guard period > 0 else { return }

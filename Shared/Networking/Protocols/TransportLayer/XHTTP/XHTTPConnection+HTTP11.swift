@@ -18,7 +18,7 @@ extension XHTTPConnection {
         let path = configuration.normalizedPath
         var request = ""
 
-        // stream-one: no session ID in path (matching Xray-core: sessionId="" for stream-one)
+        // stream-one carries no session ID in the path (sessionId is empty for stream-one).
         let metaQuery = queryParamsForMeta()
         request += buildRequestLine(method: method, path: path, queryParts: [metaQuery])
         request += "Host: \(configuration.host)\r\n"
@@ -383,37 +383,19 @@ extension XHTTPConnection {
         applySessionId(to: &headerBlock, path: &path)
         applySeq(to: &headerBlock, path: &path, seq: seq)
 
+        // Header/cookie placement carries the payload outside the body.
         let bodyData: Data
-        if configuration.uplinkDataPlacement != .body {
-            // Non-body placement: base64url-encode the data into headers or cookies.
-            let encoded = data.base64EncodedString()
-                .replacingOccurrences(of: "+", with: "-")
-                .replacingOccurrences(of: "/", with: "_")
-                .replacingOccurrences(of: "=", with: "")
-            let chunkSize = configuration.uplinkChunkSize > 0 ? configuration.uplinkChunkSize : encoded.count
-            let key = configuration.uplinkDataKey
-
-            switch configuration.uplinkDataPlacement {
-            case .header:
-                var i = 0
-                var chunkIndex = 0
-                while i < encoded.count {
-                    let end = min(i + chunkSize, encoded.count)
-                    let chunk = String(encoded[encoded.index(encoded.startIndex, offsetBy: i)..<encoded.index(encoded.startIndex, offsetBy: end)])
-                    headerBlock += "\(key)-\(chunkIndex): \(chunk)\r\n"
-                    i = end
-                    chunkIndex += 1
+        let dataFields = uplinkDataFields(for: data)
+        if dataFields.isEmpty {
+            bodyData = data
+        } else {
+            for field in dataFields {
+                switch field {
+                case .header(let name, let value): headerBlock += "\(name): \(value)\r\n"
+                case .cookie(let pair):            headerBlock += "Cookie: \(pair)\r\n"
                 }
-                headerBlock += "\(key)-Length: \(encoded.count)\r\n"
-                headerBlock += "\(key)-Upstream: 1\r\n"
-            case .cookie:
-                headerBlock += "Cookie: \(key)=\(encoded)\r\n"
-            default:
-                break
             }
             bodyData = Data()
-        } else {
-            bodyData = data
         }
 
         let metaQuery = queryParamsForMeta(seq: seq)

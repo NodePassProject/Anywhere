@@ -7,7 +7,7 @@
 
 import Foundation
 
-/// HTTP upgrade transport configuration, matching Xray-core's `httpupgrade.Config`.
+/// HTTP upgrade transport configuration.
 struct HTTPUpgradeConfiguration: Codable, Equatable, Hashable {
     /// Host header value (defaults to server address).
     let host: String

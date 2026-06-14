@@ -19,7 +19,7 @@ enum TrojanProtocol {
     static let commandTCP: UInt8 = 0x01
     static let commandUDP: UInt8 = 0x03
 
-    /// Max per-packet UDP payload accepted by Trojan servers; matches Xray-core's `maxLength = 8192`.
+    /// Max per-packet UDP payload accepted by Trojan servers (`maxLength = 8192`).
     static let maxUDPPayloadLength: Int = 8192
 
     /// SHA224(password) as 56 lowercase-hex ASCII bytes — the exact byte sequence Trojan servers compare against.

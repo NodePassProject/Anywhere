@@ -114,7 +114,7 @@ extension XHTTPConnection {
     /// Reads frames until the server's SETTINGS is received and ACKed; does not
     /// wait for the 200 OK, and early HEADERS complete the setup.
     private func processInitialServerFrames(completion: @escaping (Error?) -> Void) {
-        readH2Frame { [weak self] result in
+        h2FrameReader.readFrame { [weak self] result in
             guard let self else {
                 completion(XHTTPError.connectionClosed)
                 return
@@ -270,17 +270,23 @@ extension XHTTPConnection {
         let streamWindow = h2PeerInitialWindowSize
         let connectionWindow = h2PeerConnectionWindow
 
-        let headerBlock = encodeH2UploadHeaders(seq: seq, contentLength: data.count)
-        let headerFlags: UInt8 = data.isEmpty
-            ? (Self.h2FlagEndHeaders | Self.h2FlagEndStream)
-            : Self.h2FlagEndHeaders
+        // Header/cookie placement carries the payload in the HEADERS block; the body stays empty.
+        let dataFields = uplinkDataFields(for: data)
+        let bodyInHeaders = !dataFields.isEmpty
+        let bodyLength = bodyInHeaders ? 0 : data.count
+        let headerBlock = encodeH2UploadHeaders(seq: seq, contentLength: bodyLength, uplinkData: dataFields)
+        let sendsBody = !bodyInHeaders && !data.isEmpty
+        let headerFlags: UInt8 = sendsBody
+            ? Self.h2FlagEndHeaders
+            : (Self.h2FlagEndHeaders | Self.h2FlagEndStream)
         var outbound = buildH2Frame(type: Self.h2FrameHeaders, flags: headerFlags, streamId: streamId, payload: headerBlock)
 
-        guard !data.isEmpty else {
+        guard sendsBody else {
             lock.unlock()
+            // No body frame: empty payload, or payload carried in headers/cookies.
             // Rate limiting between POSTs is handled upstream by flushPacketUpBatch.
             downloadSend(outbound) { [weak self] error in
-                if let error {
+                if error != nil {
                     self?.markH2Closed()
                 }
                 completion(error)
@@ -321,7 +327,7 @@ extension XHTTPConnection {
             }
             if nextOffset < data.count {
                 self?.sendH2PacketUpData(data: data, streamId: streamId, offset: nextOffset, maxSize: maxSize, streamWindow: perStreamRemaining) { [weak self] error in
-                    if let error {
+                    if error != nil {
                         self?.markH2Closed()
                     }
                     completion(error)
@@ -415,7 +421,7 @@ extension XHTTPConnection {
         }
         lock.unlock()
 
-        readH2Frame { [weak self] result in
+        h2FrameReader.readFrame { [weak self] result in
             guard let self else {
                 completion(nil, XHTTPError.connectionClosed)
                 return
@@ -562,6 +568,97 @@ extension XHTTPConnection {
 
                 default:
                     self.receiveH2Data(completion: completion)
+                }
+            }
+        }
+    }
+
+    // MARK: Shared-H2 (xmux) session setup & send
+
+    /// Setup over a shared multiplexing H2 connection; mirrors the H3 path but with HPACK headers.
+    func performSharedH2Setup(completion: @escaping (Error?) -> Void) {
+        guard let shared = sharedH2 else {
+            completion(XHTTPError.setupFailed("no shared H2 connection"))
+            return
+        }
+        switch role {
+        case .downloadOnly:
+            setupSharedH2Download(shared, completion: completion)
+        case .uploadOnly:
+            // packet-up opens a stream per batch, so only stream-up opens anything at setup.
+            if mode == .streamUp {
+                openSharedH2Upload(shared, completion: completion)
+            } else {
+                completion(nil)
+            }
+        case .combined:
+            switch mode {
+            case .streamOne:
+                // Full-duplex POST on one stream; can't wait for the response (CDN buffering).
+                let stream = shared.makeStream()
+                lock.lock(); sharedH2Download = stream; lock.unlock()
+                xmuxLease?.noteRequest()
+                let headers = encodeH2RequestHeaders(method: "POST", includeMeta: false)
+                stream.sendHeaders(headers, endStream: false, completion: completion)
+            case .streamUp:
+                setupSharedH2Download(shared) { [weak self] error in
+                    if let error { completion(error); return }
+                    guard let self, let shared = self.sharedH2 else { completion(XHTTPError.connectionClosed); return }
+                    self.openSharedH2Upload(shared, completion: completion)
+                }
+            default: // packet-up (and .auto already resolved)
+                setupSharedH2Download(shared, completion: completion)
+            }
+        }
+    }
+
+    /// Opens the GET download stream; completes on send (a CDN may withhold the 200 until upload flows).
+    private func setupSharedH2Download(_ shared: XHTTPSharedH2Connection, completion: @escaping (Error?) -> Void) {
+        let stream = shared.makeStream()
+        lock.lock(); sharedH2Download = stream; lock.unlock()
+        xmuxLease?.noteRequest()
+        let headers = encodeH2RequestHeaders(method: "GET", includeMeta: true)
+        stream.sendHeaders(headers, endStream: true, completion: completion)
+    }
+
+    /// Opens the persistent stream-up upload POST; its response is drained.
+    private func openSharedH2Upload(_ shared: XHTTPSharedH2Connection, completion: @escaping (Error?) -> Void) {
+        let stream = shared.makeStream()
+        lock.lock(); sharedH2Upload = stream; lock.unlock()
+        xmuxLease?.noteRequest()
+        let headers = encodeH2UploadHeaders(seq: nil)
+        stream.sendHeaders(headers, endStream: false) { [weak self] error in
+            if error == nil { self?.sharedH2Upload?.drainResponse() }
+            completion(error)
+        }
+    }
+
+    /// Sends one packet-up batch as its own shared-H2 stream; the response only acks receipt.
+    func sendSharedH2PacketUp(data: Data, completion: @escaping (Error?) -> Void) {
+        guard let shared = sharedH2 else { completion(XHTTPError.connectionClosed); return }
+        lock.lock(); let seq = nextSeq; nextSeq += 1; lock.unlock()
+        xmuxLease?.noteRequest()
+
+        // Header/cookie placement carries the payload in the HEADERS block; the body stays empty.
+        let dataFields = uplinkDataFields(for: data)
+        let bodyInHeaders = !dataFields.isEmpty
+        let bodyLength = bodyInHeaders ? 0 : data.count
+        let headers = encodeH2UploadHeaders(seq: seq, contentLength: bodyLength, uplinkData: dataFields)
+        let stream = shared.makeStream()
+
+        if bodyInHeaders || data.isEmpty {
+            stream.sendHeaders(headers, endStream: true) { error in
+                if let error { stream.close(); completion(error); return }
+                stream.drainResponse()
+                completion(nil)
+            }
+        } else {
+            stream.sendHeaders(headers, endStream: false) { error in
+                if let error { stream.close(); completion(error); return }
+                stream.sendData(data, endStream: true) { sendErr in
+                    if let sendErr { stream.close(); completion(sendErr); return }
+                    stream.drainResponse()
+                    completion(nil)
                 }
             }
         }

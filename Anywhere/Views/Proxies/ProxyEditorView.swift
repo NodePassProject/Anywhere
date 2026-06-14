@@ -139,7 +139,7 @@ struct ProxyEditorView: View {
     private var isValid: Bool {
         guard !name.isEmpty, !serverAddress.isEmpty, UInt16(serverPort) != nil else { return false }
         if isVLESS {
-            guard UUID(xrayString: vlessUUID) != nil,
+            guard UUID(vlessString: vlessUUID) != nil,
                   !isVLESSReality || (!vlessRealitySNI.isEmpty && !vlessRealityPublicKey.isEmpty) else { return false }
             if vlessTransport == "xhttp", vlessXHTTPDownloadEnabled {
                 guard !vlessXHTTPDownloadAddress.isEmpty, UInt16(vlessXHTTPDownloadPort) != nil else { return false }
@@ -1172,8 +1172,8 @@ struct ProxyEditorView: View {
         if isHysteria || isNowhere || isTrojan || isAnyTLS || isShadowsocks || isSOCKS5 || isSudoku || isNaive {
             parsedUUID = self.configuration?.id ?? UUID()
         } else {
-            guard let u = UUID(xrayString: vlessUUID) else { return }
-            parsedUUID = u
+            guard let uuid = UUID(vlessString: vlessUUID) else { return }
+            parsedUUID = uuid
         }
         
         var vlessTLSConfiguration: TLSConfiguration?

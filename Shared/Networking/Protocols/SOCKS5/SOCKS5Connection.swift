@@ -102,8 +102,7 @@ nonisolated class SOCKS5Transport: RawTransport {
 
 // MARK: - SOCKS5Handshake
 
-/// SOCKS5 client handshake (greeting, optional auth, CONNECT or UDP ASSOCIATE);
-/// matches Xray-core's `ClientHandshake` behavior.
+/// SOCKS5 client handshake (greeting, optional auth, CONNECT or UDP ASSOCIATE).
 enum SOCKS5Handshake {
 
     struct UDPRelayInfo {

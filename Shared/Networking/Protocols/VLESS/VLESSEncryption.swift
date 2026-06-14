@@ -7,7 +7,7 @@
 
 import Foundation
 
-/// Parsed VLESS `encryption` (client) field, Xray-core's `mlkem768x25519plus` scheme:
+/// Parsed VLESS `encryption` (client) field, the `mlkem768x25519plus` scheme:
 /// `mlkem768x25519plus.<xor>.<rtt>[.<padSeg>...].<base64Key>[.<base64Key>...]`.
 struct VLESSEncryptionConfig: Equatable, Hashable {
 
@@ -93,7 +93,7 @@ struct VLESSEncryptionConfig: Equatable, Hashable {
         }
 
         // Segments shorter than 20 chars are padding specs, the rest are base64url
-        // keys — matches Xray-core's `len(r) < 20` heuristic.
+        // keys — the `len(r) < 20` heuristic.
         var paddingSegments: [String] = []
         var publicKeys: [Data] = []
         for raw in segments[3...] {
