@@ -146,27 +146,27 @@ enum HysteriaProtocol {
         /// UTF-8 "host:port" string.
         let address: String
         let data: Data
-    }
 
-    /// Serializes a UDP message. `data` and `address` run to the end of the
-    /// datagram so there's no data-length field.
-    static func encodeUDPMessage(_ msg: UDPMessage) -> Data {
-        let addrBytes = Data(msg.address.utf8)
-        let addrLenVarInt = encodeVarInt(UInt64(addrBytes.count))!
+        /// Serializes the message. `data` and `address` run to the end of the
+        /// datagram so there's no data-length field.
+        var encoded: Data {
+            let addrBytes = Data(address.utf8)
+            let addrLenVarInt = HysteriaProtocol.encodeVarInt(UInt64(addrBytes.count))!
 
-        var out = Data(capacity: udpHeaderFixedSize + addrLenVarInt.count + addrBytes.count + msg.data.count)
+            var out = Data(capacity: HysteriaProtocol.udpHeaderFixedSize + addrLenVarInt.count + addrBytes.count + data.count)
 
-        var sid = msg.sessionID.bigEndian
-        withUnsafeBytes(of: &sid) { out.append(contentsOf: $0) }
-        var pid = msg.packetID.bigEndian
-        withUnsafeBytes(of: &pid) { out.append(contentsOf: $0) }
-        out.append(msg.fragID)
-        out.append(msg.fragCount)
+            var sid = sessionID.bigEndian
+            withUnsafeBytes(of: &sid) { out.append(contentsOf: $0) }
+            var pid = packetID.bigEndian
+            withUnsafeBytes(of: &pid) { out.append(contentsOf: $0) }
+            out.append(fragID)
+            out.append(fragCount)
 
-        out.append(addrLenVarInt)
-        out.append(addrBytes)
-        out.append(msg.data)
-        return out
+            out.append(addrLenVarInt)
+            out.append(addrBytes)
+            out.append(data)
+            return out
+        }
     }
 
     /// Parses a UDP datagram payload from the server; the returned `data` is

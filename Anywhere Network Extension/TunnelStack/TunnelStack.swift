@@ -403,7 +403,7 @@ class TunnelStack {
 
         // muxManager is udpQueue-owned, so build it there (a restart-time miss
         // is fine — restart resets flows).
-        let useMux = Self.shouldUseVisionMux(configuration)
+        let useMux = configuration.usesVisionMux
         udpQueue.async { [self] in
             if useMux {
                 muxManager = MuxManager(configuration: configuration, flowQueue: udpQueue)
@@ -417,11 +417,6 @@ class TunnelStack {
         } else {
             domainRouter.reset()
         }
-    }
-
-    static func shouldUseVisionMux(_ configuration: ProxyConfiguration) -> Bool {
-        guard case .vless(_, _, let flow, _, _, let muxEnabled, _) = configuration.outbound else { return false }
-        return muxEnabled && flow == "xtls-rprx-vision"
     }
 
     private func loadIPv6Settings() {

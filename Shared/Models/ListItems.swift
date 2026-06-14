@@ -34,45 +34,24 @@ final class ProxyListItem: Identifiable {
     init(_ configuration: ProxyConfiguration, isSelected: Bool, latency: LatencyResult?) {
         id = configuration.id
         subscriptionId = configuration.subscriptionId
-        let d = Self.derive(configuration)
         name = configuration.name
-        protocolName = d.protocolName
-        transportTag = d.transportTag
-        securityTag = d.securityTag
-        isVision = d.isVision
+        protocolName = configuration.outboundProtocol.name
+        transportTag = configuration.displayTransportTag
+        securityTag = configuration.displaySecurityTag
+        isVision = configuration.hasVisionFlow
         self.isSelected = isSelected
         self.latency = latency
     }
 
     /// Assigns only changed fields so observation fires for exactly what moved.
     func update(_ configuration: ProxyConfiguration, isSelected: Bool, latency: LatencyResult?) {
-        let d = Self.derive(configuration)
         if name != configuration.name { name = configuration.name }
-        if protocolName != d.protocolName { protocolName = d.protocolName }
-        if transportTag != d.transportTag { transportTag = d.transportTag }
-        if securityTag != d.securityTag { securityTag = d.securityTag }
-        if isVision != d.isVision { isVision = d.isVision }
+        if protocolName != configuration.outboundProtocol.name { protocolName = configuration.outboundProtocol.name }
+        if transportTag != configuration.displayTransportTag { transportTag = configuration.displayTransportTag }
+        if securityTag != configuration.displaySecurityTag { securityTag = configuration.displaySecurityTag }
+        if isVision != configuration.hasVisionFlow { isVision = configuration.hasVisionFlow }
         if self.isSelected != isSelected { self.isSelected = isSelected }
         if self.latency != latency { self.latency = latency }
-    }
-
-    private static func derive(_ configuration: ProxyConfiguration) -> (protocolName: String, transportTag: String?, securityTag: String?, isVision: Bool) {
-        let transportTag: String?
-        if configuration.outboundProtocol == .vless {
-            let tag = configuration.transportLayer.tag
-            transportTag = tag.isEmpty ? nil : tag.uppercased()
-        } else {
-            transportTag = nil
-        }
-        let security = configuration.securityLayer.tag.uppercased()
-        let securityTag = security == "NONE" ? nil : security
-        let isVision: Bool
-        if case .vless(_, _, let flow?, _, _, _, _) = configuration.outbound {
-            isVision = flow.uppercased().contains("VISION")
-        } else {
-            isVision = false
-        }
-        return (configuration.outboundProtocol.name, transportTag, securityTag, isVision)
     }
 }
 
@@ -99,7 +78,7 @@ final class ChainListItem: Identifiable {
     }
 
     init(_ chain: ProxyChain, configurations: [ProxyConfiguration], isSelected: Bool, latency: LatencyResult?) {
-        let d = Self.derive(chain, configurations)
+        let d = chain.listDisplayInfo(configurations: configurations)
         id = chain.id
         name = chain.name
         proxyNames = d.names
@@ -112,7 +91,7 @@ final class ChainListItem: Identifiable {
 
     /// Assigns only changed fields so observation fires for exactly what moved.
     func update(_ chain: ProxyChain, configurations: [ProxyConfiguration], isSelected: Bool, latency: LatencyResult?) {
-        let d = Self.derive(chain, configurations)
+        let d = chain.listDisplayInfo(configurations: configurations)
         if name != chain.name { name = chain.name }
         if proxyNames != d.names { proxyNames = d.names }
         if isValid != d.isValid { isValid = d.isValid }
@@ -122,11 +101,4 @@ final class ChainListItem: Identifiable {
         if self.latency != latency { self.latency = latency }
     }
 
-    private static func derive(_ chain: ProxyChain, _ configurations: [ProxyConfiguration]) -> (names: [String], isValid: Bool, entry: String?, exit: String?) {
-        let proxies = chain.resolveProxies(from: configurations)
-        let isValid = proxies.count == chain.proxyIds.count && proxies.count >= 2
-        let entry = proxies.count >= 2 ? proxies.first?.serverAddress : nil
-        let exit = proxies.count >= 2 ? proxies.last?.serverAddress : nil
-        return (proxies.map(\.name), isValid, entry, exit)
-    }
 }

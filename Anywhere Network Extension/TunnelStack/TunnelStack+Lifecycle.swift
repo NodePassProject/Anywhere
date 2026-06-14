@@ -41,7 +41,7 @@ extension TunnelStack {
             startUDPCleanupTimer()
             installFDPressureReliefHandler()
             startReadingPackets()
-            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), mux=\(Self.shouldUseVisionMux(configuration)), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+            logger.debug("[TunnelStack] Started, mode=\(proxyMode.rawValue), mux=\(configuration.usesVisionMux), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
         }
 
         startObservingSettings()
@@ -165,7 +165,7 @@ extension TunnelStack {
     private func reclaimInstanceTransports(rebuildMux: Bool) {
         // Build the replacement mux on lwipQueue, which owns `configuration`.
         let rebuiltMux: MuxManager?
-        if rebuildMux, let configuration, Self.shouldUseVisionMux(configuration) {
+        if rebuildMux, let configuration, configuration.usesVisionMux {
             rebuiltMux = MuxManager(configuration: configuration, flowQueue: udpQueue)
         } else {
             rebuiltMux = nil
@@ -254,7 +254,7 @@ extension TunnelStack {
         lwip_bridge_init()
         startTimeoutTimer()
         startUDPCleanupTimer()
-        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), mux=\(Self.shouldUseVisionMux(configuration)), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
+        logger.debug("[TunnelStack] Restarted, mode=\(proxyMode.rawValue), mux=\(configuration.usesVisionMux), advertiseIPv6=\(advertiseIPv6ToApps), encryptedDNS=\(encryptedDNSEnabled), bypass=\(!bypassCountryCode.isEmpty)")
     }
 
     // MARK: - Settings Observation

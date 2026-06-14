@@ -176,7 +176,7 @@ struct CustomRuleSetDetailView: View {
 
     private func ruleRow(_ rule: RoutingRule) -> some View {
         HStack {
-            Image(systemName: iconName(for: rule.type))
+            Image(systemName: rule.type.iconName)
                 .foregroundStyle(.secondary)
                 .frame(width: 24)
             VStack(alignment: .leading) {
@@ -184,7 +184,7 @@ struct CustomRuleSetDetailView: View {
                     .font(.system(size: 14).monospaced())
                     .minimumScaleFactor(0.1)
                     .lineLimit(1)
-                Text(ruleTypeLabel(rule.type))
+                Text(rule.type.displayLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -224,23 +224,6 @@ struct CustomRuleSetDetailView: View {
             }
         }
     }
-
-    private func ruleTypeLabel(_ type: RoutingRuleType) -> String {
-        switch type {
-        case .domainSuffix: return String(localized: "Domain Suffix")
-        case .domainKeyword: return String(localized: "Domain Keyword")
-        case .ipCIDR: return String(localized: "IPv4 CIDR")
-        case .ipCIDR6: return String(localized: "IPv6 CIDR")
-        }
-    }
-
-    private func iconName(for type: RoutingRuleType) -> String {
-        switch type {
-        case .domainSuffix: return "globe"
-        case .domainKeyword: return "magnifyingglass"
-        case .ipCIDR, .ipCIDR6: return "network"
-        }
-    }
 }
 
 // MARK: - Add Rule Sheet
@@ -278,7 +261,7 @@ private struct AddRoutingRuleView: View {
                     ConfirmButton("Add") {
                         let value = routingRuleValue.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !value.isEmpty else { return }
-                        onAdd(RoutingRule(type: routingRuleType, value: normalizeValue(value, type: routingRuleType)))
+                        onAdd(RoutingRule(type: routingRuleType, value: routingRuleType.normalized(value)))
                         dismiss()
                     }
                     .disabled(routingRuleValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -294,25 +277,6 @@ private struct AddRoutingRuleView: View {
         case .domainKeyword: return "example"
         case .ipCIDR: return "10.0.0.0/8"
         case .ipCIDR6: return "2001:db8::/32"
-        }
-    }
-
-    func normalizeValue(_ value: String, type: RoutingRuleType) -> String {
-        switch type {
-        case .ipCIDR:
-            // Single IPv4 (no slash) → append /32
-            if !value.contains("/") {
-                return value + "/32"
-            }
-            return value
-        case .ipCIDR6:
-            // Single IPv6 (no slash) → append /128
-            if !value.contains("/") {
-                return value + "/128"
-            }
-            return value
-        case .domainSuffix, .domainKeyword:
-            return value
         }
     }
 }

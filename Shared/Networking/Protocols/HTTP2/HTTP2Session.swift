@@ -210,14 +210,14 @@ nonisolated class HTTP2Session: PoolableSession {
             (id: 0x5, value: 16384),     // MAX_FRAME_SIZE
             (id: 0x6, value: 262144),    // MAX_HEADER_LIST_SIZE
         ])
-        data.append(HTTP2Framer.serialize(settings))
+        data.append(settings.serialized)
 
         // Expand connection receive window to 128 MB
         let windowUpdate = HTTP2Framer.windowUpdateFrame(
             streamID: 0,
             increment: HTTP2FlowControl.connectionWindowUpdateIncrement
         )
-        data.append(HTTP2Framer.serialize(windowUpdate))
+        data.append(windowUpdate.serialized)
 
         transport.send(data: data) { [weak self] error in
             guard let self else { return }
@@ -383,7 +383,7 @@ nonisolated class HTTP2Session: PoolableSession {
             endStream: false
         )
 
-        transport.send(data: HTTP2Framer.serialize(headersFrame), completion: completion)
+        transport.send(data: headersFrame.serialized, completion: completion)
     }
 
     /// Sends DATA frames for a stream, respecting connection + stream flow control.
@@ -410,7 +410,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
             let chunk = Data(data[currentOffset..<(currentOffset + chunkSize)])
             let frame = HTTP2Framer.dataFrame(streamID: stream.streamID, payload: chunk)
-            frames.append(HTTP2Framer.serialize(frame))
+            frames.append(frame.serialized)
             currentOffset += chunkSize
         }
 
@@ -441,7 +441,7 @@ nonisolated class HTTP2Session: PoolableSession {
 
     /// Sends a control frame (SETTINGS ACK, PING ACK, WINDOW_UPDATE). Fire-and-forget.
     func sendControlFrame(_ frame: HTTP2Frame) {
-        transport.send(data: HTTP2Framer.serialize(frame)) { error in
+        transport.send(data: frame.serialized) { error in
             if let error {
                 logger.warning("[HTTP2Session] Failed to send control frame: \(error.localizedDescription)")
             }

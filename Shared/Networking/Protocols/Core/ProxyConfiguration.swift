@@ -178,6 +178,15 @@ enum SecurityLayer: Hashable {
         case .reality:  "reality"
         }
     }
+
+    /// SNI / server name carried by this layer; `fallback` when unsecured.
+    func serverName(fallback: String) -> String {
+        switch self {
+        case .tls(let tls): return tls.serverName
+        case .reality(let reality): return reality.serverName
+        case .none: return fallback
+        }
+    }
 }
 
 // MARK: - ProxyConfiguration
@@ -237,6 +246,33 @@ struct ProxyConfiguration: Identifiable, Hashable, Codable {
     /// Whether XUDP (GlobalID-based flow identification) is enabled for muxed UDP.
     var xudpEnabled: Bool {
         if case .vless(_, _, _, _, _, _, let x) = outbound { return x }
+        return false
+    }
+
+    /// Whether Vision-flow mux applies: VLESS with `xtls-rprx-vision` flow and Mux enabled.
+    var usesVisionMux: Bool {
+        guard case .vless(_, _, let flow, _, _, let muxEnabled, _) = outbound else { return false }
+        return muxEnabled && flow == "xtls-rprx-vision"
+    }
+
+    /// Uppercased transport tag for display (VLESS only); `nil` when not VLESS or the tag is empty.
+    var displayTransportTag: String? {
+        guard outboundProtocol == .vless else { return nil }
+        let tag = transportLayer.tag
+        return tag.isEmpty ? nil : tag.uppercased()
+    }
+
+    /// Uppercased security tag for display; `nil` when there is no security layer.
+    var displaySecurityTag: String? {
+        let tag = securityLayer.tag.uppercased()
+        return tag == "NONE" ? nil : tag
+    }
+
+    /// Whether the VLESS flow is an XTLS Vision variant (loose match, e.g. `xtls-rprx-vision-udp443`).
+    var hasVisionFlow: Bool {
+        if case .vless(_, _, let flow?, _, _, _, _) = outbound {
+            return flow.uppercased().contains("VISION")
+        }
         return false
     }
 

@@ -66,6 +66,26 @@ struct HTTP2Frame {
     let payload: Data
 
     func hasFlag(_ flag: UInt8) -> Bool { flags & flag != 0 }
+
+    /// Serializes this frame to wire format (RFC 7540 §4.1): 9-byte header + payload.
+    var serialized: Data {
+        let length = UInt32(payload.count)
+        var data = Data(capacity: HTTP2Framer.headerSize + payload.count)
+        // 24-bit length (big-endian)
+        data.append(UInt8((length >> 16) & 0xFF))
+        data.append(UInt8((length >> 8) & 0xFF))
+        data.append(UInt8(length & 0xFF))
+        data.append(type.rawValue)
+        data.append(flags)
+        // 31-bit stream ID (big-endian, reserved bit 0)
+        let sid = streamID & 0x7FFFFFFF
+        data.append(UInt8((sid >> 24) & 0xFF))
+        data.append(UInt8((sid >> 16) & 0xFF))
+        data.append(UInt8((sid >> 8) & 0xFF))
+        data.append(UInt8(sid & 0xFF))
+        data.append(payload)
+        return data
+    }
 }
 
 // MARK: - Framer
@@ -73,27 +93,6 @@ struct HTTP2Frame {
 enum HTTP2Framer {
     static let headerSize = 9
     static let maxDataPayload = 16_384  // HTTP/2 default SETTINGS_MAX_FRAME_SIZE
-
-    // MARK: Serialize
-
-    static func serialize(_ frame: HTTP2Frame) -> Data {
-        let length = UInt32(frame.payload.count)
-        var data = Data(capacity: headerSize + frame.payload.count)
-        // 24-bit length (big-endian)
-        data.append(UInt8((length >> 16) & 0xFF))
-        data.append(UInt8((length >> 8) & 0xFF))
-        data.append(UInt8(length & 0xFF))
-        data.append(frame.type.rawValue)
-        data.append(frame.flags)
-        // 31-bit stream ID (big-endian, reserved bit 0)
-        let sid = frame.streamID & 0x7FFFFFFF
-        data.append(UInt8((sid >> 24) & 0xFF))
-        data.append(UInt8((sid >> 16) & 0xFF))
-        data.append(UInt8((sid >> 8) & 0xFF))
-        data.append(UInt8(sid & 0xFF))
-        data.append(frame.payload)
-        return data
-    }
 
     // MARK: Deserialize
 

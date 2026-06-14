@@ -27,7 +27,7 @@ import Foundation
 ///   set metadata; only `name` is recognized.
 /// - **Rule lines** (`<type>, <value>`) each describe one match rule.
 ///   Type is a ``RoutingRuleType`` raw value (`0`–`3`); the value is a
-///   CIDR or domain, normalized in ``normalizeValue`` (a bare IP gains a
+///   CIDR or domain, normalized in ``RoutingRuleType/normalized(_:)`` (a bare IP gains a
 ///   `/32` or `/128`).
 /// - **Comments** start with `#` or `//`.
 ///
@@ -83,25 +83,6 @@ enum RoutingRuleSetParser {
         guard !value.isEmpty else { return nil }
 
         guard let typeInt = Int(prefix), let type = RoutingRuleType(rawValue: typeInt) else { return nil }
-        return RoutingRule(type: type, value: normalizeValue(value, type: type))
-    }
-
-    private static func normalizeValue(_ value: String, type: RoutingRuleType) -> String {
-        switch type {
-        case .ipCIDR:
-            // Single IPv4 (no slash) → append /32
-            if !value.contains("/") {
-                return value + "/32"
-            }
-            return value
-        case .ipCIDR6:
-            // Single IPv6 (no slash) → append /128
-            if !value.contains("/") {
-                return value + "/128"
-            }
-            return value
-        case .domainSuffix, .domainKeyword:
-            return value
-        }
+        return RoutingRule(type: type, value: type.normalized(value))
     }
 }
