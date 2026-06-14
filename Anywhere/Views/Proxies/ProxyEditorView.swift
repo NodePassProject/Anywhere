@@ -45,6 +45,7 @@ struct ProxyEditorView: View {
     @State private var vlessSecurity = "none"
     @State private var vlessTLSSNI = ""
     @State private var vlessTLSALPN = ""
+    @State private var vlessTLSECH = ""
     @State private var vlessRealitySNI = ""
     @State private var vlessRealityPublicKey = ""
     @State private var vlessRealityShortId = ""
@@ -83,12 +84,14 @@ struct ProxyEditorView: View {
     @State private var trojanPassword = ""
     @State private var trojanSNI = ""
     @State private var trojanALPN = ""
+    @State private var trojanECH = ""
     @State private var trojanFingerprint: TLSFingerprint = .chrome120
 
     // AnyTLS fields
     @State private var anytlsPassword = ""
     @State private var anytlsSNI = ""
     @State private var anytlsALPN = ""
+    @State private var anytlsECH = ""
     @State private var anytlsFingerprint: TLSFingerprint = .chrome120
 
     // Shadowsocks fields
@@ -654,6 +657,14 @@ struct ProxyEditorView: View {
                     } label: {
                         TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
                     }
+                    LabeledContent {
+                        TextField("Base64", text: $vlessTLSECH)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .multilineTextAlignment(.trailing)
+                    } label: {
+                        TextWithColorfulIcon(title: "ECH", comment: nil, systemName: "lock.badge.checkmark.fill", foregroundColor: .white, backgroundColor: .green)
+                    }
                     Picker(selection: $vlessFingerprint) {
                         ForEach(TLSFingerprint.allCases, id: \.self) { fp in
                             Text(fp.displayName).tag(fp)
@@ -736,6 +747,14 @@ struct ProxyEditorView: View {
                 } label: {
                     TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
                 }
+                LabeledContent {
+                    TextField("Base64", text: $trojanECH)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "ECH", comment: nil, systemName: "lock.badge.checkmark.fill", foregroundColor: .white, backgroundColor: .green)
+                }
                 Picker(selection: $trojanFingerprint) {
                     ForEach(TLSFingerprint.allCases, id: \.self) { fp in
                         Text(fp.displayName).tag(fp)
@@ -762,6 +781,14 @@ struct ProxyEditorView: View {
                         .multilineTextAlignment(.trailing)
                 } label: {
                     TextWithColorfulIcon(title: "ALPN", comment: nil, systemName: "list.bullet", foregroundColor: .white, backgroundColor: .blue)
+                }
+                LabeledContent {
+                    TextField("Base64", text: $anytlsECH)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .multilineTextAlignment(.trailing)
+                } label: {
+                    TextWithColorfulIcon(title: "ECH", comment: nil, systemName: "lock.badge.checkmark.fill", foregroundColor: .white, backgroundColor: .green)
                 }
                 Picker(selection: $anytlsFingerprint) {
                     ForEach(TLSFingerprint.allCases, id: \.self) { fp in
@@ -1013,6 +1040,7 @@ struct ProxyEditorView: View {
             if case .tls(let tls) = configuration.securityLayer {
                 vlessTLSSNI = tls.serverName
                 vlessTLSALPN = tls.alpn?.joined(separator: ",") ?? ""
+                vlessTLSECH = tls.echConfig ?? ""
                 vlessFingerprint = tls.fingerprint
             }
 
@@ -1044,11 +1072,13 @@ struct ProxyEditorView: View {
             trojanPassword = password
             trojanSNI = tls.serverName
             trojanALPN = tls.alpn?.joined(separator: ",") ?? ""
+            trojanECH = tls.echConfig ?? ""
             trojanFingerprint = tls.fingerprint
         case .anytls(let password, _, _, _, let tls):
             anytlsPassword = password
             anytlsSNI = tls.serverName
             anytlsALPN = tls.alpn?.joined(separator: ",") ?? ""
+            anytlsECH = tls.echConfig ?? ""
             anytlsFingerprint = tls.fingerprint
         case .shadowsocks(let password, let method):
             ssPassword = password
@@ -1170,9 +1200,11 @@ struct ProxyEditorView: View {
         if isVLESSTLS {
             let sni = vlessTLSSNI.isEmpty ? serverAddress : vlessTLSSNI
             let alpn: [String]? = vlessTLSALPN.isEmpty ? nil : vlessTLSALPN.split(separator: ",").map { String($0) }
+            let ech = vlessTLSECH.trimmingCharacters(in: .whitespacesAndNewlines)
             vlessTLSConfiguration = TLSConfiguration(
                 serverName: sni,
                 alpn: alpn,
+                echConfig: ech.isEmpty ? nil : ech,
                 fingerprint: vlessFingerprint
             )
         }
@@ -1296,9 +1328,10 @@ struct ProxyEditorView: View {
         case .trojan:
             let sni = trojanSNI.isEmpty ? bareAddress : trojanSNI
             let alpn: [String]? = trojanALPN.isEmpty ? nil : trojanALPN.split(separator: ",").map { String($0) }
+            let ech = trojanECH.trimmingCharacters(in: .whitespacesAndNewlines)
             outbound = .trojan(
                 password: trojanPassword,
-                tls: TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: trojanFingerprint)
+                tls: TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech.isEmpty ? nil : ech, fingerprint: trojanFingerprint)
             )
         case .anytls:
             let sni = anytlsSNI.isEmpty ? bareAddress : anytlsSNI
@@ -1314,12 +1347,13 @@ struct ProxyEditorView: View {
             } else {
                 ici = 30; it = 30; mis = 0
             }
+            let ech = anytlsECH.trimmingCharacters(in: .whitespacesAndNewlines)
             outbound = .anytls(
                 password: anytlsPassword,
                 idleCheckInterval: ici,
                 idleTimeout: it,
                 minIdleSession: mis,
-                tls: TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: anytlsFingerprint)
+                tls: TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech.isEmpty ? nil : ech, fingerprint: anytlsFingerprint)
             )
         case .shadowsocks:
             outbound = .shadowsocks(password: ssPassword, method: ssMethod)

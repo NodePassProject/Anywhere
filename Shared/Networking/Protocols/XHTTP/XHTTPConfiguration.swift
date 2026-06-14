@@ -360,7 +360,8 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             alpn = s.split(separator: ",").map(String.init)
         }
         let fp = (json?["fingerprint"] as? String).flatMap { TLSFingerprint(rawValue: $0) } ?? .chrome120
-        return TLSConfiguration(serverName: serverName, alpn: alpn, fingerprint: fp)
+        let ech = (json?["ech"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return TLSConfiguration(serverName: serverName, alpn: alpn, echConfig: ech, fingerprint: fp)
     }
 
     /// Returns nil when the public key is missing or not a valid 32-byte key (base64url or base64).

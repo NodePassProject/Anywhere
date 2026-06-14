@@ -399,9 +399,9 @@ final class MITMSession {
         let configuration = TLSConfiguration(
             serverName: host,
             alpn: [innerALPN],
-            fingerprint: .nonBrowser,
             minVersion: .tls12,
-            maxVersion: clientSupportsTLS13 ? .tls13 : .tls12
+            maxVersion: clientSupportsTLS13 ? .tls13 : .tls12,
+            fingerprint: .nonBrowser
         )
         let client = TLSClient(configuration: configuration)
         tlsClient = client

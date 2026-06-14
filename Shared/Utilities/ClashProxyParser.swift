@@ -122,6 +122,30 @@ struct ClashProxyParser {
 
     // MARK: - VLESS
 
+    /// Outcome of reading a Clash/mihomo `ech-opts` block.
+    private enum ClashECHOpts {
+        case disabled
+        case enabled(String)
+        /// `enable: true` but no inline `config:` — mihomo's "opportunistic" mode,
+        /// where the ECHConfigList is auto-discovered from a DNS HTTPS record. We
+        /// don't perform that discovery, so this can't be represented.
+        case enabledWithoutConfig
+    }
+
+    /// Parses an `ech-opts` block (mihomo: `enable` bool, `config` base64
+    /// ECHConfigList with standard padding, `query-server-name` — the last
+    /// unused, since the cover SNI comes from the config's public_name). ECH is
+    /// only honored with an inline `config:`; callers skip an opportunistic node
+    /// (`enable: true`, no config) rather than silently fall back to cleartext SNI.
+    private static func parseECHOpts(_ node: Node) -> ClashECHOpts {
+        let opts = node["ech-opts"]
+        guard opts.type == .map, getBool(opts, key: "enable") == true else { return .disabled }
+        if let config = getString(opts, key: "config"), !config.isEmpty {
+            return .enabled(config)
+        }
+        return .enabledWithoutConfig
+    }
+
     private static func parseVLESSProxy(_ node: Node) -> ProxyConfiguration? {
         guard
             let basics = parseBasics(node),
@@ -160,9 +184,16 @@ struct ClashProxyParser {
                 fingerprint: fingerprint
             ))
         } else if tlsEnabled {
+            let ech: String?
+            switch parseECHOpts(node) {
+            case .disabled: ech = nil
+            case .enabled(let config): ech = config
+            case .enabledWithoutConfig: return nil
+            }
             securityLayer = .tls(TLSConfiguration(
                 serverName: serverName,
                 alpn: alpn,
+                echConfig: ech,
                 fingerprint: fingerprint
             ))
         } else {
@@ -244,8 +275,9 @@ struct ClashProxyParser {
 
     // MARK: - Trojan
 
-    /// Nodes using Reality, ECH, gRPC, the Trojan-Go SS layer, or any non-TCP transport are
-    /// skipped — silently downgrading would speak a different wire format than the server expects.
+    /// Nodes using Reality, gRPC, the Trojan-Go SS layer, or any non-TCP transport are skipped —
+    /// silently downgrading would speak a different wire format than the server expects. ECH is
+    /// imported when it carries an inline ECHConfigList; see `parseECHOpts`.
     private static func parseTrojanProxy(_ node: Node) -> ProxyConfiguration? {
         guard
             let basics = parseBasics(node),
@@ -256,14 +288,21 @@ struct ClashProxyParser {
         guard network == "tcp" else { return nil }
 
         if node["reality-opts"].type == .map { return nil }
-        if node["ech-opts"].type == .map { return nil }
         if node["grpc-opts"].type == .map { return nil }
         let ssOpts = node["ss-opts"]
         if ssOpts.type == .map, getBool(ssOpts, key: "enabled") == true { return nil }
 
+        let ech: String?
+        switch parseECHOpts(node) {
+        case .disabled: ech = nil
+        case .enabled(let config): ech = config
+        case .enabledWithoutConfig: return nil
+        }
+
         let tls = TLSConfiguration(
             serverName: parseSNI(node, server: basics.server),
             alpn: getStringSequence(node, key: "alpn"),
+            echConfig: ech,
             fingerprint: parseFingerprint(node)
         )
 
@@ -287,9 +326,17 @@ struct ClashProxyParser {
         let idleTimeout = getInt(node, key: "idle-session-timeout") ?? 30
         let minIdleSession = getInt(node, key: "min-idle-session") ?? 0
 
+        let ech: String?
+        switch parseECHOpts(node) {
+        case .disabled: ech = nil
+        case .enabled(let config): ech = config
+        case .enabledWithoutConfig: return nil
+        }
+
         let tls = TLSConfiguration(
             serverName: parseSNI(node, server: basics.server),
             alpn: getStringSequence(node, key: "alpn"),
+            echConfig: ech,
             fingerprint: parseFingerprint(node)
         )
 

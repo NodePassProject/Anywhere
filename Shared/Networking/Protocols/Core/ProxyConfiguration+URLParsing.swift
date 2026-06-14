@@ -241,7 +241,8 @@ extension ProxyConfiguration {
             ?? (params["peer"]?.isEmpty == false ? params["peer"] : nil)
             ?? host
         let alpn = params["alpn"].flatMap { $0.isEmpty ? nil : [$0] }
-        let tls = TLSConfiguration(serverName: sni, alpn: alpn)
+        let ech = (params["ech"]?.isEmpty == false) ? params["ech"] : nil
+        let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Nowhere",
@@ -301,7 +302,8 @@ extension ProxyConfiguration {
         let fpString = params["fp"] ?? "chrome_120"
         let fingerprint = TLSFingerprint(rawValue: fpString) ?? .chrome120
 
-        let tls = TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
+        let ech = (params["ech"]?.isEmpty == false) ? params["ech"] : nil
+        let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",
@@ -361,7 +363,8 @@ extension ProxyConfiguration {
         let it  = params["it"].flatMap  { Int($0) } ?? 30
         let mis = params["mis"].flatMap { Int($0) } ?? 0
 
-        let tls = TLSConfiguration(serverName: sni, alpn: alpn, fingerprint: fingerprint)
+        let ech = (params["ech"]?.isEmpty == false) ? params["ech"] : nil
+        let tls = TLSConfiguration(serverName: sni, alpn: alpn, echConfig: ech, fingerprint: fingerprint)
 
         return ProxyConfiguration(
             name: fragmentName ?? "Untitled",

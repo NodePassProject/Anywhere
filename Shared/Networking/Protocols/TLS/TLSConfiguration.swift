@@ -18,17 +18,26 @@ enum TLSVersion: UInt16, Codable {
 struct TLSConfiguration {
     let serverName: String              // SNI (defaults to server address)
     let alpn: [String]?                 // e.g. ["h2", "http/1.1"]
-    let fingerprint: TLSFingerprint
     let minVersion: TLSVersion?         // nil = no constraint
     let maxVersion: TLSVersion?         // nil = no constraint
 
-    init(serverName: String, alpn: [String]? = nil, fingerprint: TLSFingerprint = .chrome120,
-         minVersion: TLSVersion? = nil, maxVersion: TLSVersion? = nil) {
+    /// Encrypted Client Hello config: a base64 ECHConfigList (as published for
+    /// the server), decoded and sealed against just before the handshake.
+    /// `nil` = no ECH.
+    let echConfig: String?
+
+    let fingerprint: TLSFingerprint
+
+    init(serverName: String, alpn: [String]? = nil,
+         minVersion: TLSVersion? = nil, maxVersion: TLSVersion? = nil,
+         echConfig: String? = nil,
+         fingerprint: TLSFingerprint = .chrome120) {
         self.serverName = serverName
         self.alpn = alpn
-        self.fingerprint = fingerprint
         self.minVersion = minVersion
         self.maxVersion = maxVersion
+        self.echConfig = echConfig
+        self.fingerprint = fingerprint
     }
 
     /// Parse TLS parameters from VLESS URL query parameters.
@@ -49,12 +58,15 @@ struct TLSConfiguration {
         let minVersion = Self.parseTLSVersion(params["minVersion"])
         let maxVersion = Self.parseTLSVersion(params["maxVersion"])
 
+        let ech = (params["ech"]?.isEmpty == false) ? params["ech"] : nil
+
         return TLSConfiguration(
             serverName: sni,
             alpn: alpn,
-            fingerprint: fingerprint,
             minVersion: minVersion,
-            maxVersion: maxVersion
+            maxVersion: maxVersion,
+            echConfig: ech,
+            fingerprint: fingerprint
         )
     }
 
@@ -71,7 +83,7 @@ struct TLSConfiguration {
 
 extension TLSConfiguration: Codable {
     enum CodingKeys: String, CodingKey {
-        case serverName, alpn, fingerprint, minVersion, maxVersion
+        case serverName, alpn, fingerprint, minVersion, maxVersion, echConfig
     }
 
     init(from decoder: Decoder) throws {
@@ -81,6 +93,7 @@ extension TLSConfiguration: Codable {
         fingerprint = try container.decodeIfPresent(TLSFingerprint.self, forKey: .fingerprint) ?? .chrome120
         minVersion = try container.decodeIfPresent(TLSVersion.self, forKey: .minVersion)
         maxVersion = try container.decodeIfPresent(TLSVersion.self, forKey: .maxVersion)
+        echConfig = try container.decodeIfPresent(String.self, forKey: .echConfig)
     }
 }
 
@@ -90,7 +103,8 @@ extension TLSConfiguration: Equatable, Hashable {
         lhs.alpn == rhs.alpn &&
         lhs.fingerprint == rhs.fingerprint &&
         lhs.minVersion == rhs.minVersion &&
-        lhs.maxVersion == rhs.maxVersion
+        lhs.maxVersion == rhs.maxVersion &&
+        lhs.echConfig == rhs.echConfig
     }
 
     func hash(into hasher: inout Hasher) {
@@ -99,6 +113,7 @@ extension TLSConfiguration: Equatable, Hashable {
         hasher.combine(fingerprint)
         hasher.combine(minVersion)
         hasher.combine(maxVersion)
+        hasher.combine(echConfig)
     }
 }
 
@@ -108,6 +123,12 @@ enum TLSError: Error, LocalizedError {
     case connectionFailed(String)
     case unsupportedTLSVersion
     case alert(level: UInt8, description: UInt8)
+    /// The server replied with a HelloRetryRequest, which this client does not
+    /// support (it would require a second ClientHello flight).
+    case helloRetryRequest
+    /// The server rejected ECH. `retryConfigList`, if present, is a fresh
+    /// ECHConfigList the server offered for a retry.
+    case echRejected(retryConfigList: Data?)
 
     var errorDescription: String? {
         switch self {
@@ -121,6 +142,10 @@ enum TLSError: Error, LocalizedError {
             return "Server TLS version not supported"
         case .alert(let level, let description):
             return "TLS alert: level=\(level), description=\(description)"
+        case .helloRetryRequest:
+            return "TLS server sent HelloRetryRequest (unsupported)"
+        case .echRejected(let retryConfigList):
+            return "TLS server rejected ECH" + (retryConfigList != nil ? " (retry config offered)" : "")
         }
     }
 }
