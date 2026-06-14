@@ -17,7 +17,7 @@ struct WebSocketConfiguration: Codable, Equatable, Hashable {
     /// Maximum early data bytes to embed in the upgrade request (0 = disabled).
     let maxEarlyData: Int
     let earlyDataHeaderName: String
-    /// Heartbeat (ping) interval in seconds. 0 = disabled. Matches Xray-core's `heartbeatPeriod`.
+    /// Heartbeat (ping) interval in seconds. 0 = disabled.
     let heartbeatPeriod: UInt32
 
     init(

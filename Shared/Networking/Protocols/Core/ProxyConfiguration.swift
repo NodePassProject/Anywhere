@@ -36,7 +36,7 @@ enum OutboundProtocol: String, Codable, CaseIterable {
         }
     }
 
-    /// Whether the protocol supports Xray-compatible mux.cool multiplexing (VLESS only).
+    /// Whether the protocol supports mux.cool multiplexing (VLESS only).
     var supportsMux: Bool {
         self == .vless
     }

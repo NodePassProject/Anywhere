@@ -66,7 +66,7 @@ nonisolated class MuxSession {
             option: .data,
             globalID: (isFirstFrame && network == .udp) ? globalID : nil
         )
-        // For UDP Keep frames, include address (matching Xray-core writer.go)
+        // For UDP Keep frames, include address
         if network == .udp {
             metadata.network = network
             metadata.targetHost = targetHost

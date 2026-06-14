@@ -2,7 +2,7 @@
 //  TLS12KeyDerivation.swift
 //  Anywhere
 //
-//  TLS 1.2 key derivation matching utls/prf.go and utls/internal/tls12/tls12.go
+//  TLS 1.2 key derivation (PRF per RFC 5246)
 //
 
 import Foundation

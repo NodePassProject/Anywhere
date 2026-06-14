@@ -13,7 +13,7 @@ import CommonCrypto
 
 enum ShadowsocksKeyDerivation {
 
-    /// Derives a master key from a password via EVP_BytesToKey (MD5), matching Xray-core.
+    /// Derives a master key from a password via EVP_BytesToKey (MD5).
     static func deriveKey(password: String, keySize: Int) -> Data {
         guard keySize > 0 else { return Data() }
         let passwordData = Array(password.utf8)
@@ -37,7 +37,7 @@ enum ShadowsocksKeyDerivation {
         return Data(result.prefix(keySize))
     }
 
-    /// Derives a per-salt subkey via HKDF-SHA1 with info "ss-subkey", matching Xray-core.
+    /// Derives a per-salt subkey via HKDF-SHA1 with info "ss-subkey".
     static func deriveSubkey(masterKey: Data, salt: Data, keySize: Int) -> Data {
         let symmetricKey = SymmetricKey(data: masterKey)
         let info = "ss-subkey".data(using: .utf8)!
@@ -108,7 +108,7 @@ enum ShadowsocksKeyDerivation {
 
 // MARK: - Nonce Generator
 
-/// Incrementing little-endian AEAD nonce matching Xray-core: starts at all 0xFF, so the first returned nonce is all zeros.
+/// Incrementing little-endian AEAD nonce: starts at all 0xFF, so the first returned nonce is all zeros.
 struct ShadowsocksNonce {
     private var bytes: [UInt8]
 
@@ -191,7 +191,7 @@ nonisolated class ShadowsocksAEADWriter {
     private var salt: Data
     private var saltWritten = false
 
-    /// Maximum payload bytes per chunk (matching Xray-core).
+    /// Maximum payload bytes per chunk.
     static let maxPayloadSize = 0x3FFF // 16383
 
     init(cipher: ShadowsocksCipher, masterKey: Data) {

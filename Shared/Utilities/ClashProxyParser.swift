@@ -158,7 +158,7 @@ struct ClashProxyParser {
         guard
             let basics = parseBasics(node),
             let uuidString = getString(node, key: "uuid"),
-            let uuid = UUID(xrayString: uuidString)
+            let uuid = UUID(vlessString: uuidString)
         else { return nil }
 
         // Transport: tcp (default) or ws; skip h2/grpc which we don't implement.

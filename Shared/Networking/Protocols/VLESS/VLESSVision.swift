@@ -63,12 +63,12 @@ nonisolated class VisionTrafficState {
     }
 }
 
-/// Vision padding seed from Xray-core: `[contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]`.
+/// Vision padding seed: `[contentThreshold, longPaddingMax, longPaddingBase, shortPaddingMax]`.
 private let visionPaddingSeed: [UInt32] = [900, 500, 900, 256]
 
 // MARK: - Buffer Reshaping
 
-/// Must equal Xray-core's buf.Size.
+/// Must equal the protocol buffer size.
 private let visionBufSize: Int32 = 8192
 
 /// Buffers >= this are split to leave room for the 21-byte padding header.
@@ -96,7 +96,7 @@ private func reshapeData(_ data: Data) -> [Data] {
 
     let first = data.prefix(splitIndex)
     let second = data.suffix(from: data.index(data.startIndex, offsetBy: splitIndex))
-    // Either chunk may still exceed reshapeThreshold (Xray-core's buffers are capped at 8192).
+    // Either chunk may still exceed reshapeThreshold (peer buffers are capped at 8192).
     return reshapeData(first) + reshapeData(second)
 }
 
@@ -114,7 +114,7 @@ private func visionPadding(data: Data?, command: VisionCommand, state: VisionTra
         paddingLen = Int32.random(in: 0..<Int32(visionPaddingSeed[3]))
     }
 
-    // Frame must fit Xray-core's 8192-byte buf.Buffer or the peer's reshaper
+    // Frame must fit the peer's 8192-byte buffer or its reshaper
     // fragments it and breaks padding detection.
     let maxPadding = 8192 - 21 - contentLen
     if paddingLen > maxPadding {
@@ -428,7 +428,7 @@ nonisolated class VLESSVisionConnection: ProxyConnection {
             return result
         }
 
-        // Finish padding one packet early for older Vision receivers (matches Xray-core's <= 1).
+        // Finish padding one packet early for older Vision receivers (the `<= 1` boundary).
         if !trafficState.isTLS12orAbove && trafficState.numberOfPacketsToFilter <= 1 {
             trafficState.writerIsPadding = false
             var result = Data()

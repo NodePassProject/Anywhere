@@ -68,6 +68,7 @@ extension XHTTPConnection {
     private func openH3UploadStream(session: HTTP3Session, completion: @escaping (Error?) -> Void) {
         let upload = HTTP3RequestStream(session: session)
         lock.lock(); h3Upload = upload; lock.unlock()
+        xmuxLease?.noteRequest()
         let headers = h3UploadHeaderBlock(seq: nil, contentLength: nil)
         upload.sendRequest(headerBlock: headers, endStream: false) { upErr in
             if let upErr {
@@ -83,6 +84,7 @@ extension XHTTPConnection {
     private func setupH3Download(session: HTTP3Session, completion: @escaping (Error?) -> Void) {
         let stream = HTTP3RequestStream(session: session)
         lock.lock(); h3Download = stream; lock.unlock()
+        xmuxLease?.noteRequest()
         let headers = h3RequestHeaderBlock(method: "GET", includeMeta: true)
 
         // Both callbacks run on the session queue, so `settled` is race-free.
@@ -126,9 +128,29 @@ extension XHTTPConnection {
         let seq = nextSeq
         nextSeq += 1
         lock.unlock()
+        xmuxLease?.noteRequest()
 
+        // Header/cookie placement carries the payload in the header block; the body stays empty.
+        let dataFields = uplinkDataFields(for: data)
+        let bodyInHeaders = !dataFields.isEmpty
+        let bodyLength = bodyInHeaders ? 0 : data.count
         let stream = HTTP3RequestStream(session: session)
-        let headers = h3UploadHeaderBlock(seq: seq, contentLength: data.count)
+        let headers = h3UploadHeaderBlock(seq: seq, contentLength: bodyLength, uplinkData: dataFields)
+
+        // Finish the request with no body when the payload is in headers/cookies (or empty).
+        guard !bodyInHeaders, !data.isEmpty else {
+            stream.sendRequest(headerBlock: headers, endStream: true) { error in
+                if let error {
+                    stream.close()
+                    completion(error)
+                    return
+                }
+                stream.drainResponse()
+                completion(nil)
+            }
+            return
+        }
+
         stream.sendRequest(headerBlock: headers, endStream: false) { error in
             if let error {
                 stream.close()
@@ -189,7 +211,8 @@ extension XHTTPConnection {
     }
 
     /// QPACK header block for an upload POST; `seq` is nil for stream-up, set per batch for packet-up.
-    func h3UploadHeaderBlock(seq: Int64?, contentLength: Int?) -> Data {
+    /// `uplinkData` carries a packet-up payload in headers/cookies under non-body placement.
+    func h3UploadHeaderBlock(seq: Int64?, contentLength: Int?, uplinkData: [UplinkDataField] = []) -> Data {
         var path = configuration.normalizedPath
         if !sessionId.isEmpty, configuration.sessionPlacement == .path {
             path = appendToPath(path, sessionId)
@@ -221,6 +244,14 @@ extension XHTTPConnection {
         }
         h3AppendSessionMeta(to: &headers)
         if let seq { h3AppendSeqMeta(to: &headers, seq: seq) }
+
+        // Uplink data placement — packet-up payload carried in headers or cookies.
+        for field in uplinkData {
+            switch field {
+            case .header(let name, let value): headers.append((name: name.lowercased(), value: value))
+            case .cookie(let pair):            headers.append((name: "cookie", value: pair))
+            }
+        }
 
         return QPACKEncoder.encodeRequestHeaders(
             method: configuration.uplinkHTTPMethod, authority: configuration.host, path: path, extraHeaders: headers

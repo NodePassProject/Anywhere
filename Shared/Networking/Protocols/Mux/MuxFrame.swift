@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Enums & Types
 
-/// Session status values matching Xray-core SessionStatusNew/Keep/End/KeepAlive.
+/// Session status values: New / Keep / End / KeepAlive.
 enum MuxSessionStatus: UInt8 {
     case new       = 0x01
     case keep      = 0x02
@@ -28,7 +28,7 @@ enum MuxNetwork: UInt8 {
     case udp = 0x02
 }
 
-/// Mux address type (port-first format, matching Xray-core).
+/// Mux address type (port-first format).
 private enum MuxAddressType: UInt8 {
     case ipv4   = 0x01
     case domain = 0x02

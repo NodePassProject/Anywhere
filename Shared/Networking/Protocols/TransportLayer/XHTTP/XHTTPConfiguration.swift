@@ -7,7 +7,7 @@
 
 import Foundation
 
-/// Matches Xray-core's `XmuxMode` enum in `splithttp/config.go`.
+/// XHTTP transfer mode: how the upload and download legs map onto HTTP requests.
 enum XHTTPMode: String, Codable, CaseIterable, Hashable {
     case auto
     case streamOne = "stream-one"
@@ -24,7 +24,7 @@ enum XHTTPMode: String, Codable, CaseIterable, Hashable {
     }
 }
 
-/// Matches Xray-core placement constants in `splithttp/common.go`.
+/// Where XHTTP carries a piece of metadata or payload in the HTTP request.
 enum XHTTPPlacement: String, Codable, Equatable, Hashable {
     case path
     case query
@@ -34,13 +34,114 @@ enum XHTTPPlacement: String, Codable, Equatable, Hashable {
     case body
 }
 
-/// Matches Xray-core `PaddingMethod` in `splithttp/xpadding.go`.
+/// How X-Padding filler is generated.
 enum XHTTPPaddingMethod: String, Codable, Equatable, Hashable {
     case repeatX = "repeat-x"
     case tokenish
 }
 
-/// Matches Xray-core's `splithttp.Config`; advanced fields come from the `extra` JSON blob in VLESS share links.
+/// A `from`/`to` integer range; a single value when `from == to`.
+struct XMUXRange: Codable, Equatable, Hashable {
+    var from: Int
+    var to: Int
+
+    static let zero = XMUXRange(from: 0, to: 0)
+    var isZero: Bool { from == 0 && to == 0 }
+
+    /// Random value in `[from, to)` (upper bound exclusive); `to <= from` collapses to `from`.
+    func random() -> Int { to <= from ? from : Int.random(in: from..<to) }
+
+    /// Parses an int, `{"from":a,"to":b}` object, `"a-b"`/`"a"` string, or nil → `.zero`.
+    static func parse(_ value: Any?) -> XMUXRange {
+        switch value {
+        case let i as Int:
+            return XMUXRange(from: i, to: i)
+        case let d as [String: Any]:
+            let f = d["from"] as? Int ?? 0
+            let t = d["to"] as? Int ?? f
+            return XMUXRange(from: f, to: max(f, t))
+        case let s as String:
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            if let dash = trimmed.firstIndex(of: "-"), dash != trimmed.startIndex {
+                let lo = trimmed[trimmed.startIndex..<dash].trimmingCharacters(in: .whitespaces)
+                let hi = trimmed[trimmed.index(after: dash)...].trimmingCharacters(in: .whitespaces)
+                if let f = Int(lo), let t = Int(hi) { return XMUXRange(from: f, to: max(f, t)) }
+            }
+            if let v = Int(trimmed) { return XMUXRange(from: v, to: v) }
+            return .zero
+        default:
+            return .zero
+        }
+    }
+
+    /// JSON form for export: a bare int when `from == to`, else `"from-to"`.
+    var jsonValue: Any { from == to ? from : "\(from)-\(to)" }
+}
+
+/// Connection-pool sizing and rotation for XHTTP. Ranges are `.zero` when unset (0 = no limit).
+struct XMUXConfiguration: Codable, Equatable, Hashable {
+    /// Max concurrent XHTTP sessions multiplexed over one connection (0 = unlimited).
+    var maxConcurrency: XMUXRange
+    /// Underlying connections opened per destination before existing ones are reused (0 = unlimited).
+    var maxConnections: XMUXRange
+    /// Max times a connection is handed to a new session before retirement (0 = unlimited).
+    var cMaxReuseTimes: XMUXRange
+    /// Max HTTP requests over a connection before retirement (0 = unlimited).
+    var hMaxRequestTimes: XMUXRange
+    /// Max wall-clock lifetime of a connection, seconds (0 = unlimited).
+    var hMaxReusableSecs: XMUXRange
+    /// HTTP/2 & HTTP/3 keep-alive period, seconds (0 = default, <0 = disabled).
+    var hKeepAlivePeriod: Int
+
+    static let disabled = XMUXConfiguration(
+        maxConcurrency: .zero, maxConnections: .zero, cMaxReuseTimes: .zero,
+        hMaxRequestTimes: .zero, hMaxReusableSecs: .zero, hKeepAlivePeriod: 0
+    )
+
+    /// Default applied when XHTTP omits `xmux`: serial connection reuse (`maxConcurrency` 1)
+    /// with rotation after 600–900 requests / 1800–3000 s. `maxConnections`, `cMaxReuseTimes`,
+    /// and `hKeepAlivePeriod` stay unset.
+    static let serialReuseDefault = XMUXConfiguration(
+        maxConcurrency: XMUXRange(from: 1, to: 1),
+        maxConnections: .zero,
+        cMaxReuseTimes: .zero,
+        hMaxRequestTimes: XMUXRange(from: 600, to: 900),
+        hMaxReusableSecs: XMUXRange(from: 1800, to: 3000),
+        hKeepAlivePeriod: 0
+    )
+
+    /// True when any field departs from its unset default, so pooling should engage.
+    var isEnabled: Bool {
+        !(maxConcurrency.isZero && maxConnections.isZero && cMaxReuseTimes.isZero
+          && hMaxRequestTimes.isZero && hMaxReusableSecs.isZero && hKeepAlivePeriod == 0)
+    }
+
+    /// Parses an `xmux` JSON object (each range as int / `{from,to}` / `"a-b"`).
+    static func parse(from json: [String: Any]) -> XMUXConfiguration {
+        XMUXConfiguration(
+            maxConcurrency: XMUXRange.parse(json["maxConcurrency"]),
+            maxConnections: XMUXRange.parse(json["maxConnections"]),
+            cMaxReuseTimes: XMUXRange.parse(json["cMaxReuseTimes"]),
+            hMaxRequestTimes: XMUXRange.parse(json["hMaxRequestTimes"]),
+            hMaxReusableSecs: XMUXRange.parse(json["hMaxReusableSecs"]),
+            hKeepAlivePeriod: (json["hKeepAlivePeriod"] as? Int) ?? 0
+        )
+    }
+
+    /// JSON object for the `extra`/`xhttpSettings` blob, emitting only non-zero fields.
+    var jsonObject: [String: Any] {
+        var j: [String: Any] = [:]
+        if !maxConcurrency.isZero { j["maxConcurrency"] = maxConcurrency.jsonValue }
+        if !maxConnections.isZero { j["maxConnections"] = maxConnections.jsonValue }
+        if !cMaxReuseTimes.isZero { j["cMaxReuseTimes"] = cMaxReuseTimes.jsonValue }
+        if !hMaxRequestTimes.isZero { j["hMaxRequestTimes"] = hMaxRequestTimes.jsonValue }
+        if !hMaxReusableSecs.isZero { j["hMaxReusableSecs"] = hMaxReusableSecs.jsonValue }
+        if hKeepAlivePeriod != 0 { j["hKeepAlivePeriod"] = hKeepAlivePeriod }
+        return j
+    }
+}
+
+/// XHTTP transport settings; advanced fields come from the `extra` JSON blob in VLESS share links.
 struct XHTTPConfiguration: Codable, Equatable, Hashable {
     let host: String
     let path: String
@@ -74,7 +175,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
 
     // Session ID generation (from extra)
     let sessionIDTable: String
-    /// Length range (Xray `RangeConfig`, half-open from/to); 0 → random UUID.
+    /// Length range (half-open from/to); 0 → random UUID.
     let sessionIDLengthFrom: Int
     let sessionIDLengthTo: Int
 
@@ -89,6 +190,9 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
 
     /// `nil` when up/download are not detached.
     var downloadSettings: XHTTPDownloadSettings? { _downloadSettings?.value }
+
+    /// Connection-pool/rotation settings (`xmux`); `nil` → default per-stream behavior.
+    let xmux: XMUXConfiguration?
 
     init(
         host: String,
@@ -116,7 +220,8 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         uplinkDataPlacement: XHTTPPlacement = .body,
         uplinkDataKey: String = "",
         uplinkChunkSize: Int = 0,
-        downloadSettings: XHTTPDownloadSettings? = nil
+        downloadSettings: XHTTPDownloadSettings? = nil,
+        xmux: XMUXConfiguration? = nil
     ) {
         self.host = host
         self.path = path
@@ -144,6 +249,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         self.uplinkDataKey = uplinkDataKey
         self.uplinkChunkSize = uplinkChunkSize
         self._downloadSettings = downloadSettings.map(XHTTPDownloadSettingsBox.init)
+        self.xmux = xmux
     }
 
     init(from decoder: Decoder) throws {
@@ -174,6 +280,15 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         uplinkDataKey = try c.decodeIfPresent(String.self, forKey: .uplinkDataKey) ?? ""
         uplinkChunkSize = try c.decodeIfPresent(Int.self, forKey: .uplinkChunkSize) ?? 0
         _downloadSettings = try c.decodeIfPresent(XHTTPDownloadSettingsBox.self, forKey: ._downloadSettings)
+        xmux = try c.decodeIfPresent(XMUXConfiguration.self, forKey: .xmux)
+    }
+
+    /// xmux settings used at runtime: the configured values, or the serial-reuse + rotation
+    /// default when XHTTP omits xmux. The default applies only when xmux is entirely unset;
+    /// a partial xmux is used verbatim.
+    var effectiveXMUX: XMUXConfiguration {
+        if let xmux, xmux.isEnabled { return xmux }
+        return .serialReuseDefault
     }
 
     /// Normalized path: ensure leading "/" and trailing "/".
@@ -189,7 +304,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return p
     }
 
-    /// Query string extracted from path (after "?"); matches Xray-core `GetNormalizedQuery()`.
+    /// Query string extracted from path (the part after "?").
     var normalizedQuery: String {
         let parts = path.split(separator: "?", maxSplits: 1)
         if parts.count > 1 {
@@ -198,7 +313,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return ""
     }
 
-    /// Auto-determined by placement if unset; matches Xray-core `GetNormalizedSessionKey()`.
+    /// Auto-determined by placement when unset.
     var normalizedSessionKey: String {
         if !sessionKey.isEmpty { return sessionKey }
         switch sessionPlacement {
@@ -208,7 +323,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         }
     }
 
-    /// Auto-determined by placement if unset; matches Xray-core `GetNormalizedSeqKey()`.
+    /// Auto-determined by placement when unset (distinct default from the session key).
     var normalizedSeqKey: String {
         if !seqKey.isEmpty { return seqKey }
         switch seqPlacement {
@@ -235,7 +350,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         if let predefined = XHTTPConfiguration.predefinedSessionIDTables[table] {
             table = predefined
         }
-        // Mirrors RangeConfig.rand() → RandBetween(from, to): half-open [from, to); from==to → from.
+        // Half-open range [from, to); from == to → from.
         let length: Int
         if sessionIDLengthTo <= sessionIDLengthFrom {
             length = sessionIDLengthFrom
@@ -264,7 +379,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         }
     }
 
-    /// Simplified port of Xray-core `GenerateTokenishPaddingBase62` in `xpadding.go`.
+    /// Generates base62 "tokenish" padding of approximately `targetBytes` bytes.
     private func generateTokenishPadding(targetBytes: Int) -> String {
         // base62 chars average ~0.8 bytes per char in Huffman encoding
         let n = max(1, Int(ceil(Double(targetBytes) / 0.8)))
@@ -277,8 +392,8 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         return result
     }
 
-    /// Parses XHTTP parameters from VLESS URL query parameters. Host fallback matches
-    /// Xray-core dialer.go: `host` param → TLS SNI → Reality serverName → server address.
+    /// Parses XHTTP parameters from VLESS URL query parameters. Host fallback order:
+    /// `host` param → TLS SNI → Reality serverName → server address.
     static func parse(from params: [String: String], serverAddress: String, tlsServerName: String? = nil, realityServerName: String? = nil) -> XHTTPConfiguration? {
         let host = params["host"] ?? tlsServerName ?? realityServerName ?? serverAddress
         let path = (params["path"] ?? "/").removingPercentEncoding ?? "/"
@@ -436,7 +551,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
 
         let uplinkDataPlacement = XHTTPPlacement(rawValue: extra["uplinkDataPlacement"] as? String ?? "body") ?? .body
 
-        // Defaults depend on placement — matches Xray-core Build() in transport_internet.go.
+        // Defaults depend on placement.
         let defaultUplinkDataKey: String
         switch uplinkDataPlacement {
         case .header: defaultUplinkDataKey = "X-Data"
@@ -452,6 +567,8 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         default: defaultUplinkChunkSize = 0
         }
         let uplinkChunkSize = extra["uplinkChunkSize"] as? Int ?? defaultUplinkChunkSize
+
+        let xmux = (extra["xmux"] as? [String: Any]).map(XMUXConfiguration.parse)
 
         return XHTTPConfiguration(
             host: host,
@@ -479,7 +596,8 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
             uplinkDataPlacement: uplinkDataPlacement,
             uplinkDataKey: uplinkDataKey,
             uplinkChunkSize: uplinkChunkSize,
-            downloadSettings: downloadSettings
+            downloadSettings: downloadSettings,
+            xmux: xmux
         )
     }
 }
@@ -521,6 +639,7 @@ extension XHTTPConfiguration {
         }
         if uplinkDataKey != defaultDataKey { dict["uplinkDataKey"] = uplinkDataKey }
         if uplinkChunkSize != defaultChunkSize { dict["uplinkChunkSize"] = uplinkChunkSize }
+        if let xmux, xmux.isEnabled { dict["xmux"] = xmux.jsonObject }
 
         guard !dict.isEmpty,
               let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys, .prettyPrinted]),

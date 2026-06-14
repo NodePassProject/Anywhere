@@ -1,5 +1,5 @@
 //
-//  UUID+xrayString.swift
+//  UUID+VLESSString.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 4/22/26.
@@ -9,10 +9,10 @@ import CryptoKit
 import Foundation
 
 extension UUID {
-    /// Parses a UUID the way Xray-core does (common/uuid/uuid.go ParseString):
+    /// Parses a UUID using the VLESS user-ID convention:
     /// length 32–36 is hex-decoded; length 1–30 is derived as
     /// `SHA1(zero_uuid || input)[0..<16]` with RFC 4122 v5 + variant bits stamped.
-    init?(xrayString str: String) {
+    init?(vlessString str: String) {
         let len = str.utf8.count
 
         if len >= 32, len <= 36 {

@@ -131,9 +131,8 @@ struct IPEndpoint {
 ///
 /// All I/O and state transitions run on the serial `ioQueue`; `state` is
 /// additionally lock-protected so `isTransportReady` and `forceCancel()` are
-/// safe from any thread. Socket options match Xray-core `sockopt_darwin.go`.
-/// The provider's own sockets are kernel-excluded from the tunnel, so a direct
-/// `connect(2)` here does not loop back. `initialData` is enqueued once
+/// safe from any thread. The provider's own sockets are kernel-excluded from the
+/// tunnel, so a direct `connect(2)` here does not loop back. `initialData` is enqueued once
 /// connect completes (no kernel TFO — one extra RTT for a simpler flow).
 nonisolated class RawTCPSocket: RawTransport {
 
@@ -155,7 +154,7 @@ nonisolated class RawTCPSocket: RawTransport {
 
     // MARK: Constants
 
-    /// Per-attempt connect timeout (seconds). Matches Xray-core `system_dialer.go`.
+    /// Per-attempt connect timeout (seconds).
     private static let connectTimeout: Int = 16
 
     // MARK: State

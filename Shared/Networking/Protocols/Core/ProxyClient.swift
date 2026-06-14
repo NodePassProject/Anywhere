@@ -693,7 +693,7 @@ nonisolated class ProxyClient {
         }
 
         if case .tls(let baseTLSConfig) = configuration.securityLayer {
-            // Force ALPN to http/1.1 (Xray-core tls.WithNextProto("http/1.1")).
+            // Force ALPN to http/1.1.
             let wsTlsConfig = TLSConfiguration(
                 serverName: baseTLSConfig.serverName,
                 alpn: ["http/1.1"],
@@ -1049,7 +1049,7 @@ nonisolated class ProxyClient {
 
     // MARK: - XHTTP Connection
 
-    /// HTTP version selected for XHTTP, matching Xray-core's split HTTP dialer.
+    /// HTTP version selected for an XHTTP leg.
     private enum XHTTPHTTPVersion {
         case http11
         case http2
@@ -1067,7 +1067,7 @@ nonisolated class ProxyClient {
         }
     }
 
-    /// Mirrors Xray-core's `decideHTTPVersion` for split HTTP.
+    /// Selects the XHTTP HTTP version: Reality forces h2; plain TCP is http/1.1; otherwise per TLS ALPN.
     private func decideXHTTPHTTPVersion(for securityLayer: SecurityLayer? = nil) -> XHTTPHTTPVersion {
         let security = securityLayer ?? configuration.securityLayer
         if case .reality = security {
@@ -1130,7 +1130,7 @@ nonisolated class ProxyClient {
         )
     }
 
-    /// Mode and HTTP version resolution follow Xray-core's split HTTP dialer.
+    /// Resolves the XHTTP mode and HTTP version for the connection.
     private func connectWithXHTTP(
         command: ProxyCommand,
         destinationHost: String,
@@ -1197,7 +1197,8 @@ nonisolated class ProxyClient {
         let route = consumeMainXHTTPRoute()
         let needsUploadFactory = httpVersion == .http11 && (mode == .packetUp || mode == .streamUp)
         let uploadFactory = needsUploadFactory
-            ? makeXHTTPUploadFactory(security: configuration.securityLayer, httpVersion: httpVersion)
+            ? makeXHTTPUploadFactory(security: configuration.securityLayer, httpVersion: httpVersion,
+                                     mode: mode, xmux: xhttpConfig.effectiveXMUX)
             : nil
         dialXHTTPLeg(
             endpoint: mainXHTTPEndpoint(), httpVersion: httpVersion, route: route,
@@ -1377,6 +1378,25 @@ nonisolated class ProxyClient {
         uploadFactory: ((@escaping (Result<TransportClosures, Error>) -> Void) -> Void)?,
         completion: @escaping (Result<XHTTPConnection, Error>) -> Void
     ) {
+        // xmux: pool/multiplex direct-route XHTTP connections. XHTTP always pools — serial-reuse
+        // defaults apply when xmux is omitted (see `effectiveXMUX`). Tunneled/chained routes
+        // can't pool (single-use tunnel), so they fall through to a fresh dial below.
+        if httpVersion == .http3, case .direct = route {
+            acquirePooledH3(
+                endpoint: endpoint, xmux: xhttp.effectiveXMUX, xhttp: xhttp,
+                mode: mode, sessionId: sessionId, role: role, completion: completion
+            )
+            return
+        }
+
+        if httpVersion == .http2, case .direct = route {
+            acquirePooledH2(
+                endpoint: endpoint, xmux: xhttp.effectiveXMUX, xhttp: xhttp,
+                mode: mode, sessionId: sessionId, role: role, completion: completion
+            )
+            return
+        }
+
         dialXHTTPTransport(endpoint: endpoint, httpVersion: httpVersion, route: route) { result in
             switch result {
             case .failure(let error):
@@ -1396,6 +1416,126 @@ nonisolated class ProxyClient {
                 }
                 connection.role = role
                 completion(.success(connection))
+            }
+        }
+    }
+
+    /// Acquires a shared, xmux-pooled HTTP/3 session for a direct-route XHTTP leg; the
+    /// factory is destination-bound (captures no per-flow state) so the manager is reusable.
+    private func acquirePooledH3(
+        endpoint: XHTTPEndpoint,
+        xmux: XMUXConfiguration,
+        xhttp: XHTTPConfiguration,
+        mode: XHTTPMode,
+        sessionId: String,
+        role: XHTTPChannelRole,
+        completion: @escaping (Result<XHTTPConnection, Error>) -> Void
+    ) {
+        let host = endpoint.directHost
+        let port = endpoint.port
+        let serverName = endpoint.serverName
+        let key = "h3|\(host)|\(port)|\(serverName)"
+        let manager = XMUXRegistry.shared.manager(key: key, config: xmux) {
+            { connectionCompletion in
+                // QUIC connects lazily, so a fresh session never fails at creation.
+                connectionCompletion(HTTP3Session(host: host, port: port, serverName: serverName))
+            }
+        }
+        manager.acquire { lease in
+            guard let lease, let session = lease.connection as? HTTP3Session else {
+                completion(.failure(ProxyError.connectionFailed("xmux H3 session acquisition failed")))
+                return
+            }
+            let connection = XHTTPConnection(
+                h3Session: session, configuration: xhttp, mode: mode, sessionId: sessionId
+            )
+            connection.role = role
+            connection.xmuxLease = lease
+            completion(.success(connection))
+        }
+    }
+
+    /// Acquires a shared, xmux-pooled HTTP/2 connection for a direct-route XHTTP leg; the
+    /// factory is destination-bound (captures no per-flow state) so the manager is reusable.
+    private func acquirePooledH2(
+        endpoint: XHTTPEndpoint,
+        xmux: XMUXConfiguration,
+        xhttp: XHTTPConfiguration,
+        mode: XHTTPMode,
+        sessionId: String,
+        role: XHTTPChannelRole,
+        completion: @escaping (Result<XHTTPConnection, Error>) -> Void
+    ) {
+        let host = endpoint.directHost
+        let port = endpoint.port
+        let security = endpoint.security
+        let serverName = endpoint.serverName
+        let key = "h2|\(host)|\(port)|\(serverName)"
+        let manager = XMUXRegistry.shared.manager(key: key, config: xmux) {
+            { connectionCompletion in
+                ProxyClient.dialSharedH2(host: host, port: port, security: security) { result in
+                    switch result {
+                    case .success(let shared): connectionCompletion(shared)
+                    case .failure: connectionCompletion(nil)
+                    }
+                }
+            }
+        }
+        manager.acquire { lease in
+            guard let lease, let shared = lease.connection as? XHTTPSharedH2Connection else {
+                completion(.failure(ProxyError.connectionFailed("xmux H2 connection acquisition failed")))
+                return
+            }
+            let connection = XHTTPConnection(sharedH2: shared, configuration: xhttp, mode: mode, sessionId: sessionId)
+            connection.role = role
+            connection.xmuxLease = lease
+            completion(.success(connection))
+        }
+    }
+
+    /// Dials a byte stream and brings up a shared multiplexing H2 connection on it (xmux).
+    /// Static so the pooled manager's factory captures no per-flow state; the dial client is
+    /// retained by the shared connection for its lifetime.
+    private static func dialSharedH2(
+        host: String,
+        port: UInt16,
+        security: SecurityLayer,
+        completion: @escaping (Result<XHTTPSharedH2Connection, Error>) -> Void
+    ) {
+        func bringUp(_ closures: TransportClosures, retaining object: AnyObject?) {
+            let shared = XHTTPSharedH2Connection(transport: closures)
+            if let object { shared.retain(object) }
+            shared.connect { error in
+                if let error { completion(.failure(error)) } else { completion(.success(shared)) }
+            }
+        }
+        switch security {
+        case .none:
+            let socket = RawTCPSocket()
+            socket.connect(host: host, port: port) { error in
+                if let error { completion(.failure(error)); return }
+                bringUp(TransportClosures(rawTCP: socket), retaining: socket)
+            }
+        case .tls(let tlsConfig):
+            // XHTTP rides h2; advertise it (fall back to http/1.1) regardless of the configured ALPN.
+            let h2TLS = TLSConfiguration(
+                serverName: tlsConfig.serverName, alpn: ["h2", "http/1.1"],
+                echEnabled: tlsConfig.echEnabled, echConfig: tlsConfig.echConfig, fingerprint: tlsConfig.fingerprint
+            )
+            let client = TLSClient(configuration: h2TLS)
+            client.connect(host: host, port: port) { result in
+                switch result {
+                case .success(let conn): bringUp(TransportClosures(tls: conn), retaining: client)
+                case .failure(let error): completion(.failure(error))
+                }
+            }
+        case .reality(let realityConfig):
+            let client = RealityClient(configuration: realityConfig)
+            client.connect(host: host, port: port) { result in
+                switch result {
+                case .success(let conn): bringUp(TransportClosures(tls: conn), retaining: client)
+                case .failure(let error): completion(.failure(error))
+                }
             }
         }
     }
@@ -1522,8 +1662,43 @@ nonisolated class ProxyClient {
     /// consumed any inbound tunnel, so this routes direct or through a fresh chain.
     private func makeXHTTPUploadFactory(
         security: SecurityLayer,
-        httpVersion: XHTTPHTTPVersion
+        httpVersion: XHTTPHTTPVersion,
+        mode: XHTTPMode,
+        xmux: XMUXConfiguration
     ) -> (@escaping (Result<TransportClosures, Error>) -> Void) -> Void {
+        // xmux: pool the packet-up upload socket across sessions for direct routes.
+        // stream-up's upload is one indefinite POST (never reusable); chained routes can't pool.
+        let hasChain = (configuration.chain?.isEmpty == false)
+        if mode == .packetUp, !hasChain {
+            let endpoint = mainXHTTPEndpoint()
+            let host = endpoint.directHost
+            let port = endpoint.port
+            let sec = endpoint.security
+            let serverName = endpoint.serverName
+            // HTTP/1.1 can't multiplex: force exclusive use (concurrency 1) so a socket is never
+            // handed to concurrent sessions. Rotation limits (connections/reuse/lifetime) still apply.
+            var uploadXMUX = xmux
+            uploadXMUX.maxConcurrency = XMUXRange(from: 1, to: 1)
+            let key = "h1up|\(host)|\(port)|\(serverName)"
+            let manager = XMUXRegistry.shared.manager(key: key, config: uploadXMUX) {
+                { connectionCompletion in
+                    ProxyClient.dialH1UploadConnection(host: host, port: port, security: sec) { conn in
+                        connectionCompletion(conn)
+                    }
+                }
+            }
+            return { completion in
+                manager.acquire { lease in
+                    guard let lease, let conn = lease.connection as? XHTTPH1UploadConnection else {
+                        completion(.failure(ProxyError.connectionFailed("xmux H1 upload acquisition failed")))
+                        return
+                    }
+                    conn.lease = lease
+                    completion(.success(conn.sessionClosures))
+                }
+            }
+        }
+
         return { [weak self] completion in
             guard let self else {
                 completion(.failure(ProxyError.connectionFailed("Client deallocated")))
@@ -1543,6 +1718,49 @@ nonisolated class ProxyClient {
                     completion(.failure(ProxyError.connectionFailed("HTTP/3 has no separate upload connection")))
                 case .failure(let error):
                     completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    /// Dials a fresh HTTP/1.1 upload byte stream and wraps it as a poolable upload connection (xmux).
+    /// Static so the pooled manager's factory captures no per-flow state.
+    private static func dialH1UploadConnection(
+        host: String,
+        port: UInt16,
+        security: SecurityLayer,
+        completion: @escaping (XHTTPH1UploadConnection?) -> Void
+    ) {
+        func wrap(_ closures: TransportClosures, retaining object: AnyObject?) {
+            let conn = XHTTPH1UploadConnection(transport: closures)
+            if let object { conn.retain(object) }
+            completion(conn)
+        }
+        switch security {
+        case .none:
+            let socket = RawTCPSocket()
+            socket.connect(host: host, port: port) { error in
+                if error != nil { completion(nil); return }
+                wrap(TransportClosures(rawTCP: socket), retaining: socket)
+            }
+        case .tls(let tlsConfig):
+            let h1TLS = TLSConfiguration(
+                serverName: tlsConfig.serverName, alpn: ["http/1.1"],
+                echEnabled: tlsConfig.echEnabled, echConfig: tlsConfig.echConfig, fingerprint: tlsConfig.fingerprint
+            )
+            let client = TLSClient(configuration: h1TLS)
+            client.connect(host: host, port: port) { result in
+                switch result {
+                case .success(let conn): wrap(TransportClosures(tls: conn), retaining: client)
+                case .failure: completion(nil)
+                }
+            }
+        case .reality(let realityConfig):
+            let client = RealityClient(configuration: realityConfig)
+            client.connect(host: host, port: port) { result in
+                switch result {
+                case .success(let conn): wrap(TransportClosures(tls: conn), retaining: client)
+                case .failure: completion(nil)
                 }
             }
         }
