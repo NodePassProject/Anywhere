@@ -376,6 +376,24 @@ final class AWCore {
         }
     }
 
+    // MARK: - MITM Data
+
+    private static let mitmDataURL = FileManager.default
+        .containerURL(forSecurityApplicationGroupIdentifier: Identifier.appGroupSuite)!
+        .appendingPathComponent("mitm.bin")
+
+    static func getMITMData() -> Data? {
+        try? Data(contentsOf: mitmDataURL, options: .mappedIfSafe)
+    }
+
+    static func setMITMData(_ data: Data) {
+        do {
+            try data.write(to: mitmDataURL, options: [.atomic, .noFileProtection])
+        } catch {
+            logger.error("Failed to write MITM data: \(error)")
+        }
+    }
+
     // MARK: - Darwin Notification Names
 
     enum Notification {

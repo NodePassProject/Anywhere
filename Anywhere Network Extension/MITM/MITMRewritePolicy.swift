@@ -368,3 +368,168 @@ final class MITMRewritePolicy {
         return ReplacementURL(host: host, port: port, requestTarget: target)
     }
 }
+
+// MARK: - Binary deserialization
+
+/// Decodes the `AMR1` MITM blob the host exports (see `MITMBinaryFormat`) back
+/// into `MITMRuleSet` models for `MITMRewritePolicy.load`.
+enum MITMBinaryReader {
+    private enum ReadError: Error { case badMagic, badVersion, truncated, malformed }
+
+    /// Returns `(enabled, liveRuleSets)`, or nil on bad magic/version/truncation.
+    static func decode(_ data: Data) -> (enabled: Bool, ruleSets: [MITMRuleSet])? {
+        data.withUnsafeBytes { raw -> (enabled: Bool, ruleSets: [MITMRuleSet])? in
+            var cursor = Cursor(bytes: raw.bindMemory(to: UInt8.self))
+            do {
+                return try cursor.readSnapshot()
+            } catch {
+                logger.warning("[MITM] binary payload decode failed: \(error)")
+                return nil
+            }
+        }
+    }
+
+    private struct Cursor {
+        let bytes: UnsafeBufferPointer<UInt8>
+        private var i = 0
+        private var count: Int { bytes.count }
+
+        init(bytes: UnsafeBufferPointer<UInt8>) { self.bytes = bytes }
+
+        mutating func readSnapshot() throws -> (enabled: Bool, ruleSets: [MITMRuleSet]) {
+            try expectMagic()
+            guard try u8() == MITMBinaryFormat.version else { throw ReadError.badVersion }
+            let enabled = try u8() != 0
+            let setCount = try u32()
+            var sets: [MITMRuleSet] = []
+            sets.reserveCapacity(Int(min(setCount, 4096)))
+            var remaining = setCount
+            while remaining > 0 {
+                sets.append(try readSet())
+                remaining -= 1
+            }
+            return (enabled, sets)
+        }
+
+        private mutating func readSet() throws -> MITMRuleSet {
+            let id = try readUUID()
+            let name = try str16()
+            let enabled = try u8() != 0
+            let suffixCount = try u16()
+            var suffixes: [String] = []
+            suffixes.reserveCapacity(Int(suffixCount))
+            for _ in 0..<suffixCount { suffixes.append(try str16()) }
+            let ruleCount = try u32()
+            var rules: [MITMRule] = []
+            rules.reserveCapacity(Int(min(ruleCount, UInt32(MITMRuleSet.maxRuleCount))))
+            var remaining = ruleCount
+            while remaining > 0 {
+                rules.append(try readRule())
+                remaining -= 1
+            }
+            return MITMRuleSet(id: id, name: name, enabled: enabled,
+                               domainSuffixes: suffixes, rules: rules, subscriptionURL: nil)
+        }
+
+        private mutating func readRule() throws -> MITMRule {
+            let phase: MITMPhase
+            switch try u8() {
+            case MITMBinaryFormat.Phase.httpRequest.rawValue: phase = .httpRequest
+            case MITMBinaryFormat.Phase.httpResponse.rawValue: phase = .httpResponse
+            default: throw ReadError.malformed
+            }
+            let urlPattern = try str32()
+            return MITMRule(phase: phase, urlPattern: urlPattern, operation: try readOperation())
+        }
+
+        private mutating func readOperation() throws -> MITMOperation {
+            guard let kind = MITMBinaryFormat.OpKind(rawValue: try u8()) else { throw ReadError.malformed }
+            switch kind {
+            case .rewrite:       return .rewrite(try readRewrite())
+            case .headerAdd:     return .headerAdd(name: try str16(), value: try str32())
+            case .headerDelete:  return .headerDelete(name: try str16())
+            case .headerReplace: return .headerReplace(name: try str16(), value: try str32())
+            case .script:        return .script(scriptBase64: try str32())
+            case .streamScript:  return .streamScript(scriptBase64: try str32())
+            case .bodyReplace:   return .bodyReplace(search: try str32(), replacement: try str32())
+            case .bodyJSON:      return .bodyJSON(try readJSON())
+            }
+        }
+
+        private mutating func readRewrite() throws -> MITMRewriteAction {
+            guard let kind = MITMBinaryFormat.RewriteKind(rawValue: try u8()) else { throw ReadError.malformed }
+            switch kind {
+            case .transparent:   return .transparent(url: try str32())
+            case .redirect302:   return .redirect302(url: try str32())
+            case .reject200Text: return .reject200Text(content: try str32())
+            case .reject200Gif:  return .reject200Gif
+            case .reject200Data: return .reject200Data(base64: try str32())
+            }
+        }
+
+        private mutating func readJSON() throws -> MITMJSONOperation {
+            guard let action = MITMBinaryFormat.JSONAction(rawValue: try u8()) else { throw ReadError.malformed }
+            switch action {
+            case .add:                  return .add(path: try str32(), value: try str32())
+            case .replace:              return .replace(path: try str32(), value: try str32())
+            case .delete:               return .delete(path: try str32())
+            case .replaceRecursive:     return .replaceRecursive(key: try str32(), value: try str32())
+            case .deleteRecursive:      return .deleteRecursive(key: try str32())
+            case .removeWhereKeyExists: return .removeWhereKeyExists(path: try str32(), key: try str32())
+            case .removeWhereFieldIn:   return .removeWhereFieldIn(path: try str32(), field: try str32(), values: try str32())
+            }
+        }
+
+        // MARK: Primitives
+
+        private mutating func expectMagic() throws {
+            let magic = MITMBinaryFormat.magic
+            guard i + magic.count <= count else { throw ReadError.truncated }
+            for k in 0..<magic.count where bytes[i + k] != magic[k] { throw ReadError.badMagic }
+            i += magic.count
+        }
+
+        private mutating func u8() throws -> UInt8 {
+            guard i < count else { throw ReadError.truncated }
+            defer { i += 1 }
+            return bytes[i]
+        }
+
+        private mutating func u16() throws -> UInt16 {
+            guard i + 2 <= count else { throw ReadError.truncated }
+            defer { i += 2 }
+            return UInt16(bytes[i]) | (UInt16(bytes[i + 1]) << 8)
+        }
+
+        private mutating func u32() throws -> UInt32 {
+            guard i + 4 <= count else { throw ReadError.truncated }
+            defer { i += 4 }
+            return UInt32(bytes[i]) | (UInt32(bytes[i + 1]) << 8)
+                 | (UInt32(bytes[i + 2]) << 16) | (UInt32(bytes[i + 3]) << 24)
+        }
+
+        private mutating func str16() throws -> String {
+            let n = Int(try u16())
+            guard i + n <= count else { throw ReadError.truncated }
+            defer { i += n }
+            return String(decoding: bytes[i..<i + n], as: UTF8.self)
+        }
+
+        private mutating func str32() throws -> String {
+            let n = Int(try u32())
+            guard i + n <= count else { throw ReadError.truncated }
+            defer { i += n }
+            return String(decoding: bytes[i..<i + n], as: UTF8.self)
+        }
+
+        private mutating func readUUID() throws -> UUID {
+            guard i + 16 <= count else { throw ReadError.truncated }
+            let u = UUID(uuid: (bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3],
+                                bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7],
+                                bytes[i + 8], bytes[i + 9], bytes[i + 10], bytes[i + 11],
+                                bytes[i + 12], bytes[i + 13], bytes[i + 14], bytes[i + 15]))
+            i += 16
+            return u
+        }
+    }
+}
