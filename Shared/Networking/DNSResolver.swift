@@ -192,6 +192,20 @@ nonisolated final class DNSResolver {
         }
     }
 
+    /// Drops expired ECH entries (not served stale), then trims to `maxEntries`.
+    /// Caller must hold the write lock.
+    private func compactECHUnlocked(now: CFAbsoluteTime) {
+        if echCache.contains(where: { $0.value.expiry <= now }) {
+            echCache = echCache.filter { $0.value.expiry > now }
+        }
+
+        while echCache.count > Self.maxEntries {
+            guard let coldest = echCache.min(by: { $0.value.expiry < $1.value.expiry })?.key
+            else { break }
+            echCache.removeValue(forKey: coldest)
+        }
+    }
+
     /// Lowercased cache key that avoids allocating for the common all-lowercase
     /// ASCII case; bytes >= 0x80 may be subject to Unicode case-folding.
     private static func cacheKey(for host: String) -> String {
@@ -298,8 +312,10 @@ nonisolated final class DNSResolver {
                     let ttl: TimeInterval = result
                         .map { min(max(TimeInterval($0.ttl), Self.echMinTTL), Self.echMaxTTL) }
                         ?? Self.echNegativeTTL
+                    let insertedAt = CFAbsoluteTimeGetCurrent()
                     echCache[key] = ECHCacheEntry(config: result?.config,
-                                                  expiry: CFAbsoluteTimeGetCurrent() + ttl)
+                                                  expiry: insertedAt + ttl)
+                    compactECHUnlocked(now: insertedAt)
                     return (result?.config, waiters)
                 }
                 completion(config)
