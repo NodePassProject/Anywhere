@@ -1,5 +1,5 @@
 //
-//  HTTP3RequestStream.swift
+//  XHTTPH3RequestStream.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 5/26/26.
@@ -7,18 +7,18 @@
 
 import Foundation
 
-/// A general-purpose HTTP/3 request/response stream multiplexed over an ``HTTP3Session``.
+/// A general-purpose HTTP/3 request/response stream multiplexed over an ``HTTP3Multiplexer``.
 ///
 /// The QUIC stream window is extended only as the app drains received DATA, so a
-/// slow reader backpressures the server. Every public method hops to the session
+/// slow reader backpressures the server. Every public method hops to the multiplexer
 /// queue, so all mutable state is touched on one serial queue.
-nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
+nonisolated final class XHTTPH3RequestStream: HTTP3StreamHandler {
 
     // MARK: - State
 
     enum State { case idle, requestSent, open, closed }
 
-    private weak var session: HTTP3Session?
+    private weak var multiplexer: HTTP3Multiplexer?
     private(set) var quicStreamID: Int64?
     private var state: State = .idle
 
@@ -47,8 +47,8 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
 
     // MARK: - Init
 
-    init(session: HTTP3Session) {
-        self.session = session
+    init(multiplexer: HTTP3Multiplexer) {
+        self.multiplexer = multiplexer
     }
 
     // MARK: - Request
@@ -60,10 +60,10 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
                      endStream: Bool,
                      onResponse: ((Result<Int, Error>) -> Void)? = nil,
                      completion: @escaping (Error?) -> Void) {
-        guard let session else { completion(HTTP3Error.streamClosed); return }
-        session.queue.async { [self] in
-            session.ensureReady { [weak self] error in
-                guard let self, let session = self.session else {
+        guard let multiplexer else { completion(HTTP3Error.streamClosed); return }
+        multiplexer.queue.async { [self] in
+            multiplexer.ensureReady { [weak self] error in
+                guard let self, let multiplexer = self.multiplexer else {
                     completion(HTTP3Error.streamClosed)
                     return
                 }
@@ -73,22 +73,22 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
                     return
                 }
 
-                guard let sid = session.openBidiStream() else {
+                guard let sid = multiplexer.openBidiStream() else {
                     self.state = .closed
-                    session.markStreamBlocked()
+                    multiplexer.markStreamBlocked()
                     completion(HTTP3Error.streamIdBlocked)
                     return
                 }
                 self.quicStreamID = sid
                 // Register before the write so a fast response can't race ahead of the callback.
                 self.onResponse = onResponse
-                session.registerStream(self, streamID: sid)
+                multiplexer.registerStream(self, streamID: sid)
                 self.state = .requestSent
 
                 let frame = HTTP3Framer.headersFrame(headerBlock: headerBlock)
-                session.writeStream(sid, data: frame, fin: endStream) { [weak self] error in
+                multiplexer.writeStream(sid, data: frame, fin: endStream) { [weak self] error in
                     if let error {
-                        self?.session?.queue.async { self?.handleStreamError(error) }
+                        self?.multiplexer?.queue.async { self?.handleStreamError(error) }
                     }
                     completion(error)
                 }
@@ -98,7 +98,7 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
 
     /// Sends a chunk of request body as an HTTP/3 DATA frame, optionally with FIN.
     func sendBody(_ data: Data, fin: Bool, completion: @escaping (Error?) -> Void) {
-        guard let session else { completion(HTTP3Error.streamClosed); return }
+        guard let multiplexer else { completion(HTTP3Error.streamClosed); return }
         let block: () -> Void = { [self] in
             guard state != .closed, let sid = quicStreamID else {
                 completion(HTTP3Error.streamClosed)
@@ -110,14 +110,14 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
             }
             // An empty payload with fin==true is a bare half-close (FIN, no DATA frame).
             let frame = data.isEmpty ? Data() : HTTP3Framer.dataFrame(payload: data)
-            session.writeStream(sid, data: frame, fin: fin, completion: completion)
+            multiplexer.writeStream(sid, data: frame, fin: fin, completion: completion)
         }
-        if session.isOnQueue { block() } else { session.queue.async(execute: block) }
+        if multiplexer.isOnQueue { block() } else { multiplexer.queue.async(execute: block) }
     }
 
     /// Returns the next chunk of response body, `nil` on EOF, or an error.
     func receive(completion: @escaping (Data?, Error?) -> Void) {
-        guard let session else { completion(nil, HTTP3Error.streamClosed); return }
+        guard let multiplexer else { completion(nil, HTTP3Error.streamClosed); return }
         let block: () -> Void = { [self] in
             if let error = streamError {
                 completion(nil, error)
@@ -140,7 +140,7 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
             }
             pendingReceive = completion
         }
-        if session.isOnQueue { block() } else { session.queue.async(execute: block) }
+        if multiplexer.isOnQueue { block() } else { multiplexer.queue.async(execute: block) }
     }
 
     /// Reads and discards the entire response so the stream closes cleanly on EOF —
@@ -154,16 +154,16 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
     }
 
     func close() {
-        guard let session else { return }
-        session.queue.async { [self] in
+        guard let multiplexer else { return }
+        multiplexer.queue.async { [self] in
             guard state != .closed else { return }
             state = .closed
-            session.removeStream(self)
+            multiplexer.removeStream(self)
             // A caller-initiated close before completion is H3_REQUEST_CANCELLED;
             // after a clean response it's H3_NO_ERROR.
             if let sid = quicStreamID {
                 let code: HTTP3ErrorCode = headersReceived ? .noError : .requestCancelled
-                session.shutdownStream(sid, code: code)
+                multiplexer.shutdownStream(sid, code: code)
             }
             if let cb = onResponse {
                 onResponse = nil
@@ -176,7 +176,7 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
         }
     }
 
-    // MARK: - HTTP3StreamHandler (called on session queue)
+    // MARK: - HTTP3StreamHandler (called on multiplexer queue)
 
     func handleStreamData(_ data: Data, fin: Bool) {
         if !data.isEmpty {
@@ -278,7 +278,7 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
     /// Extends the QUIC stream flow-control window once the app has consumed data.
     private func ackQuicBytes(_ count: Int) {
         guard count > 0, let sid = quicStreamID else { return }
-        session?.extendStreamOffset(sid, count: count)
+        multiplexer?.extendStreamOffset(sid, count: count)
     }
 
     private func handleStreamError(_ error: Error) {
@@ -298,9 +298,9 @@ nonisolated final class HTTP3RequestStream: HTTP3StreamHandler {
     private func closeAndShutdown(code: HTTP3ErrorCode = .noError) {
         guard state != .closed else { return }
         state = .closed
-        session?.removeStream(self)
+        multiplexer?.removeStream(self)
         if let sid = quicStreamID {
-            session?.shutdownStream(sid, code: code)
+            multiplexer?.shutdownStream(sid, code: code)
         }
     }
 }

@@ -96,7 +96,7 @@ extension TunnelStack {
             logger.info("[VPN] Path offline/sleep: releasing upstream transports; will rebuild when it returns")
 
             TransportReclaim.reclaimAll()
-            reclaimInstanceTransports(rebuildMux: false)
+            reclaimInstanceTransports(rebuildMultiplexerPool: false)
         }
     }
 
@@ -154,26 +154,26 @@ extension TunnelStack {
         }
 
         TransportReclaim.reclaimAll()
-        reclaimInstanceTransports(rebuildMux: true)
+        reclaimInstanceTransports(rebuildMultiplexerPool: true)
     }
 
     /// Reclaims the udpQueue-owned per-tunnel transports (Vision mux, SS UDP
     /// sessions, per-flow UDP connections). Must be called on `lwipQueue`; the
     /// sync hop onto `udpQueue` is deadlock-free — no udpQueue work sync-waits
-    /// back on lwipQueue. `rebuildMux` rebuilds the Vision mux after teardown
+    /// back on lwipQueue. `rebuildMultiplexerPool` rebuilds the Vision mux after teardown
     /// (network recovery) vs. leaving it `nil` (suspend/stop).
-    private func reclaimInstanceTransports(rebuildMux: Bool) {
+    private func reclaimInstanceTransports(rebuildMultiplexerPool: Bool) {
         // Build the replacement mux on lwipQueue, which owns `configuration`.
-        let rebuiltMux: MuxManager?
-        if rebuildMux, let configuration, configuration.usesVisionMux {
-            rebuiltMux = MuxManager(configuration: configuration, flowQueue: udpQueue)
+        let rebuiltMultiplexerPool: VLESSVisionUDPMultiplexerPool?
+        if rebuildMultiplexerPool, let configuration, configuration.usesVisionMux {
+            rebuiltMultiplexerPool = VLESSVisionUDPMultiplexerPool(configuration: configuration, flowQueue: udpQueue)
         } else {
-            rebuiltMux = nil
+            rebuiltMultiplexerPool = nil
         }
 
         udpQueue.sync {
-            muxManager?.closeAll()
-            muxManager = rebuiltMux
+            udpMultiplexerPool?.closeAll()
+            udpMultiplexerPool = rebuiltMultiplexerPool
             purgeShadowsocksUDPSessions()
             for (_, flow) in udpFlows {
                 flow.close()
@@ -206,7 +206,7 @@ extension TunnelStack {
         }
 
         TransportReclaim.reclaimAll()
-        reclaimInstanceTransports(rebuildMux: false)
+        reclaimInstanceTransports(rebuildMultiplexerPool: false)
 
         isTearingDown = true
         lwip_bridge_shutdown()

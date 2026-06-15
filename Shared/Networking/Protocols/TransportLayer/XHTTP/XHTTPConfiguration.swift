@@ -41,33 +41,33 @@ enum XHTTPPaddingMethod: String, Codable, Equatable, Hashable {
 }
 
 /// A `from`/`to` integer range; a single value when `from == to`.
-struct XMUXRange: Codable, Equatable, Hashable {
+struct XHTTPXMUXMultiplexerRange: Codable, Equatable, Hashable {
     var from: Int
     var to: Int
 
-    static let zero = XMUXRange(from: 0, to: 0)
+    static let zero = XHTTPXMUXMultiplexerRange(from: 0, to: 0)
     var isZero: Bool { from == 0 && to == 0 }
 
     /// Random value in `[from, to)` (upper bound exclusive); `to <= from` collapses to `from`.
     func random() -> Int { to <= from ? from : Int.random(in: from..<to) }
 
     /// Parses an int, `{"from":a,"to":b}` object, `"a-b"`/`"a"` string, or nil → `.zero`.
-    static func parse(_ value: Any?) -> XMUXRange {
+    static func parse(_ value: Any?) -> XHTTPXMUXMultiplexerRange {
         switch value {
         case let i as Int:
-            return XMUXRange(from: i, to: i)
+            return XHTTPXMUXMultiplexerRange(from: i, to: i)
         case let d as [String: Any]:
             let f = d["from"] as? Int ?? 0
             let t = d["to"] as? Int ?? f
-            return XMUXRange(from: f, to: max(f, t))
+            return XHTTPXMUXMultiplexerRange(from: f, to: max(f, t))
         case let s as String:
             let trimmed = s.trimmingCharacters(in: .whitespaces)
             if let dash = trimmed.firstIndex(of: "-"), dash != trimmed.startIndex {
                 let lo = trimmed[trimmed.startIndex..<dash].trimmingCharacters(in: .whitespaces)
                 let hi = trimmed[trimmed.index(after: dash)...].trimmingCharacters(in: .whitespaces)
-                if let f = Int(lo), let t = Int(hi) { return XMUXRange(from: f, to: max(f, t)) }
+                if let f = Int(lo), let t = Int(hi) { return XHTTPXMUXMultiplexerRange(from: f, to: max(f, t)) }
             }
-            if let v = Int(trimmed) { return XMUXRange(from: v, to: v) }
+            if let v = Int(trimmed) { return XHTTPXMUXMultiplexerRange(from: v, to: v) }
             return .zero
         default:
             return .zero
@@ -79,21 +79,21 @@ struct XMUXRange: Codable, Equatable, Hashable {
 }
 
 /// Connection-pool sizing and rotation for XHTTP. Ranges are `.zero` when unset (0 = no limit).
-struct XMUXConfiguration: Codable, Equatable, Hashable {
+struct XHTTPXMUXMultiplexerConfiguration: Codable, Equatable, Hashable {
     /// Max concurrent XHTTP sessions multiplexed over one connection (0 = unlimited).
-    var maxConcurrency: XMUXRange
+    var maxConcurrency: XHTTPXMUXMultiplexerRange
     /// Underlying connections opened per destination before existing ones are reused (0 = unlimited).
-    var maxConnections: XMUXRange
+    var maxConnections: XHTTPXMUXMultiplexerRange
     /// Max times a connection is handed to a new session before retirement (0 = unlimited).
-    var cMaxReuseTimes: XMUXRange
+    var cMaxReuseTimes: XHTTPXMUXMultiplexerRange
     /// Max HTTP requests over a connection before retirement (0 = unlimited).
-    var hMaxRequestTimes: XMUXRange
+    var hMaxRequestTimes: XHTTPXMUXMultiplexerRange
     /// Max wall-clock lifetime of a connection, seconds (0 = unlimited).
-    var hMaxReusableSecs: XMUXRange
+    var hMaxReusableSecs: XHTTPXMUXMultiplexerRange
     /// HTTP/2 & HTTP/3 keep-alive period, seconds (0 = default, <0 = disabled).
     var hKeepAlivePeriod: Int
 
-    static let disabled = XMUXConfiguration(
+    static let disabled = XHTTPXMUXMultiplexerConfiguration(
         maxConcurrency: .zero, maxConnections: .zero, cMaxReuseTimes: .zero,
         hMaxRequestTimes: .zero, hMaxReusableSecs: .zero, hKeepAlivePeriod: 0
     )
@@ -101,12 +101,12 @@ struct XMUXConfiguration: Codable, Equatable, Hashable {
     /// Default applied when XHTTP omits `xmux`: serial connection reuse (`maxConcurrency` 1)
     /// with rotation after 600–900 requests / 1800–3000 s. `maxConnections`, `cMaxReuseTimes`,
     /// and `hKeepAlivePeriod` stay unset.
-    static let serialReuseDefault = XMUXConfiguration(
-        maxConcurrency: XMUXRange(from: 1, to: 1),
+    static let serialReuseDefault = XHTTPXMUXMultiplexerConfiguration(
+        maxConcurrency: XHTTPXMUXMultiplexerRange(from: 1, to: 1),
         maxConnections: .zero,
         cMaxReuseTimes: .zero,
-        hMaxRequestTimes: XMUXRange(from: 600, to: 900),
-        hMaxReusableSecs: XMUXRange(from: 1800, to: 3000),
+        hMaxRequestTimes: XHTTPXMUXMultiplexerRange(from: 600, to: 900),
+        hMaxReusableSecs: XHTTPXMUXMultiplexerRange(from: 1800, to: 3000),
         hKeepAlivePeriod: 0
     )
 
@@ -117,13 +117,13 @@ struct XMUXConfiguration: Codable, Equatable, Hashable {
     }
 
     /// Parses an `xmux` JSON object (each range as int / `{from,to}` / `"a-b"`).
-    static func parse(from json: [String: Any]) -> XMUXConfiguration {
-        XMUXConfiguration(
-            maxConcurrency: XMUXRange.parse(json["maxConcurrency"]),
-            maxConnections: XMUXRange.parse(json["maxConnections"]),
-            cMaxReuseTimes: XMUXRange.parse(json["cMaxReuseTimes"]),
-            hMaxRequestTimes: XMUXRange.parse(json["hMaxRequestTimes"]),
-            hMaxReusableSecs: XMUXRange.parse(json["hMaxReusableSecs"]),
+    static func parse(from json: [String: Any]) -> XHTTPXMUXMultiplexerConfiguration {
+        XHTTPXMUXMultiplexerConfiguration(
+            maxConcurrency: XHTTPXMUXMultiplexerRange.parse(json["maxConcurrency"]),
+            maxConnections: XHTTPXMUXMultiplexerRange.parse(json["maxConnections"]),
+            cMaxReuseTimes: XHTTPXMUXMultiplexerRange.parse(json["cMaxReuseTimes"]),
+            hMaxRequestTimes: XHTTPXMUXMultiplexerRange.parse(json["hMaxRequestTimes"]),
+            hMaxReusableSecs: XHTTPXMUXMultiplexerRange.parse(json["hMaxReusableSecs"]),
             hKeepAlivePeriod: (json["hKeepAlivePeriod"] as? Int) ?? 0
         )
     }
@@ -192,7 +192,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
     var downloadSettings: XHTTPDownloadSettings? { _downloadSettings?.value }
 
     /// Connection-pool/rotation settings (`xmux`); `nil` → default per-stream behavior.
-    let xmux: XMUXConfiguration?
+    let xmux: XHTTPXMUXMultiplexerConfiguration?
 
     init(
         host: String,
@@ -221,7 +221,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         uplinkDataKey: String = "",
         uplinkChunkSize: Int = 0,
         downloadSettings: XHTTPDownloadSettings? = nil,
-        xmux: XMUXConfiguration? = nil
+        xmux: XHTTPXMUXMultiplexerConfiguration? = nil
     ) {
         self.host = host
         self.path = path
@@ -280,13 +280,13 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         uplinkDataKey = try c.decodeIfPresent(String.self, forKey: .uplinkDataKey) ?? ""
         uplinkChunkSize = try c.decodeIfPresent(Int.self, forKey: .uplinkChunkSize) ?? 0
         _downloadSettings = try c.decodeIfPresent(XHTTPDownloadSettingsBox.self, forKey: ._downloadSettings)
-        xmux = try c.decodeIfPresent(XMUXConfiguration.self, forKey: .xmux)
+        xmux = try c.decodeIfPresent(XHTTPXMUXMultiplexerConfiguration.self, forKey: .xmux)
     }
 
     /// xmux settings used at runtime: the configured values, or the serial-reuse + rotation
     /// default when XHTTP omits xmux. The default applies only when xmux is entirely unset;
     /// a partial xmux is used verbatim.
-    var effectiveXMUX: XMUXConfiguration {
+    var effectiveXMUX: XHTTPXMUXMultiplexerConfiguration {
         if let xmux, xmux.isEnabled { return xmux }
         return .serialReuseDefault
     }
@@ -568,7 +568,7 @@ struct XHTTPConfiguration: Codable, Equatable, Hashable {
         }
         let uplinkChunkSize = extra["uplinkChunkSize"] as? Int ?? defaultUplinkChunkSize
 
-        let xmux = (extra["xmux"] as? [String: Any]).map(XMUXConfiguration.parse)
+        let xmux = (extra["xmux"] as? [String: Any]).map(XHTTPXMUXMultiplexerConfiguration.parse)
 
         return XHTTPConfiguration(
             host: host,

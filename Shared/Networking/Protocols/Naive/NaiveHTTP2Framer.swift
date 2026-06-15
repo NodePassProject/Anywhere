@@ -1,5 +1,5 @@
 //
-//  HTTP2Framer.swift
+//  NaiveHTTP2Framer.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 3/9/26.
@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Error
 
-enum HTTP2Error: Error, LocalizedError {
+enum NaiveHTTP2Error: Error, LocalizedError {
     case notReady
     case connectionFailed(String)
     case protocolError(String)
@@ -34,7 +34,7 @@ enum HTTP2Error: Error, LocalizedError {
 // MARK: - Frame Types and Flags
 
 /// HTTP/2 frame types (RFC 7540 §6).
-enum HTTP2FrameType: UInt8 {
+enum NaiveHTTP2FrameType: UInt8 {
     case data         = 0x0
     case headers      = 0x1
     case rstStream    = 0x3
@@ -45,7 +45,7 @@ enum HTTP2FrameType: UInt8 {
 }
 
 /// HTTP/2 frame flag constants.
-enum HTTP2FrameFlags {
+enum NaiveHTTP2FrameFlags {
     /// DATA, HEADERS: last frame the endpoint will send for the stream.
     static let endStream: UInt8    = 0x1
     /// SETTINGS, PING: acknowledgment.
@@ -59,8 +59,8 @@ enum HTTP2FrameFlags {
 // MARK: - Frame
 
 /// A single HTTP/2 frame (RFC 7540 §4.1): 9-byte header + payload.
-struct HTTP2Frame {
-    let type: HTTP2FrameType
+struct NaiveHTTP2Frame {
+    let type: NaiveHTTP2FrameType
     let flags: UInt8
     let streamID: UInt32
     let payload: Data
@@ -70,7 +70,7 @@ struct HTTP2Frame {
     /// Serializes this frame to wire format (RFC 7540 §4.1): 9-byte header + payload.
     var serialized: Data {
         let length = UInt32(payload.count)
-        var data = Data(capacity: HTTP2Framer.headerSize + payload.count)
+        var data = Data(capacity: NaiveHTTP2Framer.headerSize + payload.count)
         // 24-bit length (big-endian)
         data.append(UInt8((length >> 16) & 0xFF))
         data.append(UInt8((length >> 8) & 0xFF))
@@ -90,14 +90,14 @@ struct HTTP2Frame {
 
 // MARK: - Framer
 
-enum HTTP2Framer {
+enum NaiveHTTP2Framer {
     static let headerSize = 9
     static let maxDataPayload = 16_384  // HTTP/2 default SETTINGS_MAX_FRAME_SIZE
 
     // MARK: Deserialize
 
     /// Deserializes one complete frame from `buffer`, removing the consumed bytes; `nil` if incomplete.
-    static func deserialize(from buffer: inout Data) -> HTTP2Frame? {
+    static func deserialize(from buffer: inout Data) -> NaiveHTTP2Frame? {
         guard buffer.count >= headerSize else { return nil }
 
         let b = buffer
@@ -117,17 +117,17 @@ enum HTTP2Framer {
         let payload = Data(buffer[(s + headerSize)..<(s + totalSize)])
         buffer.removeFirst(totalSize)
 
-        guard let type = HTTP2FrameType(rawValue: rawType) else {
+        guard let type = NaiveHTTP2FrameType(rawValue: rawType) else {
             // Unknown frame type — skip per RFC 7540 §4.1
-            return HTTP2Frame(type: HTTP2FrameType.data, flags: 0, streamID: sid, payload: Data())
+            return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.data, flags: 0, streamID: sid, payload: Data())
         }
 
-        return HTTP2Frame(type: type, flags: flags, streamID: sid, payload: payload)
+        return NaiveHTTP2Frame(type: type, flags: flags, streamID: sid, payload: payload)
     }
 
     // MARK: - Convenience Builders
 
-    static func settingsFrame(_ settings: [(id: UInt16, value: UInt32)]) -> HTTP2Frame {
+    static func settingsFrame(_ settings: [(id: UInt16, value: UInt32)]) -> NaiveHTTP2Frame {
         var payload = Data(capacity: settings.count * 6)
         for (id, value) in settings {
             payload.append(UInt8(id >> 8))
@@ -137,48 +137,48 @@ enum HTTP2Framer {
             payload.append(UInt8((value >> 8) & 0xFF))
             payload.append(UInt8(value & 0xFF))
         }
-        return HTTP2Frame(type: HTTP2FrameType.settings, flags: 0, streamID: 0, payload: payload)
+        return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.settings, flags: 0, streamID: 0, payload: payload)
     }
 
-    static func settingsAckFrame() -> HTTP2Frame {
-        HTTP2Frame(type: HTTP2FrameType.settings, flags: HTTP2FrameFlags.ack, streamID: 0, payload: Data())
+    static func settingsAckFrame() -> NaiveHTTP2Frame {
+        NaiveHTTP2Frame(type: NaiveHTTP2FrameType.settings, flags: NaiveHTTP2FrameFlags.ack, streamID: 0, payload: Data())
     }
 
-    static func windowUpdateFrame(streamID: UInt32, increment: UInt32) -> HTTP2Frame {
+    static func windowUpdateFrame(streamID: UInt32, increment: UInt32) -> NaiveHTTP2Frame {
         var payload = Data(capacity: 4)
         let inc = increment & 0x7FFFFFFF
         payload.append(UInt8((inc >> 24) & 0xFF))
         payload.append(UInt8((inc >> 16) & 0xFF))
         payload.append(UInt8((inc >> 8) & 0xFF))
         payload.append(UInt8(inc & 0xFF))
-        return HTTP2Frame(type: HTTP2FrameType.windowUpdate, flags: 0, streamID: streamID, payload: payload)
+        return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.windowUpdate, flags: 0, streamID: streamID, payload: payload)
     }
 
     /// Creates a HEADERS frame (END_HEADERS set) with an HPACK-encoded header block.
-    static func headersFrame(streamID: UInt32, headerBlock: Data, endStream: Bool = false) -> HTTP2Frame {
-        var flags: UInt8 = HTTP2FrameFlags.endHeaders
-        if endStream { flags |= HTTP2FrameFlags.endStream }
-        return HTTP2Frame(type: HTTP2FrameType.headers, flags: flags, streamID: streamID, payload: headerBlock)
+    static func headersFrame(streamID: UInt32, headerBlock: Data, endStream: Bool = false) -> NaiveHTTP2Frame {
+        var flags: UInt8 = NaiveHTTP2FrameFlags.endHeaders
+        if endStream { flags |= NaiveHTTP2FrameFlags.endStream }
+        return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.headers, flags: flags, streamID: streamID, payload: headerBlock)
     }
 
-    static func dataFrame(streamID: UInt32, payload: Data, endStream: Bool = false) -> HTTP2Frame {
+    static func dataFrame(streamID: UInt32, payload: Data, endStream: Bool = false) -> NaiveHTTP2Frame {
         var flags: UInt8 = 0
-        if endStream { flags |= HTTP2FrameFlags.endStream }
-        return HTTP2Frame(type: HTTP2FrameType.data, flags: flags, streamID: streamID, payload: payload)
+        if endStream { flags |= NaiveHTTP2FrameFlags.endStream }
+        return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.data, flags: flags, streamID: streamID, payload: payload)
     }
 
-    static func rstStreamFrame(streamID: UInt32, errorCode: UInt32) -> HTTP2Frame {
+    static func rstStreamFrame(streamID: UInt32, errorCode: UInt32) -> NaiveHTTP2Frame {
         var payload = Data(capacity: 4)
         payload.append(UInt8((errorCode >> 24) & 0xFF))
         payload.append(UInt8((errorCode >> 16) & 0xFF))
         payload.append(UInt8((errorCode >> 8) & 0xFF))
         payload.append(UInt8(errorCode & 0xFF))
-        return HTTP2Frame(type: HTTP2FrameType.rstStream, flags: 0, streamID: streamID, payload: payload)
+        return NaiveHTTP2Frame(type: NaiveHTTP2FrameType.rstStream, flags: 0, streamID: streamID, payload: payload)
     }
 
     /// Creates a PING ACK frame, echoing back the opaque data as required by RFC 7540 §6.7.
-    static func pingAckFrame(opaqueData: Data) -> HTTP2Frame {
-        HTTP2Frame(type: HTTP2FrameType.ping, flags: HTTP2FrameFlags.ack, streamID: 0, payload: opaqueData)
+    static func pingAckFrame(opaqueData: Data) -> NaiveHTTP2Frame {
+        NaiveHTTP2Frame(type: NaiveHTTP2FrameType.ping, flags: NaiveHTTP2FrameFlags.ack, streamID: 0, payload: opaqueData)
     }
 
     // MARK: - Payload Parsers

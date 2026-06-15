@@ -97,7 +97,7 @@ nonisolated final class HysteriaSession {
     private var _poolTCPCount = 0
     private var _poolUDPCount = 0
 
-    var poolIsClosed: Bool {
+    var isClosed: Bool {
         _poolLock.lock()
         defer { _poolLock.unlock() }
         return _poolIsClosed

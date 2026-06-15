@@ -50,7 +50,7 @@ extension ProxyClient {
                 alpn: ["http/1.1"],
                 tunnel: self.tunnel
             )
-            let http11 = HTTP11Connection(
+            let http11 = NaiveHTTP11Connection(
                 transport: transport,
                 extraHeaders: NaiveProxyHeaders.http11(basicAuth: naiveConfig.basicAuth),
                 destination: destination
@@ -58,7 +58,7 @@ extension ProxyClient {
             openTunnelAndWrap(NaiveTunnelAdapter(http11), completion: completion)
 
         case .http2:
-            HTTP2SessionPool.shared.acquireStream(
+            NaiveHTTP2MultiplexerPool.shared.acquireStream(
                 host: proxyHost,
                 port: configuration.serverPort,
                 sni: naiveConfig.effectiveSNI,
@@ -89,7 +89,7 @@ extension ProxyClient {
         retriesLeft: Int,
         completion: @escaping (Result<ProxyConnection, Error>) -> Void
     ) {
-        HTTP3SessionPool.shared.acquireStream(
+        NaiveHTTP3MultiplexerPool.shared.acquireStream(
             host: proxyHost,
             port: configuration.serverPort,
             sni: naiveConfig.effectiveSNI,

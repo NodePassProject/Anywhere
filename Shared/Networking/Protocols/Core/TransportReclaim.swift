@@ -28,9 +28,9 @@ enum TransportReclaim {
             switch proto {
             case .hysteria: HysteriaClient.pool.reclaim()
             case .nowhere:  NowhereClient.pool.reclaim()
-            case .anytls:   AnyTLSManager.shared.reclaim()
-            case .http2:    HTTP2SessionPool.shared.reclaim()
-            case .http3:    HTTP3SessionPool.shared.reclaim()
+            case .anytls:   AnyTLSMultiplexerRegistry.shared.reclaim()
+            case .http2:    NaiveHTTP2MultiplexerPool.shared.reclaim()
+            case .http3:    NaiveHTTP3MultiplexerPool.shared.reclaim()
             case .sudoku:   SudokuTransportPool.pool.reclaim()
             // Per-connection or instance-tier only — no process-wide warm cache.
             case .vless, .trojan, .shadowsocks, .socks5, .http11:

@@ -1,5 +1,5 @@
 //
-//  AnyTLSManager.swift
+//  AnyTLSMultiplexerRegistry.swift
 //  Anywhere
 //
 //  Created by NodePassProject on 5/16/26.
@@ -7,13 +7,13 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "AnyTLSManager")
+private let logger = AnywhereLogger(category: "AnyTLSMultiplexerRegistry")
 
-/// Process-wide registry of `AnyTLSClient`s keyed by `(host, port, password)`;
-/// configs sharing the same triple reuse the same warm TLS-session pool.
-nonisolated final class AnyTLSManager {
+/// Process-wide registry of `AnyTLSMultiplexerPool`s keyed by `(host, port, password)`;
+/// configs sharing the same triple reuse the same warm TLS-multiplexer pool.
+nonisolated final class AnyTLSMultiplexerRegistry {
 
-    static let shared = AnyTLSManager()
+    static let shared = AnyTLSMultiplexerRegistry()
 
     private struct Key: Hashable {
         let host: String
@@ -22,29 +22,29 @@ nonisolated final class AnyTLSManager {
     }
 
     private let lock = UnfairLock()
-    private var clients: [Key: AnyTLSClient] = [:]
+    private var clients: [Key: AnyTLSMultiplexerPool] = [:]
 
     private init() {}
 
     /// Returns the per-server pool, creating it on first use; on reuse the passed `dialOut` is dropped.
     func client(
         for configuration: ProxyConfiguration,
-        dialOut: @escaping AnyTLSClient.DialOut
-    ) -> AnyTLSClient? {
+        dialOut: @escaping AnyTLSMultiplexerPool.DialOut
+    ) -> AnyTLSMultiplexerPool? {
         guard
             case .anytls(let password, let ici, let it, let mis, _) = configuration.outbound
         else {
-            logger.debug("[AnyTLSManager] outbound is not .anytls — refusing to create client")
+            logger.debug("[AnyTLSMultiplexerRegistry] outbound is not .anytls — refusing to create client")
             return nil
         }
         let key = Key(host: configuration.serverAddress, port: configuration.serverPort, password: password)
         lock.lock()
         if let existing = clients[key] {
             lock.unlock()
-            logger.debug("[AnyTLSManager] reuse client \(configuration.serverAddress):\(configuration.serverPort)")
+            logger.debug("[AnyTLSMultiplexerRegistry] reuse client \(configuration.serverAddress):\(configuration.serverPort)")
             return existing
         }
-        let client = AnyTLSClient(
+        let client = AnyTLSMultiplexerPool(
             password: password,
             idleSessionCheckInterval: TimeInterval(ici),
             idleSessionTimeout:       TimeInterval(it),
@@ -53,11 +53,11 @@ nonisolated final class AnyTLSManager {
         )
         clients[key] = client
         lock.unlock()
-        logger.debug("[AnyTLSManager] created client \(configuration.serverAddress):\(configuration.serverPort) ici=\(ici)s it=\(it)s mis=\(mis)")
+        logger.debug("[AnyTLSMultiplexerRegistry] created client \(configuration.serverAddress):\(configuration.serverPort) ici=\(ici)s it=\(it)s mis=\(mis)")
         return client
     }
 
-    /// Closes every pooled session; called on wake/path change/stop because the
+    /// Closes every pooled multiplexer; called on wake/path change/stop because the
     /// kernel may have torn down the underlying sockets.
     func closeAll() {
         lock.lock()
@@ -65,7 +65,7 @@ nonisolated final class AnyTLSManager {
         clients.removeAll(keepingCapacity: false)
         lock.unlock()
         if !snapshot.isEmpty {
-            logger.debug("[AnyTLSManager] closeAll(\(snapshot.count) clients)")
+            logger.debug("[AnyTLSMultiplexerRegistry] closeAll(\(snapshot.count) clients)")
         }
         for client in snapshot {
             client.closeAll()
@@ -73,6 +73,6 @@ nonisolated final class AnyTLSManager {
     }
 }
 
-extension AnyTLSManager: TransportPool {
+extension AnyTLSMultiplexerRegistry: TransportPool {
     func reclaim() { closeAll() }
 }

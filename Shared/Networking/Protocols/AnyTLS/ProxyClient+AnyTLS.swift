@@ -33,12 +33,12 @@ extension ProxyClient {
         }
         logger.debug("[AnyTLS] sni=\(tlsConfig.serverName) alpn=\(tlsConfig.alpn?.joined(separator: ",") ?? "<none>") fp=\(tlsConfig.fingerprint.rawValue)")
 
-        // Don't capture self in the dial closure: AnyTLSClient persists across ProxyClient instances.
+        // Don't capture self in the dial closure: AnyTLSMultiplexerPool persists across ProxyClient instances.
         let directHost = directDialHost
         let directPort = configuration.serverPort
         let tunnel = self.tunnel
 
-        let dialOut: AnyTLSClient.DialOut = { dialCompletion in
+        let dialOut: AnyTLSMultiplexerPool.DialOut = { dialCompletion in
             let tlsClient = TLSClient(configuration: tlsConfig)
             // Anchor `tlsClient` until the async connect finishes; otherwise the socket's
             // write-source fires after deallocation and the dial hangs silently.
@@ -63,16 +63,16 @@ extension ProxyClient {
             }
         }
 
-        guard let client = AnyTLSManager.shared.client(for: configuration, dialOut: dialOut) else {
-            logger.debug("[AnyTLS] AnyTLSManager returned nil client (outbound type mismatch?)")
+        guard let client = AnyTLSMultiplexerRegistry.shared.client(for: configuration, dialOut: dialOut) else {
+            logger.debug("[AnyTLS] AnyTLSMultiplexerRegistry returned nil client (outbound type mismatch?)")
             completion(.failure(ProxyError.connectionFailed("Failed to acquire AnyTLS client")))
             return
         }
 
-        client.createStream { result in
+        client.acquireStream { result in
             switch result {
             case .failure(let error):
-                logger.debug("[AnyTLS] createStream failed: \(error.localizedDescription)")
+                logger.debug("[AnyTLS] acquireStream failed: \(error.localizedDescription)")
                 completion(.failure(error))
 
             case .success(let stream):

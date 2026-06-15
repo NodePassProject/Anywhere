@@ -9,13 +9,13 @@ import Foundation
 
 private let logger = AnywhereLogger(category: "AnyTLSStream")
 
-/// One logical stream multiplexed inside an `AnyTLSSession`.
-nonisolated final class AnyTLSStream: ProxyConnection {
+/// One logical stream multiplexed inside an `AnyTLSMultiplexer`.
+nonisolated final class AnyTLSStream: ProxyConnection, MultiplexerStreamSink {
 
     let sid: UInt32
-    private weak var session: AnyTLSSession?
+    private weak var multiplexer: AnyTLSMultiplexer?
 
-    /// Captured at construction so `outerTLSVersion` keeps working after the session goes away.
+    /// Captured at construction so `outerTLSVersion` keeps working after the multiplexer goes away.
     private let cachedTLSVersion: TLSVersion?
 
     private let receiveLock = UnfairLock()
@@ -24,20 +24,20 @@ nonisolated final class AnyTLSStream: ProxyConnection {
     private var receiveError: Error?
     private var eof: Bool = false
 
-    /// Set by `cancel()` so the session does not echo a FIN back to itself.
+    /// Set by `cancel()` so the multiplexer does not echo a FIN back to itself.
     private(set) var locallyCancelled: Bool = false
 
-    /// Fires exactly once when the stream ends; used to return the session to the idle pool.
+    /// Fires exactly once when the stream ends; used to return the multiplexer to the idle pool.
     var onEnd: (() -> Void)?
 
-    init(sid: UInt32, session: AnyTLSSession, outerTLSVersion: TLSVersion?) {
+    init(sid: UInt32, multiplexer: AnyTLSMultiplexer, outerTLSVersion: TLSVersion?) {
         self.sid = sid
-        self.session = session
+        self.multiplexer = multiplexer
         self.cachedTLSVersion = outerTLSVersion
     }
 
     override var isConnected: Bool {
-        receiveLock.withLock { !eof && receiveError == nil } && (session?.isAlive ?? false)
+        receiveLock.withLock { !eof && receiveError == nil } && (multiplexer?.isAlive ?? false)
     }
 
     override var outerTLSVersion: TLSVersion? { cachedTLSVersion }
@@ -45,15 +45,15 @@ nonisolated final class AnyTLSStream: ProxyConnection {
     // MARK: Send
 
     override func sendRaw(data: Data, completion: @escaping (Error?) -> Void) {
-        guard let session else {
-            completion(ProxyError.connectionFailed("AnyTLS session deallocated"))
+        guard let multiplexer else {
+            completion(ProxyError.connectionFailed("AnyTLS multiplexer deallocated"))
             return
         }
-        session.writeData(sid: sid, data: data, completion: completion)
+        multiplexer.writeData(sid: sid, data: data, completion: completion)
     }
 
     override func sendRaw(data: Data) {
-        session?.writeData(sid: sid, data: data, completion: { _ in })
+        multiplexer?.writeData(sid: sid, data: data, completion: { _ in })
     }
 
     // MARK: Receive
@@ -90,12 +90,12 @@ nonisolated final class AnyTLSStream: ProxyConnection {
         receiveLock.unlock()
         guard !already else { return }
         logger.debug("[AnyTLSStream] cancel sid=\(sid)")
-        session?.streamClosed(sid: sid)
+        multiplexer?.removeStream(sid: sid)
         // Local close is also an end — fire the recycle hook.
         fireOnEndOnce()
     }
 
-    // MARK: - Called by AnyTLSSession on the recv loop
+    // MARK: - Called by AnyTLSMultiplexer on the recv loop
 
     /// Delivers a payload chunk from a cmdPSH frame addressed to this stream.
     func deliverData(_ data: Data) {

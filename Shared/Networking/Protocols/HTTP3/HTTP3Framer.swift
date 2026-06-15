@@ -63,7 +63,7 @@ enum HTTP3Error: Error, LocalizedError {
     case authenticationRequired
     case streamClosed
     /// ngtcp2 returned STREAM_ID_BLOCKED — the peer hasn't granted more bidi stream
-    /// credit; the pool marks the session blocked so the caller retries on a fresh one.
+    /// credit; the pool marks the multiplexer blocked so the caller retries on a fresh one.
     case streamIdBlocked
 
     var errorDescription: String? {

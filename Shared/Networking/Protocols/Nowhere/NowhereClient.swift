@@ -132,7 +132,7 @@ nonisolated final class NowhereClient {
 
     private func acquireSession(isDefaultProxy: Bool, completion: @escaping (Result<NowhereSession, Error>) -> Void) {
         lock.lock()
-        if let existing = session, !existing.poolIsClosed {
+        if let existing = session, !existing.isClosed {
             lock.unlock()
             existing.ensureReady { error in
                 if let error { completion(.failure(error)) }

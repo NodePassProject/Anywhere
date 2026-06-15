@@ -595,7 +595,7 @@ extension XHTTPConnection {
             switch mode {
             case .streamOne:
                 // Full-duplex POST on one stream; can't wait for the response (CDN buffering).
-                let stream = shared.makeStream()
+                let stream = shared.openStream()
                 lock.lock(); sharedH2Download = stream; lock.unlock()
                 xmuxLease?.noteRequest()
                 let headers = encodeH2RequestHeaders(method: "POST", includeMeta: false)
@@ -613,8 +613,8 @@ extension XHTTPConnection {
     }
 
     /// Opens the GET download stream; completes on send (a CDN may withhold the 200 until upload flows).
-    private func setupSharedH2Download(_ shared: XHTTPSharedH2Connection, completion: @escaping (Error?) -> Void) {
-        let stream = shared.makeStream()
+    private func setupSharedH2Download(_ shared: XHTTPH2Multiplexer, completion: @escaping (Error?) -> Void) {
+        let stream = shared.openStream()
         lock.lock(); sharedH2Download = stream; lock.unlock()
         xmuxLease?.noteRequest()
         let headers = encodeH2RequestHeaders(method: "GET", includeMeta: true)
@@ -622,8 +622,8 @@ extension XHTTPConnection {
     }
 
     /// Opens the persistent stream-up upload POST; its response is drained.
-    private func openSharedH2Upload(_ shared: XHTTPSharedH2Connection, completion: @escaping (Error?) -> Void) {
-        let stream = shared.makeStream()
+    private func openSharedH2Upload(_ shared: XHTTPH2Multiplexer, completion: @escaping (Error?) -> Void) {
+        let stream = shared.openStream()
         lock.lock(); sharedH2Upload = stream; lock.unlock()
         xmuxLease?.noteRequest()
         let headers = encodeH2UploadHeaders(seq: nil)
@@ -644,7 +644,7 @@ extension XHTTPConnection {
         let bodyInHeaders = !dataFields.isEmpty
         let bodyLength = bodyInHeaders ? 0 : data.count
         let headers = encodeH2UploadHeaders(seq: seq, contentLength: bodyLength, uplinkData: dataFields)
-        let stream = shared.makeStream()
+        let stream = shared.openStream()
 
         if bodyInHeaders || data.isEmpty {
             stream.sendHeaders(headers, endStream: true) { error in

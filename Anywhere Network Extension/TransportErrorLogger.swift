@@ -77,7 +77,7 @@ enum TransportErrorLogger {
 
     // MARK: - Terminal Failure Logging
 
-    /// Logs a terminal connection failure. `HTTP2Error` demotes to debug
+    /// Logs a terminal connection failure. `NaiveHTTP2Error` demotes to debug
     /// (GOAWAY/stream-reset is normal h2 churn), EPIPE cascades to debug,
     /// ECONNRESET to info; everything else logs at error.
     fileprivate static func logTerminal(
@@ -89,7 +89,7 @@ enum TransportErrorLogger {
     ) {
         let errorDescription = conciseErrorDescription(error)
 
-        if error is HTTP2Error {
+        if error is NaiveHTTP2Error {
             logger.debug("\(prefix) \(operation) error: \(endpoint): \(errorDescription)")
             return
         }

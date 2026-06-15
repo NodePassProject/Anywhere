@@ -316,7 +316,7 @@ struct ClashProxyParser {
 
     // MARK: - AnyTLS
 
-    /// Warm-pool knobs are stored raw; `AnyTLSClient` clamps them at use time.
+    /// Warm-pool knobs are stored raw; `AnyTLSMultiplexerPool` clamps them at use time.
     private static func parseAnyTLSProxy(_ node: Node) -> ProxyConfiguration? {
         guard let basics = parseBasics(node) else { return nil }
 
