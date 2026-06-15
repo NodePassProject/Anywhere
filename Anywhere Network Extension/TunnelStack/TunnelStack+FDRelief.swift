@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "TunnelStack")
+private let logger = AnywhereLogger(category: "TunnelStack+FDRelief")
 
 extension TunnelStack {
 

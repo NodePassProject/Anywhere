@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMRewritePolicy")
 
 /// One rewrite as the runtime sees it: regexes pre-compiled, header names case-folded.
 struct CompiledMITMRule {

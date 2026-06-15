@@ -11,14 +11,14 @@ import Foundation
 
 extension ProxyConfiguration {
 
-    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "nowhere://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://", "https://", "quic://"]
+    static let parsableURLPrefixes = ["vless://", "hysteria2://", "hy2://", "nowhere://", "trojan://", "anytls://", "ss://", "socks5://", "socks://", "sudoku://"]
 
     static func canParseURL(_ string: String) -> Bool {
         parsableURLPrefixes.contains { string.hasPrefix($0) }
     }
 
     /// Parses a proxy share link; per-scheme formats are documented on the private parsers.
-    static func parse(url: String, naiveProtocol: OutboundProtocol? = nil) throws -> ProxyConfiguration {
+    static func parse(url: String) throws -> ProxyConfiguration {
         if url.hasPrefix("hysteria2://") || url.hasPrefix("hy2://") {
             return try parseHysteria(url: url)
         }
@@ -40,11 +40,8 @@ extension ProxyConfiguration {
         if url.hasPrefix("sudoku://") {
             return try parseSudoku(url: url)
         }
-        if url.hasPrefix("https://") || url.hasPrefix("quic://") {
-            return try parseNaive(url: url, protocolOverride: naiveProtocol)
-        }
         guard url.hasPrefix("vless://") else {
-            throw ProxyError.invalidURL("URL must start with vless://, hysteria2://, nowhere://, trojan://, anytls://, ss://, socks5://, sudoku://, https://, or quic://")
+            throw ProxyError.invalidURL("URL must start with vless://, hysteria2://, nowhere://, trojan://, anytls://, ss://, socks5://, or sudoku://")
         }
 
         var urlWithoutScheme = String(url.dropFirst("vless://".count))
@@ -585,71 +582,6 @@ extension ProxyConfiguration {
             serverAddress: host,
             serverPort: port,
             outbound: .sudoku(config)
-        )
-    }
-
-    /// Parses NaiveProxy `https://user:pass@host:port#name` or `quic://user:pass@host:port#name`.
-    private static func parseNaive(url: String, protocolOverride: OutboundProtocol? = nil) throws -> ProxyConfiguration {
-        let scheme: String
-        let urlWithoutScheme: String
-        if url.hasPrefix("https://") {
-            scheme = "https"
-            urlWithoutScheme = String(url.dropFirst("https://".count))
-        } else if url.hasPrefix("quic://") {
-            scheme = "quic"
-            urlWithoutScheme = String(url.dropFirst("quic://".count))
-        } else {
-            throw ProxyError.invalidURL("Naive URL must start with https:// or quic://")
-        }
-
-        var remaining = urlWithoutScheme
-
-        var fragmentName: String?
-        if let hashIndex = remaining.lastIndex(of: "#") {
-            fragmentName = String(remaining[remaining.index(after: hashIndex)...])
-                .removingPercentEncoding
-            remaining = String(remaining[..<hashIndex])
-        }
-
-        guard let atIndex = remaining.lastIndex(of: "@") else {
-            throw ProxyError.invalidURL("Missing @ separator in naive URL")
-        }
-
-        let userInfo = String(remaining[..<atIndex])
-        var serverPart = String(remaining[remaining.index(after: atIndex)...])
-
-        if let slashIndex = serverPart.firstIndex(of: "/") {
-            serverPart = String(serverPart[..<slashIndex])
-        }
-
-        guard let colonIndex = userInfo.firstIndex(of: ":") else {
-            throw ProxyError.invalidURL("Missing password in naive URL (expected user:pass)")
-        }
-        let username = String(userInfo[..<colonIndex]).removingPercentEncoding ?? String(userInfo[..<colonIndex])
-        let password = String(userInfo[userInfo.index(after: colonIndex)...]).removingPercentEncoding ?? String(userInfo[userInfo.index(after: colonIndex)...])
-
-        let (host, port) = try parseHostPort(serverPart)
-
-        let outbound: Outbound
-        switch scheme {
-        case "https":
-            let proto = protocolOverride ?? .http2
-            switch proto {
-            case .http11: outbound = .http11(username: username, password: password)
-            case .http2:  outbound = .http2(username: username, password: password)
-            default:      outbound = .http2(username: username, password: password)
-            }
-        case "quic":
-            outbound = .http3(username: username, password: password)
-        default:
-            throw ProxyError.invalidURL("Naive URL must start with https:// or quic://")
-        }
-
-        return ProxyConfiguration(
-            name: fragmentName ?? "Untitled",
-            serverAddress: host,
-            serverPort: port,
-            outbound: outbound
         )
     }
 

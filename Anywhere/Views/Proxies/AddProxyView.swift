@@ -7,12 +7,6 @@
 
 import SwiftUI
 
-fileprivate enum HTTPSLinkType: CaseIterable {
-    case subscription
-    case http11Proxy
-    case http2Proxy
-}
-
 fileprivate enum Method: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 
@@ -48,7 +42,6 @@ struct AddProxyView: View {
     @State private var selectedMethod: Method?
     @State private var showingQRScanner = false
     @State private var linkURL = ""
-    @State private var httpsLinkType: HTTPSLinkType = .subscription
     @State private var isLoading = false
     @State private var showingError = false
     @State private var errorMessage = ""
@@ -183,14 +176,6 @@ struct AddProxyView: View {
 
     private var linkInputField: some View {
         VStack {
-            if linkURL.hasPrefix("https://") {
-                Picker("Link Type", selection: $httpsLinkType) {
-                    Text("Subscription").tag(HTTPSLinkType.subscription)
-                    Text("HTTPS Proxy").tag(HTTPSLinkType.http11Proxy)
-                    Text("HTTP/2 Proxy").tag(HTTPSLinkType.http2Proxy)
-                }
-                .pickerStyle(.segmented)
-            }
             TextField(String("Link"), text: $linkURL)
                 .textFieldStyle(LinkTextFieldStyle())
                 .textInputAutocapitalization(.never)
@@ -249,9 +234,9 @@ struct AddProxyView: View {
 
     private func checkClipboard() {
         guard let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines) else { return }
-        // Accept any single-proxy URL the parser knows, plus `http://` for
-        // subscription URLs (the only scheme that's never a single proxy).
-        if ProxyConfiguration.canParseURL(clip) || clip.hasPrefix("http://") {
+        // Accept any single-proxy URL the parser knows, plus `http://`/`https://`
+        // for subscription URLs (schemes that are never a single proxy).
+        if ProxyConfiguration.canParseURL(clip) || clip.hasPrefix("http://") || clip.hasPrefix("https://") {
             linkURL = clip
         }
     }
@@ -273,17 +258,11 @@ struct AddProxyView: View {
     private func importFromString(_ string: String) {
         let trimmedURL = string.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // `https://` is ambiguous — Naive HTTP proxy or subscription — so the
-        // user's `httpsLinkType` choice overrides the parser's.
-        let isHTTPSAsSubscription = trimmedURL.hasPrefix("https://") && httpsLinkType == .subscription
-        if ProxyConfiguration.canParseURL(trimmedURL) && !isHTTPSAsSubscription {
-            let naiveProtocol: OutboundProtocol? = switch httpsLinkType {
-            case .http11Proxy: .http11
-            case .http2Proxy: .http2
-            case .subscription: nil
-            }
+        // `https://` is no longer a single proxy — only schemes the parser knows
+        // take the proxy-link path; everything else is a subscription URL.
+        if ProxyConfiguration.canParseURL(trimmedURL) {
             do {
-                let configuration = try ProxyConfiguration.parse(url: trimmedURL, naiveProtocol: naiveProtocol)
+                let configuration = try ProxyConfiguration.parse(url: trimmedURL)
                 configStore.add(configuration); viewModel.selectIfNone(configuration)
                 dismiss()
             } catch {

@@ -83,7 +83,7 @@ enum OutboundProtocol: String, Codable, CaseIterable {
         case .http2:
             "HTTP/2"
         case .http3:
-            "QUIC"
+            "HTTP/3"
         }
     }
 }

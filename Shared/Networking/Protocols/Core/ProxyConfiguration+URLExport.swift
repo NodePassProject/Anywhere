@@ -246,7 +246,6 @@ extension ProxyConfiguration {
     }
 
     private func toNaiveURL() -> String {
-        let scheme = outboundProtocol == .http3 ? "quic" : "https"
         let username: String?
         let password: String?
         switch outbound {
@@ -258,7 +257,7 @@ extension ProxyConfiguration {
         let user = (username ?? "").addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? ""
         let pass = (password ?? "").addingPercentEncoding(withAllowedCharacters: .urlPasswordAllowed) ?? ""
         let fragment = name.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) ?? name
-        return "\(scheme)://\(user):\(pass)@\(bracketedServerAddress):\(serverPort)#\(fragment)"
+        return "https://\(user):\(pass)@\(bracketedServerAddress):\(serverPort)#\(fragment)"
     }
 
     private func appendTransportParams(to params: inout [String]) {

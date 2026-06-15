@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "HTTP3Pool")
+private let logger = AnywhereLogger(category: "NaiveHTTP3MultiplexerPool")
 
 /// Pools HTTP3Multiplexer QUIC connections for reuse across CONNECT streams,
 /// with idle eviction and soft/hard caps.

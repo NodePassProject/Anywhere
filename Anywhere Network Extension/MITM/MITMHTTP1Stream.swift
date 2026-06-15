@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMHTTP1Stream")
 
 /// One direction of an HTTP/1.x byte stream through the MITM: framing state
 /// machine plus chunked decoder, emitting rewritten plaintext for the opposite

@@ -11,7 +11,7 @@ import Dispatch
 import CryptoKit
 import Security
 
-private let logger = AnywhereLogger(category: "QUIC")
+private let logger = AnywhereLogger(category: "QUICConnection")
 
 // MARK: - QUICPortHopping
 
@@ -206,7 +206,7 @@ nonisolated class QUICConnection {
 
     var isOnQueue: Bool { DispatchQueue.getSpecific(key: Self.queueKey) == true }
 
-    init(host: String, port: UInt16, serverName: String? = nil, alpn: [String] = ["h3"],
+    init(host: String, port: UInt16, serverName: String? = nil, alpn: [String],
          datagramsEnabled: Bool = false, tuning: QUICTuning,
          portHopping: QUICPortHopping? = nil,
          transport: QUICDatagramTransport? = nil) {
@@ -296,8 +296,9 @@ nonisolated class QUICConnection {
         }
     }
 
-    /// Sends RESET_STREAM + STOP_SENDING, freeing the stream ID slot; `appErrorCode` defaults to `H3_NO_ERROR` (0x100).
-    func shutdownStream(_ streamId: Int64, appErrorCode: UInt64 = 0x0100) {
+    /// Sends RESET_STREAM + STOP_SENDING, freeing the stream ID slot. The caller supplies the
+    /// application error code; each app protocol (HTTP/3, Hysteria, Nowhere) defines its own.
+    func shutdownStream(_ streamId: Int64, appErrorCode: UInt64) {
         queue.async { [weak self] in
             guard let self, let conn = self.conn else { return }
             ngtcp2_conn_shutdown_stream(conn, 0, streamId, appErrorCode)

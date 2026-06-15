@@ -284,7 +284,7 @@ nonisolated final class PerformanceMonitor: @unchecked Sendable {
     private static let reportInterval: DispatchTimeInterval = .seconds(5)
 
     private let lock = UnfairLock()
-    private let logger = AnywhereLogger(category: "Perf")
+    private let logger = AnywhereLogger(category: "PerformanceMonitor")
 
     private var spanStats: [SpanStat]
     /// Flat array indexed `component.rawValue * bucketCount + bucket`.

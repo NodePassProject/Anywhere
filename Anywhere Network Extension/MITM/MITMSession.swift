@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMSession")
 
 /// Result of the deferred upstream dial.
 struct MITMDialResult {

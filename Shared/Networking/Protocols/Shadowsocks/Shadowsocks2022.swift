@@ -10,7 +10,7 @@ import CryptoKit
 import CommonCrypto
 import Security
 
-private let logger = AnywhereLogger(category: "SS2022")
+private let logger = AnywhereLogger(category: "Shadowsocks2022")
 
 // MARK: - Constants
 

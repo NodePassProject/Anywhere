@@ -198,8 +198,8 @@ class TVProxyEditorViewController: UITableViewController {
             ("SOCKS5", "socks5"),
             ("Sudoku", "sudoku"),
             ("HTTPS", "http11"),
-            ("HTTP2", "http2"),
-            ("QUIC", "http3"),
+            ("HTTP/2", "http2"),
+            ("HTTP/3", "http3"),
         ]
         sections.append((String(localized: "Protocol"), [
             .selection(label: String(localized: "Protocol"), value: selectedProtocol.name, options: protocolOptions, key: .outboundProtocol),

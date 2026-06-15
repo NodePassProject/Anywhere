@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMRequestLog")
 
 /// Per-session cache of in-flight request method+URL for response-phase script context;
 /// HTTP/1 uses a FIFO, HTTP/2 a stream-ID map. Not thread-safe — serialized on the lwIP queue.

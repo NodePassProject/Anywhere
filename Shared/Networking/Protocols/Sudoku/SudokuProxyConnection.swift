@@ -10,7 +10,7 @@ import Darwin
 import CryptoKit
 import Security
 
-private let sudokuLogger = AnywhereLogger(category: "Sudoku")
+private let sudokuLogger = AnywhereLogger(category: "SudokuProxyConnection")
 private let sudokuObfsReadChunkSize = 128 * 1024
 private let sudokuTCPReceiveChunkSize = 64 * 1024
 private let sudokuHTTPMaskMaxQueueBytes = 4 * 1024 * 1024

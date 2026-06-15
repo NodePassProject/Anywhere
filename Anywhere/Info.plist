@@ -71,10 +71,30 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
+			<string>com.argsment.Anywhere.scheme.nowhere</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>nowhere</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
 			<string>com.argsment.Anywhere.scheme.trojan</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>trojan</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.argsment.Anywhere.scheme.anytls</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>anytls</string>
 			</array>
 		</dict>
 		<dict>
@@ -91,10 +111,10 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>com.argsment.Anywhere.scheme.quic</string>
+			<string>com.argsment.Anywhere.scheme.sudoku</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>quic</string>
+				<string>sudoku</string>
 			</array>
 		</dict>
 	</array>

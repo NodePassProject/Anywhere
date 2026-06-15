@@ -342,11 +342,11 @@ nonisolated class HTTP3Multiplexer: Multiplexer {
         var offset = 0
         var seen = Set<UInt64>()
         while offset < payload.count {
-            guard let (id, idLen) = HTTP3Framer.decodeVarInt(from: payload, offset: offset) else {
+            guard let (id, idLen) = QUICVarInt.decode(from: payload, offset: offset) else {
                 return false
             }
             offset += idLen
-            guard let (value, valLen) = HTTP3Framer.decodeVarInt(from: payload, offset: offset) else {
+            guard let (value, valLen) = QUICVarInt.decode(from: payload, offset: offset) else {
                 return false
             }
             offset += valLen

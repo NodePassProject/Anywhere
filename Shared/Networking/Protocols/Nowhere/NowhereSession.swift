@@ -182,7 +182,7 @@ nonisolated final class NowhereSession {
 
         if (sid & 0x01) == 0x01, !data.isEmpty {
             quic.extendStreamOffset(sid, count: data.count)
-            quic.shutdownStream(sid)
+            quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
         }
     }
 
@@ -236,7 +236,7 @@ nonisolated final class NowhereSession {
     }
 
     func shutdownStream(_ sid: Int64) {
-        quic.shutdownStream(sid)
+        quic.shutdownStream(sid, appErrorCode: NowhereProtocol.closeErrCodeOK)
     }
 
     func releaseTCPStream(_ sid: Int64) {

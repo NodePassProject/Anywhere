@@ -12,6 +12,8 @@ import Security
 enum NowhereProtocol {
     static let authFrameLength = 72
     static let maxTargetLength = 512
+    
+    static let closeErrCodeOK: UInt64 = 0x100
 
     private static let maxInputLength = 255
     private static let derivedALPNLength = 12

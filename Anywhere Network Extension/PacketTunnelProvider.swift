@@ -11,7 +11,7 @@ import Network
 import WidgetKit
 #endif
 
-private let logger = AnywhereLogger(category: "PacketTunnel")
+private let logger = AnywhereLogger(category: "PacketTunnelProvider")
 
 class PacketTunnelProvider: NEPacketTunnelProvider {
     private let tunnelStack = TunnelStack()

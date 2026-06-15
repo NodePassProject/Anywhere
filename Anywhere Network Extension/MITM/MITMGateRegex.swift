@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMGateRegex")
 
 /// ReDoS containment for an untrusted URL-gate regex: memoization, deadline-bounded matching
 /// on a worker queue, and quarantine after repeated timeouts — all fail-closed (no-match).
