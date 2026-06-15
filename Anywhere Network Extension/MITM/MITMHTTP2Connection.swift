@@ -279,6 +279,8 @@ final class MITMHTTP2Connection {
         heldPacedRequests.removeAll()
         pendingMessages.removeAll()
         streamingScripts.removeAll()
+        synthRespondedStreams.removeAll()
+        synthRespondedOrder.removeAll()
         oneShotSynthPacing = false
     }
 

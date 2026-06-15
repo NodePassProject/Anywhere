@@ -734,6 +734,9 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
     private let newConnection: (@escaping (XHTTPXMUXMultiplexerPoolable?) -> Void) -> Void
     private var clients: [XHTTPXMUXMultiplexerClient] = []
     private let lock = UnfairLock()
+    
+    fileprivate weak var registry: XHTTPXMUXMultiplexerRegistry?
+    fileprivate var registryKey: String?
 
     init(config: XHTTPXMUXMultiplexerConfiguration, newConnection: @escaping (@escaping (XHTTPXMUXMultiplexerPoolable?) -> Void) -> Void) {
         self.config = config
@@ -798,6 +801,7 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
             self.lock.lock()
             let waiters = client.waiters
             client.waiters.removeAll()
+            var drained = false
             if let conn {
                 client.connection = conn
                 client.state = .ready
@@ -806,10 +810,13 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
             } else {
                 client.state = .failed
                 self.clients.removeAll { $0 === client }
+                drained = self.clients.isEmpty
                 self.lock.unlock()
                 completion(nil)
             }
             for waiter in waiters { waiter(conn) }
+            // A failed first dial leaves an empty pool; evict the manager shell.
+            if drained { self.registry?.evictIfEmpty(self) }
         }
     }
 
@@ -832,14 +839,23 @@ nonisolated final class XHTTPXMUXMultiplexerManager {
         // A retired connection with no remaining sessions is dropped and torn down.
         let shouldClose = client.openUsage == 0 && client.isRetired(now: CFAbsoluteTimeGetCurrent())
         if shouldClose { clients.removeAll { $0 === client } }
+        let drained = clients.isEmpty
         lock.unlock()
         if shouldClose { client.connection?.poolClose() }
+        // Last session for this destination ended; ask the registry to drop the shell.
+        if drained { registry?.evictIfEmpty(self) }
     }
 
     func noteRequest(_ client: XHTTPXMUXMultiplexerClient) {
         lock.lock()
         if client.leftRequests > 0 && client.leftRequests != Int.max { client.leftRequests -= 1 }
         lock.unlock()
+    }
+
+    /// Whether the pool currently holds no clients.
+    fileprivate func hasNoClients() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return clients.isEmpty
     }
 }
 
@@ -861,8 +877,22 @@ nonisolated final class XHTTPXMUXMultiplexerRegistry {
         defer { lock.unlock() }
         if let existing = managers[key] { return existing }
         let manager = XHTTPXMUXMultiplexerManager(config: config, newConnection: makeFactory())
+        manager.registry = self
+        manager.registryKey = key
         managers[key] = manager
         return manager
+    }
+
+    /// Drops `manager` once its pool has fully drained, so an idle destination doesn't
+    /// retain a manager shell (config + factory closure + key) for the process lifetime.
+    fileprivate func evictIfEmpty(_ manager: XHTTPXMUXMultiplexerManager) {
+        guard let key = manager.registryKey else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard managers[key] === manager else { return }   // already replaced/removed
+        if manager.hasNoClients() {
+            managers.removeValue(forKey: key)
+        }
     }
 }
 

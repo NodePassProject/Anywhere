@@ -52,6 +52,11 @@ final class MITMProfileServer {
                         continuation.resume(throwing: error)
                         hasResumed = true
                     }
+                case .cancelled:
+                    if !hasResumed {
+                        continuation.resume(throwing: ProfileServerError.bindFailed)
+                        hasResumed = true
+                    }
                 default:
                     break
                 }

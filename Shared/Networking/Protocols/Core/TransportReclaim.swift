@@ -26,14 +26,15 @@ enum TransportReclaim {
     static func reclaimAll() {
         for proto in OutboundProtocol.allCases {
             switch proto {
+            case .vless:    VLESSEncryption0RTTCache.shared.clear()
             case .hysteria: HysteriaClient.pool.reclaim()
             case .nowhere:  NowhereClient.pool.reclaim()
             case .anytls:   AnyTLSMultiplexerRegistry.shared.reclaim()
+            case .sudoku:   SudokuTransportPool.pool.reclaim()
             case .http2:    NaiveHTTP2MultiplexerPool.shared.reclaim()
             case .http3:    NaiveHTTP3MultiplexerPool.shared.reclaim()
-            case .sudoku:   SudokuTransportPool.pool.reclaim()
-            // Per-connection or instance-tier only — no process-wide warm cache.
-            case .vless, .trojan, .shadowsocks, .socks5, .http11:
+            // Per-connection or instance-tier only — no process-wide warm state.
+            case .trojan, .shadowsocks, .socks5, .http11:
                 break
             }
         }
