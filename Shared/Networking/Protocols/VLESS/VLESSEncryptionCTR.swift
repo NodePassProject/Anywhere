@@ -19,7 +19,7 @@ final class VLESSEncryptionCTR {
         guard iv.count == 16 else {
             throw VLESSEncryptionError.framingError("VLESS CTR IV must be 16 bytes, got \(iv.count)")
         }
-        let derivedKey = Blake3Hasher.deriveKey(context: "VLESS", input: key, count: 32)
+        let derivedKey = BLAKE3Hasher.deriveKey(context: "VLESS", input: key, count: 32)
 
         var ref: CCCryptorRef?
         let status = derivedKey.withUnsafeBytes { keyPtr -> CCCryptorStatus in

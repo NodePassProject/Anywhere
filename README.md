@@ -93,7 +93,7 @@ Selectable on VLESS; layered under TLS or Reality.
 
 ### Architecture
 
-- **Minimal dependencies** — Apple frameworks, vendored C libraries (lwIP, ngtcp2), and Swift implementation of BLAKE3 and YAML
+- **Minimal dependencies** — Apple frameworks and vendored C libraries (lwIP, ngtcp2, BLAKE3, libyaml)
 - **Native Packet Tunnel** — system-wide VPN via `NEPacketTunnelProvider` with a userspace TCP/IP stack
 - **Native QUIC stack** — ngtcp2-powered client used for Hysteria2, Naive HTTP/3, and XHTTP over HTTP/3
 - **Fake-IP DNS** — transparent domain-based routing for all apps
