@@ -455,10 +455,15 @@ class TunnelStack {
     }
 
     func loadMITMSetting() {
-        let snapshot = MITMSnapshot.load()
+        guard let data = AWCore.getMITMData(),
+              let snapshot = MITMBinaryReader.decode(data) else {
+            mitmEnabled = false
+            mitmPolicy.reset()
+            return
+        }
         mitmEnabled = snapshot.enabled
         if snapshot.enabled {
-            mitmPolicy.load(ruleSets: snapshot.liveRuleSets)
+            mitmPolicy.load(ruleSets: snapshot.ruleSets)
         } else {
             mitmPolicy.reset()
         }

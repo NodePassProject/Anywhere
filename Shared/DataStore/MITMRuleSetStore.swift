@@ -34,6 +34,11 @@ final class MITMRuleSetStore {
         let split = Tombstone.split(snapshot.ruleSets)
         self.ruleSets = split.live
         self.tombstones = split.tombstones
+        // Mirror routing: keep the NE-facing binary current so it exists on
+        // first launch (and after an app update migrates onto this path), even
+        // before the user makes an edit. Diff-guarded, so it's a no-op when
+        // already current.
+        MITMSnapshot(enabled: snapshot.enabled, ruleSets: split.live).exportBinaryToAppGroup()
     }
     
     func reload() async {
@@ -50,6 +55,9 @@ final class MITMRuleSetStore {
         ruleSets = split.live
         tombstones = split.tombstones
         enabled = outcome.snapshot.enabled
+        // Refresh the NE-facing binary so a cloud-synced change is picked up on
+        // the next extension (re)start.
+        MITMSnapshot(enabled: outcome.snapshot.enabled, ruleSets: split.live).exportBinaryToAppGroup()
     }
 
     // MARK: - Rule set CRUD
