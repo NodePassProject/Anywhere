@@ -588,6 +588,201 @@ struct MITMSnapshot: Codable, Equatable {
     func save() {
         guard let data = try? JSONEncoder().encode(self) else { return }
         JSONBlobStore.shared.save(.mitm, data: data)
+        exportBinaryToAppGroup()
         AWCore.notifyMITMChanged()
+    }
+    
+    func exportBinaryToAppGroup() {
+        let data = MITMBinaryWriter.encode(enabled: enabled, ruleSets: liveRuleSets)
+        if data != AWCore.getMITMData() {
+            AWCore.setMITMData(data)
+        }
+    }
+}
+
+// MARK: - Binary serialization
+
+/// On-disk layout of the MITM payload the host writes and the Network Extension
+/// reads, mirroring the routing payload (see `RoutingBinaryFormat`): a compact
+/// binary the NE mmaps, so it never opens the SwiftData store to read rules.
+///
+/// All integers little-endian; strings are length-prefixed UTF-8 (`str16` =
+/// UInt16 length + bytes, `str32` = UInt32 length + bytes). Layout:
+/// ```
+/// magic     "AMR1"        4 bytes
+/// version   UInt8         format version (= 1)
+/// enabled   UInt8         master MITM toggle (0/1)
+/// setCount  UInt32        number of (live) rule sets
+/// sets      setCount × Set
+///
+/// Set:
+///   id          [16]      raw UUID bytes
+///   name        str16
+///   enabled     UInt8
+///   suffixCount UInt16
+///   suffixes    suffixCount × str16
+///   ruleCount   UInt32
+///   rules       ruleCount × Rule
+///
+/// Rule:
+///   phase      UInt8      0 httpRequest · 1 httpResponse
+///   urlPattern str32
+///   opKind     UInt8      operation discriminator (OpKind)
+///   …operation-specific fields…
+/// ```
+/// `subscriptionURL`/`deletedAt` are intentionally omitted — they're sync-only
+/// and the data path never reads them.
+enum MITMBinaryFormat {
+    static let magic: [UInt8] = [0x41, 0x4D, 0x52, 0x31]  // "AMR1"
+    static let version: UInt8 = 1
+
+    enum Phase: UInt8 { case httpRequest = 0, httpResponse = 1 }
+
+    enum OpKind: UInt8 {
+        case rewrite = 0, headerAdd = 1, headerDelete = 2, headerReplace = 3
+        case script = 4, streamScript = 5, bodyReplace = 6, bodyJSON = 7
+    }
+
+    enum RewriteKind: UInt8 {
+        case transparent = 0, redirect302 = 1, reject200Text = 2, reject200Gif = 3, reject200Data = 4
+    }
+
+    enum JSONAction: UInt8 {
+        case add = 0, replace = 1, delete = 2, replaceRecursive = 3
+        case deleteRecursive = 4, removeWhereKeyExists = 5, removeWhereFieldIn = 6
+    }
+
+    static func phaseByte(_ phase: MITMPhase) -> UInt8 {
+        switch phase {
+        case .httpRequest: return Phase.httpRequest.rawValue
+        case .httpResponse: return Phase.httpResponse.rawValue
+        }
+    }
+}
+
+/// Encodes a MITM snapshot to the `AMR1` binary the extension mmaps. Mirrors
+/// `RoutingBinaryWriter`.
+struct MITMBinaryWriter {
+    private var bytes: [UInt8] = []
+
+    static func encode(enabled: Bool, ruleSets: [MITMRuleSet]) -> Data {
+        var w = MITMBinaryWriter()
+        w.append(MITMBinaryFormat.magic)
+        w.bytes.append(MITMBinaryFormat.version)
+        w.bytes.append(enabled ? 1 : 0)
+        w.u32(UInt32(ruleSets.count))
+        for set in ruleSets { w.encodeSet(set) }
+        return Data(w.bytes)
+    }
+
+    private mutating func encodeSet(_ set: MITMRuleSet) {
+        append(withUnsafeBytes(of: set.id.uuid) { Array($0) })
+        str16(set.name)
+        bytes.append(set.enabled ? 1 : 0)
+        let suffixes = set.domainSuffixes.prefix(Int(UInt16.max))
+        u16(UInt16(suffixes.count))
+        for suffix in suffixes { str16(suffix) }
+        u32(UInt32(set.rules.count))
+        for rule in set.rules { encodeRule(rule) }
+    }
+
+    private mutating func encodeRule(_ rule: MITMRule) {
+        bytes.append(MITMBinaryFormat.phaseByte(rule.phase))
+        str32(rule.urlPattern)
+        encodeOperation(rule.operation)
+    }
+
+    private mutating func encodeOperation(_ operation: MITMOperation) {
+        switch operation {
+        case .rewrite(let action):
+            bytes.append(MITMBinaryFormat.OpKind.rewrite.rawValue)
+            encodeRewrite(action)
+        case .headerAdd(let name, let value):
+            bytes.append(MITMBinaryFormat.OpKind.headerAdd.rawValue)
+            str16(name); str32(value)
+        case .headerDelete(let name):
+            bytes.append(MITMBinaryFormat.OpKind.headerDelete.rawValue)
+            str16(name)
+        case .headerReplace(let name, let value):
+            bytes.append(MITMBinaryFormat.OpKind.headerReplace.rawValue)
+            str16(name); str32(value)
+        case .script(let scriptBase64):
+            bytes.append(MITMBinaryFormat.OpKind.script.rawValue)
+            str32(scriptBase64)
+        case .streamScript(let scriptBase64):
+            bytes.append(MITMBinaryFormat.OpKind.streamScript.rawValue)
+            str32(scriptBase64)
+        case .bodyReplace(let search, let replacement):
+            bytes.append(MITMBinaryFormat.OpKind.bodyReplace.rawValue)
+            str32(search); str32(replacement)
+        case .bodyJSON(let json):
+            bytes.append(MITMBinaryFormat.OpKind.bodyJSON.rawValue)
+            encodeJSON(json)
+        }
+    }
+
+    private mutating func encodeRewrite(_ action: MITMRewriteAction) {
+        switch action {
+        case .transparent(let url):
+            bytes.append(MITMBinaryFormat.RewriteKind.transparent.rawValue); str32(url)
+        case .redirect302(let url):
+            bytes.append(MITMBinaryFormat.RewriteKind.redirect302.rawValue); str32(url)
+        case .reject200Text(let content):
+            bytes.append(MITMBinaryFormat.RewriteKind.reject200Text.rawValue); str32(content)
+        case .reject200Gif:
+            bytes.append(MITMBinaryFormat.RewriteKind.reject200Gif.rawValue)
+        case .reject200Data(let base64):
+            bytes.append(MITMBinaryFormat.RewriteKind.reject200Data.rawValue); str32(base64)
+        }
+    }
+
+    private mutating func encodeJSON(_ operation: MITMJSONOperation) {
+        switch operation {
+        case .add(let path, let value):
+            bytes.append(MITMBinaryFormat.JSONAction.add.rawValue); str32(path); str32(value)
+        case .replace(let path, let value):
+            bytes.append(MITMBinaryFormat.JSONAction.replace.rawValue); str32(path); str32(value)
+        case .delete(let path):
+            bytes.append(MITMBinaryFormat.JSONAction.delete.rawValue); str32(path)
+        case .replaceRecursive(let key, let value):
+            bytes.append(MITMBinaryFormat.JSONAction.replaceRecursive.rawValue); str32(key); str32(value)
+        case .deleteRecursive(let key):
+            bytes.append(MITMBinaryFormat.JSONAction.deleteRecursive.rawValue); str32(key)
+        case .removeWhereKeyExists(let path, let key):
+            bytes.append(MITMBinaryFormat.JSONAction.removeWhereKeyExists.rawValue); str32(path); str32(key)
+        case .removeWhereFieldIn(let path, let field, let values):
+            bytes.append(MITMBinaryFormat.JSONAction.removeWhereFieldIn.rawValue); str32(path); str32(field); str32(values)
+        }
+    }
+
+    // MARK: Primitives
+
+    private mutating func u16(_ v: UInt16) {
+        bytes.append(UInt8(truncatingIfNeeded: v))
+        bytes.append(UInt8(truncatingIfNeeded: v >> 8))
+    }
+
+    private mutating func u32(_ v: UInt32) {
+        bytes.append(UInt8(truncatingIfNeeded: v))
+        bytes.append(UInt8(truncatingIfNeeded: v >> 8))
+        bytes.append(UInt8(truncatingIfNeeded: v >> 16))
+        bytes.append(UInt8(truncatingIfNeeded: v >> 24))
+    }
+
+    private mutating func append(_ slice: [UInt8]) { bytes.append(contentsOf: slice) }
+
+    /// UInt16-length-prefixed UTF-8; truncates at 65535 bytes (names/suffixes are short).
+    private mutating func str16(_ string: String) {
+        var utf8 = Array(string.utf8)
+        if utf8.count > Int(UInt16.max) { utf8 = Array(utf8.prefix(Int(UInt16.max))) }
+        u16(UInt16(utf8.count))
+        bytes.append(contentsOf: utf8)
+    }
+
+    /// UInt32-length-prefixed UTF-8; for unbounded payloads (patterns, scripts, bodies).
+    private mutating func str32(_ string: String) {
+        let utf8 = Array(string.utf8)
+        u32(UInt32(utf8.count))
+        bytes.append(contentsOf: utf8)
     }
 }
