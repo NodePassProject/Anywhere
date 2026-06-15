@@ -8,7 +8,7 @@
 import Foundation
 import CoreData
 
-private let logger = AnywhereLogger(category: "CloudBlobSync")
+private let logger = AnywhereLogger(category: "BlobSync")
 
 protocol SoftDeletable {
     var deletedAt: Date? { get }

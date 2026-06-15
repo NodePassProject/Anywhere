@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "Trojan")
+private let logger = AnywhereLogger(category: "TrojanConnection")
 
 // MARK: - TrojanConnection
 

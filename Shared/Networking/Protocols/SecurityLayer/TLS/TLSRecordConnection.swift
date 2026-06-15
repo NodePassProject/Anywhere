@@ -9,7 +9,7 @@ import Foundation
 import CryptoKit
 import CommonCrypto
 
-private let logger = AnywhereLogger(category: "TLS")
+private let logger = AnywhereLogger(category: "TLSRecordConnection")
 
 // MARK: - TLSRecordConnection
 

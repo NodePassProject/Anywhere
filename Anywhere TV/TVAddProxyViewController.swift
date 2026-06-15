@@ -30,15 +30,8 @@ class TVAddProxyViewController: UITableViewController {
         }
     }
 
-    private enum LinkType: Int {
-        case subscription = 0
-        case http11 = 1
-        case http2 = 2
-    }
-
     private var selectedMethod: Method?
     private var linkURL = ""
-    private var linkType: LinkType = .subscription
     private var isLoading = false
 
     // MARK: - Lifecycle
@@ -68,14 +61,13 @@ class TVAddProxyViewController: UITableViewController {
     // MARK: - Table View
 
     override func numberOfSections(in tableView: UITableView) -> Int {
-        selectedMethod == .link ? 3 : 1
+        selectedMethod == .link ? 2 : 1
     }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         switch section {
         case 0: return Method.allCases.count
         case 1: return 1 // Link text field
-        case 2: return isHTTPLink ? 1 : 0 // Link type picker
         default: return 0
         }
     }
@@ -84,7 +76,6 @@ class TVAddProxyViewController: UITableViewController {
         switch section {
         case 0: return String(localized: "Method")
         case 1: return String(localized: "Link")
-        case 2: return isHTTPLink ? String(localized: "Link Type") : nil
         default: return nil
         }
     }
@@ -119,18 +110,6 @@ class TVAddProxyViewController: UITableViewController {
                 content.text = linkURL
             }
             cell.contentConfiguration = content
-
-        case 2:
-            var content = cell.defaultContentConfiguration()
-            let typeText: String
-            switch linkType {
-            case .subscription: typeText = String(localized: "Subscription")
-            case .http11: typeText = String(localized: "HTTPS Proxy")
-            case .http2: typeText = String(localized: "HTTP/2 Proxy")
-            }
-            content.text = typeText
-            cell.contentConfiguration = content
-            cell.accessoryType = .disclosureIndicator
 
         default:
             break
@@ -189,9 +168,6 @@ class TVAddProxyViewController: UITableViewController {
         case 1:
             showTextInput()
 
-        case 2:
-            showLinkTypePicker()
-
         default:
             break
         }
@@ -216,30 +192,6 @@ class TVAddProxyViewController: UITableViewController {
         present(nav, animated: true)
     }
 
-    // MARK: - Link Type Picker
-
-    private var isHTTPLink: Bool {
-        linkURL.hasPrefix("http://") || linkURL.hasPrefix("https://")
-    }
-
-    private func showLinkTypePicker() {
-        let alert = UIAlertController(title: String(localized: "Link Type"), message: nil, preferredStyle: .actionSheet)
-        alert.addAction(UIAlertAction(title: String(localized: "Subscription"), style: .default) { [weak self] _ in
-            self?.linkType = .subscription
-            self?.tableView.reloadData()
-        })
-        alert.addAction(UIAlertAction(title: String(localized: "HTTPS Proxy"), style: .default) { [weak self] _ in
-            self?.linkType = .http11
-            self?.tableView.reloadData()
-        })
-        alert.addAction(UIAlertAction(title: String(localized: "HTTP/2 Proxy"), style: .default) { [weak self] _ in
-            self?.linkType = .http2
-            self?.tableView.reloadData()
-        })
-        alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
-        present(alert, animated: true)
-    }
-
     // MARK: - Continue
 
     private func updateContinueButton() {
@@ -260,17 +212,11 @@ class TVAddProxyViewController: UITableViewController {
     private func importFromString(_ string: String) {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // `https://` is ambiguous — Naive HTTP proxy or subscription — so the
-        // user's `linkType` choice overrides the parser's.
-        let isHTTPSAsSubscription = trimmed.hasPrefix("https://") && linkType == .subscription
-        if ProxyConfiguration.canParseURL(trimmed) && !isHTTPSAsSubscription {
-            let naiveProtocol: OutboundProtocol? = switch linkType {
-            case .http11: .http11
-            case .http2: .http2
-            case .subscription: nil
-            }
+        // `https://` is no longer a single proxy — only schemes the parser knows
+        // take the proxy-link path; everything else is a subscription URL.
+        if ProxyConfiguration.canParseURL(trimmed) {
             do {
-                let config = try ProxyConfiguration.parse(url: trimmed, naiveProtocol: naiveProtocol)
+                let config = try ProxyConfiguration.parse(url: trimmed)
                 ConfigurationStore.shared.add(config); self.viewModel.selectIfNone(config)
                 dismiss(animated: true)
             } catch {

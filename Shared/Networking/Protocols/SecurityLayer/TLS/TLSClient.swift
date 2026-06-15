@@ -11,7 +11,7 @@ import CommonCrypto
 import Security
 import Compression
 
-private let logger = AnywhereLogger(category: "TLS")
+private let logger = AnywhereLogger(category: "TLSClient")
 
 // MARK: - ServerHello Result
 

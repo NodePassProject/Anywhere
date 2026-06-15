@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMHTTP2Connection")
 
 /// Per-direction HTTP/2 plaintext translator between the MITM session's TLS legs.
 /// HPACK is stateful per connection-direction (RFC 7541 §2.2), so header blocks can't

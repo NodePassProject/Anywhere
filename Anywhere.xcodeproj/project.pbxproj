@@ -224,6 +224,7 @@
 				Networking/Protocols/QUIC/QUICDatagramTransport.swift,
 				Networking/Protocols/QUIC/QUICTLSHandler.swift,
 				Networking/Protocols/QUIC/QUICTuning.swift,
+				Networking/Protocols/QUIC/QUICVarInt.swift,
 				Networking/Protocols/SecurityLayer/Reality/RealityClient.swift,
 				Networking/Protocols/SecurityLayer/Reality/RealityConfiguration.swift,
 				Networking/Protocols/SecurityLayer/Reality/RealityProxyConnection.swift,

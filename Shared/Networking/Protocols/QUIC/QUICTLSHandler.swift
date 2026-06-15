@@ -9,7 +9,7 @@ import Foundation
 import CryptoKit
 import Security
 
-private let logger = AnywhereLogger(category: "QUIC-TLS")
+private let logger = AnywhereLogger(category: "QUICTLSHandler")
 
 // MARK: - Session Ticket Cache
 
@@ -132,7 +132,7 @@ nonisolated class QUICTLSHandler {
 
     // MARK: - Initialization
 
-    init(serverName: String, alpn: [String] = ["h3"]) {
+    init(serverName: String, alpn: [String]) {
         self.serverName = serverName
         self.alpn = alpn
 

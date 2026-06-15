@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMHTTP2Rewriter")
 
 /// HTTP/2 rule applier over decoded (name, value) header arrays and whole-body
 /// buffers. Stateless — per-stream buffering lives on the connection.

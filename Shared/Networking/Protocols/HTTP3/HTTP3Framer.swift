@@ -82,81 +82,20 @@ enum HTTP3Error: Error, LocalizedError {
 
 enum HTTP3Framer {
 
-    // MARK: - Variable-Length Integer (RFC 9000 §16)
-
-    static func encodeVarInt(_ value: UInt64) -> Data {
-        var data = Data()
-        if value <= 63 {
-            data.append(UInt8(value))
-        } else if value <= 16383 {
-            data.append(UInt8(0x40 | (value >> 8)))
-            data.append(UInt8(value & 0xFF))
-        } else if value <= 1_073_741_823 {
-            data.append(UInt8(0x80 | (value >> 24)))
-            data.append(UInt8((value >> 16) & 0xFF))
-            data.append(UInt8((value >> 8) & 0xFF))
-            data.append(UInt8(value & 0xFF))
-        } else {
-            data.append(UInt8(0xC0 | (value >> 56)))
-            data.append(UInt8((value >> 48) & 0xFF))
-            data.append(UInt8((value >> 40) & 0xFF))
-            data.append(UInt8((value >> 32) & 0xFF))
-            data.append(UInt8((value >> 24) & 0xFF))
-            data.append(UInt8((value >> 16) & 0xFF))
-            data.append(UInt8((value >> 8) & 0xFF))
-            data.append(UInt8(value & 0xFF))
-        }
-        return data
-    }
-
-    /// Returns (value, bytesConsumed) or nil. `offset` is relative to `data.startIndex`
-    /// so callers can pass a zero-copy slice directly.
-    static func decodeVarInt(from data: Data, offset: Int = 0) -> (UInt64, Int)? {
-        guard offset < data.count else { return nil }
-        let base = data.startIndex
-        let first = data[base + offset]
-        let prefix = first >> 6
-
-        switch prefix {
-        case 0:
-            return (UInt64(first), 1)
-        case 1:
-            guard offset + 2 <= data.count else { return nil }
-            let value = (UInt64(first & 0x3F) << 8) | UInt64(data[base + offset + 1])
-            return (value, 2)
-        case 2:
-            guard offset + 4 <= data.count else { return nil }
-            var value = UInt64(first & 0x3F) << 24
-            value |= UInt64(data[base + offset + 1]) << 16
-            value |= UInt64(data[base + offset + 2]) << 8
-            value |= UInt64(data[base + offset + 3])
-            return (value, 4)
-        case 3:
-            guard offset + 8 <= data.count else { return nil }
-            var value = UInt64(first & 0x3F) << 56
-            for i in 1..<8 {
-                value |= UInt64(data[base + offset + i]) << ((7 - i) * 8)
-            }
-            return (value, 8)
-        default:
-            return nil
-        }
-    }
-
     // MARK: - Frame Construction
 
     static func headersFrame(headerBlock: Data) -> Data {
         var frame = Data()
-        frame.append(contentsOf: encodeVarInt(HTTP3FrameType.headers.rawValue))
-        frame.append(contentsOf: encodeVarInt(UInt64(headerBlock.count)))
+        frame.append(contentsOf: QUICVarInt.encode(HTTP3FrameType.headers.rawValue))
+        frame.append(contentsOf: QUICVarInt.encode(UInt64(headerBlock.count)))
         frame.append(headerBlock)
         return frame
     }
 
     static func dataFrame(payload: Data) -> Data {
         var frame = Data()
-        frame.append(contentsOf: encodeVarInt(HTTP3FrameType.data.rawValue))
-        frame.append(contentsOf: encodeVarInt(UInt64(payload.count)))
+        frame.append(contentsOf: QUICVarInt.encode(HTTP3FrameType.data.rawValue))
+        frame.append(contentsOf: QUICVarInt.encode(UInt64(payload.count)))
         frame.append(payload)
         return frame
     }
@@ -165,28 +104,28 @@ enum HTTP3Framer {
         var payload = Data()
 
         // QPACK_MAX_TABLE_CAPACITY = 0 (no dynamic table)
-        payload.append(contentsOf: encodeVarInt(HTTP3SettingsID.qpackMaxTableCapacity.rawValue))
-        payload.append(contentsOf: encodeVarInt(0))
+        payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.qpackMaxTableCapacity.rawValue))
+        payload.append(contentsOf: QUICVarInt.encode(0))
 
         // QPACK_BLOCKED_STREAMS = 0
-        payload.append(contentsOf: encodeVarInt(HTTP3SettingsID.qpackBlockedStreams.rawValue))
-        payload.append(contentsOf: encodeVarInt(0))
+        payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.qpackBlockedStreams.rawValue))
+        payload.append(contentsOf: QUICVarInt.encode(0))
 
         // MAX_FIELD_SECTION_SIZE = 262144
-        payload.append(contentsOf: encodeVarInt(HTTP3SettingsID.maxFieldSectionSize.rawValue))
-        payload.append(contentsOf: encodeVarInt(262144))
+        payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.maxFieldSectionSize.rawValue))
+        payload.append(contentsOf: QUICVarInt.encode(262144))
 
         // SETTINGS_ENABLE_CONNECT_PROTOCOL = 1 (RFC 9220 — extended CONNECT)
-        payload.append(contentsOf: encodeVarInt(HTTP3SettingsID.enableConnectProtocol.rawValue))
-        payload.append(contentsOf: encodeVarInt(1))
+        payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.enableConnectProtocol.rawValue))
+        payload.append(contentsOf: QUICVarInt.encode(1))
 
         // SETTINGS_H3_DATAGRAM = 1 (RFC 9297 — HTTP Datagrams / CONNECT-UDP)
-        payload.append(contentsOf: encodeVarInt(HTTP3SettingsID.h3Datagram.rawValue))
-        payload.append(contentsOf: encodeVarInt(1))
+        payload.append(contentsOf: QUICVarInt.encode(HTTP3SettingsID.h3Datagram.rawValue))
+        payload.append(contentsOf: QUICVarInt.encode(1))
 
         var frame = Data()
-        frame.append(contentsOf: encodeVarInt(HTTP3FrameType.settings.rawValue))
-        frame.append(contentsOf: encodeVarInt(UInt64(payload.count)))
+        frame.append(contentsOf: QUICVarInt.encode(HTTP3FrameType.settings.rawValue))
+        frame.append(contentsOf: QUICVarInt.encode(UInt64(payload.count)))
         frame.append(payload)
         return frame
     }
@@ -203,10 +142,10 @@ enum HTTP3Framer {
     static func parseFrame(from data: Data, offset: Int = 0) -> (Frame, Int)? {
         var pos = offset
 
-        guard let (frameType, typeLen) = decodeVarInt(from: data, offset: pos) else { return nil }
+        guard let (frameType, typeLen) = QUICVarInt.decode(from: data, offset: pos) else { return nil }
         pos += typeLen
 
-        guard let (payloadLen, lenBytes) = decodeVarInt(from: data, offset: pos) else { return nil }
+        guard let (payloadLen, lenBytes) = QUICVarInt.decode(from: data, offset: pos) else { return nil }
         pos += lenBytes
 
         let totalLen = pos - offset + Int(payloadLen)

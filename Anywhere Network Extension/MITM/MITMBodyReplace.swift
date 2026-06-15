@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMBodyReplace")
 
 /// Native regex find-and-replace over a text body. Replacements are literal — no `$1`
 /// capture expansion; a non-UTF-8 body is returned unchanged.

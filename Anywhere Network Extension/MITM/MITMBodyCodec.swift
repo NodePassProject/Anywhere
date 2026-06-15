@@ -8,7 +8,7 @@
 import Compression
 import Foundation
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMBodyCodec")
 
 /// `Content-Encoding` decoders so body rules operate on plaintext. Decode-only:
 /// after rewriting we emit identity, always implicitly accepted (RFC 7231 §5.3.4).

@@ -10,7 +10,7 @@ import JavaScriptCore
 import CryptoKit
 import Security
 
-private let logger = AnywhereLogger(category: "MITM")
+private let logger = AnywhereLogger(category: "MITMScriptEngine")
 
 /// Bytes pinned by NoCopy Uint8Array allocations; file-private so the C deallocator can reference it without captures.
 private nonisolated(unsafe) var mitmScriptTypedArrayBytes: Int = 0

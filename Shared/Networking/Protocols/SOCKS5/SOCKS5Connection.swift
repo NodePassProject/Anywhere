@@ -7,7 +7,7 @@
 
 import Foundation
 
-private let logger = AnywhereLogger(category: "SOCKS5")
+private let logger = AnywhereLogger(category: "SOCKS5Connection")
 
 // MARK: - SOCKS5 Protocol Constants
 
